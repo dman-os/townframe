@@ -73,6 +73,7 @@ fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
         .expect("material-theme.json must match the Material theme schema");
     let mut mode = use_signal(|| ThemeMode::Dark);
+    let mut tab = use_signal(|| LabTab::Components);
     let native_window: Option<Arc<dyn Window>> = use_hook(try_consume_context);
     #[cfg(feature = "desktop")]
     let desktop_window: Option<DesktopContext> = use_hook(try_consume_context);
@@ -152,23 +153,132 @@ fn App() -> Element {
                     },
                     "Toggle {mode:?} mode"
                 }
-                ThemeLabNav { viewport: (available_width(), 860.0) }
                 // A screenshot run names one kit specimen group; see `kit::KitSpecimens`.
                 if let Ok(group) = std::env::var("DAYFRAME_SHOWCASE_KIT") {
                     kit::KitSpecimens { only: Some(group) }
                 } else {
-                FoundationSection {
-                    id: "tile-grammar".to_string(),
-                    title: "Feature grammar: Tiles".to_string(),
-                    description: "This feature grammar is executable evidence, not part of the foundation token language. Ordered lists combine App, Widget, and Group tiles; content variants and sublist presentation remain feature-specific.".to_string(),
-                    TileGrammarFoundation { available_width: available_width() }
+                LabTabs { active: tab(), on_select: move |next| tab.set(next) }
+                ThemeLabNav { viewport: (available_width(), 860.0), tab: tab() }
+                div {
+                    id: "lab-panel",
+                    role: "tabpanel",
+                    "aria-labelledby": tab().tab_id(),
+                    match tab() {
+                        LabTab::Components => rsx! {
+                            FoundationSection {
+                                id: "kit".to_string(),
+                                title: "Component kit".to_string(),
+                                description: "clay_dioxus_kit components at a compact and an expanded host width. The kit never measures: each frame is the host, and hands the component its width class.".to_string(),
+                                kit::KitSpecimens { only: None }
+                            }
+                        },
+                        LabTab::Tokens => rsx! { TokenFoundations {} },
+                        LabTab::Colors => rsx! {
+                            FoundationSection {
+                                id: "colors".to_string(),
+                                title: "Existing colors".to_string(),
+                                description: "Material remains the baseline palette. Every source palette and generated scheme is rendered from the unchanged JSON fixture.".to_string(),
+                                ColorFoundation { theme }
+                            }
+                        },
+                        LabTab::Tiles => rsx! {
+                            FoundationSection {
+                                id: "tile-grammar".to_string(),
+                                title: "Feature grammar: Tiles".to_string(),
+                                description: "This feature grammar is executable evidence, not part of the foundation token language. Ordered lists combine App, Widget, and Group tiles; content variants and sublist presentation remain feature-specific.".to_string(),
+                                TileGrammarFoundation { available_width: available_width() }
+                            }
+                        },
+                    }
                 }
-                FoundationSection {
-                    id: "kit".to_string(),
-                    title: "Component kit".to_string(),
-                    description: "clay_dioxus_kit components at a compact and an expanded host width. The kit never measures: each frame is the host, and hands the component its width class.".to_string(),
-                    kit::KitSpecimens { only: None }
                 }
+            }
+        }
+    }
+}
+
+/// The lab's major sections, one tab each. Each tab lists the sections the `ArcIndex` jumps
+/// between, by the `FoundationSection` id they mount under.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LabTab {
+    Components,
+    Tokens,
+    Colors,
+    Tiles,
+}
+
+impl LabTab {
+    const ALL: [LabTab; 4] = [
+        LabTab::Components,
+        LabTab::Tokens,
+        LabTab::Colors,
+        LabTab::Tiles,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            LabTab::Components => "Components",
+            LabTab::Tokens => "Tokens",
+            LabTab::Colors => "Colors",
+            LabTab::Tiles => "Tiles",
+        }
+    }
+
+    fn tab_id(self) -> &'static str {
+        match self {
+            LabTab::Components => "lab-tab-components",
+            LabTab::Tokens => "lab-tab-tokens",
+            LabTab::Colors => "lab-tab-colors",
+            LabTab::Tiles => "lab-tab-tiles",
+        }
+    }
+
+    fn sections(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            LabTab::Components => &[("kit", "Component kit")],
+            LabTab::Tokens => &[
+                ("typography", "Typography"),
+                ("spacing", "Spacing"),
+                ("shape", "Shape & borders"),
+                ("surfaces", "Surfaces & elevation"),
+                ("states", "Interaction states"),
+            ],
+            LabTab::Colors => &[("colors", "Existing colors")],
+            LabTab::Tiles => &[("tile-grammar", "Tile grammar")],
+        }
+    }
+}
+
+/// The tab bar. The active tab is `aria-selected` with `data-state="active"`, painted with the
+/// `selected` / `on-selected` roles the kit uses for its current row (`KIT-107`), and each tab is
+/// at least 48 px tall (`KIT-106`).
+#[component]
+fn LabTabs(active: LabTab, on_select: EventHandler<LabTab>) -> Element {
+    rsx! {
+        div {
+            role: "tablist",
+            "aria-label": "Theme lab sections",
+            class: "mb-6 flex flex-wrap gap-2",
+            for tab in LabTab::ALL {
+                button {
+                    key: "{tab.tab_id()}",
+                    id: tab.tab_id(),
+                    role: "tab",
+                    "aria-selected": tab == active,
+                    "aria-controls": "lab-panel",
+                    "data-state": if tab == active { "active" } else { "inactive" },
+                    class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
+                    onclick: move |_| on_select.call(tab),
+                    "{tab.label()}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn TokenFoundations() -> Element {
+    rsx! {
                 FoundationSection {
                     id: "typography".to_string(),
                     title: "Typography".to_string(),
@@ -199,15 +309,6 @@ fn App() -> Element {
                     description: "States are shown as deliberate specimens so themes can be evaluated for focus, selection, feedback, and disabled legibility.".to_string(),
                     StateFoundation {}
                 }
-                FoundationSection {
-                    id: "colors".to_string(),
-                    title: "Existing colors".to_string(),
-                    description: "Material remains the baseline palette. Every source palette and generated scheme is rendered from the unchanged JSON fixture.".to_string(),
-                    ColorFoundation { theme }
-                }
-                }
-            }
-        }
     }
 }
 
@@ -235,34 +336,15 @@ fn content_width(width: f64) -> f64 {
 }
 
 #[component]
-fn ThemeLabNav(viewport: (f64, f64)) -> Element {
+fn ThemeLabNav(viewport: (f64, f64), tab: LabTab) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
-    let ids = [
-        "tile-grammar",
-        "kit",
-        "typography",
-        "spacing",
-        "shape",
-        "surfaces",
-        "states",
-        "colors",
-    ];
-    let labels = vec![
-        "Tile grammar",
-        "Component kit",
-        "Typography",
-        "Spacing",
-        "Shape & borders",
-        "Surfaces & elevation",
-        "Interaction states",
-        "Existing colors",
-    ];
+    let sections = tab.sections();
     rsx! {
         ArcIndex {
             viewport,
-            items: labels,
+            items: sections.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
             on_select: move |index| {
-                let target = ids.get(index).and_then(|id| anchors.read().get(*id).cloned());
+                let target = sections.get(index).and_then(|(id, _)| anchors.read().get(*id).cloned());
                 spawn(async move {
                     if let Some(target) = target {
                         if let Err(error) = target.scroll_to(ScrollBehavior::Instant).await {
