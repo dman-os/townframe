@@ -101,40 +101,53 @@ A doesn't block B. The crate in A is exactly what B would wrap later.
   (re-attaching across revisions, J6) and hands over the result. That keeps the anchor model
   wholly the intext lane's.
 
-## Virtualizer host over standard Dioxus (draft, pending W1/W2)
+## Virtualizer host over standard Dioxus
 
 Operator direction (2026-11-10): the browser and webview backend is the primary deployment. We
 don't design around Blitz's gaps for now, and we never assume JS (no eval, no JS interop). The
-diff view is a guest library (boundary A), so its virtualizer has to run on standard Dioxus
-events and `MountedData`. A micro gets those once the presentation wire carries them.
+diff view is a guest library (boundary A), so its virtualizer runs on standard Dioxus events and
+`MountedData`.
 
-The S10 core asks its host (`VirtualizerHost`) for layout synchronously: scroll top, element
-heights and tops, anchor lines by `data-line-index`. In Dioxus the reads are async
-(`MountedData::get_client_rect`, `get_scroll_offset`, `get_scroll_size`) or arrive as event
-data. So the Dioxus host keeps a layout cache that events feed, and the core reads the cache:
+**What W1/W2 measured (web, `docs/scratch/pierre-spikes.md` "W1/W2 micro scroll latency" on
+`spike/pierre-scroll`):**
+- The guest runs on the page's main thread (wcmp over the page's `WebAssembly`, no worker), and
+  event dispatch into it is synchronous: the host listener calls the guest, which handles,
+  renders, flushes and applies before returning. The wire's own overhead is about 0.2 ms per
+  event (p95 0.4).
+- In all 2000 response events, the guest's DOM writes landed in the same frame as the scroll,
+  before layout and paint: 0 frames late. (Main-thread frames; a compositor-driven wheel fling
+  was not proven.)
+- Standard Dioxus already crosses the wire on web: `onresize` delivers `ResizeData`, and
+  `MountedData::get_scroll_offset` and `scroll` work as element commands.
+- A thread row growing above the viewport (20/80/240 px) is corrected with **no visible jump**
+  when the guest reads the scroll offset and then scrolls by the delta, from the resize event or
+  from its own height model. Correcting from the last known scroll top instead leaves 50 px
+  (one event's travel at 3000 px/s), worse than nothing for small growth.
+- The browser's own scroll anchoring also gives no jump, but only if the full-height spacer is a
+  sibling of the rendered window rather than its parent. A height change on an ancestor of the
+  anchor node suppresses Chromium's anchoring.
+- The real cost is the render, not the wire: a 50-row commit with Pierre's window is about
+  4400 mutations and 10.9 ms median (p95 13 to 14) of a 16.7 ms frame.
 
-| Core read | Fed by |
-|---|---|
-| root scroll top, scroll height, client height | `onscroll` (`ScrollData::scroll_top`, `scroll_height`, `client_height`) |
-| element offset and bounding height | `onresize` on each observed element (`ResizeData::get_border_box_size`) |
-| element bounding top, intersection | `onvisible` (`VisibleData::get_bounding_client_rect`, `is_intersecting`) |
-| first element child, anchor lines | the guest's own render state: it knows which rows it rendered, keyed by line index |
-| scroll writes | `MountedData::scroll(coordinates, behavior)` |
+**Consequences:**
+- Pierre's virtualization can run inside a micro on the primary backend with no new wire
+  features. The host adapter keeps a layout cache fed by `onscroll`, `onresize` and `onvisible`,
+  and does scroll corrections as read-then-scroll command pairs.
+- The S10 browser layer (`pierre_diffs_dioxus`, over web-sys) is replaced by that adapter,
+  because web-sys works only in a browser page and not in a micro.
+- Mutations per row (about 88) are the first performance target.
 
-What this changes from Pierre:
-- **Reads can be a frame stale.** A browser ResizeObserver delivers before paint; an `onresize`
-  that crosses the wire may not. W2 measures whether the resulting scroll correction is visible,
-  and whether the browser's own scroll anchoring (`overflow-anchor`) makes the correction
-  unnecessary on the primary backend.
-- **No shadow-root queries.** Anchor lines come from the guest's row state, not from the DOM.
-- **The S10 browser layer (`pierre_diffs_dioxus`, over web-sys) is replaced** by this host once
-  it exists, because web-sys works only in a browser page and not in a micro.
+**Host contracts worth making explicit (Clay, ours):**
+1. Element commands issued from an event or resize handler run in the same task, before paint.
+   It held in W1/W2 by accident of the executor.
+2. A per-row identity attribute: the surface allows only `data-testid`, `data-state` and
+   `data-value` today.
+3. `overflow-anchor` has to survive closing raw `style` (the no-egress work).
+4. Possibly a coalesced "sizes changed" event, since each `resize` listener is one guest
+   dispatch per row.
 
-Wire work this implies (Clay, ours): forward `visible`, check that `resize` and `scroll` carry
-their Dioxus data across, and give guest `MountedData` a backing that forwards
-`get_client_rect`, `get_scroll_offset`, `get_scroll_size` and `scroll` to the host. All of
-these are existing Dioxus APIs. Blitz lacks `onresize` and `onvisible` (dioxus-native panics
-with `unimplemented!`; DioxusLabs/blitz#1197); that's for later, with upstream.
+Blitz lacks `onresize` and `onvisible` (dioxus-native panics with `unimplemented!`;
+DioxusLabs/blitz#1197). That's for later, with upstream.
 
 ## What each journey needs from Clay
 
