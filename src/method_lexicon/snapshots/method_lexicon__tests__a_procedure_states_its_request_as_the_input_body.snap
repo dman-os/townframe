@@ -85,6 +85,10 @@ expression: "lexicon_of::<big_cabinet_core::drawer::protocol::AddChild>()"
           "name": "UnknownDrawer"
         },
         {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
           "name": "SelfDoc"
         },
         {

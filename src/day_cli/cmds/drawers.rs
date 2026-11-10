@@ -178,13 +178,17 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
         println!("invited {peer} to {drawer} at {access:?}");
         return Ok(ExitCode::SUCCESS);
     }
-    let message = reply.body["message"].as_str().unwrap_or_default();
-    if message.contains("unknown peer") {
+    if reply.body["error"] == "UnknownPeer" {
         error!(
             "this node has not met {peer}: connect to it first (`day peers add <ticket>` and a daemon restart), then retry"
         );
     } else {
-        error!(status = reply.status, body = %reply.body, "the node refused the invite");
+        error!(
+            status = reply.status,
+            "the node refused the invite: {}: {}",
+            reply.body["error"].as_str().unwrap_or("unnamed error"),
+            reply.body["message"].as_str().unwrap_or_default()
+        );
     }
     Ok(ExitCode::FAILURE)
 }

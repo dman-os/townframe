@@ -85,6 +85,9 @@ pub enum DrawersError {
     Storage(String),
     #[error("{0} is not a drawer this node knows")]
     UnknownDrawer(DrawerId),
+    /// A peer this node has not met: its keyhive identity arrives with a live connection.
+    #[error("unknown peer {0}")]
+    UnknownPeer(GroupKey),
     #[error("{0} is a self-doc drawer: it holds only itself and cannot take entries or members")]
     SelfDoc(DrawerId),
     #[error("{0} is already a drawer")]
