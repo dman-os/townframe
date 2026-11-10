@@ -20,6 +20,7 @@ big_nodule.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
 big_plugs_core.workspace = true
 big_sync_core.workspace = true
+service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 utils_rs.workspace = true

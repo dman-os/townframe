@@ -12,7 +12,7 @@ pub impl big_dispatch_core::DispatchScope::fn is_empty (& self) -> bool
 pub impl big_dispatch_core::DispatchScope::fn permits (& self , nsid : & str) -> bool
 pub impl big_dispatch_core::Readiness::fn is_ready (self) -> bool
 pub struct big_dispatch_core::DispatchScope  { operations: BTreeSet < String >, authorities: BTreeSet < String > }
-pub struct big_dispatch_core::InvocationContext  { deadline_unix_ms: Option < u64 >, idempotency_key: Option < String > }
+pub struct big_dispatch_core::InvocationContext  { idempotency_key: Option < String > }
 pub struct big_dispatch_core::Invoke  { operation: String, input: Value, context: InvocationContext }
 pub struct big_dispatch_core::InvokeOutput  { output: Value }
 pub struct big_dispatch_core::MintDispatchCapability  { scope: DispatchScope, rights: Rights }

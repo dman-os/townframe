@@ -163,28 +163,15 @@ impl<H: HttpTransport, P: Unary> UnaryTransport<P> for Xrpc<H> {
     }
 }
 
-pub fn encode_request<P: Serialize>(
-    operation: XrpcMethod,
+/// Writes the headers every XRPC hop carries from a call's context: `x-request-id`,
+/// `traceparent`/`tracestate`, `authorization`, `idempotency-key` and the remaining budget as a
+/// relative `x-timeout-ms` (like gRPC's `grpc-timeout`, so a hop re-derives it from its own
+/// clock). The server side parses the same set in `service_utils_rs`'s `request_context`.
+pub fn write_context_headers(
+    headers: &mut HeaderMap,
     context: &RequestContext,
     metadata: &HttpMetadata,
-    params: &P,
-) -> Result<XrpcRequest, String> {
-    if operation.kind == MethodKind::Subscription {
-        return Err("the unary HTTP adapter does not support subscriptions".to_owned());
-    }
-    let mut path = format!("xrpc/{}", operation.nsid);
-    let body = match operation.input {
-        HttpInput::Query => {
-            let query = serde_urlencoded::to_string(params).map_err(|error| error.to_string())?;
-            if !query.is_empty() {
-                path.push('?');
-                path.push_str(&query);
-            }
-            Vec::new()
-        }
-        HttpInput::JsonBody => serde_json::to_vec(params).map_err(|error| error.to_string())?,
-    };
-    let mut headers = HeaderMap::new();
+) -> Result<(), String> {
     headers.insert(
         REQUEST_ID_HEADER,
         HeaderValue::from_str(&context.request_id.to_string())
@@ -220,6 +207,32 @@ pub fn encode_request<P: Serialize>(
                 .map_err(|error| error.to_string())?,
         );
     }
+    Ok(())
+}
+
+pub fn encode_request<P: Serialize>(
+    operation: XrpcMethod,
+    context: &RequestContext,
+    metadata: &HttpMetadata,
+    params: &P,
+) -> Result<XrpcRequest, String> {
+    if operation.kind == MethodKind::Subscription {
+        return Err("the unary HTTP adapter does not support subscriptions".to_owned());
+    }
+    let mut path = format!("xrpc/{}", operation.nsid);
+    let body = match operation.input {
+        HttpInput::Query => {
+            let query = serde_urlencoded::to_string(params).map_err(|error| error.to_string())?;
+            if !query.is_empty() {
+                path.push('?');
+                path.push_str(&query);
+            }
+            Vec::new()
+        }
+        HttpInput::JsonBody => serde_json::to_vec(params).map_err(|error| error.to_string())?,
+    };
+    let mut headers = HeaderMap::new();
+    write_context_headers(&mut headers, context, metadata)?;
     if operation.input == HttpInput::JsonBody {
         headers.insert(
             header::CONTENT_TYPE,

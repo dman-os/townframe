@@ -1,21 +1,24 @@
 //! Tiny `wasi:http/handler@0.3.0` guest for exercising the nodule Wasm provider.
 //!
 //! The host dispatches XRPC calls to this component as plain HTTP requests, and
-//! the header contract is `authorization: Capability <cap-id>`,
-//! `idempotency-key`, `x-request-deadline-unix-ms` and `x-nodule-capability`
-//! (the nodule's own dispatch capability, which the guest presents on its
-//! outgoing calls).
+//! the header contract is the one every XRPC hop speaks: `authorization:
+//! Bearer <caller capability id>`, `idempotency-key`, the relative `x-timeout-ms`
+//! budget, `x-request-id`, `traceparent`/`tracestate`, and `x-nodule-capability`
+//! (the nodule's own dispatch capability as a bare id, which the guest presents
+//! on its outgoing calls).
 //!
 //! Routes (all `POST`), served for any NSID whose last segment is the route's
 //! name, so one component can stand in for several nodules:
 //! - `/xrpc/<nsid>.echo` answers 200 with
-//!   `{ input, authorization, idempotencyKey, deadline, noduleCapability }`,
+//!   `{ input, authorization, idempotencyKey, timeoutMs, requestId, traceparent,
+//!   noduleCapability }`,
 //!   where the header members are `null` when absent.
 //! - `/xrpc/<nsid>.relay` takes `{ operation, authority?, input }` and
 //!   POSTs `input` to `http://dispatch.local/xrpc/<operation>` with
-//!   `authorization: Capability <authority>`, where `authority` defaults to the
+//!   `authorization: Bearer <authority>`, where `authority` defaults to the
 //!   capability id in `x-nodule-capability`. It forwards the incoming
-//!   `idempotency-key` and `x-request-deadline-unix-ms` unchanged and answers
+//!   `idempotency-key`, `x-timeout-ms`, `x-request-id`, `traceparent` and
+//!   `tracestate` unchanged and answers
 //!   200 with `{ status, body }` (`body` is the upstream JSON, or a string when
 //!   the upstream body is not JSON) and 502 when the outgoing request fails.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }`
@@ -29,9 +32,15 @@ mod wit {
     });
 }
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use wit::wasi::http::client;
-use wit::wasi::http::types::{ErrorCode, Fields, Method, Request, Response, Scheme};
+use wit::wasi::http::types::ErrorCode;
+use wit::wasi::http::types::Fields;
+use wit::wasi::http::types::Method;
+use wit::wasi::http::types::Request;
+use wit::wasi::http::types::Response;
+use wit::wasi::http::types::Scheme;
 
 struct Component;
 wit::export!(Component with_types_in wit);
@@ -51,7 +60,19 @@ impl wit::exports::wasi::http::handler::Guest for Component {
         };
         let authorization = header("authorization");
         let idempotency_key = header("idempotency-key");
-        let deadline = header("x-request-deadline-unix-ms");
+        let timeout_ms = header("x-timeout-ms");
+        let request_id = header("x-request-id");
+        let traceparent = header("traceparent");
+        let forwarded: Vec<(&'static str, String)> = [
+            "idempotency-key",
+            "x-timeout-ms",
+            "x-request-id",
+            "traceparent",
+            "tracestate",
+        ]
+        .into_iter()
+        .filter_map(|name| header(name).map(|value| (name, value)))
+        .collect();
         let nodule_capability = header("x-nodule-capability");
         drop(headers);
 
@@ -60,10 +81,7 @@ impl wit::exports::wasi::http::handler::Guest for Component {
         };
         let route = operation.rsplit('.').next().unwrap_or_default();
         if !matches!(route, "echo" | "relay") {
-            return Ok(json_response(
-                404,
-                &json!({ "error": "UnknownOperation" }),
-            ));
+            return Ok(json_response(404, &json!({ "error": "UnknownOperation" })));
         }
         let route = route.to_owned();
 
@@ -79,7 +97,9 @@ impl wit::exports::wasi::http::handler::Guest for Component {
                     "input": input,
                     "authorization": authorization,
                     "idempotencyKey": idempotency_key,
-                    "deadline": deadline,
+                    "timeoutMs": timeout_ms,
+                    "requestId": request_id,
+                    "traceparent": traceparent,
                     "noduleCapability": nodule_capability,
                 }),
             ));
@@ -89,12 +109,7 @@ impl wit::exports::wasi::http::handler::Guest for Component {
             .get("authority")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .or_else(|| {
-                nodule_capability
-                    .as_deref()
-                    .and_then(|value| value.strip_prefix("Capability "))
-                    .map(str::to_owned)
-            });
+            .or_else(|| nodule_capability.clone());
         let (Some(target), Some(authority)) = (
             input.get("operation").and_then(Value::as_str),
             authority.as_deref(),
@@ -103,19 +118,14 @@ impl wit::exports::wasi::http::handler::Guest for Component {
         };
         let upstream_body = serde_json::to_vec(input.get("input").unwrap_or(&Value::Null))
             .expect("serializing a Value cannot fail");
-        match relay(
-            target,
-            authority,
-            idempotency_key.as_deref(),
-            deadline.as_deref(),
-            upstream_body,
-        )
-        .await
-        {
+        match relay(target, authority, &forwarded, upstream_body).await {
             Ok((status, body)) => {
                 let body = serde_json::from_slice::<Value>(&body)
                     .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
-                Ok(json_response(200, &json!({ "status": status, "body": body })))
+                Ok(json_response(
+                    200,
+                    &json!({ "status": status, "body": body }),
+                ))
             }
             Err(error) => Ok(json_response(
                 502,
@@ -140,8 +150,7 @@ async fn read_request_body(request: Request) -> Vec<u8> {
 async fn relay(
     operation: &str,
     authority: &str,
-    idempotency_key: Option<&str>,
-    deadline: Option<&str>,
+    forwarded: &[(&'static str, String)],
     body: Vec<u8>,
 ) -> Result<(u16, Vec<u8>), ErrorCode> {
     let headers = Fields::new();
@@ -150,13 +159,10 @@ async fn relay(
             .append(name, value.as_bytes())
             .expect("invalid outgoing header");
     };
-    set("authorization", &format!("Capability {authority}"));
+    set("authorization", &format!("Bearer {authority}"));
     set("content-type", "application/json");
-    if let Some(value) = idempotency_key {
-        set("idempotency-key", value);
-    }
-    if let Some(value) = deadline {
-        set("x-request-deadline-unix-ms", value);
+    for (name, value) in forwarded {
+        set(name, value);
     }
 
     let (mut body_tx, body_rx) = wit::wit_stream::new::<u8>();

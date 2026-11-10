@@ -228,10 +228,21 @@ pub(super) async fn invoke(
     input: Value,
     context: InvocationContext,
 ) -> Result<Value, DispatchError> {
+    invoke_within(node, operation, input, context, RequestContext::root()).await
+}
+
+/// [`invoke`] under the caller's own request context: its budget, request id and trace.
+pub(super) async fn invoke_within(
+    node: &BigNode,
+    operation: &str,
+    input: Value,
+    context: InvocationContext,
+    request: RequestContext,
+) -> Result<Value, DispatchError> {
     node.dispatch
         .client
         .call_with(
-            RequestContext::root(),
+            request,
             Authorization::identity(node.authority.root).metadata(),
             Invoke {
                 operation: operation.to_owned(),
@@ -273,46 +284,46 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     assert!(node.wasm.hosts(&spec.plug));
 
     // The echo returns the input, and the headers the host built for the guest: the operator's
-    // capability as the authority, and the idempotency key. No operations are granted, so the
-    // nodule is told no capability of its own.
+    // capability as a bare `Bearer` token (no signer), the idempotency key, the request id and
+    // no budget. No operations are granted, so the nodule is told no capability of its own.
     let operator_cap = serde_json::to_value(node.authority.root).unwrap();
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
-        ..Default::default()
     };
+    let outer = RequestContext::root();
+    let echoed = invoke_within(&node, &echo, json!({ "n": 1 }), context, outer.clone())
+        .await
+        .unwrap();
+    assert_eq!(echoed["input"], json!({ "n": 1 }));
     assert_eq!(
-        invoke(&node, &echo, json!({ "n": 1 }), context).await,
-        Ok(json!({
-            "input": { "n": 1 },
-            "authorization": format!("Capability {}", operator_cap.as_str().unwrap()),
-            "idempotencyKey": "key-1",
-            "deadline": null,
-            "noduleCapability": null,
-        }))
+        echoed["authorization"],
+        format!("Bearer {}", operator_cap.as_str().unwrap())
     );
-    // A deadline in the future travels as a header.
-    let deadline = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-        + 60_000;
-    let context = InvocationContext {
-        deadline_unix_ms: Some(deadline),
-        ..Default::default()
-    };
-    let echoed = invoke(&node, &echo, json!({}), context).await.unwrap();
-    assert_eq!(echoed["deadline"], json!(deadline.to_string()));
+    assert_eq!(echoed["idempotencyKey"], "key-1");
+    assert_eq!(echoed["timeoutMs"], Value::Null);
+    assert_eq!(echoed["requestId"], outer.request_id.to_string());
+    assert_eq!(echoed["noduleCapability"], Value::Null);
+
+    // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
+    let budgeted = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
+    let echoed = invoke_within(&node, &echo, json!({}), Default::default(), budgeted)
+        .await
+        .unwrap();
+    let timeout_ms: u64 = echoed["timeoutMs"].as_str().unwrap().parse().unwrap();
+    assert!(
+        (1..=60_000).contains(&timeout_ms),
+        "the guest sees what is left of 60s, got {timeout_ms}ms"
+    );
     assert_eq!(echoed["idempotencyKey"], Value::Null);
 
-    // A deadline already behind us fails in dispatch before the handler is entered.
-    let elapsed = InvocationContext {
-        deadline_unix_ms: Some(1),
-        ..Default::default()
-    };
-    assert_eq!(
-        invoke(&node, &echo, json!({}), elapsed).await,
-        Err(DispatchError::DeadlineExceeded)
-    );
+    // A budget already spent fails before the handler is entered: in the host's request
+    // validation (`Context`) or dispatch's own check, which both answer a deadline.
+    let elapsed = RequestContext::root().with_time_budget(std::time::Duration::ZERO);
+    assert!(matches!(
+        invoke_within(&node, &echo, json!({}), Default::default(), elapsed).await,
+        Err(DispatchError::DeadlineExceeded
+            | DispatchError::Context(method_core::ContextError::DeadlineExceeded))
+    ));
 
     // The guest's own refusal of an operation it does not serve is the provider's error.
     assert_eq!(
@@ -362,7 +373,7 @@ async fn relay(
 ) -> Value {
     let mut input = json!({ "operation": operation, "input": { "n": 1 } });
     if let Some(authority) = authority {
-        input["authority"] = json!(authority.strip_prefix("Capability ").unwrap_or(authority));
+        input["authority"] = json!(authority);
     }
     invoke(node, &from.relay(), input, context).await.unwrap()
 }
@@ -387,7 +398,6 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let target = b.echo();
     let context = InvocationContext {
         idempotency_key: Some("nested-key".into()),
-        ..Default::default()
     };
 
     // Granted a different operation, A holds a capability that does not permit the callee's:
@@ -425,10 +435,38 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let relayed = relay(&node, &a, &target, None, context.clone()).await;
     assert_eq!(relayed["status"], 200, "{relayed}");
     assert_eq!(relayed["body"]["input"], json!({ "n": 1 }));
-    assert_eq!(relayed["body"]["authorization"], json!(granted));
+    assert_eq!(
+        relayed["body"]["authorization"],
+        json!(format!("Bearer {granted}"))
+    );
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
     // B has no grants of its own, so it was handed no capability to confuse with A's.
     assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
+
+    // The nested call continues the outer call's request id and stays inside its budget: the
+    // guest forwards the headers it was delivered, and the egress parses them rather than
+    // starting a fresh context.
+    let outer = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
+    let nested = invoke_within(
+        &node,
+        &a.relay(),
+        json!({ "operation": target, "input": {} }),
+        context.clone(),
+        outer.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(nested["status"], 200, "{nested}");
+    assert_eq!(nested["body"]["requestId"], outer.request_id.to_string());
+    let nested_ms: u64 = nested["body"]["timeoutMs"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (1..=60_000).contains(&nested_ms),
+        "the nested call carries a budget within the outer 60s, got {nested_ms}ms"
+    );
 
     // A guest forging another nodule's capability id is denied: B's capability is bound to B.
     // It permits A's echo (which B requested), so only its holder binding can refuse A's use of

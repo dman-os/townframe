@@ -48,6 +48,7 @@ impl Provider for Echo {
         &self,
         caller: &Caller,
         _operation: &str,
+        _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {

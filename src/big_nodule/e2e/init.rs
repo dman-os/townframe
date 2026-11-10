@@ -41,6 +41,7 @@ use big_plugs_core::request::Necessity;
 use big_plugs_core::request::Request;
 use serde_json::Value;
 use serde_json::json;
+use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -125,6 +126,7 @@ impl Provider for Probe {
         &self,
         caller: &Caller,
         operation: &str,
+        _request: &RequestContext,
         context: &InvocationContext,
         _input: Value,
     ) -> Result<Value, ProviderError> {

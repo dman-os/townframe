@@ -845,7 +845,9 @@ fn request_id_from_headers(headers: &HeaderMap) -> Option<uuid::Uuid> {
         .and_then(|value| value.parse().ok())
 }
 
-fn request_context(headers: &HeaderMap) -> Result<(RequestContext, HttpMetadata), String> {
+/// Parses the headers every XRPC hop carries into the call's context and metadata; the inverse
+/// of `service_client_core_rs::xrpc::write_context_headers`.
+pub fn request_context(headers: &HeaderMap) -> Result<(RequestContext, HttpMetadata), String> {
     let mut context = RequestContext::root();
     if let Some(value) = header_string(headers, REQUEST_ID_HEADER)? {
         context.request_id = value

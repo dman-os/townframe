@@ -168,7 +168,8 @@ impl Authorization {
         }
     }
 
-    fn id_text(id: CapId) -> String {
+    /// The wire text of a capability id.
+    pub fn id_text(id: CapId) -> String {
         match serde_json::to_value(id).expect("a capability id serializes") {
             serde_json::Value::String(text) => text,
             other => unreachable!("a capability id serializes as a string, not {other}"),
@@ -188,16 +189,23 @@ impl Authorization {
         )
     }
 
+    /// The token of an `Authorization: Bearer <token>` header value; the scheme is matched case
+    /// insensitively (RFC 9110). `None` for any other scheme. This is the one parser of the
+    /// scheme: [`Self::from_header_value`] and the Wasm egress both build on it.
+    pub fn bearer_token(value: &str) -> Option<&str> {
+        value
+            .get(..Self::BEARER_SCHEME.len())
+            .filter(|scheme| scheme.eq_ignore_ascii_case(Self::BEARER_SCHEME))
+            .map(|_| &value[Self::BEARER_SCHEME.len()..])
+    }
+
     /// Parses a header value written by [`Self::header_value`]; `None` for any other scheme or a
     /// malformed token.
     pub fn from_header_value(value: &str) -> Option<Self> {
         let id = |text: &str| -> Option<CapId> {
             serde_json::from_value(serde_json::Value::String(text.to_owned())).ok()
         };
-        let token = value
-            .get(..Self::BEARER_SCHEME.len())
-            .filter(|scheme| scheme.eq_ignore_ascii_case(Self::BEARER_SCHEME))
-            .map(|_| &value[Self::BEARER_SCHEME.len()..])?;
+        let token = Self::bearer_token(value)?;
         let (authority, signer) = token.split_once('.')?;
         Some(Self {
             authority: id(authority)?,

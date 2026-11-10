@@ -17,6 +17,7 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use serde_json::Value;
+use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -47,11 +48,14 @@ pub struct Caller {
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Runs `operation`. One provider serves all of a nodule's operations, so the NSID arrives
-    /// per call (a Wasm provider builds `/xrpc/<operation>` from it).
+    /// per call (a Wasm provider builds `/xrpc/<operation>` from it). `request` is the
+    /// caller's request context: its remaining budget, request id and trace travel on to
+    /// whatever the provider calls.
     async fn call(
         &self,
         caller: &Caller,
         operation: &str,
+        request: &RequestContext,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError>;
@@ -269,6 +273,7 @@ mod tests {
             &self,
             _: &Caller,
             _: &str,
+            _: &RequestContext,
             _: &InvocationContext,
             input: Value,
         ) -> Result<Value, ProviderError> {

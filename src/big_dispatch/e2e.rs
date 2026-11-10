@@ -22,6 +22,7 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::MintDispatchCapability;
 use futures::FutureExt;
+use method_core::ContextError;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
@@ -29,6 +30,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 
 const ECHO: &str = "org.example.echo.ping";
@@ -48,6 +50,7 @@ impl Provider for Echo {
         &self,
         caller: &Caller,
         _operation: &str,
+        _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {
@@ -174,11 +177,12 @@ impl Harness {
         operation: &str,
         input: Value,
         context: InvocationContext,
+        request: RequestContext,
     ) -> Result<Value, DispatchError> {
         self.dispatch
             .client
             .call_with(
-                RequestContext::root(),
+                request,
                 authorization.metadata(),
                 Invoke {
                     operation: operation.to_owned(),
@@ -200,8 +204,14 @@ impl Harness {
         operation: &str,
         input: Value,
     ) -> Result<Value, DispatchError> {
-        self.invoke_with(authorization, operation, input, Default::default())
-            .await
+        self.invoke_with(
+            authorization,
+            operation,
+            input,
+            Default::default(),
+            RequestContext::root(),
+        )
+        .await
     }
 
     async fn mint_dispatch(
@@ -240,11 +250,16 @@ async fn the_operator_invokes_a_built_in_provider_and_its_refusals_pass_through(
 
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
-        ..Default::default()
     };
     assert_eq!(
-        h.invoke_with(operator, ECHO, json!({ "n": 1 }), context)
-            .await,
+        h.invoke_with(
+            operator,
+            ECHO,
+            json!({ "n": 1 }),
+            context,
+            RequestContext::root()
+        )
+        .await,
         Ok(json!({
             "echo": { "n": 1 },
             "idempotencyKey": "key-1",
@@ -327,47 +342,52 @@ async fn a_minted_scope_invokes_only_what_it_covers_and_only_narrows() {
 }
 
 #[tokio::test]
-async fn an_elapsed_deadline_fails_before_the_provider_and_a_running_call_is_cut_off() {
+async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_off() {
     let h = harness().await;
     let echo = h.register_echo();
     let operator = h.operator();
 
-    // The deadline is already behind us: the call fails without entering the provider. A
+    // The budget is already spent: the call fails without entering the provider. A
     // provider that was entered would have signalled `started`, so an unconsumed permit here
     // means it was.
-    let elapsed = InvocationContext {
-        deadline_unix_ms: Some(1),
-        ..Default::default()
-    };
-    assert_eq!(
-        h.invoke_with(operator, ECHO, json!({ "wait": true }), elapsed)
-            .await,
-        Err(DispatchError::DeadlineExceeded)
-    );
+    let elapsed = RequestContext::root().with_time_budget(Duration::ZERO);
+    assert!(matches!(
+        h.invoke_with(
+            operator,
+            ECHO,
+            json!({ "wait": true }),
+            Default::default(),
+            elapsed
+        )
+        .await,
+        Err(DispatchError::DeadlineExceeded
+            | DispatchError::Context(ContextError::DeadlineExceeded))
+    ));
     assert!(
         echo.started.notified().now_or_never().is_none(),
         "the provider was entered for a call whose deadline had passed"
     );
 
-    // A deadline still ahead lets the call in; the provider parks on its gate until the deadline
-    // passes, which cuts it off. The gate is never released.
-    let soon = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-        + 1_000;
-    let future = InvocationContext {
-        deadline_unix_ms: Some(soon),
-        ..Default::default()
-    };
-    assert_eq!(
-        h.invoke_with(operator, ECHO, json!({ "wait": true }), future)
-            .await,
-        Err(DispatchError::DeadlineExceeded)
-    );
+    // A budget still ahead lets the call in; the provider parks on its gate until the budget
+    // runs out, which cuts it off. The gate is never released.
+    let future = RequestContext::root().with_time_budget(Duration::from_secs(1));
+    // The host enforces the request's own budget around the whole call, so it is the one that
+    // cuts a running call off (`Context`); dispatch's own timeout answers the same way.
+    assert!(matches!(
+        h.invoke_with(
+            operator,
+            ECHO,
+            json!({ "wait": true }),
+            Default::default(),
+            future
+        )
+        .await,
+        Err(DispatchError::DeadlineExceeded
+            | DispatchError::Context(ContextError::DeadlineExceeded))
+    ));
     echo.started.notified().await;
 
-    // A call without a deadline completes once released.
+    // A call without a budget completes once released.
     echo.release.notify_one();
     assert!(
         h.invoke(operator, ECHO, json!({ "wait": true }))

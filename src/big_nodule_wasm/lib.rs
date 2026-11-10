@@ -12,7 +12,7 @@
 //!   authority, because nodule network facilities are not granted.
 //!
 //! A nodule learns its own dispatch capability from the `x-nodule-capability` header of every
-//! request it serves and presents it as `authorization` on its outgoing calls. Identity is not
+//! request it serves and presents it as `authorization: Bearer <id>` on its outgoing calls. Identity is not
 //! the guest's to claim: [`Egress`] signs each call with the actor of the workload it came from.
 //!
 //! Handler bytes come from the in-process [`BlobService`]. A handler whose bytes are not in the
@@ -51,10 +51,13 @@ use http_body_util::Full;
 use http_body_util::Limited;
 use serde_json::Value;
 use serde_json::json;
+use service_client_core_rs::xrpc::write_context_headers;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
+use service_utils_rs::xrpc::request_context;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -103,8 +106,8 @@ const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
 /// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
 
-/// The header every delivered request carries the nodule's own dispatch capability in, as
-/// `Capability <id>`. Absent when the nodule is granted no operations.
+/// The header every delivered request carries the nodule's own dispatch capability in, as a bare
+/// capability id. Absent when the nodule is granted no operations.
 const CAPABILITY_HEADER: &str = "x-nodule-capability";
 
 /// The status a transport failure (workload gone, body failed, oversize response) is reported
@@ -395,15 +398,6 @@ impl WasmProvider {
     }
 }
 
-/// The wire form of a capability id, which is how the guest sees it in `authorization`.
-fn capability_header(authority: impl serde::Serialize) -> String {
-    let Value::String(id) = serde_json::to_value(authority).expect("a capability id serializes")
-    else {
-        unreachable!("a capability id serializes as a string");
-    };
-    format!("Capability {id}")
-}
-
 fn gateway_error(message: impl std::fmt::Display) -> ProviderError {
     ProviderError::Failed {
         status: BAD_GATEWAY,
@@ -417,23 +411,36 @@ impl Provider for WasmProvider {
         &self,
         caller: &Caller,
         operation: &str,
+        request: &RequestContext,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {
-        let mut request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
-            .header(hyper::header::CONTENT_TYPE, "application/json")
-            .header(
-                hyper::header::AUTHORIZATION,
-                capability_header(caller.authorization.authority),
-            );
+        // The guest sees the contract every XRPC hop speaks (`write_context_headers`): the
+        // request id and trace, the remaining budget as a relative `x-timeout-ms`, the
+        // idempotency key, and the caller's capability as a bare `Bearer` token: the caller's
+        // signer never enters a guest.
+        let mut headers = hyper::HeaderMap::new();
+        write_context_headers(
+            &mut headers,
+            request,
+            &HttpMetadata {
+                authorization: Some(format!(
+                    "Bearer {}",
+                    Authorization::id_text(caller.authorization.authority)
+                )),
+                idempotency_key: context.idempotency_key.clone(),
+            },
+        )
+        .expect("request context headers are valid HTTP");
+        let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
+            .header(hyper::header::CONTENT_TYPE, "application/json");
+        http_request
+            .headers_mut()
+            .expect("a fresh request builder has headers")
+            .extend(headers);
         if let Some(capability) = *self.capability.lock().expect("capability lock") {
-            request = request.header(CAPABILITY_HEADER, capability_header(capability));
-        }
-        if let Some(key) = &context.idempotency_key {
-            request = request.header("idempotency-key", key);
-        }
-        if let Some(deadline) = context.deadline_unix_ms {
-            request = request.header("x-request-deadline-unix-ms", deadline);
+            http_request =
+                http_request.header(CAPABILITY_HEADER, Authorization::id_text(capability));
         }
         let body = Full::new(Bytes::from(
             serde_json::to_vec(&input).expect("a JSON value serializes"),
@@ -441,7 +448,7 @@ impl Provider for WasmProvider {
         .map_err(|never| match never {})
         .boxed_unsync();
         // The operation is an NSID the router resolved, so the URI and headers are valid.
-        let request = request.body(body).expect("a well-formed request");
+        let request = http_request.body(body).expect("a well-formed request");
 
         let response = self
             .ingress
@@ -536,12 +543,12 @@ type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
 
 /// The `dispatch.local` egress: the only outgoing request a workload can make.
 ///
-/// `POST /xrpc/<nsid>` with `authorization: Capability <id>` is invoked through dispatch with
+/// `POST /xrpc/<nsid>` with `authorization: Bearer <capability id>` is invoked through dispatch with
 /// the calling workload's nodule actor as the signer. Dispatch then admits the call as it admits
 /// any other: the capability must be live, permit the NSID and be bound to that actor, so a
 /// guest that presents another nodule's capability id is denied there. Nothing else the guest
-/// says (headers, body) is trusted as identity. `idempotency-key` and
-/// `x-request-deadline-unix-ms` pass through as the call's [`InvocationContext`].
+/// says (headers, body) is trusted as identity. The request id, trace and `x-timeout-ms` budget
+/// continue into the nested call, so it stays inside the outer call's budget.
 #[derive(Clone)]
 struct Egress {
     dispatch: Client<DispatchProtocol>,
@@ -570,55 +577,27 @@ impl Egress {
                 );
             }
         };
-        let header = |name: &str| {
-            parts
-                .headers
-                .get(name)
-                .map(|value| value.to_str().map(str::to_owned))
+        // The same parser every XRPC server hop uses: request id, trace, the budget from the
+        // relative `x-timeout-ms`, `authorization` and `idempotency-key`.
+        let (request_context, metadata) = match request_context(&parts.headers) {
+            Ok(parsed) => parsed,
+            Err(message) => return bad(hyper::StatusCode::BAD_REQUEST, "InvalidRequest", &message),
         };
-        let Some(Ok(authorization)) = header(hyper::header::AUTHORIZATION.as_str()) else {
-            return bad(
-                hyper::StatusCode::UNAUTHORIZED,
-                "AuthRequired",
-                "an `authorization: Capability <id>` header is required",
-            );
-        };
-        let Some(authority) = authorization
-            .strip_prefix("Capability ")
+        // The token is the bare capability id the guest was delivered. Never the
+        // `<authority>.<signer>` form: the signer is the workload's own, below.
+        let Some(authority) = metadata
+            .authorization
+            .as_deref()
+            .and_then(Authorization::bearer_token)
             .and_then(|id| serde_json::from_value::<CapId>(Value::String(id.to_owned())).ok())
         else {
             return bad(
                 hyper::StatusCode::UNAUTHORIZED,
                 "AuthRequired",
-                "the authorization header is not `Capability <id>`",
+                "an `authorization: Bearer <capability id>` header is required",
             );
         };
-        let deadline_unix_ms = match header("x-request-deadline-unix-ms").transpose() {
-            Ok(value) => match value.map(|value| value.parse::<u64>()).transpose() {
-                Ok(deadline) => deadline,
-                Err(_) => {
-                    return bad(
-                        hyper::StatusCode::BAD_REQUEST,
-                        "InvalidRequest",
-                        "the deadline header is not a millisecond timestamp",
-                    );
-                }
-            },
-            Err(_) => {
-                return bad(
-                    hyper::StatusCode::BAD_REQUEST,
-                    "InvalidRequest",
-                    "the deadline header is not text",
-                );
-            }
-        };
-        let Ok(idempotency_key) = header("idempotency-key").transpose() else {
-            return bad(
-                hyper::StatusCode::BAD_REQUEST,
-                "InvalidRequest",
-                "the idempotency-key header is not text",
-            );
-        };
+        let idempotency_key = metadata.idempotency_key;
         let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
             return bad(
                 hyper::StatusCode::PAYLOAD_TOO_LARGE,
@@ -659,15 +638,15 @@ impl Egress {
         let result = self
             .dispatch
             .call_with(
-                RequestContext::root(),
-                Authorization { authority, signer }.metadata(),
+                request_context,
+                HttpMetadata {
+                    idempotency_key: idempotency_key.clone(),
+                    ..Authorization { authority, signer }.metadata()
+                },
                 Invoke {
                     operation,
                     input,
-                    context: InvocationContext {
-                        deadline_unix_ms,
-                        idempotency_key,
-                    },
+                    context: InvocationContext { idempotency_key },
                 },
             )
             .await;

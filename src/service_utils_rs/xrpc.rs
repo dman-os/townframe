@@ -31,6 +31,7 @@ pub use router::XrpcMethodHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
 pub use router::XrpcSubscriptionHandler;
+pub use router::request_context;
 pub use serve::AcceptFuture;
 pub use serve::ConnectionAcceptor;
 pub use serve::serve;

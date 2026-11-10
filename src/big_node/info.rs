@@ -20,6 +20,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use service_utils_rs::RequestContext;
 use std::sync::Arc;
 
 /// The NSID of the node info query. It takes no input.
@@ -68,6 +69,7 @@ impl Provider for NodeInfoProvider {
         &self,
         _caller: &Caller,
         operation: &str,
+        _request: &RequestContext,
         _context: &InvocationContext,
         _input: Value,
     ) -> Result<Value, ProviderError> {

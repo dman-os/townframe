@@ -74,10 +74,7 @@ pub fn xrpc_router(
                             Invoke {
                                 operation: request.nsid,
                                 input: request.params,
-                                context: InvocationContext {
-                                    deadline_unix_ms: None,
-                                    idempotency_key,
-                                },
+                                context: InvocationContext { idempotency_key },
                             },
                         )
                         .await

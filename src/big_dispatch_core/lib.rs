@@ -111,15 +111,12 @@ impl Readiness {
     }
 }
 
-/// What travels with one call beside its input; providers receive it, and the host enforces
-/// `deadline_unix_ms` around the provider call.
+/// What travels with one call beside its input; providers receive it. The call's deadline,
+/// request id and trace are not here: they are the [`service_core_rs::RequestContext`] the call
+/// arrives with, and a hop re-derives the remaining budget from it (the `x-timeout-ms` header).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContext {
-    /// Wall-clock deadline in milliseconds since the Unix epoch; it is the wire form
-    /// [`service_core_rs::RequestContext`] also uses, so it survives a hop between processes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
 }

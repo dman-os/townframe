@@ -168,6 +168,7 @@ impl Provider for ServiceProvider {
         &self,
         caller: &Caller,
         operation: &str,
+        request: &RequestContext,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {
@@ -177,14 +178,14 @@ impl Provider for ServiceProvider {
             .expect("the router only resolves NSIDs this provider registered");
         // Dispatch enforces the deadline around this call; the service sees it as its budget so
         // it can stop early, as it would for any caller with one.
-        let mut request = RequestContext::root();
-        if let Some(deadline) = context.deadline_unix_ms {
-            request = request.with_time_budget(crate::until(deadline));
+        let mut service_request = RequestContext::root();
+        if let Some(budget) = request.remaining_budget() {
+            service_request = service_request.with_time_budget(budget);
         }
         let metadata = HttpMetadata {
             authorization: Some(caller.authorization.header_value()),
             idempotency_key: context.idempotency_key.clone(),
         };
-        (route.call)(request, metadata, input).await
+        (route.call)(service_request, metadata, input).await
     }
 }

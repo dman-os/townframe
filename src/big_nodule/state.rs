@@ -247,7 +247,7 @@ impl InitRoute {
         let input = serde_json::json!({});
         match self {
             Self::Local { provider, caller } => provider
-                .call(&caller, target, &context, input)
+                .call(&caller, target, &RequestContext::root(), &context, input)
                 .await
                 .map(drop)
                 .map_err(|error| match error {
@@ -1439,7 +1439,6 @@ impl State {
         run.waiting_on = None;
         run.running = Some(init.key.clone());
         let context = InvocationContext {
-            deadline_unix_ms: None,
             idempotency_key: Some(format!(
                 "nodule/{plug_id}/{}/{}",
                 installed.revision, init.key

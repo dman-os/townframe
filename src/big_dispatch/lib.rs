@@ -52,8 +52,6 @@ use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
 const SCOPE_PREFIX: &str = "DispatchService/scope/v1/";
@@ -86,14 +84,6 @@ fn authority_error(error: ClientError<AuthorityServiceError>) -> DispatchError {
         ClientError::Method(error) => DispatchError::Authority(error),
         ClientError::Transport { message, .. } => DispatchError::AuthorityUnavailable(message),
     }
-}
-
-/// Time left until a wire deadline, saturating at zero.
-pub(crate) fn until(deadline_unix_ms: u64) -> Duration {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock before UNIX epoch");
-    Duration::from_millis(deadline_unix_ms).saturating_sub(now)
 }
 
 impl DispatchService {
@@ -137,18 +127,11 @@ impl DispatchService {
         authorization: Authorization,
         params: Invoke,
     ) -> Res<InvokeOutput> {
-        // The tighter of the caller's request budget and the invocation's own deadline. Like
-        // gRPC, which answers `DEADLINE_EXCEEDED` for a call whose deadline has already passed
+        // The caller's request budget. Like gRPC, which answers `DEADLINE_EXCEEDED` for a call whose deadline has already passed
         // without running the handler, an elapsed budget fails here, before admission, lookup
         // and readiness: no admission work is spent on it and the answer reveals nothing about
         // which operations exist.
-        let budget = [
-            context.remaining_budget(),
-            params.context.deadline_unix_ms.map(until),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let budget = context.remaining_budget();
         if budget == Some(Duration::ZERO) {
             return Err(DispatchError::DeadlineExceeded);
         }
@@ -185,9 +168,13 @@ impl DispatchService {
                 });
             }
         };
-        let call = kind
-            .provider()
-            .call(&caller, &params.operation, &params.context, params.input);
+        let call = kind.provider().call(
+            &caller,
+            &params.operation,
+            context,
+            &params.context,
+            params.input,
+        );
         let result = match budget {
             Some(budget) => tokio::time::timeout(budget, call)
                 .await
