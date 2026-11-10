@@ -618,6 +618,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 
 - [slice 2] `Provider::call` currently gets only `InvocationContext`. The Wasm provider needs the **caller identity/authority** (for the authority header). Pass the verified caller into providers. Dropping the future on deadline is the cancellation path.
 - [wasm] `RequestContext::expired()` is a tokio sleep in wasm-buildable `service_core_rs`; a guest-side caller panics ("no reactor running"). After `fda5d45d` only native code calls it (transports enforce deadlines, `Client` is runtime-free), but nothing stops a future guest call. Make it runtime-agnostic or move it to the native side.
+- [test] The nodule test harness (`big_ndk_testing`) carries its own copy of big_node's e2e `config`/`secrets` helpers (~80 lines), because a public `big_node::testing` would put test helpers in a product crate's API. Fold the two copies if big_node's e2e can ever use the harness without a dev-dependency cycle.
 - [perf, minor] Native `Transport` boxes the inner call future (`fda5d45d`) because nested client calls overflowed the debug-build stack; one allocation per call.
 - [perf, minor] `Router::register` rebuilds the whole table per provider. Reconcile registers per nodule, so it's O(n²) per pass. Fine at today's scale; batch registration if it grows.
 
