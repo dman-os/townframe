@@ -217,3 +217,70 @@ fn event_doc(event: &DatumEvent) -> &DocId {
         DatumEvent::Datum { doc_id, .. } | DatumEvent::Leave { doc_id, .. } => doc_id,
     }
 }
+
+/// The intxt waiting loop polls, handles the page and polls again with the `through` it was
+/// given, so between two calls nothing is held open. A write that lands in that gap must be
+/// delivered by the next call, exactly once.
+#[tokio::test]
+async fn a_poll_resumes_across_a_gap_between_calls() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let document = node
+        .create(&alice, "create", [(key("main"), note("hello"))])
+        .await
+        .unwrap()
+        .doc_id;
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: BTreeSet::from([document.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut poll = Poller::doc(node.client(), capability, document.clone());
+    assert_eq!(poll.cursor(), 0);
+    loop {
+        if poll.page(0).await.unwrap().caught_up {
+            break;
+        }
+    }
+    let through = poll.cursor();
+    assert!(through > 0);
+
+    // No poll is in flight: the write lands in the gap between two calls.
+    node.write(
+        &alice,
+        &document,
+        WriteMode::AtCurrent,
+        [(key("second"), note("written in the gap"))],
+        [],
+    )
+    .await
+    .unwrap();
+
+    // Resuming from `through` delivers the new row. The hold only bounds the wait if the
+    // projection were slow; the page returns as soon as the row exists.
+    let resumed = poll.page(5_000).await.unwrap();
+    assert!(resumed.through > through, "{resumed:?}");
+    let [
+        DatumEvent::Datum {
+            doc_id,
+            datum_key,
+            datum: ObservedDatum::Present { .. },
+            ..
+        },
+    ] = resumed.events.as_slice()
+    else {
+        panic!("expected exactly the gap write, got {:?}", resumed.events);
+    };
+    assert_eq!(doc_id, &document);
+    assert_eq!(datum_key, &key("second"));
+
+    // Resuming from the new `through` redelivers nothing.
+    let quiet = poll.page(300).await.unwrap();
+    assert!(quiet.events.is_empty(), "{:?}", quiet.events);
+    node.stop().await;
+}
