@@ -1,6 +1,6 @@
 # intxt review loop, top down (claytxt lane)
 
-Status: draft for the operator's review, 2026-11-10. Owner: the claytxt lane (Clay and the
+Status: draft, 2026-11-10. Decided by the operator: boundary A, virtualization matching Pierre (X5), C1 parked for design. Owner: the claytxt lane (Clay and the
 supporting pieces). The intext lane owns the datums, the intxt micro, MCP and the annotation
 anchor model; this doc only states what the UI needs from them.
 
@@ -41,9 +41,11 @@ intxt micro contributes panels; it doesn't build its own navigation.
 | Thread (J4) | inline in the diff; expanded as a sheet | bottom sheet over the diff | inline, expanded in place |
 | Composer (J4, J5) | sheet | bottom sheet with the keyboard | inline under the selected range |
 
-Back on the phone walks thread → diff → files → inbox through the shell's navigation stack. That
-needs C1 step 3 (back as a call to the shell, plus the published "can go back"). Unified versus
-split comes from the host's window width (C1 steps 1–2), not from a hidden Dioxus context.
+Back on the phone walks thread → diff → files → inbox through the shell's navigation stack.
+Unified versus split comes from the window width. For the alpha both come through the shell's
+existing `HostInputs` context. C1 (host contracts in place of that side channel) is parked:
+arrangement state has to become datums under the new design, and some of the concepts it needs
+don't exist yet. The operator's requirement is that the app remembers their preferences.
 
 Arrangement and open-context state follow ADR 032 §4 and the `tables.rs` precedent. Section
 weights and preferences such as the default diff layout persist and sync. The navigation stack
@@ -56,7 +58,7 @@ ported in S6). In intxt, those rows are the threads, and the threads belong to t
 its datums, its reply and resolve actions. So the diff view has to host content it doesn't own.
 There are two ways to do that:
 
-**A. The diff view is a library the intxt micro compiles in. (Recommended for the alpha.)**
+**A. The diff view is a library the intxt micro compiles in. (Decided for the alpha, 2026-11-10; a custom element can come later for other uses.)**
 `pierre_diffs` plus a Dioxus component layer is a plain Rust crate, written without assuming it
 runs as a micro, as agreed. The intxt micro renders the whole file screen. It passes the diff and
 its annotations to the component and renders thread rows itself through a render callback, the
@@ -100,11 +102,10 @@ A doesn't block B. The crate in A is exactly what B would wrap later.
 | Shell list-and-details, panels contributed by a micro | J1–J3 | built (#80) | claytxt |
 | Phone composition | all | built (#81) | claytxt |
 | Per-mount instances (two diffs open at once) | J3 | built, not yet a PR (`feat/clay-per-mount`) | claytxt |
-| Window width as a host contract | J3 layout | C1 steps 1–2 | claytxt |
-| Back as a call, "can go back" | J2–J4 | C1 step 3 | claytxt |
-| Package config defaults, one built-ins list | the intxt app itself | C1 steps 4 and 7 | claytxt |
+| Window width, back | J2–J4 | today's `HostInputs`; C1 parked for design | claytxt |
+| Preferences remembered (default diff layout, weights) | all | gap list pending, for the C1 design session | claytxt |
 | Diff logic: parse, layout math, hunks, highlight records | J3 | ported (S3–S7) | claytxt |
-| Diff components: virtualized file and diff views | J3 | pending (S10–S12); row structure decided, virtualization waits on X5 | claytxt |
+| Diff components: virtualized file and diff views | J3 | pending (S10–S12); row structure decided; window matches Pierre (about 200 rows, 50 per commit; X5) | claytxt |
 | Syntax highlighting in wasm under a fuel budget | J3 | H1, last step open | claytxt |
 | Range selection on touch (gutter tap, drag, extend) | J5 | not started; needs Android input checks | claytxt |
 | Bottom sheet with the keyboard up | J4, J5 | ADR 032 §6 sheets; keyboard behaviour on Android unverified | claytxt |
@@ -130,19 +131,17 @@ source of truth.
 ## Work order for the claytxt lane (Sonnet lanes, at most two building at once)
 
 1. **Now:** X5 (running). Open the per-mount PR stacked on #80.
-2. **C1 steps 1–3** once the operator settles where host facts live.
-3. **Diff components S10–S12** after X5: virtualized unified and split views, built as a crate
+2. **Preferences gap list** for the C1 design session (read-only: what the shell persists today
+   against ADR 032 §4).
+3. **Diff components S10–S12**: virtualized unified and split views, built as a crate
    that doesn't assume micro execution, with a render callback for injected rows (option A).
 4. **A mock review micro:** J1–J4 over mock collections, built on the diff crate. It's a stand-in
    the intext lane replaces with the real intxt micro, so it stays deliberately thin.
 5. **Touch range selection, the composer sheet, and Android IME checks** (J5).
-6. **C1 steps 4 and 7**, before the intxt app composition exists.
 7. **H1, the last step:** highlighting in the guest under a fuel budget.
 
 ## Questions for the operator
 
-1. **Diff view boundary:** A (a library the intxt micro links) for the alpha, with B later? This
-   departs from "heavy components live in micros" for now.
-2. **J7:** is a verdict (approve or request changes) part of the alpha?
-3. **Mock review micro (step 4):** should claytxt build it, or should the intext lane start from
+1. **J7:** is a verdict (approve or request changes) part of the alpha?
+2. **Mock review micro (step 4):** should claytxt build it, or should the intext lane start from
    the diff crate directly?
