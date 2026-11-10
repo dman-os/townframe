@@ -1,0 +1,21 @@
+[package]
+name = "intxt_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
+macros = { path = "../macros" }
+jiff.workspace = true
+schemars = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+automerge.workspace = true
