@@ -632,7 +632,7 @@ mod blackbox {
         run_cases("node");
     }
 
-    /// `status` and `call` with no daemon: the command boots the node itself.
+    /// `status` and `exec` with no daemon: the command boots the node itself.
     #[test]
     fn in_process_cases() {
         run_cases("in_process");

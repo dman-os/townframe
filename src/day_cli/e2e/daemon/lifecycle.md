@@ -1,7 +1,7 @@
-# The daemon lifecycle: start, status, call over the socket, stop
+# The daemon lifecycle: start, status, exec over the socket, stop
 
 `daemon start` returns once the daemon prints its readiness line. While it runs, `status`
-and `call` reach the node over its socket instead of booting their own. `daemon stop`
+and `exec` reach the node over its socket instead of booting their own. `daemon stop`
 returns once the process has exited, and the socket is gone.
 
 ```console
@@ -30,7 +30,7 @@ nodules   0 enabled of 0
 services  not exposed by the node
 peers     none attached (the daemon's node.json has no peers section)
 
-$ day call org.example.daybook.nodules.listNodules
+$ day exec org.example.daybook.nodules.listNodules
 {
   "nodules": []
 }

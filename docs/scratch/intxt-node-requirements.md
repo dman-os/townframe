@@ -35,7 +35,7 @@ Scope: The top-down grounding for this week's node work (ledger D38). It derives
 | R2 | **`big_ndk`**: the intxt nodule is written as typed `Handler<M>` impls, calls docs/drawers/blobs through typed clients, and is unit-testable natively | Not started (the plan's NDK v0) |
 | R3 | **`day cart pack/install/enable`** from built wasm plus manifest; `day` never builds source (D38) | Not started |
 | R4 | **`day mcp`**: a stdio MCP server whose tools are the methods the presented capability reaches, schemas and descriptions from Lexicons | Not started |
-| R5 | **Generated `day` subcommands** for installed cartridges' methods, from Lexicons; `day exec`/`x` as the generic form | `day call` exists; rename and generation not started |
+| R5 | **Generated `day` subcommands** for installed cartridges' methods, from Lexicons; `day exec`/`x` as the generic form | `day exec` (alias `x`) exists; generation not started |
 | R6 | **Method Lexicons with input checking** (D31): R4, R5 and R10 all read them | Not started |
 | R7 | **Narrowed capabilities from outside the node**: an agent's MCP session gets a capability scoped to intxt's methods and drawers, not the operator's full one | One missing entry in `register_built_ins` (dispatch's own service) plus a test; awaiting operator OK |
 | R8 | **Large inputs**: a diff can exceed `MAX_MESSAGE_OCTETS`, so big payloads go through blobs and the method takes a blob reference | Blobs exist; the method convention is open |

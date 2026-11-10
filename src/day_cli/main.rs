@@ -171,7 +171,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Daemon { command } => cmds::daemon::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Status { json } => cmds::status::run(json).await,
-        StaticCommands::Call { nsid, input } => cmds::call::run(nsid, input).await,
+        StaticCommands::Exec { nsid, input } => cmds::exec::run(nsid, input).await,
     }
 }
 
@@ -228,8 +228,9 @@ enum StaticCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Call an operation through the node's dispatch router and print the JSON answer
-    Call {
+    /// Execute an operation through the node's dispatch router and print the JSON answer
+    #[clap(visible_alias = "x")]
+    Exec {
         /// The operation's NSID, such as org.example.daybook.nodules.listNodules
         nsid: String,
         /// The operation's input as JSON (default: {})

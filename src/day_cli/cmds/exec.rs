@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-/// Calls one operation through the node's dispatch router and prints the JSON answer. The
+/// Executes one operation through the node's dispatch router and prints the JSON answer. The
 /// answer is printed whether it is the operation's output or its XRPC error envelope; an error
 /// status also fails the command, as `curl --fail-with-body` does.
 pub async fn run(nsid: String, input: Option<String>) -> Res<ExitCode> {
