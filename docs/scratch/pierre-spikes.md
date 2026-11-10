@@ -559,3 +559,73 @@ ms per commit, median over 560 commits (p95 of the commit total in brackets). Lo
 - Matrix: `bench/ladder/run-matrix.sh 6 r1-dom r2 r3 r3a r3b`, then `START=7 MAX_LOAD=6 bench/ladder/run-matrix.sh 6 r1-dom r2 r3 r3a r3b`; `python3 bench/ladder/x4_tables.py results.jsonl`.
 - Native: `cd bench/blitz-x4 && CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 ../../x/agent-build.ts -- cargo build --release`; `blitz_x4 <batches.json> 7 [--sequential]`; `python3 bench/blitz-x4/summarize.py <native-*.txt>`.
 - Validation cost: `deno run --allow-read bench/ladder/validate-cost.mjs <batches-*.json>`.
+
+## X5 blank frames
+
+Question: when a diff is flung, does real Pierre (`@pierre/diffs` 1.6.4) ever show blank space, and do the Clay stack (R3) and the direct-JS receiver (R3a, X4) show it more often? Layout cost per commit only matters insofar as it produces blanks. Raw data: `/run/media/asdf/p3N/tmp/x5/` (`results.jsonl` 150 runs, `tables.md`, `stall.jsonl`, `results-interrupted.jsonl`, `results-r3a-r5-partial.jsonl`, build and matrix logs).
+
+### Variants
+- **r0**: real Pierre (the X1 R0 bundle), 1000-line Rust corpus, 600 px scroller.
+- **r3**: today's Clay micro, window profile `code-view` (the micro's default), scroll coalescing off, release guest, raised-limits host build (`DAYFRAME_RAISED_LIMITS=1`; budgets only, the window comes from the profile).
+- **r3a**: r3 with the direct JS receiver.
+- **r3-pierre / r3a-pierre**: the same with the `pierre` window profile (the experiment: Pierre-sized window). Same tokens corpus as r0.
+
+### Method (what each number means)
+- **Input**: a fresh page per cell, started at scrollTop 3000. `wheel N`: Playwright `mouse.wheel` every ~8 ms with the cumulative delta of N px/s for 3 s (compositor-driven; 16000 px/s added as a stress cell). `script N`: `scrollTop = s0 + N*t` set once per rAF for 3 s. Identical sequence for every variant.
+- **Primary**: CDP `Page.startScreencast` (png, everyNthFrame=1), every frame decoded; the crop is the scroller's client area minus a 24 px scrollbar strip. Background colour = the commonest pixel of the rest frame. A frame is blank-affected if some run of at least 20 consecutive pixel rows (one 20 px text row) in the crop is pure background. The rest frame itself has runs of at most 11 px (blank corpus lines), so 20 is above that floor. A threshold of 1 px is not usable on this corpus (it has empty lines); what counts as "no blanks" is left to the reader. Episode ms = first blank frame to the first clean frame after it (a one-frame episode reads 16.7 ms at 60 Hz).
+- **Secondary** (per rAF): the rendered rows' first/last `getBoundingClientRect` against the scroller viewport, counting uncovered pixels. Reads main-thread layout, so it can lag the compositor.
+- **Window**: rows in the DOM, px of rows above/below the viewport (median over rAF samples), rows added per MutationObserver commit.
+- 5 rounds per cell (r3a-pierre, r3-pierre round 5 and r3a round 5 were run after a power loss; interrupted partial rows kept aside, not mixed in), interleaved by variant within a round, one fresh browser per cell. All 150 runs had load average <= 10 at both ends (gate `MAX_LOAD=8`). Chromium headless, software compositing (screencast frame rate ~30-60/s, not a real display).
+
+### Result: blank-affected frames / frames captured (median over rounds; runs with any blank in brackets)
+| input | r0 (Pierre) | r3 (Clay) | r3a (direct JS) | r3-pierre | r3a-pierre |
+|---|---|---|---|---|---|
+| wheel 1000 | 0/177 (0/5) | 0/139 (0/5) | 0/130 (0/5) | 0/166 (0/5) | 0/168 (0/5) |
+| wheel 3000 | 0/178 (0/5) | 0/136 (0/5) | 0/148 (0/5) | 0/148 (0/5) | 0/154 (0/5) |
+| wheel 8000 | 0/180 (0/5) | 0/134 (0/5) | 0/125 (0/5) | 0/143 (0/5) | 0/131 (0/5) |
+| wheel 16000 | 0/181 (1/5) | 0/124 (0/5) | 0/127 (0/5) | 0/128 (0/5) | 0/133 (0/5) |
+| script 3000 | 0/197 (0/5) | 0/197 (0/5) | 0/195 (0/5) | 0/170 (0/5) | 0/181 (0/5) |
+| script 8000 | 0/197 (0/5) | 1/179 (3/5) | 0/197 (2/5) | 0/197 (0/5) | 0/197 (0/5) |
+
+(Counts in the cells are medians; the full table with spreads, max band, episode ms, rAF coverage and measured px/s is `tables.md`; the exact reading is the run lists below. `n/5` is the number of rounds with at least one blank frame.)
+
+Every run that had a blank (all others had none):
+- r0 wheel 16000, round 4 (load 6.8): 6/134 frames, max band 131 px, 6 episodes of 16.7-33.3 ms (about 183 ms total).
+- r3 script 8000: round 1: 17/179 frames, max 70 px, 16 episodes of 16.7-33.3 ms; round 3 (load 5.6): 40/153, max 199 px, 40 episodes of 16.7-33.3 ms; round 5: 1/3 frames, 598 px (the page captured only 3 frames: a main-thread hang, not a scroll lag).
+- r3a script 8000: round 3: 26/169, max 192 px, 26 episodes of 16.7-33.3 ms; round 4: 11/185, max 66 px, 11 episodes of 16.7 ms.
+- r3-pierre and r3a-pierre: none in 60 runs (30 each).
+- Max band over all clean runs is 10-11 px = the corpus's own blank lines.
+
+### Window sizes (medians over rAF samples)
+| variant | rows in DOM | px above / below the viewport | rows added (and removed) per commit |
+|---|---|---|---|
+| r0 | 200 | ~2150-2350 / ~1050-1250 | 50 (3 commits at wheel 1000, 48 at 16000) |
+| r3, r3a (code-view) | 51 | ~210 / ~210 (wheel); script 8000: ~345 above, ~78 below | 1 at 1000 px/s, 3 at 3000, 7-10 at 8000, 18-19 at 16000, in 115-200 commits per run (about one per frame) |
+| r3-pierre, r3a-pierre | 200 | ~2080-2300 / ~1090-1330 | 50 |
+
+So the Pierre profile reproduces Pierre's window (200 rows, 50-row chunks, 4000 px of rows around a 600 px viewport), not merely 1000 px each side: the rows-below/above asymmetry follows the scroll direction. The `code-view` window is about 10 rows each side and moves a few rows per frame.
+
+### What causes the blanks
+- With a Pierre-sized window the Clay stack showed no blank frames at any speed in 60 runs, including the direct receiver. The same stack with the 51-row window blanks at 8000 px/s with a main-thread-driven scroll (`script`), whose uncovered above/below margin falls to a few rows (below ~78 px median at 8000 px/s, i.e. a few rows ahead of the scroll). The blank episodes are 1 to 2 frames long, repeated across the run: the commit supplies rows one frame late and the scroll has already advanced beyond the 210 px margin. It is window size against scroll speed per frame (8000 px/s is ~133 px per 60 Hz frame), not a latency inside the receiver: r3a (cheaper commits, X4) still blanked in 2 of 5 rounds, r3-pierre and r3a-pierre in none.
+- Real wheel flings are never blank at 8000 px/s in either 51-row variant: the wheel path delivers small deltas per frame and the host keeps up (frames captured are lower than R0, 124-148 vs ~180, i.e. commits do cost frames, but no band appears).
+- R0 itself blanked once (wheel 16000, 131 px, six 16-33 ms episodes). Pierre is not immune at 16000 px/s; the bar is "rare, short".
+- Detector control (`X5_STALL_MS=300`, one round, `stall.jsonl`): blocking the page's main thread for 300 ms one second into a wheel fling made R0 show 600 px blank bands (2 frames, 33 ms) at 8000 and 16000 px/s as expected. R3a and R3a-pierre showed none (the screencast gap was ~300 ms in all variants). So the control confirms the detector can see compositor-ahead-of-DOM blanks in R0, but it did not reproduce that mechanism in the Clay variants and it is unexplained why (the wheel listener is passive; candidates: the stall is absorbed before the next screencast frame, or the Clay scroller is not scrolled independently by the compositor). Treat the Clay wheel results as "no blank observed", not "cannot blank".
+
+### Raised-window experiment
+R3a with the `pierre` profile (200 rows, 50-row commits, raised-limits host): 0 blank frames in 30 runs (6 input cells x 5 rounds), same as r3-pierre. Window size alone closes the gap seen at script 8000 (r3a: 37 blank frames over 2 of 5 runs; r3a-pierre 0). It was not the receiver: r3-pierre (no direct receiver) is also clean, and r3a with the small window still blanks. r3a-pierre commit cost is X4's (see above); this experiment does not measure that cost.
+
+### Caveats
+- Headless software compositing; the screencast does not capture every vsync frame (frames per run 80-197 of ~200 rAF ticks). Blank frames shorter than the capture interval can be missed; the screencast also compresses nothing (PNG), so the detector sees pixel-exact backgrounds.
+- One viewport (1280x1000, scroller 600 px high), one corpus (1000 lines of Rust, with syntax tokens identical between R0 and R3 only to the extent X1 verified), one machine under shared load (<= 10); round-to-round spread is large (r3 script 8000: 0 to 40 blank frames).
+- R3's `code-view` window is the micro's default profile, not necessarily what the production diff view would use.
+- The `pierre` window and its 50-row chunk commits are Pierre's number, copied; whether 200 rows is the minimum that avoids blanks was not searched (only two sizes tested).
+- Power loss (battery drain) interrupted the matrix twice; no round was mixed across the interruption (partial data kept in `results-interrupted.jsonl` and `results-r3a-r5-partial.jsonl`, not used).
+- Unresolved decision for the owner: what blank count/duration counts as "no blanks" (R0 itself has 1 of 30 runs with a blank at the stress speed).
+- The `chore/mbx` merge brought the old x/ scripts' deletion; a second merge of the rebased `chore/mbx` (adfd2778) was not taken because it conflicts with main's Clay refactor in 55 files.
+
+### Commands run (from the worktree root; inside `env -u CARGO_TARGET_DIR nix develop`, `cargo` is `mbx-1.29.2/libexec/mbx/cargo`)
+- Build: `DAYFRAME_GUEST_PROFILE=release DAYFRAME_RAISED_LIMITS=1 deno run --allow-all x/dayframe-web.ts --build`, then `cp -rL target/dayframe_web/site /run/media/asdf/p3N/tmp/x5/site` (the managed target was pruned once between builds, so the site was copied out at once).
+- Servers: `deno run --allow-all bench/ladder/serve.ts 4711 /r0/=bench/ladder/r0/dist /corpus/=/run/media/asdf/p3N/tmp/x5/corpus /=bench/ladder` and `... serve.ts 4712 /=/run/media/asdf/p3N/tmp/x5/site`, waited for with `curl`, killed by PID at the end.
+- Matrix: `MAX_LOAD=8 bench/ladder/run-x5.sh 6 r0 r3 r3a r3-pierre r3a-pierre` (interrupted), resumed per variant `START=5 bench/ladder/run-x5.sh 1 <variant>` for r3a, r3-pierre, r3a-pierre; power guard (30% and charging) in `run-x5.sh`.
+- Control: `X5_STALL_MS=300 START=1 bench/ladder/run-x5.sh 1 r0|r3a|r3a-pierre` with `X5_OUT=.../stall.jsonl`.
+- Tables: `python3 bench/ladder/aggregate-x5.py /run/media/asdf/p3N/tmp/x5/results.jsonl`.

@@ -13,8 +13,18 @@ wait_load() {
     sleep 10
   done
 }
+# Power guard (battery host): below 30% and not Full/Charging-above-30, wait.
+wait_power() {
+  for _ in $(seq 1 240); do
+    cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1); st=$(cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -1)
+    [ -z "$cap" ] && return
+    { [ "$cap" -ge 30 ] && { [ "$st" = Charging ] || [ "$st" = Full ]; }; } || [ "$st" = Full ] || { sleep 60; continue; }
+    return
+  done
+}
 for round in $(seq "${START:-1}" "$((${START:-1} + rounds - 1))"); do
   for variant in "$@"; do
+    wait_power
     wait_load
     echo "=== round $round $variant $(uptime)"
     (cd "$here" && LADDER_SPEC=x5.spec.ts X5_VARIANTS=$variant X5_ROUND=$round \
