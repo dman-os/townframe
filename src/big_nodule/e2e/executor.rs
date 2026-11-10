@@ -141,6 +141,10 @@ impl NoduleExecutor for FakeExecutor {
         }
     }
 
+    fn hosts(&self, plug_id: &PlugId) -> bool {
+        self.state.lock().unwrap().hosted.contains_key(plug_id)
+    }
+
     async fn retire(&self, plug_id: &PlugId) {
         let mut state = self.state.lock().unwrap();
         assert!(

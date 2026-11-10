@@ -68,6 +68,9 @@ pub trait NoduleExecutor: Send + Sync {
     /// [`Hosted::NotReady`] and calls [`Reensure::request`] when that changes.
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted;
 
+    /// Whether a workload is running for `plug_id`: it was ensured and not retired.
+    fn hosts(&self, plug_id: &PlugId) -> bool;
+
     /// Stop hosting whatever was ensured for `plug_id`. Called after dispatch already stopped
     /// routing to it.
     async fn retire(&self, plug_id: &PlugId);

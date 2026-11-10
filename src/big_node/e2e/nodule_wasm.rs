@@ -294,7 +294,7 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     admit(&node, plug(&spec, &bytes, &[])).await;
     let enabled = set_enabled(&node, &spec, true).await;
     assert_eq!(enabled.readiness, Readiness::Ready);
-    assert!(node.wasm.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.plug));
 
     // The echo returns the input, and the headers the host built for the guest: the operator's
     // capability as a bare `Bearer` token (no signer), the idempotency key, the request id and
@@ -358,9 +358,9 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::UnknownOperation)
     );
-    assert!(!node.wasm.hosts(&spec.plug));
+    assert!(!node.executor.hosts(&spec.plug));
     set_enabled(&node, &spec, true).await;
-    assert!(node.wasm.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.plug));
     assert_eq!(
         invoke(&node, &echo, json!({ "n": 2 }), Default::default())
             .await
@@ -553,7 +553,7 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     admit(&node, plug(&spec, &bytes, &[])).await;
     let waiting = set_enabled(&node, &spec, true).await;
     assert_eq!(waiting.readiness, Readiness::ArtifactsUnavailable);
-    assert!(!node.wasm.hosts(&spec.plug));
+    assert!(!node.executor.hosts(&spec.plug));
     assert_eq!(
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::NotReady {
@@ -659,7 +659,7 @@ async fn install_a_plug_published_on_another_node(access: big_cabinet_core::draw
     while record(node, &spec).await.readiness != Readiness::Ready {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(node.wasm.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.plug));
     assert_eq!(
         invoke(
             node,

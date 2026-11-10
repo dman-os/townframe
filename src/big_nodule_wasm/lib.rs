@@ -215,14 +215,6 @@ pub async fn boot(
 }
 
 impl WasmExecutor {
-    /// Whether a workload is running for `plug_id`.
-    pub fn hosts(&self, plug_id: &PlugId) -> bool {
-        self.hosted
-            .lock()
-            .expect("hosted lock")
-            .contains_key(plug_id)
-    }
-
     /// The signer is forgotten only once the workload is stopped, so its in-flight requests keep
     /// their identity while it drains; [`Egress`] answers any call that still outlives it as a
     /// gone upstream.
@@ -357,6 +349,13 @@ impl NoduleExecutor for WasmExecutor {
             },
         );
         Hosted::Ready(provider)
+    }
+
+    fn hosts(&self, plug_id: &PlugId) -> bool {
+        self.hosted
+            .lock()
+            .expect("hosted lock")
+            .contains_key(plug_id)
     }
 
     async fn retire(&self, plug_id: &PlugId) {
