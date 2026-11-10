@@ -44,9 +44,12 @@ use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
+use big_cabinet_core::doc::DatumAuthor;
 use big_cabinet_core::doc::DatumVersion;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 pub(super) const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
@@ -56,6 +59,9 @@ pub(crate) enum Verdict {
     Accepted {
         datum_heads: Vec<ChangeHash>,
         native: Option<Vec<u8>>,
+        /// The actors of the verified evidence covering the datum heads, from the actor binding
+        /// the gate reconstructed at each introduction, one per actor, sorted by actor id.
+        authors: Vec<DatumAuthor>,
     },
     Pending {
         reason: String,
@@ -123,6 +129,7 @@ impl<'a> Gate<'a> {
             Err(error) => return unreadable(error),
         };
         let mut datum_heads = BTreeSet::new();
+        let mut authors = BTreeMap::<Uuid7, String>::new();
         let mut single_claim_native: Option<(ChangeHash, Option<Vec<u8>>)> = None;
         let entries_len = entries.len();
         for entry in entries {
@@ -136,9 +143,19 @@ impl<'a> Gate<'a> {
             {
                 single_claim_native = Some((introduction, native.clone()));
             }
+            // The author is read off the claim before the status consumes it; it only counts when
+            // the claim is valid, which also means the attribution check saw the actor URL.
+            let author = match &entry.result {
+                ClaimHistoryResult::Accepted(claim) => claim
+                    .actor_url
+                    .as_ref()
+                    .map(|url| (claim.claim.actor_uuid, url.clone())),
+                _ => None,
+            };
             match self.claim_status(entry.result) {
                 Status::Valid => {
                     datum_heads.insert(introduction);
+                    authors.extend(author);
                 }
                 Status::Pending(reason) => {
                     datum_heads.insert(introduction);
@@ -185,6 +202,10 @@ impl<'a> Gate<'a> {
             None => Verdict::Accepted {
                 datum_heads,
                 native: current,
+                authors: authors
+                    .into_iter()
+                    .map(|(actor, url)| DatumAuthor { actor, url })
+                    .collect(),
             },
         }
     }

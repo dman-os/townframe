@@ -4,6 +4,7 @@
 //! Forgeries are planted with raw Automerge edits on documents the repository wrote correctly, so
 //! each test states exactly which invariant the sabotage breaks.
 
+mod authors;
 mod branches;
 mod capabilities;
 mod commands;
@@ -468,7 +469,7 @@ fn op<T>(result: Result<T, ClientError<DocsError>>) -> Result<T, DocsError> {
 
 fn accepted(read: &DatumRead) -> (&Value, &[ChangeHash]) {
     match read {
-        DatumRead::Accepted { value, version } => (value, version.heads.as_slice()),
+        DatumRead::Accepted { value, version, .. } => (value, version.heads.as_slice()),
         other => panic!("expected an accepted datum, got {other:?}"),
     }
 }

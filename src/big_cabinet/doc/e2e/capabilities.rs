@@ -554,6 +554,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                         capability,
                         doc_id: created.doc_id.clone(),
                         at: At::Current,
+                        with_authors: false,
                     }
                 )
                 .await),

@@ -29,6 +29,7 @@ fn accepted(digest: String, urls: Vec<String>, length_octets: u64) -> DatumRead 
             "urls": urls,
         }),
         version: DatumVersion::default(),
+        authors: Vec::new(),
     }
 }
 
@@ -1240,6 +1241,7 @@ async fn definitive_nonvalues_delete_the_exact_route() -> Res<()> {
         DatumRead::Accepted {
             value: serde_json::json!({ "digest": blob_id.digest_str() }),
             version: DatumVersion::default(),
+            authors: Vec::new(),
         },
     ]
     .into_iter()

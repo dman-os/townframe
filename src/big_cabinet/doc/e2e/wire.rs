@@ -168,6 +168,10 @@ fn datum_read_wire() {
             DatumRead::Accepted {
                 value: note("hello"),
                 version: version(&[1]),
+                authors: vec![DatumAuthor {
+                    actor: uuid7(1),
+                    url: "dtxt:actor:k/alice".into(),
+                }],
             },
         ),
         (
@@ -226,6 +230,7 @@ fn datums_read_wire() {
                 DatumRead::Accepted {
                     value: note("hello"),
                     version: version(&[2]),
+                    authors: Vec::new(),
                 },
             ),
             (
@@ -243,7 +248,22 @@ fn datum_listing_wire() {
     insta::assert_json_snapshot!(DatumListing {
         heads: vec![hash(1)],
         datums: BTreeMap::from([(key("main"), version(&[2, 3]))]),
+        authors: BTreeMap::new(),
     });
+    insta::assert_json_snapshot!(
+        "datum_listing_with_authors",
+        DatumListing {
+            heads: vec![hash(1)],
+            datums: BTreeMap::from([(key("main"), version(&[2, 3]))]),
+            authors: BTreeMap::from([(
+                key("main"),
+                vec![DatumAuthor {
+                    actor: uuid7(1),
+                    url: "dtxt:actor:k".into(),
+                }]
+            )]),
+        }
+    );
 }
 
 #[test]
@@ -582,7 +602,17 @@ fn list_datums_wire() {
         capability: capability(1),
         doc_id: document(1),
         at: At::Heads(vec![hash(1)]),
+        with_authors: false,
     });
+    insta::assert_json_snapshot!(
+        "list_datums_with_authors",
+        ListDatums {
+            capability: capability(1),
+            doc_id: document(1),
+            at: At::Heads(vec![hash(1)]),
+            with_authors: true,
+        }
+    );
 }
 
 #[test]

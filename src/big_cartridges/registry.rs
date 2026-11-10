@@ -1120,6 +1120,7 @@ mod tests {
         DatumRead::Accepted {
             value,
             version: DatumVersion::default(),
+            authors: Vec::new(),
         }
     }
 

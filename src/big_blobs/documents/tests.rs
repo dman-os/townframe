@@ -139,6 +139,7 @@ impl DocsStub {
                         heads: heads.clone(),
                         clock,
                     },
+                    authors: Vec::new(),
                 },
             );
         }
@@ -278,6 +279,7 @@ fn accepted(value: Value) -> DatumRead {
     DatumRead::Accepted {
         value,
         version: DatumVersion::default(),
+        authors: Vec::new(),
     }
 }
 

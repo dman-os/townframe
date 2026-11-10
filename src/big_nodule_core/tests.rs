@@ -1102,6 +1102,7 @@ mod admission_tests {
                     value: serde_json::to_value(NoduleInstall::from_cartridge(&cartridge, true))
                         .unwrap(),
                     version: DatumVersion::default(),
+                    authors: Vec::new(),
                 },
             );
         }
@@ -1506,6 +1507,7 @@ mod config_tests {
             DatumRead::Accepted {
                 value: json!({"layout": {"$type": "org.example.daybook.drawer.selfDoc", "empty": true}}),
                 version: DatumVersion::default(),
+                authors: Vec::new(),
             },
         );
         read.datums.insert(
@@ -1513,6 +1515,7 @@ mod config_tests {
             DatumRead::Accepted {
                 value: json!({"unexpected": true}),
                 version: DatumVersion::default(),
+                authors: Vec::new(),
             },
         );
         read.datums.insert(
@@ -1520,6 +1523,7 @@ mod config_tests {
             DatumRead::Accepted {
                 value: install_val,
                 version: DatumVersion::default(),
+                authors: Vec::new(),
             },
         );
         read.datums.insert(
@@ -1527,6 +1531,7 @@ mod config_tests {
             DatumRead::Accepted {
                 value: json!({"envelope": {}, "revision": "bad", "enabled": true}),
                 version: DatumVersion::default(),
+                authors: Vec::new(),
             },
         );
         read.datums.insert(
@@ -1548,6 +1553,7 @@ mod config_tests {
             DatumRead::Accepted {
                 value: json!({"values": {"thumbnails": false}}),
                 version: DatumVersion::default(),
+                authors: Vec::new(),
             },
         );
 
@@ -1651,6 +1657,7 @@ mod config_tests {
         DatumRead::Accepted {
             value,
             version: DatumVersion::default(),
+            authors: Vec::new(),
         }
     }
 

@@ -73,8 +73,10 @@ async fn listing_a_fuller_drawer_costs_in_proportion_to_its_slots() {
             At::Heads(large_before),
         ),
     ] {
-        let (small_cost, small_listing) = allocations_during(|| list_datums(&small, &small_at));
-        let (large_cost, large_listing) = allocations_during(|| list_datums(&large, &large_at));
+        let (small_cost, small_listing) =
+            allocations_during(|| list_datums(&small, &small_at, false));
+        let (large_cost, large_listing) =
+            allocations_during(|| list_datums(&large, &large_at, false));
         assert_eq!(small_listing.unwrap().datums.len(), 40);
         assert_eq!(large_listing.unwrap().datums.len(), 160);
         // 4x the slots: linear work is ~4x the allocations, quadratic ~16x.

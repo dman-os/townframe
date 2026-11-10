@@ -220,6 +220,7 @@ fn accepted(value: serde_json::Value) -> DatumRead {
             heads: vec![ChangeHash([1; 32])],
             clock: 1,
         },
+        authors: Vec::new(),
     }
 }
 fn absent() -> DatumRead {

@@ -645,7 +645,7 @@ impl DocumentBlobs {
         plaintext: &BlobId,
         cipher_key: &DatumKey,
     ) -> Attempt<RetainedRepresentation> {
-        let Some(DatumRead::Accepted { value, version }) = read.datums.get(cipher_key) else {
+        let Some(DatumRead::Accepted { value, version, .. }) = read.datums.get(cipher_key) else {
             return Ok(Err(DeferralReason::DatumUnavailable {
                 doc_id: doc_id.clone(),
                 datum_key: cipher_key.clone(),

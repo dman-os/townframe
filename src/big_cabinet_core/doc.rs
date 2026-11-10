@@ -101,6 +101,21 @@ pub struct DatumVersion {
     pub clock: u64,
 }
 
+/// An actor that wrote the version of a datum a read or listing reports (attribution).
+///
+/// These are the actors of the evidence the gate verified as currently covering the version, one
+/// per distinct actor and sorted by actor id; a slot with concurrent current writes lists every
+/// author. `url` is the actor URL (`dtxt:actor:<node key>[/<path>]`) taken from that verified
+/// evidence rather than from the local actor registry, so authors on other nodes resolve too.
+/// What the evidence is (today a per-datum signature) may change; the meaning of the field does not.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatumAuthor {
+    pub actor: Uuid7,
+    pub url: String,
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
@@ -108,6 +123,8 @@ pub enum DatumRead {
     Accepted {
         value: Json,
         version: DatumVersion,
+        /// Who wrote the accepted version, as the gate verified it for this read.
+        authors: Vec<DatumAuthor>,
     },
     Absent {
         version: DatumVersion,
@@ -141,6 +158,10 @@ pub struct DatumListing {
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
     pub datums: BTreeMap<DatumKey, DatumVersion>,
+    /// The authors of each row's version, present only for rows of a listing that asked
+    /// (`ListDatums::with_authors`) and whose version the gate accepted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authors: BTreeMap<DatumKey, Vec<DatumAuthor>>,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +377,10 @@ pub struct ListDatums {
     pub capability: CapId,
     pub doc_id: DocId,
     pub at: At,
+    /// Also report each row's authors. Off by default: it runs the gate per row, which a plain
+    /// listing never does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub with_authors: bool,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
