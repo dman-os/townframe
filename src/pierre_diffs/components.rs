@@ -3,6 +3,7 @@
 //! trait; the browser wiring is in the `pierre_diffs_dioxus` crate.
 
 pub mod file_diff;
+pub mod virtualized_file_diff;
 pub mod virtualizer;
 
 #[cfg(test)]
