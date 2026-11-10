@@ -37,6 +37,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             "nodules": nodules,
             "services": null,
             "peers": info.peers,
+            "relay": conf.node_dir.settings()?.relay,
         });
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(ExitCode::SUCCESS);
@@ -67,6 +68,9 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             },
             nodule["readiness"],
         );
+    }
+    if conf.node_dir.settings()?.relay {
+        println!("relay     yes");
     }
     println!("services  not exposed by the node");
     match &info.peers {

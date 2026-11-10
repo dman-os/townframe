@@ -11,6 +11,7 @@ $ day status --json
   "nodules": [],
   "path": "[..]/node",
   "peers": null,
+  "relay": false,
   "services": null,
   "socket": {
     "path": "[..]/run/day/[..].sock",

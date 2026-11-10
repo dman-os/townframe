@@ -153,8 +153,8 @@ fn try_static_cli() -> Res<StaticCliResult> {
 }
 
 async fn static_cli(cli: Cli) -> Res<ExitCode> {
-    if let StaticCommands::Init { dir } = &cli.command {
-        return cmds::init::run(dir.clone()).await;
+    if let StaticCommands::Init { dir, relay } = &cli.command {
+        return cmds::init::run(dir.clone(), *relay).await;
     }
 
     let conf = lazy::config().await?;
@@ -211,6 +211,10 @@ enum StaticCommands {
     Init {
         /// The directory to create the node in (default: the --node directory)
         dir: Option<PathBuf>,
+        /// Run the node as a relay: it accepts any peer and mirrors the drawers it is made a
+        /// member of
+        #[arg(long)]
+        relay: bool,
     },
     /// Run, start, stop and inspect the node's background daemon
     Daemon {

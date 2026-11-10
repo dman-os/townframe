@@ -11,6 +11,7 @@ Arguments:
 
 Options:
       --node <DIR>  The node's directory [env: DAY_NODE=[..]/node]
+      --relay       Run the node as a relay: it accepts any peer and mirrors the drawers it is made a member of
   -h, --help        Print help
 
 ```

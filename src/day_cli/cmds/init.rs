@@ -7,7 +7,7 @@ use crate::interlude::*;
 /// is, so running this twice cannot change a node's identity. A directory that holds something
 /// that is not a node (an unreadable or unparsable `node.json`, a version this `day` does not
 /// understand) is an error, and is not touched either.
-pub async fn run(dir: Option<PathBuf>) -> Res<ExitCode> {
+pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
     let node_dir = match dir {
         Some(dir) => {
             crate::context::NodeDir::new(crate::config::CliConfig::source(Some(&dir))?.node_path)
@@ -29,7 +29,15 @@ pub async fn run(dir: Option<PathBuf>) -> Res<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
-    let settings = node_dir.init()?;
+    node_dir.init()?;
+    if relay {
+        node_dir.update_settings(|settings| {
+            settings.relay = true;
+            settings.peers.get_or_insert_with(default);
+            Ok(())
+        })?;
+    }
+    let settings = node_dir.settings()?;
     println!(
         "initialized node {} at {}",
         settings.node_id(),

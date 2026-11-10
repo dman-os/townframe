@@ -94,6 +94,11 @@ pub struct NodeSettings {
     /// dials nor can be dialed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers: Option<PeerSettings>,
+    /// Run the node as a relay (ADR 038 section 3): accept any peer and mirror every drawer the
+    /// node is a member of, which a user grants with `day drawers invite`. A relay needs the
+    /// network attachment, so this requires a `peers` section.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relay: bool,
 }
 
 /// The `peers` section of `node.json`: its presence is what makes the daemon attach the peers
@@ -136,8 +141,8 @@ impl PeerSettings {
     }
 
     /// The peers config the daemon boots with: dial the bootstrap list under the default
-    /// mirroring policy.
-    fn peers_config(&self) -> Res<big_node::peers::PeersConfig> {
+    /// mirroring policy, or under the relay policy when the node is a relay.
+    fn peers_config(&self, relay: bool) -> Res<big_node::peers::PeersConfig> {
         let dial = self
             .bootstrap
             .iter()
@@ -145,7 +150,13 @@ impl PeerSettings {
             .collect::<Res<Vec<_>>>()?;
         Ok(big_node::peers::PeersConfig {
             loopback_only: self.loopback_only,
-            policy: big_node::peers::PolicyChoice::Mirror(big_node::peers::MirrorPolicy { dial }),
+            policy: if relay {
+                big_node::peers::PolicyChoice::Custom(Arc::new(big_node::peers::RelayPolicy::new(
+                    dial,
+                )))
+            } else {
+                big_node::peers::PolicyChoice::Mirror(big_node::peers::MirrorPolicy { dial })
+            },
             ..default()
         })
     }
@@ -246,6 +257,7 @@ impl NodeDir {
             identity_seed: data_encoding::HEXLOWER.encode(&seed),
             nodule_operations: DispatchScope::default(),
             peers: None,
+            relay: false,
         };
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -274,11 +286,16 @@ impl NodeDir {
             settings.version,
             NodeSettings::VERSION
         );
+        eyre::ensure!(
+            !settings.relay || settings.peers.is_some(),
+            "{}: a relay needs a `peers` section (it is reached over the network)",
+            path.display()
+        );
         if let Some(peers) = &settings.peers {
             // Fail on a bad ticket whichever command reads the settings, not when a daemon
             // happens to boot it.
             peers
-                .peers_config()
+                .peers_config(settings.relay)
                 .wrap_err_with(|| format!("{}: bootstrap list", path.display()))?;
         }
         Ok(settings)
@@ -450,7 +467,7 @@ impl Booted {
                 settings
                     .peers
                     .as_ref()
-                    .map(PeerSettings::peers_config)
+                    .map(|peers| peers.peers_config(settings.relay))
                     .transpose()?,
             )
         } else {
