@@ -405,6 +405,27 @@ impl Document {
             .collect()
     }
 
+    /// The first element child of `parent` at or after raw child position
+    /// `start`, with its raw position: a cursor over `parent.children` that
+    /// copies nothing and holds no borrow between calls, so a caller can walk
+    /// the live collection and call out to the host between steps (resume at
+    /// `position + 1`). It also answers `nextElementSibling` for the child at
+    /// `position` without `next_element_sibling`'s scan for the node's own slot.
+    pub fn element_child_from(
+        &self,
+        parent: impl Borrow<NodeKey>,
+        start: usize,
+    ) -> Option<(usize, NodeKey)> {
+        let arena = self.arena.borrow();
+        let children = &arena.node(*parent.borrow()).children;
+        children
+            .get(start..)?
+            .iter()
+            .enumerate()
+            .find(|(_, key)| arena.is_element(**key))
+            .map(|(offset, key)| (start + offset, *key))
+    }
+
     /// `element.previousElementSibling`
     pub fn previous_element_sibling(&self, node: impl Borrow<NodeKey>) -> Option<NodeKey> {
         let node = *node.borrow();

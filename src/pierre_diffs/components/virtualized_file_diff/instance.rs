@@ -27,11 +27,11 @@
 //   which `reconcileHeights`' `getBoundingClientRect().height` needs as well, so no
 //   new host method is needed). DOM reads go through the instance's `Document`:
 //   `codeGroup.children[1]` is the second element child, `children` of the
-//   content is its element children (a `Vec` per group, a copy of the live
-//   collection upstream reads in place), `dataset.lineIndex` /
+//   content is walked in place by raw position (`Document::element_child_from`,
+//   no copy and no arena borrow across the host call), `dataset.lineIndex` /
 //   `'lineAnnotation' in dataset` / `'noNewline' in dataset` are the
 //   `data-line-index`, `data-line-annotation` and `data-no-newline` attributes,
-//   `nextElementSibling` is `Document::next_element_sibling`, and every element
+//   `nextElementSibling` is the next step of that same walk, and every element
 //   is an `HTMLElement` (`instanceof HTMLElement` checks are always true).
 //   `FILE_ANNOTATION_DOM_KEY` is built once per measurement.
 // * `updateCodeViewLayout` keeps its upstream name (the DOM-free way to put a
@@ -546,6 +546,15 @@ where
         has_height_change
     }
 
+    /// `codeGroup.children[1]`.
+    fn second_element_child(&self, code_group: NodeKey) -> Option<NodeKey> {
+        let document = self.document();
+        let (first, _) = document.element_child_from(code_group, 0)?;
+        document
+            .element_child_from(code_group, first + 1)
+            .map(|(_, key)| key)
+    }
+
     /// The body of `reconcileHeights`' loop over `codeGroups`, after the
     /// `children[1]` check; `true` if any row's delta changed.
     fn reconcile_code_group(
@@ -555,11 +564,16 @@ where
         measure_all_rows: bool,
     ) -> bool {
         let document = self.document();
-        let Some(content) = document.children(code_group).get(1).copied() else {
+        let Some(content) = self.second_element_child(code_group) else {
             return false;
         };
         let mut has_height_change = false;
-        for line in document.children(content) {
+        // Walks the live children by raw position; `cursor` is both the following
+        // line and the line's `nextElementSibling`, and no arena borrow is held
+        // across the host call.
+        let mut cursor = document.element_child_from(content, 0);
+        while let Some((position, line)) = cursor {
+            cursor = document.element_child_from(content, position + 1);
             let Some(line_index_attr) = document.get_attribute(line, "data-line-index") else {
                 continue;
             };
@@ -582,7 +596,7 @@ where
             let mut has_metadata = false;
             // Annotations or noNewline metadata increase the size of the their
             // attached line
-            if let Some(sibling) = document.next_element_sibling(line)
+            if let Some((_, sibling)) = cursor
                 && (document.has_attribute(sibling, "data-line-annotation")
                     || document.has_attribute(sibling, "data-no-newline"))
             {
@@ -616,10 +630,12 @@ where
         let dom_key = file_annotation_dom_key();
         let mut height: Option<f64> = None;
         for code_group in code_groups.iter().copied().flatten() {
-            let Some(content) = document.children(code_group).get(1).copied() else {
+            let Some(content) = self.second_element_child(code_group) else {
                 continue;
             };
-            for child in document.children(content) {
+            let mut cursor = document.element_child_from(content, 0);
+            while let Some((position, child)) = cursor {
+                cursor = document.element_child_from(content, position + 1);
                 if document
                     .get_attribute(child, "data-line-annotation")
                     .as_deref()
