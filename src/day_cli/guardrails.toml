@@ -9,6 +9,8 @@ allowed_dependencies = [
     "big_node",
     "big_nodule_core",
     "big_repo",
+    "intxt_core",
+    "intxt_nodule",
     "method_core",
     "secrets_rs",
     "service_client_native_rs",
