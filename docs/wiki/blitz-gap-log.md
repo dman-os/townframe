@@ -36,6 +36,7 @@ Versions referenced unless stated: `blitz-dom` 0.3.0-beta.4, `dioxus` fork `a3e1
 | No pointer capture: each move is re-hit-tested, so a drag that leaves its box stops receiving events. | Drag selection of line ranges (Pierre's InteractionManager), any drag gesture. Workaround: full-window overlay during the gesture. | skill `blitz-dioxus-native-limits`, "No pointer capture" | none found (2026-11-10) |
 | `get_client_rect` takes a mutable document borrow, so calling it from `onmounted` or an event handler panics (`RefCell already borrowed`). | Measuring anything at mount or in a handler; forced the width-class-as-prop design (`clay_dioxus_kit/width.rs`). | skill, "Measuring the DOM"; verified 0.8.0-alpha / blitz-dom 0.3.0-beta.2 | none found (2026-11-10) |
 | No `transitionend` / `animationend` events. | Sequencing UI after a transition (sheets, panels). | skill, focus section | none found (2026-11-10) |
+| Hit-testing panics on a stale hoisted child: `hit_inner` walks the stacking context's positive-z hoisted children and `self.with(node_id)` unwraps a node that no longer exists (`Option::unwrap()` on `None`). | Crashed the desktop shell while dragging the sidebar's resize handle (`clay_dioxus_kit` Split), 2026-11-10; drags re-render positioned nodes under the pointer. Moved the #80 demo to Wry. | `blitz-dom` git `ffaf2bd`, `src/node/node.rs:1472`; no backtrace or repro test yet | none found (2026-11-10) |
 
 ## CSS layout and rendering
 
