@@ -40,6 +40,21 @@ pub type DocId = ObjKey;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DatumTag(String);
 
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DatumTag {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DatumTag".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::DatumTag").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
 impl DatumTag {
     /// Construct a tag that can occupy one datum-reference path component.
     ///

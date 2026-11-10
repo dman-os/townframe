@@ -7,6 +7,7 @@ use serde::Serialize;
 pub const MAX_READ_BYTES: u32 = 1024 * 1024;
 pub const MAX_PUT_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlobInfo {
@@ -14,6 +15,7 @@ pub struct BlobInfo {
     pub length_octets: u64,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlobRange {
@@ -21,6 +23,7 @@ pub struct BlobRange {
     pub length_octets: u64,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum BlobsError {
     #[error("request context failed: {0}")]
@@ -35,6 +38,7 @@ pub enum BlobsError {
     Storage { reason: String },
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PutBlob {
@@ -42,6 +46,7 @@ pub struct PutBlob {
     pub bytes: Vec<u8>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadBlob {
@@ -51,6 +56,7 @@ pub struct ReadBlob {
     pub length: u32,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatBlob {

@@ -512,6 +512,22 @@ impl FromStr for DrawerAccess {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GroupKey(pub [u8; 32]);
 
+/// The text form `Display` writes.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for GroupKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GroupKey".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::GroupKey").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
 impl fmt::Display for GroupKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))

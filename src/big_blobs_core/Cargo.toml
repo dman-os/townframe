@@ -9,6 +9,9 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+schemars = ["method_core/schemars"]
+
 [dependencies]
 method_core.workspace = true
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }

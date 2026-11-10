@@ -133,7 +133,7 @@ impl Declaration {
 /// a bound would flip to `Uint` and no longer hydrate into its `iN`, so it is refused here.
 ///
 /// Only schema positions are walked: `const`, `enum`, `default` and `examples` hold data.
-pub(in crate::datum) fn rust_number_formats_to_bounds(schema: &mut Value) -> Result<(), String> {
+pub fn rust_number_formats_to_bounds(schema: &mut Value) -> Result<(), String> {
     match schema {
         Value::Array(items) => items.iter_mut().try_for_each(rust_number_formats_to_bounds),
         Value::Object(object) => {

@@ -13,9 +13,11 @@ path = "lib.rs"
 default = ["uniffi", "test-support", "automerge"]
 uniffi = ["dep:uniffi"]
 automerge = ["dep:autosurgeon"]
+schemars = ["dep:schemars"]
 test-support = []
 
 [dependencies]
+schemars = { version = "1.2", optional = true }
 utils_rs = { workspace = true, features = ["hash"] }
 datum_core = { workspace = true }
 

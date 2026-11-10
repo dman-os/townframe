@@ -10,3 +10,4 @@ default_features = true
 features = []
 
 [builds.native]
+features = ["schemars"]

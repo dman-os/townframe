@@ -72,6 +72,7 @@ pub use big_sync_core::ObjKey as DocId;
 /// The document's own id is not a field of [`Dmeta`]: the enclosing document already knows it, and
 /// a field inside the datum would be copied verbatim onto a branch, where it would name the origin
 /// rather than the branch.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocIdentity {
     pub id: DocId,
@@ -367,6 +368,7 @@ pub struct DatumSignature {
     pub extra: crate::datum::Extra,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimOperation {
     Set,
@@ -379,6 +381,7 @@ pub enum ClaimOperation {
 /// **native storage form**, read back from the transaction after the content mutation. It is absent
 /// only for a removal. The encoding itself belongs to the repository; this type only ever holds the
 /// resulting CID, so it cannot drift from the bytes that were stored.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumClaim {
@@ -416,6 +419,25 @@ impl Cid {
 impl Serialize for Cid {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(&self.0)
+    }
+}
+
+/// `serialize_bytes` through serde_json is a list of byte values.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Cid {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Cid".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Cid").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+        })
     }
 }
 
@@ -468,6 +490,7 @@ impl TryFrom<&[u8]> for Cid {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SignatureId(Cid);

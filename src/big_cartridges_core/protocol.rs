@@ -33,6 +33,7 @@ use std::collections::BTreeSet;
 /// cartridges whose id lives under one of those DIDs; absent means any namespace, which is what the
 /// operator's own identity has. A handle can only be minted with a scope its minter covers, so a
 /// namespace set only ever narrows.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CartridgesScope {
@@ -63,6 +64,7 @@ impl CartridgesScope {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintCartridgesCapability {
@@ -76,6 +78,7 @@ pub struct MintCartridgesCapability {
 /// label with an identical envelope is an idempotent no-op; the same label with a different one
 /// is refused with [`CartridgesError::VersionExists`]; a new label must be greater than every label
 /// the cartridge has or had ([`CartridgesError::Downgrade`]).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishCartridgeVersion {
@@ -84,6 +87,7 @@ pub struct PublishCartridgeVersion {
 
 /// The DID this node publishes under: the `did:key` of the node's Ed25519 signing key. Cartridge ids
 /// built under it can be published unsigned and are signed by the node.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetPublisher {}
@@ -105,6 +109,7 @@ pub struct GetPublisher {}
 /// version in it is verified as it is folded in, exactly as for a document that synced into the
 /// drawer, so an unsigned or badly signed version is listed as unverified and never served, and
 /// no downgrade rule applies (arrival order is not version order).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportCartridgeDocument {
@@ -113,16 +118,19 @@ pub struct ImportCartridgeDocument {
     pub reach: CapId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListCartridges {}
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetCartridge {
     pub id: CartridgeId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetCartridgeVersion {
@@ -132,6 +140,7 @@ pub struct GetCartridgeVersion {
 
 /// Drops one version's envelope and artifact references from the cartridge's document. The bytes are
 /// released from retention unless another document still references them.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveCartridgeVersion {
@@ -140,6 +149,7 @@ pub struct RemoveCartridgeVersion {
 }
 
 /// Drops every version and the identity of a cartridge.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveCartridge {
@@ -149,6 +159,7 @@ pub struct RemoveCartridge {
 /// A long poll over registry changes (ADR 023). `after` is the cursor of the last answer the
 /// caller consumed, or `None` for the registry's current state. `limit` and `hold_ms` are
 /// requests the service clamps; `0` asks for the default page and no hold.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchCartridges {
@@ -164,6 +175,7 @@ pub struct WatchCartridges {
 /// sequence restarts with the process: `epoch` names the process incarnation the `seq` counts
 /// in, and a cursor from another epoch is answered with the full current state
 /// ([`CartridgeChanges::reset`]) instead of a delta the service can no longer compute.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CartridgesCursor {
@@ -173,6 +185,7 @@ pub struct CartridgesCursor {
 
 /// One cartridge whose record changed (a version published, removed or found conflicting, the cartridge
 /// removed). The caller re-reads the cartridge; it is not carried, so a change never goes stale.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CartridgeChange {
@@ -182,6 +195,7 @@ pub struct CartridgeChange {
     pub removed: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CartridgeChanges {
@@ -199,6 +213,7 @@ pub struct CartridgeChanges {
 /// the label. `conflict` says the drawer's datum has since changed or become unreadable (another
 /// node wrote it); the registry keeps serving the first-seen envelope and never resolves that
 /// silently.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CartridgeVersionRecord {
@@ -211,6 +226,7 @@ pub struct CartridgeVersionRecord {
 }
 
 /// A version in a cartridge's listing: its envelope is fetched with [`GetCartridgeVersion`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CartridgeVersionSummary {
@@ -226,6 +242,7 @@ pub struct CartridgeVersionSummary {
 }
 
 /// One cartridge in the registry, from its document in the drawer.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CartridgeRecord {
@@ -246,6 +263,7 @@ pub struct CartridgeRecord {
 }
 
 /// The result of a publish: the version as stored, and whether it was already.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedCartridgeVersion {
@@ -254,6 +272,7 @@ pub struct PublishedCartridgeVersion {
     pub unchanged: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum CartridgesError {
     #[error("request context failed: {0}")]

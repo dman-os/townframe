@@ -81,6 +81,22 @@ impl FromStr for BlobId {
     }
 }
 
+/// The human-readable form: the `Display` text.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for BlobId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "BlobId".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::BlobId").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
 impl Serialize for BlobId {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if serializer.is_human_readable() {

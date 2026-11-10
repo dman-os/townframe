@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 /// The operations a minted dispatch handle may invoke: individual NSIDs, and authority
 /// prefixes that cover every NSID at or under them (`org.example.photos` covers
 /// `org.example.photos.list`, not `org.example.photosynthesis.list`).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DispatchScope {
@@ -65,6 +66,7 @@ impl DispatchScope {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDispatchCapability {
@@ -79,6 +81,7 @@ pub struct MintDispatchCapability {
 /// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
 /// that the handler can be called now and the node's word that every initializer of this
 /// revision and start has succeeded.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Readiness {
@@ -114,6 +117,7 @@ impl Readiness {
 /// What travels with one call beside its input; providers receive it. The call's deadline,
 /// request id and trace are not here: they are the [`service_core_rs::RequestContext`] the call
 /// arrives with, and a hop re-derives the remaining budget from it (the `x-timeout-ms` header).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvocationContext {
@@ -121,6 +125,7 @@ pub struct InvocationContext {
     pub idempotency_key: Option<String>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invoke {
@@ -130,6 +135,7 @@ pub struct Invoke {
     pub context: InvocationContext,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvokeOutput {
@@ -139,6 +145,7 @@ pub struct InvokeOutput {
 /// Why an operation that is routed cannot be served right now. Provider readiness is the
 /// [`Readiness`]; `Ambiguous` is dispatch's own, for an NSID that more than
 /// one provider implements, which is never resolved by installation order (ADR 027 §5).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NotReadyReason {
@@ -146,6 +153,7 @@ pub enum NotReadyReason {
     Ambiguous,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum DispatchError {
     #[error("request context failed: {0}")]

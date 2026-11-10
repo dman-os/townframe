@@ -50,6 +50,22 @@ macro_rules! alias_byte_key {
             }
         }
 
+        /// The human-readable wire form: base58btc under the multibase `z` prefix.
+        #[cfg(feature = "schemars")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn schema_id() -> std::borrow::Cow<'static, str> {
+                concat!(module_path!(), "::", stringify!($name)).into()
+            }
+
+            fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({ "type": "string" })
+            }
+        }
+
         #[cfg(feature = "automerge")]
         impl autosurgeon::Reconcile for $name {
             type Key<'a> = autosurgeon::reconcile::NoKey;

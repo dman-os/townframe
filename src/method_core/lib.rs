@@ -6,6 +6,7 @@ use std::fmt;
 use std::pin::Pin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub enum ContextError {
     #[error("request context is missing a request id")]
     MissingRequestId,
@@ -139,6 +140,66 @@ pub trait Subscription:
 
 pub type EventStream<E, Err> = Pin<Box<dyn Stream<Item = Result<E, Err>> + Send + 'static>>;
 
+/// The schemas a method's Lexicon is projected from, as `schemars` derived them from its Rust
+/// types. Host-only: `method_lexicon` assembles the Lexicon file from this.
+#[cfg(feature = "schemars")]
+pub mod schema {
+    pub use schemars;
+    use schemars::Schema;
+    use schemars::SchemaGenerator;
+    use schemars::generate::SchemaSettings;
+
+    /// One method's request, success body and error as JSON Schema positions, with the named
+    /// definitions they reach (`$ref: #/$defs/<name>`) beside them.
+    #[derive(Debug, Clone)]
+    pub struct MethodSchemas {
+        pub request: Schema,
+        /// The success body, or the subscription's message. A method returning `()` states
+        /// `{"type":"null"}` here, which the Lexicon spells as no `output`.
+        pub output: Schema,
+        pub error: Schema,
+        pub definitions: serde_json::Map<String, serde_json::Value>,
+    }
+
+    /// Implemented by `methods!` / `service_method!` under the caller's `schemars` feature.
+    pub trait MethodSchema: crate::Method {
+        fn schemas() -> MethodSchemas;
+    }
+
+    #[doc(hidden)]
+    pub fn collect<Request, Output, Error>() -> MethodSchemas
+    where
+        Request: schemars::JsonSchema,
+        Output: schemars::JsonSchema,
+        Error: schemars::JsonSchema,
+    {
+        let mut generator: SchemaGenerator = SchemaSettings::draft2020_12().into_generator();
+        let request = generator.subschema_for::<Request>();
+        let output = generator.subschema_for::<Output>();
+        let error = generator.subschema_for::<Error>();
+        MethodSchemas {
+            request,
+            output,
+            error,
+            definitions: generator.take_definitions(true),
+        }
+    }
+}
+
+/// Emits the host-only [`schema::MethodSchema`] impl beside a `Method` impl. Expands in the
+/// caller, so the `schemars` feature it tests is the caller's own, as the `datum` macro does.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __method_schema {
+    ($request:ty, $message:ty, $error:ty) => {
+        #[cfg(feature = "schemars")]
+        impl $crate::schema::MethodSchema for $request {
+            fn schemas() -> $crate::schema::MethodSchemas {
+                $crate::schema::collect::<$request, $message, $error>()
+            }
+        }
+    };
+}
 
 /// Declares the [`Method`] impls of one service: every entry names its request type, output,
 /// XRPC kind (`query`/`procedure`) and the NSID suffix appended to `nsid_prefix`. The error type
@@ -156,5 +217,6 @@ macro_rules! methods {
                 $crate::XrpcMethod::$kind(concat!($prefix, $nsid))
                     .with_schemas(stringify!($output), stringify!($error));
         }
+        $crate::__method_schema!($request, $output, $error);
     )*};
 }

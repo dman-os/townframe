@@ -11,6 +11,9 @@ name = "big_dispatch_core"
 path = "lib.rs"
 crate-type = ["rlib"]
 
+[features]
+schemars = ["dep:schemars", "big_cabinet_core/schemars", "method_core/schemars"]
+
 [dependencies]
 method_core.workspace = true
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
@@ -21,3 +24,4 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+schemars = { version = "1.2", features = ["indexmap2"], optional = true }

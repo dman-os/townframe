@@ -36,6 +36,7 @@ members = [
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/method_core/",
+  "./src/method_lexicon/",
   "./src/service_core_rs/",
   "./src/service_client_core_rs/",
   "./src/service_client_native_rs/",
@@ -560,6 +561,9 @@ clippy.clone_on_ref_ptr = "warn"
 clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
+# `methods!` / `service_method!` test the caller's `schemars` feature; a crate that declares
+# methods without publishing Lexicons has no such feature, and its absence is the answer.
+rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("schemars"))'] }
 # clippy.used_underscore_binding = "warn"
 
 # [patch."https://github.com/dman-os/iroh-blobs"]

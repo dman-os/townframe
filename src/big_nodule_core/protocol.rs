@@ -41,6 +41,7 @@ use std::collections::BTreeSet;
 /// whose enablement and settings it may change. `admit` additionally lets it install or upgrade
 /// those same packages and no others, so a handle can never introduce a cartridge id it was not minted
 /// for. The operator's identity is unrestricted without a scope.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NoduleScope {
@@ -56,6 +57,7 @@ impl NoduleScope {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintNoduleCapability {
@@ -63,6 +65,7 @@ pub struct MintNoduleCapability {
     pub rights: Rights,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdmitNodule {
@@ -71,6 +74,7 @@ pub struct AdmitNodule {
     pub drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureNodule {
@@ -78,6 +82,7 @@ pub struct ConfigureNodule {
     pub settings: IndexMap<String, Value>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleEnabled {
@@ -85,6 +90,7 @@ pub struct SetNoduleEnabled {
     pub enabled: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleDrawerGrants {
@@ -95,6 +101,7 @@ pub struct SetNoduleDrawerGrants {
 /// Replaces the operations the nodule's actor may invoke through dispatch. The service mints one
 /// dispatch capability for the actor from it (see [`NoduleOperationGrantStatus`]); an empty scope
 /// revokes it.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleOperationGrants {
@@ -106,6 +113,7 @@ pub struct SetNoduleOperationGrants {
 /// contract, replacing the one the operator consented to earlier (ADR 028 §3). Refused unless the
 /// request is held at `ProviderChanged`, so a confirmation cannot be applied to a state the
 /// operator did not see.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmNoduleResolution {
@@ -116,6 +124,7 @@ pub struct ConfirmNoduleResolution {
 /// Sets, or with `by` absent clears, the node-local substitution of slot `cartridge_id`: the cartridge `by`
 /// (installed, and holding the slot's authority or none) is run *as* `cartridge_id` (ADR 028 §3). The
 /// caller must manage both cartridges, since `by`'s code runs with the slot's grants.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleSubstitution {
@@ -124,24 +133,28 @@ pub struct SetNoduleSubstitution {
     pub by: Option<CartridgeId>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallNodule {
     pub cartridge_id: CartridgeId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetNodule {
     pub cartridge_id: CartridgeId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListNodules {}
 
 /// The durable actor an installed nodule acts as. Its capability is not here: the service holds
 /// it, and a caller that could read it could sign as the nodule.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleActor {
@@ -151,6 +164,7 @@ pub struct NoduleActor {
 }
 
 /// Desired and effective state of one local drawer grant binding for a nodule.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleGrantStatus {
@@ -163,6 +177,7 @@ pub struct NoduleGrantStatus {
 /// Desired and effective state of the dispatch capability a nodule's operation grants mint.
 /// `desired` is the configured grants bounded by the manifest: only operations the nodule
 /// requests (see [`crate::Nodule::bind_operations`]).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleOperationGrantStatus {
@@ -177,6 +192,7 @@ pub struct NoduleOperationGrantStatus {
 }
 
 /// How a nodule's initializers have fared in its current start (see [`NoduleRecord::init`]).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleInitStatus {
@@ -195,6 +211,7 @@ pub struct NoduleInitStatus {
 }
 
 /// One installed nodule as the management surface reports it.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleRecord {
@@ -229,13 +246,16 @@ pub struct NoduleRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init: Option<NoduleInitStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub observed_heads: Vec<ChangeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<Vec<String>>"))]
     pub applied_heads: Option<Vec<ChangeHash>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum NodulesError {
     #[error("request context failed: {0}")]

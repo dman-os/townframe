@@ -54,6 +54,7 @@ pub struct CartridgeSignature {
     pub extra: Extra,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum SignatureError {
     #[error("the envelope carries no signature")]

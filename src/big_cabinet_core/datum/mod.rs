@@ -110,3 +110,5 @@ pub use universe::TypeDecl;
 pub use universe::Universe;
 #[cfg(feature = "schemars")]
 pub use universe::UniverseError;
+#[cfg(feature = "schemars")]
+pub use universe::rust_number_formats_to_bounds;

@@ -4,6 +4,7 @@ use crate::dmeta::DocId;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LocalDocUsability {
@@ -13,6 +14,7 @@ pub enum LocalDocUsability {
     Usable,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocAvailability {
@@ -21,6 +23,7 @@ pub struct DocAvailability {
     pub sync_demand: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetDocAvailability {
@@ -28,6 +31,7 @@ pub struct GetDocAvailability {
     pub doc_id: DocId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObserveDocAvailability {

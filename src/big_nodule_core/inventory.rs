@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 /// Admission records every artifact the handler references as [`Self::Unavailable`] from the
 /// envelope metadata alone. Only a node's executor, which loads the bytes, can establish
 /// [`Self::Available`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ArtifactState {
@@ -36,6 +37,7 @@ pub enum ArtifactState {
 }
 
 /// The cartridge whose code fills a slot under a substitution, and the version of it that does.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilledBy {

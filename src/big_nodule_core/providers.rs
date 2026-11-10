@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 
 /// One provider's claim on a contract, and the lockfile entry a request resolved to it records:
 /// `{contract, provider, version, revision}`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LockedProvider {
@@ -41,6 +42,7 @@ pub struct LockedProvider {
 }
 
 /// Why a request is not satisfied by a provider.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Unresolved {
@@ -60,6 +62,7 @@ pub enum Unresolved {
 }
 
 /// Where one operation request stands: what it is pinned to and, if it is not satisfied, why.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestStatus {

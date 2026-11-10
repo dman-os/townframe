@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 
 [features]
 default = []
-schemars = ["dep:schemars", "big_cabinet_core/schemars"]
+schemars = ["dep:schemars", "big_cabinet_core/schemars", "method_core/schemars"]
 test-support = []
 
 [dependencies]

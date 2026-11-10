@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["manifest"]
-schemars = ["dep:schemars", "datum_core/schemars"]
+schemars = ["dep:schemars", "datum_core/schemars", "method_core/schemars", "big_sync_core/schemars"]
 manifest = []
 
 [dependencies]

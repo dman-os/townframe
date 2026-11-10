@@ -1623,6 +1623,7 @@ dependencies = [
  "big_cabinet_core",
  "irpc",
  "method_core",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "service_core_rs",
@@ -1890,6 +1891,7 @@ dependencies = [
  "parking_lot",
  "postcard",
  "rand 0.9.5",
+ "schemars 1.2.3",
  "serde",
  "siphasher",
  "structstruck",
@@ -9500,7 +9502,24 @@ name = "method_core"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "schemars 1.2.3",
  "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "method_lexicon"
+version = "0.1.0"
+dependencies = [
+ "big_blobs_core",
+ "big_cabinet_core",
+ "big_cartridges_core",
+ "big_dispatch_core",
+ "big_nodule_core",
+ "insta",
+ "method_core",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
