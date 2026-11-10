@@ -20,6 +20,13 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 - **D4 (2026-11-10, operator)** GitHub sync is on the roadmap, probably not this week.
 - **D5 (design discussion)** A future VCS is separate from the intxt: an intxt composes artifacts and doesn't own their histories.
 - **D6 (2026-11-10, operator)** Focus is the write loop ("replacing PRs"); pure viewing is later.
+- **D7 (2026-11-10, operator)** Sessions: our own normalized datums with ACP-compatible naming (O1); one doc per session, subagents as linked sessions (O2). Later option: variant sessions as Automerge forks of their parent session doc.
+- **D8 (2026-11-10, operator)** Design philosophy: datums are containers/records of history. Multiplayer editing may use other datums over the same use case, but not by default.
+- **D9 (2026-11-10, operator)** Work structure (tasks, decisions) is its own datums; adapters can map harness task systems (todo lists, plans) into them.
+- **D10 (2026-11-10, operator)** Agent interface: MCP, CLI and hooks all eventually; the first shipped use case sets the order.
+- **D11 (2026-11-10, operator)** Evidence coverage across stacks (U10) is deferred past this week; keep it enumerated.
+- **D12 (2026-11-10, operator)** FDRs: one for the general system, one per shipped feature, starting with the first. FDRs describe what users do, and users include harness adapters, GitHub, agents, humans and supporting software. No reference-model internals in FDRs.
+- **D13 (2026-11-10, operator)** Multiplayer is a requirement for every datum: concurrent writers must not clobber each other.
 
 ## Open
 
