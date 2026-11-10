@@ -101,6 +101,41 @@ A doesn't block B. The crate in A is exactly what B would wrap later.
   (re-attaching across revisions, J6) and hands over the result. That keeps the anchor model
   wholly the intext lane's.
 
+## Virtualizer host over standard Dioxus (draft, pending W1/W2)
+
+Operator direction (2026-11-10): the browser and webview backend is the primary deployment. We
+don't design around Blitz's gaps for now, and we never assume JS (no eval, no JS interop). The
+diff view is a guest library (boundary A), so its virtualizer has to run on standard Dioxus
+events and `MountedData`. A micro gets those once the presentation wire carries them.
+
+The S10 core asks its host (`VirtualizerHost`) for layout synchronously: scroll top, element
+heights and tops, anchor lines by `data-line-index`. In Dioxus the reads are async
+(`MountedData::get_client_rect`, `get_scroll_offset`, `get_scroll_size`) or arrive as event
+data. So the Dioxus host keeps a layout cache that events feed, and the core reads the cache:
+
+| Core read | Fed by |
+|---|---|
+| root scroll top, scroll height, client height | `onscroll` (`ScrollData::scroll_top`, `scroll_height`, `client_height`) |
+| element offset and bounding height | `onresize` on each observed element (`ResizeData::get_border_box_size`) |
+| element bounding top, intersection | `onvisible` (`VisibleData::get_bounding_client_rect`, `is_intersecting`) |
+| first element child, anchor lines | the guest's own render state: it knows which rows it rendered, keyed by line index |
+| scroll writes | `MountedData::scroll(coordinates, behavior)` |
+
+What this changes from Pierre:
+- **Reads can be a frame stale.** A browser ResizeObserver delivers before paint; an `onresize`
+  that crosses the wire may not. W2 measures whether the resulting scroll correction is visible,
+  and whether the browser's own scroll anchoring (`overflow-anchor`) makes the correction
+  unnecessary on the primary backend.
+- **No shadow-root queries.** Anchor lines come from the guest's row state, not from the DOM.
+- **The S10 browser layer (`pierre_diffs_dioxus`, over web-sys) is replaced** by this host once
+  it exists, because web-sys works only in a browser page and not in a micro.
+
+Wire work this implies (Clay, ours): forward `visible`, check that `resize` and `scroll` carry
+their Dioxus data across, and give guest `MountedData` a backing that forwards
+`get_client_rect`, `get_scroll_offset`, `get_scroll_size` and `scroll` to the host. All of
+these are existing Dioxus APIs. Blitz lacks `onresize` and `onvisible` (dioxus-native panics
+with `unimplemented!`; DioxusLabs/blitz#1197); that's for later, with upstream.
+
 ## What each journey needs from Clay
 
 | Need | Journeys | Status | Owner |
