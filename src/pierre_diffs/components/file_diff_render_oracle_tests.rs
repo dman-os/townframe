@@ -654,7 +654,7 @@ fn run_case(templates: &Templates, case: &Case) {
         let instance = Rc::clone(&instances[which]);
         let mut ret = Value::Null;
         match step.op.as_str() {
-            "render" => ret = json!(instance.render(input(step))),
+            "render" => ret = json!(instance.lifecycle().render(input(step))),
             "setOptions" => {
                 instance.set_options(Some(
                     world.build_options(step.spec.as_ref().expect("a spec")),
@@ -666,14 +666,17 @@ fn run_case(templates: &Templates, case: &Case) {
                     &pool.annotations[step.annotations.as_ref().expect("annotations")],
                 ));
             }
-            "rerender" => instance.rerender(),
+            "rerender" => instance.lifecycle().rerender(),
             "flushManagers" => instance.flush_managers(),
-            "hydrate" => instance.hydrate(input(step)),
+            "hydrate" => instance.lifecycle().hydrate(input(step)),
             "filesLoaded" => {
-                let pending = instance.pending_files().expect("a load was requested");
+                let pending = instance
+                    .loading()
+                    .pending_files()
+                    .expect("a load was requested");
                 let name = pool.diff_name(&pending).expect("a named diff");
                 let source = &templates.partials[step.files.as_ref().expect("files")];
-                instance.files_loaded(
+                instance.loading().files_loaded(
                     &pending,
                     &FileDiffLoadedFiles::Changed {
                         old_file: source.old.clone().expect("old"),

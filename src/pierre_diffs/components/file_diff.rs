@@ -152,7 +152,6 @@ use crate::types::options::PrePropertiesConfig;
 use crate::types::options::ThemeOption;
 use crate::types::options::ThemeTypes;
 use crate::types::patch::FileContents;
-use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
 use crate::types::view::DiffLineAnnotation;
@@ -170,8 +169,8 @@ use crate::utils::render::get_line_annotation_name::get_line_annotation_name;
 /// does, so the class's methods live in files of their own and no type goes over the
 /// guardrails method budget.
 macro_rules! file_diff_view {
-    ($name:ident) => {
-        pub(crate) struct $name<
+    ($vis:vis $name:ident) => {
+        $vis struct $name<
             'fd,
             Host: FileDiffHost,
             Rendered: RenderedContent + 'static,
@@ -195,15 +194,15 @@ macro_rules! file_diff_view {
 }
 
 mod columns;
+mod lifecycle;
 mod loading;
 mod nodes;
-mod render;
 mod theme;
 
 use columns::Columns;
-use loading::Loading;
+pub use lifecycle::Lifecycle;
+pub use loading::Loading;
 use nodes::Nodes;
-use render::Render;
 pub(crate) use theme::Theme;
 
 pub type RenderHunkSeparatorCallback<Rendered> = PtrEq<dyn Fn(&HunkData) -> Option<Rendered>>;
@@ -1161,67 +1160,21 @@ impl<
                 }
             }),
         );
-        self.rerender();
+        Lifecycle(self).rerender();
     }
 
-    /// `render`
-    pub fn render(&self, props: FileDiffRenderProps<LAnnotation>) -> bool {
-        Render(self).render(props)
+    /// The lifecycle entry points: `render`, `hydrate`, `rerender`.
+    pub fn lifecycle(&self) -> Lifecycle<'_, Host, Rendered, LAnnotation> {
+        Lifecycle(self)
     }
 
-    /// `hydrate`: `props.file_container` is required. `prerenderedHTML` is not
-    /// supported (see the header).
-    pub fn hydrate(&self, props: FileDiffRenderProps<LAnnotation>) {
-        let file_container = props
-            .file_container
-            .expect("FileDiff.hydrate: a fileContainer is required");
-        Render(self).hydrate(file_container, props);
-    }
-
-    pub fn rerender(&self) {
-        let (enabled, no_input) = {
-            let state = self.state.borrow();
-            (
-                state.enabled,
-                state.file_diff.is_none()
-                    && state.addition_file.is_none()
-                    && state.deletion_file.is_none(),
-            )
-        };
-        if !enabled || no_input {
-            return;
-        }
-        // `requestRender()`: an instance an owner drives asks the owner to render
-        // (`forceRenderOverride`, then `requestOwnerRender`); the owner's next
-        // `render` call carries the override. (Editors, which update their rows
-        // directly, are dropped.)
-        if let Some(request_owner_render) = &self.request_owner_render {
-            self.state.borrow_mut().force_render_override = true;
-            request_owner_render();
-            return;
-        }
-        let render_range = self.state.borrow().render_range;
-        self.render(FileDiffRenderProps {
-            force_render: true,
-            render_range,
-            ..FileDiffRenderProps::default()
-        });
-    }
-
-    /// The input a host should load the full files of (`pendingFiles?.fileDiff`),
-    /// then answer with `files_loaded` (or `abandon_file_load`).
-    pub fn pending_files(&self) -> Option<Rc<FileDiffMetadata>> {
-        self.state.borrow().pending_files.clone()
-    }
-
-    /// The `.then` of `loadDiffFiles(fileDiff)`.
-    pub fn files_loaded(&self, expected_diff: &Rc<FileDiffMetadata>, files: &FileDiffLoadedFiles) {
-        Loading(self).files_loaded(expected_diff, files);
-    }
-
-    /// The `finally` of a load that failed: the request is dropped so a later
-    /// call can ask again.
-    pub fn abandon_file_load(&self, expected_diff: &Rc<FileDiffMetadata>) {
-        Loading(self).abandon_file_load(expected_diff);
+    /// Loading the full files of a partial diff, driven by the host: read
+    /// `pending_files`, load, then `files_loaded` (or `abandon_file_load`).
+    ///
+    /// After `files_loaded` the instance holds the hydrated diff as a new `Rc`
+    /// (upstream mutates the diff in place): a host renders `get_input_diff()`
+    /// from then on, not the `Rc` it passed in.
+    pub fn loading(&self) -> Loading<'_, Host, Rendered, LAnnotation> {
+        Loading(self)
     }
 }

@@ -26,7 +26,7 @@ use crate::utils::dom::css_wrappers::wrap_unsafe_css;
 use crate::utils::dom::host_theme::create_host_theme_style_node;
 use crate::utils::dom::scrollbar_gutter::get_measured_scrollbar_gutter;
 
-file_diff_view!(Theme);
+file_diff_view!(pub(crate) Theme);
 
 impl<Host, Rendered, LAnnotation> Theme<'_, Host, Rendered, LAnnotation>
 where

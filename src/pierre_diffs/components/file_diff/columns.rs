@@ -32,7 +32,7 @@ use crate::types::lines::CodeColumnType;
 use crate::utils::dom::get_or_create_code_node::CreateCodeNodeProps;
 use crate::utils::dom::get_or_create_code_node::get_or_create_code_node;
 
-file_diff_view!(Columns);
+file_diff_view!(pub(crate) Columns);
 
 #[derive(Clone, Copy)]
 struct ColumnPair {
@@ -413,7 +413,7 @@ where
             };
             self.insert_partial_html(code_elements, &result, position);
             row_count += result.row_count;
-            Render(self.0).adopt_render_data(Rc::clone(file_diff));
+            Lifecycle(self.0).adopt_render_data(Rc::clone(file_diff));
         };
         apply_chunk(prepend_result, InsertPosition::AfterBegin);
         apply_chunk(append_result, InsertPosition::BeforeEnd);

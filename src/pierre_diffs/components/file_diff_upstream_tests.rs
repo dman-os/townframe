@@ -118,7 +118,7 @@ fn header_slots_renders_updates_and_removes_the_filename_suffix_slot() {
     options.render_header_filename_suffix = suffix("initial suffix");
     let instance = instance(&dom, options);
     let render = |force_render: bool| {
-        instance.render(FileDiffRenderProps {
+        instance.lifecycle().render(FileDiffRenderProps {
             file_diff: Some(Rc::clone(&file_diff)),
             file_container: Some(file_container),
             prevent_emit: true,
@@ -167,7 +167,7 @@ fn header_slots_removes_the_filename_suffix_slot_when_a_custom_header_is_active(
     })));
     let instance = instance(&dom, options);
     let render = |force_render: bool| {
-        instance.render(FileDiffRenderProps {
+        instance.lifecycle().render(FileDiffRenderProps {
             file_diff: Some(Rc::clone(&file_diff)),
             file_container: Some(file_container),
             prevent_emit: true,
@@ -209,7 +209,7 @@ fn rerender_inputs_a_host_render_after_an_internal_rerender_takes_the_early_retu
     options.base.diff_style = Some(DiffStyle::Split);
     let instance = instance(&dom, options);
     let render = || {
-        instance.render(FileDiffRenderProps {
+        instance.lifecycle().render(FileDiffRenderProps {
             old_file: Some(Some(old_file.clone())),
             new_file: Some(Some(new_file.clone())),
             file_container: Some(file_container),
@@ -220,7 +220,7 @@ fn rerender_inputs_a_host_render_after_an_internal_rerender_takes_the_early_retu
     assert!(render());
 
     // An internal input-less rerender: what every hunk expansion triggers.
-    instance.rerender();
+    instance.lifecycle().rerender();
     let row_before = first_line(&dom, file_container);
     assert!(row_before.is_some());
 
@@ -252,14 +252,14 @@ fn rerender_inputs_parsed_unkeyed_diffs_with_the_same_filename_render_fresh_cont
     assert!(second_diff.cache_key.is_none());
 
     let text = || dom.doc.text_content(shadow_root(&dom, file_container));
-    instance.render(FileDiffRenderProps {
+    instance.lifecycle().render(FileDiffRenderProps {
         file_diff: Some(Rc::clone(&first_diff)),
         file_container: Some(file_container),
         ..FileDiffRenderProps::default()
     });
     assert!(text().contains("firstMarker"));
 
-    instance.render(FileDiffRenderProps {
+    instance.lifecycle().render(FileDiffRenderProps {
         file_diff: Some(Rc::clone(&second_diff)),
         file_container: Some(file_container),
         ..FileDiffRenderProps::default()
@@ -284,7 +284,7 @@ fn annotated_render(
     annotations: &Rc<Vec<DiffLineAnnotation<String>>>,
     range: Option<RenderRange>,
 ) {
-    instance.render(FileDiffRenderProps {
+    instance.lifecycle().render(FileDiffRenderProps {
         file_container: Some(file_container),
         file_diff: Some(Rc::clone(file_diff)),
         line_annotations: Some(Rc::clone(annotations)),
@@ -386,7 +386,7 @@ fn partial_render_renders_a_new_file_from_an_explicit_missing_old_file_side() {
     let file_container = dom.doc.create_element("div");
     let instance = partial_render_instance(&dom);
 
-    instance.render(FileDiffRenderProps {
+    instance.lifecycle().render(FileDiffRenderProps {
         file_container: Some(file_container),
         old_file: Some(None),
         new_file: Some(Some(file("new.txt", "alpha\nbeta\n"))),
@@ -408,7 +408,7 @@ fn partial_render_renders_a_deleted_file_from_an_explicit_missing_new_file_side(
     let file_container = dom.doc.create_element("div");
     let instance = partial_render_instance(&dom);
 
-    instance.render(FileDiffRenderProps {
+    instance.lifecycle().render(FileDiffRenderProps {
         file_container: Some(file_container),
         old_file: Some(Some(file("deleted.txt", "alpha\nbeta\n"))),
         new_file: Some(None),

@@ -37,7 +37,7 @@ use crate::utils::parse_diff_from_file::parse_diff_from_file;
 use crate::utils::predicates::are_files_equal::are_files_equal;
 use crate::utils::predicates::are_render_ranges_equal::are_render_ranges_equal;
 
-file_diff_view!(Render);
+file_diff_view!(pub Lifecycle);
 
 fn parse_input(
     input: &DiffFileInput,
@@ -68,7 +68,7 @@ fn has_diff_content(
     file_diff.is_some_and(|diff| !diff.hunks.is_empty()) || old_file.is_some() || new_file.is_some()
 }
 
-impl<Host, Rendered, LAnnotation> Render<'_, Host, Rendered, LAnnotation>
+impl<Host, Rendered, LAnnotation> Lifecycle<'_, Host, Rendered, LAnnotation>
 where
     Host: FileDiffHost,
     Rendered: RenderedContent + 'static,
@@ -83,7 +83,7 @@ where
             .unwrap_or_default()
     }
 
-    pub(super) fn render(&self, props: FileDiffRenderProps<LAnnotation>) -> bool {
+    pub fn render(&self, props: FileDiffRenderProps<LAnnotation>) -> bool {
         assert!(
             self.state.borrow().enabled,
             "FileDiff.render: attempting to call render after cleaned up"
@@ -471,7 +471,12 @@ where
         });
     }
 
-    pub(super) fn hydrate(&self, file_container: NodeKey, props: FileDiffRenderProps<LAnnotation>) {
+    /// `hydrate`: `props.file_container` is required. `prerenderedHTML` is not
+    /// supported (see the header).
+    pub fn hydrate(&self, props: FileDiffRenderProps<LAnnotation>) {
+        let file_container = props
+            .file_container
+            .expect("FileDiff.hydrate: a fileContainer is required");
         let prevent_emit = props.prevent_emit;
         {
             let state = self.state.borrow();
@@ -531,6 +536,36 @@ where
         if !prevent_emit {
             self.emit_post_render(false);
         }
+    }
+
+    pub fn rerender(&self) {
+        let (enabled, no_input) = {
+            let state = self.state.borrow();
+            (
+                state.enabled,
+                state.file_diff.is_none()
+                    && state.addition_file.is_none()
+                    && state.deletion_file.is_none(),
+            )
+        };
+        if !enabled || no_input {
+            return;
+        }
+        // `requestRender()`: an instance an owner drives asks the owner to render
+        // (`forceRenderOverride`, then `requestOwnerRender`); the owner's next
+        // `render` call carries the override. (Editors, which update their rows
+        // directly, are dropped.)
+        if let Some(request_owner_render) = &self.request_owner_render {
+            self.state.borrow_mut().force_render_override = true;
+            request_owner_render();
+            return;
+        }
+        let render_range = self.state.borrow().render_range;
+        self.render(FileDiffRenderProps {
+            force_render: true,
+            render_range,
+            ..FileDiffRenderProps::default()
+        });
     }
 
     fn hydrate_elements(&self, file_container: NodeKey) {

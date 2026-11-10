@@ -30,7 +30,7 @@ use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::ParseDiffOptions;
 use crate::utils::hydrate_partial_diff::hydrate_partial_diff_clone;
 
-file_diff_view!(Loading);
+file_diff_view!(pub Loading);
 
 /// `canHydrateDiff`
 fn can_hydrate_diff(file_diff: &FileDiffMetadata) -> bool {
@@ -47,6 +47,11 @@ where
     Rendered: RenderedContent + 'static,
     LAnnotation: Clone + PartialEq + 'static,
 {
+    /// The input a host should load the full files of (`pendingFiles?.fileDiff`).
+    pub fn pending_files(&self) -> Option<Rc<FileDiffMetadata>> {
+        self.state.borrow().pending_files.clone()
+    }
+
     pub(super) fn load_files_if_necessary(&self) {
         let Some(file_diff) = self.get_input_diff() else {
             return;
@@ -69,11 +74,8 @@ where
 
     /// The half of `loadFilesForDiff` after `loadDiffFiles` resolved, with the
     /// `finally` that clears the request.
-    pub(super) fn files_loaded(
-        &self,
-        expected_diff: &Rc<FileDiffMetadata>,
-        files: &FileDiffLoadedFiles,
-    ) {
+    /// The `.then` of `loadDiffFiles(fileDiff)`.
+    pub fn files_loaded(&self, expected_diff: &Rc<FileDiffMetadata>, files: &FileDiffLoadedFiles) {
         let still_input = self
             .get_input_diff()
             .is_some_and(|input| Rc::ptr_eq(&input, expected_diff));
@@ -83,7 +85,9 @@ where
         self.abandon_file_load(expected_diff);
     }
 
-    pub(super) fn abandon_file_load(&self, expected_diff: &Rc<FileDiffMetadata>) {
+    /// The `finally` of a load that failed: the request is dropped so a later
+    /// call can ask again.
+    pub fn abandon_file_load(&self, expected_diff: &Rc<FileDiffMetadata>) {
         let mut state = self.state.borrow_mut();
         if state
             .pending_files
@@ -142,6 +146,6 @@ where
                 }
             }
         }
-        self.rerender();
+        Lifecycle(self.0).rerender();
     }
 }

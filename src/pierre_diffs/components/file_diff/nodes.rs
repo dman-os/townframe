@@ -41,7 +41,7 @@ use crate::utils::predicates::are_diff_line_annotations_equal::are_diff_line_ann
 use crate::utils::predicates::are_hunk_data_equal::are_hunk_data_equal;
 use crate::utils::predicates::are_pre_properties_equal::are_pre_properties_equal;
 
-file_diff_view!(Nodes);
+file_diff_view!(pub(crate) Nodes);
 
 impl<Host, Rendered, LAnnotation> Nodes<'_, Host, Rendered, LAnnotation>
 where
@@ -95,7 +95,7 @@ where
             .unwrap_or_else(|| self.document().create_element(DIFFS_TAG_NAME));
         let container_changed = previous_container != Some(next_container);
         if container_changed {
-            Render(self.0).emit_post_render(true);
+            Lifecycle(self.0).emit_post_render(true);
         }
         {
             let mut state = self.state.borrow_mut();

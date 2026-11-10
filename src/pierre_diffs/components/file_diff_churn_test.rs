@@ -71,7 +71,7 @@ fn instance(
 
 fn render_files(instance: &Instance, edit: usize, range: Option<RenderRange>) {
     let (old_file, new_file) = pair(edit);
-    assert!(instance.render(FileDiffRenderProps {
+    assert!(instance.lifecycle().render(FileDiffRenderProps {
         old_file: Some(Some(old_file)),
         new_file: Some(Some(new_file)),
         render_range: range,
