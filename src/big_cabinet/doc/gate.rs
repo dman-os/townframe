@@ -437,9 +437,9 @@ fn ancestry(doc: &Automerge, heads: impl IntoIterator<Item = ChangeHash>) -> Has
     while let Some(hash) = pending.pop() {
         if seen.insert(hash) {
             let change = doc
-                .get_change_by_hash(&hash)
+                .get_change_meta_by_hash(&hash)
                 .expect("the gate runs on heads the caller checked are known");
-            pending.extend(change.deps().iter().copied());
+            pending.extend(change.deps);
         }
     }
     seen
