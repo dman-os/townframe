@@ -96,8 +96,16 @@ async fn a_relay_access_member_holds_a_drawer_it_cannot_read() {
     cluster.stop_all().await;
 }
 
-/// The phone is linked only to the relay, and dev is stopped before the phone reads: the note and
-/// the phone's own membership both reach it through the relay.
+/// The phone is linked only to the relay, so everything it reads reaches it through the relay. Dev
+/// goes away once the phone can read, and the phone's read then holds with dev offline.
+///
+/// Dev must not stop before the phone can read. The phone's access is more than its delegation:
+/// after the grant dev seats the phone in each document's key tree and writes a checkpoint that
+/// re-keys the history for it, both asynchronously, and the checkpoint reaches the relay as a
+/// separate sync step. The relay cannot read, so it has no way to say it holds them; the phone
+/// reading is the observable that does. Stopping dev as soon as the relay held the note's
+/// sedimentree left the phone, under load, with the history it had no key for and no peer that
+/// could produce the checkpoint.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_phone_reads_a_drawer_through_a_relay_while_the_dev_node_is_offline() {
     let mut cluster = Cluster::boot_with(&["dev", "relay", "phone"], relay_policy).await;
@@ -125,27 +133,11 @@ async fn a_phone_reads_a_drawer_through_a_relay_while_the_dev_node_is_offline() 
         .unwrap();
     cluster.admit(0, 2, &drawer.id, Access::Read).await;
 
-    // The relay holds the note's bytes before dev goes away.
-    cluster
-        .until(async |cluster| {
-            cluster
-                .node(1)
-                .repo
-                .contains_sedimentree_id(note.clone())
-                .await
-                .unwrap()
-        })
-        .await;
-    tracing::info!("INSTR relay-test pre-stop extra keyhive round"); // INSTR-TMP
-    cluster.sync_keyhive().await; // INSTR-TMP
-    tracing::info!("INSTR relay-test extra round done"); // INSTR-TMP
-    if std::env::var("RELAY_KEEP_DEV").is_err() { // INSTR-TMP
-        cluster.stop(0).await;
-    } // INSTR-TMP
-
     cluster
         .until(async |cluster| cluster.read_note(2, &note).await.is_some())
         .await;
+    cluster.stop(0).await;
+
     assert_eq!(
         cluster
             .read_note(2, &note)
