@@ -1,5 +1,6 @@
 use crate::client::NodeClient;
 use crate::interlude::*;
+use method_core::HttpMethod;
 
 use big_nodule_core::protocol::ListNodules;
 use method_core::Method;
@@ -16,7 +17,9 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
     let client = lazy::node().await?;
     let info = node_info(&client).await?;
 
-    let reply = client.call(ListNodules::XRPC.nsid, &json!({})).await?;
+    let reply = client
+        .call(ListNodules::XRPC.nsid, ListNodules::XRPC.method, &json!({}))
+        .await?;
     eyre::ensure!(
         reply.is_success(),
         "listing nodules failed with {}: {}",
@@ -88,7 +91,9 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
 
 /// Asks the node who it is and what it is connected to.
 pub async fn node_info(client: &NodeClient) -> Res<big_node::NodeInfo> {
-    let reply = client.call(big_node::GET_NODE_INFO, &json!({})).await?;
+    let reply = client
+        .call(big_node::GET_NODE_INFO, HttpMethod::Get, &json!({}))
+        .await?;
     eyre::ensure!(
         reply.is_success(),
         "getNodeInfo failed with {}: {}",

@@ -7,12 +7,12 @@ spelling of `exec`.
 $ day init
 initialized node [..] at [..]/node
 
-$ day exec org.example.daybook.nodules.listNodules
+$ day exec --get org.example.daybook.nodules.listNodules
 {
   "nodules": []
 }
 
-$ day x org.example.daybook.nodules.listNodules
+$ day x --get org.example.daybook.nodules.listNodules
 {
   "nodules": []
 }
@@ -27,6 +27,7 @@ Arguments:
   [INPUT]  The operation's input as JSON (default: {})
 
 Options:
+      --get         Call a query: send the input, an object of primitives, as the query string of a GET instead of the JSON body of a POST
       --node <DIR>  The node's directory [env: DAY_NODE=[..]/node]
   -h, --help        Print help
 

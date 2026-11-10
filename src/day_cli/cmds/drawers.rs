@@ -78,6 +78,7 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
     let minted = client
         .call(
             MintDrawerCapability::XRPC.nsid,
+            MintDrawerCapability::XRPC.method,
             &serde_json::to_value(MintDrawerCapability {
                 scope: DrawerScope {
                     drawers: [(info.known_drawers_id, DrawerAccess::Admin)].into(),
@@ -99,6 +100,7 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
     let reply = client
         .call(
             ListKnownDrawers::XRPC.nsid,
+            ListKnownDrawers::XRPC.method,
             &serde_json::to_value(ListKnownDrawers { capability })?,
         )
         .await?;
@@ -143,6 +145,7 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
     let minted = client
         .call(
             MintDrawerCapability::XRPC.nsid,
+            MintDrawerCapability::XRPC.method,
             &serde_json::to_value(MintDrawerCapability {
                 scope: DrawerScope {
                     drawers: [(drawer_id.clone(), DrawerAccess::Admin)].into(),
@@ -164,6 +167,7 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
     let reply = client
         .call(
             InvitePrincipal::XRPC.nsid,
+            InvitePrincipal::XRPC.method,
             &serde_json::to_value(InvitePrincipal {
                 capability,
                 drawer_id,

@@ -172,7 +172,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
         StaticCommands::Status { json } => cmds::status::run(json).await,
-        StaticCommands::Exec { nsid, input } => cmds::exec::run(nsid, input).await,
+        StaticCommands::Exec { nsid, input, get } => cmds::exec::run(nsid, input, get).await,
     }
 }
 
@@ -245,6 +245,10 @@ enum StaticCommands {
         nsid: String,
         /// The operation's input as JSON (default: {})
         input: Option<String>,
+        /// Call a query: send the input, an object of primitives, as the query string of a GET
+        /// instead of the JSON body of a POST
+        #[arg(long)]
+        get: bool,
     },
     /// Generate shell completions
     Completions {

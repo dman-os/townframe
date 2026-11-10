@@ -48,6 +48,9 @@ pub struct XrpcRequest {
     /// The NSID the request addressed. A fallback handler serves many NSIDs and learns which
     /// one here; a registered handler already knows its own.
     pub nsid: String,
+    /// The HTTP verb the request used. A fallback handler serves both: it is a GET's query
+    /// string (`raw_query`) or a POST's JSON body (`params`).
+    pub verb: method_core::HttpMethod,
     pub context: RequestContext,
     pub metadata: HttpMetadata,
     pub params: Value,

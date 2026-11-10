@@ -4,8 +4,11 @@
 //! operation: providers come and go at runtime (nodules enable and disable), so the table, not
 //! this surface, says what exists. A POST's JSON body is the operation's input, exactly what the
 //! operation's own client would send, and the answer is the provider's output or its own XRPC
-//! error envelope, untouched. Queries (GET) are not served: dispatch exchanges one JSON value each
-//! way, as [`Invoke`] does.
+//! error envelope, untouched. A GET is a query: the query string travels to dispatch as is
+//! ([`HttpForm::Get`]), which types it by the method's Lexicon `parameters` after admitting the
+//! caller. Which verb a method takes, and whether input and output conform to its Lexicon, are
+//! dispatch's to decide (it alone has the routing table), so every provider is held to them once.
+//! The answer is still one JSON value, as [`Invoke`] exchanges.
 //!
 //! The caller's dispatch capability is the standard XRPC credential, `Authorization: Bearer
 //! <token>` ([`BearerToken`]). What a request that presents none may do is the listener's call
@@ -14,9 +17,12 @@
 use big_cabinet_core::authority::Authorization;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use method_core::ContextError;
+use method_core::HttpMethod;
+use serde_json::Value;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::XrpcRouter;
@@ -67,16 +73,25 @@ pub fn xrpc_router(
                     // The credential travels in the request's metadata to dispatch, which
                     // admits it (a malformed token is `Unauthenticated`, see `refusal`).
                     let idempotency_key = metadata.idempotency_key.clone();
+                    let (input, http) = match request.verb {
+                        HttpMethod::Post => (request.params, HttpForm::Post),
+                        HttpMethod::Get => (
+                            Value::Null,
+                            HttpForm::Get {
+                                query: request.raw_query.unwrap_or_default(),
+                            },
+                        ),
+                    };
                     dispatch
                         .call_with(
                             request.context,
                             metadata,
                             Invoke {
                                 operation: request.nsid,
-                                input: request.params,
+                                input,
                                 context: InvocationContext {
                                     idempotency_key,
-                                    http: None,
+                                    http: Some(http),
                                 },
                             },
                         )

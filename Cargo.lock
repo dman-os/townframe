@@ -4185,6 +4185,7 @@ dependencies = [
  "secrets_rs",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",

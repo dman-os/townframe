@@ -414,8 +414,12 @@ impl XrpcRouter {
 
     /// Installs the handler that serves every NSID no operation is registered for, for a router
     /// whose operations are not known when it is built (a reverse proxy in front of a routing
-    /// table that changes at runtime). It is a procedure: the request's `nsid` names the
-    /// operation, and its JSON body is the input. Registered operations take precedence.
+    /// table that changes at runtime). The request's `nsid` names the operation and the handler
+    /// learns the verb ([`XrpcRequest::verb`]): a POST's JSON body is the input, a GET carries
+    /// only a query string (`raw_query`, which the handler reads itself, as it alone knows which
+    /// names repeat). The method's kind is the handler's to hold the verb to, since only it knows
+    /// the NSID's contract. It is registered as a procedure; registered operations take
+    /// precedence.
     pub fn register_fallback(
         &mut self,
         handler: XrpcMethodHandler,
@@ -496,7 +500,8 @@ async fn dispatch(
         )
         .await;
     }
-    let Some(handler) = router.operations.get(&nsid).or(router.fallback.as_ref()) else {
+    let registered = router.operations.get(&nsid);
+    let Some(handler) = registered.or(router.fallback.as_ref()) else {
         return error_response(
             StatusCode::NOT_FOUND,
             request_id,
@@ -504,7 +509,12 @@ async fn dispatch(
             "unknown XRPC operation",
         );
     };
-    let operation = handler.operation();
+    let mut operation = handler.operation();
+    // The fallback serves a GET as a query: the verb is the handler's to judge, not the
+    // procedure it was registered as.
+    if registered.is_none() && parts.method == Method::GET {
+        operation = XrpcMethod::query(operation.nsid);
+    }
     let (context, metadata) = match request_context(&parts.headers) {
         Ok(value) => value,
         Err(message) => {
@@ -567,7 +577,16 @@ async fn dispatch(
             );
         }
     };
-    let params = match decode_input(operation.input, raw_query.as_deref(), &body) {
+    // A fallback's GET hands over the raw query string alone.
+    let params = match if registered.is_none() && operation.input == HttpInput::Query {
+        if body.is_empty() {
+            Ok(Value::Null)
+        } else {
+            Err("query operations must not carry a request body".to_owned())
+        }
+    } else {
+        decode_input(operation.input, raw_query.as_deref(), &body)
+    } {
         Ok(params) => params,
         Err(error) => {
             return error_response(
@@ -580,6 +599,7 @@ async fn dispatch(
     };
     let call = handler.call(XrpcRequest {
         nsid,
+        verb: operation.method,
         context: context.clone(),
         metadata: metadata.clone(),
         params,
@@ -695,6 +715,7 @@ async fn dispatch_subscription(
         .unwrap_or(crate::TransportContext::Http);
     let (metadata_out, mut stream) = match (subscription.handler)(XrpcRequest {
         nsid,
+        verb: HttpMethod::Get,
         context,
         metadata,
         params,

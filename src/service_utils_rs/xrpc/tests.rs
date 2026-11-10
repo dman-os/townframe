@@ -1880,8 +1880,9 @@ async fn websocket_subscription_streams_hosted_events() {
     stop.stop().await;
 }
 
-/// A fallback serves every NSID nothing is registered for, and learns which from the request;
-/// a registered operation still wins; and a query cannot be a fallback.
+/// A fallback serves every NSID nothing is registered for, and learns which from the request and
+/// with which verb (a GET hands over its raw query string, a POST its JSON body); a registered
+/// operation still wins and keeps its own verb; and a query cannot be a fallback.
 #[tokio::test]
 async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() {
     let mut router = XrpcRouter::new(1024);
@@ -1903,7 +1904,12 @@ async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() 
         XrpcMethodHandler::new(
             XrpcMethod::procedure(""),
             |request: XrpcRequest| async move {
-                Ok::<_, XrpcHandlerError>(json!({ "nsid": request.nsid, "input": request.params }))
+                Ok::<_, XrpcHandlerError>(json!({
+                    "nsid": request.nsid,
+                    "verb": format!("{:?}", request.verb),
+                    "input": request.params,
+                    "rawQuery": request.raw_query,
+                }))
             },
         )
     };
@@ -1933,8 +1939,40 @@ async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() 
     assert_eq!(post("org.example.test.write").await, json!("registered"));
     assert_eq!(
         post("org.example.anything.at.all").await,
-        json!({ "nsid": "org.example.anything.at.all", "input": { "n": 1 } })
+        json!({
+            "nsid": "org.example.anything.at.all",
+            "verb": "Post",
+            "input": { "n": 1 },
+            "rawQuery": null,
+        })
     );
+    // A GET to the fallback reaches the handler with the query string as sent, repeats intact.
+    let got = client
+        .get(format!(
+            "http://{address}/xrpc/org.example.anything.get?a=1&a=2&b=x"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "nsid": "org.example.anything.get",
+            "verb": "Get",
+            "input": null,
+            "rawQuery": "a=1&a=2&b=x",
+        })
+    );
+    // A registered procedure still refuses a GET.
+    let refused = client
+        .get(format!("http://{address}/xrpc/org.example.test.write"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 405);
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();
 }

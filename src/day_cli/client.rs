@@ -17,6 +17,7 @@ use crate::interlude::*;
 
 use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
+use method_core::HttpMethod;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -121,8 +122,11 @@ impl NodeClient {
         self.socket
     }
 
-    /// Calls the operation `nsid` through the node's router with `input` as its JSON body.
-    pub async fn call(&self, nsid: &str, input: &Value) -> Res<Reply> {
+    /// Calls the operation `nsid` through the node's router. A procedure (`HttpMethod::Post`)
+    /// takes `input` as its JSON body; a query (`HttpMethod::Get`) takes it as its query string,
+    /// so `input` must be an object of primitives (or arrays of them), the shape a query's
+    /// Lexicon `parameters` take. The node holds the verb to the method's kind.
+    pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         eyre::ensure!(
             !nsid.is_empty()
                 && nsid
@@ -133,7 +137,11 @@ impl NodeClient {
         match &self.transport {
             Transport::Daemon(client) => {
                 let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
-                let response = client.http_client().post(url).json(input).send().await?;
+                let request = match verb {
+                    HttpMethod::Post => client.http_client().post(url).json(input),
+                    HttpMethod::Get => client.http_client().get(url).query(&query_pairs(input)?),
+                };
+                let response = request.send().await?;
                 Ok(Reply {
                     status: response.status().as_u16(),
                     body: response.json().await?,
@@ -141,9 +149,16 @@ impl NodeClient {
             }
             Transport::InProcess(running) => {
                 let router = running.1.clone();
-                let request = http::Request::post(format!("/xrpc/{nsid}"))
-                    .header(http::header::CONTENT_TYPE, "application/json")
-                    .body(axum::body::Body::from(serde_json::to_vec(input)?))?;
+                let request = match verb {
+                    HttpMethod::Post => http::Request::post(format!("/xrpc/{nsid}"))
+                        .header(http::header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(serde_json::to_vec(input)?))?,
+                    HttpMethod::Get => http::Request::get(format!(
+                        "/xrpc/{nsid}?{}",
+                        serde_urlencoded::to_string(query_pairs(input)?)?
+                    ))
+                    .body(axum::body::Body::empty())?,
+                };
                 let response = router
                     .oneshot(request)
                     .await
@@ -169,4 +184,32 @@ impl NodeClient {
             }
         }
     }
+}
+
+/// The query string pairs of a query's `input`: each property a pair, an array a pair per item
+/// (atproto's `parameters` are primitives or arrays of them), `null` omitted.
+fn query_pairs(input: &Value) -> Res<Vec<(String, String)>> {
+    let Value::Object(object) = input else {
+        eyre::bail!("a query's input is an object of parameters, not {input}");
+    };
+    let scalar = |name: &str, value: &Value| -> Res<String> {
+        match value {
+            Value::String(text) => Ok(text.clone()),
+            Value::Bool(_) | Value::Number(_) => Ok(value.to_string()),
+            other => eyre::bail!("parameter `{name}` is not a primitive: {other}"),
+        }
+    };
+    let mut pairs = Vec::new();
+    for (name, value) in object {
+        match value {
+            Value::Null => {}
+            Value::Array(items) => {
+                for item in items {
+                    pairs.push((name.clone(), scalar(name, item)?));
+                }
+            }
+            value => pairs.push((name.clone(), scalar(name, value)?)),
+        }
+    }
+    Ok(pairs)
 }

@@ -13,6 +13,7 @@ use super::nodule_wasm::put;
 use super::nodule_wasm::set_enabled;
 use super::*;
 use big_cabinet_core::doc::DocsProtocol;
+use big_cabinet_core::doc::GetDocAvailability;
 use method_core::Method;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
@@ -78,6 +79,23 @@ pub(super) async fn post(
         .http_client()
         .post(client.base_url().join(&format!("xrpc/{nsid}")).unwrap())
         .json(&input);
+    if let Some(authorization) = authorization {
+        request = request.header("authorization", authorization.header_value());
+    }
+    let response = request.send().await.unwrap();
+    (response.status().as_u16(), response.json().await.unwrap())
+}
+
+/// One plain XRPC query call: the status and the JSON body. `query` is the raw query string.
+async fn get(
+    client: &XrpcClient,
+    nsid: &str,
+    authorization: Option<Authorization>,
+    query: &str,
+) -> (u16, Value) {
+    let mut url = client.base_url().join(&format!("xrpc/{nsid}")).unwrap();
+    url.set_query(Some(query));
+    let mut request = client.http_client().get(url);
     if let Some(authorization) = authorization {
         request = request.header("authorization", authorization.header_value());
     }
@@ -231,6 +249,73 @@ async fn tcp_admits_only_the_capability_each_request_presents() {
     assert_eq!(
         post(&client, &spec.echo(), Some(forged), json!({})).await.0,
         403
+    );
+    shutdown(node, stop).await;
+}
+
+/// A query is served over GET: its query string is typed by the method's Lexicon `parameters`
+/// (undeclared names such as a cache-buster are ignored), checked, and the answer is the same
+/// JSON a POST of a procedure gives. The wrong verb for a method's kind is atproto's
+/// `InvalidRequest`.
+#[tokio::test]
+async fn a_query_is_served_over_get_and_the_wrong_verb_is_invalid() {
+    let secrets = secrets().await;
+    let (node, stop, _) = boot_listening(&secrets, tcp()).await;
+    let client = tcp_client(&node);
+    let operator = Authorization::identity(node.authority.root);
+    let note = create(&node, "get-query", json!({"$type": NOTE, "value": "x"})).await;
+    let capability = capability(
+        &node,
+        DocScope {
+            read: BTreeSet::from([note.doc_id.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let availability = GetDocAvailability::XRPC.nsid;
+    let query = format!(
+        "capability={}&docId={}&cacheBuster=7f3",
+        serde_json::to_value(capability).unwrap().as_str().unwrap(),
+        serde_json::to_value(&note.doc_id)
+            .unwrap()
+            .as_str()
+            .unwrap(),
+    );
+
+    let (status, body) = get(&client, availability, Some(operator), &query).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, node_info) = get(&client, crate::GET_NODE_INFO, Some(operator), "").await;
+    assert_eq!(status, 200, "{node_info}");
+    assert!(node_info["nodeId"].is_string(), "{node_info}");
+
+    // A missing required parameter is the caller's: checked against the Lexicon, not the
+    // service.
+    let (status, body) = get(&client, availability, Some(operator), "docId=nope").await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("InvalidRequest"))
+    );
+    // Without a token the listener refuses before dispatch, as it does a POST.
+    let (status, _) = get(&client, availability, None, &query).await;
+    assert_eq!(status, 401);
+    // atproto: `Incorrect HTTP method (POST) expected GET`, and the converse.
+    let (status, body) = post(&client, availability, Some(operator), json!({})).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("InvalidRequest"))
+    );
+    assert!(
+        body["message"].as_str().unwrap().contains("expected GET"),
+        "{body}"
+    );
+    let (status, body) = get(&client, CreateDoc::XRPC.nsid, Some(operator), "").await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("InvalidRequest"))
+    );
+    assert!(
+        body["message"].as_str().unwrap().contains("expected POST"),
+        "{body}"
     );
     shutdown(node, stop).await;
 }

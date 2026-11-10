@@ -30,7 +30,7 @@ nodules   0 enabled of 0
 services  not exposed by the node
 peers     none attached (the daemon's node.json has no peers section)
 
-$ day exec org.example.daybook.nodules.listNodules
+$ day exec --get org.example.daybook.nodules.listNodules
 {
   "nodules": []
 }

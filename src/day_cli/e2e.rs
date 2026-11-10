@@ -121,18 +121,25 @@ mod library {
         }
     }
 
-    async fn call(client: &NodeClient, nsid: &str, input: serde_json::Value) -> Reply {
-        client.call(nsid, &input).await.unwrap()
+    async fn call(
+        client: &NodeClient,
+        nsid: &str,
+        verb: method_core::HttpMethod,
+        input: serde_json::Value,
+    ) -> Reply {
+        client.call(nsid, verb, &input).await.unwrap()
     }
 
     /// Calls whose answers must not depend on how the node was reached: a query that succeeds, an
     /// operation nothing claims, and a real operation given input it must refuse.
-    fn calls() -> Vec<(&'static str, serde_json::Value)> {
+    fn calls() -> Vec<(&'static str, method_core::HttpMethod, serde_json::Value)> {
+        use method_core::HttpMethod::Post;
         vec![
-            (ListNodules::XRPC.nsid, json!({})),
-            ("org.example.nothing.here", json!({})),
+            (ListNodules::XRPC.nsid, ListNodules::XRPC.method, json!({})),
+            ("org.example.nothing.here", Post, json!({})),
             (
                 big_cabinet_core::doc::CreateDoc::XRPC.nsid,
+                Post,
                 json!({"nonsense": true}),
             ),
         ]
@@ -144,7 +151,13 @@ mod library {
         let client = NodeClient::connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
-        let reply = call(&client, ListNodules::XRPC.nsid, json!({})).await;
+        let reply = call(
+            &client,
+            ListNodules::XRPC.nsid,
+            ListNodules::XRPC.method,
+            json!({}),
+        )
+        .await;
         assert_eq!(reply.status, 200, "{reply:?}");
         assert_eq!(reply.body, json!({"nodules": []}));
         client.stop().await.unwrap();
@@ -176,8 +189,8 @@ mod library {
         let in_process = NodeClient::connect(&dir).await.unwrap();
         assert_eq!(in_process.mode(), Mode::InProcess);
         let mut local = Vec::new();
-        for (nsid, input) in calls() {
-            local.push(call(&in_process, nsid, input).await);
+        for (nsid, verb, input) in calls() {
+            local.push(call(&in_process, nsid, verb, input).await);
         }
         in_process.stop().await.unwrap();
 
@@ -186,8 +199,8 @@ mod library {
         assert_eq!(over_socket.mode(), Mode::Daemon);
         assert_eq!(over_socket.socket_state(), SocketState::Live);
         let mut remote = Vec::new();
-        for (nsid, input) in calls() {
-            remote.push(call(&over_socket, nsid, input).await);
+        for (nsid, verb, input) in calls() {
+            remote.push(call(&over_socket, nsid, verb, input).await);
         }
         over_socket.stop().await.unwrap();
         daemon.stop().await;
