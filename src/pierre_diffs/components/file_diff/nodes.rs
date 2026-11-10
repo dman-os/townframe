@@ -90,9 +90,11 @@ where
         parent_node: Option<NodeKey>,
     ) -> NodeKey {
         let previous_container = self.state.borrow().file_container;
-        let next_container = file_container
-            .or(previous_container)
-            .unwrap_or_else(|| self.document().create_element(DIFFS_TAG_NAME));
+        let next_container = file_container.or(previous_container).unwrap_or_else(|| {
+            let created = self.document().create_element(DIFFS_TAG_NAME);
+            self.state.borrow_mut().created_container = Some(created);
+            created
+        });
         let container_changed = previous_container != Some(next_container);
         if container_changed {
             Lifecycle(self.0).emit_post_render(true);

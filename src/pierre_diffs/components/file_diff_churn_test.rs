@@ -182,7 +182,7 @@ fn subtree(dom: &FakeDom, node: NodeKey, into: &mut Vec<NodeKey>) {
     }
 }
 
-fn render_everything(instance: &Instance, container: NodeKey, round: usize) {
+fn render_everything(instance: &Instance, container: Option<NodeKey>, round: usize) {
     let (old_file, new_file) = pair(round);
     let annotations = Rc::new(
         [
@@ -199,7 +199,7 @@ fn render_everything(instance: &Instance, container: NodeKey, round: usize) {
     assert!(instance.lifecycle().render(FileDiffRenderProps {
         old_file: Some(Some(old_file)),
         new_file: Some(Some(new_file)),
-        file_container: Some(container),
+        file_container: container,
         line_annotations: Some(annotations),
         render_range: Some(RenderRange {
             starting_line: 4.0,
@@ -218,10 +218,10 @@ fn clean_up_frees_every_node_the_instance_created_but_the_file_container() {
         let wrapper = dom.doc.create_element("div");
         let container = dom.doc.create_element("diffs-container");
         let instance = instance(&dom, options_that_create_everything());
-        render_everything(&instance, container, 7);
+        render_everything(&instance, Some(container), 7);
         // Render once more with another diff so rows, slots and annotations
         // have been replaced at least once.
-        render_everything(&instance, container, 8);
+        render_everything(&instance, Some(container), 8);
         dom.doc.append_child(wrapper, container);
 
         let shadow_root = dom.doc.shadow_root(container).expect("a shadow root");
@@ -264,14 +264,16 @@ fn rendering_and_cleaning_up_forever_keeps_the_document_bounded() {
     let warm_up = 20;
     let mut warm_capacity = 0;
     for round in 0..300 {
-        let container = dom.doc.create_element("diffs-container");
+        // Even rounds pass a container (the caller's to free), odd rounds let the
+        // instance make its own (the instance's to free).
+        let container = (round % 2 == 0).then(|| dom.doc.create_element("diffs-container"));
         let instance = instance(&dom, options_that_create_everything());
         render_everything(&instance, container, round);
         render_everything(&instance, container, round + 1);
         instance.lifecycle().clean_up(round % 3 == 0);
-        // The caller owns the container (and its shadow root): the instance
-        // freed everything else, so freeing these leaves the document empty.
-        dom.doc.discard(container);
+        if let Some(container) = container {
+            dom.doc.discard(container);
+        }
         if round == warm_up {
             warm_capacity = dom.doc.capacity();
         }
@@ -281,4 +283,23 @@ fn rendering_and_cleaning_up_forever_keeps_the_document_bounded() {
         warm_capacity,
         "an instance leaked nodes past cleanUp"
     );
+}
+
+#[test]
+fn clean_up_frees_a_container_the_instance_made_itself_and_only_that() {
+    let dom = Rc::new(FakeDom::default());
+    let first = instance(&dom, options_that_create_everything());
+    render_everything(&first, None, 3);
+    let container = first.state().file_container.expect("a container");
+    let shadow_root = dom.doc.shadow_root(container).expect("a shadow root");
+    first.lifecycle().clean_up(false);
+    assert!(!dom.doc.exists(container));
+    assert!(!dom.doc.exists(shadow_root));
+
+    // A container the caller passed survives, never discarded.
+    let passed = dom.doc.create_element("diffs-container");
+    let second = instance(&dom, options_that_create_everything());
+    render_everything(&second, Some(passed), 3);
+    second.lifecycle().clean_up(false);
+    assert!(dom.doc.exists(passed));
 }

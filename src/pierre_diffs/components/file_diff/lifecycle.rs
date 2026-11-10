@@ -32,7 +32,9 @@
 //   instance created them in its `Document`, so it removes and discards them
 //   too: after `clean_up` the container's shadow root is empty and every node
 //   the instance created is freed. `fileContainer` is detached (when the
-//   instance is not owner-managed) but never discarded: the caller owns it.
+//   instance is not owner-managed) but never discarded: the caller owns it. A
+//   container the instance created itself (`created_container`) is discarded
+//   last, with its shadow root.
 // * `requestRender` is inlined in `rerender`; `rerender` is on `FileDiff` itself
 //   (it is public API).
 
@@ -673,6 +675,13 @@ where
         }
         // The managers cleaned up above hold no key of what this discards.
         nodes.discard_retired();
+        // A container the instance made itself is its to free, last: everything
+        // it held is gone and it is detached (or owner-managed and left in
+        // place, which `discard` detaches).
+        let created_container = self.state.borrow_mut().created_container.take();
+        if let Some(created_container) = created_container {
+            self.document().discard(created_container);
+        }
     }
 
     fn hydrate_elements(&self, file_container: NodeKey) {

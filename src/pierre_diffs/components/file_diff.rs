@@ -101,8 +101,10 @@
 //   `flush_managers` that returns early (nothing dirty, or no `pre`) runs no
 //   setup and discards nothing. `cleanUp` cleans the managers up first and
 //   then detaches, retires and discards every node the instance created (the
-//   container belongs to the caller and is never discarded; neither is its
-//   shadow root, which lives as long as its host). Retire subtree roots only:
+//   container belongs to the caller and is never discarded, unless the
+//   instance made it itself (`created_container`; upstream leaves that one to
+//   the garbage collector), in which case it is discarded last, with its shadow
+//   root). Retire subtree roots only:
 //   a child retired after its parent was discarded panics as a stale key.
 //   Nodes the instance adopted by `hydrate` are its own from then on: cleaning
 //   up the instance that rendered them after the hydrating one is a stale key.
@@ -639,6 +641,9 @@ pub(crate) struct AnnotationElementCache<LAnnotation> {
 /// re-enter the instance).
 pub(crate) struct FileDiffState<LAnnotation> {
     pub(crate) file_container: Option<NodeKey>,
+    /// The container this instance made itself (none was passed): the only one
+    /// `clean_up` discards.
+    pub(crate) created_container: Option<NodeKey>,
     pub(crate) pre: Option<NodeKey>,
     pub(crate) code_deletions: Option<NodeKey>,
     pub(crate) code_additions: Option<NodeKey>,
@@ -768,6 +773,7 @@ impl<
                 request_owner_render,
                 state: RefCell::new(FileDiffState {
                     file_container: None,
+                    created_container: None,
                     pre: None,
                     code_deletions: None,
                     code_additions: None,
