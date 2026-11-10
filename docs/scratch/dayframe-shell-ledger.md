@@ -28,6 +28,16 @@ Branch `feat/dayframe-shell`, stacked on PR #79 (`feat/better-collections`). Des
   device. The noun for an OS window is deferred.
 - Command palette on mobile: micro-chosen; default two-finger swipe down.
 
+## Operator play-test notes (themelab, Wry, from 2026-11-11)
+
+Collected while the operator plays; nothing here is being fixed until the list is gone through
+together.
+
+| Id | Defect | What is known | State |
+|----|--------|---------------|-------|
+| P1 | The Sheet and Drawer specimens in the themelab's Components tab aren't interactive. | The specimens (`dayframe_showcase/kit.rs`, `SheetSpecimen`, `DrawerSpecimen`) start open (`use_signal(\|\| true)`), dismiss through the kit's `on_dismiss` (scrim, or Escape where keys reach the sheet) and reopen through the "Open sheet" / "Open drawer" buttons. Cause not investigated. Seen in a lab that was hot-patched to `0beb20d0` rather than rebuilt. | open |
+| P2 | ArcIndex crashes the lab. | Reported 2026-11-10 while navigating the lab; repro steps not recorded yet. The operator called it a known-buggy older piece, to fix later. | open |
+
 ## Workstreams
 
 | Id | Item | Branch / worktree | State |
