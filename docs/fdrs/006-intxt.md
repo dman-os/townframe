@@ -31,14 +31,14 @@ intxt's users are people and software alike:
 
 An intxt is a collection with its own identity, title and description. Its members are items that different users contribute:
 
-- **Code states**: the files a change touches, at the versions that matter, so the change can be read without git.
-- **Git and jj history**: the commits and branch positions the work went through, including ones later rewritten.
+- **Working copies**: each checkout the work happened in, possibly several, in several repositories, with every change to its files as it happened, so the work can be read without git and without the machine it ran on.
+- **Git and jj history**: the commits and branch positions the work went through, including ones later rewritten. Version control is a layer over the working copies, not the thing intxt records.
 - **Sessions**: what happened in agent sessions, in a readable form rather than raw logs.
 - **Notes**: annotations, replies, explanations, guides through the change.
 - **Structure**: tasks, decisions and groupings that say which parts of the work belong together and why.
 - **Evidence**: results of checks, about the exact version they ran against.
 
-New kinds of items can be added by any producer. A reader that doesn't understand a kind still keeps it intact and shows it generically; it never drops or rewrites it.
+New kinds of items can be added by any producer, and they have the same standing as intxt's own: the review loop (FDR 007) is one set of kinds among others. A reader that doesn't understand a kind still keeps it intact and shows it generically; it never drops or rewrites it. Where an existing general kind fits (a title, a note, a comment), intxt uses it rather than its own, so other apps understand intxt content and intxt understands theirs.
 
 An item can belong to several intxts. A session that produced two changes is in both; a check run can be relevant to a stack of intxts; an intxt can include or refer to another. Nothing is copied to make this work.
 
@@ -58,11 +58,13 @@ A pointer always records exactly what it was made about. When the item later cha
 
 intxt records the intermediate states of work, not only the result: earlier revisions, rewritten commits, what an agent did before changing approach. Rewriting git history doesn't remove what an intxt has already recorded, so comments made on an earlier revision stay readable and can be followed forward.
 
-What enters a shared intxt is what something in it refers to. Recording a session can observe a great deal locally (every edit, every command), but only the states that commits, notes or structure point at need to be part of what is shared. Accidental content (a build directory, a leaked secret in an intermediate state) should be stopped at that boundary: it is much harder to remove later, because shared history is not rewritten.
+Recording observes a great deal locally (every change, every command), and it stays on the machine until an intxt includes it. What enters a shared intxt is what someone included or what something in it refers to, a whole session or a whole file's history at a time. Content that should not have been shared (a leaked secret in an intermediate state) can be taken out by replacing what holds it with a cleaned copy; that stops it spreading further, but anyone who already pulled it keeps it, because shared history is not rewritten.
+
+Readers expect gaps. An intxt is spread over many pieces, some private or not yet synced, so a reader shows what it can reach and marks what it can't, the way a web page shows a missing image.
 
 ## Many participants at once
 
-Several people and agents work in the same intxt at the same time, on different devices, sometimes offline. Their contributions merge without anyone losing work. Who wrote each contribution is provable, not just a name typed into a field.
+Several people and agents work in the same intxt at the same time, on different devices, sometimes offline. Their contributions merge without anyone losing work. Who wrote each contribution is attested by the system, not just a name typed into a field; content that names an author of its own (a commit's author line, a comment imported from GitHub) is shown as such, alongside who brought it in.
 
 ## Sharing
 
@@ -84,5 +86,5 @@ An intxt is the unit of sharing and syncing: a person shares an intxt with a col
 ## Open questions
 
 1. When does a session's activity become an intxt: one per task, one per branch, one per session, or whatever the agent or operator decides? FDR 007 picks a default for the review loop.
-2. How private captured material is promoted into a shared intxt, and who decides (adapter rules, the agent, the operator).
+2. Who decides what an intxt includes (the agent, the operator, adapter defaults), and how the CLI makes that choice easy and hard to get wrong.
 3. How a reader is told that a pointer follows to a newer version versus refers only to an older one, for kinds other than code.

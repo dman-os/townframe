@@ -15,9 +15,9 @@ The review loop makes this one continuous flow: the agent's work shows up as an 
 
 ## The loop
 
-1. **The agent works.** A harness adapter records the session as it runs: messages, the edits made, and the commits created. The agent does nothing extra for this.
-2. **The work becomes an intxt.** The agent or the operator makes an intxt from recorded work with a CLI command, and can later add more work to it. Its title and description come from the agent and can be edited by anyone. Once work is in a shared intxt it can't be taken back out, only superseded, so the choice of what goes in is deliberate.
-3. **A revision is recorded.** Each time the branch moves (a new commit, an amend, a rebase), the intxt records a new revision: the commits now on the branch and the contents of every file they touch. Earlier revisions remain.
+1. **The agent works.** A harness adapter records the session as it runs, and every change to the working copies the session touches, whether an edit tool, a shell command or a checkout made it, together with the commits created. The baseline agent only runs shell commands; anything more a harness reports only adds detail. The agent does nothing extra for this, and everything stays on the machine until it is included in an intxt.
+2. **The work becomes an intxt.** The agent or the operator makes an intxt from recorded work with a CLI command (sessions and the working copies they touched, possibly in several repositories), and can later add more. Its title and description come from the agent and can be edited by anyone. Anything included can be taken out again or replaced with a redacted copy, which stops it spreading but doesn't recall copies already pulled, so the choice of what goes in is still deliberate.
+3. **A revision is recorded.** The working copy's files are recorded as they change. Each time the branch moves (a new commit, an amend, a rebase), that position is a new revision: the commits now on the branch and the files as they stood. Earlier revisions remain.
 4. **The operator reviews, anywhere.** The intxt syncs to the operator's other devices through their relay. On a phone or desktop they see:
    - the change file by file, with the code itself, not only the patch;
    - the commits it is made of;
@@ -46,8 +46,9 @@ The loop repeats until the operator is satisfied. Finishing (merging, pushing to
 - Otherwise works as it already does; commits drive revisions.
 
 **Harness adapter** (Claude Code first)
-- Records the session in readable form: messages, edits, and changes made by commands, attributed to the turn that made them. Thinking is not recorded by default.
-- Records commits and branch movements as they happen.
+- Records the session in readable form: messages and tool calls, and subagents as sessions of their own. Thinking is not recorded by default.
+- Records every change to the working copies the session touches, from edit tools, commands and checkouts alike, linked to the tool call it happened during when that is known.
+- Records commits and branch movements as they happen, in git and jj.
 - Keeps observations that nothing refers to local, and ignores files the repository ignores.
 - Only records. It does not steer the agent or put feedback into its context.
 
@@ -72,6 +73,6 @@ The loop repeats until the operator is satisfied. Finishing (merging, pushing to
 
 ## Open questions
 
-1. **Deciding what goes into an intxt:** recorded work may sit somewhere private first (a proposed working set, not settled); which commits, sessions and states the agent or operator promotes into an intxt, and how the CLI makes that choice easy and hard to get wrong, given that it can't be undone.
+1. **Deciding what goes into an intxt:** recorded work sits on the recording machine first; which sessions and working copies the agent or operator includes, and how the CLI makes that choice easy and hard to get wrong, given that removal can't recall what was already pulled.
 
-Settled while drafting (ledger D21–D23): an agent reads and writes an intxt as plain data, with no special feedback interface; a session spanning two intxts is one session in both and each viewer decides how much to show; intxt never injects into or interrupts an agent.
+Settled while drafting (ledger D21–D23, D29, D32, D35): an agent reads and writes an intxt as plain data, with no special feedback interface; a session spanning two intxts is one session in both and each viewer decides how much to show; intxt never injects into or interrupts an agent.

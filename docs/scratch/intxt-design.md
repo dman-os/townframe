@@ -1,6 +1,6 @@
 # intxt: data model v0
 
-Status: Draft
+Status: Superseded (2026-11-10) by ADR 035 (references), ADR 036 (intxt core), ADR 039 (capture), ADR 040 (work capture datums) and ADR 041 (annotations). Kept for the reasoning behind anchors (§3) and the nodule's scope (§5); its datum shapes, multi-kind targets and verdicts are out of date.
 Owner: Townframe maintainers
 Updated: 2026-11-10
 Scope: What an intxt is, the reference (anchor) model, and the datums the alpha's write loop needs: see the diff, see the agent's annotations, reply, annotate, resolve, give a verdict. It is the intxt lane's answer to the node lane's stand-in datums (`townframe-p3N-2:docs/scratch/big-ndk-intxt-sketch.md`) and the diff view's anchor requirements (claytxt lane). Decisions and open items live in `intxt-ledger.md`.
