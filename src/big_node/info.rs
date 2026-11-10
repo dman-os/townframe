@@ -9,6 +9,7 @@
 use crate::peers::Peers;
 use async_trait::async_trait;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -32,6 +33,10 @@ pub const GET_NODE_INFO: &str = "org.example.daybook.node.getNodeInfo";
 pub struct NodeInfo {
     /// [`crate::node_id`]: lowercase hex.
     pub node_id: String,
+    /// The drawer that holds this node's known-drawers list. A drawer id is a name, not a
+    /// capability: it grants nothing, but it is what a client needs to mint the handle that
+    /// lists the drawers the node knows (`listKnownDrawers`), which is how it finds drawer ids.
+    pub known_drawers_id: DrawerId,
     /// `None` when the node has no peers attachment, so it is neither dialable nor dialing.
     pub peers: Option<PeersInfo>,
 }
@@ -48,16 +53,24 @@ pub struct PeersInfo {
 
 struct NodeInfoProvider {
     node_id: String,
+    known_drawers_id: DrawerId,
     peers: Option<Peers>,
 }
 
 /// Registers the provider as `provider_id`, claiming [`GET_NODE_INFO`].
-pub(crate) fn register(router: &Router, provider_id: &str, node_id: String, peers: Option<Peers>) {
+pub(crate) fn register(
+    router: &Router,
+    provider_id: &str,
+    node_id: String,
+    known_drawers_id: DrawerId,
+    peers: Option<Peers>,
+) {
     router.register(
         provider_id,
         [(GET_NODE_INFO.to_owned(), Some(OperationKind::Query))],
         ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(NodeInfoProvider {
             node_id,
+            known_drawers_id,
             peers,
         }))),
     );
@@ -102,6 +115,7 @@ impl Provider for NodeInfoProvider {
         };
         Ok(serde_json::to_value(NodeInfo {
             node_id: self.node_id.clone(),
+            known_drawers_id: self.known_drawers_id.clone(),
             peers,
         })
         .expect("node info serializes"))

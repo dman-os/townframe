@@ -487,6 +487,7 @@ impl BigNode {
             &self.dispatch.router,
             "builtin:node",
             self.node_id.clone(),
+            self.drawers.local().known_drawers_id,
             self.peers.clone(),
         );
         provider_ids.push("builtin:node");
