@@ -149,6 +149,7 @@ fn SectionsSpecimen(width_px: f64, three: bool) -> Element {
             below: 160.0,
             to: 80.0,
         }),
+        collapse_past: None,
     };
     let mut weights = use_signal(|| {
         if three {
