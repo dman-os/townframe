@@ -284,7 +284,7 @@ fn line_at(y: f64, grown: &[usize]) -> usize {
 }
 
 #[component]
-fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, log: Signal<String>) -> Element {
+fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, on_size: Callback<(usize, f64)>) -> Element {
     rsx! {
         div {
             "data-testid": "window",
@@ -298,7 +298,7 @@ fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, log:
                         Row { line, tokens: 1, source: 1 }
                     }
                     if line % THREAD_EVERY == THREAD_EVERY - 1 {
-                        ThreadRow { k: line / THREAD_EVERY, lines: thread_base(line / THREAD_EVERY) + grown[line / THREAD_EVERY], probe, log }
+                        ThreadRow { k: line / THREAD_EVERY, lines: thread_base(line / THREAD_EVERY) + grown[line / THREAD_EVERY], probe, on_size }
                     }
                 }
             }
@@ -307,7 +307,7 @@ fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, log:
 }
 
 #[component]
-fn ThreadRow(k: usize, lines: usize, probe: bool, log: Signal<String>) -> Element {
+fn ThreadRow(k: usize, lines: usize, probe: bool, on_size: Callback<(usize, f64)>) -> Element {
     let body = rsx! {
         for i in 0..lines {
             div {
@@ -325,8 +325,8 @@ fn ThreadRow(k: usize, lines: usize, probe: bool, log: Signal<String>) -> Elemen
                 style,
                 // The ResizeData the wire delivers (W2): one entry per observed size change.
                 onresize: move |event| {
-                    let height = event.data().get_border_box_size().map(|size| size.height);
-                    log.with_mut(|text| text.push_str(&format!("{k}:{height:?};")));
+                    let height = event.data().get_border_box_size().expect("the host delivered a size").height;
+                    on_size.call((k, height));
                 },
                 {body}
             }
@@ -437,10 +437,33 @@ fn view() -> Element {
     let mut correct = use_signal(|| 0_usize);
     let mut anchor = use_signal(|| true);
     let mut probe_resize = use_signal(|| false);
-    let resize_log = use_signal(String::new);
+    let mut resize_log = use_signal(String::new);
+    // The last height each observed thread reported (`ResizeData`), and mode 3: correct the
+    // scroller by the observed change, with no model of the new height.
+    let heights = use_hook(|| std::rc::Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::<usize, f64>::new())));
     let last_top = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0.0_f64)));
     let last_top_for_grow = last_top.clone();
     let mut range = use_signal(|| window(0.0, SCROLLER_HEIGHT, 1_000_000, DEFAULT_PROFILE));
+    let last_top_for_resize = last_top.clone();
+    let on_size = use_callback(move |(k, height): (usize, f64)| {
+        resize_log.with_mut(|text| text.push_str(&format!("{k}:{height};")));
+        let previous = heights.borrow_mut().insert(k, height);
+        let top = last_top_for_resize.get();
+        let above = y_of_line((k + 1) * THREAD_EVERY, &grown.peek()) <= top;
+        if let Some(previous) = previous
+            && *correct.peek() == 3
+            && above
+            && height != previous
+        {
+            let handle = scroller.peek().clone().expect("the scroller has mounted");
+            spawn(async move {
+                handle
+                    .scroll(PixelsVector2D::new(0.0, top + (height - previous)), ScrollBehavior::Instant)
+                    .await
+                    .expect("the host corrected the scroller");
+            });
+        }
+    });
 
     let anchor_css = if anchor() { "auto" } else { "none" };
     let (start, count) = range();
@@ -490,7 +513,7 @@ fn view() -> Element {
                     },
                     "threads corpus"
                 }
-                for mode in [0_usize, 1, 2] {
+                for mode in [0_usize, 1, 2, 3] {
                     button {
                         key: "correct-{mode}",
                         "data-testid": "correct-{mode}",
@@ -706,7 +729,7 @@ fn view() -> Element {
                 },
                 div { style: "position:relative;height:{total_height}px",
                     if source() == 3 {
-                        ThreadWindow { start, count, grown: grown(), probe: probe_resize(), log: resize_log }
+                        ThreadWindow { start, count, grown: grown(), probe: probe_resize(), on_size }
                     } else {
                         Window { start, count, tokens: tokens_now, offset: offset_now, source: source(), keyed: keyed() }
                     }
