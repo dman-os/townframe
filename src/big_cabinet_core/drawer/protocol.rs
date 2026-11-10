@@ -21,6 +21,13 @@ use serde::Serialize;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 
+pub use super::listing::KnownDrawer;
+pub use super::listing::KnownDrawers;
+pub use super::listing::ListedDoc;
+pub use super::listing::ListedDocs;
+pub use super::listing::ListedDrawer;
+pub use super::listing::ListedDrawers;
+
 pub type DrawerId = DocId;
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -296,15 +303,6 @@ pub struct ListDocs {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListedDoc {
-    pub doc_id: DocId,
-    pub access: Access,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub via: Option<DrawerId>,
-}
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RememberDrawer {
     pub capability: CapId,
     pub drawer_id: DrawerId,
@@ -325,26 +323,10 @@ pub struct ListKnownDrawers {
     pub capability: CapId,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnownDrawer {
-    pub drawer_id: DrawerId,
-    pub mirror: bool,
-}
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDrawers {
     pub capability: CapId,
-}
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListedDrawer {
-    pub drawer_id: DrawerId,
-    pub layout: DrawerLayout,
-    pub descriptor: Drawer,
-    pub access: Access,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,14 +384,14 @@ method_core::methods! {
     AddChild => WriteReceipt, procedure, "addChild";
     RemoveChild => WriteReceipt, procedure, "removeChild";
     GetDrawer => DrawerView, query, "getDrawer";
-    ListDocs => Vec<ListedDoc>, procedure, "listDocs";
+    ListDocs => ListedDocs, procedure, "listDocs";
     RememberDrawer => (), procedure, "rememberDrawer";
     ForgetDrawer => (), procedure, "forgetDrawer";
-    ListKnownDrawers => Vec<KnownDrawer>, query, "listKnownDrawers";
+    ListKnownDrawers => KnownDrawers, query, "listKnownDrawers";
     SetDrawerPolicy => (), procedure, "setDrawerPolicy";
     SetDrawerSuccessor => (), procedure, "setDrawerSuccessor";
     ResolveDrawerSuccessor => SuccessorResolution, query, "resolveDrawerSuccessor";
-    ListDrawers => Vec<ListedDrawer>, query, "listDrawers";
+    ListDrawers => ListedDrawers, query, "listDrawers";
     GrantDrawer => (), procedure, "grantDrawer";
     RevokeDrawer => (), procedure, "revokeDrawer";
     InvitePrincipal => (), procedure, "invitePrincipal";

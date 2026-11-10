@@ -347,8 +347,24 @@ service_method!(PublishCartridgeVersion => PublishedCartridgeVersion, Cartridges
 service_method!(RemoveCartridgeVersion => (), CartridgesError, procedure("org.example.daybook.cartridges.removeCartridgeVersion"));
 service_method!(RemoveCartridge => (), CartridgesError, procedure("org.example.daybook.cartridges.removeCartridge"));
 service_method!(ImportCartridgeDocument => CartridgeRecord, CartridgesError, procedure("org.example.daybook.cartridges.importCartridgeDocument"));
-service_method!(GetPublisher => String, CartridgesError, query("org.example.daybook.cartridges.getPublisher"));
-service_method!(ListCartridges => Vec<CartridgeRecord>, CartridgesError, query("org.example.daybook.cartridges.listCartridges"));
+/// The result of [`GetPublisher`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CartridgePublisher {
+    pub publisher: String,
+}
+
+/// The result of [`ListCartridges`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CartridgeList {
+    pub cartridges: Vec<CartridgeRecord>,
+}
+
+service_method!(GetPublisher => CartridgePublisher, CartridgesError, query("org.example.daybook.cartridges.getPublisher"));
+service_method!(ListCartridges => CartridgeList, CartridgesError, query("org.example.daybook.cartridges.listCartridges"));
 service_method!(GetCartridge => CartridgeRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridge"));
 service_method!(GetCartridgeVersion => CartridgeVersionRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridgeVersion"));
 service_method!(WatchCartridges => CartridgeChanges, CartridgesError, procedure("org.example.daybook.cartridges.watchCartridges"));

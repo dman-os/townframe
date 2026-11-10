@@ -7,6 +7,8 @@ $ day init
 initialized node [..] at [..]/node
 
 $ day call org.example.daybook.nodules.listNodules
-[]
+{
+  "nodules": []
+}
 
 ```

@@ -401,11 +401,7 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
             "org.example.daybook.blobs.read",
             "BlobRange",
         ),
-        (
-            StatBlob::XRPC,
-            "org.example.daybook.blobs.stat",
-            "Option<BlobInfo>",
-        ),
+        (StatBlob::XRPC, "org.example.daybook.blobs.stat", "BlobStat"),
     ] {
         assert!(big_cabinet_core::datum::is_nsid(operation.nsid));
         assert_eq!(operation.nsid, nsid);
@@ -484,7 +480,17 @@ fn protocol_requests_results_and_errors_round_trip() {
         serde_json::to_value(&info).unwrap(),
         json!({"blobId": blob_id.to_string(), "lengthOctets": u64::MAX})
     );
-    protocol_wire(info);
+    // An absent `info` is elided from the JSON body (atproto has no null), which a
+    // non-self-describing codec cannot read back, so the result is checked as JSON only.
+    let stat = BlobStat { info: None };
+    assert_eq!(serde_json::to_value(&stat).unwrap(), json!({}));
+    assert_eq!(serde_json::from_value::<BlobStat>(json!({})).unwrap(), stat);
+    protocol_wire(info.clone());
+    let stat = BlobStat { info: Some(info) };
+    assert_eq!(
+        serde_json::from_value::<BlobStat>(serde_json::to_value(&stat).unwrap()).unwrap(),
+        stat
+    );
     protocol_wire(BlobRange {
         bytes: vec![0, 255],
         length_octets: 123456789,

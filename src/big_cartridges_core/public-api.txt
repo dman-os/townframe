@@ -68,6 +68,8 @@ pub struct big_cartridges_core::VersionReq  { 0: semver :: VersionReq }
 pub struct big_cartridges_core::catalog::Catalog  {  }
 pub struct big_cartridges_core::protocol::CartridgeChange  { seq: u64, cartridge_id: CartridgeId, removed: bool }
 pub struct big_cartridges_core::protocol::CartridgeChanges  { changes: Vec < CartridgeChange >, through: CartridgesCursor, caught_up: bool, reset: bool }
+pub struct big_cartridges_core::protocol::CartridgeList  { cartridges: Vec < CartridgeRecord > }
+pub struct big_cartridges_core::protocol::CartridgePublisher  { publisher: String }
 pub struct big_cartridges_core::protocol::CartridgeRecord  { id: CartridgeId, doc_id: DocId, versions: Vec < CartridgeVersionSummary >, unreadable: BTreeMap < String , String >, duplicate_docs: Vec < DocId > }
 pub struct big_cartridges_core::protocol::CartridgeVersionRecord  { id: CartridgeId, version: Version, revision: Revision, envelope: Cartridge, conflict: Option < String > }
 pub struct big_cartridges_core::protocol::CartridgeVersionSummary  { version: Version, revision: Revision, conflict: Option < String >, unverified: Option < String > }

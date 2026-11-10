@@ -739,6 +739,7 @@ impl Node {
                 },
             )
             .await
+            .map(|listed| listed.docs)
             .map_err(op)
     }
 
@@ -832,6 +833,7 @@ impl Node {
             )
             .await
             .unwrap()
+            .drawers
     }
 
     /// The Keyhive level `group` holds on `membered` (a doc or another group).

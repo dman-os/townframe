@@ -602,12 +602,14 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         .unwrap();
     assert_eq!(
         listed,
-        vec![ListedDrawer {
-            drawer_id: doc.clone(),
-            layout: cached_descriptor.layout.clone(),
-            descriptor: cached_descriptor.clone(),
-            access: Access::Read,
-        }]
+        ListedDrawers {
+            drawers: vec![ListedDrawer {
+                drawer_id: doc.clone(),
+                layout: cached_descriptor.layout.clone(),
+                descriptor: cached_descriptor.clone(),
+                access: Access::Read,
+            }]
+        }
     );
 
     let mut value = serde_json::to_value(&cached_descriptor).unwrap();
@@ -658,12 +660,14 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
             .call(RequestContext::root(), ListDrawers { capability })
             .await
             .unwrap(),
-        vec![ListedDrawer {
-            drawer_id: doc.clone(),
-            layout: fresh_descriptor.layout.clone(),
-            descriptor: fresh_descriptor,
-            access: Access::Read,
-        }]
+        ListedDrawers {
+            drawers: vec![ListedDrawer {
+                drawer_id: doc.clone(),
+                layout: fresh_descriptor.layout.clone(),
+                descriptor: fresh_descriptor,
+                access: Access::Read,
+            }]
+        }
     );
     assert_eq!(
         node.core()

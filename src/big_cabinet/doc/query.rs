@@ -153,11 +153,11 @@ impl Handler<QueryDatumRefs> for DocsService {
     async fn call(
         &self,
         request: Envelope<QueryDatumRefs>,
-    ) -> Result<ResponseEnvelope<Vec<QueriedDatumRef>>, DocsError> {
-        Ok(self
+    ) -> Result<ResponseEnvelope<QueriedDatumRefs>, DocsError> {
+        let refs = self
             .query_datum_refs(&request.context, request.params)
-            .await?
-            .into())
+            .await?;
+        Ok(QueriedDatumRefs { refs }.into())
     }
 }
 

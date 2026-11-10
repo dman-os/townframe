@@ -19,6 +19,7 @@ pub struct big_blobs_core::datum::Representation  { digest: String, length_octet
 pub struct big_blobs_core::datum::Rfc8188EncodingParameters  { record_size: u64, padding: String, extra: Extra }
 pub struct big_blobs_core::protocol::BlobInfo  { blob_id: BlobId, length_octets: u64 }
 pub struct big_blobs_core::protocol::BlobRange  { bytes: Vec < u8 >, length_octets: u64 }
+pub struct big_blobs_core::protocol::BlobStat  { info: Option < BlobInfo > }
 pub struct big_blobs_core::protocol::PutBlob  { capability: CapId, bytes: Vec < u8 > }
 pub struct big_blobs_core::protocol::ReadBlob  { capability: CapId, blob_id: BlobId, offset: u64, length: u32 }
 pub struct big_blobs_core::protocol::StatBlob  { capability: CapId, blob_id: BlobId }
@@ -34,6 +35,7 @@ pub use big_blobs_core::identity :: BlobId
 pub use big_blobs_core::identity :: BlobIdDecodeError
 pub use big_blobs_core::protocol :: BlobInfo
 pub use big_blobs_core::protocol :: BlobRange
+pub use big_blobs_core::protocol :: BlobStat
 pub use big_blobs_core::protocol :: BlobsError
 pub use big_blobs_core::protocol :: BlobsMessage
 pub use big_blobs_core::protocol :: BlobsProtocol

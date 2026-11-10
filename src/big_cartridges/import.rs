@@ -111,7 +111,8 @@ pub async fn micro_pair(
             GetPublisher {},
         )
         .await
-        .map_err(registry_error)?;
+        .map_err(registry_error)?
+        .publisher;
     let cartridge_id = CartridgeId::new(&publisher, &id).map_err(|error| {
         ImportError::Manifest(format!(
             "`id` is not a cartridge name (a lowercase letter, then lowercase letters, digits, `-`, \

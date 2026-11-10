@@ -55,6 +55,8 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::protocol::CartridgeChanges;
+use big_cartridges_core::protocol::CartridgeList;
+use big_cartridges_core::protocol::CartridgePublisher;
 use big_cartridges_core::protocol::CartridgeRecord;
 use big_cartridges_core::protocol::CartridgeVersionRecord;
 use big_cartridges_core::protocol::CartridgesError;
@@ -441,9 +443,11 @@ impl CartridgeService {
         context: &RequestContext,
         authorization: Authorization,
         _: GetPublisher,
-    ) -> Res<String> {
+    ) -> Res<CartridgePublisher> {
         self.read_caller(context, authorization).await?;
-        Ok(self.publisher.clone())
+        Ok(CartridgePublisher {
+            publisher: self.publisher.clone(),
+        })
     }
 
     async fn list(
@@ -451,9 +455,11 @@ impl CartridgeService {
         context: &RequestContext,
         authorization: Authorization,
         _: ListCartridges,
-    ) -> Res<Vec<CartridgeRecord>> {
+    ) -> Res<CartridgeList> {
         self.read_caller(context, authorization).await?;
-        Ok(self.registry.records().await)
+        Ok(CartridgeList {
+            cartridges: self.registry.records().await,
+        })
     }
 
     async fn get(
@@ -538,8 +544,8 @@ handlers! {
     RemoveCartridgeVersion => remove_version: ();
     RemoveCartridge => remove_cartridge: ();
     ImportCartridgeDocument => import_document: CartridgeRecord;
-    GetPublisher => get_publisher: String;
-    ListCartridges => list: Vec<CartridgeRecord>;
+    GetPublisher => get_publisher: CartridgePublisher;
+    ListCartridges => list: CartridgeList;
     GetCartridge => get: CartridgeRecord;
     GetCartridgeVersion => get_version: CartridgeVersionRecord;
     WatchCartridges => watch: CartridgeChanges;

@@ -195,6 +195,7 @@ async fn list(node: &BigNode) -> Vec<big_cartridges_core::protocol::CartridgeRec
         )
         .await
         .unwrap()
+        .cartridges
 }
 
 async fn retained(sql: &Database, document: &DocId) -> BTreeSet<String> {
@@ -248,7 +249,8 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
             ListCartridges {},
         )
         .await
-        .unwrap();
+        .unwrap()
+        .cartridges;
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, cartridge_id("photos"));
     assert_eq!(
@@ -458,7 +460,8 @@ async fn publishing_refuses_artifacts_whose_bytes_are_not_local() {
             ListCartridges {},
         )
         .await
-        .unwrap();
+        .unwrap()
+        .cartridges;
     assert!(listed.is_empty());
     shutdown(node, stop).await;
 }
@@ -777,7 +780,8 @@ async fn the_node_signs_unsigned_envelopes_under_its_own_publisher_did() {
         .client
         .call_with(RequestContext::root(), operator.metadata(), GetPublisher {})
         .await
-        .unwrap();
+        .unwrap()
+        .publisher;
     assert_eq!(publisher, node.cartridges.publisher);
     // The DID is the did:key of the authority's node key, the one that issues attribution
     // certificates.

@@ -146,7 +146,7 @@ mod library {
         assert_eq!(client.socket_state(), SocketState::Absent);
         let reply = call(&client, ListNodules::XRPC.nsid, json!({})).await;
         assert_eq!(reply.status, 200, "{reply:?}");
-        assert_eq!(reply.body, json!([]));
+        assert_eq!(reply.body, json!({"nodules": []}));
         client.stop().await.unwrap();
         // Stopping released the node: it can be booted again by the next command.
         NodeClient::connect(&dir)

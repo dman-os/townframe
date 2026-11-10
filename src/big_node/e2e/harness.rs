@@ -733,7 +733,7 @@ impl Cluster {
             )
             .await;
         let length = match stat {
-            Ok(info) => info.expect("stored blob has info").length_octets,
+            Ok(stat) => stat.info.expect("stored blob has info").length_octets,
             Err(ClientError::Method(big_blobs_core::BlobsError::NotFound)) => return None,
             Err(error) => panic!("stat {blob} on {}: {error:?}", self.members[index].nickname),
         };

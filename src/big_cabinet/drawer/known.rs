@@ -220,11 +220,9 @@ impl Handler<ListKnownDrawers> for DrawerService {
     async fn call(
         &self,
         request: Envelope<ListKnownDrawers>,
-    ) -> Result<ResponseEnvelope<Vec<KnownDrawer>>, DrawersError> {
-        Ok(self
-            .list_known(&request.context, request.params)
-            .await?
-            .into())
+    ) -> Result<ResponseEnvelope<KnownDrawers>, DrawersError> {
+        let drawers = self.list_known(&request.context, request.params).await?;
+        Ok(KnownDrawers { drawers }.into())
     }
 }
 

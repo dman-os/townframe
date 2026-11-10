@@ -81,8 +81,9 @@ impl Handler<ListDrawers> for DrawerService {
     async fn call(
         &self,
         request: Envelope<ListDrawers>,
-    ) -> Result<ResponseEnvelope<Vec<ListedDrawer>>, DrawersError> {
-        Ok(self.list(&request.context, request.params).await?.into())
+    ) -> Result<ResponseEnvelope<ListedDrawers>, DrawersError> {
+        let drawers = self.list(&request.context, request.params).await?;
+        Ok(ListedDrawers { drawers }.into())
     }
 }
 

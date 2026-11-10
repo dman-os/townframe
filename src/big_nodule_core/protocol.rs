@@ -210,6 +210,14 @@ pub struct NoduleInitStatus {
     pub waiting_on: Option<String>,
 }
 
+/// The result of [`ListNodules`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleList {
+    pub nodules: Vec<NoduleRecord>,
+}
+
 /// One installed nodule as the management surface reports it.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -300,7 +308,7 @@ method_core::methods! {
     SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution";
     UninstallNodule => (), procedure, "uninstallNodule";
     GetNodule => NoduleRecord, query, "getNodule";
-    ListNodules => Vec<NoduleRecord>, query, "listNodules";
+    ListNodules => NoduleList, query, "listNodules";
 }
 
 declare_service_protocol! {

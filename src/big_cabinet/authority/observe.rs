@@ -8,7 +8,7 @@ impl Handler<ObserveCapability> for AuthorityService {
         &self,
         request: Envelope<ObserveCapability>,
     ) -> Result<
-        ResponseEnvelope<EventStream<CapabilityStatus, AuthorityServiceError>>,
+        ResponseEnvelope<EventStream<CapabilityChange, AuthorityServiceError>>,
         AuthorityServiceError,
     > {
         let capability = request.params.capability;
@@ -27,17 +27,28 @@ impl Handler<ObserveCapability> for AuthorityService {
             let status = cap::ask(&ledger, |reply| cap::Command::Resolve(capability, reply)).await;
             match status {
                 Ok(_) => Some((
-                    Ok(CapabilityStatus::Live),
+                    Ok(CapabilityChange {
+                        status: CapabilityStatus::Live,
+                    }),
                     Some((ledger, revisions, changes)),
                 )),
-                Err(AuthorityError::InvalidCapability) => {
-                    Some((Ok(CapabilityStatus::Retracted), None))
-                }
+                Err(AuthorityError::InvalidCapability) => Some((
+                    Ok(CapabilityChange {
+                        status: CapabilityStatus::Retracted,
+                    }),
+                    None,
+                )),
                 Err(error) => Some((Err(error.into()), None)),
             }
         });
-        let events: EventStream<CapabilityStatus, AuthorityServiceError> =
-            Box::pin(stream::once(async { Ok(CapabilityStatus::Live) }).chain(updates));
+        let events: EventStream<CapabilityChange, AuthorityServiceError> = Box::pin(
+            stream::once(async {
+                Ok(CapabilityChange {
+                    status: CapabilityStatus::Live,
+                })
+            })
+            .chain(updates),
+        );
         Ok(events.into())
     }
 }
@@ -97,7 +108,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
         authority
             .client
             .call(
@@ -109,7 +125,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
         authority
             .client
             .call(
@@ -121,7 +142,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Retracted)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Retracted
+            }))
+        );
         assert_eq!(events.next().await, None);
         stop.stop().await;
     }
@@ -261,8 +287,18 @@ mod tests {
             .await
             .unwrap();
         let mut events = response.output;
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Retracted)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Retracted
+            }))
+        );
         assert_eq!(events.next().await, None);
         stop.stop().await;
     }

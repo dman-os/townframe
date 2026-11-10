@@ -14,6 +14,7 @@ pub use identity::BlobId;
 pub use identity::BlobIdDecodeError;
 pub use protocol::BlobInfo;
 pub use protocol::BlobRange;
+pub use protocol::BlobStat;
 pub use protocol::BlobsError;
 pub use protocol::BlobsMessage;
 pub use protocol::BlobsProtocol;

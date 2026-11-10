@@ -522,6 +522,7 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
             )
             .await
             .unwrap()
+            .refs
             .is_empty()
     );
 
@@ -551,7 +552,8 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
                 },
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .refs,
         vec![fx.note_edge(&fx.doc_outside, &fx.doc_direct)],
     );
     assert_eq!(
@@ -599,7 +601,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         )
         .await
         .unwrap();
-    assert!(scoped_backlinks.is_empty());
+    assert!(scoped_backlinks.refs.is_empty());
 
     let dave_unscoped_backlinks = fx
         .node
@@ -614,7 +616,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         )
         .await
         .unwrap();
-    assert!(dave_unscoped_backlinks.is_empty());
+    assert!(dave_unscoped_backlinks.refs.is_empty());
 
     let bob_unscoped_backlinks = fx
         .node
@@ -630,7 +632,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .await
         .unwrap();
     assert_eq!(
-        bob_unscoped_backlinks,
+        bob_unscoped_backlinks.refs,
         vec![fx.note_edge(&fx.doc_outside, &fx.doc_direct)]
     );
 
@@ -653,7 +655,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .await
         .unwrap();
     assert_eq!(
-        scoped_outgoing,
+        scoped_outgoing.refs,
         vec![fx.note_edge(&fx.doc_direct, &fx.doc_in_child_read)]
     );
 
@@ -1309,7 +1311,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         )
         .await
         .unwrap();
-    let listed_ids: BTreeSet<DocId> = listed.iter().map(|d| d.drawer_id.clone()).collect();
+    let listed_ids: BTreeSet<DocId> = listed.drawers.iter().map(|d| d.drawer_id.clone()).collect();
     assert!(listed_ids.contains(&parent));
     assert!(listed_ids.contains(&child));
 
@@ -1326,9 +1328,9 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         )
         .await
         .unwrap();
-    assert_eq!(docs.len(), 1);
-    assert_eq!(docs[0].doc_id, doc);
-    assert_eq!(docs[0].access, Access::Read);
+    assert_eq!(docs.docs.len(), 1);
+    assert_eq!(docs.docs[0].doc_id, doc);
+    assert_eq!(docs.docs[0].access, Access::Read);
 
     // 3. Discovering and projecting synced-in drawers never auto-populates `known_drawers_id`; only an
     //    explicit `RememberDrawer` adds a drawer to `ListKnownDrawers`.
@@ -1345,7 +1347,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         )
         .await
         .unwrap();
-    assert!(known_before.is_empty());
+    assert!(known_before.drawers.is_empty());
 
     node.drawers()
         .call(
@@ -1374,8 +1376,8 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         )
         .await
         .unwrap();
-    assert_eq!(known_after.len(), 1);
-    assert_eq!(known_after[0].drawer_id, parent);
+    assert_eq!(known_after.drawers.len(), 1);
+    assert_eq!(known_after.drawers[0].drawer_id, parent);
 
     node.stop().await;
 }

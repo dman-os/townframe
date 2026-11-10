@@ -27,6 +27,7 @@ use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::CapabilityChange;
 use big_cabinet_core::authority::CapabilityStatus;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;

@@ -316,6 +316,14 @@ pub enum CapabilityStatus {
     Retracted,
 }
 
+/// One event of [`ObserveCapability`]: the capability's state after a change.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityChange {
+    pub status: CapabilityStatus,
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,7 +443,7 @@ method_core::methods! {
     SignDatumClaim => SignedDatumClaim, procedure, "signDatumClaim";
 }
 
-service_core_rs::service_method!(ObserveCapability => stream CapabilityStatus, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
+service_core_rs::service_method!(ObserveCapability => stream CapabilityChange, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
 
 declare_service_protocol! {
     pub enum AuthorityProtocol => AuthorityMessage {

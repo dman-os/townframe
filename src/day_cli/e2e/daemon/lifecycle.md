@@ -31,7 +31,9 @@ services  not exposed by the node
 peers     none attached (the daemon's node.json has no peers section)
 
 $ day call org.example.daybook.nodules.listNodules
-[]
+{
+  "nodules": []
+}
 
 $ day daemon stop
 daemon stopped (pid [..])

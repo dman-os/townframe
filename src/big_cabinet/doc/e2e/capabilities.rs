@@ -954,14 +954,16 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                     },
                 )
                 .await),
-            Ok(vec![QueriedDatumRef {
-                origin_doc_id: first_origin.clone(),
-                origin_datum_key: key("main"),
-                path: "/link".to_owned(),
-                target_doc_id: selector.clone(),
-                target_datum_key: key("main"),
-                ref_heads: Vec::new(),
-            }]),
+            Ok(QueriedDatumRefs {
+                refs: vec![QueriedDatumRef {
+                    origin_doc_id: first_origin.clone(),
+                    origin_datum_key: key("main"),
+                    path: "/link".to_owned(),
+                    target_doc_id: selector.clone(),
+                    target_datum_key: key("main"),
+                    ref_heads: Vec::new(),
+                }]
+            }),
         );
         expected_calls.extend([BTreeSet::from([selector.clone()]), policy.origins.clone()]);
     }
@@ -990,7 +992,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
             },
         ] {
             let expected = if drawer_id.is_some() {
-                Ok(Vec::new())
+                Ok(QueriedDatumRefs { refs: Vec::new() })
             } else {
                 Err(DocsError::Denied)
             };

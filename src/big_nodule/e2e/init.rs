@@ -302,7 +302,10 @@ impl Node {
     }
 
     async fn list_records(&self) -> Vec<NoduleRecord> {
-        self.call(self.operator(), ListNodules {}).await.unwrap()
+        self.call(self.operator(), ListNodules {})
+            .await
+            .unwrap()
+            .nodules
     }
 
     pub(super) async fn grant_operations(

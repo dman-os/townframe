@@ -565,6 +565,7 @@ impl Node {
         Ok(self
             .call(authorization, ListNodules {})
             .await?
+            .nodules
             .into_iter()
             .map(|record| record.cartridge_id)
             .collect())

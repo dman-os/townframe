@@ -251,6 +251,7 @@ async fn completed_withdrawal_cannot_be_raced_by_publication() {
 
 #[tokio::test]
 async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
+    use big_cabinet_core::authority::CapabilityChange;
     use big_cabinet_core::authority::CapabilityStatus;
     use big_cabinet_core::authority::ObserveCapability;
     use futures::StreamExt;
@@ -279,7 +280,12 @@ async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
         let writer = fixture.sql.begin_write().await.unwrap();
         let change = async {
             match replacement {
@@ -300,7 +306,7 @@ async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
         tokio::pin!(change);
         tokio::select! {
             result = &mut change => panic!("grant change completed while writer was leased: {result:?}"),
-            event = events.next() => assert_eq!(event, Some(Ok(CapabilityStatus::Retracted))),
+            event = events.next() => assert_eq!(event, Some(Ok(CapabilityChange { status: CapabilityStatus::Retracted }))),
         }
         assert_eq!(
             sqlite::get_grant(

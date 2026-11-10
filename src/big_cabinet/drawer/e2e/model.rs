@@ -288,6 +288,7 @@ impl DrawerModel {
             )
             .await
             .unwrap()
+            .drawers
             .into_iter()
             .map(|d| (d.drawer_id, d.access))
             .collect();

@@ -66,7 +66,16 @@ pub struct StatBlob {
 
 service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"));
 service_core_rs::service_method!(ReadBlob => BlobRange, BlobsError, procedure("org.example.daybook.blobs.read"));
-service_core_rs::service_method!(StatBlob => Option<BlobInfo>, BlobsError, procedure("org.example.daybook.blobs.stat"));
+/// The result of [`StatBlob`]: `info` is absent when the blob is not held locally.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobStat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<BlobInfo>,
+}
+
+service_core_rs::service_method!(StatBlob => BlobStat, BlobsError, procedure("org.example.daybook.blobs.stat"));
 
 service_core_rs::declare_service_protocol! {
     pub enum BlobsProtocol => BlobsMessage {

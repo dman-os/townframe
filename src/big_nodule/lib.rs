@@ -60,6 +60,7 @@ use big_nodule_core::protocol::ConfirmNoduleResolution;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::MintNoduleCapability;
+use big_nodule_core::protocol::NoduleList;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
@@ -433,17 +434,19 @@ impl NoduleService {
         context: &RequestContext,
         authorization: Authorization,
         _: ListNodules,
-    ) -> Res<Vec<NoduleRecord>> {
+    ) -> Res<NoduleList> {
         let caller = self.caller(context, authorization).await?;
         let scope = self.scope_of(&caller)?.cloned();
         let context = context.clone();
-        self.state
+        let nodules = self
+            .state
             .ask(|reply| Command::List {
                 context,
                 scope,
                 reply,
             })
-            .await
+            .await?;
+        Ok(NoduleList { nodules })
     }
 }
 
@@ -474,7 +477,7 @@ handlers! {
     SetNoduleSubstitution => set_substitution: NoduleRecord;
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
-    ListNodules => list: Vec<NoduleRecord>;
+    ListNodules => list: NoduleList;
 }
 
 service_utils_rs::bind_service_protocol! {

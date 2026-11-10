@@ -155,6 +155,7 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ObserveDocAvailability;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::QueriedDatumRef;
+use big_cabinet_core::doc::QueriedDatumRefs;
 use big_cabinet_core::doc::QueryDatumRefs;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::SignatureEvidence;

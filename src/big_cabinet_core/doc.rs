@@ -389,6 +389,14 @@ pub struct QueriedDatumRef {
     pub ref_heads: Vec<ChangeHash>,
 }
 
+/// The result of [`QueryDatumRefs`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueriedDatumRefs {
+    pub refs: Vec<QueriedDatumRef>,
+}
+
 /// One long poll over the datum-set frontier (ADR 023, ADR 025).
 ///
 /// The predicate selects documents and the selection names which of their datums are delivered.
@@ -477,7 +485,7 @@ method_core::methods! {
     ReadDatums => DatumsRead, procedure, "readDatums";
     ListDatums => DatumListing, procedure, "listDatums";
     PollDatums => DatumPage, procedure, "pollDatums";
-    QueryDatumRefs => Vec<QueriedDatumRef>, procedure, "queryDatumRefs";
+    QueryDatumRefs => QueriedDatumRefs, procedure, "queryDatumRefs";
     UnsafeInspectDatum => UnsafeDatumInspection, procedure, "unsafeInspectDatum";
     InspectDatumClaims => DatumClaimsInspection, procedure, "inspectDatumClaims";
     GetDocAvailability => DocAvailability, query, "getDocAvailability";

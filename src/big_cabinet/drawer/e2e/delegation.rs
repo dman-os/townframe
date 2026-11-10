@@ -679,12 +679,14 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             )
             .await
             .unwrap(),
-        vec![ListedDrawer {
-            drawer_id: drawer.clone(),
-            layout: descriptor.layout.clone(),
-            descriptor,
-            access: Access::Write,
-        }],
+        ListedDrawers {
+            drawers: vec![ListedDrawer {
+                drawer_id: drawer.clone(),
+                layout: descriptor.layout.clone(),
+                descriptor,
+                access: Access::Write,
+            }]
+        },
     );
     for capability in [alice.capability, bob.capability, cartridge.capability] {
         assert_eq!(

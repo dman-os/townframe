@@ -486,18 +486,20 @@ impl Handler<StatBlob> for BlobService {
     async fn call(
         &self,
         request: Envelope<StatBlob>,
-    ) -> Result<ResponseEnvelope<Option<BlobInfo>>, BlobsError> {
+    ) -> Result<ResponseEnvelope<BlobStat>, BlobsError> {
         self.authorize(
             &request.context,
             request.params.capability,
             &Self::read_object(&request.params.blob_id),
         )
         .await?;
-        Ok(self
-            .stat(&request.params.blob_id)
-            .await
-            .map_err(storage_error)?
-            .into())
+        Ok(BlobStat {
+            info: self
+                .stat(&request.params.blob_id)
+                .await
+                .map_err(storage_error)?,
+        }
+        .into())
     }
 }
 

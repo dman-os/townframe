@@ -1,4 +1,3 @@
-use super::MethodLexiconError;
 use super::lexicon;
 use method_core::schema::MethodSchema;
 use serde_json::Value;
@@ -94,21 +93,6 @@ fn every_builtin() -> Vec<(&'static str, Result<Value, super::MethodLexiconError
     all
 }
 
-/// Methods whose output is not a JSON object (a list, a string, an optional, a bare enum), so no
-/// Lexicon body can state it. D41 wraps each in an object, a wire change across the service, its
-/// clients and their tests; until that lands the Lexicon is refused for exactly these.
-const PENDING_OBJECT_BODIES: [&str; 9] = [
-    "org.example.daybook.authority.observeCapability",
-    "org.example.daybook.blobs.stat",
-    "org.example.daybook.cartridges.getPublisher",
-    "org.example.daybook.cartridges.listCartridges",
-    "org.example.daybook.docs.queryDatumRefs",
-    "org.example.daybook.drawers.listDocs",
-    "org.example.daybook.drawers.listDrawers",
-    "org.example.daybook.drawers.listKnownDrawers",
-    "org.example.daybook.nodules.listNodules",
-];
-
 #[test]
 fn every_builtin_method_publishes_a_lexicon_that_passes_the_frame_check() {
     let all = every_builtin();
@@ -116,20 +100,16 @@ fn every_builtin_method_publishes_a_lexicon_that_passes_the_frame_check() {
     nsids.dedup();
     assert_eq!(nsids.len(), all.len(), "an NSID is listed twice");
 
-    let mut refused = Vec::new();
-    let mut unexpected = Vec::new();
-    for (nsid, result) in &all {
-        match result {
-            Ok(_) => {}
-            Err(MethodLexiconError::NotAnObject { part: "output", .. }) => refused.push(*nsid),
-            Err(error) => unexpected.push(error.to_string()),
-        }
-    }
-    assert!(unexpected.is_empty(), "{}", unexpected.join("\n"));
-    assert_eq!(
-        refused, PENDING_OBJECT_BODIES,
-        "the methods whose output is not an object changed: a wrapped one leaves PENDING_OBJECT_BODIES"
-    );
+    let failures: Vec<_> = all
+        .iter()
+        .filter_map(|(nsid, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| format!("{nsid}: {error}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 fn lexicon_of<M: MethodSchema>() -> Value {

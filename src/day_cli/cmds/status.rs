@@ -23,10 +23,9 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
         reply.status,
         reply.body
     );
-    let nodules = reply
-        .body
+    let nodules = reply.body["nodules"]
         .as_array()
-        .ok_or_eyre("listNodules did not answer a list")?;
+        .ok_or_eyre("listNodules did not answer a `nodules` list")?;
 
     let socket_path = conf.node_dir.socket_path()?;
     if as_json {

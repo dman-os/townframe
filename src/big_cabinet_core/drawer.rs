@@ -6,6 +6,7 @@
 //! id of the thing they list (`docEntry/<docId>`, `childEntry/<drawerId>`), the same pattern the
 //! branch datum uses: the key slot is the target, so an entry needs no reference field.
 
+pub mod listing;
 pub mod protocol;
 
 use serde::Deserialize;
