@@ -945,6 +945,18 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
         height
     }
 
+    /// Test-only: the observers and visible instances held and the window.
+    #[cfg(test)]
+    pub fn observed_state(&self) -> (usize, usize, f64, f64) {
+        let window = self.window_specs.get();
+        (
+            self.observers.borrow().len(),
+            self.visible_instances.borrow().len(),
+            window.top,
+            window.bottom,
+        )
+    }
+
     /// Test-only: whether the geometry flags `mark_dom_dirty` sets are all set.
     #[cfg(test)]
     pub fn is_dom_dirty(&self) -> bool {

@@ -114,6 +114,28 @@ struct Step {
     direction: Option<String>,
     hunk_index: Option<i64>,
     count: Option<f64>,
+    // The integration oracle's steps (`virtualized`).
+    top: Option<f64>,
+    height: Option<f64>,
+    #[serde(default)]
+    visible: bool,
+    #[serde(default)]
+    dirty: bool,
+    block_size: Option<f64>,
+    limit: Option<usize>,
+    container_top: Option<f64>,
+    container_height: Option<f64>,
+    scroll_height: Option<f64>,
+}
+
+/// The integration oracle's starting geometry.
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "camelCase")]
+struct GeometrySpec {
+    viewport_height: Option<f64>,
+    scroll_height: Option<f64>,
+    container_top: Option<f64>,
+    container_height: Option<f64>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -131,6 +153,8 @@ struct Scenario {
     options: Option<OptionsSpec>,
     #[serde(default)]
     managed: bool,
+    #[serde(default)]
+    geometry: GeometrySpec,
     steps: Vec<Step>,
 }
 
@@ -832,6 +856,8 @@ fn run_case(templates: &Templates, case: &Case) {
         );
     }
 }
+
+mod virtualized;
 
 #[test]
 fn file_diff_render_matches_the_published_class() {

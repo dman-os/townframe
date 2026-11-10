@@ -21,6 +21,7 @@ import { buildS11bInteraction } from "./s11b_interaction.mjs";
 import { buildS12aOptions } from "./s12a_file_diff.mjs";
 import { buildS12aLifecycle } from "./s12a_lifecycle.mjs";
 import { buildS12bRender } from "./s12b_render.mjs";
+import { buildS12bVirtualized } from "./s12b_virtualized.mjs";
 import { buildS12bLayout } from "./s12b_layout.mjs";
 import { buildS12bWindow } from "./s12b_window.mjs";
 import { stubHighlighter } from "./stub_highlighter.mjs";
@@ -2079,6 +2080,9 @@ const outputs = {
   // First: the published dist caches the measured scrollbar gutter for the process
   // (`measuredScrollbarGutter`), and the render oracle needs it unmeasured.
   "s12b_render.json": await buildS12bRender(oracle, makeRandom(0x5eed0f)),
+  // After the render oracle and before any oracle that measures the scrollbar
+  // gutter: the published module caches the measurement for the process.
+  "s12b_virtualized.json": await buildS12bVirtualized(oracle, makeRandom(0x5eed12)),
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
   "types.json": buildTypes(),

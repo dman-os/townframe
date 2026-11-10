@@ -67,7 +67,7 @@ function syntheticPair(random, lineCount) {
 }
 
 /** Templates (JSON data) of the inputs scenarios name; `freshPool` makes live copies. */
-async function buildTemplates(oracle, random) {
+export async function buildTemplates(oracle, random) {
   const { parseDiffFromFile } = await import(oracle.pierre("utils/parseDiffFromFile.js"));
   const { parsePatchFiles } = await import(oracle.pierre("utils/parsePatchFiles.js"));
   const jsdiff = await import(oracle.jsdiff);
@@ -136,7 +136,7 @@ async function buildTemplates(oracle, random) {
   return { files, diffs, annotations, partials };
 }
 
-function freshPool(templates) {
+export function freshPool(templates) {
   return {
     files: clone(templates.files),
     diffs: clone(templates.diffs),
@@ -158,6 +158,7 @@ const GLOBALS = [
   "Node",
   "customElements",
   "ResizeObserver",
+  "IntersectionObserver",
   "requestAnimationFrame",
   "cancelAnimationFrame",
   "CSSStyleSheet",
@@ -199,7 +200,7 @@ function signature(node) {
  * step, as a sorted set after the rest: the two sides remove the same listeners
  * in a different order, which nothing observes.
  */
-function orderedTrace(trace) {
+export function orderedTrace(trace) {
   const isOther = (entry) => entry[0] === "listener.remove" && entry[2] !== "scroll";
   // The listener's node is unnamed (the pre of a render that replaced it is
   // detached by then): the set is of (event type) removals.
@@ -207,7 +208,7 @@ function orderedTrace(trace) {
   return [...trace.filter((entry) => !isOther(entry)), ...others];
 }
 
-async function withWorld(JSDOM, oracleModules, body) {
+export async function withWorld(JSDOM, oracleModules, body) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>");
   const { window } = dom;
   const saved = new Map();
@@ -222,28 +223,56 @@ async function withWorld(JSDOM, oracleModules, body) {
   };
   install("document", window.document);
   install("window", window);
-  for (const name of ["HTMLElement", "SVGElement", "HTMLPreElement", "HTMLStyleElement", "Element", "Node", "customElements"]) {
+  for (const name of ["HTMLElement", "SVGElement", "HTMLPreElement", "HTMLStyleElement", "Element", "Node", "Document", "customElements"]) {
     install(name, window[name]);
   }
   install(
     "ResizeObserver",
     class {
-      constructor() {
-        world.trace.push(["observer.create"]);
+      constructor(callback) {
+        // The virtualizer's observer (S12b-3) has its own vocabulary.
+        this.virtualizer = callback?.name === "handleContainerResize";
+        if (this.virtualizer) world.resizeCallback = callback;
+        else world.trace.push(["observer.create"]);
       }
       observe(element) {
-        world.trace.push(["observe", world.nameOf(element)]);
+        if (this.virtualizer) world.trace.push(["resize.observe", element === window.document.documentElement ? "documentElement" : world.nameOf(element)]);
+        else world.trace.push(["observe", world.nameOf(element)]);
       }
       unobserve(element) {
         world.trace.push(["unobserve", world.nameOf(element)]);
       }
       disconnect() {
-        world.trace.push(["observer.disconnect"]);
+        world.trace.push([this.virtualizer ? "resize.disconnect" : "observer.disconnect"]);
       }
     },
   );
-  install("requestAnimationFrame", (callback) => world.frames.push(callback));
-  install("cancelAnimationFrame", () => {});
+  install(
+    "IntersectionObserver",
+    class {
+      constructor(callback, options) {
+        world.intersectionCallback = callback;
+        world.trace.push([
+          "observers.create",
+          { root: options.root === window.document ? "document" : world.nameOf(options.root), threshold: options.threshold, rootMargin: options.rootMargin },
+        ]);
+      }
+      observe(element) {
+        world.trace.push(["intersection.observe", world.nameOf(element)]);
+      }
+      unobserve(element) {
+        world.trace.push(["intersection.unobserve", world.nameOf(element)]);
+      }
+      disconnect() {
+        world.trace.push(["intersection.disconnect"]);
+      }
+    },
+  );
+  // A scenario that runs frames replaces these (S12b-3).
+  world.requestAnimationFrame = (callback) => world.frames.push(callback);
+  world.cancelAnimationFrame = () => {};
+  install("requestAnimationFrame", (callback) => world.requestAnimationFrame(callback));
+  install("cancelAnimationFrame", (id) => world.cancelAnimationFrame(id));
   install(
     "CSSStyleSheet",
     class {
@@ -300,7 +329,7 @@ async function withWorld(JSDOM, oracleModules, body) {
   }
 }
 
-function snapshotTree(node) {
+export function snapshotTree(node) {
   if (node.nodeType === 3) return node.data;
   if (node.localName === "svg" && node.hasAttribute("data-icon-sprite")) {
     return ["SVG", `sprite:${fnv32(signature(node))}`];
@@ -412,7 +441,7 @@ export function buildInstanceOptions(spec, run) {
 // ---- running a scenario -----------------------------------------------------------
 
 /** The synchronous renderer semantics the Rust port has (see the file header). */
-function installSynchronousRenderer(instance, oracleModules) {
+export function installSynchronousRenderer(instance, oracleModules) {
   const { DEFAULT_RENDER_RANGE, isDiffPlainText, renderDiffWithHighlighter } = oracleModules;
   const renderer = instance.hunksRenderer;
   renderer.getDiffForNextRender = (diff) => diff;

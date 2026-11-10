@@ -194,7 +194,7 @@ where
         &self.virtualizer
     }
 
-    pub(super) fn is_setup(&self) -> bool {
+    pub fn is_setup(&self) -> bool {
         self.state.borrow().is_setup
     }
 
