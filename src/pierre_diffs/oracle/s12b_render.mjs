@@ -194,6 +194,19 @@ function signature(node) {
   return `<${node.localName} ${attributes}>${children}</${node.localName}>`;
 }
 
+/**
+ * The non-scroll listener removals (the interaction manager's `cleanUp`) in a
+ * step, as a sorted set after the rest: the two sides remove the same listeners
+ * in a different order, which nothing observes.
+ */
+function orderedTrace(trace) {
+  const isOther = (entry) => entry[0] === "listener.remove" && entry[2] !== "scroll";
+  // The listener's node is unnamed (the pre of a render that replaced it is
+  // detached by then): the set is of (event type) removals.
+  const others = trace.filter(isOther).map((entry) => ["listener.remove", "*", entry[2]]).sort((a, b) => (JSON.stringify(a) < JSON.stringify(b) ? -1 : 1));
+  return [...trace.filter((entry) => !isOther(entry)), ...others];
+}
+
 async function withWorld(JSDOM, oracleModules, body) {
   const dom = new JSDOM("<!doctype html><html><body></body></html>");
   const { window } = dom;
@@ -245,7 +258,7 @@ async function withWorld(JSDOM, oracleModules, body) {
     return add.call(this, type, ...rest);
   };
   proto.removeEventListener = function (type, ...rest) {
-    if (type === "scroll") world.trace.push(["listener.remove", world.nameOf(this), "scroll"]);
+    world.trace.push(["listener.remove", world.nameOf(this), type]);
     return remove.call(this, type, ...rest);
   };
   // The path from the top of the node's tree; `~` steps into a shadow root.
@@ -551,7 +564,7 @@ function runScenario(JSDOM, oracleModules, templates, scenario) {
       previousTrees = serialized;
       snapshots.push({
         ret,
-        trace: world.trace.splice(0),
+        trace: orderedTrace(world.trace.splice(0)),
         state: stateOf(instance),
         trees: same ? "same" : trees,
       });

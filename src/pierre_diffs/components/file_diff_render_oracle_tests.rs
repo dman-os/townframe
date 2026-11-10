@@ -563,9 +563,12 @@ fn recorded(entry: &Value) -> bool {
             | "unobserve"
             | "observer.disconnect"
             | "cb"
-            | "ownerRender",
+            | "ownerRender"
+            | "listener.remove"
+            | "pre.removeEventListener"
+            | "document.removeEventListener",
         ) => true,
-        Some("listener.add" | "listener.remove") => entry[2] == "scroll",
+        Some("listener.add") => entry[2] == "scroll",
         _ => false,
     }
 }
@@ -577,6 +580,27 @@ fn direction_of(name: &str) -> ExpansionDirections {
         "both" => ExpansionDirections::Both,
         other => panic!("unknown direction {other}"),
     }
+}
+
+/// The non-scroll listener removals (the interaction manager's `cleanUp`) of a
+/// step as a sorted set after the rest, as the JavaScript side orders them.
+fn ordered_trace(trace: Vec<Value>) -> Vec<Value> {
+    let is_other = |entry: &Value| entry[0] == "listener.remove" && entry[2] != "scroll";
+    // The fake host records the interaction manager's removals as
+    // `pre.removeEventListener`/`document.removeEventListener`.
+    let trace: Vec<Value> = trace
+        .into_iter()
+        .map(|entry| match entry[0].as_str() {
+            Some("pre.removeEventListener") => json!(["listener.remove", "*", entry[2]]),
+            Some("document.removeEventListener") => json!(["listener.remove", "*", entry[1]]),
+            _ => entry,
+        })
+        .collect();
+    let (mut others, mut rest): (Vec<Value>, Vec<Value>) =
+        trace.into_iter().partition(|entry| is_other(entry));
+    others.sort_by_key(Value::to_string);
+    rest.extend(others);
+    rest
 }
 
 fn range_of(spec: Option<RangeSpec>) -> Option<RenderRange> {
@@ -771,11 +795,13 @@ fn run_case(templates: &Templates, case: &Case) {
         let instance = Rc::clone(&instances[which]);
         let ret = run_step(step, &instance, &input, &world, templates);
 
-        let trace: Vec<Value> = dom.trace()[trace_start..]
-            .iter()
-            .filter(|entry| recorded(entry))
-            .cloned()
-            .collect();
+        let trace = ordered_trace(
+            dom.trace()[trace_start..]
+                .iter()
+                .filter(|entry| recorded(entry))
+                .cloned()
+                .collect(),
+        );
         trace_start = dom.trace().len();
         let trees = Value::Object(container_trees(&dom, &containers.borrow()));
         // A step that left the DOM as it was says "same" in the golden.
