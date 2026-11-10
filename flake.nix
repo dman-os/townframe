@@ -11,7 +11,7 @@
     # versions, so every worktree must pin the same tag: bump it on main and rebase.
     # nixpkgs deliberately does not follow ours, so the store path is the one
     # `nix run github:jdx/mr-boxington/<tag>` produces.
-    mr-boxington.url = "github:jdx/mr-boxington/v1.29.2";
+    mr-boxington.url = "github:jdx/mr-boxington/v1.30.0";
   };
 
   outputs =
