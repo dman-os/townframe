@@ -52,6 +52,7 @@ use executor::Registered;
 use method_core::Unary;
 use secrets_rs::SecretStore;
 use serde_json::Value;
+use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
@@ -154,6 +155,16 @@ impl TestNodeBuilder {
     }
 }
 
+/// Why [`TestNode::call`] failed.
+#[derive(Debug, PartialEq)]
+pub enum CallError<E> {
+    /// The method's own typed error, from the handler.
+    Method(E),
+    /// Dispatch refused or could not complete the call (denied, not ready, a provider failure
+    /// that is not the method's error, ..).
+    Dispatch(DispatchError),
+}
+
 /// A real in-memory node hosting the registered nodules natively. Stop it with
 /// [`TestNode::stop`].
 pub struct TestNode {
@@ -168,8 +179,10 @@ impl TestNode {
         &self.node
     }
 
-    /// Calls method `M` through dispatch as the operator, with no budget.
-    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, DispatchError> {
+    /// Calls method `M` through dispatch as the operator, with no budget. The handler's own
+    /// error comes back typed as [`CallError::Method`], as it does for a typed client of the
+    /// operation; anything dispatch itself refused is [`CallError::Dispatch`].
+    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, CallError<M::Error>> {
         let output = self
             .invoke(
                 M::XRPC.nsid,
@@ -177,7 +190,18 @@ impl TestNode {
                 InvocationContext::default(),
                 RequestContext::root(),
             )
-            .await?;
+            .await
+            .map_err(|error| match error {
+                // The provider's own error is the XRPC domain envelope the handler wrote.
+                DispatchError::Provider { status, body } => body
+                    .get(DOMAIN_ERROR_FIELD)
+                    .and_then(|typed| serde_json::from_value(typed.clone()).ok())
+                    .map_or(
+                        CallError::Dispatch(DispatchError::Provider { status, body }),
+                        CallError::Method,
+                    ),
+                other => CallError::Dispatch(other),
+            })?;
         Ok(serde_json::from_value(output).unwrap_or_else(|error| {
             panic!("{} answered an unexpected shape: {error}", M::XRPC.nsid)
         }))

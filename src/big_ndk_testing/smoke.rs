@@ -122,6 +122,33 @@ fn plug(spec: &Spec, calls: &[String]) -> Plug {
     plug
 }
 
+/// The error of [`CallRelay`], shaped as the fixture's own (serde matches by variant name).
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+enum RelayError {
+    Context(method_core::ContextError),
+    InvalidRequest(String),
+    UpstreamFailed(String),
+}
+
+impl From<method_core::ContextError> for RelayError {
+    fn from(error: method_core::ContextError) -> Self {
+        Self::Context(error)
+    }
+}
+
+/// The fixture's relay, declared as a typed method under the caller's authority.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CallRelay {
+    operation: String,
+    authority: Option<String>,
+    input: Option<Value>,
+}
+
+method_core::methods! {
+    error = RelayError, nsid_prefix = "org.example.test.";
+    CallRelay => Value, procedure, "relay";
+}
+
 /// A traceparent in the outer call's trace (same trace id) under a span of its own.
 fn assert_continues_trace(traceparent: &str) {
     let (outer, seen) = (
@@ -333,5 +360,31 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     assert_eq!(own_capability(&node, &a).await, None);
     let stale = relay(&node, &a, &target, Some(&granted), context).await;
     assert_eq!(stale["status"], 403, "{stale}");
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_handlers_domain_error_reaches_the_caller_typed() {
+    let spec = caller();
+    let node = super::node()
+        .with_nodule(plug(&spec, &[]), Fixture)
+        .boot()
+        .await;
+    node.enable(&spec.plug).await;
+    // No authority and no capability of its own (nothing granted): the fixture's own
+    // `InvalidRequest` domain error, which must not be flattened into a dispatch input refusal.
+    let refused = node
+        .call(CallRelay {
+            operation: "org.example.callee.echo".into(),
+            authority: None,
+            input: None,
+        })
+        .await;
+    assert_eq!(
+        refused,
+        Err(crate::CallError::Method(RelayError::InvalidRequest(
+            "no authority and no nodule capability".into()
+        )))
+    );
     node.stop().await;
 }

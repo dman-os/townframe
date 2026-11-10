@@ -12,6 +12,8 @@ use http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::write_context_headers;
+use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
+use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_utils_rs::HttpMetadata;
@@ -63,8 +65,12 @@ pub fn delivery_headers(
 }
 
 /// A handler's response as dispatch's provider result: a success is its JSON body (`null` when
-/// empty), a `400` is `InvalidInput` carrying the XRPC `message`, any other status is the
-/// provider's own failure with its body.
+/// empty), a `400` without a method error is `InvalidInput` carrying the XRPC `message` (the
+/// handler refused the request before running the method, e.g. undecodable JSON), and any other
+/// status is the provider's own failure with its body. That includes the method's own domain
+/// error (`400` with the `operationError` member): it passes through untouched as
+/// `ProviderError::Failed`, so dispatch hands it to typed clients and XRPC listeners as the
+/// envelope the handler wrote.
 pub fn provider_result(status: StatusCode, body: &[u8]) -> Result<Value, ProviderError> {
     if status.is_success() {
         return if body.is_empty() {
@@ -76,7 +82,7 @@ pub fn provider_result(status: StatusCode, body: &[u8]) -> Result<Value, Provide
     }
     let body = serde_json::from_slice::<Value>(body)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(body).into_owned()));
-    if status == StatusCode::BAD_REQUEST {
+    if status == DOMAIN_ERROR_STATUS && body.get(DOMAIN_ERROR_FIELD).is_none() {
         // XRPC errors are `{ "error", "message" }`; the message is what a caller can act on.
         return Err(ProviderError::InvalidInput(
             body.get("message")
@@ -88,4 +94,32 @@ pub fn provider_result(status: StatusCode, body: &[u8]) -> Result<Value, Provide
         status: status.as_u16(),
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_domain_error_passes_through_and_a_refused_request_is_invalid_input() {
+        let domain = json!({
+            "error": "Refused",
+            "message": "Refused",
+            "operationError": { "Refused": { "reason": "no name" } },
+        });
+        assert_eq!(
+            provider_result(DOMAIN_ERROR_STATUS, domain.to_string().as_bytes()),
+            Err(ProviderError::Failed {
+                status: 400,
+                body: domain,
+            })
+        );
+        assert_eq!(
+            provider_result(
+                StatusCode::BAD_REQUEST,
+                br#"{"error":"InvalidRequest","message":"invalid JSON body"}"#
+            ),
+            Err(ProviderError::InvalidInput("invalid JSON body".into()))
+        );
+    }
 }
