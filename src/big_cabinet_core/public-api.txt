@@ -13,9 +13,11 @@ impl Deserialize < 'de > for big_cabinet_core::dmeta::Uuid7
 impl Deserialize < 'de > for big_cabinet_core::doc::CommandId
 impl Deserialize < 'de > for big_cabinet_core::drawer::GroupKey
 impl Deserialize < 'de > for big_cabinet_core::drawer::LayoutKind
+impl Deserialize < 'de > for big_cabinet_core::reference::ActorUrl
 impl Deserialize < 'de > for big_cabinet_core::reference::DatumKey
 impl Deserialize < 'de > for big_cabinet_core::reference::DatumReference
 impl Deserialize < 'de > for big_cabinet_core::reference::DatumTag
+impl Deserialize < 'de > for big_cabinet_core::reference::Location
 impl Deserialize < 'de > for big_cabinet_core::reference::ReferenceDocId
 impl From < ContextError > for big_cabinet_core::doc::StoreError
 impl From < DrawerAccess > for big_cabinet_core::drawer::EntryAccess
@@ -36,9 +38,11 @@ impl Serialize for big_cabinet_core::dmeta::MultibaseKey
 impl Serialize for big_cabinet_core::dmeta::SignatureBytes
 impl Serialize for big_cabinet_core::drawer::GroupKey
 impl Serialize for big_cabinet_core::drawer::LayoutKind
+impl Serialize for big_cabinet_core::reference::ActorUrl
 impl Serialize for big_cabinet_core::reference::DatumKey
 impl Serialize for big_cabinet_core::reference::DatumReference
 impl Serialize for big_cabinet_core::reference::DatumTag
+impl Serialize for big_cabinet_core::reference::Location
 impl Serialize for big_cabinet_core::reference::ReferenceDocId
 impl TryFrom < & [u8] > for big_cabinet_core::dmeta::Cid
 impl TryFrom < & [u8] > for big_cabinet_core::dmeta::MultibaseKey
@@ -63,9 +67,11 @@ impl schemars :: JsonSchema for big_cabinet_core::dmeta::MultibaseKey
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::SignatureBytes
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::Uuid7
 impl schemars :: JsonSchema for big_cabinet_core::drawer::GroupKey
+impl schemars :: JsonSchema for big_cabinet_core::reference::ActorUrl
 impl schemars :: JsonSchema for big_cabinet_core::reference::DatumKey
 impl schemars :: JsonSchema for big_cabinet_core::reference::DatumReference
 impl schemars :: JsonSchema for big_cabinet_core::reference::DatumTag
+impl schemars :: JsonSchema for big_cabinet_core::reference::Location
 impl std :: fmt :: Debug for big_cabinet_core::authority::CapId
 impl std :: fmt :: Debug for big_cabinet_core::authority::Rights
 impl std :: fmt :: Display for big_cabinet_core::authority::Rights
@@ -202,8 +208,10 @@ pub impl big_cabinet_core::reference::DatumReference::fn pinned (mut self , head
 pub impl big_cabinet_core::reference::DatumTag::fn as_str (& self) -> & str
 pub impl big_cabinet_core::reference::DatumTag::fn new (value : impl Into < String >) -> Result < Self , ReferenceError >
 pub impl big_cabinet_core::reference::Location::fn fragment (& self) -> Option < & str >
+pub impl big_cabinet_core::reference::Location::fn into_reference (self) -> DatumReference
 pub impl big_cabinet_core::reference::Location::fn new (reference : DatumReference , fragment : Option < String > ,) -> Result < Self , ReferenceError >
 pub impl big_cabinet_core::reference::Location::fn parse (value : & str) -> Result < Self , ReferenceError >
+pub impl big_cabinet_core::reference::Location::fn parse_stored (value : & str) -> Result < Self , ReferenceError >
 pub impl big_cabinet_core::reference::Location::fn reference (& self) -> & DatumReference
 pub impl big_cabinet_core::reference::ReferenceDocId::fn resolve (& self , containing_document : & DocId) -> DocId
 pub impl big_cabinet_core::schema_compat::SchemaBundle::fn new (root : Value) -> Self
