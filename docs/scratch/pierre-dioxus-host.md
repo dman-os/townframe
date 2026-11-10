@@ -57,6 +57,14 @@ document's node keys. The Dioxus layer renders the document and attaches listene
 nodes the managers observe. Loading files is host-driven: the host calls FileDiff when the
 files arrive, which triggers the re-render, as upstream's `.then` does.
 
+## Content from the embedding micro (annotations, header slots, gutter utility)
+
+FileDiff's render callbacks return a `Rendered` type bound by `RenderedContent::to_node`. For the
+Dioxus layer, `Rendered` is a slot marker: `to_node` creates a placeholder element that carries
+the slot name, and when the layer flattens the document it renders the callback's Dioxus
+`Element` (for example intxt's thread) at that placeholder. The Document never holds Dioxus
+elements; the ported logic sees an ordinary slotted node.
+
 ## Synchronous reads against async APIs
 
 The traits are synchronous because upstream's are. The cache answers most reads synchronously.
