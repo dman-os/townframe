@@ -16,7 +16,7 @@ The review loop makes this one continuous flow: the agent's work shows up as an 
 ## The loop
 
 1. **The agent works.** A harness adapter records the session as it runs: messages, the edits made, and the commits created. The agent does nothing extra for this.
-2. **The work becomes an intxt.** The agent or the operator opens an intxt for the task with a CLI command, or the adapter opens one when the agent first commits on a branch that has none. Its title and description come from the agent and can be edited by anyone.
+2. **The work becomes an intxt.** Until it belongs to an intxt, recorded work sits in a private working set on the agent's machine. The agent or the operator makes an intxt from it with a CLI command, and can later add more work to it. Its title and description come from the agent and can be edited by anyone. Once work is in a shared intxt it can't be taken back out, only superseded, so the choice of what goes in is deliberate.
 3. **A revision is recorded.** Each time the branch moves (a new commit, an amend, a rebase), the intxt records a new revision: the commits now on the branch and the contents of every file they touch. Earlier revisions remain.
 4. **The operator reviews, anywhere.** The intxt syncs to the operator's other devices through their relay. On a phone or desktop they see:
    - the change file by file, with the code itself, not only the patch;
@@ -24,7 +24,7 @@ The review loop makes this one continuous flow: the agent's work shows up as an 
    - the session that produced it, with the agent's notes and any structure it left;
    - every note, at the place it refers to.
 5. **The operator responds.** They comment on a line range, a file, a commit, a session message or another note; reply in threads; and resolve threads. Several devices can be used at once; nothing they write overwrites another.
-6. **The agent picks it up.** At its next turn, the adapter gives the agent the feedback it hasn't seen yet, with where each comment points. An agent that is idle can wait for feedback with a CLI command. It replies and resolves threads through the CLI, and acts on the feedback by changing code.
+6. **The agent picks it up.** The agent asks for feedback it hasn't seen yet, with where each comment points, through the CLI, either when it chooses to or by waiting for it. intxt never injects into or interrupts a running agent: steering belongs to the harness, and an agent that wants to be woken by new feedback can set that up itself. The agent replies and resolves threads through the CLI, and acts on the feedback by changing code.
 7. **The next revision.** The agent's new commits produce revision 2. The operator sees what changed since the revision they reviewed. Each earlier comment is shown either attached to the matching code in the new revision or as referring to the earlier revision; none disappear.
 
 The loop repeats until the operator is satisfied. Finishing (merging, pushing to GitHub) happens outside intxt for now.
@@ -40,7 +40,7 @@ The loop repeats until the operator is satisfied. Finishing (merging, pushing to
 
 **Author agent**
 - Optionally opens an intxt and leaves notes or structure (for example "these turns implemented X because of Y") when that is cheap.
-- Receives new feedback automatically at its next turn; can also wait for it explicitly.
+- Asks for unseen feedback when it chooses, or waits for it; it is never interrupted by intxt.
 - Replies to and resolves threads.
 - Otherwise works as it already does; commits drive revisions.
 
@@ -48,7 +48,7 @@ The loop repeats until the operator is satisfied. Finishing (merging, pushing to
 - Records the session in readable form: messages, edits, and changes made by commands, attributed to the turn that made them. Thinking is not recorded by default.
 - Records commits and branch movements as they happen.
 - Keeps observations that nothing refers to local, and ignores files the repository ignores.
-- Delivers unseen feedback into the agent's next turn.
+- Only records. It does not steer the agent or put feedback into its context.
 
 **Peer agent**
 - Reads an intxt (code, session, notes) through the CLI and adds comments like any other participant.
@@ -71,7 +71,7 @@ The loop repeats until the operator is satisfied. Finishing (merging, pushing to
 
 ## Open questions
 
-1. **When an intxt opens automatically:** first commit on a branch without one (proposed), first push, or only when asked.
-2. **Session scope:** a session that spans two branches contributes to two intxts; does each intxt show the whole session or only the parts relevant to it?
-3. **What the agent is given at its next turn:** every unseen comment in full, a summary with references, or only comments on what it is working on now. This trades context-window cost against completeness.
-4. **Comments that arrive mid-turn:** delivered at the next turn only, or able to interrupt.
+1. **What the agent gets when it asks for feedback:** every unseen comment in full, a summary with references, or only comments on what it is working on now. This trades context-window cost against completeness; the ADR for the agent's read side decides it.
+2. **Deciding what goes into an intxt:** the working set holds everything recorded; which commits, sessions and states the agent or operator promotes into an intxt, and how the CLI makes that choice easy and hard to get wrong, given that it can't be undone.
+
+Settled while drafting (ledger D20–D22): recorded work sits in a private working set until made into an intxt; a session spanning two intxts is one session in both and each viewer decides how much to show; intxt never injects into or interrupts an agent.
