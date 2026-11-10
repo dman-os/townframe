@@ -661,6 +661,53 @@ async fn the_toolbar_button_increments_a_stopped_wasm_counter() {
     .await;
 }
 
+// A discovered package starts disabled. Its toolbar button follows the provider's status without
+// starting it: inert and saying why while the counter is disabled, pressable again once it is
+// enabled. Before this, the button stayed live and a press failed with a bare "provider
+// unavailable".
+#[tokio::test(flavor = "current_thread")]
+async fn the_toolbar_button_of_a_disabled_counter_is_inert_until_it_is_enabled() {
+    let Shell {
+        runtime,
+        mut ui,
+        counter,
+        ..
+    } = Shell::start(WIDE_PX).await;
+    drop(runtime.set_enabled(&counter, false));
+    ui.wait_until("the button says its provider is disabled", |ui| {
+        ui.attribute(TOOLBAR_INCREMENT, "disabled").is_some()
+            && ui
+                .attribute(TOOLBAR_INCREMENT, "aria-description")
+                .as_deref()
+                == Some("Unavailable: its provider is disabled")
+    })
+    .await;
+    assert_eq!(runtime.state(&counter), MicroState::Disabled);
+
+    drop(runtime.set_enabled(&counter, true));
+    ui.wait_until("the button is pressable again", |ui| {
+        ui.attribute(TOOLBAR_INCREMENT, "disabled").is_none()
+            && ui
+                .attribute(TOOLBAR_INCREMENT, "aria-description")
+                .is_none()
+    })
+    .await;
+    ui.click(TOOLBAR_INCREMENT);
+    ui.wait_until("the press ran and the guest idled again", |ui| {
+        ui.attribute(TOOLBAR_INCREMENT, "disabled").is_none()
+            && runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+    ui.click(OPEN_SETTINGS);
+    ui.wait_until("Settings listed", |ui| ui.find(COUNTER).is_some())
+        .await;
+    ui.click(COUNTER);
+    ui.wait_until("the counter shows the one increment", |ui| {
+        ui.find(COUNTER_VALUE).is_some() && ui.text(COUNTER_VALUE) == "1"
+    })
+    .await;
+}
+
 // blitz-dom queues every added form control for the mutator's flush to reset its form owner. Dioxus
 // mounts and drops a control within one mutation batch whenever a render creates a subtree that the
 // same diff replaces (a template's original after it is cloned), so the drop must unqueue it, or the

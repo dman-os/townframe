@@ -7,6 +7,7 @@ use crate::Capability;
 use crate::Collection;
 use crate::Facet;
 use crate::FacetSnapshot;
+use crate::RefStatus;
 use crate::Row;
 use crate::context::Mount;
 use crate::context::MountInner;
@@ -263,6 +264,25 @@ where
     facet
         .current()
         .expect("the document watch outlives the view that reads it")
+}
+
+/// Bind a reference's [`RefStatus`] to Dioxus reactivity without activating its provider: the
+/// returned status is current at this render, and the calling component re-renders whenever the
+/// supervisor's status ticks move it (a disabled micro enabled, a faulted one retried). A view
+/// uses it to show an action whose provider cannot start as unavailable before it is pressed.
+/// A reference that changes between renders is followed from then on.
+pub fn use_ref_status(reference: &Capability) -> RefStatus {
+    let mut status = use_signal(|| reference.status());
+    use_resource(use_reactive((reference,), move |(reference,)| async move {
+        loop {
+            let seen = reference.status();
+            if *status.peek() != seen {
+                status.set(seen);
+            }
+            reference.status_changed(seen).await;
+        }
+    }));
+    status()
 }
 
 #[cfg(all(test, feature = "in_process"))]
