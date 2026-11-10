@@ -35,7 +35,7 @@ Every invocation first imports the transcript from its stored offset, so any hoo
 
 **Commits and branch moves.** At each check, if the current branch's target differs from the recorded one, the adapter writes a `gitCommit` datum for every commit between the old and new targets not already recorded, then a `refMove` from the old target to the new. `kind` is taken from the branch's reflog entry (`commit`, `commit (amend)`, `rebase (finish)`, `reset`), which is git's own account of the move, and is `unknown` when the reflog has none. The new revision's file contents go into the file docs as line-level splices (ADR 036 §4).
 
-**Attribution.** Every write acts as the agent's actor, `<operator>/agents/<harness>/<session id>`, through ADR 037's act-as mechanism (an environment variable the hook sets, read by every `day` call in that invocation). The signing actor of each datum is then the session that produced it, not the operator.
+**Attribution.** Every write acts as the agent's actor, `<operator>/agents/<harness>/<session id>`, through ADR 037's act-as mechanism (an environment variable the hook sets, read by every `day` call in that invocation). The signing actor of each datum is then the session that produced it, not the operator. Act-as is still a proposal in ADR 037 §2, waiting on the operator's decision there and on 037's earlier steps. Until it lands, captures are signed by the operator; the adapter uses no stand-in identity in the meantime.
 
 **Errors.** Capture never blocks or feeds the agent. A failure exits non-zero with a message (Claude Code shows it to the operator, not to the model), and the next hook retries from the stored offset. Exit code 2, which Claude Code feeds back to the model, is never used.
 
