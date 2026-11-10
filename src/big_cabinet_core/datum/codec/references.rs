@@ -268,8 +268,10 @@ mod tests {
         assert_eq!(by_path["/listed/1"].path, "/listed/1");
         // A keyed-map member's key is pointer-escaped, and an element has no sibling to pin by.
         assert_eq!(by_path["/mapped/key~1one"].path, "/mapped/key~1one");
+        // `refHeads` pins every reference its object declares, the root's location included.
+        assert_eq!(by_path["/at"].heads, by_path["/link"].heads);
         for (path, edge) in by_path {
-            if path != "/link" {
+            if path != "/link" && path != "/at" {
                 assert!(edge.heads.is_empty(), "{path}");
             }
         }
