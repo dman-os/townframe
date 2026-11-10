@@ -27,13 +27,13 @@ One intxt is one drawer (D1). Its documents:
 |---|---|---|---|
 | **Descriptor** (the drawer's descriptor doc) | `intxt/main` | whoever creates the intxt; title edits by anyone | The drawer's identity and the intxt's own metadata (D-S1) |
 | **History** (one per intxt) | `gitCommit/<sha>`, `gitRef/<name>`, `refMove/<uuid>` | the recorder | Small, always synced; everything a revision needs except file contents |
-| **File** (one per touched path per intxt) | `file/main` | the recorder | Lazy loading per file (F1: 404 files as one doc loads at ~514 MB, as per-file docs at ~75 MB) |
-| **Session** (one per session; may be in several intxts, D21) | `session/main`, `turn/<id>`, `message/<id>`, `edit/<id>` | the recorder | Large, often private, sometimes shared between intxts |
+| **File** (one per path per ref lineage per intxt, §4) | `file/main` | the recorder | Lazy loading per file (F1: 404 files as one doc loads at ~514 MB, as per-file docs at ~75 MB) |
+| **Session** (one per session; may be in several intxts, D21) | `session/main`, `turn/<id>` (holding its messages), `edit/<id>` | the recorder | Large, often private, sometimes shared between intxts |
 | **Notes** (one per intxt) | `note/<uuid>`, `thread/<rootUuid>`, `structure/<uuid>`, `seen/<actor>` | everyone | The discussion; every writer writes its own slots |
 
 The descriptor names the history and notes documents; sessions and file docs are found through the history and session datums that reference them, and all of them are roster entries of the drawer so they sync with it. A private session lives in a different drawer and is referenced only (FDR 006, Sharing); readers without access see an unresolved reference.
 
-A file doc belongs to one intxt. Sharing one file doc across intxts that touch the same path would give unrelated intxts a common history that can't be separated later (ledger P1); stacked intxts that need continuity across file docs are later work.
+A file doc belongs to one intxt. Sharing one file doc across intxts that touch the same path would give unrelated intxts a common history that can't be separated later (ledger P1). Within an intxt, a path has one file doc per ref lineage (§4).
 
 ## 3. Descriptor
 
@@ -52,8 +52,10 @@ Concurrent creators of the same intxt would each write `historyDoc`/`notesDoc`; 
 
 ## 4. Code: file documents
 
+Git commits are the base layer (D26): file docs hold the content of commits on the refs the intxt tracks, and nothing else. Working-tree edits, staging, checkouts of other branches and uncommitted states never reach them; edits between commits are recorded as patches in session docs (§6).
+
 ```jsonc
-// org.example.intxt.file/main            (one per touched path)
+// org.example.intxt.file/main            (one per path per ref lineage)
 {
   "path": "src/big_cabinet_core/reference.rs",   // current path; renames update it
   "text": "…",                                    // x-automerge Text
@@ -61,14 +63,23 @@ Concurrent creators of the same intxt would each write `historyDoc`/`notesDoc`; 
 }
 ```
 
-The recorder writes the first content it sees for the path (normally the base of the earliest commit it records) in one change, and every later state as **line-level splices** from that previous state (F1: `update_text` is character-level and 25× slower). Every observed state is appended, including states from rewritten history; nothing is rewritten. A state is identified by the document heads after the change that produced it, and commits pin those heads (§5).
+**When it is written.** Only when a tracked ref moves (§5). The recorder walks the commits the move adds, in first-parent order from the ref's base, and for each commit writes the new content of every path it changes as **line-level splices** (F1: `update_text` is character-level and 25× slower), one change per commit per path. The first content of a path (normally its state at the base) is written in one change. Every state is appended, including states from rewritten history; nothing is rewritten. A state is identified by the document heads after its change, and commits pin those heads (§5).
+
+**Which paths.** The paths changed between the merge base of the ref's `base` and its target, and the target (GitHub's three-dot "files changed"). Merging the base branch into the ref therefore adds no file docs for upstream changes.
+
+**Which doc.** A ref's file docs are listed in its `gitRef` datum (§5). When a new ref's commits are already in another ref's file doc (a stack, or a branch made from a reviewed ref), its doc is a branch of that doc (ADR 007) made at the shared commit's pinned heads, so cursors carry between the refs. Otherwise the ref starts a new doc.
+
+**Several writers.** Two machines recording the same intxt may write the same file doc concurrently. Ingestion is deterministic in content but not in Automerge identity (each writer is its own actor), so concurrent splices can leave the doc's current text a mix of both. Two rules make that harmless:
+
+1. File content is read only at a commit's pinned heads, never at the doc's current state. Reading at a pin gives exactly that commit's content, whatever was written concurrently.
+2. A writer splices from the doc's actual current text to the new commit's content, never from its own last write, so the next write repairs any mix.
 
 A deleted file keeps its doc; its pinned state at the deleting commit is absent (§5). Binary and very large files carry a blob reference instead of text and are shown as changed, not diffed.
 
 ## 5. History: commits, refs and revisions
 
 ```jsonc
-// org.example.intxt.gitCommit/<sha>      (key = the sha: concurrent recorders write identical values)
+// org.example.intxt.gitCommit/<sha>      (key = the sha; git metadata is identical for every recorder)
 {
   "sha": "4c1f…",                          // full git object id, as git spells it
   "parents": ["9a0e…"],
@@ -88,11 +99,12 @@ A deleted file keeps its doc; its pinned state at the deleting commit is absent 
 
 Git hashes stay in git's own spelling inside datums (they are git's identifiers, and `sha` is also the slot key); only Automerge heads use the URL heads encoding.
 
-`files` lists what the commit changed relative to its first parent, each with the two pinned states, so a commit's diff is the Automerge diff between `base` and `head` on each file doc. A merge commit records its first-parent diff; other parents are reachable through `parents`.
+`files` lists what the commit changed relative to its first parent, limited to the intxt's paths (§4), each with the two pinned states, so a commit's diff is the Automerge diff between `base` and `head` on each file doc. A merge commit records its first-parent diff; other parents are reachable through `parents`. How a merge is shown (first-parent diff, or only the conflict resolutions as `git show --remerge-diff` does) is the viewer's choice. The pins are written by the first recorder to ingest the commit, and a ref that later contains the commit reuses that doc lineage (§4). Two machines ingesting the same commit concurrently write different pins; both are valid, Automerge keeps one, and the other stays in the conflict set.
 
 ```jsonc
 // org.example.intxt.gitRef/<name>        (name = the ref, e.g. refs/heads/feat/intxt, percent-encoded in URLs)
-{ "target": "4c1f…", "base": "9a0e…" }     // base: the commit the review compares against (merge base with the upstream)
+{ "target": "4c1f…", "base": "9a0e…",     // base: the commit the review compares against (merge base with the upstream)
+  "files": { "src/big_cabinet_core/reference.rs": "zFileA" } }   // path -> file doc id for this ref (§4)
 
 // org.example.intxt.refMove/<uuid>       (one per observed move; append-only)
 { "ref": "refs/heads/feat/intxt", "from": "77b2…", "to": "4c1f…", "base": "9a0e…", "at": "2026-11-10T21:04:12Z", "kind": "rebase" }
@@ -102,7 +114,7 @@ Git hashes stay in git's own spelling inside datums (they are git's identifiers,
 - **Revision history** is the list of `refMove`s for a ref, ordered by `at` (and by causality where clocks disagree). D17 noted that the `gitRef` datum's own Automerge history already records its past targets; `refMove` makes that list an ordinary readable datum, so an agent or a phone can list revisions without walking document history. `kind` is an open string (`commit`, `amend`, `rebase`, `reset`, `unknown`) recorded when the adapter knows it.
 - **"What changed between revision 1 and 2"** is, per file, the Automerge diff between the head-state pins of the two revisions' tips. It needs no matching of commits across the rewrite. When both commits carry a jj `changeId`, per-commit pairing is available too.
 
-Only the recorder moves refs. Two recorders for the same ref (two machines) would race on `gitRef`; each move still lands as its own `refMove`, so the race is visible rather than lost.
+An intxt may track several refs, each with its own `gitRef` datum. Only recorders move refs. Two recorders moving the same ref concurrently (two machines on one intxt) conflict on `target`; both `refMove`s land, and the ref is shown as divergent until the next move resolves it, as jj shows a conflicted bookmark. Two recorders creating the doc for the same path concurrently conflict on that `files` key; the losing doc stays readable through the commits that pin it, and only future writes go to the winner. Two machines recording the same branch independently make two intxts.
 
 ## 6. Sessions
 
@@ -116,21 +128,24 @@ A session document is a normalized transcript (S8, D7): our own datums with ACP-
   "git": { "branch": "feat/intxt" } }
 
 // org.example.intxt.turn/<harness turn id>
-{ "seq": 41, "role": "user", "at": "…", "parentTurn": "<id>" }          // parentTurn keeps rewinds/forks as a tree
-
-// org.example.intxt.message/<harness message id>
-{ "turn": "<turn id>", "kind": "agentMessage",                          // open: userMessage | agentMessage | toolCall | toolResult | …
-  "text": "…",                                                          // for messages
-  "tool": { "name": "Edit", "kind": "edit", "summary": "reference.rs: replace parse()" } }   // for tool calls; results summarised, not stored whole
+{ "seq": 41, "at": "…", "parentTurn": "<id>",                           // parentTurn keeps rewinds/forks as a tree
+  "messages": [                                                         // appended as the turn runs
+    { "id": "<harness message id>", "seq": 0, "at": "…",
+      "kind": "agentMessage",                                           // open: userMessage | agentMessage | toolCall | toolResult | …
+      "text": "…",                                                      // for messages
+      "tool": { "name": "Edit", "kind": "edit", "summary": "reference.rs: replace parse()" } }   // for tool calls; results summarised, not stored whole
+  ] }
 
 // org.example.intxt.edit/<id>             (id derived from the tool call id and index, or a UUID for filesystem-observed edits)
-{ "turn": "<turn id>", "toolCall": "<message id>",                      // toolCall absent when observed on disk (formatter, sed, codegen)
+{ "turn": "<turn id>", "toolCall": "<message id>",                      // toolCall absent when no tool call is known
   "observedBy": "tool",                                                 // open: tool | filesystem
   "path": "src/big_cabinet_core/reference.rs",
   "patch": "@@ -120,7 +120,9 @@ …" }                                    // unified diff, always (F2: recoverable from every harness)
 ```
 
 Keys reuse the harness's own ids so a re-import converges on the same slots instead of duplicating. Message text is a plain string: a transcript is a record, not something edited collaboratively.
+
+Messages live inside their turn rather than one datum each: a cabinet document refuses updates once it holds about 500 datums (ledger F10), and a long session has thousands of messages (3,483 in one, F5) but around a hundred turns. Updating a datum replaces its signature rather than adding one (F10), so appending to the open turn on every hook is cheap. A message is addressed as a position inside its turn (`…/turn/<id>#messages/{"id":"<message id>"}`). A session longer than the limit continues in a new session doc whose `parent` is the previous one. Edits stay separate datums so notes can target them.
 
 ## 7. Notes, threads and structure
 
@@ -188,9 +203,9 @@ None of the loop's writes. Creating the intxt, recording history and sessions, c
 
 ## 10. Open questions
 
-1. **Cost of seen state and large docs.** Measured (ledger F8, F10): after the node lane's fix, `ListDatums` takes 36 ms at 1,000 slots. Two limits remain. Until the alias-scan fix lands, a doc refuses updates to existing datums at about 500 datums, so notes docs must stay under that or be split. And one seen-state map datum per reader hits the native read budget at about 5,400 slots, so seen state should be a datum per reader per slot range, or per slot. Sessions can be one datum per turn holding its messages, since updates don't accumulate signatures.
+1. **Cost of seen state and large docs.** Measured (ledger F8, F10): after the node lane's fix, `ListDatums` takes 36 ms at 1,000 slots. Two limits remain. Until the alias-scan fix lands, a doc refuses updates to existing datums at about 500 datums, so notes docs must stay under that or be split. And one seen-state map datum per reader hits the native read budget at about 5,400 slots, so seen state should be a datum per reader per slot range, or per slot. Sessions already hold messages inside turns (§6).
 2. **refMove vs the ref datum's own history.** Keep the explicit append-only `refMove` list, or read past targets from the `gitRef` datum's history (D17) and drop `refMove`?
-3. **Session shape details** (F5: one doc per session is fine, largest 2.67 MB): add ordering fields (`seq`, `at`), a `marker` datum (compaction, subagent spawn), and message kinds for non-human records; decide whether failed edits and synthetic agent messages are recorded.
-4. **Merges.** A merge commit's first-parent diff pulls in everything merged from upstream (797 file docs for one merge in F6's sample). A revision's files should probably be the net base..target diff, and merges recorded without per-file states for upstream changes.
+3. **Session shape details** (F5: one doc per session is fine, largest 2.67 MB): a `marker` datum (compaction, subagent spawn) and message kinds for non-human records; decide whether failed edits and synthetic agent messages are recorded.
+4. **Merges.** Settled for storage by §4's three-dot path set (F6's sample merge would otherwise have made 797 file docs). Still open: whether a merge commit's `files` should list upstream paths at all, given they have no file docs.
 5. **Hex in cursors.** Automerge's cursor string is `[-]<counter>@<actor hex>`, so a text-range fragment carries hex even though URLs otherwise avoid it (D24). Either accept Automerge's spelling inside the fragment (it is their grammar) or re-encode the actor in base58 and diverge. ADR 035 decides.
 6. **Evidence** (check results) is out of the loop's scope (FDR 007) and gets its own datums later.
