@@ -617,6 +617,8 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - [main] The big_node `blob_discovery` e2e tests take about 95–105s alone. Under a parallel run they exceed the default nextest kill (60s × 2) and aren't named `long_test`. Pinned 2026-11-04; they don't involve nodules.
 
 - [slice 2] `Provider::call` currently gets only `InvocationContext`. The Wasm provider needs the **caller identity/authority** (for the authority header). Pass the verified caller into providers. Dropping the future on deadline is the cancellation path.
+- [wasm] `RequestContext::expired()` is a tokio sleep in wasm-buildable `service_core_rs`; a guest-side caller panics ("no reactor running"). After `fda5d45d` only native code calls it (transports enforce deadlines, `Client` is runtime-free), but nothing stops a future guest call. Make it runtime-agnostic or move it to the native side.
+- [perf, minor] Native `Transport` boxes the inner call future (`fda5d45d`) because nested client calls overflowed the debug-build stack; one allocation per call.
 - [perf, minor] `Router::register` rebuilds the whole table per provider. Reconcile registers per nodule, so it's O(n²) per pass. Fine at today's scale; batch registration if it grows.
 
 - [test-time] Four heavy `big_cabinet` drawer e2e tests from main hit the 120s nextest kill under load, and one even alone:
