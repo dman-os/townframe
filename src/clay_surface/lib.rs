@@ -12,6 +12,13 @@
 //! `WriteMutations` writer from a batch, `tree` validates batches into the retained arena, and
 //! `render` projects that arena into a host `VirtualDom` and owns the static tag, attribute, and
 //! listener vocabulary a batch may name.
+/// Spike instrumentation (W1): a hook the host installs to timestamp stages of event delivery.
+pub mod probe {
+    use std::cell::Cell;
+    thread_local! { static HOOK: Cell<Option<fn(&'static str)>> = const { Cell::new(None) }; }
+    pub fn install(hook: fn(&'static str)) { HOOK.set(Some(hook)); }
+    pub fn mark(label: &'static str) { if let Some(h) = HOOK.get() { h(label) } }
+}
 mod render;
 mod replay;
 mod tree;

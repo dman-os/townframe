@@ -594,7 +594,9 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
                     ElementCommand::Read { request, .. } => request,
                     _ => 0,
                 };
+                let cmd_started = timing::now();
                 let outcome = run_element_command(&mounted, command).await;
+                timing::record("cmd", cmd_started, request as f64, 0.0);
                 // A failed fire-and-forget command and every read answer the guest, so a
                 // failure is never silent; a successful fire-and-forget command needs none.
                 if request == 0 && outcome.is_ok() {
@@ -633,6 +635,11 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     // begins when this body runs (the revision signal woke it) and its effects run once the
     // `VirtualDom` has diffed every dirty scope below it, so the span covers the surface
     // projection, the host diff, and the mutation writes made before the effect fires.
+    use_hook(|| {
+        if timing::ENABLED {
+            clay_surface::probe::install(|label| timing::record(label, timing::now(), 0.0, 0.0));
+        }
+    });
     let render_started = use_hook(|| Rc::new(Cell::new(0.0_f64)));
     if timing::ENABLED {
         render_started.set(timing::now());

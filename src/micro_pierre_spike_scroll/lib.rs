@@ -222,13 +222,19 @@ clay_mdk::export_micro!(activate, manifest);
 /// The window `(first line, line count)` for a scroll position: centred on the viewport, the
 /// start floored to a chunk boundary, clamped to the file (`VirtualizedFile.ts:1178-1226`).
 fn window(scroll_top: f64, viewport: f64, total_lines: usize, profile: usize) -> (usize, usize) {
+    let center = ((scroll_top + viewport / 2.0) / LINE_HEIGHT).floor() as usize;
+    window_at(center, viewport, total_lines, profile)
+}
+
+/// [`window`] for a caller that already knows which line is at the viewport's centre (W2: rows of
+/// unequal height, so the line is not `y / 20`).
+fn window_at(center: usize, viewport: f64, total_lines: usize, profile: usize) -> (usize, usize) {
     let (_, overscroll, chunk) = PROFILES[profile];
     let wanted = ((viewport + 2.0 * overscroll) / LINE_HEIGHT).ceil() as usize;
     let total = wanted.div_ceil(chunk) * chunk + chunk;
     if total_lines <= chunk {
         return (0, total_lines);
     }
-    let center = ((scroll_top + viewport / 2.0) / LINE_HEIGHT).floor() as usize;
     let center_hunk = center / chunk;
     let ideal = center_hunk as i64 - (total / chunk / 2) as i64;
     let hunks_in_file = total_lines.div_ceil(chunk) as i64;
@@ -239,6 +245,92 @@ fn window(scroll_top: f64, viewport: f64, total_lines: usize, profile: usize) ->
         total
     };
     (start, clamped.min(total_lines.saturating_sub(start)))
+}
+
+/// W2 (variable-height rows, `docs/scratch/pierre-spikes.md`): a 1000 line file with a "thread"
+/// block of 2 to 12 lines (20 px each) after every 40th line, which the model can grow (a reply
+/// arriving). The model owns all heights: `grown[k]` extra lines on thread `k`.
+const THREAD_EVERY: usize = 40;
+const THREAD_COUNT: usize = 25;
+const THREAD_LINES: usize = THREAD_EVERY * THREAD_COUNT;
+
+fn thread_base(k: usize) -> usize {
+    2 + (k * 7) % 11
+}
+
+fn thread_height(k: usize, grown: &[usize]) -> f64 {
+    (thread_base(k) + grown[k]) as f64 * LINE_HEIGHT
+}
+
+/// Content y of the top of `line` (threads sit after lines 39, 79, ...).
+fn y_of_line(line: usize, grown: &[usize]) -> f64 {
+    line as f64 * LINE_HEIGHT + (0..line / THREAD_EVERY).map(|k| thread_height(k, grown)).sum::<f64>()
+}
+
+/// The line at content `y` (a thread belongs to the line it follows).
+fn line_at(y: f64, grown: &[usize]) -> usize {
+    let mut top = 0.0;
+    for block in 0..THREAD_COUNT {
+        let lines_end = top + THREAD_EVERY as f64 * LINE_HEIGHT;
+        if y < lines_end {
+            return block * THREAD_EVERY + ((y - top) / LINE_HEIGHT).max(0.0) as usize;
+        }
+        top = lines_end + thread_height(block, grown);
+        if y < top {
+            return block * THREAD_EVERY + THREAD_EVERY - 1;
+        }
+    }
+    THREAD_LINES - 1
+}
+
+#[component]
+fn ThreadWindow(start: usize, count: usize, grown: Vec<usize>, probe: bool, log: Signal<String>) -> Element {
+    rsx! {
+        div {
+            "data-testid": "window",
+            "data-value": "{start}",
+            "data-state": "{count}",
+            style: "position:absolute;left:0;right:0;top:{y_of_line(start, &grown)}px",
+            for line in start..start + count {
+                div { key: "{line}", "data-line": "{line}",
+                    Row { line, tokens: 1, source: 1 }
+                }
+                if line % THREAD_EVERY == THREAD_EVERY - 1 {
+                    ThreadRow { key: "t{line}", k: line / THREAD_EVERY, lines: thread_base(line / THREAD_EVERY) + grown[line / THREAD_EVERY], probe, log }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ThreadRow(k: usize, lines: usize, probe: bool, log: Signal<String>) -> Element {
+    let body = rsx! {
+        for i in 0..lines {
+            div {
+                key: "{i}",
+                style: "height:20px;line-height:20px;font-size:12px;font-family:monospace;color:#f59e0b;white-space:pre",
+                "reply {k}.{i}"
+            }
+        }
+    };
+    let style = "background:rgba(245,158,11,0.12);border-left:3px solid #f59e0b";
+    if probe {
+        rsx! {
+            div {
+                "data-thread": "{k}",
+                style,
+                // The ResizeData the wire delivers (W2): one entry per observed size change.
+                onresize: move |event| {
+                    let height = event.data().get_border_box_size().map(|size| size.height);
+                    log.with_mut(|text| text.push_str(&format!("{k}:{height:?};")));
+                },
+                {body}
+            }
+        }
+    } else {
+        rsx! { div { "data-thread": "{k}", style, {body} } }
+    }
 }
 
 /// Deterministic plain-text content of one line.
@@ -335,11 +427,26 @@ fn view() -> Element {
     // The scroller's handle, from its `mounted` event: the guest end of the element commands.
     let mut scroller = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let mut measured = use_signal(String::new);
+    // W2: per-thread extra lines, how the guest reacts to a growth (0 nothing, 1 scrollTo the last
+    // known position + delta, 2 read the offset then scrollTo it + delta), the scroller's
+    // `overflow-anchor`, and whether thread rows observe their size.
+    let mut grown = use_signal(|| vec![0_usize; THREAD_COUNT]);
+    let mut correct = use_signal(|| 0_usize);
+    let mut anchor = use_signal(|| true);
+    let mut probe_resize = use_signal(|| false);
+    let resize_log = use_signal(String::new);
+    let last_top = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0.0_f64)));
+    let last_top_for_grow = last_top.clone();
     let mut range = use_signal(|| window(0.0, SCROLLER_HEIGHT, 1_000_000, DEFAULT_PROFILE));
 
+    let anchor_css = if anchor() { "auto" } else { "none" };
     let (start, count) = range();
     let total_px = total_lines() as f64 * LINE_HEIGHT;
-    let total_height = content_height(total_px, viewport(), paged());
+    let total_height = if source() == 3 {
+        y_of_line(THREAD_LINES, &grown())
+    } else {
+        content_height(total_px, viewport(), paged())
+    };
     let offset_now = page_offset();
     let tokens_now = tokens();
     rsx! {
@@ -366,6 +473,72 @@ fn view() -> Element {
                             range.set(window(0.0, viewport(), total_lines(), index));
                         },
                         "{name} window"
+                    }
+                }
+                button {
+                    "data-testid": "threads",
+                    onclick: move |_| {
+                        source.set(3);
+                        total_lines.set(THREAD_LINES);
+                        paged.set(false);
+                        page_offset.set(0.0);
+                        grown.set(vec![0; THREAD_COUNT]);
+                        range.set(window(0.0, viewport(), THREAD_LINES, profile()));
+                    },
+                    "threads corpus"
+                }
+                for mode in [0_usize, 1, 2] {
+                    button {
+                        key: "correct-{mode}",
+                        "data-testid": "correct-{mode}",
+                        onclick: move |_| correct.set(mode),
+                        "correct {mode}"
+                    }
+                }
+                button { "data-testid": "anchor-on", onclick: move |_| anchor.set(true), "anchor on" }
+                button { "data-testid": "anchor-off", onclick: move |_| anchor.set(false), "anchor off" }
+                button { "data-testid": "resize-probe", onclick: move |_| probe_resize.set(true), "resize probe" }
+                span { "data-testid": "resize-log", style: "display:none", "{resize_log}" }
+                for lines in [1_usize, 4, 12] {
+                    button {
+                        key: "grow-{lines}",
+                        "data-testid": "grow-{lines}",
+                        onclick: {
+                            let last_top = last_top_for_grow.clone();
+                            move |_| {
+                                let top = last_top.get();
+                                let current = grown.peek().clone();
+                                // The last thread whose block ends a row or more above the viewport.
+                                let k = (0..THREAD_COUNT)
+                                    .rev()
+                                    .find(|&k| y_of_line((k + 1) * THREAD_EVERY, &current) <= top - LINE_HEIGHT)
+                                    .expect("a thread above the viewport");
+                                grown.with_mut(|g| g[k] += lines);
+                                let delta = lines as f64 * LINE_HEIGHT;
+                                let handle = scroller.peek().clone().expect("the scroller has mounted");
+                                match *correct.peek() {
+                                    0 => {}
+                                    1 => {
+                                        spawn(async move {
+                                            handle
+                                                .scroll(PixelsVector2D::new(0.0, top + delta), ScrollBehavior::Instant)
+                                                .await
+                                                .expect("the host corrected the scroller");
+                                        });
+                                    }
+                                    _ => {
+                                        spawn(async move {
+                                            let at = handle.get_scroll_offset().await.expect("the host read the offset");
+                                            handle
+                                                .scroll(PixelsVector2D::new(0.0, at.y + delta), ScrollBehavior::Instant)
+                                                .await
+                                                .expect("the host corrected the scroller");
+                                        });
+                                    }
+                                }
+                            }
+                        },
+                        "grow {lines}"
                     }
                 }
                 for (index, name) in [(1_usize, "corpus-raw"), (2, "corpus-merged")] {
@@ -487,7 +660,7 @@ fn view() -> Element {
             div {
                 "data-testid": "scroller",
                 onmounted: move |event| scroller.set(Some(event.data())),
-                style: "height:{SCROLLER_HEIGHT}px;overflow-y:auto;position:relative;border:1px solid gray",
+                style: "height:{SCROLLER_HEIGHT}px;overflow-y:auto;position:relative;border:1px solid gray;overflow-anchor:{anchor_css}",
                 onscroll: move |event| {
                     let data = event.data();
                     let client = f64::from(data.client_height());
@@ -498,6 +671,7 @@ fn view() -> Element {
                     // when to rebase, and a rebase is a command back to the DOM.
                     let offset = *page_offset.peek();
                     let logical = offset + data.scroll_top();
+                    last_top.set(logical);
                     let total = *total_lines.peek();
                     let (dom_top, next_offset) = resolve_scroll(
                         logical,
@@ -517,13 +691,22 @@ fn view() -> Element {
                             });
                         }
                     }
-                    let next = window(logical, client, total, *profile.peek());
+                    let next = if *source.peek() == 3 {
+                        let g = grown.peek();
+                        window_at(line_at(logical + client / 2.0, &g), client, total, *profile.peek())
+                    } else {
+                        window(logical, client, total, *profile.peek())
+                    };
                     if next != *range.peek() {
                         range.set(next);
                     }
                 },
                 div { style: "position:relative;height:{total_height}px",
-                    Window { start, count, tokens: tokens_now, offset: offset_now, source: source(), keyed: keyed() }
+                    if source() == 3 {
+                        ThreadWindow { start, count, grown: grown(), probe: probe_resize(), log: resize_log }
+                    } else {
+                        Window { start, count, tokens: tokens_now, offset: offset_now, source: source(), keyed: keyed() }
+                    }
                 }
             }
         }

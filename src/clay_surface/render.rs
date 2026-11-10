@@ -314,11 +314,13 @@ macro_rules! expand_surface_event_listener {
                             let handles = handles.clone();
                             let listener = ListenerCallback::new(
                                 move |evt: dioxus_core::Event<PlatformEventData>| {
+                                    crate::probe::mark("listener-in");
                                     let platform_rc = evt.data();
                                     let data_json = expand_surface_event_listener!(
                                         @serialize $group, $data, platform_rc.as_ref(),
                                         element, &handles
                                     );
+                                    crate::probe::mark("encoded");
                                     let response = dispatch(Event {
                                         revision,
                                         element,
