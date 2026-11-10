@@ -15,9 +15,11 @@ use sqlite_rs as sqlite_rs_alias;
 mod sqlite {
     include!("sqlite/gen.rs");
 }
+pub mod egress;
 pub mod executor;
 mod state;
 mod store;
+pub mod wire;
 
 #[cfg(test)]
 mod e2e;

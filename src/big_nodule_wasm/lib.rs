@@ -27,20 +27,21 @@
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
-use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
-use big_dispatch_core::Invoke;
 use big_dispatch_core::Readiness;
+use big_nodule::egress;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
 use big_nodule::executor::Reensure;
+use big_nodule::wire::delivery_headers;
+use big_nodule::wire::gateway_error;
+use big_nodule::wire::provider_result;
 use big_plugs_core::PlugId;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
@@ -49,17 +50,9 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use http_body_util::Limited;
-use method_core::ContextError;
 use serde_json::Value;
 use serde_json::json;
-use service_client_core_rs::xrpc::write_context_headers;
 use service_client_native_rs::Client;
-use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
-use service_core_rs::xrpc::bearer_header_value;
-use service_core_rs::xrpc::bearer_token;
-use service_core_rs::xrpc::request_context;
-use service_utils_rs::ClientError;
-use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 use std::collections::BTreeMap;
@@ -109,10 +102,6 @@ const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
 
 /// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
-
-/// The status a transport failure (workload gone, body failed, oversize response) is reported
-/// under, as an HTTP gateway would.
-const BAD_GATEWAY: u16 = 502;
 
 /// Hosts nodule handlers as wash workloads. Built by [`boot`].
 pub struct WasmExecutor {
@@ -398,13 +387,6 @@ impl WasmProvider {
     }
 }
 
-fn gateway_error(message: impl std::fmt::Display) -> ProviderError {
-    ProviderError::Failed {
-        status: BAD_GATEWAY,
-        body: json!({ "error": "BadGateway", "message": message.to_string() }),
-    }
-}
-
 #[async_trait]
 impl Provider for WasmProvider {
     async fn call(
@@ -415,33 +397,19 @@ impl Provider for WasmProvider {
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {
-        // The guest sees the contract every XRPC hop speaks (`write_context_headers`): the
-        // request id and trace, the remaining budget as a relative `x-timeout-ms`, the
-        // idempotency key, and the caller's capability as a bare `Bearer` token: the caller's
-        // signer never enters a guest.
-        let mut headers = hyper::HeaderMap::new();
-        let hop = request.next_hop();
-        write_context_headers(
-            &mut headers,
-            &hop,
-            &HttpMetadata {
-                authorization: Some(bearer_header_value(&Authorization::id_text(
-                    caller.authorization.authority,
-                ))),
-                idempotency_key: context.idempotency_key.clone(),
-            },
-        )
-        .expect("request context headers are valid HTTP");
+        // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
+        let headers = delivery_headers(
+            caller,
+            request,
+            context,
+            *self.capability.lock().expect("capability lock"),
+        );
         let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
             .header(hyper::header::CONTENT_TYPE, "application/json");
         http_request
             .headers_mut()
             .expect("a fresh request builder has headers")
             .extend(headers);
-        if let Some(capability) = *self.capability.lock().expect("capability lock") {
-            http_request =
-                http_request.header(NODULE_CAPABILITY_HEADER, Authorization::id_text(capability));
-        }
         let body = Full::new(Bytes::from(
             serde_json::to_vec(&input).expect("a JSON value serializes"),
         ))
@@ -461,29 +429,7 @@ impl Provider for WasmProvider {
             .await
             .map_err(gateway_error)?
             .to_bytes();
-
-        if status.is_success() {
-            return if body.is_empty() {
-                Ok(Value::Null)
-            } else {
-                serde_json::from_slice(&body)
-                    .map_err(|error| gateway_error(format!("response is not JSON: {error}")))
-            };
-        }
-        let body = serde_json::from_slice::<Value>(&body)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
-        if status == hyper::StatusCode::BAD_REQUEST {
-            // XRPC errors are `{ "error", "message" }`; the message is what a caller can act on.
-            return Err(ProviderError::InvalidInput(
-                body.get("message")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| body.to_string(), str::to_owned),
-            ));
-        }
-        Err(ProviderError::Failed {
-            status: status.as_u16(),
-            body,
-        })
+        provider_result(status, &body)
     }
 }
 
@@ -541,14 +487,10 @@ impl Router for Sealed {
 /// makes it the caller identity of a nested call.
 type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
 
-/// The `dispatch.local` egress: the only outgoing request a workload can make.
-///
-/// `POST /xrpc/<nsid>` with `authorization: Bearer <capability id>` is invoked through dispatch with
-/// the calling workload's nodule actor as the signer. Dispatch then admits the call as it admits
-/// any other: the capability must be live, permit the NSID and be bound to that actor, so a
-/// guest that presents another nodule's capability id is denied there. Nothing else the guest
-/// says (headers, body) is trusted as identity. The trace and `x-timeout-ms` budget continue
-/// into the nested call, so it stays inside the outer call's budget; its request id is new.
+/// The `dispatch.local` egress of the wash host: adapts a workload's outgoing `wasi:http`
+/// request to [`big_nodule::egress::call`], which authorizes it for every executor alike. What
+/// is specific to this executor is the signer: the workload's own actor, found by the host's
+/// workload id (not guest-controllable) in [`Signers`].
 #[derive(Clone)]
 struct Egress {
     dispatch: Client<DispatchProtocol>,
@@ -556,145 +498,33 @@ struct Egress {
 }
 
 impl Egress {
-    /// Reads the guest's request and runs it through dispatch. A malformed request is answered
-    /// like an XRPC server would, not refused as a transport failure.
     async fn call(
         &self,
         workload_id: &str,
         request: hyper::Request<WasiBody>,
     ) -> (hyper::StatusCode, Value) {
-        let bad = |status: hyper::StatusCode, error: &str, message: &str| {
-            (status, json!({ "error": error, "message": message }))
-        };
         let (parts, body) = request.into_parts();
-        let operation = match parts.uri.path().strip_prefix("/xrpc/") {
-            Some(operation) if parts.method == hyper::Method::POST => operation.to_owned(),
-            _ => {
-                return bad(
-                    hyper::StatusCode::NOT_FOUND,
-                    "NotFound",
-                    "dispatch.local serves POST /xrpc/<nsid> only",
-                );
-            }
-        };
-        // The same parser every XRPC server hop uses: trace, the budget from the relative
-        // `x-timeout-ms`, `authorization` and `idempotency-key`. The nested call is a hop of its
-        // own: a fresh request id (the guest's id is the delivery hop's, and the outer call is
-        // still in flight under its own) and a child span of the incoming trace.
-        let (request_context, metadata) = match request_context(&parts.headers) {
-            Ok((parsed, metadata)) => (parsed.next_hop(), metadata),
-            Err(message) => return bad(hyper::StatusCode::BAD_REQUEST, "InvalidRequest", &message),
-        };
-        // The token is the bare capability id the guest was delivered. Never the
-        // `<authority>.<signer>` form: the signer is the workload's own, below.
-        let Some(authority) = metadata
-            .authorization
-            .as_deref()
-            .and_then(bearer_token)
-            .and_then(|id| serde_json::from_value::<CapId>(Value::String(id.to_owned())).ok())
-        else {
-            return bad(
-                hyper::StatusCode::UNAUTHORIZED,
-                "AuthRequired",
-                "an `authorization: Bearer <capability id>` header is required",
-            );
-        };
-        let idempotency_key = metadata.idempotency_key;
         let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
-            return bad(
+            return (
                 hyper::StatusCode::PAYLOAD_TOO_LARGE,
-                "InvalidRequest",
-                "the request body failed or is too large",
+                json!({ "error": "InvalidRequest", "message": "the request body failed or is too large" }),
             );
         };
-        let body = body.to_bytes();
-        let input = if body.is_empty() {
-            Value::Null
-        } else if let Ok(input) = serde_json::from_slice(&body) {
-            input
-        } else {
-            return bad(
-                hyper::StatusCode::BAD_REQUEST,
-                "InvalidRequest",
-                "the request body is not JSON",
-            );
-        };
-
-        // A workload that has been stopped (its nodule disabled, upgraded or retired) while one
-        // of its requests was still running has no identity left to call with. That is a
-        // lifecycle race, not a broken invariant, so it is answered the way a proxy answers a
-        // call from a drained upstream rather than crashing the node.
-        let Some(signer) = self
+        let signer = self
             .signers
             .lock()
             .expect("signers lock")
             .get(workload_id)
-            .copied()
-        else {
-            return bad(
-                hyper::StatusCode::SERVICE_UNAVAILABLE,
-                "WorkloadStopped",
-                "the calling handler has been stopped",
-            );
-        };
-        let result = self
-            .dispatch
-            .call_with(
-                request_context,
-                HttpMetadata {
-                    idempotency_key: idempotency_key.clone(),
-                    ..Authorization { authority, signer }.metadata()
-                },
-                Invoke {
-                    operation,
-                    input,
-                    context: InvocationContext { idempotency_key },
-                },
-            )
-            .await;
-        match result {
-            Ok(output) => (hyper::StatusCode::OK, output.output),
-            Err(ClientError::Method(error)) => dispatch_error_response(error),
-            Err(ClientError::Transport { message, .. }) => {
-                panic!("in-process dispatch transport failed: {message}")
-            }
-        }
-    }
-}
-
-/// The HTTP form of a dispatch failure, which is the inverse of [`WasmProvider::call`]'s mapping
-/// of a handler's response onto dispatch's errors: denied 403, unknown operation 404, not ready
-/// 503, invalid input 400 as an XRPC `{ error, message }`, a provider's own error as it came, a
-/// deadline 504. The failures of the services behind dispatch are gateway errors.
-fn dispatch_error_response(error: DispatchError) -> (hyper::StatusCode, Value) {
-    use hyper::StatusCode;
-    let named = |status: StatusCode, name: &str| {
-        (
-            status,
-            json!({ "error": name, "message": error.to_string() }),
+            .copied();
+        egress::call(
+            &self.dispatch,
+            signer,
+            &parts.method,
+            parts.uri.path(),
+            &parts.headers,
+            &body.to_bytes(),
         )
-    };
-    match &error {
-        DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
-        DispatchError::UnknownOperation => named(StatusCode::NOT_FOUND, "UnknownOperation"),
-        DispatchError::NotReady { .. } => named(StatusCode::SERVICE_UNAVAILABLE, "NotReady"),
-        DispatchError::InvalidInput(message) => (
-            StatusCode::BAD_REQUEST,
-            json!({ "error": "InvalidRequest", "message": message }),
-        ),
-        DispatchError::Context(ContextError::DeadlineExceeded) => {
-            named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded")
-        }
-        DispatchError::Provider { status, body } => (
-            StatusCode::from_u16(*status).expect("a provider answered a valid status"),
-            body.clone(),
-        ),
-        DispatchError::AuthorityUnavailable(_) => {
-            named(StatusCode::SERVICE_UNAVAILABLE, "AuthorityUnavailable")
-        }
-        DispatchError::Context(_) | DispatchError::Authority(_) => {
-            named(StatusCode::BAD_GATEWAY, "BadGateway")
-        }
+        .await
     }
 }
 
