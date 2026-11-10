@@ -36,3 +36,6 @@ pierre/src/managers/InteractionManager.ts|editor active line: `setEditorActiveLi
 pierre/src/managers/InteractionManager.ts|`__debugPointerEvents`, `debugLogIfEnabled`, `LogTypes`|debug logging
 pierre/src/managers/InteractionManager.ts|`hastToHtml` + `innerHTML` + `firstElementChild instanceof HTMLButtonElement` for the utility button|the host builds the detached button element from the hast (`create_element_from_hast`)
 pierre/src/managers/InteractionManager.ts|`pre.getRootNode()` / `document` `elementFromPoint` root choice|`InteractionHost::element_from_point` answers `Unavailable` when hit-testing cannot run
+pierre/src/components/FileDiff.ts|`onEditChange`, `onEditComplete`, the `Caret` type parameter, `FileDiffEditChangeHandler`, `FileDiffEditCompleteHandler`|edit mode is OUT
+pierre/src/components/FileDiff.ts|`workerManager` branch of `getTheme`, `subscribeToThemeChanges`, `handleHighlightRender`|worker pool is OUT
+pierre/src/components/FileDiff.ts|the `instance` parameter of the custom `hunkSeparators` function and of `onPostRender`, `renderAnnotation`'s and `renderGutterUtility`'s DOM return types|the callbacks return the host's `Rendered` value and do not receive the instance

@@ -1,7 +1,7 @@
 # FileDiff / VirtualizedFileDiff import closure (value imports, transitively down to ported code).
 # Columns: upstream file|LOC|class|slice|reason|first imported by
 # class: PORT (to be ported in the slice), ALREADY PORTED, DROP (not ported; reason recorded), DEFER.
-pierre/src/components/FileDiff.ts|4312|PORT|S12|the component: logic against a host trait, then Dioxus rendering|-
+pierre/src/components/FileDiff.ts|4312|PORT|S12a|the component: logic against a host trait, then Dioxus rendering|-
 pierre/src/components/VirtualizedFileDiff.ts|2452|PORT|S12|the Virtualizer instance for a diff|-
 pierre/src/components/web-components.ts|39|DROP|-|custom element registration; the host element is the Dioxus component|src/components/FileDiff.ts
 pierre/src/constants.ts|108|ALREADY PORTED|-||src/components/FileDiff.ts
@@ -18,7 +18,7 @@ pierre/src/utils/areDiffTargetsEqual.ts|14|ALREADY PORTED|-||src/components/File
 pierre/src/utils/areFilesEqual.ts|14|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
 pierre/src/utils/areHunkDataEqual.ts|15|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
 pierre/src/utils/areObjectsEqual.ts|38|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/VirtualizedFileDiff.ts
-pierre/src/utils/areOptionsEqual.ts|41|PORT|S12|maps FileDiffOptions, which ports with FileDiff; areObjectsEqual (its helper) is ported in S11a|src/components/VirtualizedFileDiff.ts
+pierre/src/utils/areOptionsEqual.ts|41|PORT|S12a|maps FileDiffOptions, which ports with FileDiff; areObjectsEqual (its helper) is ported in S11a|src/components/VirtualizedFileDiff.ts
 pierre/src/utils/arePrePropertiesEqual.ts|46|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
 pierre/src/utils/areRenderRangesEqual.ts|17|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
 pierre/src/utils/areThemesEqual.ts|17|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
@@ -33,7 +33,7 @@ pierre/src/utils/cssWrappers.ts|81|PORT|S11a|small util; utils/ (predicates, opt
 pierre/src/utils/editSessionAnnotations.ts|121|DROP|-|edit mode is OUT for v1 (CM6 lane)|src/components/FileDiff.ts
 pierre/src/utils/editSessionHunks.ts|884|DROP|-|edit mode is OUT for v1 (CM6 lane)|src/components/FileDiff.ts
 pierre/src/utils/getDiffFileInput.ts|31|PORT|S11a|small util; utils/ (predicates, options, dom)|src/components/FileDiff.ts
-pierre/src/utils/getDiffHunksRendererOptions.ts|41|PORT|S12|maps FileDiffOptions, which ports with FileDiff; shouldUseTokenTransformer (its helper) is ported in S11a|src/components/FileDiff.ts
+pierre/src/utils/getDiffHunksRendererOptions.ts|41|PORT|S12a|maps FileDiffOptions, which ports with FileDiff; shouldUseTokenTransformer (its helper) is ported in S11a|src/components/FileDiff.ts
 pierre/src/utils/getFiletypeFromFileName.ts|460|ALREADY PORTED|-||src/components/FileDiff.ts
 pierre/src/utils/getHunkSideBoundaries.ts|9|ALREADY PORTED|-||src/components/FileDiff.ts
 pierre/src/utils/getLineAnnotationName.ts|8|ALREADY PORTED|-||src/components/FileDiff.ts

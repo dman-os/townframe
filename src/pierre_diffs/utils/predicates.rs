@@ -7,6 +7,7 @@ pub mod are_diff_targets_equal;
 pub mod are_files_equal;
 pub mod are_hunk_data_equal;
 pub mod are_objects_equal;
+pub mod are_options_equal;
 pub mod are_pre_properties_equal;
 pub mod are_render_ranges_equal;
 pub mod are_selection_points_equal;

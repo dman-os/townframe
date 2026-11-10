@@ -17,6 +17,7 @@ import { buildVirtualizer } from "./virtualizer_scenarios.mjs";
 import { buildS11aUtils } from "./s11a_cases.mjs";
 import { buildS11aManagers } from "./s11a_managers.mjs";
 import { buildS11bInteraction } from "./s11b_interaction.mjs";
+import { buildS12aOptions } from "./s12a_file_diff.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const goldenDir = join(here, "golden");
@@ -2123,6 +2124,7 @@ const outputs = {
     ...(await buildS11aUtils(oracle, makeRandom(0x5eed0a))),
     managers: await buildS11aManagers(oracle, makeRandom(0x5eed0b)),
   },
+  "s12a.json": await buildS12aOptions(oracle, makeRandom(0x5eed0d), sharedDiffs().slice(0, 6)),
   "s11b.json": await buildS11bInteraction(oracle, makeRandom(0x5eed0c)),
   "../../highlights/data/highlights_data.json": highlightsData(),
 };

@@ -6,9 +6,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 115 | 25920 |
+| PORTED | 118 | 30314 |
 | REPLACED | 10 | 1817 |
-| PENDING | 89 | 33672 |
+| PENDING | 86 | 29278 |
 | OUT | 248 | 98288 |
 | DEFER | 22 | 10731 |
 
@@ -37,7 +37,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `jsdiff/libesm/util/string.js` | 185 | OUT | - |  | helpers of jsdiff word post-processing, not needed with similar |
 | `pierre/src/components/CodeView.ts` | 4643 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
 | `pierre/src/components/File.ts` | 2370 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
-| `pierre/src/components/FileDiff.ts` | 4312 | PENDING | S12 |  | PORT as Dioxus components (semantics, not code shape) |
+| `pierre/src/components/FileDiff.ts` | 4312 | PORTED | S12a | `components/file_diff.rs` | PARTIAL (S12a-1, the options seam): `FileDiffOptions` (callbacks compared by `Rc` identity), `getTheme`, the interaction wiring rule and `interaction_options`, `canPartiallyRender`, `shouldApplyColumnVariables`, `getLineIndexForDiff`. The class body (hydrate, render, annotations, expansion, managers wiring, cleanUp) and the DOM helpers follow in S12a-2/3; edit-session, worker and merge-conflict code is dropped. Oracle-tested against the published class constructed without a DOM |
 | `pierre/src/components/FileStream.ts` | 398 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
 | `pierre/src/components/UnresolvedFile.ts` | 940 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/components/VirtualizedFile.ts` | 1390 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
@@ -167,7 +167,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/areManagedSnapshotsEqual.ts` | 51 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areMergeConflictActionsEqual.ts` | 34 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/utils/areObjectsEqual.ts` | 38 | PORTED | S11a | `utils/predicates/are_objects_equal.rs` | over `HashMap<String, Value>`; oracle-tested |
-| `pierre/src/utils/areOptionsEqual.ts` | 41 | PENDING | S12 |  | maps FileDiffOptions, which ports with FileDiff; its helpers areObjectsEqual and areThemesEqual are ported (S11a) |
+| `pierre/src/utils/areOptionsEqual.ts` | 41 | PORTED | S12a | `utils/predicates/are_options_equal.rs` | field-wise over `FileDiffOptions` (exhaustive destructuring), callbacks by `Rc` identity, `theme` defaulting as upstream; undefined-valued keys cannot be told from absent ones; oracle-tested |
 | `pierre/src/utils/arePrePropertiesEqual.ts` | 46 | PORTED | S11a | `utils/predicates/are_pre_properties_equal.rs` | oracle-tested |
 | `pierre/src/utils/areRenderRangesEqual.ts` | 17 | PORTED | S11a | `utils/predicates/are_render_ranges_equal.rs` | oracle-tested |
 | `pierre/src/utils/areSelectionPointsEqual.ts` | 9 | PORTED | S11b | `utils/predicates/are_selection_points_equal.rs` | oracle-tested |
@@ -207,7 +207,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/formatCSSVariablePrefix.ts` | 4 | PORTED | S5 | `utils/render/format_css_variable_prefix.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getCodeViewItemRenderData.ts` | 37 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/getDiffFileInput.ts` | 31 | PORTED | S11a | `utils/options/get_diff_file_input.rs` | `undefined`/`null` sides are `Option<Option<_>>`; throws are panics; oracle-tested |
-| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PENDING | S12 |  | maps FileDiffOptions, which ports with FileDiff; its helper shouldUseTokenTransformer is ported (S11a) |
+| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PORTED | S12a | `utils/options/get_diff_hunks_renderer_options.rs` | over the `FileDiffOptions` struct; oracle-tested against `FileDiff.getHunksRendererOptions` |
 | `pierre/src/utils/getFileRendererOptions.ts` | 29 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
 | `pierre/src/utils/getFiletypeFromFileName.ts` | 460 | PORTED | S3 | `utils/get_filetype_from_file_name.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/getHighlighterOptions.ts` | 31 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -499,7 +499,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `highlights/dist/highlights.wasm` | 0 | OUT | S7 |  | unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern |
 | `theming/dist/modules/createThemeResolver.js` | 116 | PORTED | S7 | `highlights/theming.rs` | synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed |
 
-## Assertions converted to invariants (26)
+## Assertions converted to invariants (27)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -529,8 +529,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/Virtualizer.scrollState.test.ts` | reads and restores an element / document root logical scroll position | jsdom `scrollTo` stubs and `window.scrollY` / `innerHeight` overrides are the FakeHost world; its `scrollTo` clamps to the scrollable range as a browser does (no assertion can tell: every target is in range or already clamped by the virtualizer); `toEqual` on recorded scroll calls compares the host trace |
 | `pierre/test/InteractionManager.gutterUtility.test.ts` | all 17 tests of `InteractionManager gutter utility` | jsdom is the FakeDom model; `dispatchPointer` routes to the `pre` handlers then the document handlers and returns `defaultPrevented`; `setElementFromPoint` is the fake's hit table; `querySelector('[data-gutter-utility-slot]')` is `has_descendant` |
 | `pierre/test/InteractionManager.gutterUtility.test.ts` | InteractionManager editor active-line state (6 tests) | dropped with the editor active line (edit mode is OUT) |
+| `pierre/src/utils/areOptionsEqual.ts` | `areObjectsEqual(optionsA, optionsB, ['theme','parseDiffOptions'])` key-by-key identity | derived field-wise equality (see the header); callbacks by `Rc` pointer, which is JavaScript's identity comparison of functions |
 
-## Dropped branches (37)
+## Dropped branches (40)
 
 | upstream file | dropped | reason |
 |---|---|---|
@@ -571,6 +572,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/managers/InteractionManager.ts` | `__debugPointerEvents`, `debugLogIfEnabled`, `LogTypes` | debug logging |
 | `pierre/src/managers/InteractionManager.ts` | `hastToHtml` + `innerHTML` + `firstElementChild instanceof HTMLButtonElement` for the utility button | the host builds the detached button element from the hast (`create_element_from_hast`) |
 | `pierre/src/managers/InteractionManager.ts` | `pre.getRootNode()` / `document` `elementFromPoint` root choice | `InteractionHost::element_from_point` answers `Unavailable` when hit-testing cannot run |
+| `pierre/src/components/FileDiff.ts` | `onEditChange`, `onEditComplete`, the `Caret` type parameter, `FileDiffEditChangeHandler`, `FileDiffEditCompleteHandler` | edit mode is OUT |
+| `pierre/src/components/FileDiff.ts` | `workerManager` branch of `getTheme`, `subscribeToThemeChanges`, `handleHighlightRender` | worker pool is OUT |
+| `pierre/src/components/FileDiff.ts` | the `instance` parameter of the custom `hunkSeparators` function and of `onPostRender`, `renderAnnotation`'s and `renderGutterUtility`'s DOM return types | the callbacks return the host's `Rendered` value and do not receive the instance |
 
 ## FileDiff closure (58 modules)
 
@@ -580,9 +584,17 @@ Editor and worker references in the FileDiff path (audited by name over both fil
 
 `InteractionManager.ts` (S11b), what FileDiff and VirtualizedFileDiff reach and what the port does with it. Ported: `setOptions`, `setup`, `cleanUp`, `setSelection`, `setSelectionDirty`, `isSelectionDirty`, `getSelection`, `getHoveredLine`, `handlePointerClick`/`Move`/`Leave`/`Down` and the document `pointermove`/`pointerup`/`pointercancel` handlers, hover and its `data-hovered` attributes, line and gutter selection sessions, the selection renderer (`data-selected-line`), the gutter utility (built-in button, custom slot, placement from selection and hover, tap-reveal on touch), `data-interactive-lines`/`data-interactive-line-numbers`, hunk-expand clicks, and `pluckInteractionOptions`. Left out, each recorded in `parity/dropped.psv`: token events (DEFER, no review-loop use yet), merge-conflict actions (DEFER), the editor active line (DROP, edit mode), and `__debugPointerEvents` logging. `setEditorActiveLine`, which FileDiff calls, is therefore not ported either.
 
+`FileDiff.ts` (S12a), size pass and split. 4311 lines. After the drops: about 900 lines of edit-session code (the editor plumbing around 1291-1535, 1941-2470, 2619-2635, plus the editor branches inside `render`/`cleanUp`/`hydrate`) are dropped; the worker pool (22 lines) and merge-conflict reads are dropped. What remains is roughly 2900 lines in three seams, which is over an S6-sized slice, so it is split:
+
+- S12a-1 (done): the options seam. `FileDiffOptions`, `getDiffHunksRendererOptions`, `areOptionsEqual`, `getTheme`, the interaction wiring rule, `canPartiallyRender`, `shouldApplyColumnVariables`, `getLineIndexForDiff` (about 250 upstream lines), against the published class constructed without a DOM.
+- S12a-2: the class state and lifecycle: constructor wiring of the hunks renderer and the three managers over their host traits, `setOptions`/`syncInteractionOptions`, `setThemeType`/`applyCachedThemeState`/`hasThemeChanged`, annotations (`setLineAnnotations`, `getLatestAnnotations`, `isNewAnnotations`, `getAnnotationsForDiff`), selection deferral (`setSelectedLines`, `flushDeferredLineState`), `flushManagers`, `hydrate`/`hydrationSetup`/`loadFilesIfNecessary`/`handleFilesLoaded`/`updateInputDiff`, the render orchestration (`render`, `getInputDiff`, `getWorkingDiff`, `adoptRenderData`, `emitPostRender`), `rerender`, `cleanUp`, `isLineRenderable`/`getNearestRenderableLine`/`revealLine` (about 1100 lines after the edit-session drops).
+- S12a-3: applying a render to the rendered model: header (`applyHeaderToDOM`, header slots), `injectUnsafeCSS`/`applyThemeState`/scrollbar, `renderAnnotations`/`renderGutterUtility`/`renderSeparators`, `getOrCreatePreNode`, the code columns (`replaceCodeColumns`, `applyPartialRender`, `refreshSplitDiffView`/`refreshUnifiedDiffView`, `trimColumnRows`, buffers), and the error wrapper (about 1650 lines). These mutate a DOM through HTML strings; in the rendered-hast-model design they become edits of the model, which is a design decision (what the model is and who owns it) reported rather than made here.
+
+Upstream's FileDiff-level tests (`FileDiff.headerSlots`, `partialHydration`, `partialRender`, `rerenderInputs`, `themeTypeUpdates`) drive `render` over jsdom, so they come with S12a-2/3; none exercises only the options seam.
+
 | upstream file | LOC | class | slice | reason | first imported by |
 |---|---:|---|---|---|---|
-| `pierre/src/components/FileDiff.ts` | 4312 | PORT | S12 | the component: logic against a host trait, then Dioxus rendering | `-` |
+| `pierre/src/components/FileDiff.ts` | 4312 | PORT | S12a | the component: logic against a host trait, then Dioxus rendering | `-` |
 | `pierre/src/components/VirtualizedFileDiff.ts` | 2452 | PORT | S12 | the Virtualizer instance for a diff | `-` |
 | `pierre/src/components/web-components.ts` | 39 | DROP | - | custom element registration; the host element is the Dioxus component | `src/components/FileDiff.ts` |
 | `pierre/src/constants.ts` | 108 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
@@ -599,7 +611,7 @@ Editor and worker references in the FileDiff path (audited by name over both fil
 | `pierre/src/utils/areFilesEqual.ts` | 14 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
 | `pierre/src/utils/areHunkDataEqual.ts` | 15 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
 | `pierre/src/utils/areObjectsEqual.ts` | 38 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/VirtualizedFileDiff.ts` |
-| `pierre/src/utils/areOptionsEqual.ts` | 41 | PORT | S12 | maps FileDiffOptions, which ports with FileDiff; areObjectsEqual (its helper) is ported in S11a | `src/components/VirtualizedFileDiff.ts` |
+| `pierre/src/utils/areOptionsEqual.ts` | 41 | PORT | S12a | maps FileDiffOptions, which ports with FileDiff; areObjectsEqual (its helper) is ported in S11a | `src/components/VirtualizedFileDiff.ts` |
 | `pierre/src/utils/arePrePropertiesEqual.ts` | 46 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
 | `pierre/src/utils/areRenderRangesEqual.ts` | 17 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
 | `pierre/src/utils/areThemesEqual.ts` | 17 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
@@ -614,7 +626,7 @@ Editor and worker references in the FileDiff path (audited by name over both fil
 | `pierre/src/utils/editSessionAnnotations.ts` | 121 | DROP | - | edit mode is OUT for v1 (CM6 lane) | `src/components/FileDiff.ts` |
 | `pierre/src/utils/editSessionHunks.ts` | 884 | DROP | - | edit mode is OUT for v1 (CM6 lane) | `src/components/FileDiff.ts` |
 | `pierre/src/utils/getDiffFileInput.ts` | 31 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
-| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PORT | S12 | maps FileDiffOptions, which ports with FileDiff; shouldUseTokenTransformer (its helper) is ported in S11a | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PORT | S12a | maps FileDiffOptions, which ports with FileDiff; shouldUseTokenTransformer (its helper) is ported in S11a | `src/components/FileDiff.ts` |
 | `pierre/src/utils/getFiletypeFromFileName.ts` | 460 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
 | `pierre/src/utils/getHunkSideBoundaries.ts` | 9 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
 | `pierre/src/utils/getLineAnnotationName.ts` | 8 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |

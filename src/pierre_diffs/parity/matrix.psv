@@ -21,7 +21,7 @@ jsdiff/libesm/util/params.js|15|OUT|-||option plumbing
 jsdiff/libesm/util/string.js|185|OUT|-||helpers of jsdiff word post-processing, not needed with similar
 pierre/src/components/CodeView.ts|4643|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
 pierre/src/components/File.ts|2370|DEFER|-||single-file view deferred; review loop uses FileDiff
-pierre/src/components/FileDiff.ts|4312|PENDING|S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/FileDiff.ts|4312|PORTED|S12a|components/file_diff.rs|PARTIAL (S12a-1, the options seam): `FileDiffOptions` (callbacks compared by `Rc` identity), `getTheme`, the interaction wiring rule and `interaction_options`, `canPartiallyRender`, `shouldApplyColumnVariables`, `getLineIndexForDiff`. The class body (hydrate, render, annotations, expansion, managers wiring, cleanUp) and the DOM helpers follow in S12a-2/3; edit-session, worker and merge-conflict code is dropped. Oracle-tested against the published class constructed without a DOM
 pierre/src/components/FileStream.ts|398|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
 pierre/src/components/UnresolvedFile.ts|940|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/components/VirtualizedFile.ts|1390|DEFER|-||single-file view deferred; review loop uses FileDiff
@@ -151,7 +151,7 @@ pierre/src/utils/areLineAnnotationsEqual.ts|12|PENDING|-||PORT (Rust, oracle-tes
 pierre/src/utils/areManagedSnapshotsEqual.ts|51|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/areMergeConflictActionsEqual.ts|34|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/utils/areObjectsEqual.ts|38|PORTED|S11a|utils/predicates/are_objects_equal.rs|over `HashMap<String, Value>`; oracle-tested
-pierre/src/utils/areOptionsEqual.ts|41|PENDING|S12||maps FileDiffOptions, which ports with FileDiff; its helpers areObjectsEqual and areThemesEqual are ported (S11a)
+pierre/src/utils/areOptionsEqual.ts|41|PORTED|S12a|utils/predicates/are_options_equal.rs|field-wise over `FileDiffOptions` (exhaustive destructuring), callbacks by `Rc` identity, `theme` defaulting as upstream; undefined-valued keys cannot be told from absent ones; oracle-tested
 pierre/src/utils/arePrePropertiesEqual.ts|46|PORTED|S11a|utils/predicates/are_pre_properties_equal.rs|oracle-tested
 pierre/src/utils/areRenderRangesEqual.ts|17|PORTED|S11a|utils/predicates/are_render_ranges_equal.rs|oracle-tested
 pierre/src/utils/areSelectionPointsEqual.ts|9|PORTED|S11b|utils/predicates/are_selection_points_equal.rs|oracle-tested
@@ -191,7 +191,7 @@ pierre/src/utils/editSessionHunks.ts|884|OUT|-||OUT for v1 (edit mode; later wit
 pierre/src/utils/formatCSSVariablePrefix.ts|4|PORTED|S5|utils/render/format_css_variable_prefix.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/getCodeViewItemRenderData.ts|37|PENDING|-||PORT (Rust, oracle-tested)
 pierre/src/utils/getDiffFileInput.ts|31|PORTED|S11a|utils/options/get_diff_file_input.rs|`undefined`/`null` sides are `Option<Option<_>>`; throws are panics; oracle-tested
-pierre/src/utils/getDiffHunksRendererOptions.ts|41|PENDING|S12||maps FileDiffOptions, which ports with FileDiff; its helper shouldUseTokenTransformer is ported (S11a)
+pierre/src/utils/getDiffHunksRendererOptions.ts|41|PORTED|S12a|utils/options/get_diff_hunks_renderer_options.rs|over the `FileDiffOptions` struct; oracle-tested against `FileDiff.getHunksRendererOptions`
 pierre/src/utils/getFileRendererOptions.ts|29|DEFER|-||single-file view deferred; review loop uses FileDiff
 pierre/src/utils/getFiletypeFromFileName.ts|460|PORTED|S3|utils/get_filetype_from_file_name.rs|exact oracle parity (patches.json, utilities.json)
 pierre/src/utils/getHighlighterOptions.ts|31|PENDING|-||PORT (Rust, oracle-tested)

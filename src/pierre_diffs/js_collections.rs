@@ -111,6 +111,42 @@ impl<K: Clone + Eq + Hash, V: Clone> InsertionMap<K, V> {
     }
 }
 
+/// A callback compared the way JavaScript compares functions: by identity
+/// (`===`). `Clone` shares the allocation, so a clone equals its original.
+pub struct PtrEq<Callback: ?Sized>(pub std::rc::Rc<Callback>);
+
+impl<Callback: ?Sized> PtrEq<Callback> {
+    pub fn new(callback: std::rc::Rc<Callback>) -> Self {
+        Self(callback)
+    }
+}
+
+impl<Callback: ?Sized> Clone for PtrEq<Callback> {
+    fn clone(&self) -> Self {
+        Self(std::rc::Rc::clone(&self.0))
+    }
+}
+
+impl<Callback: ?Sized> PartialEq for PtrEq<Callback> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(std::rc::Rc::as_ptr(&self.0), std::rc::Rc::as_ptr(&other.0))
+    }
+}
+
+impl<Callback: ?Sized> std::fmt::Debug for PtrEq<Callback> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PtrEq(..)")
+    }
+}
+
+impl<Callback: ?Sized> std::ops::Deref for PtrEq<Callback> {
+    type Target = Callback;
+
+    fn deref(&self) -> &Callback {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

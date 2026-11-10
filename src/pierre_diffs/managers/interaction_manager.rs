@@ -180,6 +180,71 @@ pub struct InteractionManagerBaseOptions<Element> {
     pub get_line_index: Option<GetLineIndexUtility>,
 }
 
+// Callbacks are compared by identity (`===`), as `areOptionsEqual` compares them.
+fn rc_eq<Callback: ?Sized>(first: &Option<Rc<Callback>>, second: &Option<Rc<Callback>>) -> bool {
+    match (first, second) {
+        (Some(first), Some(second)) => std::ptr::addr_eq(Rc::as_ptr(first), Rc::as_ptr(second)),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+impl<Element> Clone for InteractionManagerBaseOptions<Element> {
+    fn clone(&self) -> Self {
+        Self {
+            line_hover_highlight: self.line_hover_highlight,
+            enable_gutter_utility: self.enable_gutter_utility,
+            on_gutter_utility_click: self.on_gutter_utility_click.clone(),
+            on_line_click: self.on_line_click.clone(),
+            on_line_number_click: self.on_line_number_click.clone(),
+            on_line_enter: self.on_line_enter.clone(),
+            on_line_leave: self.on_line_leave.clone(),
+            enable_line_selection: self.enable_line_selection,
+            controlled_selection: self.controlled_selection,
+            on_line_selected: self.on_line_selected.clone(),
+            on_line_selection_start: self.on_line_selection_start.clone(),
+            on_line_selection_change: self.on_line_selection_change.clone(),
+            on_line_selection_end: self.on_line_selection_end.clone(),
+            get_line_index: self.get_line_index.clone(),
+        }
+    }
+}
+
+impl<Element> PartialEq for InteractionManagerBaseOptions<Element> {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            line_hover_highlight,
+            enable_gutter_utility,
+            on_gutter_utility_click,
+            on_line_click,
+            on_line_number_click,
+            on_line_enter,
+            on_line_leave,
+            enable_line_selection,
+            controlled_selection,
+            on_line_selected,
+            on_line_selection_start,
+            on_line_selection_change,
+            on_line_selection_end,
+            get_line_index,
+        } = self;
+        *line_hover_highlight == other.line_hover_highlight
+            && *enable_gutter_utility == other.enable_gutter_utility
+            && rc_eq(on_gutter_utility_click, &other.on_gutter_utility_click)
+            && rc_eq(on_line_click, &other.on_line_click)
+            && rc_eq(on_line_number_click, &other.on_line_number_click)
+            && rc_eq(on_line_enter, &other.on_line_enter)
+            && rc_eq(on_line_leave, &other.on_line_leave)
+            && *enable_line_selection == other.enable_line_selection
+            && *controlled_selection == other.controlled_selection
+            && rc_eq(on_line_selected, &other.on_line_selected)
+            && rc_eq(on_line_selection_start, &other.on_line_selection_start)
+            && rc_eq(on_line_selection_change, &other.on_line_selection_change)
+            && rc_eq(on_line_selection_end, &other.on_line_selection_end)
+            && rc_eq(get_line_index, &other.get_line_index)
+    }
+}
+
 impl<Element> Default for InteractionManagerBaseOptions<Element> {
     fn default() -> Self {
         Self {
