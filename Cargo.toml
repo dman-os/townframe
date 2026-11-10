@@ -13,6 +13,7 @@ members = [
   "./src/big_nodule/",
   "./src/big_nodule_wasm/",
   "./src/big_ndk/",
+  "./src/test_nodule_handlers/",
   "./src/big_blobs/",
   "./src/big_blobs_core/",
   "./src/big_sync/",
@@ -130,6 +131,8 @@ big_dispatch = { path = "./src/big_dispatch/" }
 big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
 big_nodule = { path = "./src/big_nodule/" }
 big_nodule_wasm = { path = "./src/big_nodule_wasm/" }
+big_ndk = { path = "./src/big_ndk/" }
+test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }

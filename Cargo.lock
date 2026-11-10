@@ -15790,6 +15790,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "test_nodule_handlers"
+version = "0.1.0"
+dependencies = [
+ "big_ndk",
+ "http",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
+]
+
+[[package]]
 name = "textwrap"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

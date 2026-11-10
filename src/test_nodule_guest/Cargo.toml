@@ -13,9 +13,4 @@ path = "lib.rs"
 
 [dependencies]
 big_ndk.workspace = true
-method_core.workspace = true
-service_core_rs.workspace = true
-service_client_core_rs.workspace = true
-http.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+test_nodule_handlers.workspace = true

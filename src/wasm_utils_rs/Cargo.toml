@@ -35,6 +35,7 @@ rust-version = "1.91"
 [workspace.dependencies]
 wasm_utils_rs = { path = "." }
 big_ndk = { path = "../big_ndk" }
+test_nodule_handlers = { path = "../test_nodule_handlers" }
 method_core = { path = "../method_core", default-features = false }
 service_core_rs = { path = "../service_core_rs", default-features = false }
 service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
