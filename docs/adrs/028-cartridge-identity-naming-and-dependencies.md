@@ -136,7 +136,11 @@ Prior art: OSGi's `Import-Package` over `Require-Bundle`, and Debian's virtual p
   document, the form `Bundle::document` renders. Admission refuses a key that is not a record the
   cartridge holds: a vendored copy is its holder's to describe. Registration admits the document
   against the record's Lexicon, where it may narrow the Lexicon and never admit a value the
-  Lexicon refuses; it is a peer's data, so its shape and size are checked, not assumed.
+  Lexicon refuses; it is a peer's data, so its shape and size are checked, not assumed. The split
+  follows ADR 021: the Lexicon states what a value is, references included (a field that addresses a
+  datum refers to `org.example.daybook.defs`, ADR 035 §2.6), and the sidecar states only how a node
+  stores it. A sidecar never restates a position the Lexicon declares as a `ref`, so a storage change
+  never changes the Lexicon that other cartridges carry copies of.
 - **Resolution is recorded at enable time,** in the runtime's install datum, like a lockfile:
   each NSID maps to its provider cartridge id, version and schema revision. A change of provider is a
   change of grant and is re-consented.
