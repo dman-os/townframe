@@ -329,10 +329,18 @@ impl<C: Clone> SurfaceTree<C> {
         if let AttributeValue::Text(text) = value {
             Self::charge_string(bytes, text)?;
         }
-        if static_attribute(name, ns).is_none() {
-            return Err(PresentationError::Unsupported(
-                "attribute name or namespace".into(),
-            ));
+        match static_attribute(&DATA_ATTRIBUTES, name, ns) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(PresentationError::Unsupported(
+                    "attribute name or namespace".into(),
+                ));
+            }
+            Err(DataAttributeNamesExhausted) => {
+                return Err(PresentationError::InvalidBatch(
+                    "too many distinct data-* attribute names".into(),
+                ));
+            }
         }
         if matches!(value, AttributeValue::Float(float) if !float.is_finite()) {
             return Err(PresentationError::Unsupported(

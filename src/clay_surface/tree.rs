@@ -1,5 +1,7 @@
 //! The retained surface arena: ingress validation, the `WriteMutations` stack machine, and
 //! identity/budget bookkeeping for one mounted surface.
+use crate::render::DATA_ATTRIBUTES;
+use crate::render::DataAttributeNamesExhausted;
 use crate::render::static_attribute;
 use crate::render::supported_listener;
 use crate::render::supported_tag;

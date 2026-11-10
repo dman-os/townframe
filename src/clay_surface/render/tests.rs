@@ -344,18 +344,160 @@ fn supported_attributes_are_reviewable() {
             Some("http://www.w3.org/1999/xlink".to_owned()),
         )))
         .collect();
-    assert!(static_attribute("onclick", None).is_none());
-    assert!(static_attribute("unknown-property", None).is_none());
-    assert!(static_attribute("class", Some("unknown")).is_none());
+    let lookup = |name: &str, namespace: Option<&str>| {
+        static_attribute(&DATA_ATTRIBUTES, name, namespace).expect("snapshot probes stay in bound")
+    };
+    assert!(lookup("onclick", None).is_none());
+    assert!(lookup("unknown-property", None).is_none());
+    assert!(lookup("class", Some("unknown")).is_none());
     let supported: Vec<String> = probes
         .into_iter()
-        .filter(|(name, namespace)| static_attribute(name, namespace.as_deref()).is_some())
+        .filter(|(name, namespace)| lookup(name, namespace.as_deref()).is_some())
         .map(|(name, namespace)| match namespace {
             Some(namespace) => format!("{namespace}:{name}"),
             None => name,
         })
         .collect();
     insta::assert_yaml_snapshot!(supported);
+}
+
+#[test]
+fn data_attribute_names_are_open_within_the_documented_form() {
+    let interner = DataAttributeInterner::new(DATA_ATTRIBUTE_NAME_LIMIT);
+    let pierre_style = [
+        "data-line",
+        "data-line-index",
+        "data-line-type",
+        "data-line-annotation",
+        "data-diff-span",
+        "data-diff-type",
+        "data-code",
+        "data-gutter",
+        "data-gutter-buffer",
+        "data-content",
+        "data-content-buffer",
+        "data-column-number",
+        "data-alt-line",
+        "data-alt-line-index",
+        "data-expand-button",
+        "data-expand-index",
+        "data-separator",
+        "data-separator-wrapper",
+        "data-separator-content",
+        "data-hunk",
+        "data-hunk-index",
+        "data-file",
+        "data-file-name",
+        "data-file-header",
+        "data-change-type",
+        "data-no-newline",
+        "data-indicators",
+        "data-background",
+        "data-overflow",
+        "data-theme",
+        "data-theme-type",
+        "data-title",
+        "data-header-content",
+        "data-metadata",
+        "data-additions",
+        "data-deletions",
+        "data-diffs",
+        "data-diffs-header",
+        "data-annotation-slot",
+        "data-line-number-content",
+        "data-merge-conflict",
+        "data-unmodified-lines",
+        "data-collapsed",
+        "data-selected-line",
+        "data-selected-line-first",
+        "data-selected-line-last",
+        "data-rename",
+        "data-pure",
+        "data-testid",
+        "data-state",
+        "data-value",
+        "data-a.b",
+        "data-a_b",
+        "data-0",
+        "data--",
+        "data-x-1.2_3",
+        "data-z",
+        "data-row",
+        "data-cell",
+        "data-col",
+        "data-split",
+        "data-unified",
+        "data-9-lines",
+        "data-v1",
+    ];
+    assert!(pierre_style.len() >= 60);
+    for name in pierre_style {
+        let (resolved, namespace) = static_attribute(&interner, name, None)
+            .unwrap_or_else(|_| panic!("{name} is within the bound"))
+            .unwrap_or_else(|| panic!("{name} must be accepted"));
+        assert_eq!(resolved, name);
+        assert_eq!(namespace, None);
+    }
+    for bad in [
+        "data-",
+        "data-Line",
+        "data-LINE",
+        "data-a b",
+        "data-a:b",
+        "data- ",
+        "data-a\n",
+        "data-é",
+        "Data-line",
+        "data",
+        "datum-line",
+        "xdata-line",
+        "data-a/b",
+        "data-a=b",
+    ] {
+        assert_eq!(
+            static_attribute(&interner, bad, None),
+            Ok(None),
+            "{bad:?} must be refused"
+        );
+    }
+    assert_eq!(
+        static_attribute(&interner, "data-line", Some("style")),
+        Ok(None),
+        "a data-* name never takes a namespace"
+    );
+}
+
+#[test]
+fn data_attribute_interner_is_bounded_and_deduplicates() {
+    let interner = DataAttributeInterner::new(4096);
+    for index in 0..4096 {
+        interner
+            .intern(&format!("data-n{index}"))
+            .expect("within bound");
+    }
+    let first = interner.intern("data-n0").expect("repeat does not grow");
+    let again = interner.intern("data-n0").expect("repeat does not grow");
+    assert!(
+        std::ptr::eq(first, again),
+        "a repeated name is the same leaked str"
+    );
+    assert_eq!(
+        static_attribute(&interner, "data-n4095", None),
+        Ok(Some(("data-n4095", None)))
+    );
+    assert_eq!(
+        interner.intern("data-one-too-many"),
+        Err(DataAttributeNamesExhausted)
+    );
+    assert_eq!(
+        static_attribute(&interner, "data-one-too-many", None),
+        Err(DataAttributeNamesExhausted)
+    );
+    // The allowlist is not charged against the bound.
+    assert_eq!(
+        static_attribute(&interner, "class", None),
+        Ok(Some(("class", None)))
+    );
 }
 
 #[test]

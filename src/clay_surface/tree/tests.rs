@@ -838,6 +838,57 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
 }
 
 #[test]
+fn open_data_attributes_pass_ingress_and_render() {
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        tree: SurfaceTree,
+    }
+    fn app(props: Props) -> Element {
+        let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
+        props
+            .tree
+            .render(&dispatch, &|_| unreachable!("test has no component slots"))
+    }
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetAttribute((
+            "data-line-index".into(),
+            None,
+            AttributeValue::Text("3,1".into()),
+        )),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    // A refused batch poisons the tree, so each malformed name gets a fresh one.
+    for bad in ["data-", "data-Line", "data-a:b", "data-a b"] {
+        let error = SurfaceTree::new()
+            .apply(&[
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetAttribute((bad.into(), None, AttributeValue::Text("x".into()))),
+                Mutation::AppendChildren(1),
+            ])
+            .expect_err("malformed data-* name must be refused");
+        assert_eq!(
+            error,
+            PresentationError::Unsupported("attribute name or namespace".into()),
+            "{bad}"
+        );
+    }
+    let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree });
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let div = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    let SurfaceNodeKind::Element { attributes, .. } = &div.kind else {
+        panic!("expected an element")
+    };
+    assert_eq!(
+        attributes.get(&("data-line-index".to_owned(), None)),
+        Some(&AttributeValue::Text("3,1".into()))
+    );
+}
+
+#[test]
 fn replacing_values_and_removing_subtrees_release_retained_bytes() {
     let mut tree = SurfaceTree::new();
     tree.apply(&counter_initial_batch()).unwrap();
