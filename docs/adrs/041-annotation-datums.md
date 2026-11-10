@@ -20,8 +20,8 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 // org.example.intxt.comment/<uuidv7>
 {
   "targets": [
-    { "ref": "dtxt:datum:zFileA/org.example.intxt.note/main#content/[12@a3f-40@a3f]",
-      "refHeads": ["zbd7…"],                                              // ADR 035 §2.8: the pin, a sibling
+    { "source": { "ref": "dtxt:datum:zFileA/org.example.intxt.note/main#content/[12@a3f-40@a3f]",
+                  "heads": ["zbd7…"] },                                   // ADR 035 §2.8: a #datumPin
       "lines": { "start": 120, "end": 124 },                              // 1-based, at the pinned heads; or a cursor range in the fragment
       "quote": { "exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)" } }
   ],
@@ -31,9 +31,9 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 }
 ```
 
-- **Targets** are any `dtxt:` locations: a text range in a file document at a pinned state, a whole document or datum (no fragment), a commit, a session's tool call, another comment, a structure datum. A span of datums (turns 20–45) is a target whose `ref` is the first datum and `to` the last. A `refHeads` sibling pins every reference in its object, so a span's `to` shares its target's pin; a reference that needs a pin of its own goes in its own object.
+- **Targets** are any `dtxt:` locations: a text range in a file document at a pinned state, a whole document or datum (no fragment), a commit, a session's tool call, another comment, a structure datum. A target's `source` is a `#datumPin` (ADR 035 §2.6): the location, and the heads it was read at when pinned (W3C names this member `source` too). A span of datums (turns 20–45) is a target whose `source` is the first datum and `to` (a `#datumLocation`) the last; `to` is in the same document and is read at `source`'s heads, so a span has one pin. Endpoints that need separate pins are separate targets.
 - **Text positions** are given either as a line range at the pinned heads (`lines`) or as an Automerge cursor range in the fragment (`#content/[12@a3f-40@a3f]`). Cursors can't be written by hand: an agent would need a tool to turn a line into a cursor. A line range at a pin is exact, because the pin fixes the text, so it is the hand-writable form; a tool may add the cursor, which carries the position to later revisions more cheaply than quote matching. Readers accept either.
-- **Placing a comment in a diff** (claytxt, 2026-11-10). A viewer showing a diff between two pins maps a target's `refHeads` to a side by equality: the diff's base pin is the deletions side, its head pin the additions side, and `lines` are then that side's line numbers. So `refHeads` must be exactly the heads of a pin the reader can name (an op's or a commit observation's), never a superset. A target pinned at neither end of the diff on screen is re-resolved through its cursor, else its quote, against the head side, and shown as outdated at file level if neither resolves. A range is drawn from start to end and its thread is placed after its last visible line; that placement is the viewer's policy, not the datum's.
+- **Placing a comment in a diff** (claytxt, 2026-11-10). A viewer showing a diff between two pins maps a target's `source.heads` to a side by equality: the diff's base pin is the deletions side, its head pin the additions side, and `lines` are then that side's line numbers. So those heads must be exactly the heads of a pin the reader can name (an op's or a commit observation's), never a superset. A target pinned at neither end of the diff on screen is re-resolved through its cursor, else its quote, against the head side, and shown as outdated at file level if neither resolves. A range is drawn from start to end and its thread is placed after its last visible line; that placement is the viewer's policy, not the datum's.
 - **File-level targets** (no fragment, no `lines`) are shown in the file's header. They survive renames because a renamed file keeps its document (ADR 040 §4).
 - **`quote` is required on text targets.** A cursor never fails to resolve: one whose text was deleted resolves to a neighbouring position (F6), so a stale anchor looks valid. A reader compares the resolved text with `quote`; on a mismatch it re-attaches by quote matching or shows the comment as outdated. On a real rebase (F6), 785 of 888 anchors resolved onto identical text and quote matching recovered 99 of the other 103. Tools fill `quote`; people's clients fill it for them. A comment about deleted lines targets the earlier state.
 - **Replies** carry `replyTo` and `motivation: replying`, so a thread is one reference-index query (ADR 035 §2.6) rather than a walk over every comment's targets.
@@ -56,7 +56,7 @@ One slot per thread, written by anyone. Resolving and reopening at the same time
 { "kind": "task",                         // open: task | decision | section | …
   "title": "Move references to dtxt:", "body": { "mime": "text/markdown", "content": "…" },
   "status": "completed",                  // open, optional; ACP's spelling: pending | in_progress | completed
-  "targets": [ { "ref": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t20", "to": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t45" } ],
+  "targets": [ { "source": { "ref": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t20" }, "to": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/t45" } ],
   "parent": "dtxt:datum:zNotes/org.example.intxt.structure/0193…",
   "order": "15" }                         // fractional index: siblings sort by this string; between "1" and "2" write "15"
 ```
