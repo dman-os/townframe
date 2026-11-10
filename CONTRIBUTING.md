@@ -118,34 +118,38 @@ under the existing logical plug ID. Wasmtime is not a dependency of xtask.
 
 ## Build directories and feature resolution
 
-`CARGO_TARGET_DIR` belongs outside the checkout (`.env` points at
-`../tmp/townframe-target`). Both the Nix shells and `./x/agent-build.ts` append
-the worktree name to it: sibling worktrees sharing one directory collide on
-single-binary crates, because `<target>/debug/xtask` is whichever tree linked
-last and a fresh build elsewhere silently runs that binary.
-`TOWNFRAME_SHARED_TARGET_DIR=1` opts back into sharing.
-`cargo x guardrails doctor` reports a target directory that is inside the
-worktree or shared, and a nested `src/*/target` that `.gitignore` would let Nix
-copy into the store.
+Cargo runs through [mbx](https://mr-boxington.jdx.dev/) (mr-boxington), pinned
+as a flake input. The dev shell puts mbx's Cargo shim ahead of the toolchain's
+`cargo` and unsets stdenv's `CC`/`CXX`, so host C compilations reach mbx's
+compiler shims. mbx keys each compilation by its inputs, with checkout paths
+normalized, and restores matching outputs from one store on the machine. A
+second worktree therefore builds warm, which sccache could not do: it got 0%
+Rust hits across worktree paths because its `SCCACHE_BASEDIRS` only applies to
+C/C++. Identical compilations running at the same time wait for one result, and
+a machine-wide scheduler admits work against the CPU count and a memory budget
+learned per compilation, holding new compilations while the kernel reports
+memory pressure. On a 2026-11-09 trial, `xtask` took 62s cold and 15s from a
+second path (290 hits, 2 misses), and the `plug_test_routines` guest 79s and 18s.
 
-Sccache is a shared compiler cache, not a replacement target directory: set
-`TOWNFRAME_SCCACHE=1` in `.env` or pass
-`./x/agent-build.ts --sccache -- <cmd...>`. The shell/wrapper sets
-`RUSTC_WRAPPER=sccache`, `CARGO_INCREMENTAL=0`, `SCCACHE_DIR`,
-`SCCACHE_CACHE_SIZE`, and `SCCACHE_BASEDIRS`; `.env.example` shows the optional
-paths. `--no-sccache` overrides the opt-in for one wrapper invocation. The cache
-is additive to Cargo outputs, so keep both budgets explicit. The 2026-10-19
-benchmark got 100% hits rebuilding the same worktree path and 99.45% on warm
-concurrent builds, but 0% Rust hits across two different source paths because
-sccache 0.18.0's `SCCACHE_BASEDIRS` support is C/C++-only. A follow-up with
-nightly 1.100, `trim-paths = "all"`, and `-Ztrim-paths` still got 0/175
-cross-worktree Rust hits, so `trim-paths` is not enabled for this purpose. It
-can remap compiler diagnostics. An experimental upstream #2814/#2813 branch
-recovered 116/175 cross-worktree Rust hits (66.3%), but left 59 misses
-unexplained and has not passed generated-code or compile-time-path correctness
-checks. Further cross-worktree cache adoption is shelved; retain the stock
-opt-in without adding patched sccache, another wrapper, or `trim-paths` for this
-PR.
+Each workspace root (the root, `src/wasm_utils_rs`, and `src/btress_sysadmin`)
+gets a managed target: `target` is a symlink into the mbx cache, which mbx
+prunes when the checkout is gone, unused, or over budget. Setting
+`CARGO_TARGET_DIR` opts a checkout out of this, so leave it unset;
+`cargo x guardrails doctor` reports it. Code that locates build output reads
+`CARGO_TARGET_DIR` and falls back to the workspace's `target`, which is that
+symlink.
+
+Two settings would defeat the cache, and are absent on purpose.
+`split-debuginfo = "unpacked"` makes every native link (build scripts, proc
+macros, test binaries) unshareable across checkouts, and the doctor reports it.
+An existing `RUSTC_WRAPPER` makes mbx step aside and cache nothing.
+`mbx explain --last` names the cause of every miss and bypass in the last build.
+
+The cache directory is machine configuration, in mbx's global config
+(`mbx settings set cache_dir <dir>`). Keep it on the filesystem that holds the
+checkouts: restores reflink or hard link the cached object, and fall back to
+copying across filesystems. mbx's Cargo shim and cache agent require the exact
+same mbx version, so every worktree on a machine must pin the same tag.
 
 `.cargo/config.toml` sets `[resolver] feature-unification = "workspace"` (with
 the `[unstable] feature-unification = true` gate it needs on nightly; stable

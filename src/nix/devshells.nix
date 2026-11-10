@@ -2,9 +2,10 @@
 # packaged outputs live in ./packages.nix.
 _: {
   perSystem =
-    { pkgs, ... }:
+    { pkgs, inputs', ... }:
     let
       tools = import ./toolchains.nix { inherit pkgs; };
+      mbx = inputs'.mr-boxington.packages.mbx;
       inherit (tools) rustRust rustAndroid rustFull;
 
       androidBuildToolsVersion = "37.0.0";
@@ -221,8 +222,7 @@ _: {
       ];
 
       devTools = with pkgs; [
-        # Shared compilation cache for parallel worktrees; opt in with `TOWNFRAME_SCCACHE=1` or `x/agent-build.ts --sccache`.
-        sccache
+        mbx
         rogcat
         opentofu
         terragrunt
@@ -301,7 +301,6 @@ _: {
               pkgs.llvmPackages.clang
               pkgs.llvmPackages.libclang
               pkgs.stdenv.cc.cc.lib
-              pkgs.sccache
             ]
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ];
           shellHook = ''
@@ -389,6 +388,14 @@ _: {
               export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
             fi
             export PATH=$PATH:$PWD/x/
+            # Plain `cargo` goes through mbx's Cargo shim, which finds the real Cargo further
+            # down PATH. A build that skips mbx in an mbx-managed target dirties fingerprints
+            # and recompiles there, so the shim goes first rather than relying on `mbx build`.
+            export PATH="${mbx}/libexec/mbx:$PATH"
+            # stdenv exports CC=gcc. mbx caches host C/C++ only through the HOST_CC/HOST_CXX
+            # shims it hands to build scripts, and an explicit CC routes cc-rs around them;
+            # cc-rs falls back to `cc` from PATH, which is the same gcc wrapper.
+            unset CC CXX
             if [ -e .env ]; then
               source "$PWD/x/load-dotenv-safe.sh" .env
             fi
