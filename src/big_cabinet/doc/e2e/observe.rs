@@ -242,8 +242,16 @@ async fn a_poll_resumes_across_a_gap_between_calls() {
         .unwrap();
     let mut poll = Poller::doc(node.client(), capability, document.clone());
     assert_eq!(poll.cursor(), 0);
+    // The poll feed is a projection that catches up with writes asynchronously, so a zero-hold
+    // poll right after `create` may answer caught up at cursor 0 before the first row is
+    // projected. Hold until the created row has arrived, then until the feed is caught up.
+    let mut seen_main = false;
     loop {
-        if poll.page(0).await.unwrap().caught_up {
+        let page = poll.page(5_000).await.unwrap();
+        seen_main |= page.events.iter().any(|event| {
+            matches!(event, DatumEvent::Datum { datum_key, .. } if datum_key == &key("main"))
+        });
+        if seen_main && page.caught_up {
             break;
         }
     }
