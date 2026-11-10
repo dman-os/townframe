@@ -637,7 +637,7 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(denied, ClientError::Operation(BlobsError::Denied)));
+    assert!(matches!(denied, ClientError::Method(BlobsError::Denied)));
     let range = node
         .blobs
         .client
@@ -670,7 +670,7 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         .unwrap_err();
     assert!(matches!(
         invalid,
-        ClientError::Operation(BlobsError::InvalidInput { .. })
+        ClientError::Method(BlobsError::InvalidInput { .. })
     ));
     node.authority
         .client
@@ -695,7 +695,7 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(denied, ClientError::Operation(BlobsError::Denied)));
+    assert!(matches!(denied, ClientError::Method(BlobsError::Denied)));
     shutdown(node, stop).await;
 }
 

@@ -879,7 +879,7 @@ impl Node {
 
 fn op<T>(error: ClientError<T>) -> T {
     match error {
-        ClientError::Operation(error) => error,
+        ClientError::Method(error) => error,
         ClientError::Transport { message, .. } => panic!("transport: {message}"),
     }
 }

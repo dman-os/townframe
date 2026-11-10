@@ -673,7 +673,7 @@ impl Egress {
             .await;
         match result {
             Ok(output) => (hyper::StatusCode::OK, output.output),
-            Err(ClientError::Operation(error)) => dispatch_error_response(error),
+            Err(ClientError::Method(error)) => dispatch_error_response(error),
             Err(ClientError::Transport { message, .. }) => {
                 panic!("in-process dispatch transport failed: {message}")
             }

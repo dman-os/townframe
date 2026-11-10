@@ -78,7 +78,7 @@ async fn stream_capacity_is_independent_from_unary_capacity_and_is_released() {
         .await;
     assert!(matches!(
         second,
-        Err(ClientError::Operation(SampleError::Context(
+        Err(ClientError::Method(SampleError::Context(
             ContextError::StreamCapacityExceeded { limit: 1 }
         )))
     ));
@@ -123,7 +123,7 @@ async fn cancelling_the_context_ends_an_admitted_call() {
     context.cancel();
     assert!(matches!(
         blocked.await.expect("writer task"),
-        Err(ClientError::Operation(SampleError::Context(
+        Err(ClientError::Method(SampleError::Context(
             ContextError::Cancelled
         )))
     ));
@@ -176,13 +176,13 @@ async fn adapter_stop_cancels_in_flight_work_and_joins_it() {
 
     assert!(matches!(
         blocked.await.expect("writer task"),
-        Err(ClientError::Operation(SampleError::Context(
+        Err(ClientError::Method(SampleError::Context(
             ContextError::Cancelled
         )))
     ));
     assert!(matches!(
         subscription.recv().await,
-        Err(ClientError::Operation(SampleError::Context(
+        Err(ClientError::Method(SampleError::Context(
             ContextError::Cancelled
         )))
     ));

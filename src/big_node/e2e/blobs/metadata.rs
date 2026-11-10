@@ -174,13 +174,13 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
     ] {
         assert!(matches!(
             read(capability, document.clone()).await,
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         ));
     }
     for write in [false, true] {
         assert!(matches!(
             issuer(exact(content.clone(), write)).await,
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         ));
     }
     let write = |capability| {
@@ -198,7 +198,7 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
     };
     assert!(matches!(
         write(public_cap).await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     write(issuer(exact(public.clone(), true)).await.unwrap())
         .await
@@ -252,7 +252,7 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
         .expect("unlinking metadata does not revoke an existing exact-document capability");
     assert!(matches!(
         issuer(exact(public, false)).await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     read(issuer(exact(later.clone(), false)).await.unwrap(), later)
         .await

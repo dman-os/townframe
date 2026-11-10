@@ -145,7 +145,7 @@ impl LedgerAccess {
 fn ledger_error(error: GrantError) -> AccessError {
     match error {
         GrantError::Storage(error) => AccessError::Unavailable(error.to_string()),
-        GrantError::Authority(ClientError::Operation(error)) => {
+        GrantError::Authority(ClientError::Method(error)) => {
             AccessError::Refused(error.to_string())
         }
         GrantError::Authority(ClientError::Transport { message, .. }) => {

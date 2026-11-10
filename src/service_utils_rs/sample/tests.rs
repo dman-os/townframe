@@ -181,7 +181,7 @@ async fn empty_value_is_rejected_before_the_source_is_touched() {
         .await;
     assert!(matches!(
         rejected,
-        Err(ClientError::Operation(SampleError::InvalidValue { .. }))
+        Err(ClientError::Method(SampleError::InvalidValue { .. }))
     ));
     let page = client
         .call(
@@ -283,7 +283,7 @@ async fn lagged_subscriber_gets_a_terminal_error_and_the_stream_ends() {
     assert!(delivered <= 2, "buffered events only: {delivered}");
     assert!(matches!(
         terminal,
-        Err(ClientError::Operation(SampleError::SubscriptionLagged { skipped })) if skipped > 0
+        Err(ClientError::Method(SampleError::SubscriptionLagged { skipped })) if skipped > 0
     ));
     assert!(matches!(lagging.recv().await, Ok(None)));
     stop.stop().await;
@@ -324,13 +324,13 @@ async fn stop_fails_a_write_waiting_on_the_projector_and_joins_everything() {
     stop.stop().await;
     assert!(matches!(
         blocked.await.expect("writer task"),
-        Err(ClientError::Operation(SampleError::Context(
+        Err(ClientError::Method(SampleError::Context(
             ContextError::Cancelled
         )))
     ));
     assert!(matches!(
         subscription.recv().await,
-        Err(ClientError::Operation(SampleError::Context(
+        Err(ClientError::Method(SampleError::Context(
             ContextError::Cancelled
         )))
     ));

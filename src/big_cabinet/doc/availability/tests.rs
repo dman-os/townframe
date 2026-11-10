@@ -166,7 +166,7 @@ impl Node {
             .call(RequestContext::root(), params)
             .await
             .map_err(|error| match error {
-                ClientError::Operation(error) => error,
+                ClientError::Method(error) => error,
                 error => panic!("availability transport failed: {error:?}"),
             })
     }

@@ -64,7 +64,7 @@ pub enum XrpcClientError<E> {
 impl<E> From<XrpcClientError<E>> for ClientError<E> {
     fn from(error: XrpcClientError<E>) -> Self {
         match error {
-            XrpcClientError::Domain { error, .. } => Self::Operation(error),
+            XrpcClientError::Domain { error, .. } => Self::Method(error),
             XrpcClientError::Encode(message) => Self::Transport {
                 message,
                 outcome_unknown: false,

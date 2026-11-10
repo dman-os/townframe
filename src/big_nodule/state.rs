@@ -271,7 +271,7 @@ impl InitRoute {
                 .await
                 .map(drop)
                 .map_err(|error| match error {
-                    ClientError::Operation(error) => format!("`{target}`: {error}"),
+                    ClientError::Method(error) => format!("`{target}`: {error}"),
                     // Dispatch outlives the nodule service, and shutdown cancels the task
                     // that makes this call first.
                     ClientError::Transport { message, .. } => {
@@ -1948,7 +1948,7 @@ impl Stores {
             .await
         {
             Ok(_) => Ok(true),
-            Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => Ok(false),
+            Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => Ok(false),
             Err(error) => Err(crate::authority_error(error)),
         }
     }
@@ -1965,9 +1965,7 @@ impl Stores {
             )
             .await
         {
-            Ok(()) | Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {
-                Ok(())
-            }
+            Ok(()) | Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => Ok(()),
             Err(error) => Err(crate::authority_error(error)),
         }
     }
@@ -2061,29 +2059,29 @@ impl Stores {
 
 fn dispatch_error(error: ClientError<DispatchError>) -> NodulesError {
     match error {
-        ClientError::Operation(DispatchError::Context(error)) => error.into(),
-        ClientError::Operation(DispatchError::Authority(error)) => NodulesError::Authority(error),
-        ClientError::Operation(DispatchError::AuthorityUnavailable(msg)) => {
+        ClientError::Method(DispatchError::Context(error)) => error.into(),
+        ClientError::Method(DispatchError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(DispatchError::AuthorityUnavailable(msg)) => {
             NodulesError::AuthorityUnavailable(msg)
         }
         // Dispatch refuses a scope wider than the authority the service was granted.
-        ClientError::Operation(DispatchError::Denied) => NodulesError::Rejected(
+        ClientError::Method(DispatchError::Denied) => NodulesError::Rejected(
             "the operation grant exceeds the dispatch authority granted to the nodule service"
                 .into(),
         ),
-        ClientError::Operation(other) => NodulesError::Rejected(other.to_string()),
+        ClientError::Method(other) => NodulesError::Rejected(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }
 
 fn drawers_error(error: ClientError<DrawersError>) -> NodulesError {
     match error {
-        ClientError::Operation(DrawersError::Context(error)) => error.into(),
-        ClientError::Operation(DrawersError::Authority(error)) => NodulesError::Authority(error),
-        ClientError::Operation(DrawersError::AuthorityUnavailable(msg)) => {
+        ClientError::Method(DrawersError::Context(error)) => error.into(),
+        ClientError::Method(DrawersError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(DrawersError::AuthorityUnavailable(msg)) => {
             NodulesError::AuthorityUnavailable(msg)
         }
-        ClientError::Operation(other) => NodulesError::Rejected(other.to_string()),
+        ClientError::Method(other) => NodulesError::Rejected(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }

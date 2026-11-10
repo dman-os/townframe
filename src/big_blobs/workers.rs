@@ -111,7 +111,7 @@ impl MetadataCapabilities {
         let result = operation(capability).await;
         if matches!(
             result,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Denied | DocsError::Access(_) | DocsError::AuthorityUnavailable(_)
             ))
         ) {
@@ -390,8 +390,8 @@ fn spawn_worker(
                                 else { (report.retained, pins, pending || !report.deferred.is_empty()) }
                             }
                         }
-                        Err(ClientError::Operation(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
-                        Err(ClientError::Operation(error @ (DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
+                        Err(ClientError::Method(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
+                        Err(ClientError::Method(error @ (DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
                             tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read not ready; parking"); // INSTR
                             queue.finish(&document, generation, true).await?;
                             continue;
@@ -588,7 +588,7 @@ async fn poll_document(
         };
         let page = match page {
             Ok(page) => page,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Denied
                 | DocsError::DocNotFound
                 | DocsError::Pending { .. }

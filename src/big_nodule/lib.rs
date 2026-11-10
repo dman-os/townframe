@@ -139,26 +139,26 @@ type Res<T> = std::result::Result<T, NodulesError>;
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> NodulesError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => NodulesError::Denied,
-        ClientError::Operation(error) => NodulesError::Authority(error),
+        ClientError::Method(error) => NodulesError::Authority(error),
         ClientError::Transport { message, .. } => NodulesError::AuthorityUnavailable(message),
     }
 }
 
 pub(crate) fn docs_error(error: ClientError<DocsError>) -> NodulesError {
     match error {
-        ClientError::Operation(DocsError::Context(error)) => error.into(),
-        ClientError::Operation(DocsError::Authority(error)) => NodulesError::Authority(error),
-        ClientError::Operation(DocsError::AuthorityUnavailable(msg)) => {
+        ClientError::Method(DocsError::Context(error)) => error.into(),
+        ClientError::Method(DocsError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(DocsError::AuthorityUnavailable(msg)) => {
             NodulesError::AuthorityUnavailable(msg)
         }
-        ClientError::Operation(DocsError::Denied) => NodulesError::Denied,
-        ClientError::Operation(other) => NodulesError::Storage(other.to_string()),
+        ClientError::Method(DocsError::Denied) => NodulesError::Denied,
+        ClientError::Method(other) => NodulesError::Storage(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }

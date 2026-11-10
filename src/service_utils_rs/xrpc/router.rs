@@ -52,10 +52,10 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 
 /// A registered operation handler. [`XrpcRouter::mount`] builds one from a
-/// hosted [`Handler`]; [`XrpcOperationHandler::typed`] is the escape hatch for
+/// hosted [`Handler`]; [`XrpcMethodHandler::typed`] is the escape hatch for
 /// an operation that is not hosted through this crate.
 #[derive(Clone)]
-pub struct XrpcOperationHandler {
+pub struct XrpcMethodHandler {
     operation: XrpcMethod,
     handler: Arc<dyn Fn(XrpcRequest) -> HandlerFuture + Send + Sync>,
 }
@@ -63,16 +63,16 @@ pub struct XrpcOperationHandler {
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<crate::ResponseEnvelope<Value>, XrpcHandlerError>> + Send>>;
 
-impl std::fmt::Debug for XrpcOperationHandler {
+impl std::fmt::Debug for XrpcMethodHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("XrpcOperationHandler")
+            .debug_struct("XrpcMethodHandler")
             .field("operation", &self.operation)
             .finish_non_exhaustive()
     }
 }
 
-impl XrpcOperationHandler {
+impl XrpcMethodHandler {
     pub fn new<F, Fut, O>(operation: XrpcMethod, handler: F) -> Self
     where
         F: Fn(XrpcRequest) -> Fut + Send + Sync + 'static,
@@ -215,8 +215,8 @@ impl XrpcSubscriptionHandler {
 /// A bounded HTTP router for registered unary XRPC operations.
 #[derive(Clone, Debug)]
 pub struct XrpcRouter {
-    operations: Arc<BTreeMap<String, XrpcOperationHandler>>,
-    fallback: Option<XrpcOperationHandler>,
+    operations: Arc<BTreeMap<String, XrpcMethodHandler>>,
+    fallback: Option<XrpcMethodHandler>,
     subscriptions: Arc<BTreeMap<String, XrpcSubscriptionHandler>>,
     max_body_bytes: usize,
     admission: Arc<Semaphore>,
@@ -313,7 +313,7 @@ impl XrpcRouter {
         P: Unary,
         H: Handler<P>,
     {
-        self.register(XrpcOperationHandler::new(P::XRPC, move |request| {
+        self.register(XrpcMethodHandler::new(P::XRPC, move |request| {
             let host = Arc::clone(&host);
             async move {
                 let params: P = match P::XRPC.input {
@@ -404,7 +404,7 @@ impl XrpcRouter {
         Ok(())
     }
 
-    pub fn register(&mut self, handler: XrpcOperationHandler) -> Result<(), XrpcRegistrationError> {
+    pub fn register(&mut self, handler: XrpcMethodHandler) -> Result<(), XrpcRegistrationError> {
         if handler.operation().kind == MethodKind::Subscription {
             return Err(XrpcRegistrationError::SubscriptionUnsupported);
         }
@@ -423,7 +423,7 @@ impl XrpcRouter {
     /// operation, and its JSON body is the input. Registered operations take precedence.
     pub fn register_fallback(
         &mut self,
-        handler: XrpcOperationHandler,
+        handler: XrpcMethodHandler,
     ) -> Result<(), XrpcRegistrationError> {
         let operation = handler.operation();
         if operation.kind != MethodKind::Procedure {

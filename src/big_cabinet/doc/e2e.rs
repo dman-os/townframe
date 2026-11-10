@@ -459,7 +459,7 @@ impl Node {
 
 fn op<T>(result: Result<T, ClientError<DocsError>>) -> Result<T, DocsError> {
     result.map_err(|error| match error {
-        ClientError::Operation(error) => error,
+        ClientError::Method(error) => error,
         ClientError::Transport { message, .. } => panic!("transport: {message}"),
     })
 }

@@ -87,7 +87,7 @@ where
                 Arc::clone(host).route_inline(message).await;
                 rx.await
                     .map_err(|error| ClientError::transport(error, false))?
-                    .map_err(ClientError::Operation)
+                    .map_err(ClientError::Method)
             }
             Self::Irpc(client) => {
                 let _scope = request.context.cancellation.begin_transport_request()?;
@@ -97,7 +97,7 @@ where
                     .map_err(|error| {
                         ClientError::transport(error, P::XRPC.kind.transport_outcome_unknown())
                     })?
-                    .map_err(ClientError::Operation)
+                    .map_err(ClientError::Method)
             }
             Self::Xrpc(client) => {
                 request.context.validate()?;
@@ -173,7 +173,7 @@ fn frames<P: Subscription>(
     let frames = futures::stream::unfold(receiver, |mut receiver| async move {
         let frame = match receiver.recv().await {
             Ok(Some(Ok(frame))) => Ok(frame),
-            Ok(Some(Err(error))) => Err(ClientError::Operation(error)),
+            Ok(Some(Err(error))) => Err(ClientError::Method(error)),
             Ok(None) => return None,
             Err(error) => Err(ClientError::transport(error, false)),
         };

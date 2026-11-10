@@ -77,13 +77,13 @@ type Res<T> = std::result::Result<T, DispatchError>;
 
 fn authority_error(error: ClientError<AuthorityServiceError>) -> DispatchError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => DispatchError::Denied,
-        ClientError::Operation(error) => DispatchError::Authority(error),
+        ClientError::Method(error) => DispatchError::Authority(error),
         ClientError::Transport { message, .. } => DispatchError::AuthorityUnavailable(message),
     }
 }

@@ -99,7 +99,7 @@ where
                         .expect("operation output must serialize")),
                     // The operation's own error travels in the standard XRPC domain envelope,
                     // as it does when the same operation is served over HTTP.
-                    Err(ClientError::Operation(error)) => Err(ProviderError::Failed {
+                    Err(ClientError::Method(error)) => Err(ProviderError::Failed {
                         status: DOMAIN_ERROR_STATUS.as_u16(),
                         body: serde_json::to_value(
                             XrpcErrorEnvelope::new(

@@ -91,7 +91,7 @@ where
         .call(RequestContext::root(), params)
         .await
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
         })
 }

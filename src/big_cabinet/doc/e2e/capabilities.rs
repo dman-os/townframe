@@ -478,7 +478,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                     }
                 )
                 .await,
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         ));
     }
     node.stop().await;
@@ -1435,7 +1435,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
                     },
                 )
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         );
@@ -1514,7 +1514,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
                     },
                 )
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         );
@@ -1661,7 +1661,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
         }
         assert_eq!(
             poll.page(0).await,
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         );
         node.stop().await;
     }

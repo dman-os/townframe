@@ -345,7 +345,7 @@ async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_datum_querie
     .await;
     assert_eq!(
         carol_query.unwrap_err(),
-        ClientError::Operation(DocsError::Denied)
+        ClientError::Method(DocsError::Denied)
     );
 
     fx.node.stop().await;
@@ -401,7 +401,7 @@ async fn drawer_scoped_datum_queries_obey_containment_and_attenuation() {
     .await;
     assert_eq!(
         bob_unscoped.unwrap_err(),
-        ClientError::Operation(DocsError::Denied)
+        ClientError::Method(DocsError::Denied)
     );
 
     // Through `other`, Bob reaches `doc_outside` and `doc_relay_entry`: the attenuation of
@@ -567,7 +567,7 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
             )
             .await
             .unwrap_err(),
-        ClientError::Operation(DocsError::Denied),
+        ClientError::Method(DocsError::Denied),
     );
 
     fx.node.stop().await;
@@ -978,7 +978,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     let cursor = poll.cursor();
     assert_eq!(
         poll.next().await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     );
     assert_eq!(
         poll.cursor(),
@@ -994,7 +994,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .page(0)
         .await;
     assert!(
-        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        matches!(refused, Err(ClientError::Method(DocsError::Denied))),
         "regrant must not revive the withdrawn capability"
     );
     let mut poll = crate::test_poll::Poller::new(

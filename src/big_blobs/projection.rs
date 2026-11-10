@@ -358,7 +358,7 @@ impl BlobProjection {
                     Ok(read) => read,
                     Err(
                         ClientError::Transport { .. }
-                        | ClientError::Operation(
+                        | ClientError::Method(
                             DocsError::Denied
                             | DocsError::Authority(
                                 AuthorityServiceError::InvalidCapability

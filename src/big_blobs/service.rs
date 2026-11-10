@@ -277,8 +277,8 @@ impl BlobService {
             .call(context.child(), InspectCapability { capability })
             .await
             .map_err(|error| match error {
-                ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-                ClientError::Operation(
+                ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+                ClientError::Method(
                     AuthorityServiceError::InvalidCapability | AuthorityServiceError::Unauthorized,
                 ) => BlobsError::Denied,
                 other => storage_error(other),

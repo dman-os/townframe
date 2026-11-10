@@ -169,7 +169,7 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
         }
         assert!(matches!(
             creation.await.unwrap(),
-            Err(ClientError::Operation(DocsError::Access(_)))
+            Err(ClientError::Method(DocsError::Access(_)))
         ));
         node.stop_services().await;
         drop(resume);

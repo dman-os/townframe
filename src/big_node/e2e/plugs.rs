@@ -43,7 +43,7 @@ pub(super) fn operator(node: &BigNode) -> Authorization {
 
 fn operation<E>(error: ClientError<E>) -> E {
     match error {
-        ClientError::Operation(error) => error,
+        ClientError::Method(error) => error,
         ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
     }
 }

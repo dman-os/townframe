@@ -97,7 +97,7 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
         .page(0)
         .await;
     assert!(
-        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        matches!(refused, Err(ClientError::Method(DocsError::Denied))),
         "{refused:?}"
     );
 
@@ -111,7 +111,7 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
     .page(0)
     .await;
     assert!(
-        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        matches!(refused, Err(ClientError::Method(DocsError::Denied))),
         "{refused:?}"
     );
 

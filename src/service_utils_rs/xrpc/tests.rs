@@ -193,7 +193,7 @@ async fn test_server() -> (
 ) {
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             |context, metadata, params: EchoParams| async move {
                 Ok(Output {
@@ -206,7 +206,7 @@ async fn test_server() -> (
         ))
         .expect("query registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             |context, metadata, params: EchoParams| async move {
                 if params.value == "pending" {
@@ -228,7 +228,7 @@ async fn test_server() -> (
         ))
         .expect("procedure registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             NUMERIC_QUERY_OPERATION,
             |_context, _metadata, params: NumericParams| async move {
                 Ok(NumericOutput {
@@ -986,7 +986,7 @@ async fn blocked_fragmented_request_drops_on_shutdown_before_handler() {
     router.observe_body_drop(Arc::clone(&body_dropped));
     let handler_invoked = Arc::clone(&invoked);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             handler_invoked.store(true, Ordering::Release);
             async { Ok(json!({"value":"late"})) }
         }))
@@ -1050,7 +1050,7 @@ async fn peer_disconnect_drops_blocked_body_and_recovers_capacity() {
     router.observe_body_drop_notify(Arc::clone(&body_dropped));
     let handler_invoked = Arc::clone(&invoked);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             handler_invoked.store(true, Ordering::Release);
             async { Ok(json!({"value":"complete"})) }
         }))
@@ -1106,7 +1106,7 @@ async fn body_deadline_drops_incomplete_upload_and_recovers_capacity() {
     router.observe_body_drop(Arc::clone(&body_dropped));
     let handler_invoked = Arc::clone(&invoked);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             handler_invoked.store(true, Ordering::Release);
             async { Ok(json!({"value":"complete"})) }
         }))
@@ -1172,7 +1172,7 @@ async fn handler_timeout_drops_guard_before_receipt() {
     let handler_started = Arc::clone(&started);
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             let active = Arc::clone(&handler_active);
             let started = Arc::clone(&handler_started);
             async move {
@@ -1325,7 +1325,7 @@ async fn shutdown_cancels_and_joins_pending_connection() {
     let handler_completed = Arc::clone(&completed);
     let handler_started = Arc::clone(&started);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             if let Some(sender) = handler_started.lock().expect("started lock").take() {
                 sender.send(()).expect("started receiver");
             }
@@ -1532,7 +1532,7 @@ async fn listener_failure_aborts_and_joins_active_connection() {
     let handler_started = Arc::clone(&started);
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             if let Some(sender) = handler_started.lock().expect("started lock").take() {
                 sender.send(()).expect("started receiver");
             }
@@ -1611,7 +1611,7 @@ async fn connection_capacity_waits_before_accepting_more_peers() {
 async fn repeated_normal_connections_complete_under_connection_bound() {
     let mut router = XrpcRouter::new(1024);
     router
-            .register(XrpcOperationHandler::typed(
+            .register(XrpcMethodHandler::typed(
                 QUERY_OPERATION,
                 |_context, _metadata, params: EchoParams| async move {
                     Ok(json!({"value": params.value}))
@@ -1652,13 +1652,13 @@ async fn exhausted_long_poll_pool_still_admits_ordinary_requests() {
     let release = Arc::new(tokio::sync::Notify::new());
     let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             LONG_POLL_OPERATION,
             holding_handler(Arc::clone(&started), Arc::clone(&release)),
         ))
         .expect("long-poll registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             |_context, _metadata, params: EchoParams| async move {
                 Ok(json!({"value": params.value}))
@@ -1696,13 +1696,13 @@ async fn exhausted_ordinary_requests_still_admit_long_polls() {
     let release = Arc::new(tokio::sync::Notify::new());
     let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             holding_handler(Arc::clone(&started), Arc::clone(&release)),
         ))
         .expect("query registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             LONG_POLL_OPERATION,
             |_context, _metadata, _params: EchoParams| async move {
                 Ok(json!({"value": "polled"}))
@@ -1743,13 +1743,13 @@ async fn each_admission_class_refuses_when_its_own_pool_is_exhausted() {
     let long_poll_release = Arc::new(tokio::sync::Notify::new());
     let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             holding_handler(Arc::clone(&ordinary_started), Arc::clone(&ordinary_release)),
         ))
         .expect("query registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             LONG_POLL_OPERATION,
             holding_handler(
                 Arc::clone(&long_poll_started),
@@ -1819,7 +1819,7 @@ async fn unsupported_subscription_is_explicit() {
     let mut router = XrpcRouter::new(1024);
     assert_eq!(
         router
-            .register(XrpcOperationHandler::new(subscription, |_| async {
+            .register(XrpcMethodHandler::new(subscription, |_| async {
                 Ok(json!({}))
             }))
             .expect_err("subscription must be rejected"),
@@ -1886,21 +1886,21 @@ async fn websocket_subscription_streams_hosted_events() {
 async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() {
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             |_context, _metadata, _params: Value| async move { Ok(json!("registered")) },
         ))
         .unwrap();
     assert_eq!(
         router
-            .register_fallback(XrpcOperationHandler::new(QUERY_OPERATION, |_| async {
+            .register_fallback(XrpcMethodHandler::new(QUERY_OPERATION, |_| async {
                 Ok::<_, XrpcHandlerError>(json!(null))
             }))
             .unwrap_err(),
         XrpcRegistrationError::FallbackNotProcedure
     );
     let fallback = || {
-        XrpcOperationHandler::new(
+        XrpcMethodHandler::new(
             XrpcMethod::procedure(""),
             |request: XrpcRequest| async move {
                 Ok::<_, XrpcHandlerError>(json!({ "nsid": request.nsid, "input": request.params }))
@@ -1951,7 +1951,7 @@ async fn the_unix_acceptor_reports_peer_credentials_to_the_handlers() {
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::new(
+        .register(XrpcMethodHandler::new(
             PROCEDURE_OPERATION,
             |_request| async move { Ok::<_, XrpcHandlerError>(json!("ok")) },
         ))

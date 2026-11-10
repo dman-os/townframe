@@ -22,7 +22,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc::XrpcErrorEnvelope;
 use service_utils_rs::xrpc::XrpcHandlerError;
-use service_utils_rs::xrpc::XrpcOperationHandler;
+use service_utils_rs::xrpc::XrpcMethodHandler;
 
 /// What a request that presents no bearer token is admitted as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub fn xrpc_router(
 ) -> XrpcRouter {
     let mut router = XrpcRouter::new(max_body_bytes);
     router
-        .register_fallback(XrpcOperationHandler::new(
+        .register_fallback(XrpcMethodHandler::new(
             method_core::XrpcMethod::procedure(""),
             move |request| {
                 let dispatch = dispatch.clone();
@@ -95,7 +95,7 @@ pub fn xrpc_router(
 fn refusal(error: ClientError<DispatchError>) -> XrpcHandlerError {
     use http::StatusCode;
     let error = match error {
-        ClientError::Operation(error) => error,
+        ClientError::Method(error) => error,
         ClientError::Transport { message, .. } => return XrpcHandlerError::Unavailable(message),
     };
     match error {

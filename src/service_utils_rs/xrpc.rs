@@ -27,7 +27,7 @@ mod unix;
 pub use iroh::IrohXrpcProtocolHandler;
 #[cfg(feature = "iroh-http")]
 pub use iroh::iroh_protocol_handler;
-pub use router::XrpcOperationHandler;
+pub use router::XrpcMethodHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
 pub use router::XrpcSubscriptionHandler;

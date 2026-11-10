@@ -107,8 +107,8 @@ pub enum ClientError<E> {
         message: String,
         outcome_unknown: bool,
     },
-    #[error("operation failed: {0}")]
-    Operation(E),
+    #[error("method failed: {0}")]
+    Method(E),
 }
 
 impl<E> ClientError<E> {
@@ -122,6 +122,6 @@ impl<E> ClientError<E> {
 
 impl<E: From<ContextError>> From<ContextError> for ClientError<E> {
     fn from(error: ContextError) -> Self {
-        Self::Operation(E::from(error))
+        Self::Method(E::from(error))
     }
 }

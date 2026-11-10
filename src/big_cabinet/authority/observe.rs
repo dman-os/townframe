@@ -198,7 +198,7 @@ mod tests {
                 .subscribe(RequestContext::root(), ObserveCapability { capability })
                 .await
             {
-                Err(ClientError::Operation(error)) => assert_eq!(error, expected),
+                Err(ClientError::Method(error)) => assert_eq!(error, expected),
                 Err(error) => panic!("unexpected subscription failure: {error:?}"),
                 Ok(_) => panic!("invalid observation was admitted"),
             }
@@ -215,7 +215,7 @@ mod tests {
                     }
                 )
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         ));
@@ -230,7 +230,7 @@ mod tests {
                     }
                 )
                 .await,
-            Err(ClientError::Operation(AuthorityServiceError::Unauthorized))
+            Err(ClientError::Method(AuthorityServiceError::Unauthorized))
         ));
         assert!(!changes.has_changed().unwrap());
         stop.stop().await;

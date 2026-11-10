@@ -120,7 +120,7 @@ async fn cancelled_context_fails_the_call_before_the_transport_answers() {
                 }
             )
             .await,
-        Err(ClientError::Operation(ContextError::Cancelled))
+        Err(ClientError::Method(ContextError::Cancelled))
     );
 }
 
@@ -206,7 +206,7 @@ async fn xrpc_transport_decodes_domain_errors_and_unparsable_bodies() {
             .call(RequestContext::root(), Record { value: "x".into() })
             .await;
         match (result, expected) {
-            (Err(ClientError::Operation(_)), true) => {}
+            (Err(ClientError::Method(_)), true) => {}
             (
                 Err(ClientError::Transport {
                     message,
@@ -291,7 +291,7 @@ async fn cancellation_preempts_buffered_events_and_is_terminal() {
     context.cancel();
     assert_eq!(
         stream.recv().await,
-        Err(ClientError::Operation(ContextError::Cancelled))
+        Err(ClientError::Method(ContextError::Cancelled))
     );
     assert_eq!(stream.recv().await.unwrap(), None);
 }

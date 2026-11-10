@@ -433,7 +433,7 @@ async fn idle_and_backpressured_streams_keep_the_request_span_and_deadline() {
                 assert!(span_context(&polls[0]).is_valid());
                 assert_eq!(
                     events.recv().await,
-                    Err(ClientError::Operation(ContextError::DeadlineExceeded))
+                    Err(ClientError::Method(ContextError::DeadlineExceeded))
                 );
                 assert!(events.next().await.is_none());
                 runtime.stop.stop().await;
@@ -471,17 +471,17 @@ async fn deadlines_cover_client_queueing_and_subscription_establishment() {
     let context = RequestContext::root().with_time_budget(Duration::from_secs(5));
     assert_eq!(
         client.call(context, Probe { nested: false }).await,
-        Err(ClientError::Operation(ContextError::DeadlineExceeded))
+        Err(ClientError::Method(ContextError::DeadlineExceeded))
     );
     let context = RequestContext::root().with_time_budget(Duration::from_secs(5));
     assert!(matches!(
         client.subscribe(context, Feed { ready: false }).await,
-        Err(ClientError::Operation(ContextError::DeadlineExceeded))
+        Err(ClientError::Method(ContextError::DeadlineExceeded))
     ));
     pending_context.cancel();
     assert_eq!(
         pending.await.unwrap(),
-        Err(ClientError::Operation(ContextError::Cancelled))
+        Err(ClientError::Method(ContextError::Cancelled))
     );
 }
 

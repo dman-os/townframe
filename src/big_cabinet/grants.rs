@@ -278,7 +278,7 @@ impl State {
                 .call(context.child(), InspectCapability { capability: source })
                 .await?;
             if !cap.rights.contains(Rights::DELEGATE) || !rights.is_subset_of(cap.rights) {
-                return Err(ClientError::Operation(AuthorityServiceError::Escalation).into());
+                return Err(ClientError::Method(AuthorityServiceError::Escalation).into());
             }
             if self
                 .temporary
@@ -384,7 +384,7 @@ impl State {
                             rights = rights | held;
                             dependencies.push(source);
                         }
-                        Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {
+                        Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => {
                             grants.remove(&source);
                         }
                         Err(error) => return Err(error.into()),

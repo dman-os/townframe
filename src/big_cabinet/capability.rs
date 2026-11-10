@@ -83,8 +83,8 @@ impl DomainCapabilities {
                     )
                     .await
                 {
-                    Ok(())
-                    | Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {}
+                    Ok(()) | Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => {
+                    }
                     Err(error) => panic!("failed to retire domain namespace: {error}"),
                 }
             })
@@ -98,14 +98,14 @@ impl DomainCapabilities {
         cap: Capability,
     ) -> Result<Invocation<S>, Error> {
         if cap.issuer_id != self.namespace.namespace_id || !cap.rights.contains(Rights::USE) {
-            return Err(ClientError::Operation(AuthorityServiceError::Unauthorized));
+            return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
         }
         let object = cap
             .object
             .strip_prefix(self.prefix)
-            .ok_or(ClientError::Operation(AuthorityServiceError::Unauthorized))?;
+            .ok_or(ClientError::Method(AuthorityServiceError::Unauthorized))?;
         let bound: BoundScope<S> = serde_json::from_str(object)
-            .map_err(|_| ClientError::Operation(AuthorityServiceError::Unauthorized))?;
+            .map_err(|_| ClientError::Method(AuthorityServiceError::Unauthorized))?;
         let signer = self
             .authority
             .call(
@@ -185,7 +185,7 @@ impl DomainCapabilities {
         mut dependencies: Vec<CapId>,
     ) -> Result<Capability, Error> {
         if !caller.rights.contains(Rights::NARROW) || !rights.is_subset_of(caller.rights) {
-            return Err(ClientError::Operation(AuthorityServiceError::Escalation));
+            return Err(ClientError::Method(AuthorityServiceError::Escalation));
         }
         dependencies.push(caller.signer.capability);
         let object = format!(

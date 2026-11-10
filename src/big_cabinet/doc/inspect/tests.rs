@@ -384,7 +384,7 @@ async fn inspect(
         .call(RequestContext::root(), request)
         .await
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("inspection transport: {message}"),
         })
 }
@@ -405,7 +405,7 @@ async fn claims(
         )
         .await
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("claims transport: {message}"),
         })
 }
@@ -758,7 +758,7 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
                 }
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     );
     let mut wrong_scope = request.clone();
     wrong_scope.capability = resource.capability_id;

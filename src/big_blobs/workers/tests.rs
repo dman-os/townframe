@@ -251,12 +251,12 @@ async fn metadata_capabilities_cache_exact_scopes_and_refresh_after_denial_or_po
     let denied: Result<(), _> = metadata
         .call(&document, false, |capability| async move {
             assert_eq!(capability, read);
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         })
         .await;
     assert!(matches!(
         denied,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     assert_ne!(
         metadata
@@ -470,7 +470,7 @@ async fn refused_metadata_mint_preserves_cursor_and_retries_on_policy_change() -
     assert_eq!(mint.document, document);
     assert!(!mint.write);
     mint.reply
-        .send(Err(ClientError::Operation(DocsError::Access(
+        .send(Err(ClientError::Method(DocsError::Access(
             "read grant unavailable".into(),
         ))))
         .unwrap();

@@ -526,7 +526,7 @@ impl Node {
             .call_with(RequestContext::root(), authorization.metadata(), params)
             .await
             .map_err(|error| match error {
-                ClientError::Operation(error) => error,
+                ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
             })
     }
@@ -1082,7 +1082,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 },
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
 
     // Once the operator grants `nodules_actor` Admin on `present`, reconciliation applies the
@@ -1179,7 +1179,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 },
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     let read_cap = node
         .docs
@@ -1246,7 +1246,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 },
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     let readmitted = node
         .admit(operator, plug(example_plug!("photos"), "1.0.0", true))

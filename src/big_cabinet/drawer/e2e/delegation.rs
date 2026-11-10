@@ -471,7 +471,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 )
                 .await
                 .unwrap_err(),
-            ClientError::Operation(AuthorityServiceError::InvalidCapability)
+            ClientError::Method(AuthorityServiceError::InvalidCapability)
         );
     }
     for capability in &doc_caps {
@@ -480,13 +480,13 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 .call(RequestContext::root(), read(*capability))
                 .await
                 .unwrap_err(),
-            ClientError::Operation(DocsError::Denied)
+            ClientError::Method(DocsError::Denied)
         );
     }
     let cursor = poll.cursor();
     assert_eq!(
         poll.next().await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     );
     assert_eq!(
         poll.cursor(),
@@ -529,7 +529,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 None,
             )
             .await,
-        Err(GrantError::Authority(ClientError::Operation(
+        Err(GrantError::Authority(ClientError::Method(
             AuthorityServiceError::InvalidCapability
         )))
     ));
@@ -556,7 +556,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 .call(RequestContext::root(), InspectCapability { capability })
                 .await
                 .unwrap_err(),
-            ClientError::Operation(AuthorityServiceError::InvalidCapability)
+            ClientError::Method(AuthorityServiceError::InvalidCapability)
         );
     }
     for capability in drawer_caps {
@@ -571,7 +571,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 )
                 .await
                 .unwrap_err(),
-            ClientError::Operation(DrawersError::Denied)
+            ClientError::Method(DrawersError::Denied)
         );
     }
     for capability in doc_caps {
@@ -580,7 +580,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
                 .call(RequestContext::root(), read(capability))
                 .await
                 .unwrap_err(),
-            ClientError::Operation(DocsError::Denied)
+            ClientError::Method(DocsError::Denied)
         );
     }
     node.stop().await;
@@ -939,7 +939,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
                 )
                 .await
                 .unwrap_err(),
-            ClientError::Operation(AuthorityServiceError::InvalidCapability)
+            ClientError::Method(AuthorityServiceError::InvalidCapability)
         );
     }
     for scope in scopes {
@@ -1163,7 +1163,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
                 .call(context.child(), InspectCapability { capability })
                 .await
                 .unwrap_err(),
-            ClientError::Operation(AuthorityServiceError::InvalidCapability)
+            ClientError::Method(AuthorityServiceError::InvalidCapability)
         );
     }
     let fresh_drawer_cap = node.mint_drawer(&bob, drawer_scope).await.unwrap();
@@ -1174,11 +1174,11 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     assert_eq!(read(fresh_doc_cap).await.unwrap(), expected_read);
     assert_eq!(
         get(drawer_cap).await.unwrap_err(),
-        ClientError::Operation(DrawersError::Denied)
+        ClientError::Method(DrawersError::Denied)
     );
     assert_eq!(
         read(doc_cap).await.unwrap_err(),
-        ClientError::Operation(DocsError::Denied)
+        ClientError::Method(DocsError::Denied)
     );
     node.stop().await;
 }

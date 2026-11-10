@@ -800,7 +800,7 @@ impl DocumentBlobs {
 
 fn document_error<T>(doc_id: &DocId, error: ClientError<DocsError>) -> Attempt<T> {
     match error {
-        ClientError::Operation(
+        ClientError::Method(
             error @ (DocsError::Denied
             | DocsError::DocNotFound
             | DocsError::UnknownHeads { .. }

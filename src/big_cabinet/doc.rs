@@ -251,13 +251,13 @@ fn committed_change(doc: &Automerge, command: &CommandId) -> Option<ChangeHash> 
 
 fn authority_error(error: ClientError<AuthorityServiceError>) -> DocsError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => DocsError::Denied,
-        ClientError::Operation(error) => DocsError::Authority(error),
+        ClientError::Method(error) => DocsError::Authority(error),
         ClientError::Transport { message, .. } => DocsError::AuthorityUnavailable(message),
     }
 }

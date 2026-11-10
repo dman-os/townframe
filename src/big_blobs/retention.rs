@@ -177,7 +177,7 @@ impl Retention {
             .await
         {
             Ok(read) => Ok(Some(read)),
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Denied
                 | DocsError::DocNotFound
                 | DocsError::Pending { .. }
@@ -623,7 +623,7 @@ impl Retention {
             .await
         {
             Ok(_) => Ok(true),
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Conflict { .. }
                 | DocsError::Denied
                 | DocsError::DocNotFound

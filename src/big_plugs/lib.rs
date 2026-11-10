@@ -112,26 +112,26 @@ type Res<T> = std::result::Result<T, PlugsError>;
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> PlugsError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => PlugsError::Denied,
-        ClientError::Operation(error) => PlugsError::Authority(error),
+        ClientError::Method(error) => PlugsError::Authority(error),
         ClientError::Transport { message, .. } => PlugsError::AuthorityUnavailable(message),
     }
 }
 
 pub(crate) fn docs_error(error: ClientError<DocsError>) -> PlugsError {
     match error {
-        ClientError::Operation(DocsError::Context(error)) => error.into(),
-        ClientError::Operation(DocsError::Authority(error)) => PlugsError::Authority(error),
-        ClientError::Operation(DocsError::AuthorityUnavailable(message)) => {
+        ClientError::Method(DocsError::Context(error)) => error.into(),
+        ClientError::Method(DocsError::Authority(error)) => PlugsError::Authority(error),
+        ClientError::Method(DocsError::AuthorityUnavailable(message)) => {
             PlugsError::AuthorityUnavailable(message)
         }
-        ClientError::Operation(DocsError::Denied) => PlugsError::Denied,
-        ClientError::Operation(other) => PlugsError::Storage(other.to_string()),
+        ClientError::Method(DocsError::Denied) => PlugsError::Denied,
+        ClientError::Method(other) => PlugsError::Storage(other.to_string()),
         ClientError::Transport { message, .. } => PlugsError::Storage(message),
     }
 }

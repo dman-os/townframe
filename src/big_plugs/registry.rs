@@ -831,7 +831,7 @@ impl Registry {
             )
             .await
             .map_err(|error| match error {
-                service_utils_rs::ClientError::Operation(
+                service_utils_rs::ClientError::Method(
                     big_cabinet_core::drawer::protocol::DrawersError::Denied,
                 ) => PlugsError::Denied,
                 other => PlugsError::Storage(other.to_string()),

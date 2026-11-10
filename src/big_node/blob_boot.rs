@@ -122,7 +122,7 @@ pub(super) fn metadata_capability(
                 || !scope.drawers.is_empty()
                 || (scope.read.is_empty() && scope.write.is_empty())
             {
-                return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
+                return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
             }
             for document in scope.read.union(&scope.write) {
                 let known = sql.query(
@@ -135,11 +135,11 @@ pub(super) fn metadata_capability(
                      )",
                     (document.to_string(),),
                 ).await
-                    .map_err(|error| service_utils_rs::ClientError::Operation(DocsError::Repository(error.to_string())))?
+                    .map_err(|error| service_utils_rs::ClientError::Method(DocsError::Repository(error.to_string())))?
                     .one::<bool>()
-                    .map_err(|error| service_utils_rs::ClientError::Operation(DocsError::Repository(error.to_string())))?;
+                    .map_err(|error| service_utils_rs::ClientError::Method(DocsError::Repository(error.to_string())))?;
                 if !known {
-                    return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
+                    return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
                 }
             }
             docs.call_with(

@@ -69,7 +69,7 @@ async fn call(
         .await
         .map(|output| output.output)
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
         })
 }

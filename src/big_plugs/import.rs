@@ -52,7 +52,7 @@ pub enum ImportError {
 
 fn registry_error(error: ClientError<PlugsError>) -> ImportError {
     match error {
-        ClientError::Operation(error) => ImportError::Registry(error),
+        ClientError::Method(error) => ImportError::Registry(error),
         ClientError::Transport { message, .. } => ImportError::Transport(message),
     }
 }

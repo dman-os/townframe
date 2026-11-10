@@ -265,7 +265,7 @@ impl Drawers {
             )
             .await
             .map_err(|error| match error {
-                ClientError::Operation(error) => error,
+                ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => {
                     DrawersError::AuthorityUnavailable(message)
                 }
@@ -383,13 +383,13 @@ pub(crate) fn keyhive_access(access: Access) -> KeyhiveAccess {
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> DrawersError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => DrawersError::Denied,
-        ClientError::Operation(error) => DrawersError::Authority(error),
+        ClientError::Method(error) => DrawersError::Authority(error),
         ClientError::Transport { message, .. } => DrawersError::AuthorityUnavailable(message),
     }
 }
@@ -403,8 +403,8 @@ pub(crate) fn grant_error(error: GrantError) -> DrawersError {
 
 pub(crate) fn docs_error(error: ClientError<DocsError>) -> DrawersError {
     match error {
-        ClientError::Operation(DocsError::Context(error)) => error.into(),
-        ClientError::Operation(error) => DrawersError::Docs(error),
+        ClientError::Method(DocsError::Context(error)) => error.into(),
+        ClientError::Method(error) => DrawersError::Docs(error),
         ClientError::Transport { message, .. } => DrawersError::DocsUnavailable(message),
     }
 }
@@ -936,7 +936,7 @@ impl Core {
                                 .await
                             {
                                 Ok(read) => Ok(Some(read)),
-                                Err(ClientError::Operation(
+                                Err(ClientError::Method(
                                     DocsError::DocNotFound | DocsError::Pending { .. },
                                 )) => Ok(None),
                                 Err(error) => Err(docs_error(error)),

@@ -431,12 +431,12 @@ impl<S: DatumStore> StoreOwner<S> {
                 self.needs_full_refresh = true;
                 return Err(StoreError::DocsUnavailable(message));
             }
-            Ok(Err(ClientError::Operation(DocsError::Context(error))))
+            Ok(Err(ClientError::Method(DocsError::Context(error))))
             | Err(StoreError::Docs(DocsError::Context(error))) => {
                 self.needs_full_refresh = true;
                 return Err(StoreError::Docs(DocsError::Context(error)));
             }
-            Ok(Err(ClientError::Operation(DocsError::Denied))) => {
+            Ok(Err(ClientError::Method(DocsError::Denied))) => {
                 return Err(self.classify_write_denied().await);
             }
             Ok(Err(error)) => return Err(map_client_error(error)),
@@ -856,15 +856,15 @@ where
 
 fn map_client_error(error: ClientError<DocsError>) -> StoreError {
     match error {
-        ClientError::Operation(error) => StoreError::Docs(error),
+        ClientError::Method(error) => StoreError::Docs(error),
         ClientError::Transport { message, .. } => StoreError::DocsUnavailable(message),
     }
 }
 
 fn map_stream_error(error: ClientError<DocsError>) -> StoreError {
     match error {
-        ClientError::Operation(DocsError::Denied) => StoreError::AccessLost,
-        ClientError::Operation(error) => StoreError::Docs(error),
+        ClientError::Method(DocsError::Denied) => StoreError::AccessLost,
+        ClientError::Method(error) => StoreError::Docs(error),
         ClientError::Transport { message, .. } => StoreError::DocsUnavailable(message),
     }
 }

@@ -77,7 +77,7 @@ impl Fixture {
                 .client
                 .call(RequestContext::root(), InspectCapability { capability })
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         ));
@@ -203,7 +203,7 @@ async fn withdrawal_invalidates_old_proofs_and_transitive_derivations() {
     }
     assert!(matches!(
         fixture.mint(proof.dependencies).await,
-        Err(ClientError::Operation(
+        Err(ClientError::Method(
             AuthorityServiceError::InvalidCapability
         ))
     ));
@@ -242,7 +242,7 @@ async fn completed_withdrawal_cannot_be_raced_by_publication() {
         revoked.unwrap();
         match minted {
             Ok(capability) => fixture.assert_dead(capability.capability_id).await,
-            Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {}
+            Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => {}
             Err(error) => panic!("unexpected mint failure: {error}"),
         }
     }
@@ -427,7 +427,7 @@ async fn temporary_delegation_tracks_its_source_without_promoting_to_durable() {
                 Some(weak.capability_id)
             )
             .await,
-        Err(GrantError::Authority(ClientError::Operation(
+        Err(GrantError::Authority(ClientError::Method(
             AuthorityServiceError::Escalation
         )))
     ));
@@ -503,7 +503,7 @@ async fn restart_preserves_standing_grants_without_adopting_live_handles() {
                 }
             )
             .await,
-        Err(ClientError::Operation(
+        Err(ClientError::Method(
             AuthorityServiceError::InvalidCapability
         ))
     ));

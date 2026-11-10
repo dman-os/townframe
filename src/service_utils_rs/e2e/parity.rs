@@ -89,7 +89,7 @@ async fn domain_errors_are_typed_on_every_transport() {
         assert!(
             matches!(
                 rejected,
-                Err(ClientError::Operation(SampleError::InvalidValue { ref message }))
+                Err(ClientError::Method(SampleError::InvalidValue { ref message }))
                     if message == "value cannot be empty"
             ),
             "{name}: {rejected:?}"
@@ -129,7 +129,7 @@ async fn invalid_and_expired_contexts_are_rejected_before_the_handler_on_every_t
             assert!(
                 matches!(
                     result,
-                    Err(ClientError::Operation(SampleError::Context(ref error))) if error == expected
+                    Err(ClientError::Method(SampleError::Context(ref error))) if error == expected
                 ),
                 "{name}/{case}: {result:?}"
             );
@@ -171,7 +171,7 @@ async fn an_in_flight_call_fails_at_its_deadline_on_every_transport() {
             .await;
         assert_eq!(
             result,
-            Err(ClientError::Operation(SampleError::Context(
+            Err(ClientError::Method(SampleError::Context(
                 ContextError::DeadlineExceeded
             ))),
             "{name}"
@@ -195,7 +195,7 @@ async fn subscription_establishment_errors_are_returned_before_the_stream() {
         assert!(
             matches!(
                 result,
-                Err(ClientError::Operation(SampleError::Context(
+                Err(ClientError::Method(SampleError::Context(
                     ContextError::MissingRequestId
                 )))
             ),
@@ -210,7 +210,7 @@ async fn subscription_establishment_errors_are_returned_before_the_stream() {
     assert!(
         matches!(
             result,
-            Err(ClientError::Operation(SampleError::Context(
+            Err(ClientError::Method(SampleError::Context(
                 ContextError::MissingRequestId
             )))
         ),

@@ -23,7 +23,7 @@ pub const service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER: & str
 pub const service_core_rs::xrpc::REQUEST_ID_HEADER: & str
 pub const service_core_rs::xrpc::TIMEOUT_HEADER: & str
 pub const service_core_rs::xrpc::TRACEPARENT_HEADER: & str
-pub enum service_core_rs::operation::ClientError< E > { # [error ("transport failed: {message}")] Transport { message : String , outcome_unknown : bool , }, # [error ("operation failed: {0}")] Operation (E) }
+pub enum service_core_rs::operation::ClientError< E > { # [error ("transport failed: {message}")] Transport { message : String , outcome_unknown : bool , }, # [error ("method failed: {0}")] Method (E) }
 pub enum service_core_rs::operation::EventFrame< E > { Open (ResponseMetadata), Event (E), End }
 pub enum service_core_rs::operation::TransportContext { # [default] Unknown, Direct, Irpc, Http, Iroh { peer : String , } }
 pub enum service_core_rs::xrpc::XrpcDomainDetailsError { # [error ("XRPC domain details cannot redefine reserved field {0}")] ReservedField (& 'static str) }

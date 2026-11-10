@@ -437,7 +437,7 @@ impl Cluster {
             .await
         {
             Ok(receipt) => Some(receipt.doc_id),
-            Err(ClientError::Operation(big_cabinet_core::doc::DocsError::Denied)) => None,
+            Err(ClientError::Method(big_cabinet_core::doc::DocsError::Denied)) => None,
             Err(error) => panic!(
                 "creating a note on {}: {error:?}",
                 self.members[index].nickname
@@ -473,7 +473,7 @@ impl Cluster {
             .await
         {
             Ok(read) => Some(Note(read)),
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 big_cabinet_core::doc::DocsError::DocNotFound
                 | big_cabinet_core::doc::DocsError::Pending { .. },
             )) => None,
@@ -734,7 +734,7 @@ impl Cluster {
             .await;
         let length = match stat {
             Ok(info) => info.expect("stored blob has info").length_octets,
-            Err(ClientError::Operation(big_blobs_core::BlobsError::NotFound)) => return None,
+            Err(ClientError::Method(big_blobs_core::BlobsError::NotFound)) => return None,
             Err(error) => panic!("stat {blob} on {}: {error:?}", self.members[index].nickname),
         };
         let range = node

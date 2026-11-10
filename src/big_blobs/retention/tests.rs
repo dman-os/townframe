@@ -62,7 +62,7 @@ impl DocsStub {
                 Box::pin(async move {
                     let mut state = docs.0.lock().unwrap();
                     if let Some(error) = state.mint_errors.get(&(document.clone(), write)) {
-                        return Err(ClientError::Operation(error.clone()));
+                        return Err(ClientError::Method(error.clone()));
                     }
                     let capability =
                         CapId::from_bytes((state.capabilities.len() as u128 + 1).to_be_bytes());
