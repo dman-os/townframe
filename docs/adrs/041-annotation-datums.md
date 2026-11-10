@@ -71,7 +71,7 @@ A guided review is a set of `section` structures with `order`. Adapters can map 
 
 ## 6. Where annotations live
 
-In an intxt, annotations are one layer (ADR 036 §2) with `docs: tagged`: any document in the drawer holding these tags. A writer puts its annotations in a document it can write, typically a notes document per writer or a shared one, and starts a new one before the ~500-datum update limit (F10). Outside intxts, any drawer can hold annotations the same way.
+In an intxt, annotations are one part (ADR 036 §2), entered by `annotationsEntry/main` and found by tag: any document in the drawer holding these tags. Annotations go into a shared notes document. Every comment is its own UUIDv7 slot, so writers sharing one document never conflict. When the current notes document nears the ~500-datum update limit (F10), the next writer starts a new one, as worktree op logs rotate (ADR 040 §7). A notes document per commenter would only be needed for access (a commenter with no write access to the shared one), not for conflicts. Outside intxts, any drawer can hold annotations the same way.
 
 ## 7. Open questions
 

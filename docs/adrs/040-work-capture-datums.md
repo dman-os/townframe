@@ -21,7 +21,7 @@ agent session ──tool calls──▶ worktree op log ──pins──▶ file
 - **Git and jj objects** are keyed by their own identifiers and are the same datums whichever worktree observed them. What links them to content is the worktree op that observed them, which pins that worktree's file docs.
 - **Agent sessions** reference the worktree ops their tool calls caused. A session belongs to no worktree.
 
-This is a data arrangement, not a product decision: an intxt picks which of these layers it includes (ADR 036 §2), and a review of "one branch" is one reading of them.
+This is a data arrangement, not a product decision: an intxt picks which of these parts it includes through entry datums (`repoEntry`, `worktreeEntry`, `sessionEntry`; ADR 036 §2), and a review of "one branch" is one reading of them.
 
 ## 2. Repositories and clones
 
@@ -152,7 +152,7 @@ How the datums above split into documents. Each split has a reason: one writer p
 | File | `path`, `note`, `file` provenance | that worktree's recorder | one per path an op touched |
 | Session | `agentSession/main`, `promptTurn/<id>`, `plan/main` | the recorder of that harness | one per session, subagent and continuation |
 
-For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 40 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log, 30 file and 6 session documents, plus the intxt's descriptor and a notes document per commenter (ADR 041).
+For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 40 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log, 30 file and 6 session documents, plus the intxt's descriptor and a shared notes document (ADR 041).
 
 **Readers must expect gaps.** An intxt spread over many documents, some in other drawers, is never guaranteed to arrive whole or at once: a file doc may be missing, a session may be private, a pin may name heads not yet synced. Readers render what resolves and mark the rest, as a browser renders a page with a broken image (ADR 036 §1, ADR 035 §2.1).
 

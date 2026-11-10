@@ -17,11 +17,11 @@ Every vocabulary inside an intxt follows four rules:
 3. **Hand-writable** (D23). An agent can create or answer any of these datums by writing the JSON itself. No field requires a computation the agent can't do; it may need to read a value to copy it, never to derive one.
 4. **Authorship is the signature** (ADR 020 §5–§6). No datum carries an author field; the signing actor of a datum's current version is who wrote it. The read API must expose it (ledger L5).
 
-And every reader is robust to gaps: an intxt spans many documents, some in other drawers, and no reader is guaranteed to hold all of them, or all of their history. A missing document, an unreadable layer or a pin naming heads not yet synced is rendered as unresolved, never as an error, as a browser renders a page with a missing image.
+And every reader is robust to gaps: an intxt spans many documents, some in other drawers, and no reader is guaranteed to hold all of them, or all of their history. A missing document, an unreadable part or a pin naming heads not yet synced is rendered as unresolved, never as an error, as a browser renders a page with a missing image.
 
-## 2. Descriptor and layers
+## 2. Descriptor, entries and body
 
-The intxt's descriptor follows the drawer's own design (ADR 019): one datum identifies the intxt, and sibling datums on the same document each describe one aspect of it, in slots named by kind and name, so independent writers add aspects without touching each other.
+The intxt's descriptor follows the drawer's own design (ADR 019): one datum identifies the intxt, and sibling datums on the same document each describe one part of it. There is no generic "layer" datum. Each vocabulary describes its own parts with its own **entry datums**, and the generic **`body`** datum lists them in order, as daybook documents already order their facets.
 
 ```jsonc
 // The drawer's descriptor doc (the DrawerId)
@@ -31,41 +31,38 @@ The intxt's descriptor follows the drawer's own design (ADR 019): one datum iden
   "org.example.intxt/main": { "empty": true },                   // this drawer is an intxt
   "org.example.title/main": { "title": "Datum references move to dtxt:", "description": "markdown, optional" },
 
-  "org.example.intxt.layer/worktree/0193a…": {
-    "contains": ["org.example.work.worktree", "org.example.work.worktreeOp", "org.example.work.file"],
-    "docs": { "$type": "org.example.intxt.layer#listed", "index": "dtxt:datum:zWt/org.example.work.worktree/main" },
-    "dependsOn": ["repo/0193b…"]
-  },
-  "org.example.intxt.layer/repo/0193b…": {
-    "contains": ["org.example.work.gitRepo", "org.example.work.gitCommit", "org.example.work.gitRef"],
-    "docs": { "$type": "org.example.intxt.layer#single", "doc": "zRepo" }
-  },
-  "org.example.intxt.layer/agentSession/eb26ecaa…": {
-    "contains": ["org.example.work.agentSession", "org.example.work.promptTurn"],
-    "docs": { "$type": "org.example.intxt.layer#single", "doc": "zSess" },
-    "dependsOn": ["worktree/0193a…"]
-  },
-  "org.example.intxt.layer/annotations/main": {
-    "contains": ["org.example.comment", "org.example.threadState", "org.example.structure", "org.example.seen"],
-    "docs": { "$type": "org.example.intxt.layer#tagged" }
-  }
+  // entry datums: one per part, each owned by its vocabulary (ADR 040, ADR 041)
+  "org.example.work.worktreeEntry/0193a…":   { "worktree": "dtxt:datum:zWt/org.example.work.worktree/main" },
+  "org.example.work.repoEntry/0193b…":       { "repo": "dtxt:datum:zRepo/org.example.work.gitRepo/0193b…" },
+  "org.example.work.sessionEntry/eb26ecaa…": { "session": "dtxt:datum:zSess/org.example.work.agentSession/main" },
+  "org.example.annotationsEntry/main":       { "empty": true },  // annotations are found by tag across the drawer (ADR 041 §6)
+
+  // the ordered index of the entries
+  "org.example.body/main": { "order": [
+    "dtxt:datum:self/org.example.work.sessionEntry/eb26ecaa…",
+    "dtxt:datum:self/org.example.work.worktreeEntry/0193a…",
+    "dtxt:datum:self/org.example.work.repoEntry/0193b…",
+    "dtxt:datum:self/org.example.annotationsEntry/main"
+  ] }
 }
 ```
 
-- **`intxt/main`** marks the drawer as an intxt. It says nothing else today (`empty: true`, the empty-member convention); intxt-wide fields land beside it when one is needed. Title and description are the generic `title` datum (§5), so anything that shows titles shows an intxt's.
-- **A layer** (`intxt.layer/<kind>/<name>`) is one body of records in the intxt: one worktree's capture, one repo's git objects, one agent session, the discussion. It states:
-  - `contains`: the datum tags a reader finds in it. This is what picks renderers (§4) and tells a reader whether it understands the layer before opening any of its documents.
-  - `docs`: how to find its documents, an open union. `single` names one document. `listed` points at a datum that lists them (a worktree's file docs are listed by its worktree datum, ADR 040). `tagged` means "every document in this drawer holding these tags", found with `PollDatums` over `InDrawer` + `HasTag` (ADR 025), for layers with many writers and no owner, such as comments. New ways (sharded, in another drawer) are new members.
-  - `dependsOn`: the layers whose datums this layer's datums reference, so a reader knows what else to load to resolve them and a writer knows what it must also include when it adds this layer to an intxt.
-- `<kind>` is an open string. It names the kind of layer, which is not a datum tag: a vocabulary may contribute several kinds, and a layer may hold several vocabularies. `<name>` is whatever identifies the instance (a worktree's UUID, a session id, `main`).
-- Each layer is its own slot, so two writers adding different layers never conflict, and two writers adding the same layer write the same slot with equivalent values.
-- A layer whose documents are in another drawer (a private session, L3) uses a `docs` member naming that drawer. Readers without access to it see the layer and an unresolved reference (ADR 035 §2.1).
+- **`intxt/main`** marks the drawer as an intxt. It says nothing else today (`empty: true`, the empty-member convention). Title and description are the generic `title` datum (§5).
+- **An entry datum** names one part of the intxt (a worktree's capture, a repo, an agent session, the discussion) and points at where that part starts with plain datum references. Its tag is the vocabulary's own, so a reader that understands a vocabulary finds its parts by tag, and its schema says what it references. How the vocabulary splits its part into documents, or into other drawers, is its own design; the core only fixes the boundary rules below. Entries are slots keyed by instance, so writers adding different parts never conflict, and two writers adding the same part write equivalent values to one slot.
+- **`body`** (daybook's `Body { order }`, generic) lists the entries in the order readers show them: tab order, section order. It makes discovery one read instead of a tag scan, and it is where a part's position is chosen. Its `order` is an Automerge list (`x-automerge: list`, ADR 021), so concurrent appends by two writers both land. An entry missing from `body` still exists and is shown after the ordered ones; a `body` reference to a missing entry is skipped.
 
-Unknown layer kinds and unknown `docs` members are carried, not operated (lexicon-authoring): a reader lists them and renders their datums generically (§4).
+**Boundary rules** between vocabularies:
+
+1. **References are plain declared datum references** (ADR 035), never dedicated link datums. Declared references are indexed (ADR 035 §2.6), so the graph between parts, including "what else must a reader load to resolve this part", is a query and cannot drift from the data.
+2. **A vocabulary writes only its own documents.** A link lives on the side that knows about it, normally the later or derived one (a comment points at code; a worktree op points at the tool call that caused it); the reverse direction comes from the reference index.
+3. **Unknown entries are carried, not operated** (lexicon-authoring). A reader lists them, follows their references, and renders what it finds generically (§4).
+4. **Parts may live elsewhere.** An entry may point into another drawer (a private session, L3); readers without access see the entry and an unresolved reference.
+
+Cross-part metadata that cannot be derived from references (for example, that a session's review should be shown next to a given worktree) lands beside `order` in `body` or in the entry datums when a vocabulary needs it.
 
 ## 3. Documents
 
-Every document of every layer in the drawer is a roster entry (ADR 019), so it syncs with the drawer and inherits its access. Documents are split by what loads together and what is written together: a reader opens only the layers it shows, and a layer that grows without bound (a long session, a worktree with many files) splits by document, not by datum count. A cabinet document refuses updates to existing datums at about 500 datums until the node lane's alias-scan fix lands (ledger F10), so a vocabulary keeps documents below that or shards.
+Every document of every part in the drawer is a roster entry (ADR 019), so it syncs with the drawer and inherits its access. Documents are split by what loads together and what is written together: a reader opens only the parts it shows, and a part that grows without bound (a long session, a worktree with many files) splits by document, not by datum count. A cabinet document refuses updates to existing datums at about 500 datums until the node lane's alias-scan fix lands (ledger F10), so a vocabulary keeps documents below that or shards.
 
 ## 4. Rendering datums the reader doesn't know
 
@@ -97,17 +94,16 @@ A document holding a `path` and a `note` is a file; a document holding a `title`
 
 ## 6. What needs a nodule
 
-Nothing in the core. Creating an intxt, adding layers and writing datums are plain datum writes through the generic doc methods (D2), from a micro, the CLI, an agent or CI alike. Waiting for change is a `PollDatums` long-poll. A vocabulary may need a nodule for work clients can't do (ADR 040: reading a checkout inside the node).
+Nothing in the core. Creating an intxt, adding entries and writing datums are plain datum writes through the generic doc methods (D2), from a micro, the CLI, an agent or CI alike. Waiting for change is a `PollDatums` long-poll. A vocabulary may need a nodule for work clients can't do (ADR 040: reading a checkout inside the node).
 
 ## 7. Consequences
 
-- The previous descriptor fields `historyDoc`, `notesDoc` and `repo` are gone: layers replace the first two, and repositories are ADR 040 layers, so an intxt can span repos.
+- The previous descriptor fields `historyDoc`, `notesDoc` and `repo` are gone: entry datums and `body` replace the first two, and repositories are ADR 040 entries, so an intxt can span repos.
 - Daybook's generic datums gain Lexicon object shapes in the shared namespace; daybook_core's migration moves its documents to them.
-- The intxt micro reads layers to decide what to show. Its review UI is one set of renderers over ADR 040 and 041 layers.
+- The intxt micro reads `body` and the entries to decide what to show. Its review UI is one set of renderers over ADR 040 and 041 parts.
 
 ## 8. Open questions
 
 1. **Namespace owner** of `title`, `path`, `note`, `comment` and the other generic datums: big_cabinet_core's own vocabulary, or a shared core-datums plug. Tags stay under `org.example` until the project's domain is bought (operator).
 2. **Renderer precedence** when several rows match a tag: configuration, deferred; Clay's settings system can hold it (operator).
-3. **Layer `contains` granularity**: datum tags (as above) or vocabulary ids (one per plug or ADR). Tags are what renderers key on; vocabulary ids are shorter and stable as a vocabulary grows.
-4. **The signer in reads** (ledger L5): `readDatums` returns no signer today; the node lane adds it.
+3. **The signer in reads** (ledger L5): `readDatums` returns no signer today; the node lane adds it.
