@@ -46,6 +46,17 @@ Every request above is one of two kinds.
 and `unobserve` removes the listener on the next render. A node's `MountedData` is captured in
 `onmounted` and dropped when the node leaves the model.
 
+## The rendered model (decided for S12a-2)
+
+`pierre_diffs` owns a document type: an arena of keyed nodes that is the port's DOM. FileDiff
+renders into it, and partial render and row trimming edit it. The structural half of every
+host trait (children, attributes, queries, siblings, slots, node creation and removal, style
+writes) is implemented once, over that document, inside `pierre_diffs`. The platform host
+(Dioxus) supplies only geometry, events, observers, timers and scroll writes, keyed by the
+document's node keys. The Dioxus layer renders the document and attaches listeners to the
+nodes the managers observe. Loading files is host-driven: the host calls FileDiff when the
+files arrive, which triggers the re-render, as upstream's `.then` does.
+
 ## Synchronous reads against async APIs
 
 The traits are synchronous because upstream's are. The cache answers most reads synchronously.
