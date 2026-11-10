@@ -18,6 +18,14 @@ fn head(byte: u8) -> ChangeHash {
     ChangeHash([byte; 32])
 }
 
+fn hex_bytes(text: &str) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap();
+    }
+    bytes
+}
+
 fn node_key() -> MultibaseKey {
     MultibaseKey::try_from([7u8; 32].as_slice()).unwrap()
 }
@@ -211,12 +219,11 @@ fn datum_references_round_trip_without_heads() {
 }
 
 #[test]
-fn heads_are_multibase_sorted_and_pipe_joined() {
+fn heads_are_multibase_in_hash_byte_order_and_pipe_joined() {
     let reference = self_reference(b"main").pinned([head(9), head(2), head(9)]);
     assert_eq!(reference.heads(), &[head(2), head(9)]);
-    let mut texts = [head_text(&head(2)), head_text(&head(9))];
+    let texts = [head_text(&head(2)), head_text(&head(9))];
     assert!(texts.iter().all(|text| text.starts_with('z')));
-    texts.sort();
     let expected = format!(
         "dtxt:datum:self/org.example.note/main?heads={}|{}",
         texts[0], texts[1]
@@ -233,6 +240,30 @@ fn heads_are_multibase_sorted_and_pipe_joined() {
     assert_eq!(
         DatumReference::parse(&shuffled).unwrap().to_string(),
         expected
+    );
+}
+
+#[test]
+fn heads_are_spelled_in_hash_byte_order_even_where_their_text_sorts_otherwise() {
+    // 32-byte values spell as 43 or 44 base58 digits, so string order and byte order disagree
+    // across that boundary: 58^43 - 1 spells as 43 `z`s and 58^43 as `2` and 43 `1`s. The
+    // canonical order is the bytes', which is also the stored `refHeads` order.
+    let low = ChangeHash(hex_bytes(
+        "0edbafda67ca37188cf28263571f03b9716879e4acc9c514ab6727ffffffffff",
+    ));
+    let high = ChangeHash(hex_bytes(
+        "0edbafda67ca37188cf28263571f03b9716879e4acc9c514ab67280000000000",
+    ));
+    assert!(low < high);
+    assert!(head_text(&low) > head_text(&high));
+    let reference = self_reference(b"main").pinned([high, low]);
+    assert_eq!(
+        reference.to_string(),
+        format!(
+            "dtxt:datum:self/org.example.note/main?heads={}|{}",
+            head_text(&low),
+            head_text(&high)
+        )
     );
 }
 

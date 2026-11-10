@@ -391,8 +391,11 @@ impl DatumReference {
             encode_uri_component(go_string_escape(self.key.slot_bytes()).as_bytes(), true),
         )?;
         if !self.heads.is_empty() {
-            let mut heads = self.heads.iter().map(head_text).collect::<Vec<_>>();
-            heads.sort();
+            // `self.heads` is kept in hash-byte order, the canonical order (ADR 035): base58
+            // strings of equal-length values differ in length when they lead with zero bytes, so
+            // sorting the spelled heads would disagree with the bytes and make equal pins spell
+            // differently from their stored `refHeads`.
+            let heads = self.heads.iter().map(head_text).collect::<Vec<_>>();
             write!(formatter, "?{HEADS_KEY}={}", heads.join("|"))?;
         }
         Ok(())
