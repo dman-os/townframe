@@ -827,6 +827,17 @@ impl presentation::HostSurface for TestHost {
             }
         }
     }
+    fn element_command(
+        &mut self,
+        _surface: Resource<Surface>,
+        _element: u32,
+        _command: presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), PresentationError>> {
+        Ok(Err(PresentationError::Unsupported(
+            "element commands".into(),
+        )))
+    }
+
     fn retain(
         &mut self,
         surface: Resource<Surface>,
@@ -1028,6 +1039,33 @@ fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     assert_eq!(sdk_text_edits(&mut dom, second), ["19"]);
     assert!(!dom.edits.contains_key(&first));
     dom.unmount_target(11);
+}
+
+/// A read the host cannot answer comes back as an error reply, which the guest surfaces as the
+/// standard Dioxus `MountedError`, and a value reply decodes. Drives the guest's reply plumbing
+/// directly: a native test has no surface to send a command over.
+#[tokio::test]
+async fn sdk_element_replies_complete_reads_and_surface_errors_as_mounted_errors() {
+    fn offset_x(value: &serde_json::Value) -> f64 {
+        value["x"].as_f64().unwrap()
+    }
+    fn app() -> dioxus_core::Element {
+        dioxus_core::VNode::empty()
+    }
+    let dom = crate::GuestDom::new(app);
+
+    let (answered, wait) = dom.replies.begin();
+    dom.complete_reply(&serde_json::json!({"request": answered, "value": {"x": 3.0, "y": 4.0}}));
+    assert_eq!(crate::guest::settle(wait, offset_x).await.unwrap(), 3.0);
+
+    let (refused, wait) = dom.replies.begin();
+    assert_ne!(answered, refused);
+    dom.complete_reply(&serde_json::json!({"request": refused, "error": "not measurable"}));
+    let error = crate::guest::settle(wait, offset_x).await.unwrap_err();
+    assert!(
+        matches!(error, dioxus_html::MountedError::OperationFailed(ref cause) if cause.to_string() == "not measurable"),
+        "{error:?}"
+    );
 }
 
 #[test]
