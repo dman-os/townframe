@@ -164,6 +164,8 @@ DioxusLabs/blitz#1197). That's for later, with upstream.
 | Range selection on touch (gutter tap, drag, extend) | J5 | not started; needs Android input checks | claytxt |
 | Bottom sheet with the keyboard up | J4, J5 | ADR 032 §6 sheets; keyboard behaviour on Android unverified | claytxt |
 | Text input for the composer | J4, J5 | Dioxus input; Android IME unverified | claytxt |
+| Open `data-*` attribute names on the surface (Pierre's port emits about 60, e.g. `data-line`, `data-line-index`, `data-line-annotation`; the surface allows 3). Dioxus attribute names are `&'static str`, so arbitrary names need a bounded interner. | J3, J5 | design needed | claytxt |
+| Scoped stylesheets for a micro: Pierre's look is a large stylesheet with attribute selectors and CSS variables; the surface has only inline style properties. Must be sanitized for egress (no `url()`, fonts or imports without a capability). | J3 | design needed | claytxt |
 | Datums (intext's model, see below) | all | intext lane | intext |
 | Anchor model and re-attaching on a new revision | J3, J6 | intext lane | intext |
 | Live sync between devices | J6, the live loop | node lane | node |
