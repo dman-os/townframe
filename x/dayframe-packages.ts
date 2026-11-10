@@ -1,7 +1,7 @@
 import { $ } from "./utils.ts";
 
 // Builds the Wasm guests and lays out the package directory the desktop shell scans. Shared by
-// `check-dayframe.ts` and `dayframe.ts`; callers run `useDotenvTargetDir()` first. Prints the
+// `check-dayframe.ts` and `dayframe.ts`; the target dir comes from `cargo metadata`. Prints the
 // `DAYFRAME_*` lines and returns them, with the package directory under `DAYFRAME_PACKAGE_DIR`.
 //
 // `testFixtures` also builds the guests only tests load (the collection probe and the
