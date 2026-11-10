@@ -9,7 +9,7 @@ Scope: Draft description for the `feat/big-node` -> `main` PR. Numbers come from
 
 A node is now a value you boot, not a test helper. `big_node` boots the standard services against storage it is handed, serves one router, and optionally attaches listeners and a peers endpoint. Design: [ADR 033](../adrs/033-what-a-node-is.md), with its 2026-11-06 revision.
 
-- **`big_dispatch` and `big_dispatch_core`** own the router, admission and providers. Authority, docs, drawers, blobs, plugs and nodules register as `builtin:<service>` providers under their existing NSIDs; nodules register as before. `big_nodule` depends on `big_dispatch`.
+- **`big_dispatch` and `big_dispatch_core`** own the router, admission and providers. Authority, docs, drawers, blobs, cartridges and nodules register as `builtin:<service>` providers under their existing NSIDs; nodules register as before. `big_nodule` depends on `big_dispatch`.
 - **Credential header.** The caller's credential is `Authorization: Bearer <authority>.<signer>` in envelope metadata. Resource capabilities stay in the body (N2b).
 - **Listeners.** UDS (operator admitted by peer credentials, `0700` socket directory) and TCP, both serving the router, plus a `/xrpc/<nsid>` fallback in front of dispatch. Remote clients use HTTP/WS over iroh by default, so there is no TLS work on TCP (D31).
 - **Storage bindings.** Services are handed opened storage and never open paths: `big_repo::Storage`, `big_blobs::Storage`, an `Arc<SecretStore>` per node. A test boots 20 nodes in one process, stops them, reboots the durable ones and asserts nothing leaks (`e2e::many_nodes`).
@@ -124,8 +124,8 @@ No `file://` patch remains. Both revs are the tips of the `townframe-changes` bo
 Commit groups, in order (`git log --oneline main..feat/big-node`, about 150 commits):
 1. **Node design and dispatch:** `85b3f287`, `5e34392c`, `66321166` (ADR 033), `38ca61dd` (big_dispatch), `679af51b` (listeners), `c70ac20f` (credential header).
 2. **Bindings and peers:** `8ef60a2b` (storage bindings), `b85e19df` (peers), `7e2c2963` (follow keyhive access, replay reset fix).
-3. **Test arena:** `b0f58bec` (harness and ladder), `3f2fc461` (stress, scale, cross-node plug), `f5971214` (cost table).
-4. **Performance and correctness fixes:** the `perf(...)`, `fix(...)` and `refactor(...)` commits listed under Major fixes, plus `f34241c9` (operator superuser, plug install on the caller's handles).
+3. **Test arena:** `b0f58bec` (harness and ladder), `3f2fc461` (stress, scale, cross-node cartridge), `f5971214` (cost table).
+4. **Performance and correctness fixes:** the `perf(...)`, `fix(...)` and `refactor(...)` commits listed under Major fixes, plus `f34241c9` (operator superuser, cartridge install on the caller's handles).
 5. **`day` CLI and datums:** `39888307`, `eb217b24`, `f7f1f89c`, `9e6ec666`.
 6. **Dependency pins:** `dbc84be2`, `c087fd50`.
 7. **Stack and kit (latest):** `0484534d` (#82 and mbx merged), `a1f67718`, `a1b20739` (`method_core`), `bc55f903`, `82a0d3e5` (D39), `1edfbf4f`, `10026a24`, `01999cb1`, `fda5d45d` (`big_ndk` v0, runtime-free client).

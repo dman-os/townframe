@@ -29,7 +29,7 @@ Scope: The top-down grounding for this week's node work (ledger D38). It derives
 
 | # | Requirement | State |
 |---|---|---|
-| R1 | A cartridge carrying intxt's datum Lexicons and a nodule can be installed and enabled on the local node | Built for test fixtures (`big_plugs`, enable registers Lexicons, D37); no `day` porcelain |
+| R1 | A cartridge carrying intxt's datum Lexicons and a nodule can be installed and enabled on the local node | Built for test fixtures (`big_cartridges`, enable registers Lexicons, D37); no `day` porcelain |
 | R2 | **`big_ndk`**: the intxt nodule is written as typed `Handler<M>` impls, calls docs/drawers/blobs through typed clients, and is unit-testable natively | Not started (the plan's NDK v0) |
 | R3 | **`day cart pack/install/enable`** from built wasm plus manifest; `day` never builds source (D38) | Not started |
 | R4 | **`day mcp`**: a stdio MCP server whose tools are the methods the presented capability reaches, schemas and descriptions from Lexicons | Not started |
@@ -52,7 +52,7 @@ Scope: The top-down grounding for this week's node work (ledger D38). It derives
 | # | Requirement | State |
 |---|---|---|
 | R12 | The phone runs a node (Android) and syncs from the relay and from sibling nodes | Dayframe Android lane (#81); node-on-phone composition is the user-node ADR |
-| R13 | The intxt micro reads and writes intxt datums through its node | Micro access to node services is deferred until Clay runs on the node (plug-authoring Sequencing 4); intxt forces it into this alpha |
+| R13 | The intxt micro reads and writes intxt datums through its node | Micro access to node services is deferred until Clay runs on the node (cartridge-authoring Sequencing 4); intxt forces it into this alpha |
 | R14 | **Waiting on a review**: an agent blocks until the user responds, through `PollDatums` long-poll behind an MCP tool or a CLI command | `PollDatums` exists; exposing a long wait through MCP is open (Q4) |
 
 ### J4: public reviews on the web

@@ -1,20 +1,20 @@
-# Plug authoring: micros, nodules, and one typed-call model
+# Cartridge authoring: micros, nodules, and one typed-call model
 
 Status: Draft
 Owner: Townframe maintainers
 Updated: 2026-11-06
-Scope: How an author writes a plug with micros, nodules, or both. Drafted by the node session (townframe-p3n-2) with the Clay session (townframe-p3n-4), for operator review before an ADR. It builds on the Clay X3 authoring study (`/run/media/asdf/p3N/tmp/x3/authoring.md`) and lane T1 (typed declarations, branch `feat/dayframe-typed-decls`).
+Scope: How an author writes a cartridge with micros, nodules, or both. Drafted by the node session (townframe-p3n-2) with the Clay session (townframe-p3n-4), for operator review before an ADR. It builds on the Clay X3 authoring study (`/run/media/asdf/p3N/tmp/x3/authoring.md`) and lane T1 (typed declarations, branch `feat/dayframe-typed-decls`).
 
 ## Where things stand
 
-- **Plug manifests.** `big_plugs_core::Plug` holds `Contribution::Nodule` and `Contribution::Micro`, so one plug can ship either or both. `MicroContribution` is an opaque description today, not clay_mdk's typed `MicroManifest`.
+- **Cartridge manifests.** `big_cartridges_core::Cartridge` holds `Contribution::Nodule` and `Contribution::Micro`, so one cartridge can ship either or both. `MicroContribution` is an opaque description today, not clay_mdk's typed `MicroManifest`.
 - **Micros** are authored against `clay_mdk`: a context object, `export_micro!`, native and guest backends. They reach documents only through Clay's own WIT (`townframe:dayframe/documents`, facet-based), with no network egress. Lane T1 is replacing the stringly constants and loose-const manifest crates with typed declarations: each declared type carries its NSID, `ctx.call::<Op>()`, and schemas come from the datum macro.
-- **Nodules** have no authoring kit. The one nodule is `src/test_nodule_guest`, a raw `wasi:http/handler@0.3.0` component. It parses the capability, idempotency and deadline headers by hand and calls other operations through `http://dispatch.local/xrpc/<nsid>`. Its manifest is built in test code (`big_node/e2e/nodule_wasm.rs::plug`).
+- **Nodules** have no authoring kit. The one nodule is `src/test_nodule_guest`, a raw `wasi:http/handler@0.3.0` component. It parses the capability, idempotency and deadline headers by hand and calls other operations through `http://dispatch.local/xrpc/<nsid>`. Its manifest is built in test code (`big_node/e2e/nodule_wasm.rs::cartridge`).
 - **Typed service calls already exist** on the native side:
   - `service_core_rs::Operation` makes the request type the contract (`type Output`, `type Error`, `const XRPC` with the NSID). Each protocol declares its operations once, e.g. `big_cabinet_core/doc.rs` `operations!`.
   - Callers use `service_client_core_rs::Client<T>::call(ctx, op)` over the `direct`, `irpc` or `xrpc` (including UDS) transports of `service_client_native_rs`.
   - Servers implement `service_utils_rs::Handler<Op>`.
-- **The old daybook plugs** (`plug_<x>_manifest` + `plug_<x>_routines`) used a native manifest crate plus a wflow-bundle wasm crate with bespoke WIT. They are superseded by this design.
+- **The old daybook cartridges** (`cartridge_<x>_manifest` + `cartridge_<x>_routines`) used a native manifest crate plus a wflow-bundle wasm crate with bespoke WIT. They are superseded by this design.
 
 ## Principles and proposals
 
@@ -25,25 +25,25 @@ Items marked **(proposal)** await the operator's decision; the Clay session has 
 3. **No ambient authority in guests.** Every outgoing call carries the guest's own capability through a host-mediated path:
    - for nodules, wasi:http to `dispatch.local`, where dispatch admits the nodule's capability;
    - for micros, **(proposal)** a Clay host import carrying the micro's capability. Micros never get raw wasi:http.
-4. **One plug manifest, generated from typed declarations.** There is no hand-written JSON, and the manifest carries its schemas (`Declaration::of` / `Universe::collect`).
+4. **One cartridge manifest, generated from typed declarations.** There is no hand-written JSON, and the manifest carries its schemas (`Declaration::of` / `Universe::collect`).
 5. **Authors write the same code in native and guest form.** The kits hide WIT, streams, headers and envelopes.
 6. **Native backends are for tests and native resources, never a privileged path** (operator, 2026-11-06). Built-in micros must not bypass composition boundaries, and anything a built-in can do, a runtime-loaded package must be able to do. The same holds for the NDK's native backend: it exists to test nodule logic without wasm, never as a production shortcut.
 7. **Authority is per contract, not per guest.** A micro's grants are bound per requirement (capability bank and lazy capabilities, ADR 029/031). Collection read authority per micro will become query-scoped. The host import resolves the grant for the specific operation's contract, not one guest-wide capability. Nodules should follow the same rule: a nodule's outgoing call presents the grant for that operation, not a single nodule-wide capability.
 
-## Crate layout per plug
+## Crate layout per cartridge
 
 ```text
-plug_<x>/            (or flat: plug_<x>_decls, plug_<x>_nodule, plug_<x>_micro)
+cartridge_<x>/            (or flat: cartridge_<x>_decls, cartridge_<x>_nodule, cartridge_<x>_micro)
   decls     native + wasm-buildable: typed declarations (datums, operations, micro contracts),
-            the plug manifest builder. Depends on datum_core, not big_cabinet.
-  nodule    wasm32-wasip3 cdylib on the NDK          (omit for a micro-only plug)
-  micro     clay micro on the MDK                    (omit for a nodule-only plug)
+            the cartridge manifest builder. Depends on datum_core, not big_cabinet.
+  nodule    wasm32-wasip3 cdylib on the NDK          (omit for a micro-only cartridge)
+  micro     clay micro on the MDK                    (omit for a nodule-only cartridge)
 ```
 
-The declarations crate replaces both `plug_<x>_manifest` and `micro_<x>_manifest`. Guests depend on it for types only; the manifest builder sits behind a host-only `schemas` feature, as X3 §3.5 puts it.
+The declarations crate replaces both `cartridge_<x>_manifest` and `micro_<x>_manifest`. Guests depend on it for types only; the manifest builder sits behind a host-only `schemas` feature, as X3 §3.5 puts it.
 
 ```rust
-// plug_tasks_decls
+// cartridge_tasks_decls
 clay_mdk::package!(Tasks { id: "org.example.tasks", version: 1, authority: AUTHORITY });
 
 // Decls crates must build for wasm, so the datum macro has to target `datum_core`
@@ -56,8 +56,8 @@ clay_mdk::package!(Tasks { id: "org.example.tasks", version: 1, authority: AUTHO
 #[ndk::operation(authority = AUTHORITY, name = "complete", output = CompleteReceipt, error = TasksError)]
 pub struct Complete { pub doc_id: DocId }
 
-pub fn manifest() -> big_plugs_core::Plug {
-    PlugBuilder::<Tasks>::new()
+pub fn manifest() -> big_cartridges_core::Cartridge {
+    CartridgeBuilder::<Tasks>::new()
         .nodule(|n| n.implements::<Complete>().requires::<docs::WriteDatums>())   // nodule contribution
         .micro(|m| m                                                                // micro contribution (T1 builder)
             .declares::<TaskRows>()                              // a collection it owns: key, value and selector schemas
@@ -76,8 +76,8 @@ pub fn manifest() -> big_plugs_core::Plug {
 The NDK copies the MDK's shape without its legacy parts:
 
 ```rust
-// plug_tasks_nodule
-use plug_tasks_decls::{Complete, CompleteReceipt, TasksError};
+// cartridge_tasks_nodule
+use cartridge_tasks_decls::{Complete, CompleteReceipt, TasksError};
 use ndk::prelude::*;
 
 struct Tasks;
@@ -95,7 +95,7 @@ ndk::export_nodule!(Tasks => [Complete]);
 ```
 
 - `export_nodule!` generates the `wasi:http/handler` export. It routes `/xrpc/<nsid>` to the right `Handler<Op>`, decodes the input against `Op` and encodes the output and error envelope (the same wire as the host's XRPC router). It also builds `Cx` from the request headers: the caller's capability, the nodule's own capability, the deadline and the idempotency key.
-- `Cx` exposes typed clients (`cx.docs()`, `cx.drawers()`, `cx.blobs()`, `cx.call::<Op>()` for another plug's operation). They are the existing `service_client_core_rs::Client<T>` with a new **wasi:http transport** (an `HttpTransport` impl wrapped in `Xrpc`) to `dispatch.local`, authenticated with the nodule's capability. Guest code reads the same as native code.
+- `Cx` exposes typed clients (`cx.docs()`, `cx.drawers()`, `cx.blobs()`, `cx.call::<Op>()` for another cartridge's operation). They are the existing `service_client_core_rs::Client<T>` with a new **wasi:http transport** (an `HttpTransport` impl wrapped in `Xrpc`) to `dispatch.local`, authenticated with the nodule's capability. Guest code reads the same as native code.
 - A native backend serves the same `Handler<Op>` impls in-process for tests: a nodule's logic can be unit-tested without wasm, as micros are tested on the native MDK backend.
 - Dispatch validates input and output against the operation's Lexicon (D31), so the NDK's typing is checked at the boundary too.
 
@@ -118,7 +118,7 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 - **Permissioning is isomorphic.** A micro requirement (contract plus access) and a nodule `requires` (operation) are the same thing: a declared need for a contract, bound to a grant at install, and resolved per contract on use. The manifest uses one `requires::<Op>()` vocabulary for both.
 - **Language-neutral by construction.** Many micros and nodules will be written in TypeScript. The contract is XRPC plus Lexicons; TypeScript types and clients are generated from the same Lexicons (as atproto's lexicon codegen does). The host-mediated backend is a WIT interface (componentize-js / jco), not something Rust-only. The Rust client is one binding of the contract.
 - **Why a separate declarations crate (Rust).** It holds pure types and the manifest generator, can be published, and is consumable by other packages for their types. Real code never sits behind feature flags in the crate others depend on: a crate producing several artifacts is the pain the guardrails build matrix shows. A package shares code between its micro and its nodule through the declarations crate (pure helpers) or through its own extra crates; the convention is written down. A TypeScript package can be a single package with several entry points. A static JSON/YAML manifest stays possible for packages without a Rust declarations crate.
-- **Testing is part of authoring.** The old `plug_test_manifest/e2e/` ran a real package's workflows end to end. Its successor is a real test package (a nodule and a micro exercising every host capability) with e2e tests inside the package, on the native test backend and the wasm build. `test_nodule_guest` shrinks to a low-level dispatch fixture.
+- **Testing is part of authoring.** The old `cartridge_test_manifest/e2e/` ran a real package's workflows end to end. Its successor is a real test package (a nodule and a micro exercising every host capability) with e2e tests inside the package, on the native test backend and the wasm build. `test_nodule_guest` shrinks to a low-level dispatch fixture.
 - **Workflows** follow ledger D3, already decided: durable work goes through a wflow **service** (start, status long-poll, message, cancel operations), not a bespoke routine kind or a third contribution kind. A durable procedure returns a job reference, the journal is the storage, and components stay stateless. A nodule calls the wflow service like any other service, through the same typed clients. wflow support for nodules waits for the wflow rework PR. (The old `daybook_pdk` was only command URLs plus `invoke_command_effect`; the real kit was `wflow_sdk` / `route_wflows!`.)
 - **Naming (decided, D34): cartridge.** "Plug" reads as a plug-in, a slight enhancement of the app, while many micros are big, self-contained apps. A **cartridge** ("cart") is the single user-facing noun for the store item and the distribution unit; it bundles micros, nodules and workflows. Micros and nodules stay user-facing as the classes of thing a cartridge contains. This doc still says "plug" until the code rename lands.
 
@@ -132,7 +132,7 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
   - (a) the node session creates its own small crate for `Operation` and the envelope codec (working name `operation_core`), built for native, wasm32-unknown-unknown and wasm32-wasip3, depending on `datum_core` for NSIDs and shapes, after the datum_core PR merges. It is not a re-export from `datum_core`: that crate stays data shapes and NSIDs, and the call model grows separately;
   - (b) the micro host-import WIT is deferred with the rest of micro access to node services. When it is picked up: async-only, never callable from mount or dispatch, capability refs out-of-band, per-contract grant resolved by the host, placed in the micro-client world. The WIT is the real authoring contract (TypeScript is first-class); the Rust macros are sugar over it;
   - (c) `requires`: the Clay session owns the micro side and the node session the nodule side; the signature is agreed here first;
-  - (d) `CartridgeBuilder` in big_plugs_core over the typed declarations: the node session.
+  - (d) `CartridgeBuilder` in big_cartridges_core over the typed declarations: the node session.
 - **Timing.** T1 verifies the datum_core PR, then the clay_mdk declarations (package, collection, config, component), leaving `call` until the `Operation` crate exists.
 
 ## Settled elsewhere, and operator answers (2026-11-06)
@@ -149,12 +149,12 @@ The same `Client<Proto>` calls should work in micro code, with the transport swa
 
 1. The Clay session lands the `datum_core` extraction (the pure move, re-exports from big_cabinet_core, and the macro's `runtime =` path) as its own small PR off main. The node session then rebases its datum and macros commits onto it (D32 `f7f1f89c`, `F64` `9e6ec666`, `DmetaRead` `87c25501`, `DatumEvent` `6d7c60f6`), relying on rename detection. The node session holds off further big_cabinet_core datum and macros edits until then.
 2. NDK v0: `Operation` declarations for nodules, `export_nodule!`, `Cx`, the wasi:http client transport, a native test backend, and `test_nodule_guest` ported to it as the first consumer.
-3. The plug manifest builder over typed declarations, plus `day plug build | publish | install | enable` porcelain.
+3. The cartridge manifest builder over typed declarations, plus `day cartridge build | publish | install | enable` porcelain.
 4. Micro access to node services is **deferred** (operator, 2026-11-06): once feat/big-node merges, the Clay and node sessions put Clay on top of the node, and the micro backend is designed then, as a client of the local node rather than a parallel path. T1's typed declarations proceed independently.
 
 ## Open questions for the operator
 
-1. The declarations crate name: `plug_<x>_decls`, `plug_<x>` with features, or something else?
+1. The declarations crate name: `cartridge_<x>_decls`, `cartridge_<x>` with features, or something else?
 2. Should micro calls move onto `Operation` and `Client<Proto>` (one model), or keep the capability-bank CBOR calls with a typed wrapper?
 3. NDK crate name: `ndk`, `nodule_ndk`, `clay_ndk`?
 4. Does a nodule ever need a reactive or long-poll API beyond `PollDatums` through the client, e.g. a subscription sugar like the MDK's hooks?

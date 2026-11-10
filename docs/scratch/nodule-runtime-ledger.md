@@ -9,7 +9,7 @@ Scope: Working ledger for the `feat/nodules` PR: decisions made with the operato
 
 - Append decisions as they are made, with the date. Never silently rewrite one; mark it superseded instead.
 - Keep **In flight** and **To do** current whenever work starts, finishes or is handed to a subagent.
-- Decisions here feed ADR 027 (`docs/adrs/027-plugs-nodules-and-operation-contracts.md`, formerly 023) and the config scratch doc (`docs/scratch/nodule-config-datum-store.md`). The ADR is the normative record; this ledger is the working log.
+- Decisions here feed ADR 027 (`docs/adrs/027-cartridges-nodules-and-operation-contracts.md`, formerly 023) and the config scratch doc (`docs/scratch/nodule-config-datum-store.md`). The ADR is the normative record; this ledger is the working log.
 
 ## Decisions (2026-11-04, operator design session)
 
@@ -610,7 +610,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - [design] keyhive_wasm `tryPcsKeyHash` still returns `Option` (`.ok()`); expose the error to JS if needed.
 - [perf] `DatumStoreHandle`'s `seen_head_hashes` is a set of every head ever seen and grows without bound. It came over from the pre-merge code. Bound it, for example by keeping only the current frontier/ancestry.
 - [test] There is no dedicated test for `Predicate::sole_doc` page filtering. Add one in `big_cabinet` doc observe tests: a single-doc poll is not woken by writes elsewhere.
-- [cleanup] DONE: the two ADRs numbered 007 are split. `007-doc-branch-identity` became `034-doc-branch-identity` (its references moved with it) and `007-plug-manifests-as-drawer-docs` keeps 007, which about 100 code comments cite. The `ERROR_ADR_ID` exemption is removed.
+- [cleanup] DONE: the two ADRs numbered 007 are split. `007-doc-branch-identity` became `034-doc-branch-identity` (its references moved with it) and `007-cartridge-manifests-as-drawer-docs` keeps 007, which about 100 code comments cite. The `ERROR_ADR_ID` exemption is removed.
 - [cleanup] The root `Cargo.toml` has many unused workspace dependencies flagged by cargo's `unused_workspace_dependencies` lint (`axum-extra`, `big_node`, `bon`, `clay_rt_wcmp_wasmi`, `micro_counter`, `once_cell`, `subduction_redb_storage`, `tower`, `tower-http`, `tracing-appender`, …). All come from main. Clean up if the operator agrees.
 
 - [main] `src/big_node/e2e/blob_discovery/mod.rs` is not rustfmt-clean on origin/main (byte-identical here), so the flake `rust-fmt` check fails on it.
@@ -678,6 +678,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - Renames are pre-approved: "feel free to rename anything".
 
 - **D34. "Plug" becomes "cartridge"** (operator, 2026-11-06): "plugin" implies a slight enhancement of the app, but many micros are big, self-contained apps. A cartridge (everyday "cart") is the one user-facing noun for both the store item and the distribution unit: it bundles micros, nodules and (later) workflows. Micros and nodules stay user-facing too, as the classes of thing a cartridge contains; the store disambiguates by them. Deferred: micro access to node services, until feat/big-node merges and Clay runs on top of the node. Also decided: one typed-call model across micros and nodules (`Operation` plus the generated `Client<Proto>`, with host-mediated backends). The code rename (`big_plugs*`, `Plug`, `plug_*` crates, ADRs 027/028) waits for the Clay `datum_core` PR, which touches the same crates.
+  - **Rename in progress (2026-11-11):** pre-release, so a plain rename with no aliases. Crates `big_plugs*` become `big_cartridges*`, `Plug*` become `Cartridge*`, `plug_id` becomes `cartridge_id`, NSIDs `org.example.daybook.plug(s)` become `...cartridge(s)`, SQL via new migrations. Out of scope: the old daybook plug system (`daybook_core/plugs*`, `daybook_cli` plugs, `daybook_ffi`, `daybook_types` plug manifests, `plug_*_manifest`/`plug_*_routines`, `xtask/plug.rs`, `count_plug_pins*.sql`) and every `*plugin*` name. Entries below this one keep the old names as history.
 
 - **D35. Commands for users, XRPC names for developers** (operator, 2026-11-06): user-facing, a cartridge offers *commands*; developer-facing, they are XRPC *methods* (query, procedure, subscription). The `Operation` trait becomes `Method` in its own wasm-buildable crate after the datum_core PR (#82) merges.
 
@@ -686,7 +687,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 - **D37. Closing open questions** (operator, 2026-11-06):
   - Live schema registration is not open: enabling a plug registers its Lexicons in `SchemaRepo` under the plug as owner and disabling retires them (`big_nodule/state.rs`). Already shipped.
   - Many nodes sharing one SQLite database: not a goal (each node gets its own database, as it would on Postgres). Dropped from N3.
-  - Consent, permissions and actors, and the authoring naming questions (`plug-authoring.md`), are next week.
+  - Consent, permissions and actors, and the authoring naming questions (`cartridge-authoring.md`), are next week.
   - Test threads under load, the ledger cleanups and the small follow-ups: manager decides.
 
 - **D38. Week of 2026-11-09: big_ndk, relays and intxt as the grounding** (operator, 2026-11-09/10):

@@ -1,4 +1,4 @@
-# ADR 007: Plug Manifests as Drawer Docs
+# ADR 007: Cartridge Manifests as Drawer Docs
 
 **Status:** Proposed.
 

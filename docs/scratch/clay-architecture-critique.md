@@ -154,7 +154,7 @@ presentation boundary.
   (`DAYFRAME_PACKAGE_DIR`, else `$XDG_DATA_HOME/dayframe/packages`); web reads
   `packages/index.json`. Package identity is the SHA-256 of the exact component bytes
   and the manifest is a stand-in sidecar `<name>.manifest.json` paired with the component
-  (`clay_mdk::package`) until `big_plugs` delivers manifests. Unreadable/unpaired entries
+  (`clay_mdk::package`) until `big_cartridges` delivers manifests. Unreadable/unpaired entries
   land in `installation_errors` in the lifecycle panel, never fatal.
 - Mock lifecycle and settle buttons are in the product shell: `src/dayframe_composition/lib.rs:215-274`.
 - The remaining violation is configuration ownership, not the micro list: the shared crate's

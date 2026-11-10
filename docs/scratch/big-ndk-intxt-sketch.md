@@ -22,7 +22,7 @@ Agents produce and annotate reviews; the user reviews on the phone through the i
 
 ## The declarations crate (`intxt_decls`)
 
-Native and wasm-buildable; pure types plus the manifest builder (plug-authoring.md, crate layout). The kit's macros carry the NSID on the type and set the datum macro's runtime path to `datum_core`.
+Native and wasm-buildable; pure types plus the manifest builder (cartridge-authoring.md, crate layout). The kit's macros carry the NSID on the type and set the datum macro's runtime path to `datum_core`.
 
 ```rust
 big_ndk::authority!(AUTHORITY = "org.intxt");
@@ -157,7 +157,7 @@ mod tests {
 | `cx.command()` from the idempotency key | Retried agent calls don't duplicate reviews | Header exists; mapping doesn't |
 | Deadline propagation, `cx.hold_within_deadline` | `AwaitResponse` must not outlive its caller | Header exists; guests forward it by hand (ledger: should be automatic, as in gRPC) |
 | `cx.mount(name)` over WASI preopens | `Source::Checkout` | wash-runtime `volume_mounts`; nothing in `big_nodule_wasm` (R19) |
-| `CartridgeBuilder` with `requires`, `mount`, manifest in a custom section | Install and consent | `big_plugs_core::Plug`, hand-built in tests |
+| `CartridgeBuilder` with `requires`, `mount`, manifest in a custom section | Install and consent | `big_cartridges_core::Cartridge`, hand-built in tests |
 | `big_ndk::testing::node()` | The test module | `big_node` e2e fixtures, not packaged for authors |
 
 ## Decisions the sketch forces

@@ -1,8 +1,8 @@
-# ADR 027: Plugs, nodules, and operation contracts
+# ADR 027: Cartridges, nodules, and operation contracts
 
 **Status:** Accepted direction. The portable descriptions, the inert static catalog,
 the standalone nodule inventory and the datum-backed management service are implemented
-(`big_plugs_core`, `big_nodule_core`, `big_nodule`, and Cabinet's operation-Lexicon
+(`big_cartridges_core`, `big_nodule_core`, `big_nodule`, and Cabinet's operation-Lexicon
 admission; see §8); dispatch, execution and artifact materialization are the staged work
 of the `feat/nodules` PR (§8), and nothing executes yet. This records the agreed
 responsibilities, authority model, versioning, and staged scope. Concrete wire/guest
@@ -11,14 +11,14 @@ decisions below. The operator-approved runtime decisions D1-D6 of the
 [runtime ledger](../scratch/nodule-runtime-ledger.md) are folded in as normative text
 (2026-11-04). The [lifecycle review](../scratch/nodule-lifecycle-review.md) questions are resolved in §10.
 
-**Amended by:** [ADR 028](028-plug-identity-naming-and-dependencies.md) on plug identity,
+**Amended by:** [ADR 028](028-cartridge-identity-naming-and-dependencies.md) on cartridge identity,
 naming, dependencies, forks and substitution. Where this ADR describes package dependencies or
 the catalog role, ADR 028 is authoritative.
 
 **Updated:** 2026-11-04
 
 **Related:** [Multiprocessing notes](../DEVDOC/log.md#2026-07-04--multiprocessing),
-[ADR 007: plug manifests](007-plug-manifests-as-drawer-docs.md),
+[ADR 007: cartridge manifests](007-cartridge-manifests-as-drawer-docs.md),
 [ADR 011: task pools](011-local-first-task-coordination.md),
 [ADR 019: drawers](019-cabinet-drawers-and-selective-mirroring.md),
 [ADR 020: documents](020-documents-repo-and-datum-writes.md),
@@ -39,7 +39,7 @@ investments.
 The current plugin surface already distinguishes management from execution, but
 its contracts couple concerns that the new design separates:
 
-- [`PlugManifest`](../../src/daybook_types/manifest.rs) carries package identity,
+- [`CartridgeManifest`](../../src/daybook_types/manifest.rs) carries package identity,
   facet schemas and display hints, local state, dependencies, workflow bundles,
   routines, views, commands, initializers, and processors.
 - [`PlugsRepo`](../../src/daybook_core/plugs.rs) combines cataloguing, pinned
@@ -50,7 +50,7 @@ its contracts couple concerns that the new design separates:
 - [`Rt`](../../src/daybook_core/rt.rs) composes dispatch, workflow execution,
   initialization, Wasm host facilities, stateless views, and local state. These
   responsibilities are not all part of the package repository today either.
-- The old drawer consults plugs for schema validation, while plugs attach the
+- The old drawer consults cartridges for schema validation, while cartridges attach the
   drawer after construction to read and write their own documents. Moving those
   mutually dependent repositories into crates would preserve the wrong boundary.
 - Commands, initializers, and processors name routines in the same manifest.
@@ -58,40 +58,40 @@ its contracts couple concerns that the new design separates:
   independently declared XRPC operations they implement.
 - [`BigNode`](../../src/big_node/lib.rs) already composes Cabinet services.
   [`SchemaRepo`](../../src/big_cabinet/schema.rs) admits datum schemas independently
-  of plug execution, and the `service_*` crates supply shared service contracts,
+  of cartridge execution, and the `service_*` crates supply shared service contracts,
   clients, and hosts.
 
 The central distinction is: **declaring an operation, providing its implementation,
 and choosing how to invoke it are three different things**. There is one nodule
-surface per plug, not independently installed nodules per processor. Separate
+surface per cartridge, not independently installed nodules per processor. Separate
 service-instance lifecycles, background-worker contribution types, and a new
 routine-to-routine messaging system are not required.
 
-## 1. Packages, the plug service, and consumers
+## 1. Packages, the cartridge service, and consumers
 
-A **plug** is the application-level distribution, namespace, and versioning unit.
-Rather than treating a nodule and a micro as sibling component kinds, a plug has
+A **cartridge** is the application-level distribution, namespace, and versioning unit.
+Rather than treating a nodule and a micro as sibling component kinds, a cartridge has
 two consumer-specific facets:
 
-- The **nodule** is the plug's singular **node-facing facet**: everything in the
+- The **nodule** is the cartridge's singular **node-facing facet**: everything in the
   package that applies to BigNode. The runtime understands three things in it:
   **services** (Lexicon operation contracts and the providers implementing them),
   **facilities** (the resources a nodule is granted: private state, revisioned stores,
   artifacts, drawers, network) and **lifecycle** (install, enable, upgrade, retire,
   initialize). Everything else it carries (commands, views, processors) is a
-  **binding**, described in §2. Its identity is 1:1 with the plug's identity.
+  **binding**, described in §2. Its identity is 1:1 with the cartridge's identity.
 - The GUI facet contains zero or more **micros**, where each micro is an individual,
   specifically addressed frontend contribution (such as a gallery view, picker, or
-  inspector) namespaced under the plug.
+  inspector) namespaced under the cartridge.
 
 Schema-only and micro-only packages are valid; neither requires executable node
 behavior. Multiple artifacts, routines, or operations inside the node-facing facet
-do not make a plug multiple nodules.
+do not make a cartridge multiple nodules.
 
-The **plug service is a catalog of static package information**: identities,
+The **cartridge service is a catalog of static package information**: identities,
 manifest revisions, version labels, metadata, distribution dependencies, and
 content-addressed artifact/contribution references. It ingests package envelopes
-from synchronized drawer documents ([ADR 007](007-plug-manifests-as-drawer-docs.md))
+from synchronized drawer documents ([ADR 007](007-cartridge-manifests-as-drawer-docs.md))
 or import adapters (such as OCI registries or local bundles), verifies artifact
 digests, and tracks whether referenced blobs are known, materialized locally,
 missing, or corrupt. It does not own executable enablement, runtime configuration,
@@ -127,15 +127,15 @@ Keep these identities distinct:
 
 | Identity | Meaning |
 | --- | --- |
-| Plug / nodule identity | Single package and node-facing extension identity, stable across ordinary upgrades |
+| Cartridge / nodule identity | Single package and node-facing extension identity, stable across ordinary upgrades |
 | Version label | Semver label on a package release for discovery and dependency constraints |
 | Manifest/contribution revision | Immutable content-addressed description selected for installation or dispatch |
 | Operation NSID | ATProto Lexicon contract identity, independent of its provider |
 | Contribution key within a nodule | A provider component, revisioned store, initializer or binding inside the nodule facet |
-| Micro key within a plug | An individual GUI contribution, namespaced under its package |
+| Micro key within a cartridge | An individual GUI contribution, namespaced under its package |
 | Node and actor identities | Network participation and cryptographic attribution |
 
-Because the nodule is the node-facing facet of the plug, it shares the plug's
+Because the nodule is the node-facing facet of the cartridge, it shares the cartridge's
 namespace rather than introducing a second independently versioned distribution
 unit. Each installed nodule is provisioned a distinct local actor, not its own
 network principal. Cabinet is library machinery and a conceptual collection of
@@ -476,7 +476,7 @@ It owns:
 
 The management surface distinguishes these states and transitions:
 
-- **Known (catalogued):** `PackageEnvelope` is present in the plug service; referenced
+- **Known (catalogued):** `PackageEnvelope` is present in the cartridge service; referenced
   blobs are tracked as materialized, missing, or corrupt. No actor or grant exists.
 - **Admitted (installed):** The nodule runtime validates the services, facilities and
   lifecycle of the `NoduleDescription`, provisions the nodule's durable local actor,
@@ -527,10 +527,10 @@ control. No processors execute in this stage.
 
 | Owner | Responsibility | Not its responsibility |
 | --- | --- | --- |
-| Plug service | Static package catalog, immutable revisions, import/publication, distribution references and observation | Enablement, runtime configuration, semantic nodule/micro validation, authority, or execution |
+| Cartridge service | Static package catalog, immutable revisions, import/publication, distribution references and observation | Enablement, runtime configuration, semantic nodule/micro validation, authority, or execution |
 | Nodule runtime composed by BigNode | Nodule admission, configuration, actors, authorized routing/exposure, and integration with resource/execution services | OCI packaging, GUI composition, or implementing a competing task scheduler |
-| BigCabinet | Documents, drawers, schema admission/codecs, and domain access policy | Discovering plugs or requiring their code to read documents |
-| Authority and actor services | Generic namespace capabilities, revocation, durable actor identities, protected signing | Global plug/drawer policy or treating actor creation as a grant |
+| BigCabinet | Documents, drawers, schema admission/codecs, and domain access policy | Discovering cartridges or requiring their code to read documents |
+| Authority and actor services | Generic namespace capabilities, revocation, durable actor identities, protected signing | Global cartridge/drawer policy or treating actor creation as a grant |
 | Dispatch (nodule runtime) | Local NSID routing, ocap admission, readiness gating, provider forwarding | Choosing which node runs work, durability, or a bespoke routine kind |
 | wflow, a service behind dispatch | Durable execution: start, status long-poll, message, cancel; freezes the revision at start | Being a nodule routine kind or the dispatcher |
 | BigTasks, planned | Allocating work **across nodes** (triage, processors, distributed coordination), then handing dispatch or wflow an already captured invocation | Local routing, admission, or assuming every task concerns a document |
@@ -558,7 +558,7 @@ Portable package and nodule contracts, catalog implementation, and runtime manag
 must have non-circular dependencies. The catalog does not import runtime or Clay
 implementation types. Execution descriptors shared with BigTasks live in a portable
 contract, not duplicate definitions or a dependency back into the executor.
-Final crate names are not selected; `big_plugs` is a possible catalog name, not
+Final crate names are not selected; `big_cartridges` is a possible catalog name, not
 permission to move Daybook types wholesale.
 
 ## 5. Schemas, versions, and provider pinning
@@ -615,7 +615,7 @@ Creating that actor or enabling its nodule grants no access to existing drawers.
 A manifest describes needs and possible contributions, not granted authority.
 Installation and later configuration bind actual drawers and other resources.
 DrawerService owns actor entitlements over selected drawers and creation placements;
-the generic authority table does not interpret plug policy. Children do not inherit
+the generic authority table does not interpret cartridge policy. Children do not inherit
 operator grants. Drawer roster membership, local actor grants, and Keyhive principal
 membership remain distinct facts.
 
@@ -729,7 +729,7 @@ with fresh handles and reacquires only still-authorized access. A pinned task is
 exempt from current revocation merely because it has retained its implementation.
 
 Local SQLite state stays private to its nodule. Other nodules consume declared
-operations, not its paths or tables. Today's cross-plug `local_states` dependencies
+operations, not its paths or tables. Today's cross-cartridge `local_states` dependencies
 cannot be copied unchanged. SQLite is an explicit locality constraint; this design
 does not promise transparent movement across hosts or add a generic SQL service.
 Concrete state naming, concurrency, migration, and retention remain §10 work.
@@ -758,7 +758,7 @@ retention, and peer compatibility and is deferred.
 The catalog exposes revisioned package knowledge and artifact materialization
 status. The nodule runtime exposes revisioned desired configuration and its locally
 applied projection. Clay owns the corresponding micro state. There is no shared
-plug-service `active` boolean that claims to summarize all consumers.
+cartridge-service `active` boolean that claims to summarize all consumers.
 
 A configuration-write receipt means committed intent, not materialized artifacts,
 registered executable providers, completed initialization, or finished work. Applied
@@ -768,7 +768,7 @@ Notifications can wake clients; durable consumers need resumable cursored reads,
 not an in-memory broadcast as their only history.
 
 Policy updates, registration, activation, and revocation need coherent revision and
-acknowledgement boundaries. The current plugs code's separation of configuration
+acknowledgement boundaries. The current cartridges code's separation of configuration
 from pending-to-active materialization is useful evidence, but its cache and local
 broadcast are not the new cross-process contract.
 
@@ -783,8 +783,8 @@ is no requirement to adapt the old `Rt`, add a compatibility shim, or leave its
 execution broken while the new system is being built.
 
 The first slice of the implementation stage below ships with it, as two datum
-crates built beside the legacy code: [`big_plugs_core`](../../src/big_plugs_core/lib.rs)
-carries the `PackageEnvelope` (`org.example.daybook.plug`, with the nodule and micro
+crates built beside the legacy code: [`big_cartridges_core`](../../src/big_cartridges_core/lib.rs)
+carries the `PackageEnvelope` (`org.example.daybook.cartridge`, with the nodule and micro
 contributions as opaque schema-tagged descriptions) and
 [`big_nodule_core`](../../src/big_nodule_core/lib.rs) carries the
 `NoduleDescription` (`org.example.daybook.nodule`) and admits it. A nodule's identity
@@ -799,7 +799,7 @@ the nodule keeps only authority resolution and the contribution checks, because 
 operation main is not a record or object the datum compiler models. Neither crate
 executes anything or owns configuration.
 
-The catalog's "Known" state is likewise inert today: `big_plugs_core::catalog` imports
+The catalog's "Known" state is likewise inert today: `big_cartridges_core::catalog` imports
 validated envelopes and resolves a dependency requirement to the highest catalogued
 version. It writes no files, provisions no actor, and never substitutes another
 revision for one that is absent; importing a second envelope under an already-taken
@@ -811,7 +811,7 @@ second copy of it in the catalog.
 `big_nodule_core::inventory` implements the standalone nodule-inventory slice on top of
 catalogued envelopes: it admits a package's `Contribution::Nodule` description, enforces
 non-overlapping nodule authority prefixes across installed packages, pins a single
-selected revision per plug (preserving desired enablement and re-validating customized
+selected revision per cartridge (preserving desired enablement and re-validating customized
 settings across upgrades), validates mutable runtime configuration against the nodule's
 declared `config schema`, keeps desired enablement (`enabled`) distinct from execution
 readiness, and records required artifact declarations with materialization stubbed as
@@ -823,9 +823,9 @@ domains, under its own `nodules` subsystem actor and namespace, after `DrawerSer
 ensures the four local drawers (`present_id`, `originated_id`, `known_drawers_id`, and the
 `SelfDoc` node config drawer `config_id`) and grants `nodules_actor` write access to
 `config_id`. Portable desired configuration lives as independently addressed datums in
-that config drawer (`org.example.daybook.nodule.install/<plug_id>`,
-`org.example.daybook.nodule.settings/<plug_id>`, and
-`org.example.daybook.nodule.grants/<plug_id>` in `big_nodule_core::config`), projected
+that config drawer (`org.example.daybook.nodule.install/<cartridge_id>`,
+`org.example.daybook.nodule.settings/<cartridge_id>`, and
+`org.example.daybook.nodule.grants/<cartridge_id>` in `big_nodule_core::config`), projected
 through [`DatumStoreHandle`](../../src/big_cabinet/datum_store.rs) (`AtHeads` mutations,
 single-frontier hydration, and invalidation-driven partial refresh without touching
 unowned keys or discarding unknown/invalid entries). Admitting a package writes its
@@ -838,7 +838,7 @@ identity and public key but never its capability. Management calls (`admitNodule
 `configureNodule`, `setNoduleEnabled`, `setNoduleDrawerGrants`, `uninstallNodule`, `getNodule`,
 `listNodules`, `mintNoduleCapability` under `org.example.daybook.nodules.*`) are
 authorized by the operator's identity capability, or by a handle the service minted from
-it carrying a `NoduleScope` (`admit`, and the set of plugs whose enablement, settings,
+it carrying a `NoduleScope` (`admit`, and the set of cartridges whose enablement, settings,
 and drawer grants the holder may read and change); a handle narrows only to what it
 covers, and any other actor's identity is refused rather than looked up in a grant table.
 Host-local SQLite retains only durable actor identity bindings and rebuildable
@@ -875,7 +875,7 @@ The planned standalone work includes:
 - Portable package/nodule descriptions and references, including `config schema`,
   `requires` / `implements`, revisioned store declarations, future routine kinds
   (`call | workflow`), commands, views, initialization, and processor declarations.
-- The static plug catalog and its import/resolution/digest-verification/observation
+- The static cartridge catalog and its import/resolution/digest-verification/observation
   contract (inert subset present: import and resolution only; digest verification and
   materialization observation stay with the blob system).
 - Nodule admission/inventory, selected revisions, desired enablement, validated
@@ -954,7 +954,7 @@ Alternatives not selected:
 - **Catalog owns enablement/configuration for every contribution.** Forces it to
   understand two different plugin systems' lifecycle and policy concerns.
 - **Treat nodules and micros as symmetric sibling components.** Obscures that a
-  plug has one node-facing nodule facet (with many internal contributions) and zero
+  cartridge has one node-facing nodule facet (with many internal contributions) and zero
   or more individual GUI micros.
 - **One independently hosted nodule per processor or service.** Adds identities and
   lifecycle units the package model does not need.
@@ -1025,22 +1025,22 @@ without claiming a portable capability-token format or implementing them now.
 ### Lifecycle review questions: resolved (2026-11-04)
 
 The questions from the [lifecycle review](../scratch/nodule-lifecycle-review.md) were settled with
-the operator; [ADR 028](028-plug-identity-naming-and-dependencies.md) records the plug-level
+the operator; [ADR 028](028-cartridge-identity-naming-and-dependencies.md) records the cartridge-level
 decisions in full.
 
-- **Catalog role (review §1).** big_plugs is a registry, like npm, and does no enablement. The
-  registry is a drawer whose plug documents hold immutable versions and their `Blob` datums. Each
+- **Catalog role (review §1).** big_cartridges is a registry, like npm, and does no enablement. The
+  registry is a drawer whose cartridge documents hold immutable versions and their `Blob` datums. Each
   runtime keeps the manifest it enabled (the inline envelope in `NoduleInstall`) and references
-  the artifacts from its own drawer, so a plug the registry drops stays usable wherever it is
+  the artifacts from its own drawer, so a cartridge the registry drops stays usable wherever it is
   enabled (ADR 028 §1).
-- **Dependency split (review §1).** Manifests depend on the NSIDs they use, not on plugs, in the
-  shared request shape with `necessity` and `minRevision`. Plug-to-plug dependencies are a
+- **Dependency split (review §1).** Manifests depend on the NSIDs they use, not on cartridges, in the
+  shared request shape with `necessity` and `minRevision`. Cartridge-to-cartridge dependencies are a
   delivery hint for a future fetch layer, and enablement is refused until every required NSID
   resolves (ADR 028 §4).
 - **Manifest reshape (review §2).** Done: one XRPC handler plus `implements`, with bindings
   carried opaquely (§2 above).
 - **Initialization redesign (review §4).** Done, with run modes `Once` (per node per revision)
-  and `EveryStart`. Done-ness is host-local and keyed by (plug, init key, revision), so there is
+  and `EveryStart`. Done-ness is host-local and keyed by (cartridge, init key, revision), so there is
   no synced `PerInstall`. Readiness is gated by `Initializing`/`InitFailed` instead of queues.
   Local targets are called directly on the provider, and foreign targets go through dispatch
   under the nodule's operation grant. Waiters are woken on any readiness transition.

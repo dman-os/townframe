@@ -46,14 +46,14 @@ A data operation never accepts an identity in place of a capability ("no identit
 | --- | --- | --- |
 | role (Reader, Editor, Admin) on a resource | grant: `DrawerAccess` on a drawer | the same idea |
 | check on every request: does the user have the role? | check once at mint; requests present the minted handle | revoking the grant must also kill handles minted from it: a revocation **gate** (a dependency) does that |
-| service accounts with roles | subsystem and nodule actors; a nodule usually has **no** grants and gets a scoped handle per dispatch | least privilege by default: a plug cannot reach anything its caller did not hand it |
-| impersonation / "act on behalf of" | a capability carries a **bound signer** (whose key signs the datum claims) separately from the authority it narrows | a runtime can narrow a user's authority while signing as the plug |
+| service accounts with roles | subsystem and nodule actors; a nodule usually has **no** grants and gets a scoped handle per dispatch | least privilege by default: a cartridge cannot reach anything its caller did not hand it |
+| impersonation / "act on behalf of" | a capability carries a **bound signer** (whose key signs the datum claims) separately from the authority it narrows | a runtime can narrow a user's authority while signing as the cartridge |
 | session tokens | capability handles; they are not signed and only mean something to this node's authority | they cannot be verified offline or on another node |
 
 ## What it defends against
 
 - **Confused deputy.** A service acts with the exact handle the caller passed, not with its own broad rights. A nodule asked to "write doc X" can only do it if it was handed a handle covering X.
-- **Ambient authority.** Nothing works just because of who you are, except the operator's mint power, and even that goes through minting. A plug actor with no grants holds nothing.
+- **Ambient authority.** Nothing works just because of who you are, except the operator's mint power, and even that goes through minting. A cartridge actor with no grants holds nothing.
 - **Stale authority.** Revoking a grant or retracting a handle kills every handle derived from it, across domains: derivation is a dependency DAG and liveness is checked through it. A restart kills all handles.
 - **Escalation through narrowing.** Narrowing can only drop rights or shrink scope, never widen. A bound signer cannot be swapped by attenuation.
 

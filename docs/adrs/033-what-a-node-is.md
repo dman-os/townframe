@@ -9,7 +9,7 @@
 - [ADR 019: cabinet drawers and selective mirroring](019-cabinet-drawers-and-selective-mirroring.md)
 - [ADR 022: authority, actors, capabilities and grants](022-authority-actors-capabilities-and-grants.md)
 - [ADR 023: cursor consumption is long-poll](023-cursor-consumption-is-long-poll.md)
-- [ADR 027: plugs, nodules and operation contracts](027-plugs-nodules-and-operation-contracts.md)
+- [ADR 027: cartridges, nodules and operation contracts](027-cartridges-nodules-and-operation-contracts.md)
 - the 2026-07-04 Multiprocessing entry in the [DEVDOC log](../DEVDOC/log.md)
 
 ADRs 029–031 are reserved for the Clay branch.
@@ -22,7 +22,7 @@ The Multiprocessing entry in the DEVDOC log lists the problems with the old dayb
 
 That entry leaned toward actors with a daemon by default. It also kept the git notion of a *checkout*: a directory you can copy and open.
 
-Since then the cabinet, plugs, nodules and dispatch have landed. Every service operation already has an XRPC identity (`service_core_rs::Operation::XRPC`), and every service is reached through `Client<Proto>`. A client is `Direct` (inline), `Irpc` (another task, or another process over IRPC) or `Xrpc` (HTTP).
+Since then the cabinet, cartridges, nodules and dispatch have landed. Every service operation already has an XRPC identity (`service_core_rs::Operation::XRPC`), and every service is reached through `Client<Proto>`. A client is `Direct` (inline), `Irpc` (another task, or another process over IRPC) or `Xrpc` (HTTP).
 
 What is missing is a definition of the node itself:
 - what it owns;
@@ -69,7 +69,7 @@ Routing a request to a service and accepting connections are separate concerns. 
 
 Dispatch, meaning the operation routing table, ocap admission and providers, is not nodule-specific, so it leaves `big_nodule`:
 - **Its own crate.** Dispatch moves into `big_dispatch` (contract in `big_dispatch_core`), which `big_node` owns.
-- **Built-in services become providers.** Docs, drawers, blobs, authority, plugs and nodule management register their operations in it as built-in providers, under the NSIDs they already declare.
+- **Built-in services become providers.** Docs, drawers, blobs, authority, cartridges and nodule management register their operations in it as built-in providers, under the NSIDs they already declare.
 - **Nodules register as before.** The nodule service registers its Wasm providers in the same router, as it does today.
 
 After this, every path into the node goes through the same table. A nodule calling `docs.*`, a CLI calling `docs.*` over UDS and a test calling `docs.*` in-process are the same call.
@@ -129,7 +129,7 @@ Every node runs:
 - docs and drawers (the cabinet), with indexes;
 - blobs;
 - sync (keyhive and the BigRepo/BigSync replication);
-- plugs (the registry);
+- cartridges (the registry);
 - nodules;
 - dispatch.
 
@@ -142,7 +142,7 @@ We intend to host nodes for people: many tenants in one process, booted and stop
 - **No process-global state** belongs to a node. A shared resource pool such as a `SqliteRuntime` may be given to many nodes, but a node's state lives in what it was given.
 - **Services are handed their resources; they never open locations.** The composition root gives each service its storage bindings: a SQL database handle with a scope key, a blob store, a secret store. A service that opens a path itself (today `big_repo`'s `StorageConfig::Disk`) moves its open into the composition root.
 - **Services address each other only through clients.** Moving a service out of the address space changes the client transport at the composition root and nothing else.
-- **Each service acts as its own actor.** Services already hold actors in the node's authority (`documents`, `drawers`, `blobs`, `plugs`, `nodules`, `dispatch`). A disaggregated service presents that actor's capability when it calls the others, like any client.
+- **Each service acts as its own actor.** Services already hold actors in the node's authority (`documents`, `drawers`, `blobs`, `cartridges`, `nodules`, `dispatch`). A disaggregated service presents that actor's capability when it calls the others, like any client.
 - **Scaling to zero needs durable truth.** Anything that must survive a stop and reboot is in the node's storage, never only in memory. Rebooting from storage is the normal path, not a recovery path.
 
 ### 9. `big_node` is the system test arena
@@ -158,7 +158,7 @@ The node's integration tests live in `big_node`'s `e2e` module. They test the st
   - bootstrapping a new node.
 - **Scale:** for example, 10,000 documents of a realistic shape arriving at one node and replicating.
 - **Randomized stress:** seeded, as in `daybook_core`'s `sync/tests/stress.rs` and `big_repo`'s `test2`, with `long_test` names.
-- **Nodules across nodes:** a plug published on one node, installed and invoked on another.
+- **Nodules across nodes:** a cartridge published on one node, installed and invoked on another.
 
 The `big_repo` topology and log-nickname helpers are reused rather than rewritten.
 
@@ -217,7 +217,7 @@ Every keyring secret is named by node id (`wrapping.<node-id>`), and `big_node::
 - **GET/query operations** through the `/xrpc` fallback are not served yet (for example docs `getDocAvailability`). This is to-do work, not a design question (D31).
 - **Dispatch Lexicon validation.** Dispatch does not yet validate operation input and output against the operation's Lexicon, as atproto's XRPC servers do (D31).
 - **Narrowing tokens over the wire.** Dispatch `mintCapability` is not served through the router, and client-side token storage is undecided (D22).
-- **Node SQL scoping.** The node's own tables (authority, blobs, cabinet, plugs, nodules) are one database per node. Hosting many nodes in one database needs scoping them and namespacing the authority wrapping key.
+- **Node SQL scoping.** The node's own tables (authority, blobs, cabinet, cartridges, nodules) are one database per node. Hosting many nodes in one database needs scoping them and namespacing the authority wrapping key.
 
 ## Deferred
 

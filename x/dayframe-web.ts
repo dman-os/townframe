@@ -2,7 +2,7 @@
 
 // Build and serve the `dayframe_web` shell (ADR 018 migration steps 6–7): the shared
 // composition plus every package in `packages/index.json`. Each entry's manifest is the
-// sidecar `<name>.manifest.json` beside the component (STAND-IN until `big_plugs` delivers
+// sidecar `<name>.manifest.json` beside the component (STAND-IN until `big_cartridges` delivers
 // manifests) and is pinned with the BLAKE3 digest of the component bytes; the shell fetches a
 // package only when an instance activates and verifies the digest before `wcmp` compiles it.
 //
