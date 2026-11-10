@@ -663,7 +663,7 @@ Inputs: `script 3000`, `script 8000` (scrollTop set once per rAF, as X5, absolut
 | mutations in the batch | 4390 / 5041 | 4390 / 5086 | 4283 / 5041 | 206 / 388 | 223 / 441 |
 | events with a response / all events | 50 / 987 | 130 / 985 | 45 / 848 | 985 / 985 | 790 / 790 |
 
-For events without a response (pierre: 94% of them) the whole chain is browser event 0.1 + encode 0.0-0.1 + dispatch call 0.3 ms median (p95 2.8-5.0 includes the response events' work only through the handler, i.e. none: the p95 is the occasional response that fell below the 1-in-20 line); the boundary overhead (host `dispatch` time minus the guest's own phases) is 0.2 ms median, 0.4 p95 for every event.
+For events without a response (94% of the `pierre` events) the chain is browser event 0.1 + encode 0.0-0.1 + `dispatch` call 0.3 ms median (the all-events p95 of 2.8-5.0 ms is the responses' guest work showing through). The boundary overhead (host-measured `dispatch` time minus the guest's own phases) is 0.2 ms median and 0.4 ms p95 for every event.
 
 **Frames after the scroll that the response is painted: 0.** In all five cells and all 2000 response events the DOM mutation lands in the same main-thread frame as the scroll event (histogram `{0: n}` in `w1-tables.md`): the browser delivers the scroll event, the guest runs synchronously inside the listener, the host re-render is a microtask 0.1 ms after the dispatch returns (`dispatch return -> host render starts`), and the DOM is written before the frame's layout and paint. The cost is that the guest's work lands in the frame: 10.9 ms median and 13-13.8 ms p95 (max 14.9) of a 16.7 ms frame for a 50-row chunk commit with the `pierre` profile; 2.8 ms for a one-row commit with `code-view`.
 
@@ -731,7 +731,7 @@ Reading it:
 3. `overflow-anchor` and `scroll-padding`-class style properties: are they in the surface's attribute/style vocabulary (the style string passed here)? The raw `style` is going to be closed (micro API: no egress); anchoring needs to survive that.
 4. The surface supports only `data-testid`, `data-state` and `data-value` data attributes (`src/clay_surface/render.rs:248`); a per-row identity for tooling or anchoring needs one of those or a new attribute.
 5. A `resize` listener per unknown-height row costs one guest dispatch per observed row on mount and per size change (a render and a flush each); a window shift that mounts 50 rows with annotation threads would cost up to 50 extra dispatches. Is a coalesced "sizes changed" event wanted?
-6. Desktop/Blitz parity: nothing here covers it; Blitz has no ResizeObserver-equivalent or scroll anchoring that I know of (not checked in this spike).
+6. Desktop/Blitz parity: nothing here covers it; whether Blitz delivers `resize` or anchors scroll was not checked.
 
 ### Commands run (from the worktree root, inside `env -u CARGO_TARGET_DIR nix develop`, cargo = mbx's)
 - Build: `DAYFRAME_GUEST_PROFILE=release DAYFRAME_RAISED_LIMITS=1 mbx reserve --cpus 8 --memory 12G -- deno run --allow-all x/dayframe-web.ts --build` (log `/run/media/asdf/p3N/tmp/w1w2-build.log`), the site copied to `/run/media/asdf/p3N/tmp/w1w2/site`.
