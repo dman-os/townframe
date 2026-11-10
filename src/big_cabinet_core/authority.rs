@@ -10,6 +10,8 @@ use serde::Serialize;
 use serde::Serializer;
 use service_core_rs::HttpMetadata;
 use service_core_rs::declare_service_protocol;
+use service_core_rs::xrpc::bearer_header_value;
+use service_core_rs::xrpc::bearer_token;
 
 pub const OPERATOR_OBJECT: &str = "is operator";
 
@@ -159,8 +161,6 @@ pub struct Authorization {
 }
 
 impl Authorization {
-    const BEARER_SCHEME: &'static str = "Bearer ";
-
     pub const fn identity(capability: CapId) -> Self {
         Self {
             authority: capability,
@@ -181,22 +181,11 @@ impl Authorization {
     /// joined by a dot (`<uuid>.<uuid>`), which are token68-safe. Like any bearer token it is a
     /// secret: whoever holds both ids acts with that capability.
     pub fn header_value(&self) -> String {
-        format!(
-            "{}{}.{}",
-            Self::BEARER_SCHEME,
+        bearer_header_value(&format!(
+            "{}.{}",
             Self::id_text(self.authority),
             Self::id_text(self.signer)
-        )
-    }
-
-    /// The token of an `Authorization: Bearer <token>` header value; the scheme is matched case
-    /// insensitively (RFC 9110). `None` for any other scheme. This is the one parser of the
-    /// scheme: [`Self::from_header_value`] and the Wasm egress both build on it.
-    pub fn bearer_token(value: &str) -> Option<&str> {
-        value
-            .get(..Self::BEARER_SCHEME.len())
-            .filter(|scheme| scheme.eq_ignore_ascii_case(Self::BEARER_SCHEME))
-            .map(|_| &value[Self::BEARER_SCHEME.len()..])
+        ))
     }
 
     /// Parses a header value written by [`Self::header_value`]; `None` for any other scheme or a
@@ -205,7 +194,7 @@ impl Authorization {
         let id = |text: &str| -> Option<CapId> {
             serde_json::from_value(serde_json::Value::String(text.to_owned())).ok()
         };
-        let token = Self::bearer_token(value)?;
+        let token = bearer_token(value)?;
         let (authority, signer) = token.split_once('.')?;
         Some(Self {
             authority: id(authority)?,

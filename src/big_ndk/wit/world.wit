@@ -1,0 +1,9 @@
+package townframe:big-ndk@0.1.0;
+
+/// What every nodule built on `big_ndk` links against: it serves XRPC as plain HTTP and calls
+/// other methods through the host's `dispatch.local` egress.
+world nodule {
+  import wasi:http/client@0.3.0;
+  import wasi:random/random@0.3.0;
+  export wasi:http/handler@0.3.0;
+}

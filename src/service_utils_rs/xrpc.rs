@@ -14,6 +14,9 @@ pub use service_core_rs::xrpc::TIMEOUT_HEADER;
 pub use service_core_rs::xrpc::TRACEPARENT_HEADER;
 pub use service_core_rs::xrpc::XrpcDomainDetailsError;
 pub use service_core_rs::xrpc::XrpcErrorEnvelope;
+pub use service_core_rs::xrpc::bearer_header_value;
+pub use service_core_rs::xrpc::bearer_token;
+pub use service_core_rs::xrpc::request_context;
 #[cfg(feature = "iroh-http")]
 mod iroh;
 mod router;
@@ -31,7 +34,6 @@ pub use router::XrpcMethodHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
 pub use router::XrpcSubscriptionHandler;
-pub use router::request_context;
 pub use serve::AcceptFuture;
 pub use serve::ConnectionAcceptor;
 pub use serve::serve;

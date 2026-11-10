@@ -1,18 +1,12 @@
 //! Server side: route `/xrpc/{nsid}` to a mounted operation.
 
-use super::AUTHORIZATION_HEADER;
-use super::DOMAIN_ERROR_FIELD;
 use super::DOMAIN_ERROR_STATUS;
-use super::IDEMPOTENCY_KEY_HEADER;
 use super::REQUEST_ID_HEADER;
-use super::TIMEOUT_HEADER;
-use super::TRACEPARENT_HEADER;
 use super::XrpcErrorEnvelope;
 use super::XrpcHandlerError;
 use super::XrpcRequest;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
-use crate::context::TraceContext;
 use crate::host::Host;
 use crate::middleware::Handler;
 use crate::operation::Envelope;
@@ -43,11 +37,12 @@ use serde_json::Value;
 use serde_json::json;
 use service_client_native_rs::xrpc::ws::WsIo;
 use service_client_native_rs::xrpc::ws::accept_key;
+use service_core_rs::xrpc::domain_error_envelope;
+use service_core_rs::xrpc::request_context;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
@@ -446,21 +441,14 @@ impl XrpcRouter {
     }
 }
 
-/// Encodes a typed operation error as the standard XRPC error envelope. A
-/// non-serializable error is a programming error in the error type.
+/// Wraps a typed operation error in the shared XRPC error envelope.
 fn domain_error<E>(operation: XrpcMethod, error: &E) -> XrpcHandlerError
 where
     E: Serialize + std::fmt::Debug,
 {
-    let value = serde_json::to_value(error).expect("operation errors must serialize");
     XrpcHandlerError::Domain {
         status: DOMAIN_ERROR_STATUS,
-        body: XrpcErrorEnvelope::new(
-            operation.error_schema.to_owned(),
-            Some(format!("{error:?}")),
-            BTreeMap::from([(DOMAIN_ERROR_FIELD.to_owned(), value)]),
-        )
-        .expect("operation error detail is not reserved"),
+        body: domain_error_envelope(operation, error),
     }
 }
 
@@ -839,50 +827,10 @@ fn decode_input(input: HttpInput, raw_query: Option<&str>, body: &[u8]) -> Resul
 }
 
 fn request_id_from_headers(headers: &HeaderMap) -> Option<uuid::Uuid> {
-    header_string(headers, REQUEST_ID_HEADER)
-        .ok()
-        .flatten()
-        .and_then(|value| value.parse().ok())
-}
-
-/// Parses the headers every XRPC hop carries into the call's context and metadata; the inverse
-/// of `service_client_core_rs::xrpc::write_context_headers`.
-pub fn request_context(headers: &HeaderMap) -> Result<(RequestContext, HttpMetadata), String> {
-    let mut context = RequestContext::root();
-    if let Some(value) = header_string(headers, REQUEST_ID_HEADER)? {
-        context.request_id = value
-            .parse()
-            .map_err(|_| "x-request-id must be a UUID".to_owned())?;
-    }
-    context.trace = TraceContext::from_headers(
-        header_string(headers, TRACEPARENT_HEADER)?.as_deref(),
-        header_string(headers, "tracestate")?.as_deref(),
-    );
-    if let Some(value) = header_string(headers, TIMEOUT_HEADER)? {
-        let millis = value
-            .parse::<u64>()
-            .map_err(|_| "x-timeout-ms must be an unsigned integer".to_owned())?;
-        context = context.with_time_budget(Duration::from_millis(millis));
-    }
-    Ok((
-        context,
-        HttpMetadata {
-            authorization: header_string(headers, AUTHORIZATION_HEADER)?,
-            idempotency_key: header_string(headers, IDEMPOTENCY_KEY_HEADER)?,
-        },
-    ))
-}
-
-fn header_string(headers: &HeaderMap, name: &str) -> Result<Option<String>, String> {
     headers
-        .get(name)
-        .map(|value| {
-            value
-                .to_str()
-                .map(str::to_owned)
-                .map_err(|_| format!("{name} must be valid UTF-8 HTTP text"))
-        })
-        .transpose()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 fn handler_error_response(error: XrpcHandlerError, request_id: Option<uuid::Uuid>) -> Response {

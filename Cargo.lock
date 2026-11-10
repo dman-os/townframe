@@ -1587,6 +1587,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_ndk"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "getrandom 0.3.4",
+ "http",
+ "method_core",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
+ "tokio",
+ "wit-bindgen 0.62.0",
+]
+
+[[package]]
 name = "big_node"
 version = "0.1.0"
 dependencies = [

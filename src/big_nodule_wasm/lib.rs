@@ -58,6 +58,8 @@ use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
+use service_utils_rs::xrpc::bearer_header_value;
+use service_utils_rs::xrpc::bearer_token;
 use service_utils_rs::xrpc::request_context;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -426,10 +428,9 @@ impl Provider for WasmProvider {
             &mut headers,
             &hop,
             &HttpMetadata {
-                authorization: Some(format!(
-                    "Bearer {}",
-                    Authorization::id_text(caller.authorization.authority)
-                )),
+                authorization: Some(bearer_header_value(&Authorization::id_text(
+                    caller.authorization.authority,
+                ))),
                 idempotency_key: context.idempotency_key.clone(),
             },
         )
@@ -592,7 +593,7 @@ impl Egress {
         let Some(authority) = metadata
             .authorization
             .as_deref()
-            .and_then(Authorization::bearer_token)
+            .and_then(bearer_token)
             .and_then(|id| serde_json::from_value::<CapId>(Value::String(id.to_owned())).ok())
         else {
             return bad(
