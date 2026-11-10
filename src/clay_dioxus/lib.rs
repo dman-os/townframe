@@ -9,23 +9,32 @@ use clay_host::Host;
 use clay_host::Instance;
 use clay_host::Mount;
 use clay_host::RendererRegistry;
+use clay_surface::ELEMENT_REPLY;
+use clay_surface::ElementCommand;
+use clay_surface::ElementHandles;
+use clay_surface::ElementRead;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
+use clay_surface::NodeId;
 use clay_surface::PresentationError;
+use clay_surface::ScrollBehavior;
 use clay_surface::SurfaceEventHandler;
 use clay_surface::SurfaceTree;
 use dioxus::prelude::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
+type CommandReceiver = mpsc::UnboundedReceiver<(NodeId, ElementCommand)>;
 
 /// Handle through which a mounted surface commits wire batches into its retained [`SurfaceTree`].
 ///
@@ -41,6 +50,13 @@ pub struct SurfaceWriter {
     ancestor_surfaces: Vec<Arc<AtomicBool>>,
     revoked: Arc<AtomicBool>,
     revisions: watch::Sender<u64>,
+    /// Element commands the guest sent, drained by the mounted surface on the renderer's thread
+    /// (the host handles they act on are not `Send`).
+    commands: mpsc::UnboundedSender<(NodeId, ElementCommand)>,
+    command_receiver: Arc<Mutex<Option<CommandReceiver>>>,
+    /// Guest element ids whose `mounted` event the renderer has delivered: the only elements a
+    /// command may address.
+    mounted: Arc<Mutex<BTreeSet<NodeId>>>,
 }
 
 impl SurfaceWriter {
@@ -49,6 +65,7 @@ impl SurfaceWriter {
     /// builds one directly to feed a sink it holds.
     pub fn new(mount: Arc<Mount>) -> Self {
         let (revisions, _) = watch::channel(0);
+        let (commands, command_receiver) = mpsc::unbounded_channel();
         Self {
             mount,
             tree: Arc::new(Mutex::new(SurfaceTree::new())),
@@ -56,6 +73,9 @@ impl SurfaceWriter {
             ancestor_surfaces: Vec::new(),
             revoked: Arc::new(AtomicBool::new(false)),
             revisions,
+            commands,
+            command_receiver: Arc::new(Mutex::new(Some(command_receiver))),
+            mounted: Arc::default(),
         }
     }
 
@@ -112,6 +132,82 @@ impl clay_surface::SurfaceSink<ComponentRef> for SurfaceWriter {
 
     fn withdraw(&self) {
         self.withdraw();
+    }
+
+    fn element_command(
+        &self,
+        element: NodeId,
+        command: ElementCommand,
+    ) -> Result<(), PresentationError> {
+        if !self.is_live() {
+            return Err(PresentationError::Revoked);
+        }
+        if !self.mounted.lock().unwrap().contains(&element) {
+            return Err(PresentationError::InvalidBatch(format!(
+                "element {element} has not announced mounted"
+            )));
+        }
+        // The channel is the ordering mechanism: commands are drained in send order by one task
+        // (see `MountedSurface`), which is what makes them apply in issue order.
+        self.commands
+            .send((element, command))
+            .map_err(|_| PresentationError::Revoked)
+    }
+}
+
+/// Run one element command against the element's host handle. A read answers with the JSON
+/// value of the `element-reply` event; a failure answers with its message, which the guest
+/// surfaces as `MountedError::OperationFailed` (hosts such as Blitz answer `Unsupported` for
+/// geometry they cannot measure).
+async fn run_element_command(
+    mounted: &dioxus_html::MountedData,
+    command: ElementCommand,
+) -> Result<serde_json::Value, String> {
+    use dioxus_html::geometry::PixelsVector2D;
+    let behavior = |behavior| match behavior {
+        ScrollBehavior::Instant => dioxus_html::ScrollBehavior::Instant,
+        ScrollBehavior::Smooth => dioxus_html::ScrollBehavior::Smooth,
+    };
+    let failed = |error: dioxus_html::MountedError| error.to_string();
+    match command {
+        ElementCommand::Scroll(to) => mounted
+            .scroll(PixelsVector2D::new(to.left, to.top), behavior(to.behavior))
+            .await
+            .map(|()| serde_json::Value::Null)
+            .map_err(failed),
+        ElementCommand::ScrollBy(by) => {
+            let current = mounted.get_scroll_offset().await.map_err(failed)?;
+            mounted
+                .scroll(
+                    PixelsVector2D::new(current.x + by.left, current.y + by.top),
+                    behavior(by.behavior),
+                )
+                .await
+                .map(|()| serde_json::Value::Null)
+                .map_err(failed)
+        }
+        ElementCommand::SetFocus(focus) => mounted
+            .set_focus(focus)
+            .await
+            .map(|()| serde_json::Value::Null)
+            .map_err(failed),
+        ElementCommand::Read { what, .. } => Ok(match what {
+            ElementRead::ClientRect => {
+                let rect = mounted.get_client_rect().await.map_err(failed)?;
+                serde_json::json!({
+                    "x": rect.origin.x, "y": rect.origin.y,
+                    "width": rect.size.width, "height": rect.size.height,
+                })
+            }
+            ElementRead::ScrollOffset => {
+                let offset = mounted.get_scroll_offset().await.map_err(failed)?;
+                serde_json::json!({ "x": offset.x, "y": offset.y })
+            }
+            ElementRead::ScrollSize => {
+                let size = mounted.get_scroll_size().await.map_err(failed)?;
+                serde_json::json!({ "width": size.width, "height": size.height })
+            }
+        }),
     }
 }
 
@@ -398,6 +494,62 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
         drop(session_for_drop);
     });
 
+    // Element commands the guest sent run here, in a spawned task on the renderer's thread and
+    // never inside the event dispatch: a Blitz handler runs with the document borrowed, and a
+    // geometry read that borrows it again panics. Ordering contract: the task drains one queue,
+    // so the commands a guest issued while handling an event run in the order it issued them,
+    // and only after that dispatch has returned, i.e. after its mutations were applied. A
+    // read's answer re-enters the guest as an `element-reply` event through the raw session
+    // handler: a reply is not an input event and must not be dropped as stale.
+    let handles = use_hook(ElementHandles::default);
+    let command_session = session.as_ref().ok().cloned();
+    let command_writer = writer.clone();
+    let command_handles = handles.clone();
+    use_future(move || {
+        let session = command_session.clone();
+        let writer = command_writer.clone();
+        let handles = command_handles.clone();
+        async move {
+            let Some(session) = session else { return };
+            let mut commands = writer
+                .command_receiver
+                .lock()
+                .unwrap()
+                .take()
+                .expect("one command drain per surface writer");
+            let dispatch = session.handler();
+            while let Some((element, command)) = commands.recv().await {
+                let mounted = handles
+                    .get(element)
+                    .expect("a command is only queued for an element that announced mounted");
+                let request = match command {
+                    ElementCommand::Read { request, .. } => request,
+                    _ => 0,
+                };
+                let outcome = run_element_command(&mounted, command).await;
+                // A failed fire-and-forget command and every read answer the guest, so a
+                // failure is never silent; a successful fire-and-forget command needs none.
+                if request == 0 && outcome.is_ok() {
+                    continue;
+                }
+                let data_json = match outcome {
+                    Ok(value) => serde_json::json!({ "request": request, "value": value }),
+                    Err(error) => serde_json::json!({ "request": request, "error": error }),
+                }
+                .to_string();
+                dispatch(clay_surface::Event {
+                    revision: writer.revision(),
+                    element,
+                    name: ELEMENT_REPLY.to_owned(),
+                    bubbles: false,
+                    data_json,
+                });
+                let mut rev = revision;
+                rev.set(writer.revision());
+            }
+        }
+    });
+
     let _current_revision = revision();
     let session = match session {
         Err(error) => return rsx! { p { "Component unavailable: {error}" } },
@@ -416,17 +568,28 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
             rev.set(current_revision);
             return EventResponse::default();
         }
+        if event.name == "mounted" {
+            writer_for_event
+                .mounted
+                .lock()
+                .unwrap()
+                .insert(event.element);
+        }
         let response = dispatch(event);
         let mut rev = revision;
         rev.set(writer_for_event.revision());
         response
     });
     let tree = writer.tree.lock().unwrap();
-    tree.render(&handler, &|reference| {
-        rsx! {
-            ComponentMount { owner: owner.clone(), reference: *reference }
-        }
-    })
+    tree.render(
+        &handler,
+        &|reference| {
+            rsx! {
+                ComponentMount { owner: owner.clone(), reference: *reference }
+            }
+        },
+        &handles,
+    )
 }
 
 #[cfg(test)]

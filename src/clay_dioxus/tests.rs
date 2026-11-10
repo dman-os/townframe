@@ -570,3 +570,196 @@ fn surface_mount_renders_in_host_vdom_dispatches_reentrantly_and_revokes_on_inst
     drop(host_dom);
     assert!(dropped.get());
 }
+
+/// What a host renderer's `onmounted` hands out, in these tests: it logs every call that reaches
+/// it, so the order in which element commands arrive is observable. Scroll offsets and
+/// `set_focus` are supported; the client rect is left at Dioxus's default `NotSupported`, which is
+/// what a renderer that cannot measure answers.
+#[derive(Clone)]
+struct RecordingElement(Rc<RefCell<Vec<String>>>);
+
+impl dioxus_html::RenderedElementBacking for RecordingElement {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn get_scroll_offset(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = dioxus_html::MountedResult<dioxus_html::geometry::PixelsVector2D>>>,
+    > {
+        self.0.borrow_mut().push("get_scroll_offset".into());
+        Box::pin(async { Ok(dioxus_html::geometry::PixelsVector2D::new(1.0, 2.0)) })
+    }
+
+    fn scroll(
+        &self,
+        coordinates: dioxus_html::geometry::PixelsVector2D,
+        _behavior: dioxus_html::ScrollBehavior,
+    ) -> std::pin::Pin<Box<dyn Future<Output = dioxus_html::MountedResult<()>>>> {
+        self.0
+            .borrow_mut()
+            .push(format!("scroll({}, {})", coordinates.x, coordinates.y));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn set_focus(
+        &self,
+        focus: bool,
+    ) -> std::pin::Pin<Box<dyn Future<Output = dioxus_html::MountedResult<()>>>> {
+        self.0.borrow_mut().push(format!("set_focus({focus})"));
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// `SerializedHtmlEventConverter` for every event but `mounted`, which unpacks a
+/// [`RecordingElement`] the way a real renderer unpacks its platform handle.
+struct RecordingConverter;
+
+macro_rules! delegate_to_serialized {
+    (
+        enum Event {
+            $(
+                #[convert = $converter:ident]
+                #[events = [$($events:tt)*]]
+                $(#[raw = [$($raw:ident),* $(,)?]])?
+                $group:ident($data:ident),
+            )*
+        }
+    ) => {
+        impl dioxus_html::HtmlEventConverter for RecordingConverter {
+            $( delegate_to_serialized!(@one $converter, $data); )*
+        }
+    };
+    (@one convert_mounted_data, MountedData) => {
+        fn convert_mounted_data(
+            &self,
+            event: &dioxus_html::PlatformEventData,
+        ) -> dioxus_html::MountedData {
+            dioxus_html::MountedData::new(event.downcast::<RecordingElement>().unwrap().clone())
+        }
+    };
+    (@one $converter:ident, $data:ident) => {
+        fn $converter(&self, event: &dioxus_html::PlatformEventData) -> dioxus_html::$data {
+            dioxus_html::SerializedHtmlEventConverter.$converter(event)
+        }
+    };
+}
+
+dioxus_html::with_html_event_groups!(delegate_to_serialized);
+
+#[tokio::test]
+async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_replies() {
+    use clay_surface::ElementRead;
+    use clay_surface::ScrollBehavior;
+    use clay_surface::ScrollOffsets;
+    use clay_surface::SurfaceSink;
+    dioxus_html::set_event_converter(Box::new(RecordingConverter));
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let host_calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
+    let slot = Rc::new(RefCell::new(None));
+    let factory = SurfaceFactory(Rc::new({
+        let (slot, replies, host_calls) = (slot.clone(), replies.clone(), host_calls.clone());
+        move |_mount, writer| {
+            writer.apply(&[
+                Mutation::PushId(0),
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetId(1),
+                Mutation::AddEventListener("mounted".into()),
+                Mutation::AppendChildren(1),
+                Mutation::Pop,
+            ])?;
+            *slot.borrow_mut() = Some(writer.clone());
+            let (replies, host_calls) = (replies.clone(), host_calls.clone());
+            Ok(SurfaceSession::new(move |event| {
+                if event.name == ELEMENT_REPLY {
+                    replies
+                        .borrow_mut()
+                        .push(serde_json::from_str(&event.data_json).unwrap());
+                    return EventResponse::default();
+                }
+                assert_eq!(event.name, "mounted");
+                // What a guest's `onmounted` handler does with its `MountedData`: scroll, read,
+                // focus, and read what the renderer cannot measure, all within one dispatch.
+                let offsets = ScrollOffsets {
+                    left: 0.0,
+                    top: 40.0,
+                    behavior: ScrollBehavior::Instant,
+                };
+                for command in [
+                    ElementCommand::Scroll(offsets),
+                    ElementCommand::Read {
+                        request: 7,
+                        what: ElementRead::ScrollOffset,
+                    },
+                    ElementCommand::SetFocus(true),
+                    ElementCommand::Read {
+                        request: 8,
+                        what: ElementRead::ClientRect,
+                    },
+                ] {
+                    writer.element_command(event.element, command).unwrap();
+                }
+                // The host runs nothing until the dispatch has returned.
+                assert!(host_calls.borrow().is_empty());
+                EventResponse::default()
+            }))
+        }
+    }));
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+    }
+    fn app(props: Props) -> Element {
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+        },
+    );
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    // A command for an element that has not announced `mounted` is refused at the boundary.
+    let writer = slot.borrow().clone().unwrap();
+    assert!(matches!(
+        writer.element_command(1, ElementCommand::SetFocus(true)),
+        Err(PresentationError::InvalidBatch(_))
+    ));
+    let element = host_tree.listener_id("div", "mounted").unwrap();
+    dom.runtime().handle_event_for_target(
+        RenderTargetId::ROOT,
+        "mounted",
+        dioxus_core::Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                RecordingElement(host_calls.clone()),
+            ))) as Rc<dyn std::any::Any>,
+            false,
+        ),
+        element,
+    );
+    while replies.borrow().len() < 2 {
+        dom.wait_for_work().await;
+        dom.render_immediate(&mut host_tree);
+    }
+    assert_eq!(
+        &*host_calls.borrow(),
+        &["scroll(0, 40)", "get_scroll_offset", "set_focus(true)"]
+    );
+    let replies = replies.borrow();
+    assert_eq!(
+        replies[0],
+        serde_json::json!({"request": 7, "value": {"x": 1.0, "y": 2.0}})
+    );
+    // The renderer cannot measure, so the guest gets an error reply it surfaces as a
+    // `MountedError`; the micro is not faulted and the surface stays live.
+    assert_eq!(replies[1]["request"], 8);
+    assert!(replies[1]["error"].is_string());
+    assert!(writer.is_live());
+}
