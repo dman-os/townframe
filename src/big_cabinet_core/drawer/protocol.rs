@@ -140,6 +140,11 @@ pub struct DrawerScope {
 pub struct MintDrawerCapability {
     pub scope: DrawerScope,
     pub rights: Rights,
+    /// The actor the new handle is bound to; `None` binds it to the presented handle's own
+    /// subject. Naming another actor is an introduction: the presented handle needs
+    /// `Rights::DELEGATE`, and the actor must be live and a strict descendant of the presented
+    /// handle's subject in the actor tree (anyone else is `Escalation`).
+    pub subject: Option<Uuid7>,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

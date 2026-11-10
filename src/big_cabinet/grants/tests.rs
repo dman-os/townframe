@@ -66,6 +66,7 @@ impl Fixture {
                     dependencies,
                     object: "scoped resource".into(),
                     rights: Rights::USE | Rights::NARROW,
+                    subject: None,
                 },
             )
             .await
@@ -185,6 +186,7 @@ async fn withdrawal_invalidates_old_proofs_and_transitive_derivations() {
                 dependencies: Vec::new(),
                 object: "another domain".into(),
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -346,6 +348,7 @@ async fn temporary_delegation_tracks_its_source_without_promoting_to_durable() {
                 dependencies: Vec::new(),
                 object: "delegation source".into(),
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await
@@ -461,6 +464,7 @@ async fn restart_preserves_standing_grants_without_adopting_live_handles() {
                 dependencies: Vec::new(),
                 object: "delegation source".into(),
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await
@@ -590,6 +594,7 @@ async fn domain_shutdown_retires_grant_support_even_if_authority_stays_alive() {
                 dependencies: proof.dependencies,
                 object: "reacquired".into(),
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

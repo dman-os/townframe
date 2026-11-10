@@ -16,13 +16,13 @@ use big_cabinet::DatumStoreHandle;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::SchemaRepo;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
@@ -99,7 +99,7 @@ pub(crate) struct Stores {
     pub(crate) authority: Client<AuthorityProtocol>,
     pub(crate) drawers: Client<DrawersProtocol>,
     pub(crate) datum_store: DatumStoreHandle<NoduleConfig>,
-    pub(crate) parent: Actor,
+    pub(crate) parent: OpenedActor,
     pub(crate) parent_path: String,
     pub(crate) dispatch: Arc<Router>,
     pub(crate) dispatch_client: Client<DispatchProtocol>,
@@ -310,7 +310,7 @@ impl Handle {
 pub(crate) struct State {
     stores: Stores,
     persisted_actors: BTreeMap<CartridgeId, Uuid7>,
-    actors: BTreeMap<CartridgeId, Actor>,
+    actors: BTreeMap<CartridgeId, OpenedActor>,
     applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
     /// The dispatch handle minted for each nodule from its operation grants, with the scope it
     /// was minted for.
@@ -342,11 +342,11 @@ pub(crate) struct State {
     init_results: mpsc::Sender<InitFinished>,
 }
 
-fn nodule_actor(actor: &Actor) -> NoduleActor {
+fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
     NoduleActor {
-        actor_id: actor.actor_id,
-        url: actor.url.clone(),
-        public_key: actor.public_key.clone(),
+        actor_id: actor.actor.actor_id,
+        url: actor.actor.url.clone(),
+        public_key: actor.actor.public_key.clone(),
     }
 }
 
@@ -423,10 +423,10 @@ impl State {
         let context = RequestContext::root();
         for (cartridge_id, expected_actor_id) in state.persisted_actors.clone() {
             let actor = state.stores.open_actor(&context, &cartridge_id).await?;
-            if actor.actor_id != expected_actor_id {
+            if actor.actor.actor_id != expected_actor_id {
                 return Err(NodulesError::Storage(format!(
                     "installed nodule `{cartridge_id}` was given actor {expected_actor_id} but its path now opens {}",
-                    actor.actor_id
+                    actor.actor.actor_id
                 )));
             }
             state.actors.insert(cartridge_id, actor);
@@ -1210,7 +1210,7 @@ impl State {
     async fn serve(
         &mut self,
         installed: &mut InstalledNodule,
-        actor: &Actor,
+        actor: &OpenedActor,
         capability: Option<CapId>,
         granted: &DispatchScope,
         requests: &BTreeMap<String, RequestStatus>,
@@ -1398,7 +1398,7 @@ impl State {
     async fn advance_inits(
         &mut self,
         installed: &InstalledNodule,
-        actor: &Actor,
+        actor: &OpenedActor,
         capability: Option<CapId>,
         provider: Option<Arc<dyn Provider>>,
         trigger: Trigger,
@@ -1457,7 +1457,7 @@ impl State {
                 ),
                 caller: Caller {
                     authorization: Authorization::identity(self.stores.parent.capability),
-                    actor: self.stores.parent.actor_id,
+                    actor: self.stores.parent.actor.actor_id,
                     scope: None,
                 },
             }
@@ -1688,22 +1688,22 @@ impl State {
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
-    ) -> Res<Actor> {
+    ) -> Res<OpenedActor> {
         if let Some(actor) = self.actors.get(cartridge_id) {
             return Ok(actor.clone());
         }
         let opened = self.stores.open_actor(context, cartridge_id).await?;
         if let Some(saved_actor_id) = self.persisted_actors.get(cartridge_id) {
-            if opened.actor_id != *saved_actor_id {
+            if opened.actor.actor_id != *saved_actor_id {
                 return Err(NodulesError::Storage(format!(
                     "installed nodule `{cartridge_id}` was given actor {saved_actor_id} but its path now opens {}",
-                    opened.actor_id
+                    opened.actor.actor_id
                 )));
             }
         } else {
-            store::upsert_actor(&self.stores.sql, cartridge_id, opened.actor_id).await?;
+            store::upsert_actor(&self.stores.sql, cartridge_id, opened.actor.actor_id).await?;
             self.persisted_actors
-                .insert(cartridge_id.clone(), opened.actor_id);
+                .insert(cartridge_id.clone(), opened.actor.actor_id);
         }
         self.actors.insert(cartridge_id.clone(), opened.clone());
         Ok(opened)
@@ -1792,7 +1792,7 @@ impl State {
                                 context,
                                 cap_id,
                                 drawer_id,
-                                actor.actor_id,
+                                actor.actor.actor_id,
                                 *desired_access,
                             )
                             .await
@@ -1820,7 +1820,7 @@ impl State {
                     context,
                     &cartridge_id,
                     drawer_id,
-                    actor.actor_id,
+                    actor.actor.actor_id,
                     *desired_access,
                 )
                 .await
@@ -1895,7 +1895,7 @@ impl State {
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
-        actor: &Actor,
+        actor: &OpenedActor,
         desired: &DispatchScope,
     ) -> Res<(Option<CapId>, Option<String>)> {
         if let Some((applied, cap_id)) = self.applied_operations.get(cartridge_id).cloned() {
@@ -1995,7 +1995,11 @@ impl State {
 }
 
 impl Stores {
-    async fn open_actor(&self, context: &RequestContext, cartridge_id: &CartridgeId) -> Res<Actor> {
+    async fn open_actor(
+        &self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+    ) -> Res<OpenedActor> {
         self.authority
             .call(
                 context.child(),
@@ -2043,12 +2047,13 @@ impl Stores {
     }
 
     /// Mints the handle a nodule invokes dispatch with, from the service's own dispatch
-    /// authority. The nodule's actor is presented as the signer, which binds the handle to it:
+    /// authority, which is bound to the nodule service's actor and carries `Rights::DELEGATE`.
+    /// Naming the nodule's actor as the subject is an introduction that binds the handle to it:
     /// dispatch refuses the handle under any other actor, and retracting the actor kills it.
     async fn mint_operations(
         &self,
         context: &RequestContext,
-        actor: &Actor,
+        actor: &OpenedActor,
         scope: &DispatchScope,
     ) -> Res<CapId> {
         self.dispatch_client
@@ -2056,12 +2061,13 @@ impl Stores {
                 context.child(),
                 Authorization {
                     authority: self.dispatch_authority,
-                    signer: actor.capability,
+                    signer: self.parent.capability,
                 }
                 .metadata(),
                 MintDispatchCapability {
                     scope: scope.clone(),
                     rights: Rights::USE,
+                    subject: Some(actor.actor.actor_id),
                 },
             )
             .await
@@ -2111,6 +2117,7 @@ impl Stores {
                         create: false,
                     },
                     rights: Rights::USE | Rights::DELEGATE,
+                    subject: None,
                 },
             )
             .await

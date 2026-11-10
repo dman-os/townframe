@@ -29,12 +29,12 @@ use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
 use big_cabinet::capability::Invocation;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
@@ -143,7 +143,7 @@ pub(crate) fn docs_error(error: ClientError<DocsError>) -> CartridgesError {
 /// access policy it is granted creation through, and the node's database.
 pub struct RegistryDrawerConfig<'a> {
     pub drawers: &'a Drawers,
-    pub actor: &'a Actor,
+    pub actor: &'a OpenedActor,
     pub access: &'a DrawerAccess,
     pub sql: Database,
 }
@@ -172,7 +172,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
         .grants()
         .grant(
             &context,
-            config.actor.actor_id,
+            config.actor.actor.actor_id,
             CREATE_DRAWER_OBJECT.into(),
             Rights::USE,
             None,
@@ -191,6 +191,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
                     create: true,
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -244,7 +245,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
         .grants()
         .revoke(
             &context,
-            config.actor.actor_id,
+            config.actor.actor.actor_id,
             &[CREATE_DRAWER_OBJECT.into()],
         )
         .await
@@ -272,7 +273,7 @@ pub struct CartridgesConfig {
     pub authority: Client<AuthorityProtocol>,
     pub docs: Client<DocsProtocol>,
     pub registry_drawer: DrawerId,
-    pub actor: Actor,
+    pub actor: OpenedActor,
     pub namespace: Namespace,
     pub operator: Uuid7,
     pub blobs: Arc<BlobService>,
@@ -366,8 +367,8 @@ impl CartridgeService {
         self.capabilities
             .mint(
                 context,
-                authorization.authority,
                 &caller,
+                None,
                 params.scope,
                 params.rights,
                 Vec::new(),
@@ -595,6 +596,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

@@ -13,8 +13,8 @@ pub enum big_cartridges::import::ImportError { # [error ("the manifest is not im
 pub mod big_cartridges::import
 pub struct big_cartridges::CartridgeService  {  }
 pub struct big_cartridges::Cartridges  { host: Arc < Host < CartridgesHandler > >, client: Client < CartridgesProtocol >, publisher: String }
-pub struct big_cartridges::CartridgesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: Actor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, drawers: Client < DrawersProtocol >, node_key: NodeKey, sql: Database }
+pub struct big_cartridges::CartridgesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: OpenedActor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, drawers: Client < DrawersProtocol >, node_key: NodeKey, sql: Database }
 pub struct big_cartridges::NodeKey  { public_key: [u8 ; 32], sign: NodeSigner }
-pub struct big_cartridges::RegistryDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a Actor, access: & 'a DrawerAccess, sql: Database }
+pub struct big_cartridges::RegistryDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a OpenedActor, access: & 'a DrawerAccess, sql: Database }
 pub type big_cartridges::CartridgesHandler = Arc < CartridgeService >
 pub type big_cartridges::NodeSigner = Arc < dyn Fn (& [u8]) -> [u8 ; 64] + Send + Sync >

@@ -21,13 +21,14 @@ use big_cabinet::Drawers;
 use big_cabinet::SchemaRepo;
 use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::DrawerAccess as EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
@@ -185,17 +186,17 @@ pub struct BigNode {
     pub node_id: String,
     pub repo: SharedBigRepo,
     pub authority: Authority,
-    pub docs_actor: Actor,
+    pub docs_actor: OpenedActor,
     pub docs_namespace: Namespace,
-    pub drawers_actor: Actor,
+    pub drawers_actor: OpenedActor,
     pub drawers_namespace: Namespace,
-    pub blobs_actor: Actor,
+    pub blobs_actor: OpenedActor,
     pub blobs_namespace: Namespace,
     pub blobs: big_blobs::Blobs,
     pub blob_workers: big_blobs::workers::BlobWorkers,
-    pub nodules_actor: Actor,
-    pub cartridges_actor: Actor,
-    pub dispatch_actor: Actor,
+    pub nodules_actor: OpenedActor,
+    pub cartridges_actor: OpenedActor,
+    pub dispatch_actor: OpenedActor,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
     pub docs: DocsRepo,
@@ -376,17 +377,13 @@ impl BigNode {
             .await?;
             let (dispatch, nodule_dispatch_authority) = boot_dispatch(
                 &authority,
+                nodules_actor.actor.actor_id,
                 dispatch_namespace,
                 config.nodule_operations,
                 &mut stop,
             )
             .await?;
-            // Called by the nodule service, so it boots before it and stops after it; it uses
-            // the blob service and dispatch, which stop later still.
-            let (executor, executor_stop) =
-                host(ExecutorDeps::of(&blobs.service, &dispatch.client)).await?;
-            stop.stages.push(Stage::Service(executor_stop));
-            let (nodules, nodules_stop) = boot_nodules(
+            let (executor, nodules) = boot_nodules(
                 &authority,
                 &docs,
                 &drawers,
@@ -395,12 +392,13 @@ impl BigNode {
                 nodules_namespace,
                 &dispatch,
                 nodule_dispatch_authority,
-                Arc::clone(&executor),
+                host,
+                &blobs.service,
                 schemas,
                 config.sql,
+                &mut stop,
             )
             .await?;
-            stop.stages.push(Stage::Service(nodules_stop));
             let mut node = Self {
                 node_id,
                 repo,
@@ -523,7 +521,7 @@ async fn boot_cartridges(
     docs: &DocsRepo,
     drawers: &Drawers,
     registry_drawer: &DrawerId,
-    actor: &Actor,
+    actor: &OpenedActor,
     namespace: Namespace,
     blobs: &big_blobs::Blobs,
     sql: Database,
@@ -566,7 +564,7 @@ async fn boot_cartridges(
 async fn open_drawer_access(
     repo: &SharedBigRepo,
     authority: &Authority,
-    drawers_actor: &Actor,
+    drawers_actor: &OpenedActor,
     namespace: Namespace,
     sql: &Database,
     indexes: &Indexes,
@@ -668,7 +666,7 @@ async fn attach_peers(
 }
 
 /// Opens the subsystem actor at `path` under the node root, and its namespace.
-async fn open_actor(authority: &Authority, path: &str) -> Res<(Actor, Namespace)> {
+async fn open_actor(authority: &Authority, path: &str) -> Res<(OpenedActor, Namespace)> {
     let actor = authority
         .client
         .call(
@@ -680,32 +678,45 @@ async fn open_actor(authority: &Authority, path: &str) -> Res<(Actor, Namespace)
             },
         )
         .await?;
-    let namespace = authority.service.open_namespace(actor.actor_id).await?;
+    let namespace = authority
+        .service
+        .open_namespace(actor.actor.actor_id)
+        .await?;
     Ok((actor, namespace))
 }
 
-/// Grants the nodules actor admin over the node's config drawer, then boots the nodule service
-/// on it.
+/// Boots the nodule service's executor through `host`, then the nodule service on the node's
+/// config drawer after granting the nodules actor admin over it. The executor is called by the
+/// nodule service, so it boots before it and stops after it (its stop stage is pushed first); it
+/// uses the blob service and dispatch, which stop later still.
 #[expect(
     clippy::too_many_arguments,
     reason = "boot wiring of already-built services"
 )]
-async fn boot_nodules(
+async fn boot_nodules<Host, Hosting>(
     authority: &Authority,
     docs: &DocsRepo,
     drawers: &Drawers,
-    drawers_actor: &Actor,
-    nodules_actor: &Actor,
+    drawers_actor: &OpenedActor,
+    nodules_actor: &OpenedActor,
     namespace: Namespace,
     dispatch: &Dispatch,
     dispatch_authority: CapId,
-    executor: Arc<dyn NoduleExecutor>,
+    host: Host,
+    blobs: &Arc<BlobService>,
     schemas: Arc<SchemaRepo>,
     sql: Database,
-) -> Res<(Nodules, service_utils_rs::StopToken)> {
+    stop: &mut StopToken,
+) -> Res<(Arc<dyn NoduleExecutor>, Nodules)>
+where
+    Host: FnOnce(ExecutorDeps) -> Hosting + Send,
+    Hosting: Future<Output = Res<HostedExecutor>> + Send,
+{
+    let (executor, executor_stop) = host(ExecutorDeps::of(blobs, &dispatch.client)).await?;
+    stop.stages.push(Stage::Service(executor_stop));
     let config_drawer = drawers.local().config_id.clone();
     grant_drawer_admin(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
-    Ok(big_nodule::boot(NodulesConfig {
+    let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
         drawers: drawers.client.clone(),
@@ -717,18 +728,22 @@ async fn boot_nodules(
         dispatch: Arc::clone(&dispatch.router),
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
-        executor: Some(executor),
+        executor: Some(Arc::clone(&executor)),
         schemas,
         sql,
     })
-    .await?)
+    .await?;
+    stop.stages.push(Stage::Service(nodules_stop));
+    Ok((executor, nodules))
 }
 
 /// Boots dispatch first: the nodule service registers its providers in dispatch's router, so it
 /// must stop first and dispatch last (reverse of construction).
 ///
-/// Then the operator mints the dispatch handle the nodule service mints every nodule's own
-/// handle from: `scope` is the most any nodule can be granted. It is retracted once the nodule
+/// Then the operator introduces the nodule service to dispatch: it mints the handle the nodule
+/// service mints every nodule's own handle from, bound to `nodules_actor` (an introduction, so
+/// it carries `Rights::DELEGATE`, which the nodule service needs to bind each nodule's handle
+/// to that nodule). `scope` is the most any nodule can be granted. It is retracted once the nodule
 /// service has stopped, which also kills the handles minted from it.
 ///
 /// The retraction only matters within a live process: the authority's capability ledger is in
@@ -736,6 +751,7 @@ async fn boot_nodules(
 /// survives and there is nothing to sweep.
 async fn boot_dispatch(
     authority: &Authority,
+    nodules_actor: Uuid7,
     namespace: Namespace,
     scope: DispatchScope,
     stop: &mut StopToken,
@@ -753,7 +769,8 @@ async fn boot_dispatch(
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
                 scope,
-                rights: Rights::USE | Rights::NARROW,
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(nodules_actor),
             },
         )
         .await?
@@ -785,8 +802,8 @@ async fn boot_dispatch(
 /// service over the node's config drawer, the cartridge registry over its registry drawer.
 async fn grant_drawer_admin(
     drawers: &Drawers,
-    issuer: &Actor,
-    subject: &Actor,
+    issuer: &OpenedActor,
+    subject: &OpenedActor,
     drawer: &DrawerId,
 ) -> Res<()> {
     let cap = drawers
@@ -800,6 +817,7 @@ async fn grant_drawer_admin(
                     create: false,
                 },
                 rights: Rights::USE | Rights::DELEGATE,
+                subject: None,
             },
         )
         .await?;
@@ -810,7 +828,7 @@ async fn grant_drawer_admin(
             GrantDrawer {
                 capability: cap.capability_id,
                 drawer_id: drawer.clone(),
-                subject_id: subject.actor_id,
+                subject_id: subject.actor.actor_id,
                 access: EntryAccess::Admin,
             },
         )

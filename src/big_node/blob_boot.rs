@@ -18,8 +18,8 @@ pub(super) async fn boot(
     blobs: &big_blobs::Blobs,
     docs: &DocsRepo,
     drawers: &Drawers,
-    drawers_actor: &Actor,
-    cartridges_actor: &Actor,
+    drawers_actor: &OpenedActor,
+    cartridges_actor: &OpenedActor,
     access: &Arc<DrawerAccess>,
     repo: &SharedBigRepo,
     scope_key: Arc<str>,
@@ -58,6 +58,7 @@ pub(super) async fn boot(
                     ..Default::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await?;
@@ -99,8 +100,8 @@ pub(super) async fn boot(
 /// the identity the blob workers sign as) and grants the cartridges actor admin over it.
 async fn ensure_registry_drawer(
     drawers: &Drawers,
-    drawers_actor: &Actor,
-    cartridges_actor: &Actor,
+    drawers_actor: &OpenedActor,
+    cartridges_actor: &OpenedActor,
     access: &DrawerAccess,
     sql: Database,
 ) -> Res<DrawerId> {
@@ -154,6 +155,7 @@ pub(super) fn metadata_capability(
                 MintDocCapability {
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

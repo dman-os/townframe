@@ -20,7 +20,7 @@ impl Core {
                 .await
                 .map_err(keyhive_error)?
                 .map(Into::into)
-                .ok_or_else(|| DrawersError::UnknownPeer(*peer)),
+                .ok_or(DrawersError::UnknownPeer(*peer)),
             Principal::Group { group_id: group } => {
                 ed25519_dalek::VerifyingKey::from_bytes(&group.0)
                     .map_err(|_| keyhive_error(format!("{group} is not a valid Ed25519 point")))?;

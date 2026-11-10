@@ -13,9 +13,12 @@ impl DocsService {
     async fn branch(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: BranchDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
+        let caller = self
+            .signing_invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -228,6 +231,9 @@ impl Handler<BranchDoc> for DocsService {
         &self,
         request: Envelope<BranchDoc>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
-        Ok(self.branch(&request.context, request.params).await?.into())
+        Ok(self
+            .branch(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }

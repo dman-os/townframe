@@ -332,6 +332,11 @@ pub struct Capability {
     pub object: String,
     pub rights: Rights,
     pub issuer_id: Uuid7,
+    /// The public id of the actor this handle is bound to. An actor's identity capability has
+    /// that actor as its subject, a handle derived from it inherits the subject, and an
+    /// introduction (a mint naming a subject) binds it to another actor. Namespace roots have
+    /// none.
+    pub subject: Option<Uuid7>,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -351,6 +356,17 @@ pub struct Actor {
     pub public_key: MultibaseKey,
     pub certificate: Bytes,
     pub parent_actor_id: Option<Uuid7>,
+}
+
+/// What `OpenActor` returns: the actor, and the identity capability that was issued (or
+/// reused) for the open. The capability is the opener's own secret handle, so it is returned
+/// here and nowhere else; resolving an actor by id gives only the public [`Actor`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedActor {
+    #[serde(flatten)]
+    pub actor: Actor,
     pub capability: CapId,
 }
 
@@ -391,7 +407,7 @@ pub struct OpenActor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveActor {
-    pub capability: CapId,
+    pub actor_id: Uuid7,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +418,15 @@ pub struct MintCapability {
     pub dependencies: Vec<CapId>,
     pub object: String,
     pub rights: Rights,
+    /// The actor the new handle is bound to. `None` inherits the subject of `parent` (of
+    /// `issuer` when there is no parent). A `Some` that differs from the inherited subject is
+    /// an introduction: the parent (or issuer) must carry `Rights::DELEGATE`, the handle also
+    /// depends on that actor's liveness, and an actor with no live identity capability is
+    /// `ActorNotFound`. A handle is trusted for its own subject's descendants and nothing else,
+    /// so the named actor must be a strict descendant of the inherited subject; a sibling, an
+    /// ancestor, an unrelated actor, or any actor when the source has no subject is
+    /// `Escalation`.
+    pub subject: Option<Uuid7>,
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,13 +452,14 @@ pub struct RetractCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignDatumClaim {
-    pub actor: CapId,
+    /// The handle to sign with: it must carry `USE` and be bound to the claim's actor.
+    pub via: CapId,
     pub claim: DatumClaim,
 }
 
 method_core::methods! {
     error = AuthorityServiceError, nsid_prefix = "org.example.daybook.authority.";
-    OpenActor => Actor, procedure, "openActor";
+    OpenActor => OpenedActor, procedure, "openActor";
     ResolveActor => Actor, query, "resolveActor";
     ResolveAuthority => ResolvedAuthority, query, "resolveAuthority";
     MintCapability => Capability, procedure, "mintCapability";

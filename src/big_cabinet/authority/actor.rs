@@ -16,7 +16,6 @@ use super::cap::State;
 use super::store::ActorRow;
 use super::store::SealedKey;
 use big_cabinet_core::authority::Actor;
-use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Attribution;
 use big_cabinet_core::dmeta::Bytes;
@@ -152,17 +151,12 @@ pub(super) fn issue_certificate(
     Ok(attribution.certificate(signature)?)
 }
 
-pub(super) fn public_actor(
-    node: &ActorPublicKey,
-    row: &ActorRow,
-    capability: CapId,
-) -> Result<Actor, AuthorityError> {
+pub(super) fn public_actor(node: &ActorPublicKey, row: &ActorRow) -> Result<Actor, AuthorityError> {
     Ok(Actor {
         actor_id: row.actor_id,
         url: actor_url(node, &row.path)?,
         public_key: key_text(&row.public_key)?,
         certificate: Bytes::from(row.certificate.clone()),
         parent_actor_id: row.parent,
-        capability,
     })
 }

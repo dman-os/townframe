@@ -10,12 +10,12 @@ use std::collections::HashSet;
 impl Node {
     /// Provision a standing grant the way an embedder does for its own actors, without going
     /// through `GrantDrawer` (which would need an Admin on this node).
-    async fn provision(&self, actor: &Actor, drawer: &DrawerId, access: Access) {
+    async fn provision(&self, actor: &OpenedActor, drawer: &DrawerId, access: Access) {
         self.core()
             .grants
             .grant(
                 &RequestContext::root(),
-                actor.actor_id,
+                actor.actor.actor_id,
                 DrawerAccess::object(access, drawer),
                 Rights::USE,
                 None,

@@ -316,6 +316,7 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -372,6 +373,7 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -424,6 +426,7 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

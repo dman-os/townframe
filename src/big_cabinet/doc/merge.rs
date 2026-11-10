@@ -10,9 +10,12 @@ impl DocsService {
     async fn merge(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: MergeDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
+        let caller = self
+            .signing_invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -128,6 +131,9 @@ impl Handler<MergeDoc> for DocsService {
         &self,
         request: Envelope<MergeDoc>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
-        Ok(self.merge(&request.context, request.params).await?.into())
+        Ok(self
+            .merge(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }

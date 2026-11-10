@@ -35,6 +35,7 @@ use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OPERATOR_OBJECT;
 use big_cabinet_core::authority::ObserveCapability;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::ResolvedAuthority;
@@ -252,21 +253,17 @@ impl AuthorityService {
             Rights::all(),
             node.actors_issuer,
             cap::Kind::Object,
+            None,
             [actors_namespace.capability],
         )?;
         let root_cap = root.id;
-        state.insert(root);
-        assert!(
-            state
-                .actors
-                .insert(
-                    root_cap,
-                    cap::ActorBinding {
-                        actor_id: node.operator,
-                        reuse_key: None,
-                    },
-                )
-                .is_none()
+        state.bind_identity(
+            root,
+            cap::ActorBinding {
+                actor_id: node.operator,
+                parent_actor: None,
+                reuse_key: None,
+            },
         );
         let changes = tokio::sync::watch::channel(0).0;
         let ledger = cap::spawn(state, changes.clone(), &tasks);
@@ -389,13 +386,18 @@ impl AuthorityService {
     }
 
     /// The registry row of a registered actor, from memory when it was seen before and from one
-    /// read snapshot otherwise.
+    /// read snapshot otherwise. An id no actor has is [`AuthorityError::ActorNotFound`]: callers
+    /// pass ids they were handed, not only ids the ledger vouched for.
     async fn cached_actor_row(&self, uuid: Uuid7) -> Result<Arc<ActorRow>, AuthorityError> {
         if let Some(row) = self.actor_rows.lock().expect("actor row cache").get(&uuid) {
             return Ok(Arc::clone(row));
         }
         let transaction = self.read().await?;
-        let row = Arc::new(Self::actor_row(&transaction, uuid).await?);
+        let row = Arc::new(
+            store::actor(&transaction, uuid)
+                .await?
+                .ok_or(AuthorityError::ActorNotFound)?,
+        );
         drop(transaction);
         self.actor_rows
             .lock()

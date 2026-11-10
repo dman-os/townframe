@@ -369,7 +369,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         drawer_caps.push(node.drawer_capability(actor, &[&drawer]).await.unwrap());
         doc_caps.push(node.mint_doc(actor, doc_scope.clone()).await.unwrap());
         let (_, dependencies) = old_core
-            .effective(&RequestContext::root(), actor.actor_id, &drawer)
+            .effective(&RequestContext::root(), actor.actor.actor_id, &drawer)
             .await
             .unwrap()
             .unwrap();
@@ -523,7 +523,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
             .grants
             .grant(
                 &RequestContext::root(),
-                bob.actor_id,
+                bob.actor.actor_id,
                 drawer_object(Access::Admin, &drawer),
                 Rights::USE,
                 None,
@@ -594,7 +594,8 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
     let bob = node.actor("bob").await;
-    let cartridge = node.actor("cartridge").await;
+    // Bob can introduce only its own descendants.
+    let cartridge = node.sub_actor(bob.capability, "bob/cartridge").await;
     let drawer = node.collection(&alice, "workspace").await;
     let doc = node
         .create_doc(&alice, &drawer, "initial-note")
@@ -618,6 +619,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             MintDrawerCapability {
                 scope: scope.clone(),
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(cartridge.actor.actor_id),
             },
         )
         .await
@@ -640,8 +642,8 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         .invocation(&RequestContext::root(), delegated)
         .await
         .unwrap();
-    assert_eq!(caller.signer, cartridge);
-    assert_eq!(caller.originating_actor, Some(bob.actor_id));
+    assert_eq!(caller.signer, cartridge.actor);
+    assert_eq!(caller.originating_actor, Some(bob.actor.actor_id));
     assert_eq!(
         node.mint_drawer(&cartridge, scope).await.unwrap_err(),
         DrawersError::Denied
@@ -712,7 +714,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
                 GrantDrawer {
                     capability: delegated,
                     drawer_id: drawer.clone(),
-                    subject_id: cartridge.actor_id,
+                    subject_id: cartridge.actor.actor_id,
                     access: Access::Write,
                 }
             )
@@ -736,6 +738,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
                         create: false
                     },
                     rights: Rights::USE,
+                    subject: None,
                 }
             )
             .await
@@ -760,7 +763,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         .unwrap()
         .unwrap()
         .actor_uuid;
-    assert_eq!(signer, cartridge.actor_id.to_string());
+    assert_eq!(signer, cartridge.actor.actor_id.to_string());
     node.authority
         .client
         .call(
@@ -832,7 +835,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
                     GrantDrawer {
                         capability,
                         drawer_id: drawer.clone(),
-                        subject_id: bob.actor_id,
+                        subject_id: bob.actor.actor_id,
                         access: Access::Write,
                     }
                 )
@@ -847,7 +850,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             GrantDrawer {
                 capability: admin,
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
                 access: Access::Write,
             },
         )
@@ -889,7 +892,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
         .grants
         .revoke(
             &RequestContext::root(),
-            bob.actor_id,
+            bob.actor.actor_id,
             &[drawer_object(Access::Relay, &drawer)],
         )
         .await
@@ -912,7 +915,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             RevokeDrawer {
                 capability: admin,
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
             },
         )
         .await
@@ -956,7 +959,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             GrantDrawer {
                 capability: admin,
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
                 access: Access::Read,
             },
         )
@@ -1058,7 +1061,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     let context = RequestContext::root();
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor_id, &alternative)
+            .effective(&context, bob.actor.actor_id, &alternative)
             .await
             .unwrap()
             .unwrap()
@@ -1067,7 +1070,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     );
     let selected_proof = node
         .core()
-        .effective(&context, bob.actor_id, &selected)
+        .effective(&context, bob.actor.actor_id, &selected)
         .await
         .unwrap()
         .unwrap();
@@ -1075,14 +1078,14 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     assert!(!selected_proof.1.is_empty());
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor_id, &drawer)
+            .effective(&context, bob.actor.actor_id, &drawer)
             .await
             .unwrap(),
         Some(selected_proof.clone())
     );
     assert_eq!(
         node.core()
-            .reach(&context, bob.actor_id, &doc)
+            .reach(&context, bob.actor.actor_id, &doc)
             .await
             .unwrap(),
         Some(selected_proof)
@@ -1141,14 +1144,14 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
             RevokeDrawer {
                 capability: admin,
                 drawer_id: drawer_id.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
             },
         )
     };
     revoke(&alternative).await.unwrap();
     assert_eq!(
         node.core()
-            .effective(&context, bob.actor_id, &alternative)
+            .effective(&context, bob.actor.actor_id, &alternative)
             .await
             .unwrap(),
         None
@@ -1185,11 +1188,109 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     node.stop().await;
 }
 
+/// The actors whose signatures cover the drawer descriptor on `doc`, read back through an
+/// inspection handle so the answer is what the document says, not what the drawer service
+/// recorded about the call.
+async fn descriptor_signers(node: &Node, doc: &DocId) -> BTreeSet<big_cabinet_core::dmeta::Uuid7> {
+    let docs = node.docs.as_ref().unwrap();
+    let capability = docs
+        .mint_inspection_handle(doc.clone(), node.docs_actor.actor.actor_id)
+        .await
+        .unwrap();
+    let handle = match node.repo.get_doc(doc).await.unwrap() {
+        big_repo::DocLookup::Ready(handle) => handle,
+        _ => panic!("document is local"),
+    };
+    let mut heads = handle.with_document_read(|doc| doc.get_heads()).await;
+    heads.sort();
+    docs.client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::doc::InspectDatumClaims {
+                capability: capability.capability_id,
+                doc_id: doc.clone(),
+                datum_key: drawer_key(),
+                heads,
+            },
+        )
+        .await
+        .unwrap()
+        .evidence
+        .into_iter()
+        .map(|entry| match entry.result {
+            big_cabinet_core::doc::SignatureEvidence::VerifiedSignature { evidence } => {
+                evidence.claim.actor_uuid
+            }
+            other => panic!("expected a verified signature, got {other:?}"),
+        })
+        .collect()
+}
+
+/// createSelfDoc writes the descriptor through a handle the drawer service mints for the call,
+/// but the signature is the caller's: the service signs through the handle the caller presented
+/// and is never introduced to the caller's actor.
+#[tokio::test]
+async fn create_self_doc_signs_the_descriptor_as_the_caller() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let cartridge = node.sub_actor(alice.capability, "alice/cartridge").await;
+    let home = node.collection(&alice, "home").await;
+    let scope = DrawerScope {
+        drawers: [(home.clone(), Access::Write)].into(),
+        create: true,
+    };
+    let own = node.mint_drawer(&alice, scope.clone()).await.unwrap();
+    // Alice's handle, introduced to her descendant: its subject is the cartridge, so the
+    // descriptor is the cartridge's signature although alice owns the drawer.
+    let delegated = node
+        .drawers()
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(own).metadata(),
+            MintDrawerCapability {
+                scope,
+                rights: Rights::USE,
+                subject: Some(cartridge.actor.actor_id),
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    for (name, capability, signer) in [
+        ("alice signs", own, &alice),
+        ("cartridge signs", delegated, &cartridge),
+    ] {
+        let doc = node
+            .create_doc(&alice, &home, &format!("doc of {name}"))
+            .await
+            .unwrap();
+        node.drawers()
+            .call(
+                RequestContext::root(),
+                CreateDrawer {
+                    capability,
+                    command: command(name),
+                    layout: CreateLayout::SelfDoc {
+                        doc_id: doc.clone(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            descriptor_signers(&node, &doc).await,
+            BTreeSet::from([signer.actor.actor_id]),
+            "{name}"
+        );
+    }
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
-    let cartridge = node.actor("cartridge").await;
+    let cartridge = node.sub_actor(alice.capability, "alice/cartridge").await;
     let home = node.collection(&alice, "home").await;
     let doc = node.create_doc(&alice, &home, "note").await.unwrap();
     let scope = DrawerScope {
@@ -1209,6 +1310,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             MintDrawerCapability {
                 scope,
                 rights: Rights::USE,
+                subject: Some(cartridge.actor.actor_id),
             },
         )
         .await
@@ -1255,11 +1357,11 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.actor_uuid, cartridge.actor_id.to_string());
+        assert_eq!(row.actor_uuid, cartridge.actor.actor_id.to_string());
         let operation: ledger::Op = serde_json::from_str(&row.op_json).unwrap();
         match operation {
             ledger::Op::Create { owner_id, .. } | ledger::Op::CreateSelfDoc { owner_id, .. } => {
-                assert_eq!(owner_id, Some(alice.actor_id));
+                assert_eq!(owner_id, Some(alice.actor.actor_id));
             }
             other => panic!("unexpected creation operation: {other:?}"),
         }
@@ -1277,7 +1379,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
         .grants
         .revoke(
             &RequestContext::root(),
-            alice.actor_id,
+            alice.actor.actor_id,
             &[CREATE_DRAWER_OBJECT.into()],
         )
         .await
@@ -1329,7 +1431,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
 async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both_layouts() {
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
-    let cartridge = node.actor("cartridge").await;
+    let cartridge = node.sub_actor(alice.capability, "alice/cartridge").await;
     let home = node.collection(&alice, "home").await;
     let doc = node.create_doc(&alice, &home, "note").await.unwrap();
     let context = RequestContext::root();
@@ -1350,14 +1452,15 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             MintDrawerCapability {
                 scope,
                 rights: Rights::USE,
+                subject: Some(cartridge.actor.actor_id),
             },
         )
         .await
         .unwrap()
         .capability_id;
     let caller = node.core().invocation(&context, delegated).await.unwrap();
-    assert_eq!(caller.signer, cartridge);
-    assert_eq!(caller.originating_actor, Some(alice.actor_id));
+    assert_eq!(caller.signer, cartridge.actor);
+    assert_eq!(caller.originating_actor, Some(alice.actor.actor_id));
     drop(
         node.core()
             .authorize_create(&context, &caller.authority)
@@ -1446,20 +1549,21 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         .core()
         .as_signer(
             &context,
-            caller.signer.capability,
+            caller.via,
             DocScope {
                 write: [doc.clone()].into(),
                 ..Default::default()
             },
-            |capability| {
+            |authorization| {
                 let (self_doc_command, doc, node, context) =
                     (&self_doc_command, &doc, &node, &context);
                 async move {
                     node.docs()
-                        .call(
+                        .call_with(
                             context.child(),
+                            authorization.metadata(),
                             WriteDatums {
-                                capability,
+                                capability: authorization.authority,
                                 command: Some(self_doc_command.clone()),
                                 doc_id: doc.clone(),
                                 mode: WriteMode::AtCurrent,
@@ -1492,7 +1596,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             .grants
             .matching(
                 &context,
-                alice.actor_id,
+                alice.actor.actor_id,
                 &[drawer_object(Access::Admin, &doc)],
             )
             .await
@@ -1530,7 +1634,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.actor_uuid, cartridge.actor_id.to_string());
+        assert_eq!(row.actor_uuid, cartridge.actor.actor_id.to_string());
         assert_eq!(
             serde_json::from_str::<ledger::Op>(&row.op_json).unwrap(),
             *expected_op

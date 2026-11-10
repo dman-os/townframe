@@ -3,7 +3,7 @@
 use super::*;
 
 /// The document's current heads, read as `actor` without verifying any datum.
-async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
+async fn heads(node: &Node, actor: &OpenedActor, doc_id: &DocId) -> Vec<ChangeHash> {
     let capability = node
         .mint_doc(
             actor,
@@ -32,7 +32,7 @@ async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
 
 /// Wait until the `datum_set` index carries the note of `doc_id` at the document's current
 /// heads: not merely some row for the document, but the row for the state the test wrote.
-async fn wait_for_datum_set(node: &Node, actor: &Actor, doc_id: &DocId) {
+async fn wait_for_datum_set(node: &Node, actor: &OpenedActor, doc_id: &DocId) {
     let heads = heads(node, actor, doc_id).await;
     let note_key = note("").0;
     node.wait_indexed(NOTE, |route, membership| {
@@ -120,9 +120,9 @@ async fn next_leave(poll: &mut crate::test_poll::Poller, expected: &DocId) {
 /// `parent`; Carol holds only `Relay` on `parent`.
 struct Containment {
     node: Node,
-    alice: Actor,
-    bob: Actor,
-    carol: Actor,
+    alice: OpenedActor,
+    bob: OpenedActor,
+    carol: OpenedActor,
     parent: DrawerId,
     other: DrawerId,
     doc_direct: DocId,
@@ -255,12 +255,12 @@ impl Containment {
         }
     }
 
-    async fn capability(&self, actor: &Actor, scope: DocScope) -> CapId {
+    async fn capability(&self, actor: &OpenedActor, scope: DocScope) -> CapId {
         self.node.mint_doc(actor, scope).await.unwrap()
     }
 
     /// A doc-scope capability over `parent` alone at `access`.
-    async fn parent_capability(&self, actor: &Actor, access: Access) -> CapId {
+    async fn parent_capability(&self, actor: &OpenedActor, access: Access) -> CapId {
         self.capability(
             actor,
             DocScope {
@@ -972,7 +972,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
             RevokeDrawer {
                 capability: node.drawer_capability(&alice, &[&drawer]).await.unwrap(),
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
             },
         )
         .await

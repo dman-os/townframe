@@ -342,7 +342,11 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
         json!({"access": "Read"})
     );
     // ListDocs answers from the projection alone (GetDrawer rescans the roster first).
-    async fn listed(node: &Node, alice: &Actor, drawer: &DrawerId) -> BTreeMap<DocId, Access> {
+    async fn listed(
+        node: &Node,
+        alice: &OpenedActor,
+        drawer: &DrawerId,
+    ) -> BTreeMap<DocId, Access> {
         node.list_docs(alice, drawer, 0, None)
             .await
             .unwrap()
@@ -506,7 +510,7 @@ async fn the_known_drawers_list_is_explicit_and_survives_restart() {
         .grants
         .grant(
             &RequestContext::root(),
-            alice.actor_id,
+            alice.actor.actor_id,
             drawer_object(Access::Admin, &known_drawers),
             Rights::USE,
             None,
@@ -1276,7 +1280,7 @@ async fn successor_absence_after_removal_is_not_an_unavailable_target() {
         .grants
         .grant(
             &RequestContext::root(),
-            alice.actor_id,
+            alice.actor.actor_id,
             drawer_object(Access::Read, &missing),
             Rights::USE,
             None,

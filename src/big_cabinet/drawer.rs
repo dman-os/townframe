@@ -264,6 +264,7 @@ impl Drawers {
                         create: false,
                     },
                     rights,
+                    subject: None,
                 },
             )
             .await
@@ -325,8 +326,8 @@ impl Handler<MintDrawerCapability> for DrawerService {
             .capabilities
             .mint(
                 &request.context,
-                authorization.authority,
                 &caller,
+                params.subject,
                 params.scope,
                 params.rights,
                 dependencies,
@@ -439,16 +440,21 @@ impl Core {
     }
 
     /// Run `request` against the docs service under a capability narrowed to `scope` and
-    /// signed as `signer`, minted for this call and retracted once it returns. The drawer
-    /// service holds doc authority over every drawer it projects, so a handle per request
-    /// is how it narrows that authority; retracting it keeps the authority's handle table
-    /// from growing with every roster read.
+    /// signed through the handle `signer`, minted for this call and retracted once it returns.
+    /// The drawer service holds doc authority over every drawer it projects, so a handle per
+    /// request is how it narrows that authority; retracting it keeps the authority's handle
+    /// table from growing with every roster read. The minted handle stays bound to the drawer
+    /// service (no introduction), and `signer` is only the handle the docs service signs
+    /// through: the drawer service's own identity (`self.issuer`) for its own writes, or the
+    /// handle a caller presented when the write is the caller's. `request` receives the
+    /// [`Authorization`] to attach to the docs call that signs; a call that signs as the drawer
+    /// service needs only its `authority`.
     pub(crate) async fn as_signer<T, F>(
         &self,
         context: &RequestContext,
         signer: CapId,
         scope: DocScope,
-        request: impl FnOnce(CapId) -> F,
+        request: impl FnOnce(Authorization) -> F,
     ) -> Result<T, DrawersError>
     where
         F: Future<Output = Result<T, DrawersError>>,
@@ -457,20 +463,21 @@ impl Core {
             .docs()
             .call_with(
                 context.child(),
-                Authorization {
-                    authority: self.issuer,
-                    signer,
-                }
-                .metadata(),
+                Authorization::identity(self.issuer).metadata(),
                 MintDocCapability {
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await
             .map_err(docs_error)?
             .capability_id;
-        let result = request(capability).await;
+        let result = request(Authorization {
+            authority: capability,
+            signer,
+        })
+        .await;
         self.capabilities
             .retract(context, capability)
             .await
@@ -712,7 +719,10 @@ impl Core {
                 write: [drawer.clone()].into(),
                 ..Default::default()
             },
-            |capability| async move {
+            |Authorization {
+                 authority: capability,
+                 ..
+             }| async move {
                 self.docs()
                     .call(
                         context.child(),
@@ -812,7 +822,10 @@ impl Core {
                     read: [doc.clone()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -919,7 +932,10 @@ impl Core {
                         read: [drawer_id.clone()].into(),
                         ..Default::default()
                     },
-                    |capability| {
+                    |Authorization {
+                         authority: capability,
+                         ..
+                     }| {
                         let drawer_id = &drawer_id;
                         async move {
                             match self

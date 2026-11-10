@@ -75,7 +75,7 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
             RevokeDrawer {
                 capability: node.drawer_capability(&alice, &[&drawer]).await.unwrap(),
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
             },
         )
         .await
@@ -95,7 +95,7 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
             GrantDrawer {
                 capability: node.drawer_capability(&carol, &[&drawer]).await.unwrap(),
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
                 access: Access::Read,
             },
         )
@@ -844,7 +844,7 @@ async fn list_docs_is_one_check_then_the_scoped_roster() {
             big_cabinet_core::drawer::protocol::RevokeDrawer {
                 capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
                 drawer_id: home.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
             },
         )
         .await
@@ -1308,7 +1308,7 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
             );
             assert_eq!(
                 node.core()
-                    .reach(&RequestContext::root(), actor.actor_id, doc)
+                    .reach(&RequestContext::root(), actor.actor.actor_id, doc)
                     .await
                     .unwrap()
                     .map(|(access, _)| access),
@@ -1398,7 +1398,9 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
 async fn metadata_only_capability_does_not_grant_drawer_or_content() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
-    let holder = node.actor("metadata-only").await;
+    let holder = node
+        .sub_actor(alice.capability, "alice/metadata-only")
+        .await;
     let home = node.collection(&alice, "home").await;
     let content = node.create_doc(&alice, &home, "content").await.unwrap();
     for root in [MetaRoot::Public, MetaRoot::Sensitive] {
@@ -1438,6 +1440,7 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                         ..Default::default()
                     },
                     rights: Rights::USE | Rights::NARROW,
+                    subject: Some(holder.actor.actor_id),
                 },
             )
             .await
@@ -1538,6 +1541,7 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                             MintDocCapability {
                                 scope,
                                 rights: Rights::USE,
+                                subject: Some(holder.actor.actor_id),
                             },
                         )
                         .await

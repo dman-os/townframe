@@ -4,11 +4,11 @@
 //! Forgeries are planted with raw Automerge edits on documents the repository wrote correctly, so
 //! each test states exactly which invariant the sabotage breaks.
 
-mod list_costs;
 mod branches;
 mod capabilities;
 mod commands;
 mod gate;
+mod list_costs;
 mod model;
 mod observe;
 mod peer;
@@ -24,8 +24,8 @@ use crate::schema::SchemaRepo;
 use automerge::Automerge;
 use automerge::ChangeHash;
 use big_cabinet_core::DatumKey;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::doc::ObservedDatum;
@@ -79,7 +79,7 @@ fn schemas() -> Arc<SchemaRepo> {
 struct Node {
     authority: Authority,
     authority_stop: Option<StopToken>,
-    docs_actor: Actor,
+    docs_actor: OpenedActor,
     docs_namespace: Namespace,
     access: Arc<LedgerAccess>,
     repo: SharedBigRepo,
@@ -249,7 +249,7 @@ impl Node {
     }
 
     /// A fresh actor allowed to create documents in [`PLACEMENT`].
-    async fn writer(&self, path: &str) -> Actor {
+    async fn writer(&self, path: &str) -> OpenedActor {
         let actor = self
             .authority
             .client
@@ -273,12 +273,12 @@ impl Node {
         actor
     }
 
-    async fn grant(&self, actor: &Actor, object: String) {
+    async fn grant(&self, actor: &OpenedActor, object: String) {
         self.access
             .grants
             .grant(
                 &RequestContext::root(),
-                actor.actor_id,
+                actor.actor.actor_id,
                 object,
                 Rights::USE,
                 None,
@@ -287,7 +287,7 @@ impl Node {
             .unwrap();
     }
 
-    async fn capability(&self, actor: &Actor, scope: DocScope) -> Result<CapId, DocsError> {
+    async fn capability(&self, actor: &OpenedActor, scope: DocScope) -> Result<CapId, DocsError> {
         op(self
             .client()
             .call_with(
@@ -296,6 +296,7 @@ impl Node {
                 MintDocCapability {
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await)
@@ -304,7 +305,7 @@ impl Node {
 
     async fn create(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         command: &str,
         datums: impl IntoIterator<Item = (DatumKey, Value)>,
     ) -> Result<WriteReceipt, DocsError> {
@@ -332,7 +333,7 @@ impl Node {
 
     async fn write(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         document: &DocId,
         mode: WriteMode,
         set: impl IntoIterator<Item = (DatumKey, Value)>,
@@ -364,7 +365,7 @@ impl Node {
 
     async fn read(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         document: &DocId,
         at: At,
         optimistic: bool,
@@ -394,7 +395,7 @@ impl Node {
 
     async fn read_one(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         document: &DocId,
         at: At,
         datum: &DatumKey,

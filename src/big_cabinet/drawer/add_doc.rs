@@ -56,7 +56,10 @@ impl Core {
                     read: [drawer.clone()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),

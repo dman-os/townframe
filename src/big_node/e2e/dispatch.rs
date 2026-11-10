@@ -32,6 +32,7 @@ pub(super) async fn narrowed(node: &BigNode, scope: DispatchScope) -> Authorizat
             MintDispatchCapability {
                 scope,
                 rights: Rights::USE | Rights::NARROW,
+                subject: None,
             },
         )
         .await

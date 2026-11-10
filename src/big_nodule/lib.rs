@@ -32,13 +32,13 @@ use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
 use big_cabinet::capability::Invocation;
 use big_cabinet_core::DocId;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
@@ -118,7 +118,7 @@ pub struct NodulesConfig {
     pub docs: Client<DocsProtocol>,
     pub drawers: Client<DrawersProtocol>,
     pub config_drawer: DrawerId,
-    pub actor: Actor,
+    pub actor: OpenedActor,
     pub actor_path: String,
     pub namespace: Namespace,
     pub operator: Uuid7,
@@ -247,8 +247,8 @@ impl NoduleService {
         self.capabilities
             .mint(
                 context,
-                authorization.authority,
                 &caller,
+                None,
                 params.scope,
                 params.rights,
                 Vec::new(),
@@ -524,6 +524,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

@@ -103,7 +103,7 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
-use big_cabinet_core::authority::ResolveActor;
+use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::datum::CompiledSchema;
@@ -178,6 +178,7 @@ use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
 use service_utils_rs::Host;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::Spawner;
@@ -329,6 +330,29 @@ fn unaccepted(verdict: Verdict) -> Result<Vec<ChangeHash>, Unaccepted> {
 }
 
 impl DocsService {
+    /// The invocation of a request that signs: a create, write, branch or merge. The handle signs
+    /// as its own subject unless the caller attached an `Authorization` whose `authority` is this
+    /// request's handle, whose `signer` is then the handle the call signs through. That is how a
+    /// service signs on behalf of its authenticated caller without being introduced to the
+    /// caller's actor: the signature is exactly as wide as the handle the caller presented. Any
+    /// other credential in the metadata (dispatch forwards its caller's) is the transport's, not a
+    /// signer for this handle, and is not consulted.
+    async fn signing_invocation(
+        &self,
+        context: &RequestContext,
+        metadata: &HttpMetadata,
+        capability: CapId,
+    ) -> Result<Invocation<DocScope>, DocsError> {
+        let signer = match Authorization::from_metadata(metadata) {
+            Ok(authorization) if authorization.authority == capability => authorization.signer,
+            _ => capability,
+        };
+        self.capabilities
+            .resolve_signed(context, capability, signer)
+            .await
+            .map_err(authority_error)
+    }
+
     async fn invocation(
         &self,
         context: &RequestContext,
@@ -497,7 +521,7 @@ impl DocsRepo {
     pub async fn mint_inspection_handle(
         &self,
         doc_id: DocId,
-        signer: CapId,
+        subject: Uuid7,
     ) -> Result<Capability, DocsError> {
         let service = Arc::clone(&self.service);
         let owner = self.mint_spawner.clone();
@@ -508,21 +532,15 @@ impl DocsRepo {
                     let context = RequestContext::root();
                     let caller = service
                         .inspection_capabilities
-                        .source::<DocId>(
-                            &context,
-                            Authorization {
-                                authority: service.issuer,
-                                signer,
-                            },
-                        )
+                        .source::<DocId>(&context, Authorization::identity(service.issuer))
                         .await
                         .map_err(authority_error)?;
                     service
                         .inspection_capabilities
                         .mint(
                             &context,
-                            service.issuer,
                             &caller,
+                            Some(subject),
                             doc_id,
                             Rights::USE,
                             Vec::new(),
@@ -556,12 +574,18 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         .authority
         .call(
             RequestContext::root(),
-            ResolveActor {
+            ResolveAuthority {
                 capability: config.issuer,
             },
         )
         .await
-        .map_err(authority_error)?;
+        .map_err(authority_error)?
+        .actor
+        .ok_or_else(|| {
+            authority_error(ClientError::Method(
+                AuthorityServiceError::UnrecognizedActor,
+            ))
+        })?;
     let core = |tag: &str| {
         config
             .schema_repo

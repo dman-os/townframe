@@ -286,7 +286,7 @@ impl DocsService {
                 .call(
                     context.child(),
                     SignDatumClaim {
-                        actor: capability,
+                        via: capability,
                         claim: claim.clone(),
                     },
                 )

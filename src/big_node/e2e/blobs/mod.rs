@@ -29,6 +29,7 @@ pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -143,6 +144,7 @@ pub(super) async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<C
                 dependencies,
                 object,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -360,7 +362,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
         .grants()
         .grant(
             &RequestContext::root(),
-            node.drawers_actor.actor_id,
+            node.drawers_actor.actor.actor_id,
             big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT.into(),
             Rights::USE,
             None,
@@ -379,6 +381,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -413,6 +416,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
                     ]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

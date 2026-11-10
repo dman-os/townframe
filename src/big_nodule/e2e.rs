@@ -20,10 +20,10 @@ use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
@@ -187,9 +187,14 @@ fn test_schemas() -> Arc<SchemaRepo> {
     )
 }
 
-/// The operator grants the nodule service dispatch over [`OPERATIONS_CEILING`], to mint the
-/// nodules' own handles from.
-async fn grant_nodule_dispatch(authority: &Authority, dispatch: &Dispatch) -> CapId {
+/// The operator introduces the nodule service to dispatch over [`OPERATIONS_CEILING`]: a handle
+/// bound to `nodules_actor`, with `DELEGATE` so the service can bind each nodule's own handle
+/// to that nodule.
+async fn grant_nodule_dispatch(
+    authority: &Authority,
+    dispatch: &Dispatch,
+    nodules_actor: big_cabinet_core::dmeta::Uuid7,
+) -> CapId {
     dispatch
         .client
         .call_with(
@@ -200,7 +205,8 @@ async fn grant_nodule_dispatch(authority: &Authority, dispatch: &Dispatch) -> Ca
                     authorities: [OPERATIONS_CEILING.to_owned()].into(),
                     ..Default::default()
                 },
-                rights: Rights::USE | Rights::NARROW,
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(nodules_actor),
             },
         )
         .await
@@ -222,8 +228,8 @@ struct Node {
     worker: Option<DrawerWorker>,
     worker_stop: StopToken,
     drawers_stop: StopToken,
-    drawers_actor: Actor,
-    nodules_actor: Actor,
+    drawers_actor: OpenedActor,
+    nodules_actor: OpenedActor,
     docs: DocsRepo,
     drawers: Drawers,
     sql: TestDb,
@@ -282,7 +288,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
     let dispatch_actor = open("dispatch").await.expect("dispatch actor");
     let dispatch_namespace = authority
         .service
-        .open_namespace(dispatch_actor.actor_id)
+        .open_namespace(dispatch_actor.actor.actor_id)
         .await
         .expect("dispatch namespace");
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
@@ -292,12 +298,12 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
     });
     let docs_namespace = authority
         .service
-        .open_namespace(docs_actor.actor_id)
+        .open_namespace(docs_actor.actor.actor_id)
         .await
         .expect("docs namespace");
     let drawers_namespace = authority
         .service
-        .open_namespace(drawers_actor.actor_id)
+        .open_namespace(drawers_actor.actor.actor_id)
         .await
         .expect("drawers namespace");
     let (repo, repo_stop) = BigRepo::boot(big_repo::Config {
@@ -354,10 +360,11 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         &drawers,
         &drawers_actor,
         &drawers.local().config_id,
-        nodules_actor.actor_id,
+        nodules_actor.actor.actor_id,
     )
     .await;
-    let dispatch_authority = grant_nodule_dispatch(&authority, &dispatch).await;
+    let dispatch_authority =
+        grant_nodule_dispatch(&authority, &dispatch, nodules_actor.actor.actor_id).await;
     let (nodules, stop) = boot_nodules(
         &authority,
         &docs,
@@ -398,7 +405,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
 
 async fn grant_drawer_admin(
     drawers: &Drawers,
-    grantor: &Actor,
+    grantor: &OpenedActor,
     drawer_id: &DrawerId,
     subject_id: big_cabinet_core::dmeta::Uuid7,
 ) {
@@ -413,6 +420,7 @@ async fn grant_drawer_admin(
                     create: false,
                 },
                 rights: Rights::USE | Rights::DELEGATE,
+                subject: None,
             },
         )
         .await
@@ -440,7 +448,7 @@ async fn boot_nodules(
     authority: &Authority,
     docs: &DocsRepo,
     drawers: &Drawers,
-    nodules_actor: &Actor,
+    nodules_actor: &OpenedActor,
     dispatch: &Dispatch,
     dispatch_authority: CapId,
     sql: &TestDb,
@@ -449,7 +457,7 @@ async fn boot_nodules(
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
         .service
-        .open_namespace(nodules_actor.actor_id)
+        .open_namespace(nodules_actor.actor.actor_id)
         .await
         .expect("nodules namespace");
     boot(NodulesConfig {
@@ -607,7 +615,7 @@ impl Node {
 
     /// The actor the nodule path names right now, opened by the test through the subsystem
     /// actor it holds, so a record's actor can be checked without the service's handle.
-    async fn actor_at(&self, cartridge_id: &CartridgeId) -> Actor {
+    async fn actor_at(&self, cartridge_id: &CartridgeId) -> OpenedActor {
         self.authority
             .client
             .call(
@@ -654,9 +662,12 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     assert_eq!(record.applied_heads.as_ref(), Some(&record.observed_heads));
     let actor = node.actor_at(&id(example_cartridge!("photos"))).await;
     let record_actor = record.actor.as_ref().expect("provisioned actor");
-    assert_eq!(record_actor.actor_id, actor.actor_id);
-    assert_eq!(record_actor.public_key, actor.public_key);
-    assert_eq!(actor.parent_actor_id, Some(node.nodules_actor.actor_id));
+    assert_eq!(record_actor.actor_id, actor.actor.actor_id);
+    assert_eq!(record_actor.public_key, actor.actor.public_key);
+    assert_eq!(
+        actor.actor.parent_actor_id,
+        Some(node.nodules_actor.actor.actor_id)
+    );
 
     let enabled = node
         .call(
@@ -726,7 +737,7 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     assert_eq!(upgraded.version, Some("1.1.0".parse().unwrap()));
     assert_eq!(
         upgraded.actor.as_ref().expect("provisioned actor").actor_id,
-        actor.actor_id
+        actor.actor.actor_id
     );
     assert!(upgraded.enabled);
     assert_eq!(upgraded.config, Some(settings_of(false)));
@@ -1032,7 +1043,7 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
         &node.drawers,
         &node.drawers_actor,
         &present,
-        node.nodules_actor.actor_id,
+        node.nodules_actor.actor.actor_id,
     )
     .await;
     let v1 = node
@@ -1139,6 +1150,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                         ..DocScope::default()
                     },
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await,
@@ -1151,7 +1163,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
         &node.drawers,
         &node.drawers_actor,
         &present,
-        node.nodules_actor.actor_id,
+        node.nodules_actor.actor.actor_id,
     )
     .await;
     let applied = node
@@ -1184,6 +1196,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1256,6 +1269,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1327,7 +1341,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             .as_ref()
             .expect("provisioned actor")
             .actor_id,
-        actor.actor_id
+        actor.actor.actor_id
     );
     node.shutdown().await;
 }
@@ -1363,6 +1377,7 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

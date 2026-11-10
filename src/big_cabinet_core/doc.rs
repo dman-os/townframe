@@ -4,6 +4,7 @@ use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
 use crate::dmeta::DocId;
+use crate::dmeta::Uuid7;
 use crate::drawer::DrawerAccess;
 use crate::query::DatumSelection;
 use crate::query::Predicate;
@@ -282,6 +283,11 @@ pub struct DocScope {
 pub struct MintDocCapability {
     pub scope: DocScope,
     pub rights: Rights,
+    /// The actor the new handle is bound to; `None` binds it to the presented handle's own
+    /// subject. Naming another actor is an introduction: the presented handle needs
+    /// `Rights::DELEGATE`, and the actor must be live and a strict descendant of the presented
+    /// handle's subject in the actor tree (anyone else is `Escalation`).
+    pub subject: Option<Uuid7>,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

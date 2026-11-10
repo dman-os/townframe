@@ -63,7 +63,7 @@ fn unsigned_text(doc: &mut Automerge, datum: &DatumKey, heads: &[ChangeHash], te
 
 const NOT_SIGNED: &str = "not the one its signatures cover";
 
-async fn seeded(node: &Node) -> (Actor, WriteReceipt) {
+async fn seeded(node: &Node) -> (OpenedActor, WriteReceipt) {
     let alice = node.writer("alice").await;
     let created = node
         .create(
@@ -330,7 +330,7 @@ async fn a_bogus_signature_entry_rejects_only_its_own_datum() {
             .unwrap()
             .to_owned();
         let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
-        tx.put(&entry, "actorUuid", alice.actor_id.to_string())
+        tx.put(&entry, "actorUuid", alice.actor.actor_id.to_string())
             .unwrap();
         tx.put(&entry, "docUuid", doc_uuid).unwrap();
         tx.put(&entry, "signature", vec![9_u8; 64]).unwrap();
@@ -524,7 +524,7 @@ enum Damage {
 async fn signed_outside(
     node: &Node,
     document: &DocId,
-    signer: &Actor,
+    signer: &OpenedActor,
     damage: Damage,
     node_actor: ActorId,
     text: &str,
@@ -543,15 +543,16 @@ async fn signed_outside(
         let dmeta = object(&tx, &datums, DMETA);
         let actors = object(&tx, &dmeta, "actors");
         let binding = tx
-            .put_object(&actors, signer.actor_id.to_string(), ObjType::Map)
+            .put_object(&actors, signer.actor.actor_id.to_string(), ObjType::Map)
             .unwrap();
-        tx.put(&binding, "pubkey", signer.public_key.to_string())
+        tx.put(&binding, "pubkey", signer.actor.public_key.to_string())
             .unwrap();
-        tx.put(&binding, "actorUrl", signer.url.as_str()).unwrap();
+        tx.put(&binding, "actorUrl", signer.actor.url.as_str())
+            .unwrap();
         tx.put(
             &binding,
             "delegation",
-            signer.certificate.as_slice().to_vec(),
+            signer.actor.certificate.as_slice().to_vec(),
         )
         .unwrap();
         let aliases = object(&tx, &dmeta, "datumUuids");
@@ -575,7 +576,7 @@ async fn signed_outside(
         let list = signatures(&tx, &datum);
         tx.delete(&list, 0).unwrap();
         let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
-        tx.put(&entry, "actorUuid", signer.actor_id.to_string())
+        tx.put(&entry, "actorUuid", signer.actor.actor_id.to_string())
             .unwrap();
         let documents = object(&tx, &dmeta, "docUuids");
         let doc_uuid = tx
@@ -600,7 +601,7 @@ async fn signed_outside(
             origin_document: document.clone(),
             datum_key: datum.clone(),
             chosen_uuid: chosen.try_into().unwrap(),
-            actor_uuid: signer.actor_id,
+            actor_uuid: signer.actor.actor_id,
             operation: ClaimOperation::Set,
             value_cid: Some(cid_of(&encode_native(&native))),
             predecessors,
@@ -609,7 +610,9 @@ async fn signed_outside(
             Damage::None => {}
             Damage::MissingCertificate => tx.delete(&binding, "delegation").unwrap(),
             Damage::MissingUrl => tx.delete(&binding, "actorUrl").unwrap(),
-            Damage::MissingActor => tx.delete(&actors, signer.actor_id.to_string()).unwrap(),
+            Damage::MissingActor => tx
+                .delete(&actors, signer.actor.actor_id.to_string())
+                .unwrap(),
             Damage::MissingAlias => tx.delete(&aliases, chosen.to_string()).unwrap(),
             Damage::UnboundDocUuid => tx
                 .put(
@@ -654,7 +657,7 @@ async fn signed_outside(
         .call(
             RequestContext::root(),
             SignDatumClaim {
-                actor: signer.capability,
+                via: signer.capability,
                 claim: claim.unwrap(),
             },
         )

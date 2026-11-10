@@ -153,6 +153,7 @@ impl Node {
                 MintDocCapability {
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

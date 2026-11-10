@@ -109,6 +109,7 @@ async fn capability(node: &BigNode, scope: DocScope) -> CapId {
             MintDocCapability {
                 scope,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -271,10 +272,10 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     let identity = (
         node.repo.local_peer_id(),
         node.authority.node_issuer.clone(),
-        node.docs_actor.actor_id,
-        node.docs_actor.public_key.clone(),
-        node.drawers_actor.actor_id,
-        node.drawers_actor.public_key.clone(),
+        node.docs_actor.actor.actor_id,
+        node.docs_actor.actor.public_key.clone(),
+        node.drawers_actor.actor.actor_id,
+        node.drawers_actor.actor.public_key.clone(),
         node.docs_namespace.namespace_id,
         node.drawers_namespace.namespace_id,
     );
@@ -325,10 +326,10 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
         (
             node.repo.local_peer_id(),
             node.authority.node_issuer.clone(),
-            node.docs_actor.actor_id,
-            node.docs_actor.public_key.clone(),
-            node.drawers_actor.actor_id,
-            node.drawers_actor.public_key.clone(),
+            node.docs_actor.actor.actor_id,
+            node.docs_actor.actor.public_key.clone(),
+            node.drawers_actor.actor.actor_id,
+            node.drawers_actor.actor.public_key.clone(),
             node.docs_namespace.namespace_id,
             node.drawers_namespace.namespace_id,
         ),

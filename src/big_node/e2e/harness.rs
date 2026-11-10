@@ -380,6 +380,7 @@ impl Cluster {
                         create: false,
                     },
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

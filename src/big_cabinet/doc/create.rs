@@ -11,10 +11,13 @@ impl DocsService {
     async fn create(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: CreateDoc,
     ) -> Result<WriteReceipt, DocsError> {
         let instr_start = std::time::Instant::now(); // INSTR
-        let caller = self.invocation(context, params.capability).await?;
+        let caller = self
+            .signing_invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -64,7 +67,7 @@ impl DocsService {
             aliases: BTreeMap::new(),
         };
         let initial = match self
-            .initial_content(context, actor.capability, &mut plan, Automerge::new())
+            .initial_content(context, caller.via, &mut plan, Automerge::new())
             .await
         {
             Ok(initial) => initial,
@@ -146,6 +149,9 @@ impl Handler<CreateDoc> for DocsService {
         &self,
         request: Envelope<CreateDoc>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
-        Ok(self.create(&request.context, request.params).await?.into())
+        Ok(self
+            .create(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }

@@ -1238,6 +1238,7 @@ pub(super) async fn import_document(
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1255,6 +1256,7 @@ pub(super) async fn import_document(
                     create: false,
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

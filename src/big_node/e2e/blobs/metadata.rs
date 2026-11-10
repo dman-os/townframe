@@ -17,6 +17,7 @@ async fn drawer_capability(node: &BigNode, scope: DrawerScope) -> CapId {
             MintDrawerCapability {
                 scope,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

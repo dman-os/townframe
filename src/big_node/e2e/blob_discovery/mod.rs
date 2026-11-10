@@ -17,7 +17,7 @@ pub(super) async fn collection(node: &BigNode, name: &str) -> DocId {
         .grants()
         .grant(
             &RequestContext::root(),
-            node.drawers_actor.actor_id,
+            node.drawers_actor.actor.actor_id,
             CREATE_DRAWER_OBJECT.into(),
             Rights::USE,
             None,
@@ -36,6 +36,7 @@ pub(super) async fn collection(node: &BigNode, name: &str) -> DocId {
                     ..Default::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -72,6 +73,7 @@ async fn child(node: &BigNode, parent: &DocId, child: &DocId) {
                     ]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -254,6 +256,7 @@ async fn self_doc(node: &BigNode, parent: &DocId, inventory: &DocId) -> BlobId {
                     drawers: BTreeMap::from([(parent.clone(), Access::Admin)]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

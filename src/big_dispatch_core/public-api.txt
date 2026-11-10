@@ -16,4 +16,4 @@ pub struct big_dispatch_core::DispatchScope  { operations: BTreeSet < String >, 
 pub struct big_dispatch_core::InvocationContext  { idempotency_key: Option < String >, http: Option < HttpForm > }
 pub struct big_dispatch_core::Invoke  { operation: String, input: Value, context: InvocationContext }
 pub struct big_dispatch_core::InvokeOutput  { output: Value }
-pub struct big_dispatch_core::MintDispatchCapability  { scope: DispatchScope, rights: Rights }
+pub struct big_dispatch_core::MintDispatchCapability  { scope: DispatchScope, rights: Rights, subject: Option < Uuid7 > }

@@ -28,6 +28,7 @@ impl cap::State {
             rights,
             namespace.namespace_id,
             cap::Kind::Object,
+            None,
             [namespace.capability, parent],
         )?;
         Ok((parent_actor, issued))
@@ -40,6 +41,7 @@ impl cap::State {
         &mut self,
         issued: cap::CapRow,
         actor_id: Uuid7,
+        parent_actor: Uuid7,
         parent: CapId,
     ) -> Result<CapId, AuthorityError> {
         for dependency in &issued.dependencies {
@@ -50,17 +52,13 @@ impl cap::State {
             return Ok(*capability);
         }
         let capability = issued.id;
-        self.insert(issued);
-        assert!(
-            self.actors
-                .insert(
-                    capability,
-                    cap::ActorBinding {
-                        actor_id,
-                        reuse_key: Some(key),
-                    },
-                )
-                .is_none()
+        self.bind_identity(
+            issued,
+            cap::ActorBinding {
+                actor_id,
+                parent_actor: Some(parent_actor),
+                reuse_key: Some(key),
+            },
         );
         assert!(self.actor_caps.insert(key, capability).is_none());
         Ok(capability)
@@ -68,7 +66,7 @@ impl cap::State {
 }
 
 impl AuthorityService {
-    async fn open_actor(&self, request: OpenActor) -> Result<Actor, AuthorityError> {
+    async fn open_actor(&self, request: OpenActor) -> Result<OpenedActor, AuthorityError> {
         let (parent_actor, issued) = cap::ask(&self.ledger, |reply| cap::Command::AdmitActor {
             parent: request.parent,
             rights: request.rights,
@@ -109,11 +107,15 @@ impl AuthorityService {
         let capability = cap::ask(&self.ledger, |reply| cap::Command::BindActor {
             issued,
             actor_id: row.actor_id,
+            parent_actor,
             parent: request.parent,
             reply,
         })
         .await?;
-        actor::public_actor(&self.node_public_key(), &row, capability)
+        Ok(OpenedActor {
+            actor: actor::public_actor(&self.node_public_key(), &row)?,
+            capability,
+        })
     }
 }
 
@@ -121,7 +123,7 @@ impl Handler<OpenActor> for AuthorityService {
     async fn call(
         &self,
         request: Envelope<OpenActor>,
-    ) -> Result<ResponseEnvelope<Actor>, AuthorityServiceError> {
+    ) -> Result<ResponseEnvelope<OpenedActor>, AuthorityServiceError> {
         Ok(self.open_actor(request.params).await?.into())
     }
 }

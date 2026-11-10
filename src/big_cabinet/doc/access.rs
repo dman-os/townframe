@@ -294,8 +294,8 @@ impl DocsService {
         self.capabilities
             .mint(
                 context,
-                authorization.authority,
                 &caller,
+                request.subject,
                 request.scope,
                 request.rights,
                 dependencies,

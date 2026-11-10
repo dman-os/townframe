@@ -12,6 +12,7 @@
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::dmeta::Uuid7;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
@@ -72,6 +73,11 @@ impl DispatchScope {
 pub struct MintDispatchCapability {
     pub scope: DispatchScope,
     pub rights: Rights,
+    /// The actor the new handle is bound to; `None` binds it to the presented handle's own
+    /// subject. Naming another actor is an introduction: the presented handle needs
+    /// `Rights::DELEGATE`, and the actor must be live and a strict descendant of the presented
+    /// handle's subject in the actor tree (anyone else is `Escalation`).
+    pub subject: Option<Uuid7>,
 }
 
 /// Whether a provider can serve a call, and if not the first reason in priority order. For a

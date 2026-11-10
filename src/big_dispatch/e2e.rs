@@ -114,7 +114,7 @@ async fn harness() -> Harness {
         .expect("dispatch actor");
     let namespace = authority
         .service
-        .open_namespace(actor.actor_id)
+        .open_namespace(actor.actor.actor_id)
         .await
         .expect("dispatch namespace");
     let (dispatch, dispatch_stop) = crate::boot(DispatchConfig {
@@ -237,6 +237,7 @@ impl Harness {
                 MintDispatchCapability {
                     scope,
                     rights: Rights::USE | Rights::NARROW,
+                    subject: None,
                 },
             )
             .await

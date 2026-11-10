@@ -202,23 +202,24 @@ pub mod big_cabinet_core::drawer::protocol
 pub mod big_cabinet_core::query
 pub mod big_cabinet_core::reference
 pub mod big_cabinet_core::schema_compat
-pub struct big_cabinet_core::authority::Actor  { actor_id: Uuid7, url: String, public_key: MultibaseKey, certificate: Bytes, parent_actor_id: Option < Uuid7 >, capability: CapId }
+pub struct big_cabinet_core::authority::Actor  { actor_id: Uuid7, url: String, public_key: MultibaseKey, certificate: Bytes, parent_actor_id: Option < Uuid7 > }
 pub struct big_cabinet_core::authority::AttenuateCapability  { capability: CapId, rights: Rights }
 pub struct big_cabinet_core::authority::Authorization  { authority: CapId, signer: CapId }
 pub struct big_cabinet_core::authority::CapId  {  }
-pub struct big_cabinet_core::authority::Capability  { capability_id: CapId, object: String, rights: Rights, issuer_id: Uuid7 }
+pub struct big_cabinet_core::authority::Capability  { capability_id: CapId, object: String, rights: Rights, issuer_id: Uuid7, subject: Option < Uuid7 > }
 pub struct big_cabinet_core::authority::CapabilityChange  { status: CapabilityStatus }
 pub struct big_cabinet_core::authority::InspectCapability  { capability: CapId }
-pub struct big_cabinet_core::authority::MintCapability  { issuer: CapId, parent: Option < CapId >, dependencies: Vec < CapId >, object: String, rights: Rights }
+pub struct big_cabinet_core::authority::MintCapability  { issuer: CapId, parent: Option < CapId >, dependencies: Vec < CapId >, object: String, rights: Rights, subject: Option < Uuid7 > }
 pub struct big_cabinet_core::authority::Namespace  { namespace_id: Uuid7, capability: CapId }
 pub struct big_cabinet_core::authority::ObserveCapability  { capability: CapId }
 pub struct big_cabinet_core::authority::OpenActor  { parent: CapId, path: String, rights: Rights }
-pub struct big_cabinet_core::authority::ResolveActor  { capability: CapId }
+pub struct big_cabinet_core::authority::OpenedActor  { actor: Actor, capability: CapId }
+pub struct big_cabinet_core::authority::ResolveActor  { actor_id: Uuid7 }
 pub struct big_cabinet_core::authority::ResolveAuthority  { capability: CapId }
 pub struct big_cabinet_core::authority::ResolvedAuthority  { capability: Capability, actor: Option < Actor > }
 pub struct big_cabinet_core::authority::RetractCapability  { via: CapId, capability: CapId }
 pub struct big_cabinet_core::authority::Rights  {  }
-pub struct big_cabinet_core::authority::SignDatumClaim  { actor: CapId, claim: DatumClaim }
+pub struct big_cabinet_core::authority::SignDatumClaim  { via: CapId, claim: DatumClaim }
 pub struct big_cabinet_core::datum::operation::SchemaRef< 'a >  { path: String, target: & 'a str }
 pub struct big_cabinet_core::dmeta::ActorMetadata  { created_at: Vec < Timestamp >, pubkey: MultibaseKey, actor_url: String, delegation: Option < Bytes >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::BranchOrigin  { datum_ref: crate :: DatumReference, ref_heads: Vec < automerge :: ChangeHash >, extra: crate :: datum :: Extra }
@@ -246,7 +247,7 @@ pub struct big_cabinet_core::doc::DatumsRead  { heads: Vec < ChangeHash >, datum
 pub struct big_cabinet_core::doc::DocScope  { read: BTreeSet < DocId >, write: BTreeSet < DocId >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerAccess > }
 pub struct big_cabinet_core::doc::ListDatums  { capability: CapId, doc_id: DocId, at: At }
 pub struct big_cabinet_core::doc::MergeDoc  { capability: CapId, command: Option < CommandId >, source_id: DocId, at: At, target_id: DocId }
-pub struct big_cabinet_core::doc::MintDocCapability  { scope: DocScope, rights: Rights }
+pub struct big_cabinet_core::doc::MintDocCapability  { scope: DocScope, rights: Rights, subject: Option < Uuid7 > }
 pub struct big_cabinet_core::doc::PollDatums  { capability: CapId, predicate: Predicate, datums: DatumSelection, after: u64, limit: u32, hold_ms: u32 }
 pub struct big_cabinet_core::doc::QueriedDatumRef  { origin_doc_id: DocId, origin_datum_key: DatumKey, path: String, target_doc_id: DocId, target_datum_key: DatumKey, ref_heads: Vec < ChangeHash > }
 pub struct big_cabinet_core::doc::QueriedDatumRefs  { refs: Vec < QueriedDatumRef > }
@@ -293,7 +294,7 @@ pub struct big_cabinet_core::drawer::protocol::ListDrawers  { capability: CapId 
 pub struct big_cabinet_core::drawer::protocol::ListKnownDrawers  { capability: CapId }
 pub struct big_cabinet_core::drawer::protocol::LocalDrawers  { present_id: DrawerId, originated_id: DrawerId, known_drawers_id: DrawerId, config_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::MetaDocCreated  { drawer_id: DrawerId, kind: String, name: String, root: MetaRoot, doc_id: DocId, heads: Vec < ChangeHash > }
-pub struct big_cabinet_core::drawer::protocol::MintDrawerCapability  { scope: DrawerScope, rights: Rights }
+pub struct big_cabinet_core::drawer::protocol::MintDrawerCapability  { scope: DrawerScope, rights: Rights, subject: Option < Uuid7 > }
 pub struct big_cabinet_core::drawer::protocol::RememberDrawer  { capability: CapId, drawer_id: DrawerId, mirror: bool }
 pub struct big_cabinet_core::drawer::protocol::RemoveChild  { capability: CapId, command: CommandId, parent_id: DrawerId, child_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::RemoveDoc  { capability: CapId, command: CommandId, drawer_id: DrawerId, doc_id: DocId }

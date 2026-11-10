@@ -32,7 +32,7 @@ fn branch_value(path: &str, origin: &WriteReceipt) -> Value {
 impl Node {
     async fn branch(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         command: &str,
         origin: &DocId,
         path: &str,
@@ -71,7 +71,7 @@ impl Node {
 
     async fn merge(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         source: &DocId,
         target: &DocId,
     ) -> Result<WriteReceipt, DocsError> {
@@ -106,7 +106,7 @@ impl Node {
     ) -> Vec<DatumClaimEvidence> {
         let docs = self.docs.as_ref().unwrap();
         let capability = docs
-            .mint_inspection_handle(document.clone(), self.docs_actor.capability)
+            .mint_inspection_handle(document.clone(), self.docs_actor.actor.actor_id)
             .await
             .unwrap();
         let handle = match self.repo.get_doc(document).await.unwrap() {
@@ -570,14 +570,14 @@ async fn the_boot_pass_announces_and_places_a_committed_branch_and_abandons_an_u
                 &command(name),
                 Kind::Branch,
                 [0; 32],
-                alice.actor_id,
+                alice.actor.actor_id,
                 None,
                 Some(PLACEMENT),
                 Some(&Detail::Branch {
                     origin: origin.doc_id.clone(),
                     path: format!("/{name}"),
                     stealth: false,
-                    owner_id: Some(alice.actor_id),
+                    owner_id: Some(alice.actor.actor_id),
                 }),
             )
             .await
@@ -649,7 +649,7 @@ async fn the_boot_pass_settles_a_merge_by_whether_the_target_holds_the_source_he
                 &command(name),
                 Kind::Merge,
                 [0; 32],
-                alice.actor_id,
+                alice.actor.actor_id,
                 Some(&origin.doc_id),
                 None,
                 Some(&Detail::Merge {

@@ -405,6 +405,7 @@ impl State {
                                     dependencies: Vec::new(),
                                     object: format!("grant gate {}", Uuid7::new()),
                                     rights: Rights::all(),
+                                    subject: None,
                                 },
                             )
                             .await?;

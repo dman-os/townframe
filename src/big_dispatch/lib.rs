@@ -97,9 +97,9 @@ fn authority_error(error: ClientError<AuthorityServiceError>) -> DispatchError {
 
 impl DispatchService {
     /// Verifies `authorization` through the authority service, the same path the nodule service
-    /// uses. Cost per call: `ResolveAuthority` + `ResolveActor` against the authority's
-    /// in-process ledger for an identity; a scoped handle adds one more `ResolveActor` for the
-    /// signer it was bound to. Each `ResolveActor` (and an identity's `ResolveAuthority`)
+    /// uses. Cost per call: one `ResolveAuthority` for the presented handle, plus one
+    /// `ResolveActor` for the actor it is bound to when it is a scoped handle. Resolving the
+    /// presenter (see `invoke`) adds another `ResolveAuthority`. Each one that names an actor
     /// currently reads the actor's registry row on the authority's reader pool.
     async fn caller(
         &self,
@@ -145,6 +145,12 @@ impl DispatchService {
             return Err(ContextError::DeadlineExceeded.into());
         }
         let verified = self.caller(context, authorization).await?;
+        let presenter = self
+            .capabilities
+            .presenter(context, authorization.signer)
+            .await
+            .map_err(authority_error)?
+            .actor_id;
         let scope = self.scope_of(&verified)?;
         // A handle is its holder's: it was minted bound to one actor and only that actor may
         // invoke through it. Presenting another actor's handle under one's own signer is the
@@ -152,7 +158,7 @@ impl DispatchService {
         // handle id: the signer is always the nodule's own actor there.
         if verified
             .bound_signer
-            .is_some_and(|holder| holder != verified.signer.actor_id)
+            .is_some_and(|holder| holder != presenter)
         {
             return Err(DispatchError::Denied);
         }
@@ -165,7 +171,7 @@ impl DispatchService {
         }
         let caller = Caller {
             authorization,
-            actor: verified.signer.actor_id,
+            actor: presenter,
             scope: scope.cloned(),
         };
         let entry = self.router.resolve(&params.operation)?;
@@ -234,8 +240,8 @@ impl DispatchService {
         self.capabilities
             .mint(
                 context,
-                authorization.authority,
                 &caller,
+                params.subject,
                 params.scope,
                 params.rights,
                 Vec::new(),

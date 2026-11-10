@@ -29,7 +29,10 @@ impl DrawerService {
                     .collect(),
                 ..Default::default()
             },
-            |capability| async move {
+            |Authorization {
+                 authority: capability,
+                 ..
+             }| async move {
                 let mut listed = Vec::with_capacity(records.len());
                 for (record, access) in records {
                     let read = core

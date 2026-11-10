@@ -18,6 +18,7 @@ use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OPERATOR_OBJECT;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::ResolvedAuthority;
@@ -116,7 +117,7 @@ impl TestAuthority {
         parent: CapId,
         path: &str,
         rights: Rights,
-    ) -> Result<Actor, AuthorityServiceError> {
+    ) -> Result<OpenedActor, AuthorityServiceError> {
         self.call(OpenActor {
             parent,
             path: path.to_owned(),
@@ -126,7 +127,7 @@ impl TestAuthority {
     }
 
     /// An actor under the operator holding every right.
-    async fn subsystem(&self, path: &str) -> Actor {
+    async fn subsystem(&self, path: &str) -> OpenedActor {
         self.open(self.root(), path, Rights::all())
             .await
             .expect("subsystem actor")
@@ -152,6 +153,7 @@ impl TestAuthority {
             dependencies: Vec::new(),
             object: object.to_owned(),
             rights,
+            subject: None,
         })
         .await
     }
@@ -168,10 +170,19 @@ impl TestAuthority {
         self.call(RetractCapability { via, capability }).await
     }
 
-    async fn sign(&self, actor: CapId, claim: DatumClaim) -> Result<(), AuthorityServiceError> {
+    /// The actor an identity capability is, as the old capability-gated `ResolveActor` said it:
+    /// the capability must carry `USE` and be an identity capability.
+    async fn actor_of(&self, capability: CapId) -> Result<Actor, AuthorityServiceError> {
+        self.call(ResolveAuthority { capability })
+            .await?
+            .actor
+            .ok_or(AuthorityServiceError::UnrecognizedActor)
+    }
+
+    async fn sign(&self, via: CapId, claim: DatumClaim) -> Result<(), AuthorityServiceError> {
         let signed = self
             .call(SignDatumClaim {
-                actor,
+                via,
                 claim: claim.clone(),
             })
             .await?;
@@ -221,14 +232,10 @@ async fn boot_hosts_a_service_whose_root_is_the_operators_actor_capability() {
             object: OPERATOR_OBJECT.to_owned(),
             rights: Rights::all(),
             issuer_id: root.issuer_id,
+            subject: Some(test.authority.service.operator_uuid()),
         }
     );
-    let operator = test
-        .call(ResolveActor {
-            capability: test.root(),
-        })
-        .await
-        .expect("operator");
+    let operator = test.actor_of(test.root()).await.expect("operator");
     // The operator is the root of the path hierarchy: its URL is the node root.
     assert_eq!(
         operator.url,
@@ -248,10 +255,7 @@ async fn boot_hosts_a_service_whose_root_is_the_operators_actor_capability() {
     );
     test.retract(test.root(), test.root()).await.unwrap();
     assert_refused!(
-        test.call(ResolveActor {
-            capability: test.root()
-        })
-        .await,
+        test.actor_of(test.root()).await,
         AuthorityServiceError::InvalidCapability
     );
     test.stop.stop().await;
@@ -262,39 +266,34 @@ async fn an_opened_actor_carries_a_verifiable_attribution_certificate() {
     let test = boot_authority().await;
     let actor = test.subsystem("docs").await;
     assert_eq!(
-        actor.url,
+        actor.actor.url,
         format!("db+actor://{}/docs", test.authority.node_issuer)
     );
     assert_eq!(
-        actor.parent_actor_id,
+        actor.actor.parent_actor_id,
         Some(test.authority.service.operator_uuid())
     );
-    assert!(actor.public_key.to_string().starts_with('z'));
+    assert!(actor.actor.public_key.to_string().starts_with('z'));
 
     // The certificate is exactly what dmeta stores, and it verifies against the
     // issuer a verifier is told to expect — not against its own `iss`.
     let metadata = ActorMetadata {
         extra: Default::default(),
         created_at: Vec::new(),
-        pubkey: actor.public_key.clone(),
-        actor_url: actor.url.clone(),
-        delegation: Some(actor.certificate.clone()),
+        pubkey: actor.actor.public_key.clone(),
+        actor_url: actor.actor.url.clone(),
+        delegation: Some(actor.actor.certificate.clone()),
     };
     Attribution::verify(
-        &actor.certificate,
+        &actor.actor.certificate,
         &test.authority.node_issuer,
-        actor.actor_id,
+        actor.actor.actor_id,
         &metadata,
     )
     .expect("attribution certificate");
 
-    let resolved = test
-        .call(ResolveActor {
-            capability: actor.capability,
-        })
-        .await
-        .expect("resolve");
-    assert_eq!(resolved, actor);
+    let resolved = test.actor_of(actor.capability).await.expect("resolve");
+    assert_eq!(resolved, actor.actor);
     test.stop.stop().await;
 }
 
@@ -307,11 +306,14 @@ async fn actor_paths_extend_their_parent_by_exactly_one_segment() {
         .await
         .expect("nested actor");
     assert!(
-        cartridges.url.ends_with("/rt/cartridges"),
+        cartridges.actor.url.ends_with("/rt/cartridges"),
         "{}",
-        cartridges.url
+        cartridges.actor.url
     );
-    assert_eq!(cartridges.parent_actor_id, Some(runtime.actor_id));
+    assert_eq!(
+        cartridges.actor.parent_actor_id,
+        Some(runtime.actor.actor_id)
+    );
 
     for (parent, path) in [
         (runtime.capability, "other"),
@@ -352,8 +354,8 @@ async fn opening_an_actor_again_returns_the_same_identity() {
         .open(test.root(), "docs", Rights::USE | Rights::MINT_CHILD)
         .await
         .unwrap();
-    assert_eq!(narrower.actor_id, first.actor_id);
-    assert_eq!(narrower.public_key, first.public_key);
+    assert_eq!(narrower.actor.actor_id, first.actor.actor_id);
+    assert_eq!(narrower.actor.public_key, first.actor.public_key);
     assert_ne!(narrower.capability, first.capability);
 
     // A child's rights stay inside its parent's.
@@ -375,15 +377,12 @@ async fn opening_an_actor_again_returns_the_same_identity() {
     // Retracting a capability and opening again rotates the handle, not the actor.
     test.retract(test.root(), first.capability).await.unwrap();
     assert_refused!(
-        test.call(ResolveActor {
-            capability: first.capability
-        })
-        .await,
+        test.actor_of(first.capability).await,
         AuthorityServiceError::InvalidCapability
     );
     let rotated = test.open(test.root(), "docs", Rights::all()).await.unwrap();
-    assert_eq!(rotated.actor_id, first.actor_id);
-    assert_eq!(rotated.certificate, first.certificate);
+    assert_eq!(rotated.actor.actor_id, first.actor.actor_id);
+    assert_eq!(rotated.actor.certificate, first.actor.certificate);
     assert_ne!(rotated.capability, first.capability);
     test.stop.stop().await;
 }
@@ -392,7 +391,7 @@ async fn opening_an_actor_again_returns_the_same_identity() {
 async fn only_an_actors_own_capability_acts_as_it() {
     let test = boot_authority().await;
     let docs = test.subsystem("docs").await;
-    let namespace = test.namespace(docs.actor_id).await;
+    let namespace = test.namespace(docs.actor.actor_id).await;
     assert_refused!(
         test.mint(docs.capability, "edit doc X", OBJECT).await,
         AuthorityServiceError::Unauthorized
@@ -401,18 +400,15 @@ async fn only_an_actors_own_capability_acts_as_it() {
         .mint(namespace.capability, "edit doc X", OBJECT)
         .await
         .unwrap();
-    assert_eq!(edit.issuer_id, docs.actor_id);
+    assert_eq!(edit.issuer_id, docs.actor.actor_id);
 
     assert_refused!(
-        test.sign(edit.capability_id, datum_claim(docs.actor_id, 1))
+        test.sign(edit.capability_id, datum_claim(docs.actor.actor_id, 1))
             .await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
-        test.call(ResolveActor {
-            capability: edit.capability_id
-        })
-        .await,
+        test.actor_of(edit.capability_id).await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
@@ -431,15 +427,12 @@ async fn only_an_actors_own_capability_acts_as_it() {
         .await
         .unwrap();
     assert_refused!(
-        test.sign(opener.capability, datum_claim(docs.actor_id, 2))
+        test.sign(opener.capability, datum_claim(docs.actor.actor_id, 2))
             .await,
         AuthorityServiceError::Unauthorized
     );
     assert_refused!(
-        test.call(ResolveActor {
-            capability: opener.capability
-        })
-        .await,
+        test.actor_of(opener.capability).await,
         AuthorityServiceError::Unauthorized
     );
     test.stop.stop().await;
@@ -449,7 +442,7 @@ async fn only_an_actors_own_capability_acts_as_it() {
 async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
     let test = boot_authority().await;
     let docs = test.subsystem("docs").await;
-    let namespace = test.namespace(docs.actor_id).await;
+    let namespace = test.namespace(docs.actor.actor_id).await;
     let edit = test
         .mint(
             namespace.capability,
@@ -468,7 +461,8 @@ async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
             capability_id: copy.capability_id,
             object: edit.object.clone(),
             rights: Rights::USE,
-            issuer_id: docs.actor_id,
+            issuer_id: docs.actor.actor_id,
+            subject: None,
         }
     );
 
@@ -499,17 +493,21 @@ async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
     assert_eq!(derived.issuer_id, registered.issuer_id);
     assert_eq!(named.object, registered.object);
     assert_ne!(named.issuer_id, registered.issuer_id);
+    // A handle derived from an identity capability is bound to the same actor, so it signs as
+    // that actor; a handle that merely carries the same label is bound to nobody and cannot.
+    assert_eq!(derived.subject, Some(docs.actor.actor_id));
+    test.sign(derived.capability_id, datum_claim(docs.actor.actor_id, 4))
+        .await
+        .expect("a derived handle signs as its subject");
+    assert_eq!(named.subject, None);
+    assert_refused!(
+        test.sign(named.capability_id, datum_claim(docs.actor.actor_id, 4))
+            .await,
+        AuthorityServiceError::UnrecognizedActor
+    );
     for counterfeit in [derived, named] {
         assert_refused!(
-            test.call(ResolveActor {
-                capability: counterfeit.capability_id
-            })
-            .await,
-            AuthorityServiceError::UnrecognizedActor
-        );
-        assert_refused!(
-            test.sign(counterfeit.capability_id, datum_claim(docs.actor_id, 4))
-                .await,
+            test.actor_of(counterfeit.capability_id).await,
             AuthorityServiceError::UnrecognizedActor
         );
         assert_refused!(
@@ -605,7 +603,8 @@ async fn inspection_exposes_uuid_handles_but_not_parent_authority() {
         .await
         .unwrap();
     let wire = serde_json::to_value(&edit).unwrap();
-    assert_eq!(wire.as_object().unwrap().len(), 4);
+    assert_eq!(wire.as_object().unwrap().len(), 5);
+    assert!(wire["subject"].is_null());
     assert!(wire.get("parent").is_none());
     assert!(wire.get("kind").is_none());
     let id = uuid::Uuid::parse_str(wire["capabilityId"].as_str().unwrap()).unwrap();
@@ -824,7 +823,7 @@ async fn resolution_only_recognizes_exact_registered_identity_issuances() {
         .unwrap(),
         ResolvedAuthority {
             capability,
-            actor: Some(actor)
+            actor: Some(actor.actor)
         }
     );
     let namespace = test.namespace(Uuid7::new()).await;
@@ -877,17 +876,17 @@ async fn resolution_only_recognizes_exact_registered_identity_issuances() {
 async fn signing_binds_the_claim_to_the_presenting_actor() {
     let test = boot_authority().await;
     let docs = test.subsystem("docs").await;
-    test.sign(docs.capability, datum_claim(docs.actor_id, 7))
+    test.sign(docs.capability, datum_claim(docs.actor.actor_id, 7))
         .await
         .expect("signature");
     let signed = test
         .call(SignDatumClaim {
-            actor: docs.capability,
-            claim: datum_claim(docs.actor_id, 8),
+            via: docs.capability,
+            claim: datum_claim(docs.actor.actor_id, 8),
         })
         .await
         .unwrap();
-    assert_eq!(signed.actor_public_key, docs.public_key);
+    assert_eq!(signed.actor_public_key, docs.actor.public_key);
 
     // A claim naming another actor is refused, including the actor's parent.
     for actor in [Uuid7::new(), test.authority.service.operator_uuid()] {
@@ -909,11 +908,11 @@ async fn unknown_capability_ids_are_refused() {
         AuthorityServiceError::InvalidCapability
     );
     assert_refused!(
-        test.call(ResolveActor { capability: forged }).await,
+        test.actor_of(forged).await,
         AuthorityServiceError::InvalidCapability
     );
     assert_refused!(
-        test.sign(forged, datum_claim(docs.actor_id, 1)).await,
+        test.sign(forged, datum_claim(docs.actor.actor_id, 1)).await,
         AuthorityServiceError::InvalidCapability
     );
     test.stop.stop().await;
@@ -930,7 +929,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
     let first = TestAuthority { authority, stop };
     let docs = first.subsystem("docs").await;
     let plugin = first.subsystem("plugin").await;
-    let namespace = first.namespace(docs.actor_id).await;
+    let namespace = first.namespace(docs.actor.actor_id).await;
     let edit = first
         .mint(namespace.capability, "edit doc X", OBJECT)
         .await
@@ -939,10 +938,10 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
         .attenuate(docs.capability, Rights::all())
         .await
         .unwrap();
-    let claim = datum_claim(docs.actor_id, 9);
+    let claim = datum_claim(docs.actor.actor_id, 9);
     let signature = first
         .call(SignDatumClaim {
-            actor: docs.capability,
+            via: docs.capability,
             claim: claim.clone(),
         })
         .await
@@ -975,7 +974,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
             AuthorityServiceError::InvalidCapability
         );
         assert_refused!(
-            reopened.call(ResolveActor { capability }).await,
+            reopened.actor_of(capability).await,
             AuthorityServiceError::InvalidCapability
         );
     }
@@ -983,7 +982,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
     assert_ne!(reopened_docs.capability, docs.capability);
     assert_eq!(
         reopened_docs,
-        Actor {
+        OpenedActor {
             capability: reopened_docs.capability,
             ..docs
         }
@@ -996,7 +995,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
         .unwrap();
     let reopened_signature = reopened
         .call(SignDatumClaim {
-            actor: reopened_docs.capability,
+            via: reopened_docs.capability,
             claim,
         })
         .await
@@ -1057,6 +1056,7 @@ async fn cross_namespace_derivations_depend_on_both_source_and_issuer() {
                 dependencies: Vec::new(),
                 object: "target".into(),
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: None,
             })
             .await
             .unwrap();
@@ -1140,6 +1140,7 @@ async fn liveness_gates_preserve_rights_and_cross_namespace_retraction() {
                 dependencies: vec![signer.capability, gate.capability_id],
                 object: "scoped object".into(),
                 rights: Rights::all(),
+                subject: None,
             })
             .await
             .unwrap();
@@ -1150,13 +1151,11 @@ async fn liveness_gates_preserve_rights_and_cross_namespace_retraction() {
                 object: "scoped object".into(),
                 rights: Rights::all(),
                 issuer_id: namespace.namespace_id,
+                subject: None,
             }
         );
         assert_refused!(
-            test.call(ResolveActor {
-                capability: derived.capability_id,
-            })
-            .await,
+            test.actor_of(derived.capability_id).await,
             AuthorityServiceError::UnrecognizedActor
         );
         let leaf = test
@@ -1233,6 +1232,7 @@ async fn invalid_gates_publish_nothing_and_cannot_replace_narrowing_authority() 
                 dependencies: vec![signer.capability, dependency],
                 object: "rejected".into(),
                 rights: Rights::all(),
+                subject: None,
             })
             .await,
             AuthorityServiceError::InvalidCapability
@@ -1250,6 +1250,7 @@ async fn invalid_gates_publish_nothing_and_cannot_replace_narrowing_authority() 
                 dependencies: vec![namespace.capability],
                 object: "rejected".into(),
                 rights: Rights::USE | Rights::NARROW,
+                subject: None,
             })
             .await,
             AuthorityServiceError::Unauthorized
@@ -1284,6 +1285,7 @@ async fn mint_publication_is_serialized_with_dependency_retraction() {
                 dependencies: vec![gate.capability_id],
                 object: "dependent".into(),
                 rights: Rights::all(),
+                subject: None,
             },
         ));
         let retract = service.call(Envelope::new(
@@ -1330,6 +1332,7 @@ async fn mint_publication_is_serialized_with_dependency_retraction() {
                 dependencies: vec![gate.capability_id],
                 object: "after retraction".into(),
                 rights: Rights::all(),
+                subject: None,
             })
             .await,
             AuthorityServiceError::InvalidCapability
@@ -1412,6 +1415,7 @@ async fn both_dependencies_bound_minting_and_failures_publish_no_capability() {
                 dependencies: Vec::new(),
                 object: "derived".into(),
                 rights,
+                subject: None,
             })
             .await
             .unwrap_err(),
@@ -1441,6 +1445,7 @@ async fn diamond_dependencies_are_deduplicated_and_depth_is_bounded_before_inser
                 dependencies: vec![issuer, held.capability_id, held.capability_id],
                 object: "diamond".into(),
                 rights: Rights::all(),
+                subject: None,
             })
             .await
             .unwrap();
@@ -1457,6 +1462,7 @@ async fn diamond_dependencies_are_deduplicated_and_depth_is_bounded_before_inser
                 dependencies,
                 object: "too deep".into(),
                 rights: Rights::all(),
+                subject: None,
             })
             .await,
             AuthorityServiceError::Escalation
@@ -1504,6 +1510,7 @@ async fn gate_graph_union_is_bounded_and_duplicate_roots_are_stored_once() {
                 dependencies: dependencies.to_vec(),
                 object: "branch".into(),
                 rights: Rights::USE,
+                subject: None,
             })
             .await
             .unwrap()
@@ -1522,6 +1529,7 @@ async fn gate_graph_union_is_bounded_and_duplicate_roots_are_stored_once() {
             .collect(),
         object: "at the node limit".into(),
         rights: Rights::USE | Rights::NARROW,
+        subject: None,
     };
     let accepted = test.call(request.clone()).await.unwrap();
     let accepted_id = accepted.capability_id;
@@ -1595,7 +1603,7 @@ async fn simultaneous_service_instances_share_identities_not_handles() {
     let (authority, stop) = first.unwrap();
     let first = TestAuthority { authority, stop };
     let subject = first.subsystem("subject").await;
-    let namespace = first.namespace(subject.actor_id).await;
+    let namespace = first.namespace(subject.actor.actor_id).await;
     let held = first
         .mint(namespace.capability, "shared", Rights::all())
         .await
@@ -1603,8 +1611,8 @@ async fn simultaneous_service_instances_share_identities_not_handles() {
     let (authority, stop) = second.unwrap();
     let second = TestAuthority { authority, stop };
     let second_subject = second.subsystem("subject").await;
-    assert_eq!(second_subject.actor_id, subject.actor_id);
-    assert_eq!(second_subject.public_key, subject.public_key);
+    assert_eq!(second_subject.actor.actor_id, subject.actor.actor_id);
+    assert_eq!(second_subject.actor.public_key, subject.actor.public_key);
     assert_ne!(second_subject.capability, subject.capability);
     assert_ne!(first.root(), second.root());
     let second_namespace = second.namespace(namespace.namespace_id).await;
@@ -1662,7 +1670,7 @@ async fn simultaneous_service_instances_share_identities_not_handles() {
         held
     );
     first
-        .sign(subject.capability, datum_claim(subject.actor_id, 3))
+        .sign(subject.capability, datum_claim(subject.actor.actor_id, 3))
         .await
         .unwrap();
     third_stop.stop().await;
@@ -1710,7 +1718,7 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
                     )",
             (
                 Uuid7::new().to_string(),
-                subject.actor_id.to_string(),
+                subject.actor.actor_id.to_string(),
                 Rights::USE.bits_i64(),
             ),
         )
@@ -1772,7 +1780,7 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
         );
         assert_eq!(snapshot().await, before);
         first
-            .sign(subject.capability, datum_claim(subject.actor_id, 4))
+            .sign(subject.capability, datum_claim(subject.actor.actor_id, 4))
             .await
             .unwrap();
         assert_eq!(first.subsystem("subject").await, subject);
@@ -1819,7 +1827,7 @@ async fn unversioned_identities_gain_migration_history_without_replacing_keys() 
     );
     assert_eq!(
         test.call(SignDatumClaim {
-            actor: test.root(),
+            via: test.root(),
             claim,
         })
         .await
@@ -1948,7 +1956,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
     ];
 
     for (name, client) in &transports {
-        let actor: Actor = call(
+        let actor: OpenedActor = call(
             client,
             OpenActor {
                 parent: test.root(),
@@ -1958,7 +1966,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
         )
         .await
         .unwrap_or_else(|error| panic!("{name}: {error}"));
-        let namespace = test.namespace(actor.actor_id).await;
+        let namespace = test.namespace(actor.actor.actor_id).await;
         let edit = call(
             client,
             MintCapability {
@@ -1967,6 +1975,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
                 dependencies: vec![actor.capability],
                 object: "edit doc X".into(),
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1989,21 +1998,27 @@ async fn the_protocol_answers_alike_over_every_transport() {
         )
         .await
         .unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert_refused!(
-            call(
-                client,
-                ResolveActor {
-                    capability: derived.capability_id
-                }
-            )
-            .await,
-            AuthorityServiceError::UnrecognizedActor
+        // A handle derived from an identity capability is bound to the same actor without being
+        // an identity capability itself.
+        let resolved = call(
+            client,
+            ResolveAuthority {
+                capability: derived.capability_id,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(resolved.actor, None, "{name}");
+        assert_eq!(
+            resolved.capability.subject,
+            Some(actor.actor.actor_id),
+            "{name}"
         );
         let signed = call(
             client,
             SignDatumClaim {
-                actor: actor.capability,
-                claim: datum_claim(actor.actor_id, 3),
+                via: actor.capability,
+                claim: datum_claim(actor.actor.actor_id, 3),
             },
         )
         .await
@@ -2012,8 +2027,8 @@ async fn the_protocol_answers_alike_over_every_transport() {
         let refusal = call(
             client,
             SignDatumClaim {
-                actor: edit.capability_id,
-                claim: datum_claim(actor.actor_id, 3),
+                via: edit.capability_id,
+                claim: datum_claim(actor.actor.actor_id, 3),
             },
         )
         .await;
@@ -2062,23 +2077,11 @@ async fn cached_actor_rows_never_outlive_the_capability_that_names_them() {
     // The first resolution reads the row; later ones, including through other capabilities of
     // the same actor, are served from memory without growing the cache.
     let docs = test.subsystem("docs").await;
-    let resolved = test
-        .call(ResolveActor {
-            capability: docs.capability,
-        })
-        .await
-        .unwrap();
-    assert_eq!(resolved, docs);
+    let resolved = test.actor_of(docs.capability).await.unwrap();
+    assert_eq!(resolved, docs.actor);
     assert_eq!(cached(), 1);
     for _ in 0..3 {
-        assert_eq!(
-            test.call(ResolveActor {
-                capability: docs.capability
-            })
-            .await
-            .unwrap(),
-            docs
-        );
+        assert_eq!(test.actor_of(docs.capability).await.unwrap(), docs.actor);
         test.call(ResolveAuthority {
             capability: docs.capability,
         })
@@ -2090,14 +2093,9 @@ async fn cached_actor_rows_never_outlive_the_capability_that_names_them() {
     // A write after the cache is warm is visible to the next read: a new actor resolves to its
     // own row, and opening the same path again names the same identity.
     let photos = test.subsystem("photos").await;
-    let photos_resolved = test
-        .call(ResolveActor {
-            capability: photos.capability,
-        })
-        .await
-        .unwrap();
-    assert_eq!(photos_resolved, photos);
-    assert_ne!(photos.actor_id, docs.actor_id);
+    let photos_resolved = test.actor_of(photos.capability).await.unwrap();
+    assert_eq!(photos_resolved, photos.actor);
+    assert_ne!(photos.actor.actor_id, docs.actor.actor_id);
     assert_eq!(cached(), 2);
 
     // Retiring the actor's capability refuses it even though its row is still cached: liveness
@@ -2107,17 +2105,13 @@ async fn cached_actor_rows_never_outlive_the_capability_that_names_them() {
         .unwrap();
     assert_eq!(cached(), 2);
     for refused in [
-        test.call(ResolveActor {
-            capability: docs.capability,
-        })
-        .await
-        .map(|_| ()),
+        test.actor_of(docs.capability).await.map(|_| ()),
         test.call(ResolveAuthority {
             capability: docs.capability,
         })
         .await
         .map(|_| ()),
-        test.sign(docs.capability, datum_claim(docs.actor_id, 3))
+        test.sign(docs.capability, datum_claim(docs.actor.actor_id, 3))
             .await
             .map(|_| ()),
     ] {
@@ -2127,15 +2121,11 @@ async fn cached_actor_rows_never_outlive_the_capability_that_names_them() {
     // Reopening the retired path names the same actor under a fresh capability, served by the
     // same cached row.
     let reopened = test.subsystem("docs").await;
-    assert_eq!(reopened.actor_id, docs.actor_id);
+    assert_eq!(reopened.actor.actor_id, docs.actor.actor_id);
     assert_ne!(reopened.capability, docs.capability);
     assert_eq!(
-        test.call(ResolveActor {
-            capability: reopened.capability
-        })
-        .await
-        .unwrap(),
-        reopened
+        test.actor_of(reopened.capability).await.unwrap(),
+        reopened.actor
     );
     assert_eq!(cached(), 2);
     test.stop.stop().await;
@@ -2170,4 +2160,428 @@ async fn nodes_sharing_a_keyring_keep_separate_wrapping_keys() {
     assert!(matches!(refused, Err(AuthorityError::StateCorrupt(_))));
     let (_again, again_stop) = boot(&secrets, "node-b", second_sql.clone()).await.unwrap();
     again_stop.stop().await;
+}
+
+impl TestAuthority {
+    /// Mint a handle in `namespace` from `parent`, naming `subject` as the actor it is bound to.
+    async fn mint_from(
+        &self,
+        namespace: &Namespace,
+        parent: CapId,
+        rights: Rights,
+        subject: Option<Uuid7>,
+    ) -> Result<Capability, AuthorityServiceError> {
+        self.call(MintCapability {
+            issuer: namespace.capability,
+            parent: Some(parent),
+            dependencies: Vec::new(),
+            object: "bound handle".to_owned(),
+            rights,
+            subject,
+        })
+        .await
+    }
+}
+
+#[tokio::test]
+async fn a_minted_handle_inherits_its_parents_subject() {
+    let test = boot_authority().await;
+    let docs = test.subsystem("docs").await;
+    let namespace = test.namespace(docs.actor.actor_id).await;
+    assert_eq!(
+        test.call(InspectCapability {
+            capability: docs.capability
+        })
+        .await
+        .unwrap()
+        .subject,
+        Some(docs.actor.actor_id)
+    );
+    let handle = test
+        .mint_from(&namespace, docs.capability, Rights::all(), None)
+        .await
+        .unwrap();
+    assert_eq!(handle.subject, Some(docs.actor.actor_id));
+    let grandchild = test
+        .mint_from(&namespace, handle.capability_id, Rights::USE, None)
+        .await
+        .unwrap();
+    assert_eq!(grandchild.subject, Some(docs.actor.actor_id));
+    let attenuated = test
+        .attenuate(handle.capability_id, Rights::USE)
+        .await
+        .unwrap();
+    assert_eq!(attenuated.subject, Some(docs.actor.actor_id));
+    // With no parent the handle inherits from the issuer, a namespace root, which has none.
+    assert_eq!(
+        test.mint(namespace.capability, "rootless", Rights::USE)
+            .await
+            .unwrap()
+            .subject,
+        None
+    );
+    // Naming the subject it would inherit anyway is not an introduction.
+    let limited = test
+        .attenuate(docs.capability, Rights::USE | Rights::NARROW)
+        .await
+        .unwrap();
+    assert_eq!(
+        test.mint_from(
+            &namespace,
+            limited.capability_id,
+            Rights::USE,
+            Some(docs.actor.actor_id)
+        )
+        .await
+        .unwrap()
+        .subject,
+        Some(docs.actor.actor_id)
+    );
+    test.stop.stop().await;
+}
+
+#[tokio::test]
+async fn an_introduction_needs_delegate_and_a_live_descendant_of_the_introducer() {
+    let test = boot_authority().await;
+    let docs = test.subsystem("docs").await;
+    let child = test
+        .open(docs.capability, "docs/child", Rights::all())
+        .await
+        .unwrap();
+    let grandchild = test
+        .open(child.capability, "docs/child/grandchild", Rights::all())
+        .await
+        .unwrap();
+    let namespace = test.namespace(docs.actor.actor_id).await;
+
+    // A child and a grandchild are both the introducer's own descendants.
+    for descendant in [&child, &grandchild] {
+        let introduced = test
+            .mint_from(
+                &namespace,
+                docs.capability,
+                Rights::USE,
+                Some(descendant.actor.actor_id),
+            )
+            .await
+            .unwrap();
+        assert_eq!(introduced.subject, Some(descendant.actor.actor_id));
+    }
+
+    // Without DELEGATE the source cannot bind a handle to anyone else.
+    let no_delegate = test
+        .attenuate(
+            docs.capability,
+            Rights::USE | Rights::NARROW | Rights::MINT_CHILD,
+        )
+        .await
+        .unwrap();
+    assert_refused!(
+        test.mint_from(
+            &namespace,
+            no_delegate.capability_id,
+            Rights::USE,
+            Some(child.actor.actor_id)
+        )
+        .await,
+        AuthorityServiceError::Unauthorized
+    );
+
+    // An introduction is never wider than its source.
+    assert_refused!(
+        test.mint_from(
+            &namespace,
+            no_delegate.capability_id,
+            Rights::all(),
+            Some(child.actor.actor_id)
+        )
+        .await,
+        AuthorityServiceError::Escalation
+    );
+
+    // An actor nobody has opened cannot be introduced to, even by a source that may delegate.
+    assert_refused!(
+        test.mint_from(&namespace, docs.capability, Rights::USE, Some(Uuid7::new()))
+            .await,
+        AuthorityServiceError::ActorNotFound
+    );
+    test.stop.stop().await;
+}
+
+/// The rule of ADR 037 question 2: a handle is trusted for its own subject's descendants and
+/// nothing else, so DELEGATE never lets a holder name a sibling, an ancestor, an unrelated
+/// actor or the operator, and a handle bound to no actor cannot introduce at all.
+#[tokio::test]
+async fn an_introduction_to_anyone_but_a_descendant_is_an_escalation_even_with_delegate() {
+    let test = boot_authority().await;
+    let docs = test.subsystem("docs").await;
+    let sibling = test.subsystem("sibling").await;
+    let child = test
+        .open(docs.capability, "docs/child", Rights::all())
+        .await
+        .unwrap();
+    let grandchild = test
+        .open(child.capability, "docs/child/grandchild", Rights::all())
+        .await
+        .unwrap();
+    let docs_namespace = test.namespace(docs.actor.actor_id).await;
+    let operator = test.authority.service.operator_uuid();
+
+    // From `docs`: its sibling and the operator above it.
+    for named in [sibling.actor.actor_id, operator] {
+        assert_refused!(
+            test.mint_from(&docs_namespace, docs.capability, Rights::USE, Some(named))
+                .await,
+            AuthorityServiceError::Escalation
+        );
+    }
+    // From `child`: its parent, its uncle, and the operator; its own child is fine.
+    let child_namespace = test.namespace(child.actor.actor_id).await;
+    for named in [docs.actor.actor_id, sibling.actor.actor_id, operator] {
+        assert_refused!(
+            test.mint_from(&child_namespace, child.capability, Rights::USE, Some(named))
+                .await,
+            AuthorityServiceError::Escalation
+        );
+    }
+    assert_eq!(
+        test.mint_from(
+            &child_namespace,
+            child.capability,
+            Rights::USE,
+            Some(grandchild.actor.actor_id)
+        )
+        .await
+        .unwrap()
+        .subject,
+        Some(grandchild.actor.actor_id)
+    );
+    // A descendant does not reach back up through its own handle.
+    assert_refused!(
+        test.mint_from(
+            &child_namespace,
+            grandchild.capability,
+            Rights::USE,
+            Some(child.actor.actor_id)
+        )
+        .await,
+        AuthorityServiceError::Escalation
+    );
+    // The operator introduces any other actor, because all of them descend from it.
+    let operator_namespace = test.namespace(operator).await;
+    assert_eq!(
+        test.mint_from(
+            &operator_namespace,
+            test.root(),
+            Rights::USE,
+            Some(grandchild.actor.actor_id)
+        )
+        .await
+        .unwrap()
+        .subject,
+        Some(grandchild.actor.actor_id)
+    );
+    // A namespace root is bound to no actor, so it has no descendants to introduce.
+    assert_refused!(
+        test.call(MintCapability {
+            issuer: docs_namespace.capability,
+            parent: None,
+            dependencies: Vec::new(),
+            object: "rootless".to_owned(),
+            rights: Rights::USE,
+            subject: Some(child.actor.actor_id),
+        })
+        .await,
+        AuthorityServiceError::Escalation
+    );
+    // Refusals take the missing right first: without DELEGATE it is Unauthorized, never a hint
+    // about who the named actor is related to.
+    let no_delegate = test
+        .attenuate(docs.capability, Rights::USE | Rights::NARROW)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.mint_from(
+            &docs_namespace,
+            no_delegate.capability_id,
+            Rights::USE,
+            Some(sibling.actor.actor_id)
+        )
+        .await,
+        AuthorityServiceError::Unauthorized
+    );
+    test.stop.stop().await;
+}
+
+#[tokio::test]
+async fn retracting_the_last_identity_capability_invalidates_handles_introduced_to_the_actor() {
+    let test = boot_authority().await;
+    let docs = test.subsystem("docs").await;
+    let other = test
+        .open(docs.capability, "docs/other", Rights::all())
+        .await
+        .unwrap();
+    // A second identity capability for the same actor: a different grant, so a different row.
+    let second = test
+        .open(
+            docs.capability,
+            "docs/other",
+            Rights::USE | Rights::MINT_CHILD,
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.actor.actor_id, other.actor.actor_id);
+    assert_ne!(second.capability, other.capability);
+    let namespace = test.namespace(docs.actor.actor_id).await;
+    let introduced = test
+        .mint_from(
+            &namespace,
+            docs.capability,
+            Rights::USE,
+            Some(other.actor.actor_id),
+        )
+        .await
+        .unwrap();
+
+    test.retract(other.capability, other.capability)
+        .await
+        .unwrap();
+    test.call(InspectCapability {
+        capability: introduced.capability_id,
+    })
+    .await
+    .expect("one identity capability is still live");
+
+    test.retract(second.capability, second.capability)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.call(InspectCapability {
+            capability: introduced.capability_id,
+        })
+        .await,
+        AuthorityServiceError::InvalidCapability
+    );
+    // Introducing to the actor is refused until it has a live identity capability again.
+    assert_refused!(
+        test.mint_from(
+            &namespace,
+            docs.capability,
+            Rights::USE,
+            Some(other.actor.actor_id)
+        )
+        .await,
+        AuthorityServiceError::ActorNotFound
+    );
+    let reopened = test
+        .open(docs.capability, "docs/other", Rights::all())
+        .await
+        .unwrap();
+    assert_eq!(reopened.actor.actor_id, other.actor.actor_id);
+    test.mint_from(
+        &namespace,
+        docs.capability,
+        Rights::USE,
+        Some(other.actor.actor_id),
+    )
+    .await
+    .expect("the reopened actor can be introduced to");
+    // The retracted handle stays dead: liveness is a new row, not a revived one.
+    assert_refused!(
+        test.call(InspectCapability {
+            capability: introduced.capability_id,
+        })
+        .await,
+        AuthorityServiceError::InvalidCapability
+    );
+    test.stop.stop().await;
+}
+
+#[tokio::test]
+async fn signing_by_handle_signs_as_its_subject_and_refuses_any_other_actor() {
+    let test = boot_authority().await;
+    let docs = test.subsystem("docs").await;
+    let other = test
+        .open(docs.capability, "docs/other", Rights::all())
+        .await
+        .unwrap();
+    let namespace = test.namespace(docs.actor.actor_id).await;
+    let introduced = test
+        .mint_from(
+            &namespace,
+            docs.capability,
+            Rights::USE,
+            Some(other.actor.actor_id),
+        )
+        .await
+        .unwrap();
+    let signed = test
+        .call(SignDatumClaim {
+            via: introduced.capability_id,
+            claim: datum_claim(other.actor.actor_id, 1),
+        })
+        .await
+        .unwrap();
+    signed.verify().unwrap();
+    assert_eq!(signed.actor_public_key, other.actor.public_key);
+    // The handle's subject is `other`, so a claim for its introducer is refused.
+    assert_refused!(
+        test.sign(
+            introduced.capability_id,
+            datum_claim(docs.actor.actor_id, 1)
+        )
+        .await,
+        AuthorityServiceError::Unauthorized
+    );
+    // A handle without USE does not sign, even for its own subject.
+    let narrow_only = test
+        .mint_from(
+            &namespace,
+            docs.capability,
+            Rights::NARROW,
+            Some(other.actor.actor_id),
+        )
+        .await
+        .unwrap();
+    assert_refused!(
+        test.sign(
+            narrow_only.capability_id,
+            datum_claim(other.actor.actor_id, 1)
+        )
+        .await,
+        AuthorityServiceError::Unauthorized
+    );
+    // A handle bound to nobody has no one to sign as.
+    let unbound = test
+        .mint(namespace.capability, "unbound", Rights::USE)
+        .await
+        .unwrap();
+    assert_refused!(
+        test.sign(unbound.capability_id, datum_claim(docs.actor.actor_id, 1))
+            .await,
+        AuthorityServiceError::UnrecognizedActor
+    );
+    test.stop.stop().await;
+}
+
+#[tokio::test]
+async fn resolving_an_actor_by_id_needs_no_capability() {
+    let test = boot_authority().await;
+    let docs = test.subsystem("docs").await;
+    assert_eq!(
+        test.call(ResolveActor {
+            actor_id: docs.actor.actor_id
+        })
+        .await
+        .unwrap(),
+        docs.actor
+    );
+    assert_refused!(
+        test.call(ResolveActor {
+            actor_id: Uuid7::new()
+        })
+        .await,
+        AuthorityServiceError::ActorNotFound
+    );
+    test.stop.stop().await;
 }

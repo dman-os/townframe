@@ -50,10 +50,7 @@ pub(super) async fn drawer_of(slots: usize) -> (Automerge, Vec<ChangeHash>) {
         .await
         .unwrap()
         .heads;
-    let edits = keys
-        .iter()
-        .step_by(10)
-        .map(|k| (k.clone(), note("second")));
+    let edits = keys.iter().step_by(10).map(|k| (k.clone(), note("second")));
     node.write(&alice, &created.doc_id, WriteMode::AtCurrent, edits, [])
         .await
         .unwrap();

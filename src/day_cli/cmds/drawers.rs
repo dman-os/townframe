@@ -85,6 +85,7 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
                     create: false,
                 },
                 rights: Rights::USE,
+                subject: None,
             })?,
         )
         .await?;
@@ -152,6 +153,7 @@ async fn invite(drawer: &str, peer: &str, access: DrawerAccess) -> Res<ExitCode>
                     create: false,
                 },
                 rights: Rights::USE,
+                subject: None,
             })?,
         )
         .await?;

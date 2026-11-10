@@ -8,12 +8,12 @@ use automerge::ObjType;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
 use big_cabinet_core::DatumKey;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Bytes;
@@ -57,7 +57,7 @@ const DMETA: &str = "org.example.daybook.dmeta/main";
 struct Fixture {
     authority: Authority,
     authority_stop: StopToken,
-    issuer: Actor,
+    issuer: OpenedActor,
     namespace: Namespace,
     access: Arc<LedgerAccess>,
     repo: SharedBigRepo,
@@ -208,7 +208,7 @@ impl Fixture {
             .await
             .unwrap();
         let capability = docs
-            .mint_inspection_handle(doc_id.clone(), issuer.capability)
+            .mint_inspection_handle(doc_id.clone(), issuer.actor.actor_id)
             .await
             .unwrap();
         let expected = UnsafeDatumInspection {
@@ -279,6 +279,7 @@ impl Fixture {
                     dependencies: Vec::new(),
                     object,
                     rights,
+                    subject: None,
                 },
             )
             .await
@@ -591,13 +592,13 @@ async fn capability_checks_precede_any_repository_lookup() {
     let mut fixture = Fixture::new().await;
     let wrong_object = fixture
         .docs
-        .mint_inspection_handle(DocId::new([82; 32]), fixture.issuer.capability)
+        .mint_inspection_handle(DocId::new([82; 32]), fixture.issuer.actor.actor_id)
         .await
         .unwrap();
     let other_namespace = fixture
         .authority
         .service
-        .open_namespace(fixture.issuer.actor_id)
+        .open_namespace(fixture.issuer.actor.actor_id)
         .await
         .unwrap();
     let wrong_issuer = fixture
@@ -616,7 +617,10 @@ async fn capability_checks_precede_any_repository_lookup() {
         .await;
     let retracted = fixture
         .docs
-        .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
+        .mint_inspection_handle(
+            fixture.document.document_id(),
+            fixture.issuer.actor.actor_id,
+        )
         .await
         .unwrap();
     fixture.retract(retracted.capability_id).await;
@@ -668,7 +672,7 @@ async fn capability_checks_precede_any_repository_lookup() {
 }
 
 #[tokio::test]
-async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
+async fn inspection_scope_is_distinct_and_retracting_the_introduced_actor_revokes_it() {
     let fixture = Fixture::new().await;
     let signer = fixture
         .authority
@@ -676,8 +680,8 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
         .call(
             RequestContext::root(),
             OpenActor {
-                parent: fixture.authority.root,
-                path: "inspector".into(),
+                parent: fixture.issuer.capability,
+                path: "documents/inspector".into(),
                 rights: Rights::USE,
             },
         )
@@ -689,7 +693,7 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
         .grants
         .grant(
             &RequestContext::root(),
-            fixture.issuer.actor_id,
+            fixture.issuer.actor.actor_id,
             LedgerAccess::object(AccessRequest::Read(&document)),
             Rights::USE,
             None,
@@ -712,13 +716,14 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: Some(signer.actor.actor_id),
             },
         )
         .await
         .unwrap();
     let inspection = fixture
         .docs
-        .mint_inspection_handle(document.clone(), signer.capability)
+        .mint_inspection_handle(document.clone(), signer.actor.actor_id)
         .await
         .unwrap();
     let mut request = fixture.request();
@@ -773,9 +778,11 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
     assert_eq!(
         fixture
             .docs
-            .mint_inspection_handle(document, resource.capability_id)
+            .mint_inspection_handle(document, Uuid7::new())
             .await,
-        Err(DocsError::Denied)
+        Err(DocsError::Authority(
+            big_cabinet_core::authority::AuthorityServiceError::ActorNotFound
+        ))
     );
     fixture
         .authority
@@ -853,7 +860,10 @@ async fn boot_requires_exact_actor_association_and_shutdown_closes_inspection_an
     assert_eq!(
         fixture
             .docs
-            .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
+            .mint_inspection_handle(
+                fixture.document.document_id(),
+                fixture.issuer.actor.actor_id
+            )
             .await
             .unwrap_err(),
         expected

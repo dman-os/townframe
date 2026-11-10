@@ -94,19 +94,20 @@ impl Core {
                     let receipt = self
                         .as_signer(
                             context,
-                            actor.capability,
+                            caller.via,
                             DocScope {
                                 write: [doc_id.clone()].into(),
                                 ..Default::default()
                             },
-                            |capability| {
+                            |authorization| {
                                 let (command, doc_id) = (&command, &doc_id);
                                 async move {
                                     self.docs()
-                                        .call(
+                                        .call_with(
                                             context.child(),
+                                            authorization.metadata(),
                                             WriteDatums {
-                                                capability,
+                                                capability: authorization.authority,
                                                 command: Some(command.clone()),
                                                 doc_id: doc_id.clone(),
                                                 mode: WriteMode::AtCurrent,
@@ -161,7 +162,10 @@ impl Core {
                     read: [doc_id.clone()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -330,7 +334,10 @@ impl Core {
                     create: [METADATA_PLACEMENT.into()].into(),
                     ..Default::default()
                 },
-                |capability| {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| {
                     let descriptor = &descriptor;
                     async move {
                         self.docs()
@@ -393,7 +400,10 @@ impl Core {
                     create: [METADATA_PLACEMENT.into()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -494,7 +504,10 @@ impl Core {
                             create: [METADATA_PLACEMENT.into()].into(),
                             ..Default::default()
                         },
-                        |capability| async move {
+                        |Authorization {
+                             authority: capability,
+                             ..
+                         }| async move {
                             self.docs()
                                 .call(
                                     context.child(),
@@ -633,7 +646,10 @@ impl DrawerService {
                         create: [METADATA_PLACEMENT.into()].into(),
                         ..Default::default()
                     },
-                    |capability| {
+                    |Authorization {
+                         authority: capability,
+                         ..
+                     }| {
                         let (command, context) = (&command, &context);
                         async move {
                             self.core

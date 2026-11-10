@@ -12,8 +12,8 @@
 //! in the spec and the state actor runs the reconcile that calls `ensure` again.
 
 use async_trait::async_trait;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cartridges_core::Artifact;
 use big_cartridges_core::CartridgeId;
@@ -35,7 +35,7 @@ pub struct HandlerSpec {
     pub handler: Artifact,
     /// The nodule's durable actor, which the handler's outgoing calls are made as: the executor
     /// signs them with `actor.capability`, never with anything the handler says about itself.
-    pub actor: Actor,
+    pub actor: OpenedActor,
     /// The dispatch capability minted from the nodule's operation grants, which the handler is
     /// told so it can present it on its own outgoing calls. `None` when nothing is granted. It
     /// changes whenever the grants do, and `ensure` runs on every reconcile, so an executor that

@@ -257,7 +257,7 @@ impl DrawerModel {
             .max()
     }
 
-    async fn check(&mut self, node: &Node, alice: &Actor, bob: &Actor, context: &str) {
+    async fn check(&mut self, node: &Node, alice: &OpenedActor, bob: &OpenedActor, context: &str) {
         let expected_listed: BTreeMap<DrawerId, Access> = (0..DRAWERS)
             .filter_map(|d| {
                 self.effective_bob(d)
@@ -398,8 +398,8 @@ impl DrawerModel {
 /// One script's run against the node: Alice administers every drawer it touches, Bob is the
 /// subject whose reach `model` predicts, and `home` is the drawer the docs are created in.
 struct ScriptRun {
-    alice: Actor,
-    bob: Actor,
+    alice: OpenedActor,
+    bob: OpenedActor,
     home: DrawerId,
     model: DrawerModel,
 }
@@ -414,7 +414,7 @@ impl ScriptRun {
             .grants
             .grant(
                 &RequestContext::root(),
-                alice.actor_id,
+                alice.actor.actor_id,
                 drawer_object(Access::Admin, &node.local().known_drawers_id),
                 Rights::USE,
                 None,
@@ -675,7 +675,7 @@ impl ScriptRun {
                         RevokeDrawer {
                             capability,
                             drawer_id: self.model.drawers[drawer].clone(),
-                            subject_id: self.bob.actor_id,
+                            subject_id: self.bob.actor.actor_id,
                         },
                     )
                     .await

@@ -94,6 +94,7 @@ mod tests {
                     dependencies: Vec::new(),
                     object: "observed object".into(),
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

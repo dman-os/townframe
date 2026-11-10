@@ -209,7 +209,14 @@ impl Model {
         self.checkpoints.push(merged);
     }
 
-    async fn check(&self, node: &Node, actor: &Actor, snapshot: &Snapshot, at: At, context: &str) {
+    async fn check(
+        &self,
+        node: &Node,
+        actor: &OpenedActor,
+        snapshot: &Snapshot,
+        at: At,
+        context: &str,
+    ) {
         let capability = node
             .capability(
                 actor,
@@ -453,8 +460,8 @@ enum Op {
 
 #[derive(Clone)]
 enum Request {
-    Create(Actor, CreateDoc),
-    Write(Actor, WriteDatums),
+    Create(OpenedActor, CreateDoc),
+    Write(OpenedActor, WriteDatums),
 }
 
 impl Request {
@@ -494,7 +501,13 @@ impl Request {
     }
 }
 
-async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8, script: &[Op]) {
+async fn run(
+    node: &mut Node,
+    actors: &[OpenedActor; 2],
+    case: &str,
+    initial_mask: u8,
+    script: &[Op],
+) {
     tracing::info!(
         case,
         initial_mask,

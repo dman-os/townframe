@@ -11,10 +11,13 @@ impl DocsService {
     async fn write(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: WriteDatums,
     ) -> Result<WriteReceipt, DocsError> {
         let instr_start = std::time::Instant::now(); // INSTR
-        let caller = self.invocation(context, params.capability).await?;
+        let caller = self
+            .signing_invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -63,7 +66,7 @@ impl DocsService {
         let result = self
             .commit_write(
                 context,
-                actor.capability,
+                caller.via,
                 &params.mode,
                 &mut plan,
                 params.command.as_ref(),
@@ -171,6 +174,9 @@ impl Handler<WriteDatums> for DocsService {
         &self,
         request: Envelope<WriteDatums>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
-        Ok(self.write(&request.context, request.params).await?.into())
+        Ok(self
+            .write(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }

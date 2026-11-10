@@ -5,6 +5,8 @@ use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::MintCapability;
 use crate::authority::Namespace;
+use crate::authority::OpenedActor;
+use crate::authority::ResolveActor;
 use crate::authority::ResolveAuthority;
 use crate::authority::ResolvedAuthority;
 use crate::authority::Rights;
@@ -241,23 +243,39 @@ fn authority_identifiers_wire() {
             object: "read document".into(),
             rights: Rights::USE | Rights::NARROW,
             issuer_id: actor_id,
+            subject: Some(actor_id),
         },
         json!({
             "capabilityId": "01010101-0101-0101-0101-010101010101",
             "object": "read document",
             "rights": ["use", "narrow"],
             "issuerId": actor_id,
+            "subject": actor_id,
         }),
     );
     let public_key = MultibaseKey::try_from(&[2u8; 32][..]).unwrap();
     let certificate = Bytes::from(vec![3, 4]);
+    let actor = Actor {
+        actor_id,
+        url: "db+actor://node/child".into(),
+        public_key: public_key.clone(),
+        certificate: certificate.clone(),
+        parent_actor_id: Some(actor_id),
+    };
     wire(
-        &Actor {
-            actor_id,
-            url: "db+actor://node/child".into(),
-            public_key: public_key.clone(),
-            certificate: certificate.clone(),
-            parent_actor_id: Some(actor_id),
+        &actor,
+        json!({
+            "actorId": actor_id,
+            "url": "db+actor://node/child",
+            "publicKey": public_key,
+            "certificate": certificate,
+            "parentActorId": actor_id,
+        }),
+    );
+    // What `OpenActor` returns is the public actor with the opener's identity capability beside it.
+    wire(
+        &OpenedActor {
+            actor,
             capability: capability_id,
         },
         json!({
@@ -297,6 +315,7 @@ fn authority_resolution_and_mint_wire() {
         object: "opaque application object".into(),
         rights: Rights::USE,
         issuer_id: actor_id,
+        subject: None,
     };
     let actor = Actor {
         actor_id,
@@ -304,7 +323,6 @@ fn authority_resolution_and_mint_wire() {
         public_key: MultibaseKey::try_from(&[2u8; 32][..]).unwrap(),
         certificate: Bytes::from(vec![3, 4]),
         parent_actor_id: None,
-        capability: capability_id,
     };
     for actor in [None, Some(actor)] {
         let response: <ResolveAuthority as Method>::Output = ResolvedAuthority {
@@ -322,6 +340,7 @@ fn authority_resolution_and_mint_wire() {
             dependencies: vec![signer],
             object: "opaque domain data".into(),
             rights: Rights::USE,
+            subject: Some(actor_id),
         },
         json!({
             "issuer": capability_id,
@@ -329,8 +348,10 @@ fn authority_resolution_and_mint_wire() {
             "dependencies": [signer],
             "object": "opaque domain data",
             "rights": ["use"],
+            "subject": actor_id,
         }),
     );
+    wire(&ResolveActor { actor_id }, json!({"actorId": actor_id}));
 }
 
 #[test]
@@ -370,6 +391,7 @@ fn core_protocol_envelopes_wire() {
             dependencies: Vec::new(),
             object: "read document".into(),
             rights: Rights::USE,
+            subject: None,
         },
     ));
     wire(
@@ -378,7 +400,7 @@ fn core_protocol_envelopes_wire() {
             "MintCapability",
             json!({
                 "issuer": capability, "parent": null, "dependencies": [],
-                "object": "read document", "rights": ["use"],
+                "object": "read document", "rights": ["use"], "subject": null,
             }),
         ),
     );
