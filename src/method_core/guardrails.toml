@@ -1,0 +1,16 @@
+version = 1
+role = "foundation"
+dependency_reason = "The typed-call trait (`Method`) and its XRPC declaration, small enough that a wasm guest links it without the service runtime."
+allowed_dependencies = []
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]

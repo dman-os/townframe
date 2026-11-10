@@ -168,6 +168,13 @@ mod tests {
 4. **Revisions are datums in one doc**, not big_cabinet branches: a revision supersedes, it doesn't fork. (Branches stay available if intxt later wants "suggested change" forks.)
 5. **Harness extension:** a Claude Code plugin needs no code from this lane beyond `day mcp`. It bundles the MCP server entry (`day mcp --capability <intxt-scoped cap>`), a skill telling the agent when to create, revise and await reviews, and optionally a hook that calls `createReview` after `gh pr create`.
 
+## Implementation notes for v0 (from the code, 2026-11-11)
+
+- **Client side is mostly there.** `service_client_core_rs::HttpTransport` is the seam a guest implements over its HTTP import; `Xrpc<H>` turns it into a `UnaryTransport` for every unary method, and `encode_request` already writes the request-id, authorization, idempotency and timeout headers. The NDK's guest transport is one `HttpTransport` impl over `wasi:http/client` to `dispatch.local`.
+- **The server trait can't be shared as-is.** `service_utils_rs::Handler<M>` is `Send + Sync + 'static` and returns `Send` futures, which a wasm guest cannot provide (the client traits already dropped `Send` for the same reason). `big_ndk` therefore declares its own `Handler<M>` without `Send`; the native test backend runs it on a local set or adapts it, never the other way round.
+- **Incoming decode without axum.** `export_nodule!` decodes the wasi:http request into the method's params and a request context in the guest. `service_core_rs::xrpc` has the header constants and `read_headers`; the query-string and body decode the host does in `service_utils_rs::xrpc` must move to (or be shared from) a wasm-buildable place, not be re-implemented in the kit.
+- **Reconcile the header contract first.** `test_nodule_guest` documents `authorization: Capability <id>` and `x-request-deadline-unix-ms`; the client encoder writes `x-timeout-ms`, and `big_dispatch/xrpc.rs` documents `Authorization: Bearer <token>`. Find which is current on each path (inbound delivery, egress to `dispatch.local`) and make one contract; the kit must not carry two.
+
 ## Build order this implies
 
 1. `Method` crate (D35), then `big_ndk` macros generating `Method` types and `export_nodule!`, with `test_nodule_guest`'s echo/relay re-expressed on it as the smoke test.
