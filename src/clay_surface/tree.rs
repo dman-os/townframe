@@ -2,6 +2,7 @@
 //! identity/budget bookkeeping for one mounted surface.
 use crate::render::DATA_ATTRIBUTES;
 use crate::render::DataAttributeNamesExhausted;
+use crate::render::is_data_attribute_name;
 use crate::render::static_attribute;
 use crate::render::supported_listener;
 use crate::render::supported_tag;
@@ -65,6 +66,9 @@ pub struct SurfaceTree<C = ()> {
     element_to_node: Vec<Option<SurfaceNodeId>>,
     pub(crate) revision: u64,
     retained_bytes: usize,
+    /// Distinct `data-*` names this surface has used, bounded by [`Self::MAX_DATA_ATTRIBUTE_NAMES`].
+    /// Kept across `clear` so a surface cannot reset its budget by resetting its tree.
+    data_attribute_names: std::collections::BTreeSet<&'static str>,
     failure: Option<PresentationError>,
 }
 
@@ -94,6 +98,7 @@ impl<C: Clone> SurfaceTree<C> {
     pub const MAX_ATTRIBUTES_PER_NODE: usize = 64;
     pub const MAX_LISTENERS_PER_NODE: usize = 32;
     pub const MAX_BATCH_WORK: usize = 128 * 1024;
+    pub const MAX_DATA_ATTRIBUTE_NAMES: usize = 512;
 
     pub fn new() -> Self {
         Self {
@@ -112,6 +117,7 @@ impl<C: Clone> SurfaceTree<C> {
             element_to_node: vec![Some(SurfaceNodeId::ROOT)],
             revision: 0,
             retained_bytes: 0,
+            data_attribute_names: std::collections::BTreeSet::new(),
             failure: None,
         }
     }
@@ -184,7 +190,9 @@ impl<C: Clone> SurfaceTree<C> {
         let revision = self.revision.saturating_add(1);
         let failure = self.failure.take();
         let next_generation = self.next_generation;
+        let data_attribute_names = std::mem::take(&mut self.data_attribute_names);
         *self = Self::new();
+        self.data_attribute_names = data_attribute_names;
         self.revision = revision;
         self.next_generation = next_generation;
         self.failure = failure;

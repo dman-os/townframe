@@ -894,6 +894,40 @@ fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
 }
 
 #[test]
+fn data_attribute_names_are_capped_per_surface() {
+    let cap = SurfaceTree::MAX_DATA_ATTRIBUTE_NAMES;
+    let set_names = |names: &mut dyn Iterator<Item = String>| {
+        let mut batch = vec![Mutation::CreateElement(("div".into(), None))];
+        batch.extend(names.map(|name| {
+            Mutation::SetAttribute((name, None, AttributeValue::Text("x".into())))
+        }));
+        batch.push(Mutation::AppendChildren(1));
+        batch
+    };
+    // Spread over batches: one element holds at most MAX_ATTRIBUTES_PER_NODE attributes.
+    let mut surface = SurfaceTree::new();
+    for chunk in (0..cap).collect::<Vec<_>>().chunks(SurfaceTree::MAX_ATTRIBUTES_PER_NODE) {
+        let mut names = chunk.iter().map(|index| format!("data-cap-a{index}"));
+        surface.apply(&set_names(&mut names)).expect("within the per-surface cap");
+    }
+    // Repeating names (including after other work) consumes no budget.
+    let mut repeats = (0..SurfaceTree::MAX_ATTRIBUTES_PER_NODE).map(|index| format!("data-cap-a{index}"));
+    surface.apply(&set_names(&mut repeats)).expect("repeats are free");
+    // A second surface has its own budget, though it shares names with the first.
+    let mut other = SurfaceTree::new();
+    let mut fresh = ["data-cap-a0".to_owned(), "data-cap-b0".to_owned()].into_iter();
+    other.apply(&set_names(&mut fresh)).expect("independent budget");
+    // The 513th distinct name on the first surface is refused.
+    let mut one_more = std::iter::once("data-cap-a-over".to_owned());
+    assert_eq!(
+        surface.apply(&set_names(&mut one_more)),
+        Err(PresentationError::InvalidBatch(
+            "too many distinct data-* attribute names on this surface".into()
+        ))
+    );
+}
+
+#[test]
 fn replacing_values_and_removing_subtrees_release_retained_bytes() {
     let mut tree = SurfaceTree::new();
     tree.apply(&counter_initial_batch()).unwrap();

@@ -190,7 +190,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     pub(super) fn validate_mutation(
-        &self,
+        &mut self,
         mutation: &Mutation<C>,
         bytes: &mut usize,
         work: &mut usize,
@@ -314,7 +314,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     fn validate_attribute(
-        &self,
+        &mut self,
         top: SurfaceNodeId,
         name: &str,
         ns: Option<&str>,
@@ -329,8 +329,25 @@ impl<C: Clone> SurfaceTree<C> {
         if let AttributeValue::Text(text) = value {
             Self::charge_string(bytes, text)?;
         }
+        // The process-wide interner leaks every distinct data-* name (Dioxus attribute names are
+        // `&'static str`), so its 4096-name budget is shared by every micro. The per-surface cap
+        // keeps one micro from spending it all. It is checked before interning so a surface that
+        // is over budget interns nothing new, and it counts every distinct name the surface
+        // uses, including names other surfaces already interned.
+        let new_data_name = ns.is_none()
+            && is_data_attribute_name(name)
+            && !self.data_attribute_names.contains(name);
+        if new_data_name && self.data_attribute_names.len() >= Self::MAX_DATA_ATTRIBUTE_NAMES {
+            return Err(PresentationError::InvalidBatch(
+                "too many distinct data-* attribute names on this surface".into(),
+            ));
+        }
         match static_attribute(&DATA_ATTRIBUTES, name, ns) {
-            Ok(Some(_)) => {}
+            Ok(Some((interned, _))) => {
+                if new_data_name {
+                    self.data_attribute_names.insert(interned);
+                }
+            }
             Ok(None) => {
                 return Err(PresentationError::Unsupported(
                     "attribute name or namespace".into(),

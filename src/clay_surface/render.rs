@@ -138,7 +138,7 @@ impl DataAttributeInterner {
 
 /// `data-` followed by one or more of `[a-z0-9-._]`: the HTML custom data attribute form,
 /// without namespace colons, uppercase, or whitespace.
-fn is_data_attribute_name(name: &str) -> bool {
+pub(crate) fn is_data_attribute_name(name: &str) -> bool {
     name.strip_prefix("data-").is_some_and(|suffix| {
         !suffix.is_empty()
             && suffix
