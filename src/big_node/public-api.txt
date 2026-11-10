@@ -15,6 +15,7 @@ pub enum big_node::peers::Direction { Incoming, Outgoing }
 pub enum big_node::peers::PeersEvent { Connected { peer : PeerKey , direction : Direction , }, Disconnected { peer : PeerKey , reason : String , }, # [doc = " A document this node subscribes to was synced with `peer`."] DocSynced { peer : PeerKey , doc : ObjKey , }, # [doc = " Everything `peer` has in `part` has been synced."] PartSynced { peer : PeerKey , part : PartKey , }, # [doc = " `peer` has changes this node has not caught up with."] Stale { peer : PeerKey , } }
 pub enum big_node::peers::PolicyChoice { Mirror (MirrorPolicy), Custom (Arc < dyn PeerPolicy >) }
 pub impl big_node::BigNode::async fn boot (config : Config) -> Res < (Self , StopToken) >
+pub impl big_node::BigNode::async fn boot_with < Host , Hosting > (config : Config , host : Host) -> Res < (Self , StopToken) > where Host : FnOnce (ExecutorDeps) -> Hosting + Send , Hosting : Future < Output = Res < (Arc < dyn NoduleExecutor > , service_utils_rs :: StopToken) > > + Send ,
 pub impl big_node::Bindings::async fn in_directory (runtime : & SqliteRuntime , directory : & Path , keyhive_secrets : Option < Arc < SecretStore > > ,) -> Res < Self >
 pub impl big_node::StopToken::async fn stop (mut self) -> Res < () >
 pub impl big_node::peers::Peers::async fn connect (& self , addr : iroh :: EndpointAddr) -> Res < PeerKey >
@@ -24,9 +25,10 @@ pub impl big_node::peers::Peers::fn addr (& self) -> iroh :: EndpointAddr
 pub impl big_node::peers::Peers::fn subscribe (& self) -> broadcast :: Receiver < PeersEvent >
 pub impl big_node::peers::Peers::fn ticket (& self) -> String
 pub mod big_node::peers
-pub struct big_node::BigNode  { node_id: String, repo: SharedBigRepo, authority: Authority, docs_actor: Actor, docs_namespace: Namespace, drawers_actor: Actor, drawers_namespace: Namespace, blobs_actor: Actor, blobs_namespace: Namespace, blobs: big_blobs :: Blobs, blob_workers: big_blobs :: workers :: BlobWorkers, nodules_actor: Actor, plugs_actor: Actor, dispatch_actor: Actor, indexes: Arc < Indexes >, drawer_access: Arc < DrawerAccess >, docs: DocsRepo, drawers: Drawers, dispatch: Dispatch, wasm: Arc < WasmExecutor >, nodules: Nodules, plugs: Plugs, registry_drawer: DrawerId, listeners: Listeners, peers: Option < peers :: Peers > }
+pub struct big_node::BigNode  { node_id: String, repo: SharedBigRepo, authority: Authority, docs_actor: Actor, docs_namespace: Namespace, drawers_actor: Actor, drawers_namespace: Namespace, blobs_actor: Actor, blobs_namespace: Namespace, blobs: big_blobs :: Blobs, blob_workers: big_blobs :: workers :: BlobWorkers, nodules_actor: Actor, plugs_actor: Actor, dispatch_actor: Actor, indexes: Arc < Indexes >, drawer_access: Arc < DrawerAccess >, docs: DocsRepo, drawers: Drawers, dispatch: Dispatch, executor: Arc < dyn NoduleExecutor >, nodules: Nodules, plugs: Plugs, registry_drawer: DrawerId, listeners: Listeners, peers: Option < peers :: Peers > }
 pub struct big_node::Bindings  { sql: Database, repo: big_repo :: Storage, blobs: big_blobs :: Storage }
 pub struct big_node::Config  { repo: big_repo :: Config, sql: Database, schemas: Arc < SchemaRepo >, secrets: Arc < SecretStore >, index_concurrency: NonZeroUsize, blob_storage: big_blobs :: Storage, nodule_operations: DispatchScope, listeners: Listeners, peers: Option < peers :: PeersConfig > }
+pub struct big_node::ExecutorDeps  { blobs: Arc < BlobService >, dispatch: service_client_native_rs :: Client < DispatchProtocol > }
 pub struct big_node::StopToken  {  }
 pub struct big_node::peers::Peers  {  }
 pub struct big_node::peers::PeersConfig  { loopback_only: bool, policy: PolicyChoice, initial_backoff: Duration, max_backoff: Duration, sweep_interval: Duration }

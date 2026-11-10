@@ -10,6 +10,7 @@ pub use info::NodeInfo;
 use listeners::Listener;
 pub use listeners::Listeners;
 
+use big_blobs::BlobService;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
 use big_cabinet::DocsConfig;
@@ -35,12 +36,12 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_dispatch::Dispatch;
 use big_dispatch::DispatchConfig;
 use big_dispatch::ServiceProvider;
+use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_nodule::Nodules;
 use big_nodule::NodulesConfig;
 use big_nodule::executor::NoduleExecutor;
-use big_nodule_wasm::WasmExecutor;
 use big_plugs::Plugs;
 use big_plugs::PlugsConfig;
 use big_plugs::RegistryDrawerConfig;
@@ -58,6 +59,14 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use utils_rs::prelude::Res;
+
+/// What a node hands the factory of its nodule executor: the services the executor reaches.
+pub struct ExecutorDeps {
+    /// Where an executor that runs handler bytes reads them.
+    pub blobs: Arc<BlobService>,
+    /// How a handler's outgoing calls enter dispatch (see `big_nodule::egress`).
+    pub dispatch: service_client_native_rs::Client<DispatchProtocol>,
+}
 
 /// What a node is configured with. Every storage resource in it is a binding the composition
 /// root already opened (ADR 033 section 8): no service opens a path, so the node's place on disk,
@@ -97,7 +106,11 @@ pub struct Config {
 /// the node boots, which is what lets a host name per-node resources (keyring entries, the
 /// Unix socket) without opening the node.
 pub fn node_id(identity_seed: &[u8; 32]) -> String {
-    data_encoding::HEXLOWER.encode(iroh::SecretKey::from_bytes(identity_seed).public().as_bytes())
+    data_encoding::HEXLOWER.encode(
+        iroh::SecretKey::from_bytes(identity_seed)
+            .public()
+            .as_bytes(),
+    )
 }
 
 /// Removes every keyring entry the node with `identity_seed` keeps in `secrets`, for tearing a
@@ -173,7 +186,9 @@ pub struct BigNode {
     pub docs: DocsRepo,
     pub drawers: Drawers,
     pub dispatch: Dispatch,
-    pub wasm: Arc<WasmExecutor>,
+    /// Hosts the nodules' handlers: the wasm executor on a production node, or whatever
+    /// [`BigNode::boot_with`] was given.
+    pub executor: Arc<dyn NoduleExecutor>,
     pub nodules: Nodules,
     /// The plug registry service and the grouped drawer it keeps its plugs in.
     pub plugs: Plugs,
@@ -232,7 +247,26 @@ impl BigNode {
         Ok(())
     }
 
+    /// Boots a production node: its nodules' handlers are Wasm components.
     pub async fn boot(config: Config) -> Res<(Self, StopToken)> {
+        Self::boot_with(config, |deps| async move {
+            let (wasm, stop) = big_nodule_wasm::boot(deps.blobs, deps.dispatch).await?;
+            Ok((wasm as Arc<dyn NoduleExecutor>, stop))
+        })
+        .await
+    }
+
+    /// Boots a node whose nodules' handlers are hosted by the executor `host` builds. The
+    /// executor goes through the same install, enable and grant flow as the wasm one; this is
+    /// the seam a test harness supplies its own through. `host` runs once the services the
+    /// executor calls exist, and the stop token it returns is stopped between the nodule
+    /// service that calls it and the services it calls.
+    pub async fn boot_with<Host, Hosting>(config: Config, host: Host) -> Res<(Self, StopToken)>
+    where
+        Host: FnOnce(ExecutorDeps) -> Hosting + Send,
+        Hosting:
+            Future<Output = Res<(Arc<dyn NoduleExecutor>, service_utils_rs::StopToken)>> + Send,
+    {
         let mut stop = StopToken::default();
         let attachments = Attachments::of(&config);
         // Boxed: booting every service inline makes this future large enough (in debug builds)
@@ -332,12 +366,15 @@ impl BigNode {
                 &mut stop,
             )
             .await?;
-            // The Wasm executor is called by the nodule service, so it boots before it and
-            // stops after it. It reads handler bytes from the blob service, which stops later
-            // still, and its guests call dispatch, which stops later still.
-            let (wasm, wasm_stop) =
-                big_nodule_wasm::boot(Arc::clone(&blobs.service), dispatch.client.clone()).await?;
-            stop.stages.push(Stage::Service(wasm_stop));
+            // The executor is called by the nodule service, so it boots before it and stops
+            // after it. It may read handler bytes from the blob service, which stops later
+            // still, and its handlers call dispatch, which stops later still.
+            let (executor, executor_stop) = host(ExecutorDeps {
+                blobs: Arc::clone(&blobs.service),
+                dispatch: dispatch.client.clone(),
+            })
+            .await?;
+            stop.stages.push(Stage::Service(executor_stop));
             let (nodules, nodules_stop) = boot_nodules(
                 &authority,
                 &docs,
@@ -347,7 +384,7 @@ impl BigNode {
                 nodules_namespace,
                 &dispatch,
                 nodule_dispatch_authority,
-                Arc::clone(&wasm) as Arc<dyn NoduleExecutor>,
+                Arc::clone(&executor),
                 schemas,
                 config.sql,
             )
@@ -373,7 +410,7 @@ impl BigNode {
                 docs,
                 drawers,
                 dispatch,
-                wasm,
+                executor,
                 nodules,
                 plugs,
                 registry_drawer,
