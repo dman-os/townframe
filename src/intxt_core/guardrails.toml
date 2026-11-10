@@ -1,0 +1,12 @@
+version = 1
+role = "domain"
+dependency_reason = "intxt's datum vocabularies are Cabinet datum declarations and nothing else."
+allowed_dependencies = ["big_cabinet_core", "macros"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
