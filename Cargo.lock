@@ -4178,6 +4178,8 @@ dependencies = [
  "data-encoding",
  "directories",
  "http",
+ "intxt_core",
+ "intxt_nodule",
  "libc",
  "method_core",
  "rand 0.9.5",

@@ -26,6 +26,8 @@ big_nodule_core.workspace = true
 big_repo.workspace = true
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
+intxt_core = { path = "../intxt_core" }
+intxt_nodule = { path = "../intxt_nodule" }
 
 #
 # cli
