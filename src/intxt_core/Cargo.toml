@@ -25,7 +25,3 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-big_cabinet = { path = "../big_cabinet" }
-big_ndk_testing = { path = "../big_ndk_testing" }
-service_utils_rs.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
