@@ -32,45 +32,23 @@ function installationSource(cargoToml: string): string[] {
   return ["--git", repository, "--rev", revision];
 }
 
-function parseDotenvTargetDir(dotenvText: string): string | undefined {
-  return dotenvText
-    .match(/^(?:export\s+)?CARGO_TARGET_DIR\s*=\s*["']?([^"'\r\n#]+)["']?/m)
-    ?.[1]
-    ?.trim();
-}
-
 export function resolveInstallRoot(
   root: ReturnType<typeof $.path>,
   env: Record<string, string | undefined>,
-  dotenvText = "",
 ) {
   const configuredRoot = env.DIOXUS_CLI_ROOT?.trim();
   if (configuredRoot) {
     return root.resolve(configuredRoot);
   }
-  const targetDir = env.CARGO_TARGET_DIR?.trim() ||
-    parseDotenvTargetDir(dotenvText);
+  const targetDir = env.CARGO_TARGET_DIR?.trim();
   if (targetDir) {
     return root.resolve(targetDir).join("dioxus-cli");
   }
   return root.join("target", "dioxus-cli");
 }
 
-async function readDotenvText(
-  root: ReturnType<typeof $.path>,
-): Promise<string> {
-  const dotenvPath = root.join(".env");
-  return (await dotenvPath.exists()) ? await dotenvPath.readText() : "";
-}
-
 async function install(rootPath: string, installPath: string) {
   const root = $.path(rootPath);
-  if (!Deno.env.get("CARGO_TARGET_DIR")) {
-    const dotenvTarget = parseDotenvTargetDir(await readDotenvText(root));
-    if (dotenvTarget) {
-      Deno.env.set("CARGO_TARGET_DIR", root.resolve(dotenvTarget).toString());
-    }
-  }
   const source = installationSource(await root.join("Cargo.toml").readText());
   if (source[0] === "--path") {
     const manifest = root.resolve(source[1]).join("Cargo.toml");
@@ -98,45 +76,37 @@ async function install(rootPath: string, installPath: string) {
 
 if (import.meta.main) {
   const root = $.path(new URL("../", import.meta.url));
-  const dotenvText = await readDotenvText(root);
   await install(
     root.toString(),
-    resolveInstallRoot(root, Deno.env.toObject(), dotenvText).toString(),
+    resolveInstallRoot(root, Deno.env.toObject()).toString(),
   );
 }
 
-Deno.test("Dioxus CLI install root uses CARGO_TARGET_DIR or .env before repo target", () => {
+Deno.test("Dioxus CLI install root prefers DIOXUS_CLI_ROOT, then CARGO_TARGET_DIR, then the repo target", () => {
   const root = $.path("/workspace/repo");
-  const fromEnv = resolveInstallRoot(
-    root,
-    { CARGO_TARGET_DIR: "/run/media/asdf/p3N/tmp/townframe-target" },
-    "CARGO_TARGET_DIR=/ignored\n",
-  );
-  if (
-    fromEnv.toString() !== "/run/media/asdf/p3N/tmp/townframe-target/dioxus-cli"
-  ) {
-    throw new Error(`unexpected env install root: ${fromEnv}`);
-  }
-  const fromDotenv = resolveInstallRoot(
-    root,
-    {},
-    "CARGO_TARGET_DIR=/run/media/asdf/p3N/tmp/townframe-target\n",
-  );
-  if (
-    fromDotenv.toString() !==
-      "/run/media/asdf/p3N/tmp/townframe-target/dioxus-cli"
-  ) {
-    throw new Error(`unexpected dotenv install root: ${fromDotenv}`);
-  }
-  const explicit = resolveInstallRoot(
-    root,
-    {
-      DIOXUS_CLI_ROOT: "/custom/dx-root",
-      CARGO_TARGET_DIR: "/run/media/asdf/p3N/tmp/townframe-target",
-    },
-  );
-  if (explicit.toString() !== "/custom/dx-root") {
-    throw new Error(`unexpected explicit install root: ${explicit}`);
+  const cases: [Record<string, string>, string][] = [
+    [
+      {
+        DIOXUS_CLI_ROOT: "/custom/dx-root",
+        CARGO_TARGET_DIR: "/elsewhere/target",
+      },
+      "/custom/dx-root",
+    ],
+    [
+      { CARGO_TARGET_DIR: "/elsewhere/target" },
+      "/elsewhere/target/dioxus-cli",
+    ],
+    [{}, "/workspace/repo/target/dioxus-cli"],
+  ];
+  for (const [env, expected] of cases) {
+    const actual = resolveInstallRoot(root, env).toString();
+    if (actual !== expected) {
+      throw new Error(
+        `install root for ${
+          JSON.stringify(env)
+        } was ${actual}, expected ${expected}`,
+      );
+    }
   }
 });
 
@@ -202,9 +172,6 @@ Deno.test("Dioxus CLI installs the metadata-selected local package with spaced p
     for (const path of [app, cli, library]) {
       await Deno.mkdir(path.toString(), { recursive: true });
     }
-    await app.join(".env").writeText(
-      'CARGO_TARGET_DIR="../target with spaces"\n',
-    );
     await app.join("Cargo.toml").writeText(
       '[patch.crates-io]\ndioxus = { path = "../fork with spaces/library" }\n',
     );
@@ -225,11 +192,7 @@ Deno.test("Dioxus CLI installs the metadata-selected local package with spaced p
       'version = 4\n[[package]]\nname = "dioxus"\nversion = "0.0.0"\n[[package]]\nname = "dioxus-cli"\nversion = "0.0.0"\n',
     );
     Deno.env.delete("CARGO_TARGET_DIR");
-    const destination = resolveInstallRoot(
-      app,
-      {},
-      await app.join(".env").readText(),
-    );
+    const destination = directory.join("dx root");
     await install(app.toString(), destination.toString());
     const executable = destination.join(
       "bin",
