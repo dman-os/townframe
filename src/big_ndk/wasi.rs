@@ -1,6 +1,7 @@
 //! The `wasi:http` edge: the only place the kit touches the generated bindings. Everything above
 //! it works on `http` types, so the routing and envelope logic runs natively in unit tests.
 
+use crate::HttpHandle;
 use crate::Nodule;
 use crate::serve::serve;
 use crate::wit;
@@ -154,7 +155,15 @@ pub async fn serve_wasi<N: Nodule>(request: Request) -> Result<Response, ErrorCo
         .await
         .expect("request body receiver disappeared");
 
-    let answer = serve(&N::default(), &method, &path, &delivered, &body).await;
+    let answer = serve(
+        &N::default(),
+        HttpHandle::new(WasiHttp),
+        &method,
+        &path,
+        &delivered,
+        &body,
+    )
+    .await;
 
     let response_headers = Fields::new();
     for (name, value) in answer.headers() {

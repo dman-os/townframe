@@ -1,5 +1,6 @@
 use crate::Cx;
 use crate::Handler;
+use crate::cx::HttpHandle;
 use http::Method;
 use http::StatusCode;
 use http::header;
@@ -47,11 +48,12 @@ pub trait Nodule: Default {
 }
 
 /// Serves one `wasi:http` request as XRPC: `POST /xrpc/<nsid>` with a JSON body, answered in
-/// the envelope the host's router uses. Any other path is `404 NotFound`, an NSID the nodule
+/// the envelope the host's router uses, with the handler's outgoing calls going over `transport`. Any other path is `404 NotFound`, an NSID the nodule
 /// does not serve is `404 UnknownOperation`, and a malformed header or body is `400
 /// InvalidRequest`.
 pub async fn serve<N: Nodule>(
     nodule: &N,
+    transport: HttpHandle,
     method: &Method,
     path: &str,
     headers: &http::HeaderMap,
@@ -63,7 +65,7 @@ pub async fn serve<N: Nodule>(
         .filter(|_| method == Method::POST)
     {
         None => Reply::error(StatusCode::NOT_FOUND, "NotFound", None),
-        Some(nsid) => match Cx::from_headers(headers) {
+        Some(nsid) => match Cx::from_headers(headers, transport) {
             Err(message) => Reply::error(StatusCode::BAD_REQUEST, "InvalidRequest", Some(message)),
             Ok(cx) => {
                 // Like the router, answer with the id of the request that was served.
