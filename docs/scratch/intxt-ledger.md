@@ -141,6 +141,8 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
   - The gate: ~850 allocations and ~2.5 ms per edit, flat; its 79 heads-based reads are bounded (automerge's `clock_at` caches every 16 nodes).
   - So a signed Text write costs in proportion to the text's size, twice over, not to its history. For intxt file docs that is the main recording cost on large files. The 500-datum refusal (F10) stands. The bench is being fixed: edits at a fixed line, position as a separate axis.
 
+- **F19 (2026-11-10, nodules lane) Fixes for the write cost (F18), by payoff.** (3) The value-CID read walks the Text a character at a time through `list_range_at`; read it in bulk instead, which is a plain-cost fix the nodules lane takes first, after the dtxt migration. (1) Splice input for Text fields (already a deferred node-ledger item): positions relative to the write's base heads under `IfDatumsUnchanged`; claims still cover the resulting value. (2) Reusing the dry-run stage is the operator's deferred two-phase-write decision. Options: keep the dry stage plus rollback; a pure JSON→native claim mirror; or staging on a clone held across the signing await, which needs a per-doc writer gate. Staging twice is now measured at about half of a write.
+
 ## In flight
 
 - Nothing building. `feat/intxt` has `chore/mbx` merged (2d0f3ff1); p3N-4 since rebased `chore/mbx` as `adfd2778` with the same fixes. Build with `env -u CARGO_TARGET_DIR nix develop -c …`.
