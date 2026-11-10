@@ -103,8 +103,8 @@ Content identity only, with no query hints. In ADR 026 a blob is reached through
 - `Blob.urls` is legacy (the encryptor no longer writes it; `big_blobs/documents.rs` still falls back to it and accepts `db+blob` and `daybook-blob`). It is retired with daybook_core's migration.
 - Every `db+…` occurrence (about 240, including the Kotlin app; half are `db+facet` in FDRs and the dayledger plug) is migrated or deleted with its feature.
 
-## 5. Open questions
+## 5. Target constraints
 
-1. **Target constraints.** A reference position can only say "a `dtxt:datum:`". Whether a schema may also constrain the target's tag (a `fileDoc` field must point at `file/main`) is unspecified; until it is, such constraints are checked by readers.
+A reference position can only say "a `dtxt:datum:`". A schema does not constrain the target's tag, and Cabinet does not enforce one. Cabinet could only check at write time, and a reference is weak (§2.1): its target may not exist yet, may be unreadable to the writer, or may change tag meaning later, so a write-time check would reject legitimate references and still not keep them valid. Readers check instead: a reference whose target has an unexpected tag is rendered as unresolved, like any other reference that doesn't resolve (operator, 2026-11-10). A schema may document the expected tags for tools and renderers; that note is not enforced.
 
-Settled by the operator on 2026-11-10: cursors keep Automerge's hex spelling; slots keep raw `/`; UUID aliases and locators are query keys if ever needed, not path parts; query keys are not formalized beyond `heads=`; stored references keep the pin in a sibling field.
+Settled by the operator on 2026-11-10: cursors keep Automerge's hex spelling; slots keep raw `/`; UUID aliases and locators are query keys if ever needed, not path parts; query keys are not formalized beyond `heads=`; stored references keep the pin in a sibling field; target tags are reader-checked, not enforced.
