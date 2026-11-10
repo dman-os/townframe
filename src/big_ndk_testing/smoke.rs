@@ -279,7 +279,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     let (a, b) = (caller(), callee());
     let node = super::node()
         .with_nodule(plug(&a, &[b.echo(), b.relay()]), Fixture)
-        .with_nodule(plug(&b, &[]), Fixture)
+        .with_nodule(plug(&b, &[a.echo()]), Fixture)
         .boot()
         .await;
     for spec in [&a, &b] {
@@ -354,6 +354,24 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         (1..=60_000).contains(&nested_ms),
         "the nested call carries a budget within the outer 60s, got {nested_ms}ms"
     );
+
+    // A handler forging another nodule's capability id is denied: B's capability is bound to B.
+    // It permits A's echo (which B requested), so only its holder binding can refuse A's use of
+    // it.
+    node.grant(
+        &b.plug,
+        DispatchScope {
+            authorities: [a.authority.to_owned()].into(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let theirs = own_capability(&node, &b).await.unwrap();
+    let forged = relay(&node, &a, &a.echo(), Some(&theirs), context.clone()).await;
+    assert_eq!(forged["status"], 403, "{forged}");
+    // The same capability from its own nodule is honored, which is what the forgery lacked.
+    let own = relay(&node, &b, &a.echo(), None, context.clone()).await;
+    assert_eq!(own["status"], 200, "{own}");
 
     // Revoking takes effect: the handler is told no capability and the one it remembered is dead.
     node.grant(&a.plug, DispatchScope::default()).await;
