@@ -62,7 +62,7 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 - **D24 (2026-11-10, operator)** Scheme: `dtxt` (no `+`, no `db`; keeps the d alliteration, recognizable, not tied to an org name). Form: kind after a colon, as DID methods and URN namespaces do, then an opaque path; kinds are full words. `dtxt:datum:<doc|self>/<tag>/<slot>[?heads=…][#<automerge path>]`, `dtxt:actor:<node key>[/<path>]`, `dtxt:blob:<multihash>`. Heads encoding defaults to automerge-repo's (bs58check, `|`-joined, sorted) unless the operator objects. Supersedes the `day:` name in the A1 draft.
 - **D25 (2026-11-10, operator)** `?heads=` uses our multibase base58btc (`z` prefix), not bs58check. Human-in-the-loop waits and cron-like work may later use wflow; not this week.
 - **A2** Datum shapes for the review loop: file docs, commit datums, ref datums, session docs, annotations, structure, thread state; each checked against D13 (multiplayer).
-- **A3** The capture adapter (Claude Code first): session normalization, edit attribution including command-made changes, commit/ref observation, the private working set and promotion into intxts (D20).
+- **A3** The capture adapter (Claude Code first): drafted as ADR 039 (2026-11-10). Its §4 proposes P1 as a local log with explicit promotion (`intxt new`/`intxt add`), awaiting the operator.
 - **A4** Datums legible and authorable as plain JSON (D23): check every datum shape by asking whether an agent could write it by hand correctly.
 
 - **N1** dpaths ADR 010 explicitly excludes git integration and keeps reps as latest state, not history, so it offers no git-like history model to reuse.
