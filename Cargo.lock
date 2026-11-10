@@ -1716,6 +1716,7 @@ dependencies = [
  "serde_json",
  "service_client_core_rs",
  "service_client_native_rs",
+ "service_core_rs",
  "service_utils_rs",
  "tokio",
  "tracing",

@@ -12,6 +12,9 @@ pub const TRACEPARENT_HEADER: &str = "traceparent";
 pub const AUTHORIZATION_HEADER: &str = "authorization";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 pub const TIMEOUT_HEADER: &str = "x-timeout-ms";
+/// Carries the nodule's own dispatch capability as a bare id, set by the host on every delivery
+/// to a nodule that was granted operations.
+pub const NODULE_CAPABILITY_HEADER: &str = "x-nodule-capability";
 pub const DOMAIN_ERROR_FIELD: &str = "operationError";
 pub const DOMAIN_ERROR_STATUS: StatusCode = StatusCode::BAD_REQUEST;
 /// The `Authorization` scheme of every XRPC hop, including its separating space.

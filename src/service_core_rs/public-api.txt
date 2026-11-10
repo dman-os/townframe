@@ -20,6 +20,7 @@ pub const service_core_rs::xrpc::AUTHORIZATION_HEADER: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_FIELD: & str
 pub const service_core_rs::xrpc::DOMAIN_ERROR_STATUS: StatusCode
 pub const service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER: & str
+pub const service_core_rs::xrpc::NODULE_CAPABILITY_HEADER: & str
 pub const service_core_rs::xrpc::REQUEST_ID_HEADER: & str
 pub const service_core_rs::xrpc::TIMEOUT_HEADER: & str
 pub const service_core_rs::xrpc::TRACEPARENT_HEADER: & str

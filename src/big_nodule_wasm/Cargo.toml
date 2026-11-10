@@ -23,6 +23,7 @@ big_sync_core.workspace = true
 method_core.workspace = true
 service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
+service_core_rs.workspace = true
 service_utils_rs.workspace = true
 utils_rs.workspace = true
 

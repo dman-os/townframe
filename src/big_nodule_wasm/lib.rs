@@ -54,13 +54,14 @@ use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::write_context_headers;
 use service_client_native_rs::Client;
+use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
+use service_core_rs::xrpc::bearer_header_value;
+use service_core_rs::xrpc::bearer_token;
+use service_core_rs::xrpc::request_context;
 use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
-use service_utils_rs::xrpc::bearer_header_value;
-use service_utils_rs::xrpc::bearer_token;
-use service_utils_rs::xrpc::request_context;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -108,10 +109,6 @@ const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
 
 /// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
-
-/// The header every delivered request carries the nodule's own dispatch capability in, as a bare
-/// capability id. Absent when the nodule is granted no operations.
-const CAPABILITY_HEADER: &str = "x-nodule-capability";
 
 /// The status a transport failure (workload gone, body failed, oversize response) is reported
 /// under, as an HTTP gateway would.
@@ -390,7 +387,7 @@ impl NoduleExecutor for WasmExecutor {
 struct WasmProvider {
     ingress: Arc<Ingress<Sealed, Egress>>,
     workload_id: String,
-    /// The nodule's own dispatch capability, delivered in [`CAPABILITY_HEADER`]. Replaced in
+    /// The nodule's own dispatch capability, delivered in [`NODULE_CAPABILITY_HEADER`]. Replaced in
     /// place when the nodule's grants change.
     capability: Mutex<Option<CapId>>,
 }
@@ -443,7 +440,7 @@ impl Provider for WasmProvider {
             .extend(headers);
         if let Some(capability) = *self.capability.lock().expect("capability lock") {
             http_request =
-                http_request.header(CAPABILITY_HEADER, Authorization::id_text(capability));
+                http_request.header(NODULE_CAPABILITY_HEADER, Authorization::id_text(capability));
         }
         let body = Full::new(Bytes::from(
             serde_json::to_vec(&input).expect("a JSON value serializes"),

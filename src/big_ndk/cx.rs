@@ -8,13 +8,10 @@ use service_core_rs::ClientError;
 use service_core_rs::Envelope;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
+use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_core_rs::xrpc::bearer_token;
 use service_core_rs::xrpc::request_context;
-
-/// The header carrying the nodule's own dispatch capability as a bare id, set by the host on
-/// every delivery to a nodule that was granted operations.
-pub const NODULE_CAPABILITY_HEADER: &str = "x-nodule-capability";
 
 /// What a handler knows about the call it is serving, built from the headers the host delivered,
 /// and the way it calls other methods.
