@@ -87,8 +87,12 @@ and JS is ruled out. The options:
   `onframe`-like listener on the surface). This keeps upstream's batching exactly, but it's a
   Clay invention, not a Dioxus API.
 
-Recommendation: start with A, measure with the W1 harness, and only add B if batching shows up
-in the numbers. Either way it's a decision for the operator, because B extends the wire.
+**Decided (operator, 2026-11-10): A.** It is an `AnimationFrames` implementation that runs the
+queue at the end of the current dispatch, so the ported code doesn't change. The browser delivers
+scroll events and ResizeObserver callbacks at most once per frame, and Chromium aligns
+`pointermove` to frames, so for the hot inputs one dispatch is about one frame, and the queue still
+dedupes callbacks within a dispatch. B (a host frame event) stays possible if the W1 harness ever
+shows double renders mattering.
 
 ## Timers
 
