@@ -34,6 +34,10 @@ rust-version = "1.91"
 
 [workspace.dependencies]
 wasm_utils_rs = { path = "." }
+big_ndk = { path = "../big_ndk" }
+method_core = { path = "../method_core", default-features = false }
+service_core_rs = { path = "../service_core_rs", default-features = false }
+service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
 clay_rt_wcmp = { path = "../clay_rt_wcmp" }
 wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
 wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
@@ -64,6 +68,7 @@ axum-extra = { version = "0.12.6", default-features = false }
 tower = "0.5"
 tower-http = "0.7"
 http = "1"
+getrandom03 = { package = "getrandom", version = "0.3" }
 
 [workspace.lints]
 clippy.clone_on_ref_ptr = "warn"

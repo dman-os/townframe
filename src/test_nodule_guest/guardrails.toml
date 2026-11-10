@@ -1,7 +1,7 @@
 version = 1
 role = "plugin"
-dependency_reason = "tiny p3 wasi:http test guest for the nodule runtime; depends on no internal crates"
-allowed_dependencies = []
+dependency_reason = "tiny p3 wasi:http test guest for the nodule runtime, written on the nodule development kit"
+allowed_dependencies = ["big_ndk", "method_core", "service_client_core_rs", "service_core_rs"]
 allow_external_api_types = false
 
 [builds.wasm32-wasip3]
