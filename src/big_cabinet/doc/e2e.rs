@@ -4,6 +4,7 @@
 //! Forgeries are planted with raw Automerge edits on documents the repository wrote correctly, so
 //! each test states exactly which invariant the sabotage breaks.
 
+mod list_costs;
 mod branches;
 mod capabilities;
 mod commands;
