@@ -6,7 +6,9 @@ use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsMessage;
 use big_cabinet_core::doc::ObservedDatum;
 use big_cabinet_core::doc::PollDatums;
+use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::query::Anchor;
 use futures::future::BoxFuture;
 use service_utils_rs::InlineRoute;
@@ -471,5 +473,91 @@ async fn refused_metadata_mint_preserves_cursor_and_retries_on_policy_change() -
     assert_eq!(polls.minted.len(), 1);
     polls.stop.stop().await;
     drop(held);
+    Ok(())
+}
+
+/// A roster write on a drawer doc names the one member whose membership moved, so its poll
+/// enqueues that member alone. Enqueueing the drawer instead fanned out to every member
+/// (`enqueue_root_members`), and each note created re-reconciled every note already in the
+/// drawer. Pages re-deliver the drawer's whole state as `enter`, so only the entries whose
+/// version moved (or that vanished) count. The first page, with nothing to diff against, and a
+/// change no entry localizes (here the descriptor) still enqueue the drawer itself, and a
+/// parked drawer stays parked through member-only pages, so its next rearm reaches everyone.
+#[tokio::test]
+async fn roster_entries_on_a_polled_drawer_enqueue_only_the_member_they_name() -> Res<()> {
+    let sql = SqliteRuntime::new(Default::default()).ephemeral(&[])?;
+    let mut polls = Polls::new(sql).await?;
+    let drawer = DocId::new([1; 32]);
+    let settled = DocId::new([2; 32]);
+    let entered = DocId::new([3; 32]);
+    let descriptor = DatumKey::from_text(Drawer::ID, "main")?;
+    let entry = |doc: &DocId| DatumKey::from_text(DrawerDocEntry::ID, doc.to_string());
+    let at = |clock: u64| ObservedDatum::Present {
+        doc_heads: Vec::new(),
+        version: DatumVersion {
+            heads: Vec::new(),
+            clock,
+        },
+    };
+    let cases = [
+        // Nothing to diff against yet: the drawer itself, parked as its metadata waits.
+        (
+            vec![(descriptor.clone(), 1), (entry(&settled)?, 1)],
+            &drawer,
+        ),
+        // A doc enters: only it, not the settled member nor the parked drawer.
+        (
+            vec![
+                (descriptor.clone(), 1),
+                (entry(&settled)?, 1),
+                (entry(&entered)?, 1),
+            ],
+            &entered,
+        ),
+        // A doc leaves: only it.
+        (
+            vec![(descriptor.clone(), 1), (entry(&entered)?, 1)],
+            &settled,
+        ),
+        // The descriptor moves every member's target: the drawer, to fan out.
+        (
+            vec![(descriptor.clone(), 2), (entry(&entered)?, 1)],
+            &drawer,
+        ),
+    ];
+    polls.start(drawer.clone(), false);
+    let mut call = polls.next().await;
+    for (through, (datums, stale)) in (1..).zip(cases) {
+        assert_request(&call.request, &drawer, false, through - 1);
+        call.reply
+            .send(Ok(DatumPage {
+                events: vec![DatumEvent::Enter {
+                    revision: through,
+                    doc_id: drawer.clone(),
+                    datums: datums
+                        .into_iter()
+                        .map(|(key, clock)| (key, at(clock)))
+                        .collect(),
+                }],
+                through,
+                caught_up: true,
+            }))
+            .unwrap();
+        call = polls.next().await;
+        let (queued, generation) = polls.queue.next().await?.unwrap();
+        assert_eq!(&queued, stale);
+        polls
+            .queue
+            .finish(&queued, generation, queued == drawer)
+            .await?;
+        assert!(polls.queue.next().await?.is_none());
+    }
+    polls
+        .queue
+        .ingest("availability", 1, BTreeSet::new(), true)
+        .await?;
+    assert_eq!(polls.queue.next().await?.unwrap().0, drawer);
+    polls.stop.stop().await;
+    drop(call);
     Ok(())
 }

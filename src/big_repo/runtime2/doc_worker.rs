@@ -22,8 +22,9 @@ use crate::runtime2::types::BrokenReason;
 use crate::runtime2::types::DocLookup;
 use crate::runtime2::types::LiveDocBundle;
 use crate::runtime2::types::LiveDocHandle;
+use crate::runtime2::types::NoWriteAccess;
 use crate::runtime2::types::handle_validity;
-use crate::runtime2::types::invalid_handle_message;
+use crate::runtime2::types::invalid_handle_error;
 use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
@@ -753,11 +754,20 @@ impl<F: FutureForm> DocWorker2<F> {
             checkpoint_count,
             "load_doc_snapshot: tree composition"
         );
-        let doc_id_snapshot = self.doc_id.clone();
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
-        for item in &order {
+        // Walk descendants first (reverse of the ancestors-first topological
+        // order). `try_causal_decrypt` returns the plaintext and key of the
+        // item *and its whole ancestor closure*, so the first walk from a
+        // descendant covers every item below it. Visiting ancestors first
+        // made each item's walk re-decrypt its entire closure (N(N+1)/2
+        // decrypts for a linear history of N); descendants first, a linear
+        // history needs one walk and the rest are served from `plaintexts`.
+        // Blockers lose nothing: a descendant's closure is a superset of any
+        // ancestor's, so its walk already reported every blocker the ancestor's
+        // own walk would.
+        for item in order.iter().rev() {
             let (kind, head) = match item {
                 SedimentreeItem::Fragment(index) => {
                     (BigRepoCiphertextKind::Fragment, fragments[*index].head())
@@ -785,37 +795,15 @@ impl<F: FutureForm> DocWorker2<F> {
             // (one per grant), so always take the full walk for them.
             let is_checkpoint =
                 kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head);
-            let cached_key = if is_checkpoint {
-                None
-            } else {
-                self.recovered_keys
-                    .lock()
-                    .expect("recovered-key cache lock poisoned")
-                    .get(&head)
-                    .copied()
-            };
-            if let Some(key) = cached_key {
-                match self
-                    .io
-                    .decrypt_with_cached_key(self.sed_id, locator, key)
-                    .await?
-                {
-                    Some(plaintext) => {
-                        plaintexts.insert(head.as_bytes().to_vec(), plaintext);
-                        continue;
-                    }
-                    None => {
-                        tracing::debug!(
-                            %doc_id_snapshot,
-                            ?head,
-                            "cached decryption key failed AEAD; invalidating entry"
-                        );
-                        self.recovered_keys
-                            .lock()
-                            .expect("recovered-key cache lock poisoned")
-                            .remove(&head);
-                    }
-                }
+            // Already decrypted as part of a descendant's closure walk.
+            if !is_checkpoint && plaintexts.contains_key(head.as_bytes().as_slice()) {
+                continue;
+            }
+            if !is_checkpoint
+                && let Some(plaintext) = self.decrypt_with_recovered_key(head, locator).await?
+            {
+                plaintexts.insert(head.as_bytes().to_vec(), plaintext);
+                continue;
             }
 
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
@@ -893,6 +881,41 @@ impl<F: FutureForm> DocWorker2<F> {
             blockers,
             blocked_refs,
         )
+    }
+
+    /// Open one blob with its cached application secret, if the recovered-key cache holds one.
+    /// A cached key that fails AEAD is discarded on sight and reported as a miss, so the caller
+    /// falls back to the authoritative Keyhive derivation; stale keys are never trusted.
+    async fn decrypt_with_recovered_key(
+        &self,
+        head: CommitId,
+        locator: BigRepoCiphertextLocator,
+    ) -> eyre::Result<Option<Vec<u8>>> {
+        let Some(key) = self
+            .recovered_keys
+            .lock()
+            .expect("recovered-key cache lock poisoned")
+            .get(&head)
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let plaintext = self
+            .io
+            .decrypt_with_cached_key(self.sed_id, locator, key)
+            .await?;
+        if plaintext.is_none() {
+            tracing::debug!(
+                doc_id = %self.doc_id,
+                ?head,
+                "cached decryption key failed AEAD; invalidating entry"
+            );
+            self.recovered_keys
+                .lock()
+                .expect("recovered-key cache lock poisoned")
+                .remove(&head);
+        }
+        Ok(plaintext)
     }
 
     async fn take_or_load_transient_doc(
@@ -1027,8 +1050,8 @@ impl<F: FutureForm> DocWorker2<F> {
             bundle_id,
             current.as_ref().and_then(|bundle| bundle.broken_reason()),
         );
-        if let Some(message) = invalid_handle_message(validity) {
-            resp.send(Err(ferr!("{message}")))
+        if let Some(refusal) = invalid_handle_error(validity) {
+            resp.send(Err(refusal))
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             return Ok(());
@@ -1041,11 +1064,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     .as_ref()
                     .expect("live bundle present for a valid commit")
                     .mark_broken(BrokenReason::CommitRejectedNoWriteAccess);
-                resp.send(Err(ferr!(
-                    "document write rejected: local access is not writable (revoked or read-only)"
-                )))
-                .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                .ok();
+                resp.send(Err(NoWriteAccess.into()))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
                 return Ok(());
             }
             Err(error) => {

@@ -17,6 +17,7 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::ReadDatums;
@@ -166,11 +167,24 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         Arc::clone(&config.metadata_capability),
         config.policy.clone(),
     );
+    let repo = Arc::clone(&config.repo);
     let retention = Retention::new(
         config.sql.clone(),
         Arc::clone(&config.service),
         config.docs.clone(),
         metadata.clone(),
+        Arc::new(move |inventory: DocId| {
+            let repo = Arc::clone(&repo);
+            Box::pin(async move {
+                let local =
+                    ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32()?)?;
+                let inventory = ed25519_dalek::VerifyingKey::from_bytes(&inventory.to_bytes32()?)?;
+                Ok(repo
+                    .keyhive()
+                    .can_write(&local.into(), inventory.into())
+                    .await)
+            })
+        }),
         Arc::clone(&config.parts),
     )
     .await?;
@@ -485,6 +499,7 @@ async fn poll_document(
 ) -> Res<()> {
     let source = format!("poll-document:{document}");
     let mut after = queue.progress(&source).await?;
+    let mut known = None;
     let predicate = Predicate::IsDoc {
         doc_id: document.clone(),
     };
@@ -521,16 +536,109 @@ async fn poll_document(
             }
             Err(error) => return Err(error.into()),
         };
-        let documents = if page.events.is_empty() {
-            BTreeSet::new()
-        } else {
-            BTreeSet::from([document.clone()])
-        };
+        let documents = affected_documents(&document, &mut known, &page.events);
         queue
             .ingest(&source, page.through, documents, false)
             .await?;
         after = page.through;
     }
+}
+
+/// The docs a page of `polled`'s datum changes makes stale. `known` is the datum versions the
+/// previous page delivered, `None` before the first page of this task.
+///
+/// Processing a drawer doc (or a sensitive root) in the worker re-observes the drawer's
+/// metadata and re-enqueues every member (`enqueue_root_members`), since a descriptor or
+/// meta-doc change moves every member's writer target. A roster entry is different: a
+/// `drawerDocEntry/<doc>` names the one member whose membership moved, and a member's writer
+/// target reads only its own entry, the descriptor and the meta docs (`refresh_targets`).
+/// Enqueueing the drawer for each roster write made every note created re-reconcile every
+/// note already in the drawer, so a page whose changes are all doc entries enqueues just the
+/// docs they name.
+///
+/// A `PollDatums` page is not a delta: each page re-delivers the doc as `enter` with its whole
+/// selected state, and only removals come as `datum` events. So the changed keys are found by
+/// diffing the versions against the previous page. Without a previous page (a fresh task, as
+/// after a restart) or on `leave`, nothing is known to be unchanged and the polled doc itself
+/// is stale. Any change other than a doc entry (descriptor, meta docs, child
+/// entries) leaves the polled doc stale, as before. A parked drawer keeps its `waiting` row
+/// untouched by a member-only page, so the next rearm still fans it out to everyone.
+fn affected_documents(
+    polled: &DocId,
+    known: &mut Option<BTreeMap<DatumKey, DatumVersion>>,
+    events: &[big_cabinet_core::doc::DatumEvent],
+) -> BTreeSet<DocId> {
+    use big_cabinet_core::doc::DatumEvent;
+    use big_cabinet_core::doc::ObservedDatum;
+    if events.is_empty() {
+        return BTreeSet::new();
+    }
+    let previous = known.take();
+    let mut current = None;
+    let mut left = false;
+    for event in events {
+        match event {
+            DatumEvent::Enter { datums, .. } => {
+                current = Some(
+                    datums
+                        .iter()
+                        .filter_map(|(key, datum)| match datum {
+                            ObservedDatum::Present { version, .. } => {
+                                Some((key.clone(), version.clone()))
+                            }
+                            ObservedDatum::Removed { .. } => None,
+                        })
+                        .collect::<BTreeMap<_, _>>(),
+                );
+            }
+            DatumEvent::Datum {
+                datum_key, datum, ..
+            } => {
+                let current = current.get_or_insert_with(|| previous.clone().unwrap_or_default());
+                match datum {
+                    ObservedDatum::Present { version, .. } => {
+                        current.insert(datum_key.clone(), version.clone());
+                    }
+                    ObservedDatum::Removed { .. } => {
+                        current.remove(datum_key);
+                    }
+                }
+            }
+            DatumEvent::Leave { .. } => {
+                left = true;
+                current = None;
+            }
+        }
+    }
+    let Some(previous) = previous.filter(|_| !left) else {
+        *known = current;
+        return BTreeSet::from([polled.clone()]);
+    };
+    let Some(current) = current else {
+        *known = Some(previous);
+        return BTreeSet::new();
+    };
+    let changed = current
+        .iter()
+        .filter(|(key, version)| previous.get(*key) != Some(*version))
+        .map(|(key, _)| key)
+        .chain(previous.keys().filter(|key| !current.contains_key(*key)));
+    let mut documents = BTreeSet::new();
+    for key in changed {
+        // A doc entry's slot is the member's doc id: the roster only stores admitted entries,
+        // so a slot that does not parse is a broken invariant, not a reason to widen the work.
+        let document = if key.tag().as_str() == big_cabinet_core::drawer::DrawerDocEntry::ID {
+            std::str::from_utf8(key.slot_bytes())
+                .expect("a drawerDocEntry slot is a utf-8 doc id")
+                .parse::<DocId>()
+                .expect("a drawerDocEntry slot is a doc id")
+        } else {
+            polled.clone()
+        };
+        documents.insert(document);
+    }
+    *known = Some(current);
+    documents
 }
 
 async fn poll_writer_documents(

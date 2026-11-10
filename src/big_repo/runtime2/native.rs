@@ -686,24 +686,17 @@ where
                 ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
-            let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
-            let local_write = access.is_some_and(|access| access.is_editor());
-            // Public-member path: a doc that grants editor access to the
-            // well-known Public agent may be written by anyone (the writer
-            // encrypts through Public's well-known keys).
-            let public_ident = keyhive_core::principal::public::Public.id();
-            let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
-            let public_write = public_access.is_some_and(|access| access.is_editor());
+            // Own editor access, or the Public-member path: a doc that grants
+            // editor access to the well-known Public agent may be written by
+            // anyone (the writer encrypts through Public's well-known keys).
+            let writable = self.keyhive.can_write(&local_ident, doc_ident).await;
             tracing::debug!(
                 %doc_id,
                 local_peer_id = %self.local_peer_id,
-                local_access = ?access,
-                public_access = ?public_access,
-                local_write,
-                public_write,
+                writable,
                 "document write-access probe"
             );
-            Ok(local_write || public_write)
+            Ok(writable)
         })
     }
 
@@ -1161,24 +1154,16 @@ where
             // Return the entrypoint first, followed by the decrypted causal
             // ancestors. Consumers can therefore materialize the exact blob
             // requested as well as its closure.
+            // Keyhive's causal walk already unwrapped each ancestor's envelope:
+            // `state.complete` holds plaintexts. Re-parsing them as envelopes
+            // would read the first plaintext bytes as a length and preallocate
+            // up to 1 MiB per ancestor before failing.
+            let mut seen = std::collections::HashSet::from([encrypted.content_ref.clone()]);
             let mut complete = vec![(encrypted.content_ref.clone(), entrypoint_envelope.plaintext)];
-            for (content_ref, ciphertext_or_plaintext) in state.complete {
-                if complete
-                    .iter()
-                    .any(|(known_ref, _)| known_ref == &content_ref)
-                {
-                    continue;
+            for (content_ref, plaintext) in state.complete {
+                if seen.insert(content_ref.clone()) {
+                    complete.push((content_ref, plaintext));
                 }
-                match bincode::deserialize::<'_, Envelope<Vec<u8>, Vec<u8>>>(
-                    &ciphertext_or_plaintext,
-                ) {
-                    Ok(env) => {
-                        complete.push((content_ref, env.plaintext));
-                    }
-                    Err(_) => {
-                        complete.push((content_ref, ciphertext_or_plaintext));
-                    }
-                };
             }
 
             let mut blockers = Vec::new();
@@ -2140,13 +2125,8 @@ where
     // The incorporation sink is awaited inline: the exchange cannot complete
     // until the durable incorporation record commits. The same sink answers
     // boot's WAL-vs-admission diff for crash-window reconciliation.
-    let keyhive_dispatcher_notify = Arc::new(tokio::sync::Notify::new());
-    let keyhive_reporter_weak = Arc::downgrade(&keyhive_dispatcher_notify);
-    let incorporation_sink = KeyhiveIncorporationSink::new(
-        group_part_store.clone(),
-        evt_tx.clone(),
-        keyhive_reporter_weak,
-    );
+    let incorporation_sink =
+        KeyhiveIncorporationSink::new(group_part_store.clone(), evt_tx.clone());
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
             keyhive.clone_keyhive(),
@@ -2161,9 +2141,8 @@ where
         .ingest_from_storage()
         .await
         .map_err(|error| ferr!("failed recovering keyhive event WAL: {error}"))?;
-    // One dispatcher owns the debounced, classified fan-out of keyhive change
     // One dispatcher owns the debounced, classified fan-out of durable
-    // admission-log changes. The notifier is only a wake-up hint.
+    // admission-log changes; it wakes on the store's admission watermark.
     let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
         Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
     // One timer and one clock serve every actor in this node — the hub, the
@@ -2178,7 +2157,6 @@ where
             group_part_store.clone(),
             Arc::clone(&timer),
             Arc::clone(&clock),
-            Arc::clone(&keyhive_dispatcher_notify),
             keyhive_dispatcher_subscriptions,
             utils_rs::batching::DebouncePolicy {
                 quiet_window: std::time::Duration::from_millis(100),
@@ -2345,10 +2323,10 @@ where
     let spawned_causal_checkpoint = crate::runtime2::spawn_causal_checkpoint_worker(
         group_part_store.clone(),
         keyhive.clone(),
+        Arc::clone(&keyhive_protocol),
         handle.clone(),
         Arc::clone(&timer),
         Arc::clone(&clock),
-        evt_tx.clone(),
         causal_checkpoint_group_scope,
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
@@ -2361,11 +2339,8 @@ where
     // Prekey janitor: rotates the local agent's consumed prekeys. Driven by
     // the durable admission log (own cursor) so Add ops incorporated while
     // the runtime was down are picked up on the next boot.
-    let spawned_prekey_janitor = crate::runtime2::spawn_prekey_janitor_worker(
-        group_part_store.clone(),
-        keyhive.clone(),
-        Arc::clone(&timer),
-    );
+    let spawned_prekey_janitor =
+        crate::runtime2::spawn_prekey_janitor_worker(group_part_store.clone(), keyhive.clone());
     stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
     stop_token.worker_tasks.spawn(Sendable::from_future(
         spawned_prekey_janitor

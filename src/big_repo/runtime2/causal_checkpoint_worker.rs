@@ -3,7 +3,15 @@
 //! The worker owns one admission walker and a bounded keyed task scheduler.
 //! Admission decoding and document coverage are physical tasks; the walker's own
 //! state commit is what records how far the consumer has reconciled.
+//!
+//! It also seats new readers. A grant seats its reader only in the key trees of the
+//! documents the granting node holds, so a reader added to a group has no leaf in a group
+//! document the granter never saw. Every admitted delegation, and every admitted prekey
+//! expansion (the missing prekeys that may have held a seat back), reconciles the readers
+//! of each document the delegate or prekey owner reaches: this node issues the missing
+//! adds for the trees it holds, persists them, and covers the document causally.
 
+use crate::handler::BigRepoKeyhiveProtocol;
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
 use crate::runtime2::WorkerGroupScope;
@@ -16,6 +24,7 @@ use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
+use keyhive_core::principal::identifier::Identifier;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -40,11 +49,10 @@ pub struct SpawnedCausalCheckpointWorker<F: FutureForm> {
 pub fn spawn_causal_checkpoint_worker(
     store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
     clock: Arc<dyn crate::runtime2::Clock>,
-    // FIXME: fuck, probably a copy paste leftover from the group part worker?
-    _evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
 ) -> SpawnedCausalCheckpointWorker<Sendable> {
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
@@ -79,9 +87,6 @@ pub fn spawn_causal_checkpoint_worker(
 
             let source = keyhive_admission::Store {
                 store: store.clone(),
-                // The loop below sleeps on the same timer the admission reader
-                // polls with, so both cadences are driven by one seam.
-                timer: Arc::clone(&timer),
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
@@ -95,13 +100,24 @@ pub fn spawn_causal_checkpoint_worker(
                         StaticEvent::CgkaOperation(operation) => FrontierKey::Document(
                             crate::DocumentId::new(operation.payload().doc_id().as_bytes()),
                         ),
-                        _ => FrontierKey::Decode(row.seq),
+                        StaticEvent::Delegated(delegation) => FrontierKey::Reach {
+                            seq: row.seq,
+                            agent: delegation.payload().delegate,
+                        },
+                        StaticEvent::PrekeysExpanded(expansion) => FrontierKey::Reach {
+                            seq: row.seq,
+                            agent: Identifier::from(*expansion.issuer()),
+                        },
+                        StaticEvent::Revoked(_) | StaticEvent::PrekeyRotated(_) => {
+                            FrontierKey::Decode(row.seq)
+                        }
                     }
                 },
             )
             .await?;
             let worker = Worker {
                 keyhive,
+                keyhive_protocol,
                 runtime,
                 scope,
                 admission,
@@ -131,6 +147,13 @@ pub fn spawn_causal_checkpoint_worker(
 enum FrontierKey {
     Decode(u64),
     Document(crate::DocumentId),
+    /// An admitted row that may make `agent` a reader no key tree seats yet: a delegation
+    /// to it, or prekeys it published. Keyed by row, so a reconciliation that has issued
+    /// adds is never replaced before it has persisted them.
+    Reach {
+        seq: u64,
+        agent: Identifier,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +168,10 @@ enum Task {
         doc_id: crate::DocumentId,
         source: SourceCursor,
     },
+    ReconcileReaders {
+        agent: Identifier,
+        source: SourceCursor,
+    },
 }
 
 #[derive(Debug)]
@@ -153,10 +180,14 @@ enum TaskOutput {
     /// The document is outside the worker's group scope: its cursor settles
     /// without causal coverage.
     OutOfScope,
+    /// Every document the agent reaches in scope has its readers seated, as far as this
+    /// node holds the trees and the readers' prekeys.
+    Reconciled,
 }
 
 struct Worker<'a> {
     keyhive: BigKeyhiveHandle,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     scope: WorkerGroupScope,
     admission: ConcurrentDeltaWalker<
@@ -252,6 +283,7 @@ impl<'a> Worker<'a> {
             task.clone(),
             self.runtime.clone(),
             self.keyhive.clone(),
+            Arc::clone(&self.keyhive_protocol),
             self.scope.clone(),
         );
         self.tasks.replace(key, task, future)?;
@@ -285,6 +317,9 @@ impl<'a> Worker<'a> {
                     FrontierKey::Document(doc_id.clone()),
                     Task::EnsureCoverage { doc_id, source },
                 )
+            }
+            FrontierKey::Reach { agent, .. } => {
+                self.start_task(delta.key, Task::ReconcileReaders { agent, source })
             }
             // Admission rows with no document payload only gate the cursor.
             FrontierKey::Decode(_) => {
@@ -330,6 +365,12 @@ impl<'a> Worker<'a> {
                     self.pending_admission.remove(&doc_id);
                 }
             }
+            (Task::ReconcileReaders { source, .. }, Ok(TaskOutput::Reconciled)) => {
+                self.acknowledge_source(source).await?;
+            }
+            (task, Ok(output)) => {
+                unreachable!("causal-checkpoint task {task:?} produced {output:?}")
+            }
             (_, Err(error)) => panic!("causal-checkpoint task failed: {error:?}"),
         }
         Ok(())
@@ -347,21 +388,58 @@ async fn run_task(
     task: Task,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     keyhive: BigKeyhiveHandle,
+    keyhive_protocol: BigRepoKeyhiveProtocol,
     scope: WorkerGroupScope,
 ) -> Res<TaskOutput> {
+    let in_scope = async |doc_id: &crate::DocumentId| -> Res<bool> {
+        Ok(match scope.groups() {
+            None => true,
+            Some(_) => scope.admits_doc_groups(
+                &keyhive
+                    .group_ids_containing_document(doc_id.clone())
+                    .await?,
+            ),
+        })
+    };
     match task {
         Task::EnsureCoverage { doc_id, .. } => {
-            if let Some(_) = scope.groups()
-                && !scope.admits_doc_groups(
-                    &keyhive
-                        .group_ids_containing_document(doc_id.clone())
-                        .await?,
-                )
-            {
+            if !in_scope(&doc_id).await? {
                 return Ok(TaskOutput::OutOfScope);
             }
             runtime.ensure_causal_coverage(doc_id).await?;
             Ok(TaskOutput::Covered)
+        }
+        Task::ReconcileReaders { agent, .. } => {
+            for doc_id in keyhive.docs_for_agent(&agent).await.into_keys() {
+                if !in_scope(&doc_id).await? {
+                    continue;
+                }
+                let kh_doc_id = crate::keyhive::keyhive_doc_id(doc_id.clone())?;
+                let added = keyhive
+                    .clone_keyhive()
+                    .reconcile_doc_readers(kh_doc_id)
+                    .await
+                    .map_err(|err| ferr!("reader reconciliation failed: {err}"))?;
+                if added.is_empty() {
+                    continue;
+                }
+                // Persisting publishes the adds to the peers and admits them locally. The
+                // task is keyed by its admission row and never replaced, so issued adds are
+                // not dropped before they are persisted.
+                keyhive_protocol
+                    .persist_local_events(
+                        added
+                            .into_iter()
+                            .map(|op| StaticEvent::CgkaOperation(Box::new(op)))
+                            .collect(),
+                    )
+                    .await
+                    .map_err(|err| ferr!("failed persisting reader adds: {err}"))?;
+                // The adds re-key the document for its new readers; cover its history
+                // for them now rather than when the adds' own admission rows come round.
+                runtime.ensure_causal_coverage(doc_id).await?;
+            }
+            Ok(TaskOutput::Reconciled)
         }
     }
 }

@@ -79,6 +79,7 @@ pub use runtime2::types::GetDocError;
 pub use runtime2::types::GroupScopeController;
 pub use runtime2::types::GroupScopeHandle;
 pub use runtime2::types::KeyhiveSyncCancelled;
+pub use runtime2::types::NoWriteAccess;
 pub use runtime2::types::PutDocError;
 pub use runtime2::types::SyncDocError;
 pub use runtime2::types::SyncDocOutcome;
@@ -1517,6 +1518,9 @@ impl BigDocHandle {
         self.with_document_read(|doc| doc.save()).await
     }
 
+    /// Run `operation` against the document and commit whatever it changed. A commit
+    /// refused because this node's keyhive access is not writable fails with a report
+    /// carrying [`NoWriteAccess`]; the change never persisted.
     pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
@@ -1539,14 +1543,14 @@ impl BigDocHandle {
         // The refusal is rendered by the same function the worker's commit gate
         // uses, so it names the recorded reason: reporting a worker teardown as
         // an earlier rejected commit is what made that failure unattributable.
-        if let Some(message) = self
+        if let Some(refusal) = self
             .handle
             .bundle
             .broken_reason()
             .map(runtime2::types::HandleValidity::Broken)
-            .and_then(runtime2::types::invalid_handle_message)
+            .and_then(runtime2::types::invalid_handle_error)
         {
-            return Err(ferr!("{message}"));
+            return Err(refusal);
         }
 
         // All automerge work happens under a short sync lock; nothing is held
@@ -1560,27 +1564,25 @@ impl BigDocHandle {
                 return (out, None);
             }
 
-            // Capture the current materialization while holding the same lock
-            // as the mutation. Any newly retained head must remain
-            // independently loadable after sedimentree minimization discards
-            // its predecessors.
-            let snapshot = doc.save();
+            // Each loose commit carries exactly the Automerge change it names
+            // (as a change chunk, compressed when Automerge finds it worth it),
+            // never a materialization of the document. Minimization deletes a
+            // loose commit only when a stored fragment covers its range
+            // (`CommitDag::simplify` in sedimentree_core), and that fragment's
+            // blob is the Automerge bundle of the same members
+            // (`process_pending_fragment_requests`), so the fragments plus the
+            // remaining loose commits always load the whole history.
             let changes = doc
                 .get_changes(&before_heads)
                 .into_iter()
-                .map(|change| {
+                .map(|mut change| {
                     let head = CommitId::new(change.hash().0);
                     let parents = change
                         .deps()
                         .iter()
                         .map(|dep| CommitId::new(dep.0))
                         .collect::<BTreeSet<_>>();
-                    let bytes = if after_heads.contains(&change.hash()) {
-                        snapshot.clone()
-                    } else {
-                        change.raw_bytes().to_vec()
-                    };
-                    (head, parents, bytes)
+                    (head, parents, change.bytes().into_owned())
                 })
                 .collect::<Vec<_>>();
             let patches = if self

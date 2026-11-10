@@ -117,6 +117,8 @@ use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumMetadata;
 use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::Dmeta;
+use big_cabinet_core::dmeta::DmetaSchema;
+use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
@@ -219,7 +221,7 @@ pub struct DocsService {
     system_actor: Actor,
     node_issuer: MultibaseKey,
     raw: CompiledSchema,
-    dmeta: SchemaHandle,
+    dmeta: DmetaSchema,
     branch: SchemaHandle,
     commands: Commands,
     datum_set: Option<Arc<DatumSetStore>>,
@@ -267,6 +269,18 @@ fn access_error(error: AccessError) -> DocsError {
 
 fn repository(error: impl std::fmt::Display) -> DocsError {
     DocsError::Repository(error.to_string())
+}
+
+/// The refusal for a document commit big_repo rejected. A capability can authorize a write
+/// this node cannot make: the operator is a cabinet superuser on every drawer it knows, but
+/// keyhive enforces the node's own standing at commit time, and a drawer synced in from a peer
+/// may hold only Read. That rejection ([`big_repo::NoWriteAccess`]) is the caller's write being
+/// denied, and it never persisted, so it is `Some(Denied)`, a definite refusal. `None` for any
+/// other failure: a repository fault whose outcome the caller cannot know.
+fn commit_refusal(error: &utils_rs::prelude::eyre::Report) -> Option<DocsError> {
+    error
+        .downcast_ref::<big_repo::NoWriteAccess>()
+        .map(|_| DocsError::Denied)
 }
 
 fn sorted(mut heads: Vec<ChangeHash>) -> Vec<ChangeHash> {
@@ -572,7 +586,8 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         system_actor: actor,
         node_issuer: config.node_issuer,
         raw: CompiledSchema::compile(serde_json::json!({})).expect("the empty schema compiles"),
-        dmeta,
+        dmeta: DmetaSchema::new(dmeta.compiled().clone())
+            .expect("dmeta's member declarations compile on their own"),
         branch,
         commands: Commands::open(config.sql).await?,
         datum_set: config.datum_set,

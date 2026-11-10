@@ -74,6 +74,34 @@ impl CompiledSchema {
         &self.document
     }
 
+    /// The schema one member of this document is declared by, compiled on its own, so a value
+    /// written into that member alone is checked and reconciled exactly as it would be in place.
+    ///
+    /// `path` names object members from the root; every member of a keyed map shares one
+    /// declaration, so any key names it. The member keeps this document's definitions and Lexicon
+    /// data marker, so references inside it resolve as before and its values check under the same
+    /// data model.
+    pub fn member(&self, path: &[&str]) -> Result<Self, CodecError> {
+        let mut schema = resolve_schema(&self.document, &self.document, HOPS)?;
+        for key in path {
+            let declared =
+                declared_member(schema, key).ok_or_else(|| CodecError::Undefined {
+                    name: format!("member `{key}`"),
+                })?;
+            schema = resolve_schema(&self.document, declared, HOPS)?;
+        }
+        let mut document = schema
+            .as_object()
+            .expect("a resolved member declaration is an object")
+            .clone();
+        for keyword in ["$schema", "$defs", crate::datum::input::DATA] {
+            if let Some(carried) = self.document.get(keyword) {
+                document.insert(keyword.to_owned(), carried.clone());
+            }
+        }
+        Self::compile(Value::Object(document))
+    }
+
     /// Whether any position declares the `reference` storage form. A consumer walks a value for
     /// its references only when this says there are any to find.
     pub fn declares_references(&self) -> bool {
