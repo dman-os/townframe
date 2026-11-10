@@ -18,5 +18,9 @@
   "@pierre/theming": {
     "version": "1.0.2",
     "npmIntegrity": "sha512-RmXLLqtx31UGcR8kZyO5hGAQ1EXz6loT1Cu0BFAGsbnBboIxp2BlomkLfWyvdT4WZXnBGyu25onL1gKpFQuSUw=="
+  },
+  "jsdom": {
+    "version": "26.1.0",
+    "npmIntegrity": "sha512-Cvc9WUhxSMEo4McES3P7oK3QaXldCfNWp7pl2NNeiIFlCoLr3kfq9kb1fxftiwk1FLV7CvpvDfonxtzUDeSOPg=="
   }
 }

@@ -3,7 +3,11 @@
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes: the `SVGSpriteNames` string union is the `SvgSpriteName` enum with
 // `as_str`; the sprite sheet constant is generated verbatim from the
-// template literal.
+// template literal. `sprite_sheet_element` is what `div.innerHTML =
+// SVGSpriteSheet; div.firstChild` yields in `FileDiff.ensureSpriteSVG`: the sheet
+// parsed into a hast element, whitespace text nodes included. The sheet is
+// well-formed markup of `svg`, `symbol` and `path` elements with double-quoted
+// or bare attributes and no entities, so the parser is that small.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SvgSpriteName {
@@ -199,3 +203,86 @@ pub const SVG_SPRITE_SHEET: &str = r####"<svg data-icon-sprite aria-hidden="true
     <path d="M1.5 8c0 1.613.088 2.806.288 3.704.196.88.478 1.381.802 1.706.286.286.71.54 1.41.73V1.86c-.7.19-1.124.444-1.41.73-.324.325-.606.826-.802 1.706C1.588 5.194 1.5 6.387 1.5 8m4 6.397c.697.07 1.522.103 2.5.103 1.613 0 2.806-.088 3.704-.288.88-.195 1.381-.478 1.706-.802s.607-.826.802-1.706c.2-.898.288-2.091.288-3.704s-.088-2.806-.288-3.704c-.195-.88-.478-1.381-.802-1.706s-.826-.606-1.706-.802C10.806 1.588 9.613 1.5 8 1.5c-.978 0-1.803.033-2.5.103zM0 8c0-6.588 1.412-8 8-8s8 1.412 8 8-1.412 8-8 8-8-1.412-8-8m7-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1z"/>
   </symbol>
 </svg>"####;
+
+/// The sprite sheet as a hast element (see the file header).
+pub fn sprite_sheet_element() -> crate::hast::Element {
+    use crate::hast::Element;
+    use crate::hast::ElementContent;
+    use crate::hast::Properties;
+    use crate::hast::Text;
+
+    let mut stack: Vec<Element> = Vec::new();
+    let mut root: Option<Element> = None;
+    let mut rest = SVG_SPRITE_SHEET;
+    while !rest.is_empty() {
+        if let Some(tag_start) = rest.strip_prefix('<') {
+            let end = tag_start
+                .find('>')
+                .expect("the sprite sheet is well-formed");
+            let tag = &tag_start[..end];
+            rest = &tag_start[end + 1..];
+            if let Some(name) = tag.strip_prefix('/') {
+                let element = stack.pop().expect("a closing tag has an opener");
+                assert_eq!(element.tag_name, name);
+                match stack.last_mut() {
+                    Some(parent) => parent.children.push(ElementContent::Element(element)),
+                    None => root = Some(element),
+                }
+                continue;
+            }
+            let self_closing = tag.ends_with('/');
+            let tag = tag.trim_end_matches('/').trim_end();
+            let (name, attributes) = tag.split_once(' ').unwrap_or((tag, ""));
+            let mut attributes = attributes.trim_start();
+            let mut properties = Properties::new();
+            while !attributes.is_empty() {
+                let key_end = attributes.find(['=', ' ']).unwrap_or(attributes.len());
+                let (key, after) = attributes.split_at(key_end);
+                if let Some(value) = after.strip_prefix("=\"") {
+                    let close = value.find('"').expect("a quoted value closes");
+                    properties.set(key, &value[..close]);
+                    attributes = value[close + 1..].trim_start();
+                } else {
+                    properties.set(key, "");
+                    attributes = after.trim_start();
+                }
+            }
+            let element = Element::new(name, properties, Vec::new());
+            if self_closing {
+                stack
+                    .last_mut()
+                    .expect("a void element has a parent")
+                    .children
+                    .push(ElementContent::Element(element));
+            } else {
+                stack.push(element);
+            }
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            if let Some(parent) = stack.last_mut() {
+                parent
+                    .children
+                    .push(ElementContent::Text(Text::new(&rest[..end])));
+            }
+            rest = &rest[end..];
+        }
+    }
+    root.expect("the sprite sheet has a root element")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sheet_parses_to_one_symbol_per_icon() {
+        let sheet = sprite_sheet_element();
+        assert_eq!(sheet.tag_name, "svg");
+        let symbols = sheet
+            .children
+            .iter()
+            .filter_map(crate::hast::ElementContent::as_element)
+            .count();
+        assert_eq!(symbols, 36);
+    }
+}

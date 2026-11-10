@@ -10,6 +10,8 @@ mod file_diff_lifecycle_oracle_tests;
 #[cfg(test)]
 mod file_diff_oracle_tests;
 #[cfg(test)]
+mod file_diff_render_oracle_tests;
+#[cfg(test)]
 mod virtualizer_oracle_tests;
 #[cfg(test)]
 mod virtualizer_reconcile_queue_test;

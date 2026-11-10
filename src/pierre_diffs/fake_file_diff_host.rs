@@ -82,3 +82,15 @@ impl ScrollSyncHost for FakeDom {
         self.emit(json!(["clearTimeout", timeout_id]));
     }
 }
+
+/// No container is connected, so the scrollbar gutter is never measured and the
+/// theme CSS carries `--diffs-scrollbar-gutter-fallback`.
+impl crate::utils::dom::scrollbar_gutter::ScrollbarGutterHost for FakeDom {
+    fn is_host_connected(&self) -> bool {
+        false
+    }
+
+    fn measure_probe(&self, _probe: &crate::hast::Element) -> f64 {
+        unreachable!("an unconnected host is never measured")
+    }
+}

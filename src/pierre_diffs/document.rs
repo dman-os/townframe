@@ -17,6 +17,12 @@
 //! and drops rows forever, and a stale key fails `exists` and panics on use (an
 //! invariant break) instead of naming whatever reused the slot.
 //!
+//! An element can have a shadow root (`attach_shadow`): a root node whose parent
+//! is the host (parent walks cross the boundary, as `composedPath` does) but
+//! which is not among the host's `children`. The platform layer flattens it,
+//! rendering the shadow tree with the host's slotted children at its slots
+//! (`assigned_slot`).
+//!
 //! Methods take `&self` (interior mutability) because the managers re-enter
 //! their hosts from callbacks, as upstream's classes re-enter the DOM.
 //! Attribute values are strings; `Properties` keeps insertion order.
@@ -44,6 +50,9 @@ struct Node {
     data: NodeData,
     parent: Option<NodeKey>,
     children: Vec<NodeKey>,
+    /// `element.shadowRoot`: a root node whose parent is this host but which is
+    /// not one of its `children`.
+    shadow_root: Option<NodeKey>,
 }
 
 struct Slot {
@@ -94,6 +103,10 @@ pub enum Mutation {
     ReplaceChildren {
         parent: NodeKey,
         children: Vec<NodeKey>,
+    },
+    /// The node's whole property bag was edited (`edit_properties`).
+    EditProperties {
+        node: NodeKey,
     },
 }
 
@@ -159,6 +172,7 @@ impl Document {
             data,
             parent: None,
             children: Vec::new(),
+            shadow_root: None,
         };
         if let Some(index) = arena.free.pop() {
             let slot = &mut arena.slots[index as usize];
@@ -223,6 +237,27 @@ impl Document {
         key
     }
 
+    /// `host.shadowRoot`
+    pub fn shadow_root(&self, host: impl Borrow<NodeKey>) -> Option<NodeKey> {
+        self.arena.borrow().node(*host.borrow()).shadow_root
+    }
+
+    /// `host.attachShadow({ mode: 'open' })`: the new root's parent is `host`
+    /// (parent walks cross the boundary, as `composedPath` does) but it is not
+    /// among `host`'s `children`. A host has at most one root.
+    pub fn attach_shadow(&self, host: impl Borrow<NodeKey>) -> NodeKey {
+        let host = *host.borrow();
+        assert!(
+            self.shadow_root(host).is_none(),
+            "attach_shadow: the host already has a shadow root"
+        );
+        let root = self.create_element("#shadow-root");
+        let mut arena = self.arena.borrow_mut();
+        arena.node_mut(root).parent = Some(host);
+        arena.node_mut(host).shadow_root = Some(root);
+        root
+    }
+
     /// `parent.appendChild(child)`: moves `child` if it is attached elsewhere.
     pub fn append_child(&self, parent: impl Borrow<NodeKey>, child: impl Borrow<NodeKey>) {
         let (parent, child) = (*parent.borrow(), *child.borrow());
@@ -279,8 +314,11 @@ impl Document {
         let mut arena = self.arena.borrow_mut();
         let mut stack = vec![node];
         while let Some(key) = stack.pop() {
-            let children = std::mem::take(&mut arena.node_mut(key).children);
+            let node = arena.node_mut(key);
+            let children = std::mem::take(&mut node.children);
+            let shadow_root = node.shadow_root.take();
             stack.extend(children);
+            stack.extend(shadow_root);
             let slot = &mut arena.slots[key.index as usize];
             slot.node = None;
             slot.generation += 1;
@@ -329,6 +367,30 @@ impl Document {
             current = self.parent(key);
         }
         false
+    }
+
+    /// `node.childNodes`: every child, text nodes included.
+    pub fn child_nodes(&self, node: impl Borrow<NodeKey>) -> Vec<NodeKey> {
+        self.arena.borrow().node(*node.borrow()).children.clone()
+    }
+
+    /// Several attribute and style writes at once: `edit` sees the node's
+    /// property bag (for utilities that edit a `Properties`).
+    pub fn edit_properties(&self, node: impl Borrow<NodeKey>, edit: impl FnOnce(&mut Properties)) {
+        let node = *node.borrow();
+        self.with_properties(node, edit);
+        self.notify(&Mutation::EditProperties { node });
+    }
+
+    /// `element.attributes`, in order, as `(name, value)` strings.
+    pub fn attributes(&self, node: impl Borrow<NodeKey>) -> Vec<(String, String)> {
+        match &self.arena.borrow().node(*node.borrow()).data {
+            NodeData::Element { properties, .. } => properties
+                .defined()
+                .filter_map(|(name, value)| Some((name.to_owned(), attribute_text(value)?)))
+                .collect(),
+            NodeData::Text(_) => Vec::new(),
+        }
     }
 
     /// `element.children`: element children only.
@@ -553,6 +615,23 @@ mod tests {
             "{}",
             document.capacity()
         );
+    }
+
+    #[test]
+    fn a_shadow_root_is_parented_to_its_host_but_is_not_a_child() {
+        let document = Document::new();
+        let host = document.create_element("diffs-container");
+        let root = document.attach_shadow(host);
+        let pre = document.create_element("pre");
+        document.append_child(root, pre);
+        assert_eq!(document.shadow_root(host), Some(root));
+        assert!(document.children(host).is_empty());
+        assert_eq!(document.parent(root), Some(host));
+        assert!(document.is_attached(pre, host));
+        assert_eq!(document.children(root), vec![pre]);
+        document.discard(host);
+        assert!(!document.exists(root));
+        assert!(!document.exists(pre));
     }
 
     #[test]

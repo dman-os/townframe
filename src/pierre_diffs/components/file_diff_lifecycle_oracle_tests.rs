@@ -28,9 +28,11 @@ use crate::components::file_diff::FileDiffHunkSeparators;
 use crate::components::file_diff::FileDiffOptions;
 use crate::components::file_diff::FileDiffRenderData;
 use crate::components::file_diff::LineAnnotations;
+use crate::components::file_diff::Theme;
 use crate::document::NodeKey;
 use crate::fake_interaction_dom::FakeDom;
 use crate::fake_interaction_dom::TreeNode;
+use crate::highlighter_types::PlainTextHighlighter;
 use crate::js_collections::PtrEq;
 use crate::managers::interaction_manager::LineHoverHighlight;
 use crate::managers::interaction_manager::SelectionCallback;
@@ -309,7 +311,7 @@ fn snapshot(instance: &Instance, named: &Named) -> Value {
     ) = {
         let state = instance.state();
         (
-            state.header_cache.html.clone(),
+            state.header_cache.header.as_ref().map(header_text),
             state.header_cache.file_diff.clone(),
             state.managers_dirty,
             state.line_state_refresh_pending,
@@ -419,7 +421,7 @@ fn apply_set(dom: &FakeDom, instance: &Instance, named: &Named, fields: &Map<Str
                     scrollbar_gutter: value["scrollbarGutter"].as_f64(),
                 });
             }
-            "headerHtml" => state.header_cache.html = value.as_str().map(str::to_owned),
+            "headerHtml" => state.header_cache.header = value.as_str().map(header_element),
             "headerDiff" => {
                 state.header_cache.file_diff = value.as_str().map(|name| named.diff(name));
             }
@@ -451,7 +453,7 @@ fn query(dom: &FakeDom, instance: &Instance, named: &Named, step: &Map<String, V
             let fallback = step.get("diff").map(|_| diff());
             named.diff_name(instance.get_working_diff(fallback).as_ref())
         }
-        "hasThemeChanged" => json!(instance.has_theme_changed()),
+        "hasThemeChanged" => json!(Theme(instance).has_theme_changed()),
         "shouldApplyColumnVariables" => json!(instance.should_apply_column_variables(overflow())),
         "getLineIndex" => {
             let side = match step.get("side").and_then(Value::as_str) {
@@ -474,37 +476,20 @@ fn query(dom: &FakeDom, instance: &Instance, named: &Named, step: &Map<String, V
     dom.emit(json!(["result", what, value]));
 }
 
-/// `applyThemeState` is S12a-3: the port panics with its arguments, which this
-/// turns into the trace entry the oracle's recorder writes.
-fn apply_theme_state_entry(dom: &FakeDom, message: &str) -> Option<Value> {
-    let arguments = message
-        .strip_prefix("not yet implemented: S12a-3 applyThemeState(")?
-        .strip_suffix(')')?;
-    // `NodeKey { index: 3, generation: 0 }, "styles", Dark, Some(Light)`
-    let (container, rest) = arguments.split_once(" }, ")?;
-    let container = format!("{container} }}");
-    let name = dom
-        .by_name
-        .borrow()
-        .iter()
-        .find(|(_, key)| format!("{key:?}") == container)
-        .map(|(name, _)| name.clone())
-        .expect("the container is a named node");
-    let (styles, rest) = rest.strip_prefix('"')?.split_once("\", ")?;
-    let (theme_type, base) = rest.split_once(", ")?;
-    let base = match base {
-        "None" => Value::Null,
-        "Some(Light)" => json!("light"),
-        "Some(Dark)" => json!("dark"),
-        other => panic!("base theme type {other}"),
-    };
-    Some(json!([
-        "applyThemeState",
-        name,
-        styles,
-        theme_type.to_lowercase(),
-        base
-    ]))
+/// The header element standing for the oracle's header HTML string.
+fn header_element(text: &str) -> crate::hast::Element {
+    crate::hast::Element::new(
+        "div",
+        crate::hast::Properties::new().with("data-test", text),
+        Vec::new(),
+    )
+}
+
+fn header_text(header: &crate::hast::Element) -> String {
+    match header.properties.get("data-test") {
+        Some(crate::hast::PropValue::Str(text)) => text.clone(),
+        other => panic!("not a test header: {other:?}"),
+    }
 }
 
 #[test]
@@ -538,7 +523,9 @@ fn file_diff_lifecycle_matches_the_published_class() {
                 Rc::clone(&dom),
                 Rc::clone(&hub),
                 UniversalRenderingManager::new(Rc::clone(&dom)),
+                Rc::new(PlainTextHighlighter),
                 build_options(&dom, &functions, &initial),
+                None,
             )
         }));
         let instance = match constructed {
@@ -554,6 +541,26 @@ fn file_diff_lifecycle_matches_the_published_class() {
                 continue;
             }
         };
+        // The oracle replaces `applyThemeState` on the published class with a
+        // recorder; the port's seam does the same.
+        {
+            let recorded = Rc::clone(&dom);
+            instance.state().theme_state_recorder = Some(Rc::new(
+                move |container, styles, theme_type, base_theme_type| {
+                    recorded.emit(json!([
+                        "applyThemeState",
+                        recorded.name_of(container),
+                        styles,
+                        format!("{theme_type:?}").to_lowercase(),
+                        match base_theme_type {
+                            None => Value::Null,
+                            Some(BaseThemeType::Light) => json!("light"),
+                            Some(BaseThemeType::Dark) => json!("dark"),
+                        },
+                    ]));
+                },
+            ));
+        }
         let named = Named {
             diffs: diffs.clone(),
             annotations: annotations.clone(),
@@ -622,11 +629,7 @@ fn file_diff_lifecycle_matches_the_published_class() {
                 Op::Snapshot => dom.emit(json!(["snapshot", snapshot(&instance, &named)])),
             }));
             if let Err(payload) = outcome {
-                let message = panic_message(payload.as_ref());
-                match apply_theme_state_entry(&dom, &message) {
-                    Some(entry) => dom.emit(entry),
-                    None => dom.emit(json!(["throws", message])),
-                }
+                dom.emit(json!(["throws", panic_message(payload.as_ref())]));
             }
         }
         // Leave nothing registered, as the oracle does.
@@ -670,7 +673,9 @@ fn instance_over(dom: &Rc<FakeDom>) -> Rc<Instance> {
         Rc::clone(dom),
         ResizeObserverHub::new(Rc::clone(dom)),
         UniversalRenderingManager::new(Rc::clone(dom)),
+        Rc::new(PlainTextHighlighter),
         Options::default(),
+        None,
     )
 }
 

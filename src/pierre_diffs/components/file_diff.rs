@@ -8,10 +8,12 @@
 // seam reads, the constructor wiring, `setOptions`, `syncInteractionOptions`,
 // `setThemeType` (with `applyCachedThemeState` and `hasThemeChanged`), the
 // annotation bookkeeping, selection deferral, `flushManagers`, `getLineIndex`
-// and `handleExpandHunk`/`expandHunk`. Hydration, loading and `render` (2b),
-// `rerender`, `cleanUp`, `isLineRenderable`, `getNearestRenderableLine` and
-// `revealLine` (2c) and the DOM helpers (S12a-3) follow; see
-// parity/closure_notes.md.
+// and `handleExpandHunk`/`expandHunk`. S12a-2b (hydration, loading, `render`
+// and the DOM it builds, partial render and trimming): `render`, `hydrate`,
+// `rerender`, `loadFilesIfNecessary` with `files_loaded`, and the helpers, in
+// the views under `file_diff/` (`render`, `loading`, `nodes`, `columns`,
+// `theme`). `cleanUp`, `isLineRenderable`, `getNearestRenderableLine` and
+// `revealLine` (2c) follow; see parity/closure_notes.md.
 // * `FileDiffOptions<Element, Rendered, LAnnotation>`: `extends BaseDiffOptions,
 //   InteractionManagerBaseOptions<'diff'>` is composition (`base`,
 //   `interaction`). The callbacks upstream types as returning
@@ -59,11 +61,34 @@
 //   compares addresses). `EMPTY_LINE_ANNOTATIONS` is one empty `Rc` per
 //   instance, so another instance's empty array is not identical to it (not
 //   observable by an owner that passes its own arrays).
-// * `applyThemeState` (shadow-root CSS, S12a-3) is not ported: reaching it
-//   panics with its arguments in the message. It is reachable only once
-//   `appliedThemeCSS` and `fileContainer` are set, which `render` (2b) does.
-// * `loadFilesIfNecessary` (2b) and `rerender` (2c), which `expandHunk` calls,
-//   are `todo!()`; a hunk-expand click panics until they are ported.
+// S12a-2b, render and hydration:
+// * The type gets a `RenderedContent` bound: callbacks that return slotted
+//   content (annotations, header slots, custom separators, the gutter utility)
+//   return a `Rendered` that can make a node in the document (`to_node`; an
+//   element, or text), which the instance places itself when it has no
+//   `requestOwnerRender` (the constructor's last parameter; with one, the owner
+//   renders those nodes and `render` only asks it to).
+//   The constructor also takes the `DiffsHighlighter` the renderer runs over
+//   (upstream reaches a module-level shared highlighter).
+// * The container's shadow root is a `Document` shadow root (`attach_shadow`,
+//   `shadow_root`: parent is the host, not among its children). `fileContainer`
+//   is created in the document, or passed in.
+// * Props are `FileDiffRenderProps` (`oldFile`/`newFile` are `None` for
+//   `undefined` and `Some(None)` for `null`); `hydrate` takes the container in
+//   its props, without `prerenderedHTML`.
+// * Rows and nodes a render drops are `retire`d (see the ownership rule below):
+//   `Nodes::drop_node`, `Nodes::replace_children_retiring`.
+// * `hunksRenderer.renderDiff` is synchronous, returns the result, and the
+//   renderer has no render cache: `getDiffForNextRender` is the identity (the
+//   working diff), `hydrate`/`clearRenderCache` are not called.
+// * `hydratePartialDiff('merge')` mutates the diff in place upstream; here the
+//   instance swaps its `Rc` for the hydrated copy (see `loading.rs`), so a host
+//   renders the hydrated diff it reads back from `get_input_diff`.
+// * `FileDiffState` carries the fields `render` writes; the header cache holds
+//   the header element where upstream holds its HTML.
+// * `FileDiff` is at its method budget: `render`, `hydrate`, `rerender`,
+//   `files_loaded`, `abandon_file_load` and `pending_files` are the public entry
+//   points, everything else is in the views. 2c must add its methods to views.
 // * `options` is mutated in place by `mergeOptions` (upstream replaces the
 //   object by a spread copy); only the owner of the instance can tell.
 // * Node ownership. The instance owns the nodes it creates in its `Document`.
@@ -79,12 +104,16 @@
 //   a child retired after its parent was discarded panics as a stale key.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::rc::Weak;
 
 use crate::components::virtualizer::VirtualizerHost;
 use crate::constants::default_themes;
+use crate::document::Document;
 use crate::document::NodeKey;
+use crate::hast;
+use crate::highlighter_types::DiffsHighlighter;
 use crate::js_collections::PtrEq;
 use crate::managers::interaction_manager::GetHoveredLineResult;
 use crate::managers::interaction_manager::GetLineIndexUtility;
@@ -107,28 +136,75 @@ use crate::managers::scroll_sync_manager::ScrollSyncManager;
 use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::renderers::diff_hunks_renderer::DefaultHooks;
 use crate::renderers::diff_hunks_renderer::DiffHunksRenderer;
+use crate::renderers::diff_hunks_renderer::HunksRenderResult;
+use crate::types::layout::RenderRange;
 use crate::types::lines::ExpansionDirections;
 use crate::types::lines::HunkData;
 use crate::types::options::AppliedThemeStyleCache;
 use crate::types::options::BaseDiffOptions;
 use crate::types::options::BaseThemeType;
+use crate::types::options::DiffIndicators;
 use crate::types::options::DiffStyle;
 use crate::types::options::HunkSeparators;
 use crate::types::options::Overflow;
 use crate::types::options::PostRenderPhase;
+use crate::types::options::PrePropertiesConfig;
 use crate::types::options::ThemeOption;
 use crate::types::options::ThemeTypes;
+use crate::types::patch::FileContents;
+use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
 use crate::types::view::DiffLineAnnotation;
 use crate::types::view::SelectedLineRange;
 use crate::types::view::SelectionSide;
+use crate::utils::dom::scrollbar_gutter::ScrollbarGutterHost;
 use crate::utils::get_hunk_side_boundaries::get_hunk_side_start_boundary;
 use crate::utils::options::get_diff_hunks_renderer_options::get_diff_hunks_renderer_options;
 use crate::utils::predicates::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::predicates::are_themes_equal::are_themes_equal;
 use crate::utils::render::get_line_annotation_name::AnnotationName;
 use crate::utils::render::get_line_annotation_name::get_line_annotation_name;
+
+/// Declares a view over `FileDiff` (a deref wrapper), as `managers/interaction_manager/`
+/// does, so the class's methods live in files of their own and no type goes over the
+/// guardrails method budget.
+macro_rules! file_diff_view {
+    ($name:ident) => {
+        pub(crate) struct $name<
+            'fd,
+            Host: FileDiffHost,
+            Rendered: RenderedContent + 'static,
+            LAnnotation: Clone + PartialEq + 'static,
+        >(pub(crate) &'fd FileDiff<Host, Rendered, LAnnotation>);
+
+        impl<
+            'fd,
+            Host: FileDiffHost,
+            Rendered: RenderedContent + 'static,
+            LAnnotation: Clone + PartialEq + 'static,
+        > std::ops::Deref for $name<'fd, Host, Rendered, LAnnotation>
+        {
+            type Target = FileDiff<Host, Rendered, LAnnotation>;
+
+            fn deref(&self) -> &Self::Target {
+                self.0
+            }
+        }
+    };
+}
+
+mod columns;
+mod loading;
+mod nodes;
+mod render;
+mod theme;
+
+use columns::Columns;
+use loading::Loading;
+use nodes::Nodes;
+use render::Render;
+pub(crate) use theme::Theme;
 
 pub type RenderHunkSeparatorCallback<Rendered> = PtrEq<dyn Fn(&HunkData) -> Option<Rendered>>;
 
@@ -435,9 +511,44 @@ pub fn get_line_index_for_diff(
 /// answering the same `Document` the instance renders into (the trait system
 /// cannot say so; an implementation whose `document()` methods disagree is a
 /// bug). Implemented for every type that implements the three.
-pub trait FileDiffHost: ResizeManagerHost + ScrollSyncHost + InteractionHost {}
+pub trait FileDiffHost:
+    ResizeManagerHost + ScrollSyncHost + InteractionHost + ScrollbarGutterHost
+{
+}
 
-impl<Host> FileDiffHost for Host where Host: ResizeManagerHost + ScrollSyncHost + InteractionHost {}
+impl<Host> FileDiffHost for Host where
+    Host: ResizeManagerHost + ScrollSyncHost + InteractionHost + ScrollbarGutterHost
+{
+}
+
+/// What a render callback (`renderAnnotation`, `renderHeaderPrefix`, the custom
+/// hunk separator...) hands back, as far as `FileDiff` is concerned: something
+/// it can put into the document when it places slotted content itself (an
+/// instance with no `requestOwnerRender`). Upstream's `HTMLElement | string |
+/// number`: an element, or text.
+pub trait RenderedContent {
+    /// A detached node in `document` (an element or a text node).
+    fn to_node(&self, document: &Document) -> NodeKey;
+}
+
+impl RenderedContent for hast::Element {
+    fn to_node(&self, document: &Document) -> NodeKey {
+        document.create_from_hast(self)
+    }
+}
+
+#[cfg(test)]
+impl RenderedContent for u8 {
+    fn to_node(&self, document: &Document) -> NodeKey {
+        document.create_text(&self.to_string())
+    }
+}
+
+impl RenderedContent for String {
+    fn to_node(&self, document: &Document) -> NodeKey {
+        document.create_text(self)
+    }
+}
 
 /// What `VirtualizedFileDiff` (which extends `FileDiff`) adds: the virtualizer.
 pub trait VirtualizedFileDiffHost: FileDiffHost + VirtualizerHost {}
@@ -465,13 +576,55 @@ impl<LAnnotation> Clone for FileDiffRenderData<LAnnotation> {
 /// `HeaderCache`
 #[derive(Default)]
 pub struct HeaderCache {
-    pub last_rendered_html: Option<String>,
-    pub html: Option<String>,
+    /// `lastRenderedHTML`: the header element last put in the shadow root.
+    pub last_rendered_header: Option<hast::Element>,
+    /// `html`: the header element for `file_diff`, reusable while that diff is
+    /// the one being rendered.
+    pub header: Option<hast::Element>,
     pub file_diff: Option<Rc<FileDiffMetadata>>,
 }
 
 /// `DeferredSelectedLinesWrite`
 type DeferredSelectedLinesWrite = (Option<SelectedLineRange>, SelectionWriteOptions);
+
+/// `FileDiffRenderProps`: `MaybeDiffFileInput` is `old_file`/`new_file`, each
+/// `None` for `undefined` and `Some(None)` for `null`.
+pub struct FileDiffRenderProps<LAnnotation> {
+    pub file_diff: Option<Rc<FileDiffMetadata>>,
+    pub defer_managers: bool,
+    pub force_render: bool,
+    pub prevent_emit: bool,
+    pub line_annotations: Option<LineAnnotations<LAnnotation>>,
+    pub file_container: Option<NodeKey>,
+    pub container_wrapper: Option<NodeKey>,
+    pub render_range: Option<RenderRange>,
+    pub old_file: Option<Option<FileContents>>,
+    pub new_file: Option<Option<FileContents>>,
+}
+
+impl<LAnnotation> Default for FileDiffRenderProps<LAnnotation> {
+    fn default() -> Self {
+        Self {
+            file_diff: None,
+            defer_managers: false,
+            force_render: false,
+            prevent_emit: false,
+            line_annotations: None,
+            file_container: None,
+            container_wrapper: None,
+            render_range: None,
+            old_file: None,
+            new_file: None,
+        }
+    }
+}
+
+/// `AnnotationElementCache`
+pub(crate) struct AnnotationElementCache<LAnnotation> {
+    pub(crate) element: NodeKey,
+    pub(crate) annotation: DiffLineAnnotation<LAnnotation>,
+    pub(crate) file_diff: Rc<FileDiffMetadata>,
+}
 
 /// The fields of the class that change over its life. One `RefCell`; a borrow
 /// is never held across a call into a manager, a host or a callback (they
@@ -497,7 +650,42 @@ pub(crate) struct FileDiffState<LAnnotation> {
     pub(crate) retired: Vec<NodeKey>,
     /// `EMPTY_LINE_ANNOTATIONS`
     pub(crate) empty_line_annotations: LineAnnotations<LAnnotation>,
+    pub(crate) sprite_svg: Option<NodeKey>,
+    pub(crate) code_unified: Option<NodeKey>,
+    pub(crate) buffer_before: Option<NodeKey>,
+    pub(crate) buffer_after: Option<NodeKey>,
+    pub(crate) theme_css_style: Option<NodeKey>,
+    pub(crate) has_adopted_theme_css: bool,
+    pub(crate) unsafe_css_style: Option<NodeKey>,
+    pub(crate) applied_unsafe_css: Option<String>,
+    pub(crate) gutter_utility_content: Option<NodeKey>,
+    pub(crate) header_element: Option<NodeKey>,
+    pub(crate) header_prefix: Option<NodeKey>,
+    pub(crate) header_filename_suffix: Option<NodeKey>,
+    pub(crate) header_metadata: Option<NodeKey>,
+    pub(crate) header_custom: Option<NodeKey>,
+    /// `separatorCache`: the element and the hunk it was built for.
+    pub(crate) separator_cache: HashMap<String, (NodeKey, HunkData)>,
+    pub(crate) place_holder: Option<NodeKey>,
+    pub(crate) annotation_cache: HashMap<String, AnnotationElementCache<LAnnotation>>,
+    pub(crate) deletion_file: Option<FileContents>,
+    pub(crate) addition_file: Option<FileContents>,
+    pub(crate) force_render_override: bool,
+    pub(crate) render_range: Option<RenderRange>,
+    /// `pendingFiles?.fileDiff`: the input a file load was requested for.
+    pub(crate) pending_files: Option<Rc<FileDiffMetadata>>,
+    pub(crate) applied_pre_attributes: Option<PrePropertiesConfig>,
+    pub(crate) last_row_count: Option<usize>,
+    pub(crate) mounted: bool,
+    pub(crate) enabled: bool,
+    /// Replaces `applyThemeState` in the lifecycle oracle, as the JavaScript
+    /// side replaces it on the published class.
+    #[cfg(test)]
+    pub(crate) theme_state_recorder: Option<ThemeStateRecorder>,
 }
+
+#[cfg(test)]
+pub(crate) type ThemeStateRecorder = Rc<dyn Fn(NodeKey, &str, ThemeTypes, Option<BaseThemeType>)>;
 
 pub struct FileDiff<Host: FileDiffHost, Rendered: 'static, LAnnotation: 'static> {
     host: Rc<Host>,
@@ -507,11 +695,16 @@ pub struct FileDiff<Host: FileDiffHost, Rendered: 'static, LAnnotation: 'static>
     resize_manager: Rc<ResizeManager<Host>>,
     scroll_sync_manager: Rc<ScrollSyncManager<Host>>,
     interaction_manager: Rc<InteractionManager<Host>>,
+    highlighter: Rc<dyn DiffsHighlighter>,
+    request_owner_render: Option<Rc<dyn Fn()>>,
     state: RefCell<FileDiffState<LAnnotation>>,
 }
 
-impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
-    FileDiff<Host, Rendered, LAnnotation>
+impl<
+    Host: FileDiffHost,
+    Rendered: RenderedContent + 'static,
+    LAnnotation: Clone + PartialEq + 'static,
+> FileDiff<Host, Rendered, LAnnotation>
 {
     /// `new FileDiff(options)`; pass `FileDiffOptions::default()` for upstream's
     /// `{ theme: DEFAULT_THEMES }` default.
@@ -519,7 +712,9 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
         host: Rc<Host>,
         resize_observer_hub: Rc<ResizeObserverHub<Host>>,
         render_queue: UniversalRenderingManager<Host>,
+        highlighter: Rc<dyn DiffsHighlighter>,
         options: FileDiffOptions<NodeKey, Rendered, LAnnotation>,
+        request_owner_render: Option<Rc<dyn Fn()>>,
     ) -> Rc<Self> {
         Rc::new_cyclic(|weak: &Weak<Self>| {
             // `createHunksRenderer`
@@ -561,6 +756,8 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
                 resize_manager,
                 scroll_sync_manager,
                 interaction_manager,
+                highlighter,
+                request_owner_render,
                 state: RefCell::new(FileDiffState {
                     file_container: None,
                     pre: None,
@@ -576,6 +773,34 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
                     deferred_selected_lines: None,
                     retired: Vec::new(),
                     empty_line_annotations: Rc::new(Vec::new()),
+                    sprite_svg: None,
+                    code_unified: None,
+                    buffer_before: None,
+                    buffer_after: None,
+                    theme_css_style: None,
+                    has_adopted_theme_css: false,
+                    unsafe_css_style: None,
+                    applied_unsafe_css: None,
+                    gutter_utility_content: None,
+                    header_element: None,
+                    header_prefix: None,
+                    header_filename_suffix: None,
+                    header_metadata: None,
+                    header_custom: None,
+                    separator_cache: HashMap::new(),
+                    place_holder: None,
+                    annotation_cache: HashMap::new(),
+                    deletion_file: None,
+                    addition_file: None,
+                    force_render_override: false,
+                    render_range: None,
+                    pending_files: None,
+                    applied_pre_attributes: None,
+                    last_row_count: None,
+                    mounted: false,
+                    enabled: true,
+                    #[cfg(test)]
+                    theme_state_recorder: None,
                 }),
             }
         })
@@ -704,61 +929,7 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
         }
         // `mergeOptions({ themeType })`
         self.options.borrow_mut().base.base.theme_type = Some(theme_type);
-        self.apply_cached_theme_state(theme_type);
-    }
-
-    pub fn apply_cached_theme_state(&self, theme_type: ThemeTypes) -> bool {
-        let (file_container, applied_theme_css) = {
-            let state = self.state.borrow();
-            (state.file_container, state.applied_theme_css.clone())
-        };
-        let theme_is_name = matches!(
-            self.options.borrow().base.base.theme,
-            Some(ThemeOption::Name(_))
-        );
-        let (false, Some(file_container), Some(applied_theme_css)) =
-            (theme_is_name, file_container, applied_theme_css)
-        else {
-            return false;
-        };
-        let effective_theme_type = match applied_theme_css.base_theme_type {
-            Some(BaseThemeType::Light) => ThemeTypes::Light,
-            Some(BaseThemeType::Dark) => ThemeTypes::Dark,
-            None => theme_type,
-        };
-        if applied_theme_css.theme_type == effective_theme_type {
-            return false;
-        }
-        self.apply_theme_state(
-            file_container,
-            &applied_theme_css.theme_styles,
-            theme_type,
-            applied_theme_css.base_theme_type,
-        );
-        true
-    }
-
-    /// `applyThemeState` (shadow-root theme CSS) belongs to S12a-3.
-    fn apply_theme_state(
-        &self,
-        container: NodeKey,
-        theme_styles: &str,
-        theme_type: ThemeTypes,
-        base_theme_type: Option<BaseThemeType>,
-    ) {
-        todo!(
-            "S12a-3 applyThemeState({container:?}, {theme_styles:?}, {theme_type:?}, \
-             {base_theme_type:?})"
-        )
-    }
-
-    pub fn has_theme_changed(&self) -> bool {
-        let theme = self.get_theme();
-        self.state
-            .borrow()
-            .applied_theme_css
-            .as_ref()
-            .is_some_and(|applied| !are_themes_equal(Some(&applied.theme), Some(&theme)))
+        Theme(self).apply_cached_theme_state(theme_type);
     }
 
     pub fn get_hovered_line(&self) -> Option<GetHoveredLineResult> {
@@ -846,7 +1017,7 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
 
     pub fn clear_reusable_header(&self) {
         let mut state = self.state.borrow_mut();
-        state.header_cache.html = None;
+        state.header_cache.header = None;
         state.header_cache.file_diff = None;
     }
 
@@ -984,7 +1155,7 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
         direction: ExpansionDirections,
         expansion_line_count_override: Option<f64>,
     ) {
-        self.load_files_if_necessary();
+        Loading(self).load_files_if_necessary();
         self.hunks_renderer.borrow_mut().expand_hunk(
             usize::try_from(hunk_index).expect("hunk index is not negative"),
             direction,
@@ -999,13 +1170,64 @@ impl<Host: FileDiffHost, Rendered: 'static, LAnnotation: Clone + 'static>
         self.rerender();
     }
 
-    /// `loadFilesIfNecessary` is S12a-2b.
-    fn load_files_if_necessary(&self) {
-        todo!("S12a-2b loadFilesIfNecessary")
+    /// `render`
+    pub fn render(&self, props: FileDiffRenderProps<LAnnotation>) -> bool {
+        Render(self).render(props)
     }
 
-    /// `rerender` is S12a-2c.
-    fn rerender(&self) {
-        todo!("S12a-2c rerender")
+    /// `hydrate`: `props.file_container` is required. `prerenderedHTML` is not
+    /// supported (see the header).
+    pub fn hydrate(&self, props: FileDiffRenderProps<LAnnotation>) {
+        let file_container = props
+            .file_container
+            .expect("FileDiff.hydrate: a fileContainer is required");
+        Render(self).hydrate(file_container, props);
+    }
+
+    pub fn rerender(&self) {
+        let (enabled, no_input) = {
+            let state = self.state.borrow();
+            (
+                state.enabled,
+                state.file_diff.is_none()
+                    && state.addition_file.is_none()
+                    && state.deletion_file.is_none(),
+            )
+        };
+        if !enabled || no_input {
+            return;
+        }
+        // `requestRender()`: an instance an owner drives asks the owner to render
+        // (`forceRenderOverride`, then `requestOwnerRender`); the owner's next
+        // `render` call carries the override. (Editors, which update their rows
+        // directly, are dropped.)
+        if let Some(request_owner_render) = &self.request_owner_render {
+            self.state.borrow_mut().force_render_override = true;
+            request_owner_render();
+            return;
+        }
+        let render_range = self.state.borrow().render_range;
+        self.render(FileDiffRenderProps {
+            force_render: true,
+            render_range,
+            ..FileDiffRenderProps::default()
+        });
+    }
+
+    /// The input a host should load the full files of (`pendingFiles?.fileDiff`),
+    /// then answer with `files_loaded` (or `abandon_file_load`).
+    pub fn pending_files(&self) -> Option<Rc<FileDiffMetadata>> {
+        self.state.borrow().pending_files.clone()
+    }
+
+    /// The `.then` of `loadDiffFiles(fileDiff)`.
+    pub fn files_loaded(&self, expected_diff: &Rc<FileDiffMetadata>, files: &FileDiffLoadedFiles) {
+        Loading(self).files_loaded(expected_diff, files);
+    }
+
+    /// The `finally` of a load that failed: the request is dropped so a later
+    /// call can ask again.
+    pub fn abandon_file_load(&self, expected_diff: &Rc<FileDiffMetadata>) {
+        Loading(self).abandon_file_load(expected_diff);
     }
 }

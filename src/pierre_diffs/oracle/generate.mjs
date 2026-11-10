@@ -19,6 +19,8 @@ import { buildS11aManagers } from "./s11a_managers.mjs";
 import { buildS11bInteraction } from "./s11b_interaction.mjs";
 import { buildS12aOptions } from "./s12a_file_diff.mjs";
 import { buildS12aLifecycle } from "./s12a_lifecycle.mjs";
+import { buildS12bRender } from "./s12b_render.mjs";
+import { stubHighlighter } from "./stub_highlighter.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const goldenDir = join(here, "golden");
@@ -1328,46 +1330,6 @@ const { renderDiffWithHighlighter } = await import(
   oracle.pierre("utils/renderDiffWithHighlighter.js")
 );
 
-/**
- * The stand-in highlighter both sides use: one uncolored token per non-empty
- * line, fixed themes. Mirrors `PlainTextHighlighter` in highlighter_types.rs.
- * (The dist's own plain-text path still asks a highlighter for tokens, so the
- * real Shiki is never involved and results are deterministic.)
- */
-const stubHighlighter = {
-  name: "plain-text-stub",
-  getTheme(name) {
-    const light = name.includes("light");
-    return {
-      name,
-      type: light ? "light" : "dark",
-      fg: light ? "#070707" : "#fbfbfb",
-      bg: light ? "#ffffff" : "#0b0b0b",
-      colors: {
-        "terminal.ansiGreen": light ? "#0dbe4e" : "#5ecc71",
-        "gitDecoration.deletedResourceForeground": light
-          ? "#ff2e3f"
-          : "#ff6762",
-      },
-    };
-  },
-  codeToTokens(code) {
-    const tokens = [];
-    const terminator = /\r\n|\r|\n/g;
-    let position = 0;
-    let offset = 0;
-    for (;;) {
-      const match = terminator.exec(code);
-      const line = code.slice(position, match ? match.index : code.length);
-      tokens.push(line === "" ? [] : [{ content: line, offset }]);
-      offset += line.length + (match ? match[0].length : 0);
-      if (!match) break;
-      position = match.index + match[0].length;
-    }
-    return { tokens };
-  },
-};
-
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (value !== null && typeof value === "object") {
@@ -2111,6 +2073,9 @@ function buildHighlights() {
 }
 
 const outputs = {
+  // First: the published dist caches the measured scrollbar gutter for the process
+  // (`measuredScrollbarGutter`), and the render oracle needs it unmeasured.
+  "s12b_render.json": await buildS12bRender(oracle, makeRandom(0x5eed0f)),
   "jsdiff.json": buildJsdiff(),
   "scanners.json": buildScanners(),
   "types.json": buildTypes(),

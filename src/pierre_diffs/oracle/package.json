@@ -6,6 +6,7 @@
   "dependencies": {
     "@pierre/diffs": "1.6.4",
     "diff": "9.0.0",
+    "jsdom": "26.1.0",
     "shiki": "3.23.0"
   }
 }

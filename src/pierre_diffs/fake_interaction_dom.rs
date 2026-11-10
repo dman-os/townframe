@@ -39,6 +39,9 @@ pub struct Shared {
     pub labels: RefCell<HashMap<NodeKey, String>>,
     pub trace: RefCell<Vec<Value>>,
     pub recording: Cell<bool>,
+    /// Name unlabeled nodes by their path from the top of their tree (the render
+    /// oracle's naming: `label/index/~/index`, `~` being a shadow root).
+    pub path_names: Cell<bool>,
 }
 
 impl Shared {
@@ -48,8 +51,38 @@ impl Shared {
         }
     }
 
+    fn path_name(&self, doc: &Document, node: NodeKey) -> String {
+        let mut segments = Vec::new();
+        let mut current = node;
+        while let Some(parent) = doc.parent(current) {
+            segments.push(if doc.shadow_root(parent) == Some(current) {
+                "~".to_owned()
+            } else {
+                doc.child_nodes(parent)
+                    .iter()
+                    .position(|child| *child == current)
+                    .expect("a child of its parent")
+                    .to_string()
+            });
+            current = parent;
+        }
+        let label = self
+            .labels
+            .borrow()
+            .get(&current)
+            .cloned()
+            .unwrap_or_else(|| "?".to_owned());
+        std::iter::once(label)
+            .chain(segments.into_iter().rev())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     // The scenario's name, or the role of a node the manager created.
     pub fn name_of(&self, doc: &Document, node: NodeKey) -> String {
+        if self.path_names.get() {
+            return self.path_name(doc, node);
+        }
         if let Some(label) = self.labels.borrow().get(&node) {
             return label.clone();
         }
@@ -120,7 +153,7 @@ impl Default for FakeDom {
                     node,
                     name: property,
                 } => observed.emit(json!(["style.remove", name(*node), property])),
-                Mutation::InsertBefore { .. } => {}
+                Mutation::InsertBefore { .. } | Mutation::EditProperties { .. } => {}
             }
         })));
         Self {

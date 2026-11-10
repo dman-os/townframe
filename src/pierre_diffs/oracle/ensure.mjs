@@ -43,6 +43,7 @@ function checkLockAgainstPins(lock) {
     "diff",
     "@pierre/highlights",
     "@pierre/theming",
+    "jsdom",
   ]) {
     const locked = lock.packages[`node_modules/${name}`];
     if (
@@ -79,6 +80,7 @@ export function ensureOracle() {
     pierre: (relative) =>
       pathToFileURL(join(modules, "@pierre/diffs/dist", relative)).href,
     jsdiff: pathToFileURL(join(modules, "diff/libesm/index.js")).href,
+    jsdom: pathToFileURL(join(modules, "jsdom/lib/api.js")).href,
     modules,
   };
 }
