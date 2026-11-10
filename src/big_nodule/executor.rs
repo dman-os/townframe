@@ -15,11 +15,11 @@ use async_trait::async_trait;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Revision;
 use big_dispatch::Provider;
 use big_dispatch_core::Readiness;
-use big_plugs_core::Artifact;
-use big_plugs_core::PlugId;
-use big_plugs_core::Revision;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use tokio::sync::Notify;
 
 /// Everything an executor needs to host one nodule revision's handler.
 pub struct HandlerSpec {
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub revision: Revision,
     /// The handler artifact as the envelope declares it: key, digest, size and media type. Its
     /// bytes are retained and fetched through the `Blob` datum the config document carries.
@@ -43,7 +43,7 @@ pub struct HandlerSpec {
     pub capability: Option<CapId>,
     /// The operations the handler implements, by NSID (`None` kind for a foreign contract).
     pub operations: BTreeMap<String, Option<OperationKind>>,
-    /// Ask the state actor to call `ensure` again for this plug.
+    /// Ask the state actor to call `ensure` again for this cartridge.
     pub reensure: Reensure,
 }
 
@@ -68,34 +68,34 @@ pub trait NoduleExecutor: Send + Sync {
     /// [`Hosted::NotReady`] and calls [`Reensure::request`] when that changes.
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted;
 
-    /// Whether a workload is running for `plug_id`: it was ensured and not retired.
-    fn hosts(&self, plug_id: &PlugId) -> bool;
+    /// Whether a workload is running for `cartridge_id`: it was ensured and not retired.
+    fn hosts(&self, cartridge_id: &CartridgeId) -> bool;
 
-    /// Stop hosting whatever was ensured for `plug_id`. Called after dispatch already stopped
+    /// Stop hosting whatever was ensured for `cartridge_id`. Called after dispatch already stopped
     /// routing to it.
-    async fn retire(&self, plug_id: &PlugId);
+    async fn retire(&self, cartridge_id: &CartridgeId);
 }
 
-/// The plugs whose executor asked to be ensured again, and the wakeup for the task that does it.
+/// The cartridges whose executor asked to be ensured again, and the wakeup for the task that does it.
 /// A set plus a [`Notify`] permit rather than a channel: a request is never lost to a wakeup
-/// that races it (`notify_one` stores a permit), repeated requests for one plug coalesce, and
+/// that races it (`notify_one` stores a permit), repeated requests for one cartridge coalesce, and
 /// `request` has no failure to hide, because the executor is constructed before the state actor
 /// and may outlive it, so a request with nobody left to read it is not an invariant break.
 #[derive(Default)]
 pub(crate) struct ReensureQueue {
-    pending: Mutex<BTreeSet<PlugId>>,
+    pending: Mutex<BTreeSet<CartridgeId>>,
     wake: Notify,
 }
 
 impl ReensureQueue {
-    pub(crate) fn handle(self: &Arc<Self>, plug_id: PlugId) -> Reensure {
+    pub(crate) fn handle(self: &Arc<Self>, cartridge_id: CartridgeId) -> Reensure {
         Reensure {
-            plug_id,
+            cartridge_id,
             queue: Arc::clone(self),
         }
     }
 
-    pub(crate) async fn requested(&self) -> BTreeSet<PlugId> {
+    pub(crate) async fn requested(&self) -> BTreeSet<CartridgeId> {
         loop {
             let taken = std::mem::take(&mut *self.pending.lock().expect("reensure queue lock"));
             if !taken.is_empty() {
@@ -106,10 +106,10 @@ impl ReensureQueue {
     }
 }
 
-/// A plug-bound request for the state actor to call [`NoduleExecutor::ensure`] again.
+/// A cartridge-bound request for the state actor to call [`NoduleExecutor::ensure`] again.
 #[derive(Clone)]
 pub struct Reensure {
-    plug_id: PlugId,
+    cartridge_id: CartridgeId,
     queue: Arc<ReensureQueue>,
 }
 
@@ -119,7 +119,7 @@ impl Reensure {
             .pending
             .lock()
             .expect("reensure queue lock")
-            .insert(self.plug_id.clone());
+            .insert(self.cartridge_id.clone());
         self.queue.wake.notify_one();
     }
 }

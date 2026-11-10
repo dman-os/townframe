@@ -89,7 +89,7 @@ pub enum Readiness {
     /// the operation) makes the nodule ready. An optional request never causes this.
     NeedsConfiguration,
     /// A required operation request has no provider that satisfies it: none enabled, more than
-    /// one, a revision older than the request's `minRevision`, or a different plug than the one
+    /// one, a revision older than the request's `minRevision`, or a different cartridge than the one
     /// the operator consented to. The record's `requests` say which and why. Not a fault: the
     /// nodule is enabled and waits (as a Kubernetes pod waits on a missing dependency, a systemd
     /// unit on `Requires=`), and becomes ready once a provider appears or the operator confirms.

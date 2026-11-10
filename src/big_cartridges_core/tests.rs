@@ -2,25 +2,26 @@ use super::*;
 use big_cabinet_core::datum::DatumMember;
 use serde_json::json;
 
-fn plug() -> Plug {
-    let mut plug = Plug::new(
-        example_plug!("photos").parse().unwrap(),
+fn cartridge() -> Cartridge {
+    let mut cartridge = Cartridge::new(
+        example_cartridge!("photos").parse().unwrap(),
         "1.2.3".parse().unwrap(),
     );
-    plug.title = Some("Photos".into());
-    plug.dependencies.push(Dependency {
-        id: example_plug!("search-api").parse().unwrap(),
+    cartridge.title = Some("Photos".into());
+    cartridge.dependencies.push(Dependency {
+        id: example_cartridge!("search-api").parse().unwrap(),
         version: "^2".parse().unwrap(),
         extra: Default::default(),
     });
-    plug.artifacts.push(Artifact {
+    cartridge.artifacts.push(Artifact {
         key: "routines".into(),
         digest: Digest::of(b"wasm"),
         size: Some(4),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: "org.example.daybook.nodule".into(),
             description: [("id".to_owned(), json!("org.example.photos"))]
@@ -28,7 +29,8 @@ fn plug() -> Plug {
                 .collect(),
             extra: Default::default(),
         }));
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Micro(MicroContribution {
             schema: "org.example.clay.micro".into(),
             description: [("entry".to_owned(), json!("gallery.js"))]
@@ -36,15 +38,15 @@ fn plug() -> Plug {
                 .collect(),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
 #[test]
 fn the_envelope_spells_ids_versions_and_digests_as_text() {
-    let plug = plug();
-    plug.validate().unwrap();
-    let value = serde_json::to_value(&plug).unwrap();
-    assert_eq!(value["id"], example_plug!("photos"));
+    let cartridge = cartridge();
+    cartridge.validate().unwrap();
+    let value = serde_json::to_value(&cartridge).unwrap();
+    assert_eq!(value["id"], example_cartridge!("photos"));
     assert_eq!(value["version"], "1.2.3");
     assert_eq!(value["dependencies"][0]["version"], "^2");
     let digest = value["artifacts"][0]["digest"].as_str().unwrap();
@@ -52,23 +54,33 @@ fn the_envelope_spells_ids_versions_and_digests_as_text() {
     assert_eq!(digest.parse::<Digest>().unwrap(), Digest::of(b"wasm"));
     assert_eq!(value["contributions"][0]["$type"], NoduleContribution::ID);
     assert_eq!(value["contributions"][1]["$type"], MicroContribution::ID);
-    assert_eq!(serde_json::from_value::<Plug>(value).unwrap(), plug);
-    assert_eq!(plug.nodule().unwrap().schema, "org.example.daybook.nodule");
-    assert_eq!(plug.micro().unwrap().schema, "org.example.clay.micro");
     assert_eq!(
-        plug.artifact("routines").unwrap().media_type.as_deref(),
+        serde_json::from_value::<Cartridge>(value).unwrap(),
+        cartridge
+    );
+    assert_eq!(
+        cartridge.nodule().unwrap().schema,
+        "org.example.daybook.nodule"
+    );
+    assert_eq!(cartridge.micro().unwrap().schema, "org.example.clay.micro");
+    assert_eq!(
+        cartridge
+            .artifact("routines")
+            .unwrap()
+            .media_type
+            .as_deref(),
         Some("application/wasm")
     );
 }
 
 #[test]
-fn a_plug_id_is_a_did_and_a_lowercase_name() {
-    let text = example_plug!("photos");
-    let id: PlugId = text.parse().unwrap();
+fn a_cartridge_id_is_a_did_and_a_lowercase_name() {
+    let text = example_cartridge!("photos");
+    let id: CartridgeId = text.parse().unwrap();
     assert_eq!(id.namespace, crate::test_support::EXAMPLE_NAMESPACE);
     assert_eq!(id.name, "photos");
     assert_eq!(id.to_string(), text);
-    assert_eq!(crate::test_support::plug_id("photos"), id);
+    assert_eq!(crate::test_support::cartridge_id("photos"), id);
     for bad in [
         "photos",
         "@example/photos",
@@ -81,10 +93,10 @@ fn a_plug_id_is_a_did_and_a_lowercase_name() {
         "did:key:z6Mk/photos.",
         "did:key:z6Mk/a..b",
     ] {
-        assert!(bad.parse::<PlugId>().is_err(), "{bad}");
+        assert!(bad.parse::<CartridgeId>().is_err(), "{bad}");
     }
     // Dotted names are legal, as Clay micro ids are (`dayframe.counter`).
-    let dotted: PlugId = example_plug!("dayframe.counter").parse().unwrap();
+    let dotted: CartridgeId = example_cartridge!("dayframe.counter").parse().unwrap();
     assert_eq!(dotted.name, "dayframe.counter");
 }
 
@@ -101,7 +113,7 @@ fn dids_are_checked_by_the_did_core_grammar_and_methods_are_open() {
         "did:ex:a.b-c_d",
     ] {
         let text = format!("{good}/photos");
-        let id: PlugId = text
+        let id: CartridgeId = text
             .parse()
             .unwrap_or_else(|error| panic!("{good}: {error}"));
         assert_eq!(id.to_string(), text);
@@ -131,23 +143,23 @@ fn dids_are_checked_by_the_did_core_grammar_and_methods_are_open() {
         "did:key:é",
         too_long.as_str(),
     ] {
-        assert!(PlugId::new(bad, "photos").is_err(), "{bad:?}");
+        assert!(CartridgeId::new(bad, "photos").is_err(), "{bad:?}");
     }
     let at_limit = format!("did:web:{}", "a".repeat(MAX_DID_OCTETS - "did:web:".len()));
-    assert!(PlugId::new(&at_limit, "photos").is_ok());
+    assert!(CartridgeId::new(&at_limit, "photos").is_ok());
 }
 
 #[test]
-fn a_plug_id_round_trips_through_text_serde_and_a_datum_key_slot() {
+fn a_cartridge_id_round_trips_through_text_serde_and_a_datum_key_slot() {
     use big_cabinet_core::reference::DatumKey;
     for namespace in ["did:web:localhost%3A3000:u", "did:key:z6Mk", "did:ex:a::b"] {
-        let id = PlugId::new(namespace, "photos").unwrap();
+        let id = CartridgeId::new(namespace, "photos").unwrap();
         let text = id.to_string();
         assert_eq!(text, format!("{namespace}/photos"));
-        assert_eq!(text.parse::<PlugId>().unwrap(), id);
+        assert_eq!(text.parse::<CartridgeId>().unwrap(), id);
         let json = serde_json::to_value(&id).unwrap();
         assert_eq!(json, json!(text));
-        assert_eq!(serde_json::from_value::<PlugId>(json).unwrap(), id);
+        assert_eq!(serde_json::from_value::<CartridgeId>(json).unwrap(), id);
         // The key slot spells the id as it stands: `:` and `%` need no escaping there, and
         // the key parses back, text and all, to the same id.
         let key = DatumKey::from_text("org.example.daybook.blob", text.clone()).unwrap();
@@ -158,12 +170,12 @@ fn a_plug_id_round_trips_through_text_serde_and_a_datum_key_slot() {
         assert_eq!(
             std::str::from_utf8(reparsed.slot_bytes())
                 .unwrap()
-                .parse::<PlugId>()
+                .parse::<CartridgeId>()
                 .unwrap(),
             id
         );
     }
-    assert!(serde_json::from_value::<PlugId>(json!("@example/photos")).is_err());
+    assert!(serde_json::from_value::<CartridgeId>(json!("@example/photos")).is_err());
 }
 
 #[test]
@@ -174,7 +186,7 @@ fn versions_and_requirements_reject_nonsense() {
 
 #[test]
 fn the_authority_is_an_nsid_prefix_and_part_of_the_revision() {
-    let mut held = plug();
+    let mut held = cartridge();
     for valid in ["org.example", "org.example.photos", "com.atproto"] {
         held.authority = Some(valid.into());
         held.validate().unwrap();
@@ -196,16 +208,16 @@ fn the_authority_is_an_nsid_prefix_and_part_of_the_revision() {
     let mut other = held.clone();
     other.authority = Some("org.example.albums".into());
     assert_ne!(held.revision(), other.revision());
-    let round: Plug = serde_json::from_value(serde_json::to_value(&held).unwrap()).unwrap();
+    let round: Cartridge = serde_json::from_value(serde_json::to_value(&held).unwrap()).unwrap();
     assert_eq!(round, held);
 }
 
 #[test]
 fn the_revision_is_the_content_hash_and_sees_unknown_members() {
-    let plug = plug();
-    let revision = plug.revision();
-    assert_eq!(plug.clone().revision(), revision);
-    let mut carried = plug.clone();
+    let cartridge = cartridge();
+    let revision = cartridge.revision();
+    assert_eq!(cartridge.clone().revision(), revision);
+    let mut carried = cartridge.clone();
     carried.extra.insert("futureField".into(), json!(1));
     assert_ne!(carried.revision(), revision);
     let text = revision.to_string();
@@ -216,49 +228,52 @@ fn the_revision_is_the_content_hash_and_sees_unknown_members() {
 #[test]
 fn an_unknown_contribution_is_carried_not_refused() {
     let value = json!({
-        "id": example_plug!("photos"),
+        "id": example_cartridge!("photos"),
         "version": "0.1.0",
         "contributions": [
-            { "$type": "org.example.daybook.plug.theme", "palette": ["#fff"] },
+            { "$type": "org.example.daybook.cartridge.theme", "palette": ["#fff"] },
         ],
         "futureField": true,
     });
-    let plug: Plug = serde_json::from_value(value.clone()).unwrap();
-    plug.validate().unwrap();
-    assert!(matches!(plug.contributions[0], Contribution::Unknown(_)));
-    assert_eq!(plug.nodule(), None);
-    assert_eq!(serde_json::to_value(&plug).unwrap(), value);
+    let cartridge: Cartridge = serde_json::from_value(value.clone()).unwrap();
+    cartridge.validate().unwrap();
+    assert!(matches!(
+        cartridge.contributions[0],
+        Contribution::Unknown(_)
+    ));
+    assert_eq!(cartridge.nodule(), None);
+    assert_eq!(serde_json::to_value(&cartridge).unwrap(), value);
 }
 
 #[test]
 fn validation_owns_distribution_not_contribution_content() {
-    let mut two_nodules = plug();
+    let mut two_nodules = cartridge();
     two_nodules
         .contributions
         .push(two_nodules.contributions[0].clone());
     let error = two_nodules.validate().unwrap_err().to_string();
     assert!(error.contains("one node-facing nodule"), "{error}");
 
-    let mut two_micros = plug();
+    let mut two_micros = cartridge();
     two_micros
         .contributions
         .push(two_micros.contributions[1].clone());
     let error = two_micros.validate().unwrap_err().to_string();
     assert!(error.contains("has one micro"), "{error}");
 
-    let mut duplicate_artifact = plug();
+    let mut duplicate_artifact = cartridge();
     duplicate_artifact
         .artifacts
         .push(duplicate_artifact.artifacts[0].clone());
     let error = duplicate_artifact.validate().unwrap_err().to_string();
     assert!(error.contains("artifact key `routines`"), "{error}");
 
-    let mut self_dependency = plug();
+    let mut self_dependency = cartridge();
     self_dependency.dependencies[0].id = self_dependency.id.clone();
     let error = self_dependency.validate().unwrap_err().to_string();
     assert!(error.contains("depend on itself"), "{error}");
 
-    let mut bad_schema = plug();
+    let mut bad_schema = cartridge();
     let Contribution::Nodule(nodule) = &mut bad_schema.contributions[0] else {
         unreachable!()
     };
@@ -267,7 +282,7 @@ fn validation_owns_distribution_not_contribution_content() {
     assert!(error.contains("contributions[0].schema"), "{error}");
 
     // The description is a consumer's business: nonsense passes the catalog.
-    let mut nonsense_description = plug();
+    let mut nonsense_description = cartridge();
     let Contribution::Nodule(nodule) = &mut nonsense_description.contributions[0] else {
         unreachable!()
     };
@@ -285,7 +300,7 @@ mod declaration {
     #[test]
     fn the_envelope_datums_declare_publish_and_admit() {
         let universe = Universe::collect([
-            Declaration::of::<Plug>().unwrap(),
+            Declaration::of::<Cartridge>().unwrap(),
             Declaration::of::<NoduleContribution>().unwrap(),
             Declaration::of::<MicroContribution>().unwrap(),
         ]);
@@ -297,22 +312,22 @@ mod declaration {
         assert_eq!(
             ids,
             [
-                "org.example.daybook.plug",
-                "org.example.daybook.plug.nodule",
-                "org.example.daybook.plug.micro",
+                "org.example.daybook.cartridge",
+                "org.example.daybook.cartridge.nodule",
+                "org.example.daybook.cartridge.micro",
             ]
         );
         let bundle = Bundle::new(&universe, Vec::new());
         let lexicons = bundle.lexicons().unwrap();
         assert_eq!(lexicons.len(), 3);
-        let plug = &lexicons[0].file;
-        let contributions = &plug["defs"]["main"]["properties"]["contributions"]["items"];
-        assert_eq!(contributions["type"], "union", "{plug}");
-        assert_eq!(contributions.get("closed"), None, "{plug}");
+        let cartridge = &lexicons[0].file;
+        let contributions = &cartridge["defs"]["main"]["properties"]["contributions"]["items"];
+        assert_eq!(contributions["type"], "union", "{cartridge}");
+        assert_eq!(contributions.get("closed"), None, "{cartridge}");
         assert_eq!(
             contributions["refs"],
             json!([NoduleContribution::ID, MicroContribution::ID]),
-            "{plug}"
+            "{cartridge}"
         );
         // A description is `unknown` to the catalog's Lexicon: any data object.
         let nodule = &lexicons[1].file;
@@ -330,16 +345,16 @@ mod declaration {
             let compiled = bundle
                 .validate_lexicon(&lexicon.id, &lexicon.file, &carried)
                 .unwrap_or_else(|error| panic!("{}: {error}", lexicon.id));
-            if lexicon.id == Plug::ID {
-                let mut value = serde_json::to_value(super::plug()).unwrap();
-                value["$type"] = json!(Plug::ID);
+            if lexicon.id == Cartridge::ID {
+                let mut value = serde_json::to_value(super::cartridge()).unwrap();
+                value["$type"] = json!(Cartridge::ID);
                 for size in [json!(null), json!(0), json!(4), json!(i64::MAX)] {
                     value["artifacts"][0]["size"] = size;
                     let stored = big_cabinet_core::datum::Stored::check(&compiled, value.clone())
                         .unwrap()
                         .into_value();
                     assert_eq!(stored, value);
-                    let envelope: Plug = serde_json::from_value(stored).unwrap();
+                    let envelope: Cartridge = serde_json::from_value(stored).unwrap();
                     envelope.validate().unwrap();
                     assert_eq!(
                         serde_json::to_value(envelope.artifacts[0].size).unwrap(),
@@ -367,16 +382,16 @@ mod registry_layout {
         let version: Version = "1.2.3-beta.1".parse().unwrap();
         assert_eq!(
             identity_key().to_string(),
-            "org.example.daybook.plug.identity/main"
+            "org.example.daybook.cartridge.identity/main"
         );
         assert_eq!(
             version_key(&version).to_string(),
-            "org.example.daybook.plug/1.2.3-beta.1"
+            "org.example.daybook.cartridge/1.2.3-beta.1"
         );
         let artifact = artifact_key(&version, "wasm/handler");
         assert_eq!(
             artifact.to_string(),
-            "org.example.daybook.blob/plug.artifact/1.2.3-beta.1/wasm/handler"
+            "org.example.daybook.blob/cartridge.artifact/1.2.3-beta.1/wasm/handler"
         );
         assert_eq!(
             artifact_slot_version(&artifact).as_deref(),
@@ -397,7 +412,7 @@ mod registry_layout {
             .map(|datum| datum.id.as_str())
             .collect();
         assert!(
-            ids.contains(&PlugIdentity::ID) && ids.contains(&Plug::ID),
+            ids.contains(&CartridgeIdentity::ID) && ids.contains(&Cartridge::ID),
             "{ids:?}"
         );
         big_cabinet_core::datum::Bundle::new(&universe, Vec::new())
@@ -425,7 +440,7 @@ mod signatures {
 
     #[test]
     fn a_signature_round_trips_and_leaves_the_revision_alone() {
-        let unsigned = plug();
+        let unsigned = cartridge();
         let signed = sign_as_example(unsigned.clone());
         signed.verify_signature().unwrap();
         assert_eq!(signed.revision(), unsigned.revision());
@@ -437,20 +452,20 @@ mod signatures {
                 .unwrap()
                 .starts_with('z')
         );
-        let decoded: Plug = serde_json::from_value(value).unwrap();
+        let decoded: Cartridge = serde_json::from_value(value).unwrap();
         decoded.verify_signature().unwrap();
         assert_eq!(unsigned.verify_signature(), Err(SignatureError::Missing));
     }
 
     #[test]
     fn a_tampered_envelope_does_not_verify() {
-        let mut signed = sign_as_example(plug());
+        let mut signed = sign_as_example(cartridge());
         signed.title = Some("Not what was signed".into());
         assert!(matches!(
             signed.verify_signature(),
             Err(SignatureError::Invalid(_))
         ));
-        let mut carried = sign_as_example(plug());
+        let mut carried = sign_as_example(cartridge());
         carried.extra.insert("futureField".into(), json!(1));
         assert!(matches!(
             carried.verify_signature(),
@@ -460,7 +475,7 @@ mod signatures {
 
     #[test]
     fn another_keys_signature_does_not_verify() {
-        let forged = sign_with_seed(plug(), &[9; 32]);
+        let forged = sign_with_seed(cartridge(), &[9; 32]);
         assert!(matches!(
             forged.verify_signature(),
             Err(SignatureError::Invalid(_))
@@ -469,15 +484,15 @@ mod signatures {
 
     #[test]
     fn only_ed25519_did_key_is_verifiable() {
-        let mut web = sign_as_example(plug());
-        web.id = PlugId::new("did:web:example.com", "photos").unwrap();
+        let mut web = sign_as_example(cartridge());
+        web.id = CartridgeId::new("did:web:example.com", "photos").unwrap();
         assert_eq!(
             web.verify_signature(),
             Err(SignatureError::UnsupportedMethod("web".into()))
         );
         // A did:key of another key type (a secp256k1 multicodec) is refused, not guessed at.
-        let mut other = sign_as_example(plug());
-        other.id = PlugId::new(
+        let mut other = sign_as_example(cartridge());
+        other.id = CartridgeId::new(
             "did:key:zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBme",
             "photos",
         )
@@ -486,13 +501,13 @@ mod signatures {
             other.verify_signature(),
             Err(SignatureError::UnsupportedKey(_))
         ));
-        let mut unknown = sign_as_example(plug());
+        let mut unknown = sign_as_example(cartridge());
         unknown.signature.as_mut().unwrap().alg = "rsa".into();
         assert_eq!(
             unknown.verify_signature(),
             Err(SignatureError::UnsupportedAlgorithm("rsa".into()))
         );
-        let mut garbled = sign_as_example(plug());
+        let mut garbled = sign_as_example(cartridge());
         garbled.signature.as_mut().unwrap().value = "z11".into();
         assert!(matches!(
             garbled.verify_signature(),

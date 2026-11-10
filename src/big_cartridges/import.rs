@@ -1,24 +1,24 @@
-//! Importers that turn files on this node into published plug versions.
+//! Importers that turn files on this node into published cartridge versions.
 //!
 //! These are library functions and not service operations on purpose: an operation that reads
 //! a caller-named path would let any publish handle read any file the node can (a confused
 //! deputy). The embedder, who already owns the filesystem, reads the bytes and calls in here.
-//! Every importer ends in the ordinary [`PublishPlugVersion`] path, so signatures, immutability,
+//! Every importer ends in the ordinary [`PublishCartridgeVersion`] path, so signatures, immutability,
 //! the downgrade rule and namespace scopes apply to an imported version exactly as to any other.
 
 use big_blobs::BlobService;
 use big_cabinet_core::authority::Authorization;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::MicroContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::protocol::GetPublisher;
-use big_plugs_core::protocol::PlugsError;
-use big_plugs_core::protocol::PlugsProtocol;
-use big_plugs_core::protocol::PublishPlugVersion;
-use big_plugs_core::protocol::PublishedPlugVersion;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::MicroContribution;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::CartridgesProtocol;
+use big_cartridges_core::protocol::GetPublisher;
+use big_cartridges_core::protocol::PublishCartridgeVersion;
+use big_cartridges_core::protocol::PublishedCartridgeVersion;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -45,12 +45,12 @@ pub enum ImportError {
     #[error("importing the component into the blob store failed: {0}")]
     Blob(String),
     #[error("the registry refused the version: {0}")]
-    Registry(#[from] PlugsError),
+    Registry(#[from] CartridgesError),
     #[error("the registry could not be reached: {0}")]
     Transport(String),
 }
 
-fn registry_error(error: ClientError<PlugsError>) -> ImportError {
+fn registry_error(error: ClientError<CartridgesError>) -> ImportError {
     match error {
         ClientError::Method(error) => ImportError::Registry(error),
         ClientError::Transport { message, .. } => ImportError::Transport(message),
@@ -58,13 +58,13 @@ fn registry_error(error: ClientError<PlugsError>) -> ImportError {
 }
 
 /// Clay's stand-in package, a `<name>.component.wasm` beside its `<name>.manifest.json`
-/// (`clay_mdk::Package`), published as one plug version under the node's own publisher DID.
+/// (`clay_mdk::Package`), published as one cartridge version under the node's own publisher DID.
 ///
 /// The manifest is read generically, with no dependency on Clay's crates, and only two members
 /// are interpreted:
-/// - `id` becomes the plug name, so the plug id is `<node publisher DID>/<id>`. The id must
-///   already be a valid plug name segment; it is refused rather than rewritten, because a
-///   rewrite (such as `.` to `-`) could make two micro ids one plug.
+/// - `id` becomes the cartridge name, so the cartridge id is `<node publisher DID>/<id>`. The id must
+///   already be a valid cartridge name segment; it is refused rather than rewritten, because a
+///   rewrite (such as `.` to `-`) could make two micro ids one cartridge.
 /// - `package_version`, an integer, becomes the semver `<n>.0.0`.
 ///
 /// The contribution's schema is always [`CLAY_MICRO_MANIFEST_SCHEMA`].
@@ -74,12 +74,12 @@ fn registry_error(error: ClientError<PlugsError>) -> ImportError {
 /// micro contribution's `description`, unread. The envelope is left unsigned, so the node signs
 /// it through the registry's own-namespace convenience.
 pub async fn micro_pair(
-    plugs: &Client<PlugsProtocol>,
+    cartridges: &Client<CartridgesProtocol>,
     blobs: &BlobService,
     authorization: Authorization,
     component: Vec<u8>,
     manifest_json: &[u8],
-) -> Result<PublishedPlugVersion, ImportError> {
+) -> Result<PublishedCartridgeVersion, ImportError> {
     let serde_json::Value::Object(mut manifest) = serde_json::from_slice(manifest_json)
         .map_err(|error| ImportError::Manifest(format!("not JSON: {error}")))?
     else {
@@ -104,7 +104,7 @@ pub async fn micro_pair(
         return Err(ImportError::Component("not a WebAssembly binary".into()));
     }
 
-    let publisher = plugs
+    let publisher = cartridges
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
@@ -112,9 +112,9 @@ pub async fn micro_pair(
         )
         .await
         .map_err(registry_error)?;
-    let plug_id = PlugId::new(&publisher, &id).map_err(|error| {
+    let cartridge_id = CartridgeId::new(&publisher, &id).map_err(|error| {
         ImportError::Manifest(format!(
-            "`id` is not a plug name (a lowercase letter, then lowercase letters, digits, `-`, \
+            "`id` is not a cartridge name (a lowercase letter, then lowercase letters, digits, `-`, \
              `_` or single inner `.`, at most 64): {error}"
         ))
     })?;
@@ -127,7 +127,7 @@ pub async fn micro_pair(
         .import_stream(futures::stream::iter([Ok(bytes::Bytes::from(component))]))
         .await
         .map_err(|error| ImportError::Blob(error.to_string()))?;
-    let mut envelope = Plug::new(plug_id, version);
+    let mut envelope = Cartridge::new(cartridge_id, version);
     envelope.authority = authority;
     envelope.artifacts.push(Artifact {
         key: MICRO_COMPONENT_ARTIFACT.into(),
@@ -143,11 +143,11 @@ pub async fn micro_pair(
             description: manifest.into_iter().collect(),
             extra: Default::default(),
         }));
-    plugs
+    cartridges
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
-            PublishPlugVersion { envelope },
+            PublishCartridgeVersion { envelope },
         )
         .await
         .map_err(registry_error)

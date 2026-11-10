@@ -7,32 +7,34 @@
 
 use crate::sqlite;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::Revision;
-use big_plugs_core::Version;
-use big_plugs_core::protocol::PlugsError;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Revision;
+use big_cartridges_core::Version;
+use big_cartridges_core::protocol::CartridgesError;
 use sqlite_rs::Database;
 
 /// A version label's first-seen content.
 #[derive(Debug, Clone)]
 pub(crate) struct FirstSeen {
     pub(crate) revision: Revision,
-    pub(crate) envelope: Plug,
+    pub(crate) envelope: Cartridge,
 }
 
-fn storage(error: impl std::fmt::Display) -> PlugsError {
-    PlugsError::Storage(error.to_string())
+fn storage(error: impl std::fmt::Display) -> CartridgesError {
+    CartridgesError::Storage(error.to_string())
 }
 
-pub(crate) async fn migrate(database: &Database) -> Result<(), PlugsError> {
+pub(crate) async fn migrate(database: &Database) -> Result<(), CartridgesError> {
     database
         .apply_migrations(sqlite::MIGRATION_TABLE, sqlite::MIGRATIONS)
         .await
         .map_err(storage)
 }
 
-pub(crate) async fn registry_drawer(database: &Database) -> Result<Option<DrawerId>, PlugsError> {
+pub(crate) async fn registry_drawer(
+    database: &Database,
+) -> Result<Option<DrawerId>, CartridgesError> {
     let transaction = database.begin_read().await.map_err(storage)?;
     let drawer = sqlite::registry_drawer(&transaction)
         .await
@@ -47,7 +49,7 @@ pub(crate) async fn registry_drawer(database: &Database) -> Result<Option<Drawer
 pub(crate) async fn set_registry_drawer(
     database: &Database,
     drawer: &DrawerId,
-) -> Result<(), PlugsError> {
+) -> Result<(), CartridgesError> {
     let transaction = database.begin_write().await.map_err(storage)?;
     sqlite::set_registry_drawer(&transaction, drawer.to_string())
         .await
@@ -57,7 +59,7 @@ pub(crate) async fn set_registry_drawer(
 
 pub(crate) async fn first_seen(
     database: &Database,
-) -> Result<Vec<(PlugId, Version, FirstSeen)>, PlugsError> {
+) -> Result<Vec<(CartridgeId, Version, FirstSeen)>, CartridgesError> {
     let transaction = database.begin_read().await.map_err(storage)?;
     let rows = sqlite::first_seen(&transaction).await.map_err(storage)?;
     // Every column was written from a validated value by `upsert_first_seen`, so a row that does
@@ -66,7 +68,9 @@ pub(crate) async fn first_seen(
         .into_iter()
         .map(|row| {
             (
-                row.plug_id.parse().expect("stored plug id is valid"),
+                row.cartridge_id
+                    .parse()
+                    .expect("stored cartridge id is valid"),
                 row.version.parse().expect("stored version is valid"),
                 FirstSeen {
                     revision: row.revision.parse().expect("stored revision is valid"),
@@ -80,8 +84,8 @@ pub(crate) async fn first_seen(
 
 pub(crate) async fn upsert_first_seen(
     database: &Database,
-    envelope: &Plug,
-) -> Result<(), PlugsError> {
+    envelope: &Cartridge,
+) -> Result<(), CartridgesError> {
     let transaction = database.begin_write().await.map_err(storage)?;
     sqlite::upsert_first_seen(
         &transaction,

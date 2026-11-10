@@ -9,24 +9,24 @@ impl From < GrammarError > for big_nodule_core::NoduleError
 impl From < InventoryError > for big_nodule_core::config::StoreError
 impl From < InventoryError > for big_nodule_core::protocol::NodulesError
 impl From < OperationGrants > for big_nodule_core::config::DispatchScope
-pub big_nodule_core::config::fn artifact_key (plug_id : & PlugId , artifact : & str) -> DatumKey
+pub big_nodule_core::config::fn artifact_key (cartridge_id : & CartridgeId , artifact : & str) -> DatumKey
 pub big_nodule_core::config::fn config_universe () -> big_cabinet_core :: datum :: Universe
-pub big_nodule_core::config::fn grants_key (plug_id : & PlugId) -> DatumKey
-pub big_nodule_core::config::fn install_key (plug_id : & PlugId) -> DatumKey
-pub big_nodule_core::config::fn settings_key (plug_id : & PlugId) -> DatumKey
-pub big_nodule_core::config::fn substitution_key (plug_id : & PlugId) -> DatumKey
+pub big_nodule_core::config::fn grants_key (cartridge_id : & CartridgeId) -> DatumKey
+pub big_nodule_core::config::fn install_key (cartridge_id : & CartridgeId) -> DatumKey
+pub big_nodule_core::config::fn settings_key (cartridge_id : & CartridgeId) -> DatumKey
+pub big_nodule_core::config::fn substitution_key (cartridge_id : & CartridgeId) -> DatumKey
 pub const big_nodule_core::AUTHORITY: & str
 pub enum big_nodule_core::NoduleError { # [error ("nodule description invalid at `{path}`: {reason}")] Invalid { path : String , reason : String } }
-pub enum big_nodule_core::RunMode { # [doc = " Once per node per plug revision: not again on restart or re-enable, again on a new revision."] Once, # [doc = " Each time the nodule starts: node boot, and enabling it."] EveryStart, # [datum (other)] Unknown (String) }
+pub enum big_nodule_core::RunMode { # [doc = " Once per node per cartridge revision: not again on restart or re-enable, again on a new revision."] Once, # [doc = " Each time the nodule starts: node boot, and enabling it."] EveryStart, # [datum (other)] Unknown (String) }
 pub enum big_nodule_core::StateKind { Sqlite, Kv, # [datum (other)] Unknown (String) }
 pub enum big_nodule_core::StoreMode { Frontier, Log, # [datum (other)] Unknown (String) }
-pub enum big_nodule_core::config::Admission { Admitted { version : Version , nodule : Nodule , admitted : crate :: Admitted , artifacts : BTreeMap < String , (big_plugs_core :: Artifact , crate :: inventory :: ArtifactState) > , }, # [doc = " The envelope cannot be installed; `version` is a best-effort read of the raw envelope for"] # [doc = " the refusal record."] Refused { version : Option < Version > , reason : String , } }
+pub enum big_nodule_core::config::Admission { Admitted { version : Version , nodule : Nodule , admitted : crate :: Admitted , artifacts : BTreeMap < String , (big_cartridges_core :: Artifact , crate :: inventory :: ArtifactState ,) , > , }, # [doc = " The envelope cannot be installed; `version` is a best-effort read of the raw envelope for"] # [doc = " the refusal record."] Refused { version : Option < Version > , reason : String , } }
 pub enum big_nodule_core::config::DatumSlot< T > { # [default] Absent, Accepted { value : T , raw : Option < Value > , }, Invalid { raw : Option < Value > , reason : String , } }
-pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , desired_operations : DispatchScope , }, Refused { plug_id : PlugId , version : Option < Version > , revision : Option < Revision > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
+pub enum big_nodule_core::config::NoduleResolution { Admitted { installed : InstalledNodule , desired_grants : BTreeMap < DrawerId , DrawerAccess > , desired_operations : DispatchScope , }, Refused { cartridge_id : CartridgeId , version : Option < Version > , revision : Option < Revision > , enabled : bool , config : Option < IndexMap < String , Value > > , reason : String , } }
 pub enum big_nodule_core::inventory::ArtifactState { Unavailable, Available }
-pub enum big_nodule_core::inventory::InventoryError { # [error (transparent)] Plug (# [from] PlugError), # [error (transparent)] Nodule (# [from] NoduleError), # [error ("plug `{0}` carries no nodule contribution")] MissingContribution (PlugId), # [error ("plug `{id}` nodule contribution has unsupported schema `{schema}`")] UnsupportedSchema { id : PlugId , schema : String }, # [error ("plug `{id}` nodule contribution is not a valid nodule datum: {reason}")] InvalidContribution { id : PlugId , reason : String }, # [error ("plug `{id}` handler requires artifact `{artifact}` not declared in plug envelope")] MissingArtifact { id : PlugId , artifact : String }, # [error ("plug `{id}` handler artifact `{artifact}` declares no size, which a node needs to \ reference and fetch its bytes")] ArtifactSizeRequired { id : PlugId , artifact : String }, # [error ("plug `{id}` holds authority `{authority}`, which overlaps `{existing_authority}` held by `{existing_plug}`")] AuthorityConflict { id : PlugId , authority : String , existing_plug : Box < PlugId > , existing_authority : String , }, # [error ("plug `{id}` carries Lexicon `{nsid}` in a copy that conflicts with the one carried by \ `{other}`: copies must be identical unless their declared revisions differ, and a \ vendored copy never out-revises the authority's")] LexiconConflict { id : PlugId , nsid : String , other : Box < PlugId > , }, # [error ("cannot substitute for `{id}`: {reason}")] InvalidSubstitution { id : PlugId , reason : String }, # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
-pub enum big_nodule_core::protocol::NodulesError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("nodule state failed: {0}")] Storage (String), # [error ("the package was refused: {0}")] Rejected (String), # [error ("nodule for plug `{0}` is not installed")] UnknownPlug (PlugId), # [error ("nodule for plug `{0}` declares no config schema")] NoConfigSchema (PlugId) }
-pub enum big_nodule_core::providers::Unresolved { # [doc = " No enabled provider offers the contract."] NoProvider, # [doc = " More than one does. Disabling one resolves it, as with dispatch's `Ambiguous`."] Ambiguous { providers : Vec < String > }, # [doc = " The one provider's Lexicon is older than the request's `minRevision`."] RevisionTooOld { provider : String , required : u32 , offered : u32 , }, # [doc = " The contract is now provided by another plug than the one recorded. See"] # [doc = " [`RequestStatus::evaluate`]."] ProviderChanged { from : String , to : String } }
+pub enum big_nodule_core::inventory::InventoryError { # [error (transparent)] Cartridge (# [from] CartridgeError), # [error (transparent)] Nodule (# [from] NoduleError), # [error ("cartridge `{0}` carries no nodule contribution")] MissingContribution (CartridgeId), # [error ("cartridge `{id}` nodule contribution has unsupported schema `{schema}`")] UnsupportedSchema { id : CartridgeId , schema : String }, # [error ("cartridge `{id}` nodule contribution is not a valid nodule datum: {reason}")] InvalidContribution { id : CartridgeId , reason : String }, # [error ("cartridge `{id}` handler requires artifact `{artifact}` not declared in cartridge envelope")] MissingArtifact { id : CartridgeId , artifact : String }, # [error ("cartridge `{id}` handler artifact `{artifact}` declares no size, which a node needs to \ reference and fetch its bytes")] ArtifactSizeRequired { id : CartridgeId , artifact : String }, # [error ("cartridge `{id}` holds authority `{authority}`, which overlaps `{existing_authority}` held by `{existing_cartridge}`")] AuthorityConflict { id : CartridgeId , authority : String , existing_cartridge : Box < CartridgeId > , existing_authority : String , }, # [error ("cartridge `{id}` carries Lexicon `{nsid}` in a copy that conflicts with the one carried by \ `{other}`: copies must be identical unless their declared revisions differ, and a \ vendored copy never out-revises the authority's")] LexiconConflict { id : CartridgeId , nsid : String , other : Box < CartridgeId > , }, # [error ("cannot substitute for `{id}`: {reason}")] InvalidSubstitution { id : CartridgeId , reason : String }, # [error ("nodule for cartridge `{0}` is not installed")] UnknownCartridge (CartridgeId), # [error ("nodule for cartridge `{0}` declares no config schema")] NoConfigSchema (CartridgeId) }
+pub enum big_nodule_core::protocol::NodulesError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("nodule state failed: {0}")] Storage (String), # [error ("the package was refused: {0}")] Rejected (String), # [error ("nodule for cartridge `{0}` is not installed")] UnknownCartridge (CartridgeId), # [error ("nodule for cartridge `{0}` declares no config schema")] NoConfigSchema (CartridgeId) }
+pub enum big_nodule_core::providers::Unresolved { # [doc = " No enabled provider offers the contract."] NoProvider, # [doc = " More than one does. Disabling one resolves it, as with dispatch's `Ambiguous`."] Ambiguous { providers : Vec < String > }, # [doc = " The one provider's Lexicon is older than the request's `minRevision`."] RevisionTooOld { provider : String , required : u32 , offered : u32 , }, # [doc = " The contract is now provided by another cartridge than the one recorded. See"] # [doc = " [`RequestStatus::evaluate`]."] ProviderChanged { from : String , to : String } }
 pub impl big_nodule_core::Nodule::fn admit (& self , authority : Option < & str >) -> Result < Admitted >
 pub impl big_nodule_core::Nodule::fn bind_operations (& self , grants : & DispatchScope) -> (DispatchScope , DispatchScope)
 pub impl big_nodule_core::Nodule::fn datum_lexicons (& self) -> impl Iterator < Item = & IndexMap < String , Value > >
@@ -36,32 +36,32 @@ pub impl big_nodule_core::Nodule::fn operation_requests (& self) -> impl Iterato
 pub impl big_nodule_core::Nodule::fn registrable_datums (& self , authority : Option < & str >) -> RegistrableDatums < '_ >
 pub impl big_nodule_core::Nodule::fn unmet_requests < 'a > (& 'a self , granted : & 'a DispatchScope ,) -> impl Iterator < Item = & 'a Request >
 pub impl big_nodule_core::Nodule::fn validate_config (& self , settings : & IndexMap < String , Value > , path : & str) -> Result < () >
-pub impl big_nodule_core::config::AdmissionCache::fn admission (& self , plug_id : & PlugId , install : & NoduleInstall) -> Arc < Admission >
+pub impl big_nodule_core::config::AdmissionCache::fn admission (& self , cartridge_id : & CartridgeId , install : & NoduleInstall) -> Arc < Admission >
 pub impl big_nodule_core::config::AdmissionCache::fn new () -> Self
 pub impl big_nodule_core::config::DatumSlot < T >::fn accepted (& self) -> Option < & T >
 pub impl big_nodule_core::config::DatumSlot < T >::fn is_absent (& self) -> bool
-pub impl big_nodule_core::config::NoduleConfig::fn admit (& mut self , cache : & AdmissionCache , plug : & Plug , drawers : Option < BTreeMap < DrawerId , DrawerAccess > > ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn admit (& mut self , cache : & AdmissionCache , cartridge : & Cartridge , drawers : Option < BTreeMap < DrawerId , DrawerAccess > > ,) -> Result < InstalledNodule , InventoryError >
 pub impl big_nodule_core::config::NoduleConfig::fn carried_keys (& self) -> & BTreeMap < DatumKey , DatumRead >
-pub impl big_nodule_core::config::NoduleConfig::fn configure (& mut self , plug_id : & PlugId , settings : IndexMap < String , Value > ,) -> Result < InstalledNodule , InventoryError >
-pub impl big_nodule_core::config::NoduleConfig::fn entries (& self) -> & BTreeMap < PlugId , NoduleEntry >
-pub impl big_nodule_core::config::NoduleConfig::fn entry (& self , plug_id : & PlugId) -> Option < & NoduleEntry >
+pub impl big_nodule_core::config::NoduleConfig::fn configure (& mut self , cartridge_id : & CartridgeId , settings : IndexMap < String , Value > ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn entries (& self) -> & BTreeMap < CartridgeId , NoduleEntry >
+pub impl big_nodule_core::config::NoduleConfig::fn entry (& self , cartridge_id : & CartridgeId) -> Option < & NoduleEntry >
 pub impl big_nodule_core::config::NoduleConfig::fn new () -> Self
 pub impl big_nodule_core::config::NoduleConfig::fn remove_carried_key (& mut self , key : & DatumKey) -> bool
-pub impl big_nodule_core::config::NoduleConfig::fn resolve (& self , cache : & AdmissionCache) -> BTreeMap < PlugId , NoduleResolution >
-pub impl big_nodule_core::config::NoduleConfig::fn set_drawer_grants (& mut self , plug_id : & PlugId , drawers : BTreeMap < DrawerId , DrawerAccess > ,) -> Result < InstalledNodule , InventoryError >
-pub impl big_nodule_core::config::NoduleConfig::fn set_enabled (& mut self , cache : & AdmissionCache , plug_id : & PlugId , enabled : bool ,) -> Result < InstalledNodule , InventoryError >
-pub impl big_nodule_core::config::NoduleConfig::fn set_operation_grants (& mut self , plug_id : & PlugId , operations : DispatchScope ,) -> Result < InstalledNodule , InventoryError >
-pub impl big_nodule_core::config::NoduleConfig::fn set_substitution (& mut self , cache : & AdmissionCache , plug_id : & PlugId , by : Option < PlugId > ,) -> Result < () , InventoryError >
-pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , plug_id : & PlugId) -> Result < () , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn resolve (& self , cache : & AdmissionCache) -> BTreeMap < CartridgeId , NoduleResolution >
+pub impl big_nodule_core::config::NoduleConfig::fn set_drawer_grants (& mut self , cartridge_id : & CartridgeId , drawers : BTreeMap < DrawerId , DrawerAccess > ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn set_enabled (& mut self , cache : & AdmissionCache , cartridge_id : & CartridgeId , enabled : bool ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn set_operation_grants (& mut self , cartridge_id : & CartridgeId , operations : DispatchScope ,) -> Result < InstalledNodule , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn set_substitution (& mut self , cache : & AdmissionCache , cartridge_id : & CartridgeId , by : Option < CartridgeId > ,) -> Result < () , InventoryError >
+pub impl big_nodule_core::config::NoduleConfig::fn uninstall (& mut self , cartridge_id : & CartridgeId) -> Result < () , InventoryError >
 pub impl big_nodule_core::config::NoduleEntry::fn is_empty (& self) -> bool
-pub impl big_nodule_core::config::NoduleInstall::fn decode_plug (& self) -> Result < Plug , String >
-pub impl big_nodule_core::config::NoduleInstall::fn from_plug (plug : & Plug , enabled : bool) -> Self
+pub impl big_nodule_core::config::NoduleInstall::fn decode_cartridge (& self) -> Result < Cartridge , String >
+pub impl big_nodule_core::config::NoduleInstall::fn from_cartridge (cartridge : & Cartridge , enabled : bool) -> Self
 pub impl big_nodule_core::config::NoduleSettings::fn new (values : IndexMap < String , Value >) -> Self
 pub impl big_nodule_core::inventory::InstalledNodule::fn artifact_states (& self) -> BTreeMap < String , ArtifactState >
 pub impl big_nodule_core::inventory::InstalledNodule::fn is_configured (& self) -> bool
 pub impl big_nodule_core::inventory::InstalledNodule::fn readiness (& self) -> Readiness
 pub impl big_nodule_core::protocol::NoduleScope::fn covers (& self , other : & Self) -> bool
-pub impl big_nodule_core::providers::ProviderIndex::fn new (resolved : & BTreeMap < PlugId , NoduleResolution >) -> Self
+pub impl big_nodule_core::providers::ProviderIndex::fn new (resolved : & BTreeMap < CartridgeId , NoduleResolution >) -> Self
 pub impl big_nodule_core::providers::ProviderIndex::fn offers (& self , nsid : & str , native : impl IntoIterator < Item = String > ,) -> Vec < LockedProvider >
 pub impl big_nodule_core::providers::RequestStatus::fn evaluate (request : & Request , offers : & [LockedProvider] , pinned : Option < & LockedProvider > ,) -> Self
 pub mod big_nodule_core::config
@@ -82,27 +82,27 @@ pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < NoduleIn
 pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId , EntryAccess >, operations: Option < OperationGrants >, extra: Extra }
 pub struct big_nodule_core::config::NoduleInstall  { envelope: IndexMap < String , Value >, revision: Revision, enabled: bool, extra: Extra }
 pub struct big_nodule_core::config::NoduleSettings  { values: IndexMap < String , Value >, extra: Extra }
-pub struct big_nodule_core::config::NoduleSubstitution  { by: PlugId, extra: Extra }
+pub struct big_nodule_core::config::NoduleSubstitution  { by: CartridgeId, extra: Extra }
 pub struct big_nodule_core::config::OperationGrants  { operations: Vec < String >, authorities: Vec < String >, extra: Extra }
-pub struct big_nodule_core::inventory::FilledBy  { plug_id: PlugId, version: Version }
-pub struct big_nodule_core::inventory::InstalledNodule  { plug_id: PlugId, version: Version, revision: Revision, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, config: Option < IndexMap < String , Value > >, filled_by: Option < FilledBy > }
-pub struct big_nodule_core::protocol::AdmitNodule  { plug: Plug, drawers: Option < BTreeMap < DrawerId , DrawerAccess > > }
-pub struct big_nodule_core::protocol::ConfigureNodule  { plug_id: PlugId, settings: IndexMap < String , Value > }
-pub struct big_nodule_core::protocol::ConfirmNoduleResolution  { plug_id: PlugId, binding: String }
-pub struct big_nodule_core::protocol::GetNodule  { plug_id: PlugId }
+pub struct big_nodule_core::inventory::FilledBy  { cartridge_id: CartridgeId, version: Version }
+pub struct big_nodule_core::inventory::InstalledNodule  { cartridge_id: CartridgeId, version: Version, revision: Revision, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, config: Option < IndexMap < String , Value > >, filled_by: Option < FilledBy > }
+pub struct big_nodule_core::protocol::AdmitNodule  { cartridge: Cartridge, drawers: Option < BTreeMap < DrawerId , DrawerAccess > > }
+pub struct big_nodule_core::protocol::ConfigureNodule  { cartridge_id: CartridgeId, settings: IndexMap < String , Value > }
+pub struct big_nodule_core::protocol::ConfirmNoduleResolution  { cartridge_id: CartridgeId, binding: String }
+pub struct big_nodule_core::protocol::GetNodule  { cartridge_id: CartridgeId }
 pub struct big_nodule_core::protocol::ListNodules  {  }
 pub struct big_nodule_core::protocol::MintNoduleCapability  { scope: NoduleScope, rights: Rights }
 pub struct big_nodule_core::protocol::NoduleActor  { actor_id: Uuid7, url: String, public_key: MultibaseKey }
 pub struct big_nodule_core::protocol::NoduleGrantStatus  { desired: DrawerAccess, granted: bool, error: Option < String > }
 pub struct big_nodule_core::protocol::NoduleInitStatus  { attempts: u32, error: Option < String >, waiting_on: Option < String > }
 pub struct big_nodule_core::protocol::NoduleOperationGrantStatus  { desired: DispatchScope, unrequested: DispatchScope, granted: bool, error: Option < String > }
-pub struct big_nodule_core::protocol::NoduleRecord  { plug_id: PlugId, version: Option < Version >, revision: Option < Revision >, actor: Option < NoduleActor >, filled_by: Option < FilledBy >, enabled: bool, readiness: Readiness, config: Option < IndexMap < String , Value > >, artifacts: BTreeMap < String , ArtifactState >, drawers: BTreeMap < DrawerId , NoduleGrantStatus >, operations: Option < NoduleOperationGrantStatus >, requests: BTreeMap < String , RequestStatus >, init: Option < NoduleInitStatus >, observed_heads: Vec < ChangeHash >, applied_heads: Option < Vec < ChangeHash > >, error: Option < String > }
-pub struct big_nodule_core::protocol::NoduleScope  { admit: bool, plugs: BTreeSet < PlugId > }
-pub struct big_nodule_core::protocol::SetNoduleDrawerGrants  { plug_id: PlugId, drawers: BTreeMap < DrawerId , DrawerAccess > }
-pub struct big_nodule_core::protocol::SetNoduleEnabled  { plug_id: PlugId, enabled: bool }
-pub struct big_nodule_core::protocol::SetNoduleOperationGrants  { plug_id: PlugId, operations: DispatchScope }
-pub struct big_nodule_core::protocol::SetNoduleSubstitution  { plug_id: PlugId, by: Option < PlugId > }
-pub struct big_nodule_core::protocol::UninstallNodule  { plug_id: PlugId }
+pub struct big_nodule_core::protocol::NoduleRecord  { cartridge_id: CartridgeId, version: Option < Version >, revision: Option < Revision >, actor: Option < NoduleActor >, filled_by: Option < FilledBy >, enabled: bool, readiness: Readiness, config: Option < IndexMap < String , Value > >, artifacts: BTreeMap < String , ArtifactState >, drawers: BTreeMap < DrawerId , NoduleGrantStatus >, operations: Option < NoduleOperationGrantStatus >, requests: BTreeMap < String , RequestStatus >, init: Option < NoduleInitStatus >, observed_heads: Vec < ChangeHash >, applied_heads: Option < Vec < ChangeHash > >, error: Option < String > }
+pub struct big_nodule_core::protocol::NoduleScope  { admit: bool, cartridges: BTreeSet < CartridgeId > }
+pub struct big_nodule_core::protocol::SetNoduleDrawerGrants  { cartridge_id: CartridgeId, drawers: BTreeMap < DrawerId , DrawerAccess > }
+pub struct big_nodule_core::protocol::SetNoduleEnabled  { cartridge_id: CartridgeId, enabled: bool }
+pub struct big_nodule_core::protocol::SetNoduleOperationGrants  { cartridge_id: CartridgeId, operations: DispatchScope }
+pub struct big_nodule_core::protocol::SetNoduleSubstitution  { cartridge_id: CartridgeId, by: Option < CartridgeId > }
+pub struct big_nodule_core::protocol::UninstallNodule  { cartridge_id: CartridgeId }
 pub struct big_nodule_core::providers::LockedProvider  { contract: String, provider: String, version: Option < Version >, lexicon_revision: Option < u32 > }
 pub struct big_nodule_core::providers::ProviderIndex  {  }
 pub struct big_nodule_core::providers::RequestStatus  { contract: String, locked: Option < LockedProvider >, unresolved: Option < Unresolved > }

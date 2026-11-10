@@ -50,6 +50,7 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
+use big_cartridges_core::CartridgeId;
 use big_dispatch_core::DispatchProtocol;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::config_universe;
@@ -69,7 +70,6 @@ use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
 use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::protocol::UninstallNodule;
-use big_plugs_core::PlugId;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
@@ -206,19 +206,27 @@ impl NoduleService {
         }
     }
 
-    /// A scoped handle admits only the plug ids in its `plugs`, and only with `admit` set.
-    fn require_admit(&self, caller: &Invocation<NoduleScope>, plug_id: &PlugId) -> Res<()> {
+    /// A scoped handle admits only the cartridge ids in its `cartridges`, and only with `admit` set.
+    fn require_admit(
+        &self,
+        caller: &Invocation<NoduleScope>,
+        cartridge_id: &CartridgeId,
+    ) -> Res<()> {
         match self.scope_of(caller)? {
-            Some(scope) if !(scope.admit && scope.plugs.contains(plug_id)) => {
+            Some(scope) if !(scope.admit && scope.cartridges.contains(cartridge_id)) => {
                 Err(NodulesError::Denied)
             }
             _ => Ok(()),
         }
     }
 
-    fn require_manage(&self, caller: &Invocation<NoduleScope>, plug_id: &PlugId) -> Res<()> {
+    fn require_manage(
+        &self,
+        caller: &Invocation<NoduleScope>,
+        cartridge_id: &CartridgeId,
+    ) -> Res<()> {
         match self.scope_of(caller)? {
-            Some(scope) if !scope.plugs.contains(plug_id) => Err(NodulesError::Denied),
+            Some(scope) if !scope.cartridges.contains(cartridge_id) => Err(NodulesError::Denied),
             _ => Ok(()),
         }
     }
@@ -255,12 +263,12 @@ impl NoduleService {
         params: AdmitNodule,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_admit(&caller, &params.plug.id)?;
+        self.require_admit(&caller, &params.cartridge.id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Admit {
                 context,
-                plug: Box::new(params.plug),
+                cartridge: Box::new(params.cartridge),
                 drawers: params.drawers,
                 reply,
             })
@@ -274,12 +282,12 @@ impl NoduleService {
         params: ConfigureNodule,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Configure {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 settings: params.settings,
                 reply,
             })
@@ -293,12 +301,12 @@ impl NoduleService {
         params: SetNoduleEnabled,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetEnabled {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 enabled: params.enabled,
                 reply,
             })
@@ -312,12 +320,12 @@ impl NoduleService {
         params: ConfirmNoduleResolution,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::ConfirmResolution {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 binding: params.binding,
                 reply,
             })
@@ -331,7 +339,7 @@ impl NoduleService {
         params: SetNoduleSubstitution,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         if let Some(by) = &params.by {
             self.require_manage(&caller, by)?;
         }
@@ -339,7 +347,7 @@ impl NoduleService {
         self.state
             .ask(|reply| Command::SetSubstitution {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 by: params.by,
                 reply,
             })
@@ -353,12 +361,12 @@ impl NoduleService {
         params: SetNoduleDrawerGrants,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetDrawerGrants {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 drawers: params.drawers,
                 reply,
             })
@@ -372,12 +380,12 @@ impl NoduleService {
         params: SetNoduleOperationGrants,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetOperationGrants {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 operations: params.operations,
                 reply,
             })
@@ -391,12 +399,12 @@ impl NoduleService {
         params: UninstallNodule,
     ) -> Res<()> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Uninstall {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 reply,
             })
             .await
@@ -409,12 +417,12 @@ impl NoduleService {
         params: GetNodule,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Get {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 reply,
             })
             .await

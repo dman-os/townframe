@@ -11,7 +11,7 @@ allowed_dependencies = [
     "big_node",
     "big_nodule",
     "big_nodule_core",
-    "big_plugs_core",
+    "big_cartridges_core",
     "big_repo",
     "method_core",
     "secrets_rs",

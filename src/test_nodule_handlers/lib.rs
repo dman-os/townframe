@@ -74,7 +74,7 @@ struct Relay {
 }
 
 // The NSIDs are bare route names: `Fixture::route` matches the last segment of whatever
-// authority the plug declared, so these `XRPC.nsid`s are never compared.
+// authority the cartridge declared, so these `XRPC.nsid`s are never compared.
 method_core::methods! {
     error = FixtureError, nsid_prefix = "";
     Echo => Value, procedure, "echo";

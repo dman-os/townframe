@@ -9,6 +9,12 @@ use async_trait::async_trait;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::example_cartridge;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -21,12 +27,6 @@ use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::UninstallNodule;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
@@ -79,23 +79,23 @@ impl Provider for Echo {
 
 /// A package serving `serves` through a handler component. `serves` is declared in its own
 /// Lexicons when it lives under `org.example.<name>`, otherwise it is a foreign operation.
-pub(super) fn serving_plug(plug_id: &str, serves: &str) -> Plug {
-    serving_plug_of(
-        plug_id,
+pub(super) fn serving_cartridge(cartridge_id: &str, serves: &str) -> Cartridge {
+    serving_cartridge_of(
+        cartridge_id,
         "1.0.0",
         serves,
-        plug_id.rsplit('/').next().unwrap(),
+        cartridge_id.rsplit('/').next().unwrap(),
     )
 }
 
-/// [`serving_plug`] at `version`, whose handler artifact is `handler_bytes`.
-pub(super) fn serving_plug_of(
-    plug_id: &str,
+/// [`serving_cartridge`] at `version`, whose handler artifact is `handler_bytes`.
+pub(super) fn serving_cartridge_of(
+    cartridge_id: &str,
     version: &str,
     serves: &str,
     handler_bytes: &str,
-) -> Plug {
-    let name = plug_id.rsplit('/').next().unwrap();
+) -> Cartridge {
+    let name = cartridge_id.rsplit('/').next().unwrap();
     let nodule_id = format!("org.example.{name}");
     let mut nodule = Nodule::default();
     if serves.starts_with(&format!("{nodule_id}.")) {
@@ -117,22 +117,23 @@ pub(super) fn serving_plug_of(
         extra: Default::default(),
     });
     nodule.implements = vec![serves.to_owned()];
-    let mut plug = Plug::new(plug_id.parse().unwrap(), version.parse().unwrap());
-    plug.authority = Some(nodule_id);
-    plug.artifacts.push(Artifact {
+    let mut cartridge = Cartridge::new(cartridge_id.parse().unwrap(), version.parse().unwrap());
+    cartridge.authority = Some(nodule_id);
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(handler_bytes.as_bytes()),
         size: Some(handler_bytes.len() as u64),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: lexicon(serde_json::to_value(nodule).unwrap()),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
 impl Node {
@@ -172,11 +173,11 @@ impl Node {
             .await
     }
 
-    pub(super) async fn set_enabled(&self, plug_id: &str, enabled: bool) {
+    pub(super) async fn set_enabled(&self, cartridge_id: &str, enabled: bool) {
         self.call(
             self.operator(),
             SetNoduleEnabled {
-                plug_id: id(plug_id),
+                cartridge_id: id(cartridge_id),
                 enabled,
             },
         )
@@ -194,16 +195,19 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
     let mut node = super::node().await;
     let operator = node.operator();
     let own = "org.example.photos.list";
-    node.admit(operator, serving_plug(example_plug!("photos"), own))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        serving_cartridge(example_cartridge!("photos"), own),
+    )
+    .await
+    .unwrap();
 
     // Admitted but disabled is unbound: it claims nothing yet.
     assert_eq!(
         node.invoke(operator, own, json!({})).await,
         Err(DispatchError::UnknownOperation)
     );
-    node.set_enabled(example_plug!("photos"), true).await;
+    node.set_enabled(example_cartridge!("photos"), true).await;
     // Its handler artifact is not fetched and there is no executor, so the operation is known
     // but not serving.
     assert_eq!(
@@ -213,10 +217,13 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
         )))
     );
     let entry = node.dispatch.router.resolve(own).unwrap();
-    assert_eq!(entry.provider_id, example_plug!("photos"));
+    assert_eq!(entry.provider_id, example_cartridge!("photos"));
     assert_eq!(entry.operation_kind, Some(OperationKind::Query));
     // The nodule's record reports the readiness dispatch answers with.
-    let record = node.get(operator, example_plug!("photos")).await.unwrap();
+    let record = node
+        .get(operator, example_cartridge!("photos"))
+        .await
+        .unwrap();
     assert_eq!(record.readiness, entry.state.readiness());
     assert_eq!(record.readiness, Readiness::ArtifactsUnavailable);
 
@@ -227,16 +234,16 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
         Err(DispatchError::NotReady { .. })
     ));
 
-    node.set_enabled(example_plug!("photos"), false).await;
+    node.set_enabled(example_cartridge!("photos"), false).await;
     assert_eq!(
         node.invoke(operator, own, json!({})).await,
         Err(DispatchError::UnknownOperation)
     );
-    node.set_enabled(example_plug!("photos"), true).await;
+    node.set_enabled(example_cartridge!("photos"), true).await;
     node.call(
         operator,
         UninstallNodule {
-            plug_id: id(example_plug!("photos")),
+            cartridge_id: id(example_cartridge!("photos")),
         },
     )
     .await
@@ -253,19 +260,19 @@ async fn two_nodules_implementing_one_operation_are_ambiguous_until_one_is_disab
     let node = super::node().await;
     let operator = node.operator();
     let shared = "org.example.shared.ping";
-    for plug_id in [example_plug!("alpha"), example_plug!("beta")] {
-        node.admit(operator, serving_plug(plug_id, shared))
+    for cartridge_id in [example_cartridge!("alpha"), example_cartridge!("beta")] {
+        node.admit(operator, serving_cartridge(cartridge_id, shared))
             .await
             .unwrap();
-        node.set_enabled(plug_id, true).await;
+        node.set_enabled(cartridge_id, true).await;
     }
     assert_eq!(
         node.invoke(operator, shared, json!({})).await,
         Err(not_ready(NotReadyReason::Ambiguous))
     );
-    node.set_enabled(example_plug!("alpha"), false).await;
+    node.set_enabled(example_cartridge!("alpha"), false).await;
     let entry = node.dispatch.router.resolve(shared).unwrap();
-    assert_eq!(entry.provider_id, example_plug!("beta"));
+    assert_eq!(entry.provider_id, example_cartridge!("beta"));
     assert_eq!(entry.operation_kind, None);
     assert_eq!(
         node.invoke(operator, shared, json!({})).await,

@@ -8,15 +8,15 @@
 //! vanish without every dependent being re-evaluated in that same pass.
 //!
 //! Every request resolves the same way. A data request (one with `access`) names a datum NSID,
-//! and its provider is the enabled plug that holds the datum (declares the record under its
-//! authority); a copy another plug vendors is not an offer, because implementing or vendoring is
+//! and its provider is the enabled cartridge that holds the datum (declares the record under its
+//! authority); a copy another cartridge vendors is not an offer, because implementing or vendoring is
 //! not owning (ADR 028 §5). The datums the node itself registers at boot are native offers,
 //! like routes registered straight into dispatch.
 
 use crate::config::NoduleResolution;
-use big_plugs_core::PlugId;
-use big_plugs_core::Version;
-use big_plugs_core::request::Request;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Version;
+use big_cartridges_core::request::Request;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -28,14 +28,14 @@ use std::collections::BTreeSet;
 #[serde(rename_all = "camelCase")]
 pub struct LockedProvider {
     pub contract: String,
-    /// The provider's plug id for a nodule; the registrant's own name for a native provider
+    /// The provider's cartridge id for a nodule; the registrant's own name for a native provider
     /// registered straight into dispatch's routing table.
     pub provider: String,
     /// The provider's package version, absent for a native provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<Version>,
     /// The `revision` of the provider's Lexicon for the contract, when it carries one that
-    /// declares it. Distinct from a plug revision, which is a content hash.
+    /// declares it. Distinct from a cartridge revision, which is a content hash.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lexicon_revision: Option<u32>,
 }
@@ -54,7 +54,7 @@ pub enum Unresolved {
         required: u32,
         offered: u32,
     },
-    /// The contract is now provided by another plug than the one recorded. See
+    /// The contract is now provided by another cartridge than the one recorded. See
     /// [`RequestStatus::evaluate`].
     ProviderChanged { from: String, to: String },
 }
@@ -65,7 +65,7 @@ pub enum Unresolved {
 pub struct RequestStatus {
     pub contract: String,
     /// The lockfile entry after this evaluation: the provider it resolved to, or the entry
-    /// recorded earlier while unresolved (so a missing provider coming back as the same plug
+    /// recorded earlier while unresolved (so a missing provider coming back as the same cartridge
     /// resolves without asking again).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locked: Option<LockedProvider>,
@@ -78,12 +78,12 @@ impl RequestStatus {
     /// recorded for its binding (one for this contract, or none).
     ///
     /// Exactly one offer resolves, provided its Lexicon revision (when it declares one) is at
-    /// least the request's `minRevision`. With a pin, the offer must also be the pinned plug:
+    /// least the request's `minRevision`. With a pin, the offer must also be the pinned cartridge:
     /// the first resolution needs no confirmation (enabling the nodule is the consent), but a
-    /// different plug now providing the contract is a different publisher's code receiving the
-    /// nodule's calls and what it sends, so plug identity is the consent boundary and
+    /// different cartridge now providing the contract is a different publisher's code receiving the
+    /// nodule's calls and what it sends, so cartridge identity is the consent boundary and
     /// [`Unresolved::ProviderChanged`] holds the request until the operator confirms. The same
-    /// plug at another version is an ordinary upgrade by the same publisher: it re-pins
+    /// cartridge at another version is an ordinary upgrade by the same publisher: it re-pins
     /// silently. Two or more offers are ambiguous, never decided by order.
     pub fn evaluate(
         request: &Request,
@@ -138,20 +138,20 @@ pub struct ProviderIndex {
     /// Every nodule in the snapshot, enabled or not: a registration under one of these ids in
     /// dispatch's routing table is the nodule service's own, so the snapshot decides it (the
     /// table lags it until that nodule's turn in the pass).
-    nodules: BTreeSet<PlugId>,
+    nodules: BTreeSet<CartridgeId>,
 }
 
 impl ProviderIndex {
     /// Indexes what each enabled, admitted nodule implements and the datum records it holds.
     ///
     /// A slot filled by a substitution (see [`crate::inventory::InstalledNodule::filled_by`]) is
-    /// offered under the slot's plug id with the filler's version and Lexicons. Dependents name
+    /// offered under the slot's cartridge id with the filler's version and Lexicons. Dependents name
     /// the slot, so a substitution is not a provider change for them: their pin stays on the slot
     /// and only its version moves, as for any upgrade. The operator's substitution is itself the
     /// consent, and enablement survives it (ADR 028 §3).
-    pub fn new(resolved: &BTreeMap<PlugId, NoduleResolution>) -> Self {
+    pub fn new(resolved: &BTreeMap<CartridgeId, NoduleResolution>) -> Self {
         let mut offers: BTreeMap<String, Vec<LockedProvider>> = BTreeMap::new();
-        for (plug_id, resolution) in resolved {
+        for (cartridge_id, resolution) in resolved {
             let NoduleResolution::Admitted { installed, .. } = resolution else {
                 continue;
             };
@@ -164,7 +164,7 @@ impl ProviderIndex {
                     .or_default()
                     .push(LockedProvider {
                         contract: nsid.clone(),
-                        provider: plug_id.to_string(),
+                        provider: cartridge_id.to_string(),
                         version: Some(installed.version.clone()),
                         lexicon_revision: installed.nodule.lexicon_revision(nsid),
                     });
@@ -176,7 +176,7 @@ impl ProviderIndex {
                     .or_default()
                     .push(LockedProvider {
                         contract: nsid.to_owned(),
-                        provider: plug_id.to_string(),
+                        provider: cartridge_id.to_string(),
                         version: Some(installed.version.clone()),
                         lexicon_revision: installed.nodule.lexicon_revision(nsid),
                     });
@@ -203,8 +203,8 @@ impl ProviderIndex {
                 .into_iter()
                 .filter(|provider_id| {
                     !provider_id
-                        .parse::<PlugId>()
-                        .is_ok_and(|plug_id| self.nodules.contains(&plug_id))
+                        .parse::<CartridgeId>()
+                        .is_ok_and(|cartridge_id| self.nodules.contains(&cartridge_id))
                 })
                 .map(|provider| LockedProvider {
                     contract: nsid.to_owned(),
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn another_plug_is_a_change_and_the_same_plug_at_a_new_version_is_not() {
+    fn another_cartridge_is_a_change_and_the_same_cartridge_at_a_new_version_is_not() {
         let pin = offer("p", Some(1));
         let mut upgraded = offer("p", Some(2));
         upgraded.version = Some("1.1.0".parse().unwrap());

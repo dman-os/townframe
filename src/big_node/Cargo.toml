@@ -18,8 +18,8 @@ big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule.workspace = true
 big_nodule_wasm.workspace = true
-big_plugs.workspace = true
-big_plugs_core.workspace = true
+big_cartridges.workspace = true
+big_cartridges_core.workspace = true
 big_repo.workspace = true
 big_nodule_core.workspace = true
 big_sync.workspace = true
@@ -43,7 +43,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 method_core.workspace = true
-big_plugs_core = { workspace = true, features = ["test-support"] }
+big_cartridges_core = { workspace = true, features = ["test-support"] }
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 rand.workspace = true

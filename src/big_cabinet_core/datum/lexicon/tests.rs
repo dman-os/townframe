@@ -52,7 +52,7 @@ fn a_dynamic_map_still_may_not_admit_a_non_canonical_value() {
 }
 
 /// A named type travels beside the datum that reaches it and is referenced locally, which is
-/// what lets a plug be read on its own. Inlining it would lose the name a peer points at, and
+/// what lets a cartridge be read on its own. Inlining it would lose the name a peer points at, and
 /// leaving the reference alone would publish a file that does not resolve.
 #[test]
 fn a_named_definition_is_carried_and_referenced_locally() {

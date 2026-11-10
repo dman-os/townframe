@@ -17,7 +17,7 @@ pub mod big_nodule::wire
 pub struct big_nodule::NoduleService  {  }
 pub struct big_nodule::Nodules  { host: Arc < Host < NodulesHandler > >, client: Client < NodulesProtocol > }
 pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, drawers: Client < DrawersProtocol >, config_drawer: DrawerId, actor: Actor, actor_path: String, namespace: Namespace, operator: Uuid7, dispatch: Arc < big_dispatch :: Router >, dispatch_client: Client < DispatchProtocol >, dispatch_authority: CapId, executor: Option < Arc < dyn executor :: NoduleExecutor > >, schemas: Arc < SchemaRepo >, sql: Database }
-pub struct big_nodule::executor::HandlerSpec  { plug_id: PlugId, revision: Revision, handler: Artifact, actor: Actor, capability: Option < CapId >, operations: BTreeMap < String , Option < OperationKind > >, reensure: Reensure }
+pub struct big_nodule::executor::HandlerSpec  { cartridge_id: CartridgeId, revision: Revision, handler: Artifact, actor: Actor, capability: Option < CapId >, operations: BTreeMap < String , Option < OperationKind > >, reensure: Reensure }
 pub struct big_nodule::executor::Reensure  {  }
-pub trait big_nodule::executor::NoduleExecutor { fn kind (& self) -> & 'static str; async fn ensure (& self , spec : & HandlerSpec) -> Hosted; fn hosts (& self , plug_id : & PlugId) -> bool; async fn retire (& self , plug_id : & PlugId) }
+pub trait big_nodule::executor::NoduleExecutor { fn kind (& self) -> & 'static str; async fn ensure (& self , spec : & HandlerSpec) -> Hosted; fn hosts (& self , cartridge_id : & CartridgeId) -> bool; async fn retire (& self , cartridge_id : & CartridgeId) }
 pub type big_nodule::NodulesHandler = Arc < NoduleService >

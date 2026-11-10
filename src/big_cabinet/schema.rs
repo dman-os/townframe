@@ -150,7 +150,7 @@ pub enum SchemaRepoError {
 
 #[derive(Debug, Clone)]
 struct OwnedSidecar {
-    plug: Universe,
+    cartridge: Universe,
     dependencies: Vec<Universe>,
 }
 
@@ -160,7 +160,7 @@ impl OwnedSidecar {
             .validate()
             .map_err(|source| SchemaRepoError::SidecarInvalid { source })?;
         Ok(Self {
-            plug: bundle.plug.clone(),
+            cartridge: bundle.cartridge.clone(),
             dependencies: bundle
                 .dependencies
                 .iter()
@@ -170,7 +170,7 @@ impl OwnedSidecar {
     }
 
     fn borrowed(&self) -> Bundle<'_> {
-        Bundle::new(&self.plug, self.dependencies.iter().collect())
+        Bundle::new(&self.cartridge, self.dependencies.iter().collect())
     }
 }
 
@@ -206,8 +206,8 @@ impl SchemaHandle {
 }
 
 /// The datum schemas this node knows. The boot set (the core datums and the groups the embedder
-/// registers) is fixed for the life of the repo; beyond it, a plug's Lexicons are registered
-/// under an owner and retired with it, live, as the plug is enabled and disabled. Readers hold a
+/// registers) is fixed for the life of the repo; beyond it, a cartridge's Lexicons are registered
+/// under an owner and retired with it, live, as the cartridge is enabled and disabled. Readers hold a
 /// [`SchemaHandle`], so a retired schema stays usable to whoever already resolved it and only
 /// stops resolving for new readers.
 #[derive(Debug)]
@@ -363,7 +363,7 @@ impl SchemaRepo {
     }
 
     /// Whether `datum_tag` belongs to the boot set: known to the node itself rather than
-    /// registered by a plug.
+    /// registered by a cartridge.
     pub fn is_boot_schema(&self, datum_tag: &str) -> bool {
         let state = self.read();
         state.known.contains_key(datum_tag) && !state.owners.contains_key(datum_tag)

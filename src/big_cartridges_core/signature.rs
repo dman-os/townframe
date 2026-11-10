@@ -1,16 +1,16 @@
-//! Publisher signatures on plug envelopes (ADR 028 §2–§3).
+//! Publisher signatures on cartridge envelopes (ADR 028 §2–§3).
 //!
-//! A version is signed by the DID that owns its plug id's namespace, and every node checks that
-//! signature itself before it accepts the version, so provenance never depends on how the plug
+//! A version is signed by the DID that owns its cartridge id's namespace, and every node checks that
+//! signature itself before it accepts the version, so provenance never depends on how the cartridge
 //! was delivered or on who relayed it.
 //!
-//! **What is signed.** The signature is a member of the envelope ([`Plug::signature`]) but is not
-//! part of what [`Plug::revision`] hashes: the revision is the canonical JSON of the envelope
+//! **What is signed.** The signature is a member of the envelope ([`Cartridge::signature`]) but is not
+//! part of what [`Cartridge::revision`] hashes: the revision is the canonical JSON of the envelope
 //! *without* its signature. The signed message is [`SIGNING_DOMAIN`] followed by those 32 revision
 //! bytes. Two consequences follow. The revision stays the immutability key, so attaching or
 //! replacing a signature never makes a version "different content". And the signature covers
 //! every member of the envelope, unknown ones included, because the revision does. The domain
-//! prefix keeps a signature made for a plug from being valid as any other signed structure under
+//! prefix keeps a signature made for a cartridge from being valid as any other signed structure under
 //! the same key, which matters because the node signs with its own long-lived key.
 //!
 //! **Which keys verify.** Only `did:key` carries its public key in the identifier, so it is the
@@ -25,18 +25,18 @@
 //! additive value, not a reinterpretation of existing bytes, and a verifier that does not know it
 //! refuses instead of guessing.
 
-use crate::Plug;
+use crate::Cartridge;
 use big_cabinet_core::datum::Extra;
 use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// The algorithm name [`PlugSignature::alg`] carries for Ed25519.
+/// The algorithm name [`CartridgeSignature::alg`] carries for Ed25519.
 pub const ED25519: &str = "ed25519";
 
 /// Prepended to the revision bytes before signing; see the module documentation.
-pub const SIGNING_DOMAIN: &[u8] = b"org.example.daybook.plug.signature.v1\0";
+pub const SIGNING_DOMAIN: &[u8] = b"org.example.daybook.cartridge.signature.v1\0";
 
 /// The multicodec varint of an Ed25519 public key, as `did:key` prefixes it.
 const ED25519_PUB_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -46,7 +46,7 @@ const ED25519_PUB_MULTICODEC: [u8; 2] = [0xed, 0x01];
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugSignature {
+pub struct CartridgeSignature {
     pub alg: String,
     /// The signature bytes as multibase base58btc.
     pub value: String,
@@ -85,7 +85,7 @@ fn did_key_public_key(namespace: &str) -> Result<VerifyingKey, SignatureError> {
         .strip_prefix("did:")
         .and_then(|rest| rest.split_once(':'))
         .map(|(method, _)| method)
-        .expect("a plug namespace is a syntactically valid DID");
+        .expect("a cartridge namespace is a syntactically valid DID");
     if method != "key" {
         return Err(SignatureError::UnsupportedMethod(method.to_owned()));
     }
@@ -104,7 +104,7 @@ fn did_key_public_key(namespace: &str) -> Result<VerifyingKey, SignatureError> {
         .map_err(|error| SignatureError::Malformed(format!("not a curve point: {error}")))
 }
 
-impl Plug {
+impl Cartridge {
     /// The bytes a publisher signs: [`SIGNING_DOMAIN`] and this envelope's revision.
     pub fn signing_message(&self) -> Vec<u8> {
         let mut message = SIGNING_DOMAIN.to_vec();
@@ -113,12 +113,12 @@ impl Plug {
     }
 
     /// Signs the envelope, replacing any signature it carried. `sign` receives
-    /// [`Plug::signing_message`] and returns the 64 Ed25519 signature bytes; taking a function
+    /// [`Cartridge::signing_message`] and returns the 64 Ed25519 signature bytes; taking a function
     /// lets the node sign without handing its key out. Nothing here checks that the signer is the
-    /// namespace's key: [`Plug::verify_signature`] does, wherever the envelope is accepted.
+    /// namespace's key: [`Cartridge::verify_signature`] does, wherever the envelope is accepted.
     pub fn sign_with(&mut self, sign: impl FnOnce(&[u8]) -> [u8; 64]) {
         let signature = sign(&self.signing_message());
-        self.signature = Some(PlugSignature {
+        self.signature = Some(CartridgeSignature {
             alg: ED25519.to_owned(),
             value: utils_rs::hash::encode_base58_multibase(signature),
             extra: Default::default(),

@@ -1,16 +1,16 @@
-//! The plug registry protocol (ADR 028 §1): the wire contract between the node-side registry
+//! The cartridge registry protocol (ADR 028 §1): the wire contract between the node-side registry
 //! service and whoever publishes to or reads from it.
 //!
 //! Every operation names its caller by the request's `Authorization: Bearer` credential (the
 //! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
 //! without one fails with `ContextError::Unauthenticated`. The credential is the operator's own identity
-//! capability, or a handle the registry minted through [`MintPlugsCapability`] that carries a
-//! [`PlugsScope`]. An arbitrary actor presenting its identity is refused. The registry does no
+//! capability, or a handle the registry minted through [`MintCartridgesCapability`] that carries a
+//! [`CartridgesScope`]. An arbitrary actor presenting its identity is refused. The registry does no
 //! enablement: it versions what is published and keeps a published version immutable, and each
 //! runtime decides for itself what to enable from it.
 
-use crate::Plug;
-use crate::PlugId;
+use crate::Cartridge;
+use crate::CartridgeId;
 use crate::Revision;
 use crate::Version;
 use crate::signature::SignatureError;
@@ -30,19 +30,19 @@ use std::collections::BTreeSet;
 
 /// What a minted registry handle may do. Without `publish` it reads the registry (list, get,
 /// watch); with it, it also publishes and removes. `namespaces` narrows publishing and removal to
-/// plugs whose id lives under one of those DIDs; absent means any namespace, which is what the
+/// cartridges whose id lives under one of those DIDs; absent means any namespace, which is what the
 /// operator's own identity has. A handle can only be minted with a scope its minter covers, so a
 /// namespace set only ever narrows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PlugsScope {
+pub struct CartridgesScope {
     #[serde(default)]
     pub publish: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespaces: Option<BTreeSet<String>>,
 }
 
-impl PlugsScope {
+impl CartridgesScope {
     pub fn covers(&self, other: &Self) -> bool {
         (self.publish || !other.publish)
             && match (&self.namespaces, &other.namespaces) {
@@ -53,7 +53,7 @@ impl PlugsScope {
             }
     }
 
-    /// Whether this scope may publish or remove plugs under `namespace`.
+    /// Whether this scope may publish or remove cartridges under `namespace`.
     pub fn may_publish_under(&self, namespace: &str) -> bool {
         self.publish
             && self
@@ -65,8 +65,8 @@ impl PlugsScope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MintPlugsCapability {
-    pub scope: PlugsScope,
+pub struct MintCartridgesCapability {
+    pub scope: CartridgesScope,
     pub rights: Rights,
 }
 
@@ -74,40 +74,40 @@ pub struct MintPlugsCapability {
 /// The envelope must carry the signature of its namespace DID, except that an unsigned envelope
 /// under the node's own publisher DID (see [`GetPublisher`]) is signed by the node. The same
 /// label with an identical envelope is an idempotent no-op; the same label with a different one
-/// is refused with [`PlugsError::VersionExists`]; a new label must be greater than every label
-/// the plug has or had ([`PlugsError::Downgrade`]).
+/// is refused with [`CartridgesError::VersionExists`]; a new label must be greater than every label
+/// the cartridge has or had ([`CartridgesError::Downgrade`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PublishPlugVersion {
-    pub envelope: Plug,
+pub struct PublishCartridgeVersion {
+    pub envelope: Cartridge,
 }
 
-/// The DID this node publishes under: the `did:key` of the node's Ed25519 signing key. Plug ids
+/// The DID this node publishes under: the `did:key` of the node's Ed25519 signing key. Cartridge ids
 /// built under it can be published unsigned and are signed by the node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetPublisher {}
 
-/// Installs a plug from an existing document, one an author wrote and signed elsewhere, by
+/// Installs a cartridge from an existing document, one an author wrote and signed elsewhere, by
 /// entering it in the registry drawer, so the registry follows it as the author publishes more.
 /// The document can be in any drawer the caller can read, including one that synced in from a
 /// peer. The registry holds no standing access to anything but its own drawer: the caller lends
 /// it two handles for this one call.
-/// - `read` is a docs-domain handle that reads `doc_id`. The registry reads the plug identity
+/// - `read` is a docs-domain handle that reads `doc_id`. The registry reads the cartridge identity
 ///   through it before anything is entered.
 /// - `reach` is a drawers-domain handle that reaches `doc_id` at Read or above. Entering the
 ///   document gives the registry drawer's members Read on it, which the caller must itself hold.
 ///
 /// The document is entered at Read: the registry serves an author's document and never writes
-/// it, so publishing to or removing versions of a plug whose document was installed this way is
+/// it, so publishing to or removing versions of a cartridge whose document was installed this way is
 /// refused (`Denied`) rather than written into the author's document.
-/// The document must carry a plug identity datum. Nothing is checked here beyond that: each
+/// The document must carry a cartridge identity datum. Nothing is checked here beyond that: each
 /// version in it is verified as it is folded in, exactly as for a document that synced into the
 /// drawer, so an unsigned or badly signed version is listed as unverified and never served, and
 /// no downgrade rule applies (arrival order is not version order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ImportPlugDocument {
+pub struct ImportCartridgeDocument {
     pub doc_id: DocId,
     pub read: CapId,
     pub reach: CapId,
@@ -115,35 +115,35 @@ pub struct ImportPlugDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListPlugs {}
+pub struct ListCartridges {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GetPlug {
-    pub id: PlugId,
+pub struct GetCartridge {
+    pub id: CartridgeId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GetPlugVersion {
-    pub id: PlugId,
+pub struct GetCartridgeVersion {
+    pub id: CartridgeId,
     pub version: Version,
 }
 
-/// Drops one version's envelope and artifact references from the plug's document. The bytes are
+/// Drops one version's envelope and artifact references from the cartridge's document. The bytes are
 /// released from retention unless another document still references them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemovePlugVersion {
-    pub id: PlugId,
+pub struct RemoveCartridgeVersion {
+    pub id: CartridgeId,
     pub version: Version,
 }
 
-/// Drops every version and the identity of a plug.
+/// Drops every version and the identity of a cartridge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemovePlug {
-    pub id: PlugId,
+pub struct RemoveCartridge {
+    pub id: CartridgeId,
 }
 
 /// A long poll over registry changes (ADR 023). `after` is the cursor of the last answer the
@@ -151,9 +151,9 @@ pub struct RemovePlug {
 /// requests the service clamps; `0` asks for the default page and no hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WatchPlugs {
+pub struct WatchCartridges {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<PlugsCursor>,
+    pub after: Option<CartridgesCursor>,
     #[serde(default)]
     pub limit: u32,
     #[serde(default)]
@@ -163,84 +163,84 @@ pub struct WatchPlugs {
 /// Where a watcher is. The registry is derived from the drawer when a node boots, so its change
 /// sequence restarts with the process: `epoch` names the process incarnation the `seq` counts
 /// in, and a cursor from another epoch is answered with the full current state
-/// ([`PlugChanges::reset`]) instead of a delta the service can no longer compute.
+/// ([`CartridgeChanges::reset`]) instead of a delta the service can no longer compute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugsCursor {
+pub struct CartridgesCursor {
     pub epoch: Uuid7,
     pub seq: u64,
 }
 
-/// One plug whose record changed (a version published, removed or found conflicting, the plug
-/// removed). The caller re-reads the plug; it is not carried, so a change never goes stale.
+/// One cartridge whose record changed (a version published, removed or found conflicting, the cartridge
+/// removed). The caller re-reads the cartridge; it is not carried, so a change never goes stale.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugChange {
+pub struct CartridgeChange {
     pub seq: u64,
-    pub plug_id: PlugId,
-    /// The plug no longer exists in the registry.
+    pub cartridge_id: CartridgeId,
+    /// The cartridge no longer exists in the registry.
     pub removed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugChanges {
-    pub changes: Vec<PlugChange>,
+pub struct CartridgeChanges {
+    pub changes: Vec<CartridgeChange>,
     /// The cursor to send next. Every change here is at or below it.
-    pub through: PlugsCursor,
+    pub through: CartridgesCursor,
     /// No further change is waiting past `through`.
     pub caught_up: bool,
     /// The answer is the registry's full state rather than a delta: the caller had no cursor or
-    /// one from another epoch, so a plug it holds and that is absent here is gone.
+    /// one from another epoch, so a cartridge it holds and that is absent here is gone.
     pub reset: bool,
 }
 
-/// One version of a plug as the registry serves it: always the content the node first saw for
+/// One version of a cartridge as the registry serves it: always the content the node first saw for
 /// the label. `conflict` says the drawer's datum has since changed or become unreadable (another
 /// node wrote it); the registry keeps serving the first-seen envelope and never resolves that
 /// silently.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugVersionRecord {
-    pub id: PlugId,
+pub struct CartridgeVersionRecord {
+    pub id: CartridgeId,
     pub version: Version,
     pub revision: Revision,
-    pub envelope: Plug,
+    pub envelope: Cartridge,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
 }
 
-/// A version in a plug's listing: its envelope is fetched with [`GetPlugVersion`].
+/// A version in a cartridge's listing: its envelope is fetched with [`GetCartridgeVersion`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugVersionSummary {
+pub struct CartridgeVersionSummary {
     pub version: Version,
     pub revision: Revision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<String>,
     /// Why the version's signature did not verify (a synced write whose signature is bad, or
     /// whose DID method cannot be verified here). Such a version is listed so it is visible, but
-    /// it is not served: [`GetPlugVersion`] refuses it with [`PlugsError::Unverified`].
+    /// it is not served: [`GetCartridgeVersion`] refuses it with [`CartridgesError::Unverified`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<String>,
 }
 
-/// One plug in the registry, from its document in the drawer.
+/// One cartridge in the registry, from its document in the drawer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PlugRecord {
-    pub id: PlugId,
+pub struct CartridgeRecord {
+    pub id: CartridgeId,
     pub doc_id: DocId,
     /// Ascending by version.
-    pub versions: Vec<PlugVersionSummary>,
+    pub versions: Vec<CartridgeVersionSummary>,
     /// Version slots in the document that are not a servable version, by slot, with why: an
     /// unparseable label, an envelope that does not decode, one whose id or version disagrees
     /// with its slot, and no first-seen content to fall back on.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unreadable: BTreeMap<String, String>,
-    /// Other documents in the drawer that also claim this plug id (two nodes each created one
+    /// Other documents in the drawer that also claim this cartridge id (two nodes each created one
     /// before they synced). The document with the lowest id is served; these are ignored, never
-    /// merged, so a node that synced them sees the same plug as one that did not.
+    /// merged, so a node that synced them sees the same cartridge as one that did not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub duplicate_docs: Vec<DocId>,
 }
@@ -248,14 +248,14 @@ pub struct PlugRecord {
 /// The result of a publish: the version as stored, and whether it was already.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PublishedPlugVersion {
-    pub record: PlugVersionRecord,
+pub struct PublishedCartridgeVersion {
+    pub record: CartridgeVersionRecord,
     /// The label was already published with an identical envelope, so nothing was written.
     pub unchanged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum PlugsError {
+pub enum CartridgesError {
     #[error("request context failed: {0}")]
     Context(#[from] ContextError),
     #[error("the presented capability does not permit this operation")]
@@ -270,11 +270,11 @@ pub enum PlugsError {
     Rejected(String),
     /// A published version never changes content: the label is taken by another envelope.
     #[error(
-        "plug `{id}` {version} is already published at revision {existing}; this envelope is \
+        "cartridge `{id}` {version} is already published at revision {existing}; this envelope is \
          {incoming}"
     )]
     VersionExists {
-        id: PlugId,
+        id: CartridgeId,
         version: Box<Version>,
         existing: Revision,
         incoming: Revision,
@@ -289,59 +289,64 @@ pub enum PlugsError {
          cannot sign it"
     )]
     UnsignedForeignNamespace { namespace: String },
-    /// A new label must order after every label the plug has or had, so a validly signed older
+    /// A new label must order after every label the cartridge has or had, so a validly signed older
     /// version cannot be published as new (a downgrade attack). Taking an older version is an
     /// explicit runtime action, not a registry one.
-    #[error("plug `{id}` {version} does not order after {newest}, the newest version it has had")]
+    #[error(
+        "cartridge `{id}` {version} does not order after {newest}, the newest version it has had"
+    )]
     Downgrade {
-        id: PlugId,
+        id: CartridgeId,
         version: Box<Version>,
         newest: Box<Version>,
     },
-    /// The handle's namespace scope does not include the plug's namespace.
+    /// The handle's namespace scope does not include the cartridge's namespace.
     #[error("the presented capability may not publish under `{namespace}`")]
     NamespaceNotPermitted { namespace: String },
     /// The version exists in the drawer but its signature did not verify, so it is not served.
-    #[error("plug `{id}` {version} is not served: {reason}")]
+    #[error("cartridge `{id}` {version} is not served: {reason}")]
     Unverified {
-        id: PlugId,
+        id: CartridgeId,
         version: Box<Version>,
         reason: String,
     },
     /// An artifact's bytes are not in the local blob store, so the registry would pin bytes it
     /// cannot serve.
-    #[error("artifact `{artifact}` of plug `{id}` is not in the local blob store")]
-    ArtifactUnavailable { id: PlugId, artifact: String },
-    #[error("plug `{0}` is not in the registry")]
-    UnknownPlug(PlugId),
-    #[error("plug `{id}` has no version {version}")]
-    UnknownVersion { id: PlugId, version: Box<Version> },
+    #[error("artifact `{artifact}` of cartridge `{id}` is not in the local blob store")]
+    ArtifactUnavailable { id: CartridgeId, artifact: String },
+    #[error("cartridge `{0}` is not in the registry")]
+    UnknownCartridge(CartridgeId),
+    #[error("cartridge `{id}` has no version {version}")]
+    UnknownVersion {
+        id: CartridgeId,
+        version: Box<Version>,
+    },
 }
 
-service_method!(MintPlugsCapability => Capability, PlugsError, procedure("org.example.daybook.plugs.mintPlugsCapability"));
-service_method!(PublishPlugVersion => PublishedPlugVersion, PlugsError, procedure("org.example.daybook.plugs.publishPlugVersion"));
-service_method!(RemovePlugVersion => (), PlugsError, procedure("org.example.daybook.plugs.removePlugVersion"));
-service_method!(RemovePlug => (), PlugsError, procedure("org.example.daybook.plugs.removePlug"));
-service_method!(ImportPlugDocument => PlugRecord, PlugsError, procedure("org.example.daybook.plugs.importPlugDocument"));
-service_method!(GetPublisher => String, PlugsError, query("org.example.daybook.plugs.getPublisher"));
-service_method!(ListPlugs => Vec<PlugRecord>, PlugsError, query("org.example.daybook.plugs.listPlugs"));
-service_method!(GetPlug => PlugRecord, PlugsError, query("org.example.daybook.plugs.getPlug"));
-service_method!(GetPlugVersion => PlugVersionRecord, PlugsError, query("org.example.daybook.plugs.getPlugVersion"));
-service_method!(WatchPlugs => PlugChanges, PlugsError, procedure("org.example.daybook.plugs.watchPlugs"));
+service_method!(MintCartridgesCapability => Capability, CartridgesError, procedure("org.example.daybook.cartridges.mintCartridgesCapability"));
+service_method!(PublishCartridgeVersion => PublishedCartridgeVersion, CartridgesError, procedure("org.example.daybook.cartridges.publishCartridgeVersion"));
+service_method!(RemoveCartridgeVersion => (), CartridgesError, procedure("org.example.daybook.cartridges.removeCartridgeVersion"));
+service_method!(RemoveCartridge => (), CartridgesError, procedure("org.example.daybook.cartridges.removeCartridge"));
+service_method!(ImportCartridgeDocument => CartridgeRecord, CartridgesError, procedure("org.example.daybook.cartridges.importCartridgeDocument"));
+service_method!(GetPublisher => String, CartridgesError, query("org.example.daybook.cartridges.getPublisher"));
+service_method!(ListCartridges => Vec<CartridgeRecord>, CartridgesError, query("org.example.daybook.cartridges.listCartridges"));
+service_method!(GetCartridge => CartridgeRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridge"));
+service_method!(GetCartridgeVersion => CartridgeVersionRecord, CartridgesError, query("org.example.daybook.cartridges.getCartridgeVersion"));
+service_method!(WatchCartridges => CartridgeChanges, CartridgesError, procedure("org.example.daybook.cartridges.watchCartridges"));
 
 declare_service_protocol! {
-    pub enum PlugsProtocol => PlugsMessage {
+    pub enum CartridgesProtocol => CartridgesMessage {
         unary {
-            MintPlugsCapability(MintPlugsCapability),
-            PublishPlugVersion(PublishPlugVersion),
-            RemovePlugVersion(RemovePlugVersion),
-            RemovePlug(RemovePlug),
-            ImportPlugDocument(ImportPlugDocument),
+            MintCartridgesCapability(MintCartridgesCapability),
+            PublishCartridgeVersion(PublishCartridgeVersion),
+            RemoveCartridgeVersion(RemoveCartridgeVersion),
+            RemoveCartridge(RemoveCartridge),
+            ImportCartridgeDocument(ImportCartridgeDocument),
             GetPublisher(GetPublisher),
-            ListPlugs(ListPlugs),
-            GetPlug(GetPlug),
-            GetPlugVersion(GetPlugVersion),
-            WatchPlugs(WatchPlugs)
+            ListCartridges(ListCartridges),
+            GetCartridge(GetCartridge),
+            GetCartridgeVersion(GetCartridgeVersion),
+            WatchCartridges(WatchCartridges)
         }
         stream {}
     }

@@ -5,9 +5,9 @@
 use super::nodule_wasm::admit;
 use super::nodule_wasm::boot_node;
 use super::nodule_wasm::caller;
+use super::nodule_wasm::cartridge;
 use super::nodule_wasm::guest_bytes;
 use super::nodule_wasm::invoke;
-use super::nodule_wasm::plug;
 use super::nodule_wasm::put;
 use super::nodule_wasm::set_enabled;
 use super::*;
@@ -100,8 +100,8 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             big_cabinet_core::authority::OpenActor::XRPC.nsid,
         ),
         (
-            "builtin:plugs",
-            big_plugs_core::protocol::PublishPlugVersion::XRPC.nsid,
+            "builtin:cartridges",
+            big_cartridges_core::protocol::PublishCartridgeVersion::XRPC.nsid,
         ),
         (
             "builtin:nodules",
@@ -130,7 +130,7 @@ async fn built_in_and_nodule_operations_share_one_router_and_one_admission() {
     let spec = caller();
     let echo = spec.echo();
     put(&node, &bytes).await;
-    admit(&node, plug(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
     let record: NoduleRecord = set_enabled(&node, &spec, true).await;
     assert_eq!(record.readiness, big_dispatch_core::Readiness::Ready);
 

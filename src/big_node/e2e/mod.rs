@@ -29,6 +29,7 @@ use std::collections::BTreeSet;
 
 mod blob_discovery;
 mod blobs;
+mod cartridges;
 mod costs;
 mod dispatch;
 mod harness;
@@ -38,7 +39,6 @@ mod many_nodes;
 mod network;
 mod nodule_wasm;
 mod peers;
-mod plugs;
 mod stress;
 
 const NOTE: &str = "org.example.note";
@@ -207,7 +207,7 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     let docs = Arc::downgrade(&node.docs.host);
     let drawers = Arc::downgrade(&node.drawers.host);
     let nodules = Arc::downgrade(&node.nodules.host);
-    let plugs = Arc::downgrade(&node.plugs.host);
+    let cartridges = Arc::downgrade(&node.cartridges.host);
     let policy = Arc::downgrade(&node.drawer_access);
     let authority = Arc::downgrade(&node.authority.host);
     let authority_service = Arc::downgrade(&node.authority.service);
@@ -220,7 +220,7 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     assert_eq!(indexes.live_tasks(), 0);
     drop(indexes);
     assert!(nodules.upgrade().is_none());
-    assert!(plugs.upgrade().is_none());
+    assert!(cartridges.upgrade().is_none());
     assert!(docs.upgrade().is_none());
     assert!(drawers.upgrade().is_none());
     assert!(policy.upgrade().is_none());

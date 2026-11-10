@@ -1,5 +1,5 @@
 [package]
-name = "big_plugs_core"
+name = "big_cartridges_core"
 version.workspace = true
 edition.workspace = true
 
@@ -7,7 +7,7 @@ edition.workspace = true
 workspace = true
 
 [lib]
-name = "big_plugs_core"
+name = "big_cartridges_core"
 path = "lib.rs"
 crate-type = ["rlib"]
 

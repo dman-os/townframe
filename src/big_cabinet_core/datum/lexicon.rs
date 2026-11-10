@@ -33,7 +33,7 @@ const TAG: &str = "$type";
 /// Lexicon file it publishes.
 ///
 /// Named definitions the datum reaches are carried into this file and referenced locally, which is
-/// what lets a plug be read on its own: there is no registry, and a definition two datums both
+/// what lets a cartridge be read on its own: there is no registry, and a definition two datums both
 /// reach is carried by both. A union member is referenced by the id its `$type` const states,
 /// because that id is data a peer reads and not a structure this file owns.
 pub fn project_datum(id: &str, document: &Value) -> Result<Value, String> {

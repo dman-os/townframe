@@ -1,25 +1,25 @@
 //! The shared request shape (ADR 028 §4): how a manifest names what it uses.
 //!
-//! Every runtime that consumes a plug (BigNode's nodule, Clay's micro) states its needs in this
-//! one vocabulary, so an audit of "what can this plug reach" reads the same everywhere. A request
+//! Every runtime that consumes a cartridge (BigNode's nodule, Clay's micro) states its needs in this
+//! one vocabulary, so an audit of "what can this cartridge reach" reads the same everywhere. A request
 //! names a contract by NSID, never a provider: whichever enabled provider offers the NSID
 //! satisfies it, and the concrete provider, collection or document is configuration. A manifest
 //! describes needs, not granted authority; a request confers nothing by itself.
 
-use crate::PlugError;
+use crate::CartridgeError;
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::is_nsid;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-/// One thing a plug asks for.
+/// One thing a cartridge asks for.
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
-    /// The plug-local name code uses to reach the grant. Unique within one manifest.
+    /// The cartridge-local name code uses to reach the grant. Unique within one manifest.
     pub binding: String,
     /// The NSID of the contract used: an operation, a datum schema, a collection contract or a
     /// runtime-defined contract.
@@ -35,7 +35,7 @@ pub struct Request {
     /// canonical (signed) form of a manifest stays minimal and deterministic.
     #[serde(default, skip_serializing_if = "Resolution::is_default")]
     pub resolution: Resolution,
-    /// The least Lexicon `revision` of `contract` that serves the plug. Carried and checked for
+    /// The least Lexicon `revision` of `contract` that serves the cartridge. Carried and checked for
     /// shape here; enforcing it is the resolution step's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_revision: Option<u32>,
@@ -43,7 +43,7 @@ pub struct Request {
     pub extra: Extra,
 }
 
-/// Whether a plug can run without the request being granted.
+/// Whether a cartridge can run without the request being granted.
 #[macros::datum(open_string)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub enum Necessity {
@@ -79,7 +79,7 @@ impl Necessity {
     }
 
     /// An unknown member is required: a build that does not understand a relaxation must not
-    /// assume the plug can run without the grant.
+    /// assume the cartridge can run without the grant.
     pub fn is_required(&self) -> bool {
         !matches!(self, Self::Optional)
     }
@@ -109,36 +109,36 @@ impl Request {
     /// each contract an NSID, an access (when present) and a minimum revision are meaningful.
     /// Two requests for one contract are allowed, since distinct bindings may use it differently.
     /// An unknown necessity or resolution is carried, not refused.
-    pub fn validate_all(requests: &[Self], field: &str) -> Result<(), PlugError> {
+    pub fn validate_all(requests: &[Self], field: &str) -> Result<(), CartridgeError> {
         let mut bindings = BTreeSet::new();
         for (index, request) in requests.iter().enumerate() {
             let path = format!("{field}[{index}]");
             if request.binding.is_empty() {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     format!("{path}.binding"),
                     "a binding is not empty",
                 ));
             }
             if !bindings.insert(request.binding.as_str()) {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     format!("{path}.binding"),
                     format!("binding `{}` is declared twice", request.binding),
                 ));
             }
             if !is_nsid(&request.contract) {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     format!("{path}.contract"),
                     format!("`{}` is not an NSID", request.contract),
                 ));
             }
             if request.access.as_deref() == Some("") {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     format!("{path}.access"),
                     "an access is absent or not empty",
                 ));
             }
             if request.min_revision == Some(0) {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     format!("{path}.minRevision"),
                     "a Lexicon revision starts at 1",
                 ));

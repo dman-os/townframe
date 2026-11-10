@@ -9,6 +9,15 @@ use super::*;
 use big_blobs::BlobService;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::datum::DatumMember;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Necessity;
+use big_cartridges_core::request::Request;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -22,15 +31,6 @@ use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Necessity;
-use big_plugs_core::request::Request;
 use service_utils_rs::ClientError;
 use service_utils_rs::TraceContext;
 use std::time::Duration;
@@ -38,7 +38,7 @@ use std::time::Duration;
 /// One nodule running the test guest: the guest serves `echo` and `relay` under whatever
 /// authority the nodule owns, so the same component stands in for several nodules.
 pub(super) struct Spec {
-    plug: PlugId,
+    cartridge: CartridgeId,
     pub(super) authority: &'static str,
 }
 
@@ -59,14 +59,14 @@ impl Spec {
 
 pub(super) fn caller() -> Spec {
     Spec {
-        plug: example_plug!("wasm-test").parse().unwrap(),
+        cartridge: example_cartridge!("wasm-test").parse().unwrap(),
         authority: "org.example.test",
     }
 }
 
 fn callee() -> Spec {
     Spec {
-        plug: example_plug!("wasm-callee").parse().unwrap(),
+        cartridge: example_cartridge!("wasm-callee").parse().unwrap(),
         authority: "org.example.callee",
     }
 }
@@ -104,11 +104,11 @@ fn procedure(nsid: &str) -> Value {
     })
 }
 
-/// The plug whose nodule declares `spec.authority`'s three operations, implements them through
+/// The cartridge whose nodule declares `spec.authority`'s three operations, implements them through
 /// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
 /// relays to). The requests are optional: the nodule runs before its grant, and the tests
 /// exercise what the grant then permits.
-pub(super) fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
+pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> Cartridge {
     let mut nodule = Nodule {
         requires: calls
             .iter()
@@ -131,22 +131,23 @@ pub(super) fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
         extra: Default::default(),
     });
     nodule.implements = operations.into();
-    let mut plug = Plug::new(spec.plug.clone(), "1.0.0".parse().unwrap());
-    plug.authority = Some(spec.authority.to_owned());
-    plug.artifacts.push(Artifact {
+    let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
+    cartridge.authority = Some(spec.authority.to_owned());
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(bytes),
         size: Some(bytes.len() as u64),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
 pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
@@ -164,14 +165,14 @@ pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
         .unwrap();
 }
 
-pub(super) async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
+pub(super) async fn admit(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             AdmitNodule {
-                plug,
+                cartridge,
                 drawers: None,
             },
         )
@@ -186,7 +187,7 @@ pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> N
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             SetNoduleEnabled {
-                plug_id: spec.plug.clone(),
+                cartridge_id: spec.cartridge.clone(),
                 enabled,
             },
         )
@@ -201,7 +202,7 @@ async fn set_operations(node: &BigNode, spec: &Spec, operations: DispatchScope) 
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             SetNoduleOperationGrants {
-                plug_id: spec.plug.clone(),
+                cartridge_id: spec.cartridge.clone(),
                 operations,
             },
         )
@@ -216,7 +217,7 @@ async fn record(node: &BigNode, spec: &Spec) -> NoduleRecord {
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
             GetNodule {
-                plug_id: spec.plug.clone(),
+                cartridge_id: spec.cartridge.clone(),
             },
         )
         .await
@@ -291,10 +292,10 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let spec = caller();
     let (echo, absent) = (spec.echo(), spec.absent());
     put(&node, &bytes).await;
-    admit(&node, plug(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
     let enabled = set_enabled(&node, &spec, true).await;
     assert_eq!(enabled.readiness, Readiness::Ready);
-    assert!(node.executor.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.cartridge));
 
     // The echo returns the input, and the headers the host built for the guest: the operator's
     // capability as a bare `Bearer` token (no signer), the idempotency key, the request id and
@@ -358,9 +359,9 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::UnknownOperation)
     );
-    assert!(!node.executor.hosts(&spec.plug));
+    assert!(!node.executor.hosts(&spec.cartridge));
     set_enabled(&node, &spec, true).await;
-    assert!(node.executor.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.cartridge));
     assert_eq!(
         invoke(&node, &echo, json!({ "n": 2 }), Default::default())
             .await
@@ -407,7 +408,7 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     // its grants can ever confer.
     let requested = [(&a, vec![b.echo(), b.absent()]), (&b, vec![a.echo()])];
     for (spec, calls) in &requested {
-        admit(&node, plug(spec, &bytes, calls)).await;
+        admit(&node, cartridge(spec, &bytes, calls)).await;
         assert_eq!(
             set_enabled(&node, spec, true).await.readiness,
             Readiness::Ready
@@ -550,10 +551,10 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     let (node, stop) = boot_node(&secrets).await;
     let spec = caller();
     let echo = spec.echo();
-    admit(&node, plug(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
     let waiting = set_enabled(&node, &spec, true).await;
     assert_eq!(waiting.readiness, Readiness::ArtifactsUnavailable);
-    assert!(!node.executor.hosts(&spec.plug));
+    assert!(!node.executor.hosts(&spec.cartridge));
     assert_eq!(
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::NotReady {
@@ -577,9 +578,9 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     shutdown(node, stop).await;
 }
 
-/// A plug published on one node is installed and invoked on another (ADR 033 section 9). Alice
-/// publishes the nodule's plug in her registry and invites Bob's node to her registry drawer at
-/// `access`; the plug document and, through Bob's mirror of the drawer's blob inventory, the
+/// A cartridge published on one node is installed and invoked on another (ADR 033 section 9). Alice
+/// publishes the nodule's cartridge in her registry and invites Bob's node to her registry drawer at
+/// `access`; the cartridge document and, through Bob's mirror of the drawer's blob inventory, the
 /// handler bytes sync to Bob. Bob's operator installs the document into Bob's registry, lending the
 /// registry a handle on Alice's drawer it holds without any grant (the operator reaches every
 /// drawer), then admits the nodule from what Bob's registry serves and invokes it through his
@@ -588,15 +589,17 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
 /// Installing enters Alice's document in Bob's registry drawer at Read, which Bob's node signs as
 /// a Keyhive delegation on a document it holds only through Alice's drawer: both invite levels
 /// are exercised, since Read is the lowest that can carry it.
-async fn install_a_plug_published_on_another_node(access: big_cabinet_core::drawer::DrawerAccess) {
+async fn install_a_cartridge_published_on_another_node(
+    access: big_cabinet_core::drawer::DrawerAccess,
+) {
+    use super::cartridges::import_document;
+    use super::cartridges::operator;
+    use super::cartridges::publish;
     use super::harness::Cluster;
     use super::harness::Topology;
-    use super::plugs::import_document;
-    use super::plugs::operator;
-    use super::plugs::publish;
-    use big_plugs_core::protocol::GetPlug;
-    use big_plugs_core::protocol::GetPlugVersion;
-    use big_plugs_core::test_support::sign_as_example;
+    use big_cartridges_core::protocol::GetCartridge;
+    use big_cartridges_core::protocol::GetCartridgeVersion;
+    use big_cartridges_core::test_support::sign_as_example;
 
     let bytes = guest_bytes();
     let spec = caller();
@@ -606,18 +609,18 @@ async fn install_a_plug_published_on_another_node(access: big_cabinet_core::draw
 
     let publisher = cluster.node(alice);
     put(publisher, &bytes).await;
-    let envelope = sign_as_example(plug(&spec, &bytes, &[]));
+    let envelope = sign_as_example(cartridge(&spec, &bytes, &[]));
     publish(publisher, operator(publisher), envelope.clone())
         .await
         .unwrap();
     let document = publisher
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(publisher).metadata(),
-            GetPlug {
-                id: spec.plug.clone(),
+            GetCartridge {
+                id: spec.cartridge.clone(),
             },
         )
         .await
@@ -634,16 +637,16 @@ async fn install_a_plug_published_on_another_node(access: big_cabinet_core::draw
     let installed = import_document(node, operator(node), &registry, &document)
         .await
         .unwrap();
-    assert_eq!(installed.id, spec.plug);
+    assert_eq!(installed.id, spec.cartridge);
     assert_eq!(installed.doc_id, document);
     let served = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(node).metadata(),
-            GetPlugVersion {
-                id: spec.plug.clone(),
+            GetCartridgeVersion {
+                id: spec.cartridge.clone(),
                 version: envelope.version.clone(),
             },
         )
@@ -659,7 +662,7 @@ async fn install_a_plug_published_on_another_node(access: big_cabinet_core::draw
     while record(node, &spec).await.readiness != Readiness::Ready {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(node.executor.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.cartridge));
     assert_eq!(
         invoke(
             node,
@@ -675,11 +678,13 @@ async fn install_a_plug_published_on_another_node(access: big_cabinet_core::draw
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_plug_published_on_one_node_is_installed_and_invoked_on_another() {
-    install_a_plug_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Read).await;
+async fn a_cartridge_published_on_one_node_is_installed_and_invoked_on_another() {
+    install_a_cartridge_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Read)
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_plug_published_on_one_node_is_installed_by_an_admin_member_of_its_drawer() {
-    install_a_plug_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Admin).await;
+async fn a_cartridge_published_on_one_node_is_installed_by_an_admin_member_of_its_drawer() {
+    install_a_cartridge_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Admin)
+        .await;
 }

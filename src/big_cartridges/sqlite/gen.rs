@@ -2,15 +2,16 @@
 use crate::sqlite_rs_alias::Migration;
 use crate::sqlite_rs_alias::SqlResult;
 
-pub const MIGRATION_TABLE: &str = "_big_plugs_migrations";
+pub const MIGRATION_TABLE: &str = "_big_cartridges_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_registry.sql", sql: include_str!("migrations/001_registry.sql") },
+    Migration { version: 2, name: "002_cartridge_rename.sql", sql: include_str!("migrations/002_cartridge_rename.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FirstSeenRow {
-    pub plug_id: String,
+    pub cartridge_id: String,
     pub version: String,
     pub revision: String,
     pub envelope_json: String,
@@ -18,7 +19,7 @@ pub struct FirstSeenRow {
 impl crate::sqlite_rs_alias::FromRow for FirstSeenRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(4)?;
-        Ok(FirstSeenRow { plug_id: row.get::<String>("plug_id")?, version: row.get::<String>("version")?, revision: row.get::<String>("revision")?, envelope_json: row.get::<String>("envelope_json")? })
+        Ok(FirstSeenRow { cartridge_id: row.get::<String>("cartridge_id")?, version: row.get::<String>("version")?, revision: row.get::<String>("revision")?, envelope_json: row.get::<String>("envelope_json")? })
     }
 }
 
@@ -40,6 +41,6 @@ pub async fn set_registry_drawer(db: &impl crate::sqlite_rs_alias::Executor, dra
 }
 
 pub const UPSERT_FIRST_SEEN_SQL: &str = include_str!("queries/upsert_first_seen.sql");
-pub async fn upsert_first_seen(db: &impl crate::sqlite_rs_alias::Executor, plug_id: String, version: String, revision: String, envelope_json: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(UPSERT_FIRST_SEEN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(plug_id), crate::sqlite_rs_alias::IntoValue::into_value(version), crate::sqlite_rs_alias::IntoValue::into_value(revision), crate::sqlite_rs_alias::IntoValue::into_value(envelope_json)]).await
+pub async fn upsert_first_seen(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, version: String, revision: String, envelope_json: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_FIRST_SEEN_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(version), crate::sqlite_rs_alias::IntoValue::into_value(revision), crate::sqlite_rs_alias::IntoValue::into_value(envelope_json)]).await
 }

@@ -65,7 +65,9 @@ impl Bundle<'_> {
         carried: &[&Value],
     ) -> Result<CompiledSchema> {
         self.validate()?;
-        if !self.definitions().is_empty() && !self.plug.datums.iter().any(|datum| datum.id == tag) {
+        if !self.definitions().is_empty()
+            && !self.cartridge.datums.iter().any(|datum| datum.id == tag)
+        {
             return Err(invalid(
                 "supplement",
                 format!("bundle does not declare datum `{tag}`"),
@@ -182,7 +184,7 @@ impl Bundle<'_> {
             ));
         }
         let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
-        if let Some(datum) = self.plug.datums.iter().find(|datum| datum.id == tag) {
+        if let Some(datum) = self.cartridge.datums.iter().find(|datum| datum.id == tag) {
             let supplement = serde_json::to_value(
                 self.document(&datum.name)
                     .expect("validated datum definition"),

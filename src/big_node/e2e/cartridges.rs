@@ -1,4 +1,4 @@
-//! The plug registry end to end: the service over the real drawer, docs and blob stack.
+//! The cartridge registry end to end: the service over the real drawer, docs and blob stack.
 
 use super::blobs::blob_cap;
 use super::*;
@@ -7,35 +7,35 @@ use big_blobs_core::BlobInfo;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
-use big_plugs_core::Artifact;
-use big_plugs_core::Digest;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
-use big_plugs_core::protocol::GetPlug;
-use big_plugs_core::protocol::GetPlugVersion;
-use big_plugs_core::protocol::GetPublisher;
-use big_plugs_core::protocol::ImportPlugDocument;
-use big_plugs_core::protocol::ListPlugs;
-use big_plugs_core::protocol::MintPlugsCapability;
-use big_plugs_core::protocol::PlugChanges;
-use big_plugs_core::protocol::PlugsCursor;
-use big_plugs_core::protocol::PlugsError;
-use big_plugs_core::protocol::PlugsScope;
-use big_plugs_core::protocol::PublishPlugVersion;
-use big_plugs_core::protocol::PublishedPlugVersion;
-use big_plugs_core::protocol::RemovePlug;
-use big_plugs_core::protocol::RemovePlugVersion;
-use big_plugs_core::protocol::WatchPlugs;
-use big_plugs_core::registry::identity_key;
-use big_plugs_core::registry::version_key;
-use big_plugs_core::signature::SignatureError;
-use big_plugs_core::test_support::plug_id;
-use big_plugs_core::test_support::sign_as_example;
-use big_plugs_core::test_support::sign_with_seed;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Digest;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::CartridgeChanges;
+use big_cartridges_core::protocol::CartridgesCursor;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::CartridgesScope;
+use big_cartridges_core::protocol::GetCartridge;
+use big_cartridges_core::protocol::GetCartridgeVersion;
+use big_cartridges_core::protocol::GetPublisher;
+use big_cartridges_core::protocol::ImportCartridgeDocument;
+use big_cartridges_core::protocol::ListCartridges;
+use big_cartridges_core::protocol::MintCartridgesCapability;
+use big_cartridges_core::protocol::PublishCartridgeVersion;
+use big_cartridges_core::protocol::PublishedCartridgeVersion;
+use big_cartridges_core::protocol::RemoveCartridge;
+use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::WatchCartridges;
+use big_cartridges_core::registry::identity_key;
+use big_cartridges_core::registry::version_key;
+use big_cartridges_core::signature::SignatureError;
+use big_cartridges_core::test_support::cartridge_id;
+use big_cartridges_core::test_support::sign_as_example;
+use big_cartridges_core::test_support::sign_with_seed;
 use service_utils_rs::ClientError;
 use std::time::Duration;
 
-const PHOTOS: &str = example_plug!("photos");
+const PHOTOS: &str = example_cartridge!("photos");
 
 pub(super) fn operator(node: &BigNode) -> Authorization {
     Authorization::identity(node.authority.root)
@@ -63,26 +63,26 @@ async fn put(node: &BigNode, bytes: &[u8]) -> BlobInfo {
 }
 
 /// `id` at `version` with one artifact, `handler`, holding `info`'s bytes, not yet signed.
-fn unsigned(id: &str, version: &str, info: &BlobInfo) -> Plug {
-    let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
-    plug.artifacts.push(Artifact {
+fn unsigned(id: &str, version: &str, info: &BlobInfo) -> Cartridge {
+    let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest(info.blob_id.to_bytes32()),
         size: Some(info.length_octets),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug
+    cartridge
 }
 
 /// `photos` under the example namespace, signed by its owner as an external publisher would.
-fn photos(version: &str, info: &BlobInfo) -> Plug {
+fn photos(version: &str, info: &BlobInfo) -> Cartridge {
     sign_as_example(unsigned(PHOTOS, version, info))
 }
 
 /// A write to one version slot of a registry document, as a synced change from another node
 /// would land: straight on the document, past the registry service.
-async fn write_version_datum(node: &BigNode, doc_id: &DocId, envelope: &Plug) {
+async fn write_version_datum(node: &BigNode, doc_id: &DocId, envelope: &Cartridge) {
     node.docs
         .client
         .call(
@@ -114,13 +114,13 @@ async fn get_version(
     node: &BigNode,
     id: &str,
     version: &str,
-) -> Result<big_plugs_core::protocol::PlugVersionRecord, PlugsError> {
-    node.plugs
+) -> Result<big_cartridges_core::protocol::CartridgeVersionRecord, CartridgesError> {
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(node).metadata(),
-            GetPlugVersion {
+            GetCartridgeVersion {
                 id: id.parse().unwrap(),
                 version: version.parse().unwrap(),
             },
@@ -132,27 +132,27 @@ async fn get_version(
 pub(super) async fn publish(
     node: &BigNode,
     authorization: Authorization,
-    envelope: Plug,
-) -> Result<PublishedPlugVersion, PlugsError> {
-    node.plugs
+    envelope: Cartridge,
+) -> Result<PublishedCartridgeVersion, CartridgesError> {
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
-            PublishPlugVersion { envelope },
+            PublishCartridgeVersion { envelope },
         )
         .await
         .map_err(operation)
 }
 
-async fn mint(node: &BigNode, scope: PlugsScope) -> Authorization {
+async fn mint(node: &BigNode, scope: CartridgesScope) -> Authorization {
     let capability = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(node).metadata(),
-            MintPlugsCapability {
+            MintCartridgesCapability {
                 scope,
                 rights: Rights::USE,
             },
@@ -167,15 +167,15 @@ async fn mint(node: &BigNode, scope: PlugsScope) -> Authorization {
 
 async fn watch(
     node: &BigNode,
-    after: Option<PlugsCursor>,
+    after: Option<CartridgesCursor>,
     hold_ms: u32,
-) -> Result<PlugChanges, PlugsError> {
-    node.plugs
+) -> Result<CartridgeChanges, CartridgesError> {
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(node).metadata(),
-            WatchPlugs {
+            WatchCartridges {
                 after,
                 limit: 0,
                 hold_ms,
@@ -185,13 +185,13 @@ async fn watch(
         .map_err(operation)
 }
 
-async fn list(node: &BigNode) -> Vec<big_plugs_core::protocol::PlugRecord> {
-    node.plugs
+async fn list(node: &BigNode) -> Vec<big_cartridges_core::protocol::CartridgeRecord> {
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(node).metadata(),
-            ListPlugs {},
+            ListCartridges {},
         )
         .await
         .unwrap()
@@ -240,13 +240,17 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
         .unwrap();
 
     let list = node
-        .plugs
+        .cartridges
         .client
-        .call_with(RequestContext::root(), operator.metadata(), ListPlugs {})
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            ListCartridges {},
+        )
         .await
         .unwrap();
     assert_eq!(list.len(), 1);
-    assert_eq!(list[0].id, plug_id("photos"));
+    assert_eq!(list[0].id, cartridge_id("photos"));
     assert_eq!(
         list[0]
             .versions
@@ -256,26 +260,26 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
         ["1.0.0", "1.1.0"]
     );
     let record = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlug {
-                id: plug_id("photos"),
+            GetCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
         .unwrap();
     assert_eq!(record, list[0]);
     let version = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlugVersion {
-                id: plug_id("photos"),
+            GetCartridgeVersion {
+                id: cartridge_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
         )
@@ -289,7 +293,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     // actor presenting only its own identity is refused outright.
     let reader = mint(
         &node,
-        PlugsScope {
+        CartridgesScope {
             publish: false,
             ..Default::default()
         },
@@ -297,58 +301,58 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
     .await;
     let publisher = mint(
         &node,
-        PlugsScope {
+        CartridgesScope {
             publish: true,
             ..Default::default()
         },
     )
     .await;
-    node.plugs
+    node.cartridges
         .client
-        .call_with(RequestContext::root(), reader.metadata(), ListPlugs {})
+        .call_with(RequestContext::root(), reader.metadata(), ListCartridges {})
         .await
         .unwrap();
     assert_eq!(
         publish(&node, reader, photos("2.0.0", &info)).await,
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 reader.metadata(),
-                RemovePlug {
-                    id: plug_id("photos")
+                RemoveCartridge {
+                    id: cartridge_id("photos")
                 }
             )
             .await
             .map_err(operation),
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     publish(&node, publisher, photos("2.0.0", &info))
         .await
         .unwrap();
     assert_eq!(
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 Authorization::identity(node.docs_actor.capability).metadata(),
-                ListPlugs {}
+                ListCartridges {}
             )
             .await
             .map_err(operation),
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 reader.metadata(),
-                MintPlugsCapability {
-                    scope: PlugsScope {
+                MintCartridgesCapability {
+                    scope: CartridgesScope {
                         publish: true,
                         ..Default::default()
                     },
@@ -357,7 +361,7 @@ async fn publish_list_and_get_serve_what_was_published_to_the_right_callers() {
             )
             .await
             .map_err(operation),
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     shutdown(node, stop).await;
 }
@@ -382,8 +386,8 @@ async fn a_published_version_never_changes_content() {
     let changed = sign_as_example(changed);
     assert_eq!(
         publish(&node, operator, changed.clone()).await,
-        Err(PlugsError::VersionExists {
-            id: plug_id("photos"),
+        Err(CartridgesError::VersionExists {
+            id: cartridge_id("photos"),
             version: Box::new("1.0.0".parse().unwrap()),
             existing: first.record.revision,
             incoming: changed.revision(),
@@ -391,13 +395,13 @@ async fn a_published_version_never_changes_content() {
     );
     // The refusal left the stored version as it was.
     let kept = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlugVersion {
-                id: plug_id("photos"),
+            GetCartridgeVersion {
+                id: cartridge_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
         )
@@ -407,13 +411,13 @@ async fn a_published_version_never_changes_content() {
 
     // Removal leaves a tombstone: the label is never reused for other content, though the
     // identical envelope may be published again.
-    node.plugs
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            RemovePlugVersion {
-                id: plug_id("photos"),
+            RemoveCartridgeVersion {
+                id: cartridge_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
         )
@@ -421,7 +425,7 @@ async fn a_published_version_never_changes_content() {
         .unwrap();
     assert!(matches!(
         publish(&node, operator, changed).await,
-        Err(PlugsError::VersionExists { .. })
+        Err(CartridgesError::VersionExists { .. })
     ));
     let restored = publish(&node, operator, photos("1.0.0", &info))
         .await
@@ -440,18 +444,18 @@ async fn publishing_refuses_artifacts_whose_bytes_are_not_local() {
     };
     assert_eq!(
         publish(&node, operator(&node), photos("1.0.0", &absent)).await,
-        Err(PlugsError::ArtifactUnavailable {
-            id: plug_id("photos"),
+        Err(CartridgesError::ArtifactUnavailable {
+            id: cartridge_id("photos"),
             artifact: "handler".into(),
         })
     );
     let listed = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator(&node).metadata(),
-            ListPlugs {},
+            ListCartridges {},
         )
         .await
         .unwrap();
@@ -469,13 +473,13 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
         .await
         .unwrap();
     let doc = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlug {
-                id: plug_id("photos"),
+            GetCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
@@ -485,13 +489,13 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     while retained(&sql, &doc).await.is_empty() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    node.plugs
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            RemovePlugVersion {
-                id: plug_id("photos"),
+            RemoveCartridgeVersion {
+                id: cartridge_id("photos"),
                 version: "1.0.0".parse().unwrap(),
             },
         )
@@ -500,44 +504,44 @@ async fn artifacts_are_retained_while_published_and_released_after_removal() {
     while !retained(&sql, &doc).await.is_empty() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    // The plug itself stays, with no versions, until it is removed.
+    // The cartridge itself stays, with no versions, until it is removed.
     let record = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlug {
-                id: plug_id("photos"),
+            GetCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
         .unwrap();
     assert!(record.versions.is_empty());
-    node.plugs
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            RemovePlug {
-                id: plug_id("photos"),
+            RemoveCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
         .unwrap();
     assert_eq!(
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 operator.metadata(),
-                GetPlug {
-                    id: plug_id("photos"),
+                GetCartridge {
+                    id: cartridge_id("photos"),
                 },
             )
             .await
             .map_err(operation),
-        Err(PlugsError::UnknownPlug(plug_id("photos")))
+        Err(CartridgesError::UnknownCartridge(cartridge_id("photos")))
     );
     shutdown(node, stop).await;
 }
@@ -582,7 +586,7 @@ async fn the_registry_is_rebuilt_from_its_drawer_after_a_restart() {
     let changed = sign_as_example(changed);
     assert!(matches!(
         publish(&node, Authorization::identity(node.authority.root), changed).await,
-        Err(PlugsError::VersionExists { existing, .. }) if existing == published.record.revision
+        Err(CartridgesError::VersionExists { existing, .. }) if existing == published.record.revision
     ));
     shutdown(node, stop).await;
 }
@@ -613,7 +617,7 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     let (published, ()) = tokio::join!(held, publishing);
     assert!(!published.reset && published.caught_up);
     assert_eq!(published.changes.len(), 1);
-    assert_eq!(published.changes[0].plug_id, plug_id("photos"));
+    assert_eq!(published.changes[0].cartridge_id, cartridge_id("photos"));
     assert!(!published.changes[0].removed);
     assert_eq!(published.through.seq, published.changes[0].seq);
 
@@ -622,13 +626,13 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     assert!(quiet.changes.is_empty() && quiet.caught_up);
     assert_eq!(quiet.through, published.through);
 
-    node.plugs
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            RemovePlug {
-                id: plug_id("photos"),
+            RemoveCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
@@ -641,7 +645,7 @@ async fn the_watch_observes_publish_and_remove_from_a_cursor() {
     // A cursor from another incarnation is answered with the full state.
     let stale = watch(
         &node,
-        Some(PlugsCursor {
+        Some(CartridgesCursor {
             epoch: big_cabinet_core::dmeta::Uuid7::new(),
             seq: 99,
         }),
@@ -662,13 +666,13 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     let original = photos("1.0.0", &info);
     publish(&node, operator, original.clone()).await.unwrap();
     let record = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlug {
-                id: plug_id("photos"),
+            GetCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
@@ -682,13 +686,13 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
 
     let version = loop {
         let version = node
-            .plugs
+            .cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 operator.metadata(),
-                GetPlugVersion {
-                    id: plug_id("photos"),
+                GetCartridgeVersion {
+                    id: cartridge_id("photos"),
                     version: "1.0.0".parse().unwrap(),
                 },
             )
@@ -723,8 +727,8 @@ async fn an_envelope_must_carry_its_namespace_owners_signature() {
     // Unsigned under a namespace that is not the node's: the node will not sign for it.
     assert_eq!(
         publish(&node, operator, unsigned(PHOTOS, "1.0.0", &info)).await,
-        Err(PlugsError::UnsignedForeignNamespace {
-            namespace: big_plugs_core::example_namespace!().into(),
+        Err(CartridgesError::UnsignedForeignNamespace {
+            namespace: big_cartridges_core::example_namespace!().into(),
         })
     );
     // Signed with another key than the namespace's.
@@ -735,22 +739,22 @@ async fn an_envelope_must_carry_its_namespace_owners_signature() {
             sign_with_seed(unsigned(PHOTOS, "1.0.0", &info), &[9; 32])
         )
         .await,
-        Err(PlugsError::Signature(SignatureError::Invalid(_)))
+        Err(CartridgesError::Signature(SignatureError::Invalid(_)))
     ));
     // A signature that no longer matches the envelope it is attached to.
     let mut tampered = photos("1.0.0", &info);
     tampered.title = Some("edited after signing".into());
     assert!(matches!(
         publish(&node, operator, tampered).await,
-        Err(PlugsError::Signature(SignatureError::Invalid(_)))
+        Err(CartridgesError::Signature(SignatureError::Invalid(_)))
     ));
     // A DID whose method cannot be verified without resolution fails closed, signed or not.
     let web = sign_as_example(unsigned("did:web:example.com/photos", "1.0.0", &info));
     assert_eq!(
         publish(&node, operator, web).await,
-        Err(PlugsError::Signature(SignatureError::UnsupportedMethod(
-            "web".into()
-        )))
+        Err(CartridgesError::Signature(
+            SignatureError::UnsupportedMethod("web".into())
+        ))
     );
     assert!(list(&node).await.is_empty());
 
@@ -769,17 +773,17 @@ async fn the_node_signs_unsigned_envelopes_under_its_own_publisher_did() {
     let operator = operator(&node);
     let info = put(&node, b"node published handler").await;
     let publisher = node
-        .plugs
+        .cartridges
         .client
         .call_with(RequestContext::root(), operator.metadata(), GetPublisher {})
         .await
         .unwrap();
-    assert_eq!(publisher, node.plugs.publisher);
+    assert_eq!(publisher, node.cartridges.publisher);
     // The DID is the did:key of the authority's node key, the one that issues attribution
     // certificates.
     assert_eq!(
         publisher,
-        big_plugs_core::signature::did_key(&node.authority.service.node_public_key())
+        big_cartridges_core::signature::did_key(&node.authority.service.node_public_key())
     );
 
     let own = format!("{publisher}/mine");
@@ -793,7 +797,7 @@ async fn the_node_signs_unsigned_envelopes_under_its_own_publisher_did() {
 }
 
 #[tokio::test]
-async fn a_new_label_must_order_after_every_label_the_plug_has_or_had() {
+async fn a_new_label_must_order_after_every_label_the_cartridge_has_or_had() {
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let operator = operator(&node);
@@ -806,8 +810,8 @@ async fn a_new_label_must_order_after_every_label_the_plug_has_or_had() {
         .unwrap();
 
     // A validly signed older version is not an upgrade, even though nothing is wrong with it.
-    let downgrade = |version: &str, newest: &str| PlugsError::Downgrade {
-        id: plug_id("photos"),
+    let downgrade = |version: &str, newest: &str| CartridgesError::Downgrade {
+        id: cartridge_id("photos"),
         version: Box::new(version.parse().unwrap()),
         newest: Box::new(newest.parse().unwrap()),
     };
@@ -837,13 +841,13 @@ async fn a_new_label_must_order_after_every_label_the_plug_has_or_had() {
         .await
         .unwrap();
     for version in ["1.2.0", "1.0.0"] {
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 operator.metadata(),
-                RemovePlugVersion {
-                    id: plug_id("photos"),
+                RemoveCartridgeVersion {
+                    id: cartridge_id("photos"),
                     version: version.parse().unwrap(),
                 },
             )
@@ -873,13 +877,13 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
         .await
         .unwrap();
     let record = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            GetPlug {
-                id: plug_id("photos"),
+            GetCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
@@ -890,13 +894,13 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
     write_version_datum(&node, &record.doc_id, &forged).await;
     let listed = loop {
         let record = node
-            .plugs
+            .cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 operator.metadata(),
-                GetPlug {
-                    id: plug_id("photos"),
+                GetCartridge {
+                    id: cartridge_id("photos"),
                 },
             )
             .await
@@ -918,7 +922,7 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
     assert_eq!(listed.versions[0].unverified, None);
     assert!(matches!(
         get_version(&node, PHOTOS, "1.1.0").await,
-        Err(PlugsError::Unverified { .. })
+        Err(CartridgesError::Unverified { .. })
     ));
     // The genuine versions are untouched.
     assert_eq!(
@@ -943,8 +947,8 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let info = put(&node, b"scoped handler").await;
-    let own = format!("{}/mine", node.plugs.publisher);
-    let scoped = |namespaces: Option<&[&str]>| PlugsScope {
+    let own = format!("{}/mine", node.cartridges.publisher);
+    let scoped = |namespaces: Option<&[&str]>| CartridgesScope {
         publish: true,
         namespaces: namespaces.map(|namespaces| {
             namespaces
@@ -954,15 +958,15 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
         }),
     };
     // A handle can mint narrower handles only if it carries the NARROW right.
-    let mint_as = |authorization: Authorization, scope: PlugsScope, rights: Rights| {
+    let mint_as = |authorization: Authorization, scope: CartridgesScope, rights: Rights| {
         let node = &node;
         async move {
-            node.plugs
+            node.cartridges
                 .client
                 .call_with(
                     RequestContext::root(),
                     authorization.metadata(),
-                    MintPlugsCapability { scope, rights },
+                    MintCartridgesCapability { scope, rights },
                 )
                 .await
                 .map_err(operation)
@@ -974,7 +978,7 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     };
     let handle = mint_as(
         operator(&node),
-        scoped(Some(&[big_plugs_core::example_namespace!()])),
+        scoped(Some(&[big_cartridges_core::example_namespace!()])),
         Rights::USE | Rights::NARROW,
     )
     .await
@@ -985,8 +989,8 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
         .unwrap();
     assert_eq!(
         publish(&node, handle, unsigned(&own, "1.0.0", &info)).await,
-        Err(PlugsError::NamespaceNotPermitted {
-            namespace: node.plugs.publisher.clone()
+        Err(CartridgesError::NamespaceNotPermitted {
+            namespace: node.cartridges.publisher.clone()
         })
     );
     // The node's convenience signing is not a way around the scope, and removal is scoped too.
@@ -994,28 +998,28 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
         .await
         .unwrap();
     assert_eq!(
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 handle.metadata(),
-                RemovePlug {
+                RemoveCartridge {
                     id: own.parse().unwrap(),
                 }
             )
             .await
             .map_err(operation),
-        Err(PlugsError::NamespaceNotPermitted {
-            namespace: node.plugs.publisher.clone()
+        Err(CartridgesError::NamespaceNotPermitted {
+            namespace: node.cartridges.publisher.clone()
         })
     );
-    node.plugs
+    node.cartridges
         .client
         .call_with(
             RequestContext::root(),
             handle.metadata(),
-            RemovePlug {
-                id: plug_id("photos"),
+            RemoveCartridge {
+                id: cartridge_id("photos"),
             },
         )
         .await
@@ -1024,7 +1028,7 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
     // Minting narrows: the same or fewer namespaces, never any or more.
     let narrower = mint_as(
         handle,
-        scoped(Some(&[big_plugs_core::example_namespace!()])),
+        scoped(Some(&[big_cartridges_core::example_namespace!()])),
         Rights::USE,
     )
     .await
@@ -1034,16 +1038,19 @@ async fn a_handle_scoped_to_namespaces_publishes_and_removes_only_under_them() {
         .unwrap();
     assert_eq!(
         mint_as(handle, scoped(None), Rights::USE).await,
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
         mint_as(
             handle,
-            scoped(Some(&[big_plugs_core::example_namespace!(), "did:web:x"])),
+            scoped(Some(&[
+                big_cartridges_core::example_namespace!(),
+                "did:web:x"
+            ])),
             Rights::USE
         )
         .await,
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     shutdown(node, stop).await;
 }
@@ -1068,9 +1075,9 @@ async fn micro_pair(
     node: &BigNode,
     component: &[u8],
     manifest: &str,
-) -> Result<PublishedPlugVersion, big_plugs::import::ImportError> {
-    big_plugs::import::micro_pair(
-        &node.plugs.client,
+) -> Result<PublishedCartridgeVersion, big_cartridges::import::ImportError> {
+    big_cartridges::import::micro_pair(
+        &node.cartridges.client,
         &node.blobs.service,
         operator(node),
         component.to_vec(),
@@ -1081,14 +1088,14 @@ async fn micro_pair(
 
 #[tokio::test]
 async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() {
-    use big_plugs::import::ImportError;
+    use big_cartridges::import::ImportError;
     let secrets = secrets().await;
     let (node, stop, _sql) = boot_memory(&secrets).await;
     let published = micro_pair(&node, COMPONENT, CLAY_MANIFEST).await.unwrap();
     let envelope = &published.record.envelope;
     assert_eq!(
         envelope.id.to_string(),
-        format!("{}/counter", node.plugs.publisher)
+        format!("{}/counter", node.cartridges.publisher)
     );
     assert_eq!(envelope.version.to_string(), "2.0.0");
     envelope.verify_signature().unwrap();
@@ -1097,7 +1104,10 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
     assert_eq!(artifact.size, Some(COMPONENT.len() as u64));
     assert_eq!(artifact.media_type.as_deref(), Some("application/wasm"));
     let micro = envelope.micro().unwrap();
-    assert_eq!(micro.schema, big_plugs::import::CLAY_MICRO_MANIFEST_SCHEMA);
+    assert_eq!(
+        micro.schema,
+        big_cartridges::import::CLAY_MICRO_MANIFEST_SCHEMA
+    );
     // The description is the manifest minus the members the envelope states itself.
     assert!(!micro.description.contains_key("id"));
     assert!(!micro.description.contains_key("package_version"));
@@ -1128,7 +1138,7 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
     let older = CLAY_MANIFEST.replace("\"package_version\": 2", "\"package_version\": 1");
     assert!(matches!(
         micro_pair(&node, COMPONENT, &older).await,
-        Err(ImportError::Registry(PlugsError::Downgrade { .. }))
+        Err(ImportError::Registry(CartridgesError::Downgrade { .. }))
     ));
 
     // Bad input is refused before anything is published.
@@ -1140,12 +1150,12 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
         micro_pair(&node, COMPONENT, "[]").await,
         Err(ImportError::Manifest(_))
     ));
-    // Clay's real ids are dotted, and a dotted id is its own plug name.
+    // Clay's real ids are dotted, and a dotted id is its own cartridge name.
     let dotted = CLAY_MANIFEST.replace("\"counter\"", "\"dayframe.counter\"");
     let published = micro_pair(&node, COMPONENT, &dotted).await.unwrap();
     assert_eq!(
         published.record.id.to_string(),
-        format!("{}/dayframe.counter", node.plugs.publisher)
+        format!("{}/dayframe.counter", node.cartridges.publisher)
     );
     // The NSID is the format identity, so a manifest without the old integer `schema` imports.
     let unversioned = CLAY_MANIFEST
@@ -1156,15 +1166,15 @@ async fn clays_package_pair_is_published_under_the_nodes_did_and_signed_by_it() 
     let invalid = CLAY_MANIFEST.replace("\"counter\"", "\"Counter\"");
     assert!(matches!(
         micro_pair(&node, COMPONENT, &invalid).await,
-        Err(ImportError::Manifest(reason)) if reason.contains("plug name")
+        Err(ImportError::Manifest(reason)) if reason.contains("cartridge name")
     ));
     assert_eq!(list(&node).await.len(), 3);
     shutdown(node, stop).await;
 }
 
 /// A document an author made outside the registry drawer, in the node's local drawer, holding
-/// the plug identity and the given versions as they would be written by the author's tooling.
-async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Plug]) -> DocId {
+/// the cartridge identity and the given versions as they would be written by the author's tooling.
+async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Cartridge]) -> DocId {
     let placement = format!("drawer {}", node.drawers.local().present_id);
     let create = capability(
         node,
@@ -1197,7 +1207,7 @@ async fn author_document(node: &BigNode, command: &str, id: &str, versions: &[Pl
         .doc_id
 }
 
-/// Installs the plug document `doc_id`, found in `drawer`, into the registry as `authorization`
+/// Installs the cartridge document `doc_id`, found in `drawer`, into the registry as `authorization`
 /// asks. The operator lends the registry the two handles the import needs, one to read the
 /// document and one reaching it through `drawer`, and retracts them once the call returns: the
 /// registry keeps no standing access to `drawer`. The operator reaches every drawer without a
@@ -1207,7 +1217,7 @@ pub(super) async fn import_document(
     authorization: Authorization,
     drawer: &DocId,
     doc_id: &DocId,
-) -> Result<big_plugs_core::protocol::PlugRecord, PlugsError> {
+) -> Result<big_cartridges_core::protocol::CartridgeRecord, CartridgesError> {
     use big_cabinet_core::authority::RetractCapability;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::protocol::DrawerScope;
@@ -1247,12 +1257,12 @@ pub(super) async fn import_document(
         .unwrap()
         .capability_id;
     let imported = node
-        .plugs
+        .cartridges
         .client
         .call_with(
             RequestContext::root(),
             authorization.metadata(),
-            ImportPlugDocument {
+            ImportCartridgeDocument {
                 doc_id: doc_id.clone(),
                 read,
                 reach,
@@ -1296,11 +1306,11 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     let record = import_document(&node, operator, &present, &doc)
         .await
         .unwrap();
-    assert_eq!(record.id, plug_id("photos"));
+    assert_eq!(record.id, cartridge_id("photos"));
     assert_eq!(record.doc_id, doc);
     assert_eq!(record.versions.len(), 1);
     assert_eq!(record.versions[0].unverified, None);
-    assert_eq!(listed_ids(&node).await, [plug_id("photos")]);
+    assert_eq!(listed_ids(&node).await, [cartridge_id("photos")]);
     assert_eq!(
         get_version(&node, PHOTOS, "1.0.0").await.unwrap().envelope,
         genuine
@@ -1316,22 +1326,22 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     // so neither a new version nor a removal lands in it.
     assert_eq!(
         publish(&node, operator, photos("1.1.0", &info)).await,
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
-        node.plugs
+        node.cartridges
             .client
             .call_with(
                 RequestContext::root(),
                 operator.metadata(),
-                RemovePlugVersion {
-                    id: plug_id("photos"),
+                RemoveCartridgeVersion {
+                    id: cartridge_id("photos"),
                     version: "1.0.0".parse().unwrap(),
                 },
             )
             .await
             .map_err(operation),
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     assert_eq!(
         get_version(&node, PHOTOS, "1.0.0").await.unwrap().envelope,
@@ -1353,10 +1363,10 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     }
     assert!(matches!(
         get_version(&node, other, "1.0.0").await,
-        Err(PlugsError::Unverified { .. })
+        Err(CartridgesError::Unverified { .. })
     ));
 
-    // A document that is not a plug document is refused, and a handle's namespace scope applies
+    // A document that is not a cartridge document is refused, and a handle's namespace scope applies
     // to the id the document names.
     let no_identity = {
         let doc = author_document(&node, "author anonymous", PHOTOS, &[]).await;
@@ -1387,11 +1397,11 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     };
     assert!(matches!(
         import_document(&node, operator, &present, &no_identity).await,
-        Err(PlugsError::Rejected(_))
+        Err(CartridgesError::Rejected(_))
     ));
     let scoped = mint(
         &node,
-        PlugsScope {
+        CartridgesScope {
             publish: true,
             namespaces: Some(BTreeSet::from(["did:key:z6MkOther".to_owned()])),
         },
@@ -1400,11 +1410,11 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     let outside = author_document(&node, "author scoped", PHOTOS, &[genuine]).await;
     assert!(matches!(
         import_document(&node, scoped, &present, &outside).await,
-        Err(PlugsError::NamespaceNotPermitted { .. })
+        Err(CartridgesError::NamespaceNotPermitted { .. })
     ));
     let reader = mint(
         &node,
-        PlugsScope {
+        CartridgesScope {
             publish: false,
             ..Default::default()
         },
@@ -1412,12 +1422,12 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
     .await;
     assert_eq!(
         import_document(&node, reader, &present, &outside).await,
-        Err(PlugsError::Denied)
+        Err(CartridgesError::Denied)
     );
     shutdown(node, stop).await;
 }
 
-async fn listed_ids(node: &BigNode) -> Vec<big_plugs_core::PlugId> {
+async fn listed_ids(node: &BigNode) -> Vec<big_cartridges_core::CartridgeId> {
     list(node)
         .await
         .into_iter()

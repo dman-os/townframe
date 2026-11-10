@@ -7,8 +7,8 @@ use super::dispatch::operations;
 use super::nodule_wasm::Spec;
 use super::nodule_wasm::admit;
 use super::nodule_wasm::caller;
+use super::nodule_wasm::cartridge;
 use super::nodule_wasm::guest_bytes;
-use super::nodule_wasm::plug;
 use super::nodule_wasm::put;
 use super::nodule_wasm::set_enabled;
 use super::*;
@@ -42,7 +42,7 @@ async fn boot_listening(
     let (node, stop) = BigNode::boot(config).await.unwrap();
     let spec = caller();
     put(&node, &bytes).await;
-    admit(&node, plug(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
     set_enabled(&node, &spec, true).await;
     (node, stop, spec)
 }

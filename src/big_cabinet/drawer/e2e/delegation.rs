@@ -594,7 +594,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
     let bob = node.actor("bob").await;
-    let plug = node.actor("plug").await;
+    let cartridge = node.actor("cartridge").await;
     let drawer = node.collection(&alice, "workspace").await;
     let doc = node
         .create_doc(&alice, &drawer, "initial-note")
@@ -612,7 +612,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             RequestContext::root(),
             Authorization {
                 authority: source,
-                signer: plug.capability,
+                signer: cartridge.capability,
             }
             .metadata(),
             MintDrawerCapability {
@@ -640,10 +640,10 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         .invocation(&RequestContext::root(), delegated)
         .await
         .unwrap();
-    assert_eq!(caller.signer, plug);
+    assert_eq!(caller.signer, cartridge);
     assert_eq!(caller.originating_actor, Some(bob.actor_id));
     assert_eq!(
-        node.mint_drawer(&plug, scope).await.unwrap_err(),
+        node.mint_drawer(&cartridge, scope).await.unwrap_err(),
         DrawersError::Denied
     );
     assert_eq!(
@@ -686,7 +686,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             access: Access::Write,
         }],
     );
-    for capability in [alice.capability, bob.capability, plug.capability] {
+    for capability in [alice.capability, bob.capability, cartridge.capability] {
         assert_eq!(
             op(node
                 .drawers()
@@ -710,7 +710,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
                 GrantDrawer {
                     capability: delegated,
                     drawer_id: drawer.clone(),
-                    subject_id: plug.actor_id,
+                    subject_id: cartridge.actor_id,
                     access: Access::Write,
                 }
             )
@@ -746,19 +746,19 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             RequestContext::root(),
             RemoveDoc {
                 capability: delegated,
-                command: command("plug removes entry"),
+                command: command("cartridge removes entry"),
                 drawer_id: drawer.clone(),
                 doc_id: doc,
             },
         )
         .await
         .unwrap();
-    let signer = sqlite::get_op(&node.sql, "plug removes entry".to_owned())
+    let signer = sqlite::get_op(&node.sql, "cartridge removes entry".to_owned())
         .await
         .unwrap()
         .unwrap()
         .actor_uuid;
-    assert_eq!(signer, plug.actor_id.to_string());
+    assert_eq!(signer, cartridge.actor_id.to_string());
     node.authority
         .client
         .call(
@@ -1187,7 +1187,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
 async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
-    let plug = node.actor("plug").await;
+    let cartridge = node.actor("cartridge").await;
     let home = node.collection(&alice, "home").await;
     let doc = node.create_doc(&alice, &home, "note").await.unwrap();
     let scope = DrawerScope {
@@ -1201,7 +1201,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             RequestContext::root(),
             Authorization {
                 authority: source,
-                signer: plug.capability,
+                signer: cartridge.capability,
             }
             .metadata(),
             MintDrawerCapability {
@@ -1253,7 +1253,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.actor_uuid, plug.actor_id.to_string());
+        assert_eq!(row.actor_uuid, cartridge.actor_id.to_string());
         let operation: ledger::Op = serde_json::from_str(&row.op_json).unwrap();
         match operation {
             ledger::Op::Create { owner_id, .. } | ledger::Op::CreateSelfDoc { owner_id, .. } => {
@@ -1266,7 +1266,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             Access::Admin
         );
         assert_eq!(
-            node.view(&plug, &receipt.drawer_id).await.unwrap_err(),
+            node.view(&cartridge, &receipt.drawer_id).await.unwrap_err(),
             DrawersError::Denied
         );
         created.push(receipt.drawer_id);
@@ -1316,7 +1316,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             Access::Admin
         );
         assert_eq!(
-            node.view(&plug, &drawer).await.unwrap_err(),
+            node.view(&cartridge, &drawer).await.unwrap_err(),
             DrawersError::Denied
         );
     }
@@ -1327,7 +1327,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
 async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both_layouts() {
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
-    let plug = node.actor("plug").await;
+    let cartridge = node.actor("cartridge").await;
     let home = node.collection(&alice, "home").await;
     let doc = node.create_doc(&alice, &home, "note").await.unwrap();
     let context = RequestContext::root();
@@ -1342,7 +1342,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             context.child(),
             Authorization {
                 authority: source,
-                signer: plug.capability,
+                signer: cartridge.capability,
             }
             .metadata(),
             MintDrawerCapability {
@@ -1354,7 +1354,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         .unwrap()
         .capability_id;
     let caller = node.core().invocation(&context, delegated).await.unwrap();
-    assert_eq!(caller.signer, plug);
+    assert_eq!(caller.signer, cartridge);
     assert_eq!(caller.originating_actor, Some(alice.actor_id));
     drop(
         node.core()
@@ -1528,7 +1528,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.actor_uuid, plug.actor_id.to_string());
+        assert_eq!(row.actor_uuid, cartridge.actor_id.to_string());
         assert_eq!(
             serde_json::from_str::<ledger::Op>(&row.op_json).unwrap(),
             *expected_op
@@ -1548,7 +1548,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         assert_eq!(view.access, Access::Admin);
         assert_eq!(view.descriptor, descriptor);
         assert_eq!(
-            node.view(&plug, &created.drawer_id).await.unwrap_err(),
+            node.view(&cartridge, &created.drawer_id).await.unwrap_err(),
             DrawersError::Denied
         );
         recovered.push(created.drawer_id);
@@ -1560,7 +1560,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             Access::Admin
         );
         assert_eq!(
-            node.view(&plug, &drawer).await.unwrap_err(),
+            node.view(&cartridge, &drawer).await.unwrap_err(),
             DrawersError::Denied
         );
     }

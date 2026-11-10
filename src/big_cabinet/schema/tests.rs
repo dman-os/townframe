@@ -68,7 +68,7 @@ fn independently_authored_records_are_authoritative_and_handles_are_owned() {
 fn dependency_storage_annotations_are_owned_without_becoming_validation_authority() {
     let tag = "org.example.schema.text";
     let repo = {
-        let plug = universe(tag, json!({"$ref": "#/$defs/Carried"}));
+        let cartridge = universe(tag, json!({"$ref": "#/$defs/Carried"}));
         let dependency = Universe {
             datums: Vec::new(),
             types: vec![TypeDecl {
@@ -80,7 +80,7 @@ fn dependency_storage_annotations_are_owned_without_becoming_validation_authorit
             }],
         };
         SchemaRepo::open([SchemaRegistrationGroup::new(
-            Some(Bundle::new(&plug, vec![&dependency])),
+            Some(Bundle::new(&cartridge, vec![&dependency])),
             [registration(tag, json!({"type": "string", "minLength": 2}))],
             Vec::new(),
         )])
@@ -318,7 +318,7 @@ fn unknown_reads_are_best_effort_but_unknown_writes_are_refused() {
     ));
 }
 
-fn plug_group(tags: &[&str]) -> SchemaRegistrationGroup<'static> {
+fn cartridge_group(tags: &[&str]) -> SchemaRegistrationGroup<'static> {
     SchemaRegistrationGroup::new(
         None,
         tags.iter()
@@ -331,8 +331,8 @@ fn plug_group(tags: &[&str]) -> SchemaRegistrationGroup<'static> {
 fn an_owners_schemas_register_replace_and_retire_live() {
     let repo = SchemaRepo::open([]).unwrap();
     repo.register(
-        "plug-a",
-        plug_group(&["org.example.a.one", "org.example.a.two"]),
+        "cartridge-a",
+        cartridge_group(&["org.example.a.one", "org.example.a.two"]),
     )
     .unwrap();
     assert!(repo.resolve_for_read("org.example.a.one").is_some());
@@ -343,34 +343,34 @@ fn an_owners_schemas_register_replace_and_retire_live() {
 
     // Registering again replaces the owner's set, so `two` goes and `three` arrives.
     repo.register(
-        "plug-a",
-        plug_group(&["org.example.a.one", "org.example.a.three"]),
+        "cartridge-a",
+        cartridge_group(&["org.example.a.one", "org.example.a.three"]),
     )
     .unwrap();
     assert!(repo.resolve_for_read("org.example.a.two").is_none());
     assert!(repo.resolve_for_read("org.example.a.three").is_some());
 
-    repo.retire("plug-a");
+    repo.retire("cartridge-a");
     assert!(repo.resolve_for_read("org.example.a.one").is_none());
     assert_eq!(held.datum_tag(), "org.example.a.one");
     assert!(
         repo.resolve_for_read(Dmeta::ID).is_some(),
         "retiring never touches the boot set"
     );
-    repo.retire("plug-a");
+    repo.retire("cartridge-a");
 }
 
 #[test]
 fn a_registration_never_shadows_and_a_refusal_leaves_the_owner_untouched() {
     let repo = SchemaRepo::open([]).unwrap();
-    repo.register("plug-a", plug_group(&["org.example.a.one"]))
+    repo.register("cartridge-a", cartridge_group(&["org.example.a.one"]))
         .unwrap();
     assert!(matches!(
-        repo.register("plug-b", plug_group(&["org.example.a.one"])),
+        repo.register("cartridge-b", cartridge_group(&["org.example.a.one"])),
         Err(SchemaRepoError::DuplicateDatumTag(_))
     ));
     assert!(matches!(
-        repo.register("plug-b", plug_group(&[Dmeta::ID])),
+        repo.register("cartridge-b", cartridge_group(&[Dmeta::ID])),
         Err(SchemaRepoError::DuplicateDatumTag(_))
     ));
     // A group that fails to compile does not retire what the owner already had.
@@ -383,7 +383,7 @@ fn a_registration_never_shadows_and_a_refusal_leaves_the_owner_untouched() {
         Vec::new(),
     );
     assert!(matches!(
-        repo.register("plug-a", broken),
+        repo.register("cartridge-a", broken),
         Err(SchemaRepoError::Admission { .. })
     ));
     assert!(repo.resolve_for_read("org.example.a.one").is_some());

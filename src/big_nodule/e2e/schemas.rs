@@ -1,29 +1,29 @@
 //! The schema registry (ADR 028 §4–§5, plan item P7): an enabled nodule's datum records are
 //! registered live in the node's schema repo and retired with it, data requests resolve against
-//! the plug holding the datum (with `minRevision` checked), and copies of a Lexicon that cannot
+//! the cartridge holding the datum (with `minRevision` checked), and copies of a Lexicon that cannot
 //! be reconciled are refused. Against the fake executor, with no sleeps.
 
 use super::Node;
 use super::init::Probe;
-use super::init::init_plug;
+use super::init::init_cartridge;
 use super::init::node_hosting;
 use super::init::with_requests;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::Dmeta;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Request;
 use big_dispatch_core::Readiness;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
-use big_plugs_core::Contribution;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Request;
 use serde_json::Value;
 use serde_json::json;
 
-const ALPHA: &str = example_plug!("alpha");
-const BETA: &str = example_plug!("beta");
-const GAMMA: &str = example_plug!("gamma");
+const ALPHA: &str = example_cartridge!("alpha");
+const BETA: &str = example_cartridge!("beta");
+const GAMMA: &str = example_cartridge!("gamma");
 const NOTE: &str = "org.example.beta.note";
 
 /// A record Lexicon for `nsid` with one string property `field`, at `revision` when given.
@@ -43,10 +43,10 @@ fn record(nsid: &str, revision: Option<u32>, field: &str) -> Value {
     lexicon
 }
 
-/// `plug` carrying one more Lexicon file.
-fn with_lexicon(mut plug: Plug, lexicon: Value) -> Plug {
-    let Some(Contribution::Nodule(nodule)) = plug.contributions.first_mut() else {
-        panic!("init plugs carry a nodule");
+/// `cartridge` carrying one more Lexicon file.
+fn with_lexicon(mut cartridge: Cartridge, lexicon: Value) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
     };
     nodule
         .description
@@ -55,13 +55,13 @@ fn with_lexicon(mut plug: Plug, lexicon: Value) -> Plug {
         .as_array_mut()
         .unwrap()
         .push(lexicon);
-    plug
+    cartridge
 }
 
 /// Beta, holding the `note` record at `revision`.
-fn beta(version: &str, revision: u32) -> Plug {
+fn beta(version: &str, revision: u32) -> Cartridge {
     with_lexicon(
-        init_plug("beta", version, &[], &[], &[]),
+        init_cartridge("beta", version, &[], &[], &[]),
         record(NOTE, Some(revision), "text"),
     )
 }
@@ -78,7 +78,7 @@ async fn node_with_alpha(requests: Vec<Request>) -> Node {
     let node = node_hosting(&Probe::new()).await;
     node.admit(
         node.operator(),
-        with_requests(init_plug("alpha", "1.0.0", &[], &[], &[]), requests),
+        with_requests(init_cartridge("alpha", "1.0.0", &[], &[], &[]), requests),
     )
     .await
     .unwrap();
@@ -129,14 +129,14 @@ async fn an_enabled_nodules_datums_are_registered_live_and_retired_with_it() {
 
 #[tokio::test]
 async fn a_nodule_holding_a_datum_the_node_already_knows_is_refused() {
-    // `dmeta` is a boot schema: a plug claiming its NSID would shadow the node's own.
+    // `dmeta` is a boot schema: a cartridge claiming its NSID would shadow the node's own.
     let node = node_hosting(&Probe::new()).await;
-    let mut plug = with_lexicon(
-        init_plug("beta", "1.0.0", &[], &[], &[]),
+    let mut cartridge = with_lexicon(
+        init_cartridge("beta", "1.0.0", &[], &[], &[]),
         record(Dmeta::ID, None, "text"),
     );
-    plug.authority = Some("org.example".into());
-    node.install(plug).await;
+    cartridge.authority = Some("org.example".into());
+    node.install(cartridge).await;
     let record = node.record(BETA).await;
     assert_eq!(record.readiness, Readiness::Refused);
     assert!(
@@ -213,7 +213,7 @@ async fn a_vendored_copy_that_conflicts_with_the_holders_is_refused_and_surfaced
     // Gamma vendors `note` at the holder's revision with a different body.
     let gamma = with_requests(
         with_lexicon(
-            init_plug("gamma", "1.0.0", &[], &[], &[]),
+            init_cartridge("gamma", "1.0.0", &[], &[], &[]),
             record(NOTE, Some(1), "title"),
         ),
         vec![read(NOTE, None)],

@@ -1,6 +1,6 @@
 -- name: set_registry_drawer :exec
 -- param: drawer_id String
-INSERT INTO plugs_registry_drawer
+INSERT INTO cartridges_registry_drawer
      ( singleton
      , drawer_id
      )

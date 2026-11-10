@@ -1,9 +1,9 @@
-//! The plug registry service (ADR 028 §1): the node-side catalog of plugs.
+//! The cartridge registry service (ADR 028 §1): the node-side catalog of cartridges.
 //!
-//! The registry is a grouped drawer holding one document per plug id, with each version as an
-//! immutable datum and a `Blob` datum per artifact (see [`big_plugs_core::registry`]). The
+//! The registry is a grouped drawer holding one document per cartridge id, with each version as an
+//! immutable datum and a `Blob` datum per artifact (see [`big_cartridges_core::registry`]). The
 //! service derives what it serves from that drawer ([`registry`]), so another node syncing the
-//! drawer discovers the same plugs; SQLite holds only the drawer's id and this node's first-seen
+//! drawer discovers the same cartridges; SQLite holds only the drawer's id and this node's first-seen
 //! record of each version ([`store`]). It does no enablement: each runtime owns that.
 //!
 //! Boot is two steps because the blob workers are configured with the drawers they maintain
@@ -54,26 +54,26 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
-use big_plugs_core::protocol::GetPlug;
-use big_plugs_core::protocol::GetPlugVersion;
-use big_plugs_core::protocol::GetPublisher;
-use big_plugs_core::protocol::ImportPlugDocument;
-use big_plugs_core::protocol::ListPlugs;
-use big_plugs_core::protocol::MintPlugsCapability;
-use big_plugs_core::protocol::PlugChanges;
-use big_plugs_core::protocol::PlugRecord;
-use big_plugs_core::protocol::PlugVersionRecord;
-use big_plugs_core::protocol::PlugsError;
-use big_plugs_core::protocol::PlugsMessage;
-use big_plugs_core::protocol::PlugsProtocol;
-use big_plugs_core::protocol::PlugsScope;
-use big_plugs_core::protocol::PublishPlugVersion;
-use big_plugs_core::protocol::PublishedPlugVersion;
-use big_plugs_core::protocol::RemovePlug;
-use big_plugs_core::protocol::RemovePlugVersion;
-use big_plugs_core::protocol::WatchPlugs;
-use big_plugs_core::registry::registry_universe;
-use big_plugs_core::signature::did_key;
+use big_cartridges_core::protocol::CartridgeChanges;
+use big_cartridges_core::protocol::CartridgeRecord;
+use big_cartridges_core::protocol::CartridgeVersionRecord;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::CartridgesMessage;
+use big_cartridges_core::protocol::CartridgesProtocol;
+use big_cartridges_core::protocol::CartridgesScope;
+use big_cartridges_core::protocol::GetCartridge;
+use big_cartridges_core::protocol::GetCartridgeVersion;
+use big_cartridges_core::protocol::GetPublisher;
+use big_cartridges_core::protocol::ImportCartridgeDocument;
+use big_cartridges_core::protocol::ListCartridges;
+use big_cartridges_core::protocol::MintCartridgesCapability;
+use big_cartridges_core::protocol::PublishCartridgeVersion;
+use big_cartridges_core::protocol::PublishedCartridgeVersion;
+use big_cartridges_core::protocol::RemoveCartridge;
+use big_cartridges_core::protocol::RemoveCartridgeVersion;
+use big_cartridges_core::protocol::WatchCartridges;
+use big_cartridges_core::registry::registry_universe;
+use big_cartridges_core::signature::did_key;
 use registry::Registry;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
@@ -93,11 +93,11 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 /// The prefix of every capability object this domain mints; the scope follows it as JSON.
-const SCOPE_PREFIX: &str = "PlugService/scope/v1/";
+const SCOPE_PREFIX: &str = "CartridgeService/scope/v1/";
 
 static REGISTRY_UNIVERSE: LazyLock<Universe> = LazyLock::new(registry_universe);
 
-/// The schema registration group for the registry's datums (the envelope and the plug identity).
+/// The schema registration group for the registry's datums (the envelope and the cartridge identity).
 /// The `Blob` Lexicon the artifact references use is registered beside it by big_blobs.
 pub fn schema_group() -> SchemaRegistrationGroup<'static> {
     let bundle = Bundle::new(&REGISTRY_UNIVERSE, Vec::new());
@@ -108,31 +108,31 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
     SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
 }
 
-type Res<T> = std::result::Result<T, PlugsError>;
+type Res<T> = std::result::Result<T, CartridgesError>;
 
-pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> PlugsError {
+pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> CartridgesError {
     match error {
         ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
         ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
-        ) => PlugsError::Denied,
-        ClientError::Method(error) => PlugsError::Authority(error),
-        ClientError::Transport { message, .. } => PlugsError::AuthorityUnavailable(message),
+        ) => CartridgesError::Denied,
+        ClientError::Method(error) => CartridgesError::Authority(error),
+        ClientError::Transport { message, .. } => CartridgesError::AuthorityUnavailable(message),
     }
 }
 
-pub(crate) fn docs_error(error: ClientError<DocsError>) -> PlugsError {
+pub(crate) fn docs_error(error: ClientError<DocsError>) -> CartridgesError {
     match error {
         ClientError::Method(DocsError::Context(error)) => error.into(),
-        ClientError::Method(DocsError::Authority(error)) => PlugsError::Authority(error),
+        ClientError::Method(DocsError::Authority(error)) => CartridgesError::Authority(error),
         ClientError::Method(DocsError::AuthorityUnavailable(message)) => {
-            PlugsError::AuthorityUnavailable(message)
+            CartridgesError::AuthorityUnavailable(message)
         }
-        ClientError::Method(DocsError::Denied) => PlugsError::Denied,
-        ClientError::Method(other) => PlugsError::Storage(other.to_string()),
-        ClientError::Transport { message, .. } => PlugsError::Storage(message),
+        ClientError::Method(DocsError::Denied) => CartridgesError::Denied,
+        ClientError::Method(other) => CartridgesError::Storage(other.to_string()),
+        ClientError::Transport { message, .. } => CartridgesError::Storage(message),
     }
 }
 
@@ -159,7 +159,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
     if let Some(drawer) = store::registry_drawer(&config.sql).await? {
         return Ok(drawer);
     }
-    let storage = |error: &dyn std::fmt::Display| PlugsError::Storage(error.to_string());
+    let storage = |error: &dyn std::fmt::Display| CartridgesError::Storage(error.to_string());
     let command = |text: &str| {
         CommandId::try_from(text.to_owned()).expect("a registry drawer command is within bounds")
     };
@@ -200,7 +200,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
             context.child(),
             CreateDrawer {
                 capability: create.capability_id,
-                command: command("plug registry drawer"),
+                command: command("cartridge registry drawer"),
                 layout: CreateLayout::SingleGroup,
             },
         )
@@ -223,7 +223,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
                 context.child(),
                 CreateMetaDoc {
                     capability: admin.capability_id,
-                    command: command(&format!("plug registry inventory {root} {name}")),
+                    command: command(&format!("cartridge registry inventory {root} {name}")),
                     drawer_id: drawer.clone(),
                     kind: big_blobs::workers::INVENTORY_KIND.into(),
                     name: name.into(),
@@ -252,7 +252,7 @@ pub async fn ensure_registry_drawer(config: RegistryDrawerConfig<'_>) -> Res<Dra
 
 /// The node's publisher identity: its Ed25519 public key and a function that signs a message with
 /// the matching secret. The secret never leaves its owner; the registry only ever asks for
-/// signatures over envelopes (domain-separated, see [`big_plugs_core::signature`]).
+/// signatures over envelopes (domain-separated, see [`big_cartridges_core::signature`]).
 pub struct NodeKey {
     pub public_key: [u8; 32],
     pub sign: NodeSigner,
@@ -266,7 +266,7 @@ pub type NodeSigner = Arc<dyn Fn(&[u8]) -> [u8; 64] + Send + Sync>;
 /// the actor holding Admin on it, the namespace it mints handles in, the operator whose identity
 /// administers the registry, the blob service it checks artifact bytes against, the node's
 /// publisher key, and the database.
-pub struct PlugsConfig {
+pub struct CartridgesConfig {
     pub authority: Client<AuthorityProtocol>,
     pub docs: Client<DocsProtocol>,
     pub registry_drawer: DrawerId,
@@ -280,7 +280,7 @@ pub struct PlugsConfig {
 }
 
 /// The hosted surface: it settles who the caller is, then hands the work to the registry.
-pub struct PlugService {
+pub struct CartridgeService {
     capabilities: DomainCapabilities,
     operator: Uuid7,
     registry: Arc<Registry>,
@@ -292,38 +292,41 @@ pub struct PlugService {
     tasks: Spawner,
 }
 
-impl PlugService {
+impl CartridgeService {
     async fn caller(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-    ) -> Res<Invocation<PlugsScope>> {
+    ) -> Res<Invocation<CartridgesScope>> {
         self.capabilities
-            .source::<PlugsScope>(context, authorization)
+            .source::<CartridgesScope>(context, authorization)
             .await
             .map_err(authority_error)
     }
 
     /// What the caller may do: everything for the operator's identity, the scope of a handle this
     /// domain minted, nothing for any other identity.
-    fn scope_of<'a>(&self, caller: &'a Invocation<PlugsScope>) -> Res<Option<&'a PlugsScope>> {
+    fn scope_of<'a>(
+        &self,
+        caller: &'a Invocation<CartridgesScope>,
+    ) -> Res<Option<&'a CartridgesScope>> {
         if !caller.rights.contains(Rights::USE) {
-            return Err(PlugsError::Denied);
+            return Err(CartridgesError::Denied);
         }
         match &caller.authority {
             DomainAuthority::Identity(actor) if *actor == self.operator => Ok(None),
-            DomainAuthority::Identity(_) => Err(PlugsError::Denied),
+            DomainAuthority::Identity(_) => Err(CartridgesError::Denied),
             DomainAuthority::Scoped(scope) => Ok(Some(scope)),
         }
     }
 
-    /// Publishing and removing need the handle's `publish` scope, and the plug's namespace must be
+    /// Publishing and removing need the handle's `publish` scope, and the cartridge's namespace must be
     /// one the handle may publish under.
-    fn require_publish(&self, caller: &Invocation<PlugsScope>, namespace: &str) -> Res<()> {
+    fn require_publish(&self, caller: &Invocation<CartridgesScope>, namespace: &str) -> Res<()> {
         match self.scope_of(caller)? {
-            Some(scope) if !scope.publish => Err(PlugsError::Denied),
+            Some(scope) if !scope.publish => Err(CartridgesError::Denied),
             Some(scope) if !scope.may_publish_under(namespace) => {
-                Err(PlugsError::NamespaceNotPermitted {
+                Err(CartridgesError::NamespaceNotPermitted {
                     namespace: namespace.to_owned(),
                 })
             }
@@ -350,13 +353,13 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: MintPlugsCapability,
+        params: MintCartridgesCapability,
     ) -> Res<Capability> {
         let caller = self.caller(context, authorization).await?;
         if let Some(scope) = self.scope_of(&caller)?
             && !scope.covers(&params.scope)
         {
-            return Err(PlugsError::Denied);
+            return Err(CartridgesError::Denied);
         }
         self.capabilities
             .mint(
@@ -375,8 +378,8 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: PublishPlugVersion,
-    ) -> Res<PublishedPlugVersion> {
+        params: PublishCartridgeVersion,
+    ) -> Res<PublishedCartridgeVersion> {
         let mut envelope = params.envelope;
         self.write_caller(context, authorization, &envelope.id.namespace)
             .await?;
@@ -384,7 +387,7 @@ impl PlugService {
             // The node signs only for its own DID: signing for any other namespace would let a
             // local publisher pass an envelope off as someone else's.
             if envelope.id.namespace != self.publisher {
-                return Err(PlugsError::UnsignedForeignNamespace {
+                return Err(CartridgesError::UnsignedForeignNamespace {
                     namespace: envelope.id.namespace,
                 });
             }
@@ -397,7 +400,7 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: RemovePlugVersion,
+        params: RemoveCartridgeVersion,
     ) -> Res<()> {
         self.write_caller(context, authorization, &params.id.namespace)
             .await?;
@@ -406,23 +409,23 @@ impl PlugService {
             .await
     }
 
-    async fn remove_plug(
+    async fn remove_cartridge(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: RemovePlug,
+        params: RemoveCartridge,
     ) -> Res<()> {
         self.write_caller(context, authorization, &params.id.namespace)
             .await?;
-        self.registry.remove_plug(&params.id).await
+        self.registry.remove_cartridge(&params.id).await
     }
 
     async fn import_document(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: ImportPlugDocument,
-    ) -> Res<PlugRecord> {
+        params: ImportCartridgeDocument,
+    ) -> Res<CartridgeRecord> {
         let caller = self.caller(context, authorization).await?;
         // The document's namespace is known only after it is read, so the scope is checked
         // against it by the registry once it has.
@@ -447,8 +450,8 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        _: ListPlugs,
-    ) -> Res<Vec<PlugRecord>> {
+        _: ListCartridges,
+    ) -> Res<Vec<CartridgeRecord>> {
         self.read_caller(context, authorization).await?;
         Ok(self.registry.records().await)
     }
@@ -457,21 +460,21 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: GetPlug,
-    ) -> Res<PlugRecord> {
+        params: GetCartridge,
+    ) -> Res<CartridgeRecord> {
         self.read_caller(context, authorization).await?;
         self.registry
             .record(&params.id)
             .await
-            .ok_or(PlugsError::UnknownPlug(params.id))
+            .ok_or(CartridgesError::UnknownCartridge(params.id))
     }
 
     async fn get_version(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: GetPlugVersion,
-    ) -> Res<PlugVersionRecord> {
+        params: GetCartridgeVersion,
+    ) -> Res<CartridgeVersionRecord> {
         self.read_caller(context, authorization).await?;
         self.registry.version(&params.id, &params.version).await
     }
@@ -483,8 +486,8 @@ impl PlugService {
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: WatchPlugs,
-    ) -> Res<PlugChanges> {
+        params: WatchCartridges,
+    ) -> Res<CartridgeChanges> {
         self.read_caller(context, authorization).await?;
         let hold =
             Duration::from_millis(u64::from(params.hold_ms.min(registry::WATCH_MAX_HOLD_MS)));
@@ -515,7 +518,7 @@ impl PlugService {
 
 macro_rules! handlers {
     ($($request:ident => $method:ident : $output:ty;)*) => {$(
-        impl Handler<$request> for PlugService {
+        impl Handler<$request> for CartridgeService {
             async fn call(
                 &self,
                 request: Envelope<$request>,
@@ -530,42 +533,42 @@ macro_rules! handlers {
     )*};
 }
 handlers! {
-    MintPlugsCapability => mint: Capability;
-    PublishPlugVersion => publish: PublishedPlugVersion;
-    RemovePlugVersion => remove_version: ();
-    RemovePlug => remove_plug: ();
-    ImportPlugDocument => import_document: PlugRecord;
+    MintCartridgesCapability => mint: Capability;
+    PublishCartridgeVersion => publish: PublishedCartridgeVersion;
+    RemoveCartridgeVersion => remove_version: ();
+    RemoveCartridge => remove_cartridge: ();
+    ImportCartridgeDocument => import_document: CartridgeRecord;
     GetPublisher => get_publisher: String;
-    ListPlugs => list: Vec<PlugRecord>;
-    GetPlug => get: PlugRecord;
-    GetPlugVersion => get_version: PlugVersionRecord;
-    WatchPlugs => watch: PlugChanges;
+    ListCartridges => list: Vec<CartridgeRecord>;
+    GetCartridge => get: CartridgeRecord;
+    GetCartridgeVersion => get_version: CartridgeVersionRecord;
+    WatchCartridges => watch: CartridgeChanges;
 }
 
 service_utils_rs::bind_service_protocol! {
-    pub struct PlugsBinding for PlugsProtocol => PlugsMessage {
+    pub struct CartridgesBinding for CartridgesProtocol => CartridgesMessage {
         unary {
-            MintPlugsCapability(MintPlugsCapability),
-            PublishPlugVersion(PublishPlugVersion),
-            RemovePlugVersion(RemovePlugVersion),
-            RemovePlug(RemovePlug),
-            ImportPlugDocument(ImportPlugDocument),
+            MintCartridgesCapability(MintCartridgesCapability),
+            PublishCartridgeVersion(PublishCartridgeVersion),
+            RemoveCartridgeVersion(RemoveCartridgeVersion),
+            RemoveCartridge(RemoveCartridge),
+            ImportCartridgeDocument(ImportCartridgeDocument),
             GetPublisher(GetPublisher),
-            ListPlugs(ListPlugs),
-            GetPlug(GetPlug),
-            GetPlugVersion(GetPlugVersion),
-            WatchPlugs(WatchPlugs)
+            ListCartridges(ListCartridges),
+            GetCartridge(GetCartridge),
+            GetCartridgeVersion(GetCartridgeVersion),
+            WatchCartridges(WatchCartridges)
         }
         stream {}
     }
 }
 
-pub type PlugsHandler = Arc<PlugService>;
+pub type CartridgesHandler = Arc<CartridgeService>;
 
 /// A booted registry service: the host that fronts it and the client its consumers use.
-pub struct Plugs {
-    pub host: Arc<Host<PlugsHandler>>,
-    pub client: Client<PlugsProtocol>,
+pub struct Cartridges {
+    pub host: Arc<Host<CartridgesHandler>>,
+    pub client: Client<CartridgesProtocol>,
     /// The node's publisher DID, the namespace unsigned envelopes are signed for.
     pub publisher: String,
 }
@@ -573,7 +576,7 @@ pub struct Plugs {
 /// Boot the registry on `config.registry_drawer`: scan the drawer into the served state, wait for
 /// the scan to catch up (so a restart serves what was published before it), and host the service.
 /// The returned token stops the host, then the drawer follower, then retires the namespace.
-pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
+pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
     store::migrate(&config.sql).await?;
     let capability = config
         .docs
@@ -628,7 +631,7 @@ pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
         .await
         .expect("the registry follower reports its first scan");
     let publisher = did_key(&config.node_key.public_key);
-    let service = Arc::new(PlugService {
+    let service = Arc::new(CartridgeService {
         capabilities,
         operator: config.operator,
         registry,
@@ -637,9 +640,9 @@ pub async fn boot(config: PlugsConfig) -> Res<(Plugs, StopToken)> {
         tasks,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::new(Transport::direct(PlugsBinding::new(Arc::clone(&host))));
+    let client = Client::new(Transport::direct(CartridgesBinding::new(Arc::clone(&host))));
     Ok((
-        Plugs {
+        Cartridges {
             host,
             client,
             publisher,

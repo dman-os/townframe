@@ -302,19 +302,23 @@ async fn an_opened_actor_carries_a_verifiable_attribution_certificate() {
 async fn actor_paths_extend_their_parent_by_exactly_one_segment() {
     let test = boot_authority().await;
     let runtime = test.subsystem("rt").await;
-    let plugs = test
-        .open(runtime.capability, "rt/plugs", Rights::all())
+    let cartridges = test
+        .open(runtime.capability, "rt/cartridges", Rights::all())
         .await
         .expect("nested actor");
-    assert!(plugs.url.ends_with("/rt/plugs"), "{}", plugs.url);
-    assert_eq!(plugs.parent_actor_id, Some(runtime.actor_id));
+    assert!(
+        cartridges.url.ends_with("/rt/cartridges"),
+        "{}",
+        cartridges.url
+    );
+    assert_eq!(cartridges.parent_actor_id, Some(runtime.actor_id));
 
     for (parent, path) in [
         (runtime.capability, "other"),
         (runtime.capability, "rt2"),
         (runtime.capability, "rt"),
         (runtime.capability, "rt/"),
-        (runtime.capability, "rt/plugs/ocr"),
+        (runtime.capability, "rt/cartridges/ocr"),
         (runtime.capability, "rt/.."),
         (runtime.capability, "rt/a b"),
         (test.root(), "a/b"),

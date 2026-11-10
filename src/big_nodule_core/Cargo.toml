@@ -13,14 +13,14 @@ crate-type = ["rlib"]
 
 [features]
 default = []
-schemars = ["dep:schemars", "big_cabinet_core/schemars", "big_plugs_core/schemars"]
+schemars = ["dep:schemars", "big_cabinet_core/schemars", "big_cartridges_core/schemars"]
 
 [dependencies]
 method_core.workspace = true
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 big_dispatch_core.workspace = true
-big_plugs_core = { path = "../big_plugs_core", default-features = false }
+big_cartridges_core = { path = "../big_cartridges_core", default-features = false }
 macros = { path = "../macros" }
 service_core_rs = { path = "../service_core_rs" }
 # `declare_service_protocol!` expands to `irpc` derives that name both crates directly.
@@ -34,4 +34,4 @@ indexmap = { version = "2", features = ["serde"] }
 schemars = { version = "1.2", features = ["indexmap2"], optional = true }
 
 [dev-dependencies]
-big_plugs_core = { path = "../big_plugs_core", default-features = false, features = ["test-support"] }
+big_cartridges_core = { path = "../big_cartridges_core", default-features = false, features = ["test-support"] }

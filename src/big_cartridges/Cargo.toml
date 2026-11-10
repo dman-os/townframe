@@ -1,5 +1,5 @@
 [package]
-name = "big_plugs"
+name = "big_cartridges"
 version.workspace = true
 edition.workspace = true
 
@@ -16,7 +16,7 @@ big_blobs = { path = "../big_blobs" }
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
-big_plugs_core = { workspace = true, features = ["schemars"] }
+big_cartridges_core = { workspace = true, features = ["schemars"] }
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
@@ -32,5 +32,5 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
-big_plugs_core = { workspace = true, features = ["schemars", "test-support"] }
+big_cartridges_core = { workspace = true, features = ["schemars", "test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

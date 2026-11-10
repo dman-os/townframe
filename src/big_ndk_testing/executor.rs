@@ -13,6 +13,9 @@
 
 use async_trait::async_trait;
 use big_cabinet_core::authority::CapId;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Digest;
+use big_cartridges_core::Revision;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -27,9 +30,6 @@ use big_nodule::executor::NoduleExecutor;
 use big_nodule::wire::delivery_headers;
 use big_nodule::wire::gateway_error;
 use big_nodule::wire::provider_result;
-use big_plugs_core::Digest;
-use big_plugs_core::PlugId;
-use big_plugs_core::Revision;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
@@ -216,14 +216,14 @@ impl Running {
 }
 
 pub(crate) struct NativeExecutor {
-    nodules: BTreeMap<PlugId, Box<dyn Registered>>,
+    nodules: BTreeMap<CartridgeId, Box<dyn Registered>>,
     dispatch: Client<DispatchProtocol>,
-    hosted: Mutex<BTreeMap<PlugId, Running>>,
+    hosted: Mutex<BTreeMap<CartridgeId, Running>>,
 }
 
 impl NativeExecutor {
     pub(crate) fn new(
-        nodules: BTreeMap<PlugId, Box<dyn Registered>>,
+        nodules: BTreeMap<CartridgeId, Box<dyn Registered>>,
         dispatch: Client<DispatchProtocol>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -252,7 +252,7 @@ impl NoduleExecutor for NativeExecutor {
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
-            match hosted.get(&spec.plug_id) {
+            match hosted.get(&spec.cartridge_id) {
                 Some(running)
                     if running.revision == spec.revision
                         && running.handler == spec.handler.digest =>
@@ -262,23 +262,23 @@ impl NoduleExecutor for NativeExecutor {
                     *running.provider.capability.lock().expect("capability lock") = spec.capability;
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
-                Some(_) => hosted.remove(&spec.plug_id),
+                Some(_) => hosted.remove(&spec.cartridge_id),
                 None => None,
             }
         };
         if let Some(stale) = stale {
             stale.stop().await;
         }
-        let registered = self.nodules.get(&spec.plug_id).unwrap_or_else(|| {
+        let registered = self.nodules.get(&spec.cartridge_id).unwrap_or_else(|| {
             panic!(
-                "plug {} was admitted but no native nodule was registered for it",
-                spec.plug_id
+                "cartridge {} was admitted but no native nodule was registered for it",
+                spec.cartridge_id
             )
         });
         // The handler artifact's bytes are never read: the nodule is the Rust value the author
         // registered, so only the envelope's declaration that it has a handler matters.
         let started = registered.start(
-            format!("nodule/{}", spec.plug_id),
+            format!("nodule/{}", spec.cartridge_id),
             Egress {
                 dispatch: self.dispatch.clone(),
                 signer: spec.actor.capability,
@@ -289,7 +289,7 @@ impl NoduleExecutor for NativeExecutor {
             capability: Mutex::new(spec.capability),
         });
         self.hosted.lock().expect("hosted lock").insert(
-            spec.plug_id.clone(),
+            spec.cartridge_id.clone(),
             Running {
                 revision: spec.revision,
                 handler: spec.handler.digest,
@@ -301,15 +301,19 @@ impl NoduleExecutor for NativeExecutor {
         Hosted::Ready(provider)
     }
 
-    fn hosts(&self, plug_id: &PlugId) -> bool {
+    fn hosts(&self, cartridge_id: &CartridgeId) -> bool {
         self.hosted
             .lock()
             .expect("hosted lock")
-            .contains_key(plug_id)
+            .contains_key(cartridge_id)
     }
 
-    async fn retire(&self, plug_id: &PlugId) {
-        let running = self.hosted.lock().expect("hosted lock").remove(plug_id);
+    async fn retire(&self, cartridge_id: &CartridgeId) {
+        let running = self
+            .hosted
+            .lock()
+            .expect("hosted lock")
+            .remove(cartridge_id);
         if let Some(running) = running {
             running.stop().await;
         }

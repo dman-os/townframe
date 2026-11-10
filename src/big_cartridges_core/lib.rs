@@ -1,6 +1,6 @@
-//! The plug catalog's portable package envelope (ADR 027 §1–2).
+//! The cartridge catalog's portable package envelope (ADR 027 §1–2).
 //!
-//! A [`Plug`] is one immutable package revision as the catalog carries it: identity, version
+//! A [`Cartridge`] is one immutable package revision as the catalog carries it: identity, version
 //! label, distribution dependencies, content-addressed artifacts, and the contributions the
 //! package makes. The catalog validates the envelope and its distribution references; it does not
 //! interpret a contribution. The nodule description and the micro descriptions are carried as
@@ -32,25 +32,25 @@ pub mod signature;
 
 pub const AUTHORITY: &str = "org.example.daybook";
 
-/// `org.example.daybook.plug/main`: one package revision. The revision is not a field, it is the
-/// content hash of the envelope ([`Plug::revision`]), so a pin names exactly these bytes and two
+/// `org.example.daybook.cartridge/main`: one package revision. The revision is not a field, it is the
+/// content hash of the envelope ([`Cartridge::revision`]), so a pin names exactly these bytes and two
 /// catalogs that imported the same package agree without coordination.
 #[macros::datum(authority = AUTHORITY)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Plug {
+pub struct Cartridge {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub id: PlugId,
+    pub id: CartridgeId,
     /// The semver label a release is discovered and depended upon by. Not an operation or
     /// contract identity: a contract that changes meaning takes a new NSID (ADR 027 §6).
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub version: Version,
-    /// The NSID authority prefix this plug holds, for example `org.example.photos`: the schema
-    /// namespace its contributions declare under (ADR 028 §5). It is the plug's, not any one
+    /// The NSID authority prefix this cartridge holds, for example `org.example.photos`: the schema
+    /// namespace its contributions declare under (ADR 028 §5). It is the cartridge's, not any one
     /// runtime's, so every kind of contribution reads the same field. Identity stays `id`: this
-    /// says which NSIDs the package is the authority over, and a node refuses two enabled plugs
-    /// holding the same or nested prefixes. Absent for a plug that declares no schemas of its own;
+    /// says which NSIDs the package is the authority over, and a node refuses two enabled cartridges
+    /// holding the same or nested prefixes. Absent for a cartridge that declares no schemas of its own;
     /// a runtime refuses a contribution that declares under a prefix the envelope does not hold.
     /// Part of the signed revision like every other member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,16 +65,16 @@ pub struct Plug {
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contributions: Vec<Contribution>,
-    /// The publisher's signature over [`Plug::revision`] (see [`signature`]). Absent on an
+    /// The publisher's signature over [`Cartridge::revision`] (see [`signature`]). Absent on an
     /// envelope that has not been signed yet; the registry accepts only signed ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<signature::PlugSignature>,
+    pub signature: Option<signature::CartridgeSignature>,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
-impl Plug {
-    pub fn new(id: PlugId, version: Version) -> Self {
+impl Cartridge {
+    pub fn new(id: CartridgeId, version: Version) -> Self {
         Self {
             id,
             version,
@@ -106,11 +106,11 @@ impl Plug {
 
     /// The distribution checks the catalog owns. Contribution payloads are not read: a nodule or
     /// micro description is checked by the runtime that admits it.
-    pub fn validate(&self) -> Result<(), PlugError> {
+    pub fn validate(&self) -> Result<(), CartridgeError> {
         if let Some(authority) = &self.authority
             && !is_nsid_authority(authority)
         {
-            return Err(PlugError::invalid(
+            return Err(CartridgeError::invalid(
                 "authority",
                 format!("`{authority}` is not an NSID authority (two or more reverse-DNS labels)"),
             ));
@@ -119,13 +119,13 @@ impl Plug {
         for (index, dependency) in self.dependencies.iter().enumerate() {
             let path = format!("dependencies[{index}]");
             if dependency.id == self.id {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     path,
                     "a package cannot depend on itself",
                 ));
             }
             if !dependencies.insert(&dependency.id) {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     path,
                     format!("`{}` is depended upon twice", dependency.id),
                 ));
@@ -135,10 +135,13 @@ impl Plug {
         for (index, artifact) in self.artifacts.iter().enumerate() {
             let path = format!("artifacts[{index}]");
             if artifact.key.is_empty() {
-                return Err(PlugError::invalid(path, "an artifact key is not empty"));
+                return Err(CartridgeError::invalid(
+                    path,
+                    "an artifact key is not empty",
+                ));
             }
             if !artifacts.insert(artifact.key.as_str()) {
-                return Err(PlugError::invalid(
+                return Err(CartridgeError::invalid(
                     path,
                     format!("artifact key `{}` is declared twice", artifact.key),
                 ));
@@ -152,9 +155,9 @@ impl Plug {
                 Contribution::Nodule(nodule) => {
                     nodules += 1;
                     if nodules > 1 {
-                        return Err(PlugError::invalid(
+                        return Err(CartridgeError::invalid(
                             path,
-                            "a plug has one node-facing nodule; its routines and operations are \
+                            "a cartridge has one node-facing nodule; its routines and operations are \
                              contributions inside it, not further nodules",
                         ));
                     }
@@ -163,10 +166,10 @@ impl Plug {
                 Contribution::Micro(micro) => {
                     micros += 1;
                     if micros > 1 {
-                        return Err(PlugError::invalid(
+                        return Err(CartridgeError::invalid(
                             path,
-                            "a plug has one micro; its micro id is the plug id it is installed as, \
-                             so a second micro is a second plug",
+                            "a cartridge has one micro; its micro id is the cartridge id it is installed as, \
+                             so a second micro is a second cartridge",
                         ));
                     }
                     check_schema(&path, &micro.schema)?;
@@ -200,9 +203,9 @@ impl Plug {
     }
 }
 
-fn check_schema(path: &str, schema: &str) -> Result<(), PlugError> {
+fn check_schema(path: &str, schema: &str) -> Result<(), CartridgeError> {
     if !is_nsid(schema) {
-        return Err(PlugError::invalid(
+        return Err(CartridgeError::invalid(
             format!("{path}.schema"),
             format!("`{schema}` is not the NSID of a description datum"),
         ));
@@ -218,7 +221,7 @@ fn check_schema(path: &str, schema: &str) -> Result<(), PlugError> {
 #[serde(rename_all = "camelCase")]
 pub struct Dependency {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub id: PlugId,
+    pub id: CartridgeId,
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub version: VersionReq,
     #[serde(flatten)]
@@ -254,10 +257,10 @@ pub enum Contribution {
     Unknown(big_cabinet_core::datum::UnknownMember),
 }
 
-/// `org.example.daybook.plug.nodule`: the package's one node-facing facet. `schema` is the id of
+/// `org.example.daybook.cartridge.nodule`: the package's one node-facing facet. `schema` is the id of
 /// the description datum the payload conforms to, so the nodule runtime can tell a description
 /// it understands from one it must carry; the catalog reads neither.
-#[macros::datum(authority = Plug::ID, name = "nodule")]
+#[macros::datum(authority = Cartridge::ID, name = "nodule")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -268,11 +271,11 @@ pub struct NoduleContribution {
     pub extra: Extra,
 }
 
-/// `org.example.daybook.plug.micro`: the package's one GUI contribution. It has no key of its own:
-/// the micro's identity is the plug id it is installed as. `schema` is the id of the description
+/// `org.example.daybook.cartridge.micro`: the package's one GUI contribution. It has no key of its own:
+/// the micro's identity is the cartridge id it is installed as. `schema` is the id of the description
 /// the payload conforms to, and `description` is Clay's manifest minus the members the envelope
 /// already states (`id`, `package_version`).
-#[macros::datum(authority = Plug::ID, name = "micro")]
+#[macros::datum(authority = Cartridge::ID, name = "micro")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,25 +287,25 @@ pub struct MicroContribution {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum PlugError {
-    #[error("plug envelope invalid at `{path}`: {reason}")]
+pub enum CartridgeError {
+    #[error("cartridge envelope invalid at `{path}`: {reason}")]
     Invalid { path: String, reason: String },
     /// One version of a package names one revision. A second envelope claiming the same version is
     /// a republish under an existing label, which would make the label mean two different byte
     /// strings; the catalog refuses it instead of picking one.
     #[error(
-        "plug `{id}` {version} is already catalogued at revision {existing}; this envelope is \
+        "cartridge `{id}` {version} is already catalogued at revision {existing}; this envelope is \
          {incoming}"
     )]
     Conflict {
-        id: PlugId,
+        id: CartridgeId,
         version: Box<Version>,
         existing: Revision,
         incoming: Revision,
     },
 }
 
-impl PlugError {
+impl CartridgeError {
     fn invalid(path: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::Invalid {
             path: path.into(),
@@ -315,25 +318,25 @@ impl PlugError {
 /// is the publisher's DID, of any method, and the name is a lowercase segment. A DID is a
 /// valid datum key slot as it stands (`:` and `%` need no escaping there), and neither a DID nor a
 /// name contains `/`, so the first `/` always splits the text form back into its two parts. That
-/// text form is the one spelling used in datum key slots (`nodule.install/<plug>`,
-/// `nodule.artifact/<plug>/<key>`), persisted rows and workload ids; there is no second encoding.
+/// text form is the one spelling used in datum key slots (`nodule.install/<cartridge>`,
+/// `nodule.artifact/<cartridge>/<key>`), persisted rows and workload ids; there is no second encoding.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PlugId {
+pub struct CartridgeId {
     pub namespace: String,
     pub name: String,
 }
 
-/// A DID as a plug namespace is bounded to this many bytes. The DID grammar sets no limit, but a
-/// plug id is embedded in every datum key, persisted row and workload id, so an unbounded
+/// A DID as a cartridge namespace is bounded to this many bytes. The DID grammar sets no limit, but a
+/// cartridge id is embedded in every datum key, persisted row and workload id, so an unbounded
 /// publisher string would be an unbounded key. 512 holds every `did:key` and `did:plc`, and a
 /// `did:web` whose host alone may be a full 253-octet DNS name plus a path.
 const MAX_DID_OCTETS: usize = 512;
 
-impl PlugId {
+impl CartridgeId {
     /// Both parts are validated here; `namespace` is a DID per the W3C DID Core syntax.
-    pub fn new(namespace: &str, name: &str) -> Result<Self, InvalidPlugId> {
+    pub fn new(namespace: &str, name: &str) -> Result<Self, InvalidCartridgeId> {
         if !is_did(namespace) || !is_segment(name) {
-            return Err(InvalidPlugId(format!("{namespace}/{name}")));
+            return Err(InvalidCartridgeId(format!("{namespace}/{name}")));
         }
         Ok(Self {
             namespace: namespace.to_owned(),
@@ -347,7 +350,7 @@ impl PlugId {
 /// `idchar = ALPHA / DIGIT / "." / "-" / "_" / pct-encoded`. That is: non-empty, may contain `:`
 /// (empty `::` segments included), may not end in `:`, and `%` must start a two-hex-digit escape.
 /// Escapes must use uppercase hex, the RFC 3986 §6.2.2.1 canonical form: accepting `%3a` beside
-/// `%3A` would give one DID two plug ids, and an id must name exactly one publisher.
+/// `%3A` would give one DID two cartridge ids, and an id must name exactly one publisher.
 /// Methods are open: whether a method is known is a resolution concern, not a syntax one.
 fn is_did(did: &str) -> bool {
     if did.len() > MAX_DID_OCTETS {
@@ -392,7 +395,7 @@ fn is_did(did: &str) -> bool {
     true
 }
 
-/// A plug name: lowercase letters, digits, `-`, `_` and `.`, starting with a letter. Dots are
+/// A cartridge name: lowercase letters, digits, `-`, `_` and `.`, starting with a letter. Dots are
 /// allowed as npm allows them (Clay micro ids read `dayframe.counter`), but never last or doubled,
 /// so a name is never a `.`/`..` key-slot segment and `a..b` cannot alias anything.
 fn is_segment(segment: &str) -> bool {
@@ -407,28 +410,28 @@ fn is_segment(segment: &str) -> bool {
         })
 }
 
-impl fmt::Display for PlugId {
+impl fmt::Display for CartridgeId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}/{}", self.namespace, self.name)
     }
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("`{0}` is not a plug id: expected `<did>/<name>`, a DID and a lowercase ascii name")]
-pub struct InvalidPlugId(pub String);
+#[error("`{0}` is not a cartridge id: expected `<did>/<name>`, a DID and a lowercase ascii name")]
+pub struct InvalidCartridgeId(pub String);
 
-impl FromStr for PlugId {
-    type Err = InvalidPlugId;
+impl FromStr for CartridgeId {
+    type Err = InvalidCartridgeId;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let (namespace, name) = value
             .split_once('/')
-            .ok_or_else(|| InvalidPlugId(value.to_owned()))?;
-        Self::new(namespace, name).map_err(|_| InvalidPlugId(value.to_owned()))
+            .ok_or_else(|| InvalidCartridgeId(value.to_owned()))?;
+        Self::new(namespace, name).map_err(|_| InvalidCartridgeId(value.to_owned()))
     }
 }
 
-/// The DID namespace test fixtures publish under, as a literal so [`example_plug!`] can `concat!`
+/// The DID namespace test fixtures publish under, as a literal so [`example_cartridge!`] can `concat!`
 /// it into const contexts.
 #[cfg(any(test, feature = "test-support"))]
 #[macro_export]
@@ -438,45 +441,45 @@ macro_rules! example_namespace {
     };
 }
 
-/// The text form of the fixture plug `<name>` (`<example namespace>/<name>`), usable in `const`s
+/// The text form of the fixture cartridge `<name>` (`<example namespace>/<name>`), usable in `const`s
 /// and string positions so fixtures do not repeat DID literals.
 #[cfg(any(test, feature = "test-support"))]
 #[macro_export]
-macro_rules! example_plug {
+macro_rules! example_cartridge {
     ($name:literal) => {
         concat!($crate::example_namespace!(), "/", $name)
     };
 }
 
-/// Plug ids for tests across the crates that consume them.
+/// Cartridge ids for tests across the crates that consume them.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use super::Plug;
-    use super::PlugId;
+    use super::Cartridge;
+    use super::CartridgeId;
 
     pub const EXAMPLE_NAMESPACE: &str = example_namespace!();
 
     /// `EXAMPLE_NAMESPACE/<name>`.
-    pub fn plug_id(name: &str) -> PlugId {
-        PlugId::new(EXAMPLE_NAMESPACE, name).expect("fixture plug ids are valid")
+    pub fn cartridge_id(name: &str) -> CartridgeId {
+        CartridgeId::new(EXAMPLE_NAMESPACE, name).expect("fixture cartridge ids are valid")
     }
 
     /// The seed of the Ed25519 key whose `did:key` is [`EXAMPLE_NAMESPACE`]: a published test
     /// vector, not a secret.
     pub const EXAMPLE_SEED: [u8; 32] = [7; 32];
 
-    /// Signs `plug` with the key whose `did:key` is `seed`'s, which is the namespace of every
+    /// Signs `cartridge` with the key whose `did:key` is `seed`'s, which is the namespace of every
     /// fixture id when `seed` is [`EXAMPLE_SEED`].
-    pub fn sign_with_seed(mut plug: Plug, seed: &[u8; 32]) -> Plug {
+    pub fn sign_with_seed(mut cartridge: Cartridge, seed: &[u8; 32]) -> Cartridge {
         use ed25519_dalek::Signer;
         let key = ed25519_dalek::SigningKey::from_bytes(seed);
-        plug.sign_with(|message| key.sign(message).to_bytes());
-        plug
+        cartridge.sign_with(|message| key.sign(message).to_bytes());
+        cartridge
     }
 
-    /// `plug` signed by the owner of [`EXAMPLE_NAMESPACE`].
-    pub fn sign_as_example(plug: Plug) -> Plug {
-        sign_with_seed(plug, &EXAMPLE_SEED)
+    /// `cartridge` signed by the owner of [`EXAMPLE_NAMESPACE`].
+    pub fn sign_as_example(cartridge: Cartridge) -> Cartridge {
+        sign_with_seed(cartridge, &EXAMPLE_SEED)
     }
 }
 
@@ -566,7 +569,7 @@ hash32!(
     InvalidRevision
 );
 
-text_wire!(PlugId);
+text_wire!(CartridgeId);
 
 /// A semver release label, as the envelope spells it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -1,18 +1,23 @@
 //! Resolving operation requests to providers and the lockfile (ADR 028 §3–§4, plan item P5):
 //! a required request without exactly one satisfying provider holds the nodule at
-//! `ProviderMissing`, the resolution is recorded node-locally, and a different plug providing the
+//! `ProviderMissing`, the resolution is recorded node-locally, and a different cartridge providing the
 //! contract is re-consented. Against the fake executor, with no sleeps.
 
 use super::Node;
 use super::dispatch::not_ready;
-use super::dispatch::serving_plug;
+use super::dispatch::serving_cartridge;
 use super::id;
 use super::init::PING;
 use super::init::Probe;
-use super::init::init_plug;
+use super::init::init_cartridge;
 use super::init::necessity;
 use super::init::node_hosting;
 use super::init::with_requests;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Necessity;
+use big_cartridges_core::request::Request;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::protocol::ConfirmNoduleResolution;
@@ -21,16 +26,11 @@ use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
-use big_plugs_core::Contribution;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Necessity;
-use big_plugs_core::request::Request;
 use serde_json::json;
 
-const ALPHA: &str = example_plug!("alpha");
-const BETA: &str = example_plug!("beta");
-const GAMMA: &str = example_plug!("gamma");
+const ALPHA: &str = example_cartridge!("alpha");
+const BETA: &str = example_cartridge!("beta");
+const GAMMA: &str = example_cartridge!("gamma");
 /// The operation alpha requests: beta serves it from its own Lexicons, gamma as a substitute.
 const BETA_PING: &str = "org.example.beta.ping";
 
@@ -40,7 +40,10 @@ async fn node_with_alpha(requests: Vec<Request>) -> Node {
     let node = node_hosting(&Probe::new()).await;
     node.admit(
         node.operator(),
-        with_requests(init_plug("alpha", "1.0.0", &[PING], &[], &[]), requests),
+        with_requests(
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
+            requests,
+        ),
     )
     .await
     .unwrap();
@@ -48,19 +51,19 @@ async fn node_with_alpha(requests: Vec<Request>) -> Node {
     node
 }
 
-fn beta(version: &str) -> Plug {
-    init_plug("beta", version, &[BETA_PING], &[], &[])
+fn beta(version: &str) -> Cartridge {
+    init_cartridge("beta", version, &[BETA_PING], &[], &[])
 }
 
-/// `plug` whose Lexicon for `nsid` declares `revision`.
-fn with_revision(mut plug: Plug, nsid: &str, revision: u32) -> Plug {
-    let Some(Contribution::Nodule(nodule)) = plug.contributions.first_mut() else {
-        panic!("init plugs carry a nodule");
+/// `cartridge` whose Lexicon for `nsid` declares `revision`.
+fn with_revision(mut cartridge: Cartridge, nsid: &str, revision: u32) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
     };
     let lexicons = nodule.description["lexicons"].as_array_mut().unwrap();
     let file = lexicons.iter_mut().find(|file| file["id"] == nsid).unwrap();
     file["revision"] = json!(revision);
-    plug
+    cartridge
 }
 
 fn locked(provider: &str, version: &str, lexicon_revision: Option<u32>) -> LockedProvider {
@@ -89,26 +92,30 @@ fn unresolved(locked: Option<LockedProvider>, reason: Unresolved) -> RequestStat
 }
 
 impl Node {
-    pub(super) async fn record(&self, plug_id: &str) -> NoduleRecord {
-        self.get(self.operator(), plug_id).await.unwrap()
+    pub(super) async fn record(&self, cartridge_id: &str) -> NoduleRecord {
+        self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
-    async fn confirm(&self, plug_id: &str, binding: &str) -> Result<NoduleRecord, NodulesError> {
+    async fn confirm(
+        &self,
+        cartridge_id: &str,
+        binding: &str,
+    ) -> Result<NoduleRecord, NodulesError> {
         self.call(
             self.operator(),
             ConfirmNoduleResolution {
-                plug_id: id(plug_id),
+                cartridge_id: id(cartridge_id),
                 binding: binding.to_owned(),
             },
         )
         .await
     }
 
-    /// Admits `plug` and enables it.
-    pub(super) async fn install(&self, plug: Plug) {
-        let plug_id = plug.id.to_string();
-        self.admit(self.operator(), plug).await.unwrap();
-        self.set_enabled(&plug_id, true).await;
+    /// Admits `cartridge` and enables it.
+    pub(super) async fn install(&self, cartridge: Cartridge) {
+        let cartridge_id = cartridge.id.to_string();
+        self.admit(self.operator(), cartridge).await.unwrap();
+        self.set_enabled(&cartridge_id, true).await;
     }
 }
 
@@ -176,7 +183,7 @@ async fn a_provider_older_than_min_revision_is_unresolved_until_it_is_upgraded()
         )
     );
 
-    // The same plug at a sufficient revision resolves and is pinned at its new version, with
+    // The same cartridge at a sufficient revision resolves and is pinned at its new version, with
     // no confirmation: same publisher, an ordinary upgrade.
     node.admit(node.operator(), with_revision(beta("1.1.0"), BETA_PING, 2))
         .await
@@ -206,7 +213,7 @@ async fn the_lockfile_is_on_the_record_durable_and_begins_afresh_when_the_nodule
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(record.requests[BETA_PING], resolved(BETA, "1.0.0", None));
 
-    // It is host-local state, not in memory only: after a restart a different plug providing
+    // It is host-local state, not in memory only: after a restart a different cartridge providing
     // the contract is still a change from what was consented to.
     node.restart_nodules().await.unwrap();
     assert_eq!(
@@ -214,7 +221,7 @@ async fn the_lockfile_is_on_the_record_durable_and_begins_afresh_when_the_nodule
         resolved(BETA, "1.0.0", None)
     );
     node.set_enabled(BETA, false).await;
-    node.install(serving_plug(GAMMA, BETA_PING)).await;
+    node.install(serving_cartridge(GAMMA, BETA_PING)).await;
     assert_eq!(
         node.record(ALPHA).await.requests[BETA_PING].unresolved,
         Some(Unresolved::ProviderChanged {
@@ -233,10 +240,10 @@ async fn the_lockfile_is_on_the_record_durable_and_begins_afresh_when_the_nodule
 }
 
 #[tokio::test]
-async fn a_different_plug_providing_the_contract_is_reconsented() {
+async fn a_different_cartridge_providing_the_contract_is_reconsented() {
     let node = node_with_alpha(vec![necessity(BETA_PING, Necessity::Required)]).await;
     node.install(beta("1.0.0")).await;
-    node.admit(node.operator(), serving_plug(GAMMA, BETA_PING))
+    node.admit(node.operator(), serving_cartridge(GAMMA, BETA_PING))
         .await
         .unwrap();
     assert_eq!(
@@ -244,7 +251,7 @@ async fn a_different_plug_providing_the_contract_is_reconsented() {
         Readiness::Ready
     );
 
-    // Nothing to confirm while the pinned plug still provides it.
+    // Nothing to confirm while the pinned cartridge still provides it.
     assert!(matches!(
         node.confirm(ALPHA, BETA_PING).await,
         Err(NodulesError::Rejected(_))
@@ -276,8 +283,8 @@ async fn a_different_plug_providing_the_contract_is_reconsented() {
         Err(NodulesError::Rejected(_))
     ));
     assert!(matches!(
-        node.confirm(example_plug!("absent"), BETA_PING).await,
-        Err(NodulesError::UnknownPlug(_))
+        node.confirm(example_cartridge!("absent"), BETA_PING).await,
+        Err(NodulesError::UnknownCartridge(_))
     ));
     let record = node.confirm(ALPHA, BETA_PING).await.unwrap();
     assert_eq!(record.readiness, Readiness::Ready);
@@ -301,7 +308,7 @@ async fn two_providers_are_ambiguous_and_resolve_again_when_one_is_disabled() {
         Readiness::Ready
     );
 
-    node.install(serving_plug(GAMMA, BETA_PING)).await;
+    node.install(serving_cartridge(GAMMA, BETA_PING)).await;
     let record = node.record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::ProviderMissing);
     assert_eq!(
@@ -315,7 +322,7 @@ async fn two_providers_are_ambiguous_and_resolve_again_when_one_is_disabled() {
     );
 
     // Dispatch agrees the operation is ambiguous, and disabling the newcomer needs no
-    // confirmation: the pinned plug provides it again.
+    // confirmation: the pinned cartridge provides it again.
     node.set_enabled(GAMMA, false).await;
     let record = node.record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Ready);

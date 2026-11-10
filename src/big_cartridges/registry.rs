@@ -1,9 +1,9 @@
-//! The registry's state: the plugs this node serves, derived from the registry drawer.
+//! The registry's state: the cartridges this node serves, derived from the registry drawer.
 //!
 //! Nothing here is authoritative except the drawer. A scan of the drawer (a `PollDatums` from
-//! cursor 0, then the same poll held for changes) selects every document that carries a plug
+//! cursor 0, then the same poll held for changes) selects every document that carries a cartridge
 //! identity datum, and each such document is folded into one [`DocView`]. A node that syncs the
-//! drawer therefore discovers the same plugs, and the whole state is rebuilt on every boot.
+//! drawer therefore discovers the same cartridges, and the whole state is rebuilt on every boot.
 //!
 //! The one thing the drawer cannot say is what a version label meant *first*. That is the node's
 //! own record ([`FirstSeen`], in SQLite), taken the first time a label is read from the drawer and
@@ -53,22 +53,22 @@ use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::Version;
-use big_plugs_core::protocol::PlugChange;
-use big_plugs_core::protocol::PlugChanges;
-use big_plugs_core::protocol::PlugRecord;
-use big_plugs_core::protocol::PlugVersionRecord;
-use big_plugs_core::protocol::PlugVersionSummary;
-use big_plugs_core::protocol::PlugsCursor;
-use big_plugs_core::protocol::PlugsError;
-use big_plugs_core::protocol::PublishedPlugVersion;
-use big_plugs_core::registry::PlugIdentity;
-use big_plugs_core::registry::artifact_key;
-use big_plugs_core::registry::artifact_slot_version;
-use big_plugs_core::registry::identity_key;
-use big_plugs_core::registry::version_key;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Version;
+use big_cartridges_core::protocol::CartridgeChange;
+use big_cartridges_core::protocol::CartridgeChanges;
+use big_cartridges_core::protocol::CartridgeRecord;
+use big_cartridges_core::protocol::CartridgeVersionRecord;
+use big_cartridges_core::protocol::CartridgeVersionSummary;
+use big_cartridges_core::protocol::CartridgesCursor;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::PublishedCartridgeVersion;
+use big_cartridges_core::registry::CartridgeIdentity;
+use big_cartridges_core::registry::artifact_key;
+use big_cartridges_core::registry::artifact_slot_version;
+use big_cartridges_core::registry::identity_key;
+use big_cartridges_core::registry::version_key;
 use serde_json::Value as Json;
 use service_client_native_rs::Client;
 use service_utils_rs::RequestContext;
@@ -91,7 +91,7 @@ const POLL_HOLD_MS: u32 = 5_000;
 const WATCH_MAX_LIMIT: u32 = 1024;
 pub(crate) const WATCH_MAX_HOLD_MS: u32 = 15_000;
 
-type FirstSeenMap = BTreeMap<(PlugId, Version), FirstSeen>;
+type FirstSeenMap = BTreeMap<(CartridgeId, Version), FirstSeen>;
 
 /// One version as served: the first-seen envelope, and whether the drawer disagrees with it. An
 /// `unverified` version is one the drawer holds whose signature did not verify and that this node
@@ -99,7 +99,7 @@ type FirstSeenMap = BTreeMap<(PlugId, Version), FirstSeen>;
 /// served.
 #[derive(Debug, Clone, PartialEq)]
 struct VersionState {
-    envelope: Plug,
+    envelope: Cartridge,
     conflict: Option<String>,
     unverified: Option<String>,
 }
@@ -107,7 +107,7 @@ struct VersionState {
 /// What one registry document says, after comparing it with the first-seen record.
 #[derive(Debug, Clone, PartialEq)]
 struct DocView {
-    id: PlugId,
+    id: CartridgeId,
     versions: BTreeMap<Version, VersionState>,
     unreadable: BTreeMap<String, String>,
 }
@@ -118,21 +118,21 @@ pub(crate) struct State {
     sql: Database,
     first_seen: FirstSeenMap,
     views: BTreeMap<DocId, DocView>,
-    /// The documents claiming each plug id. Two nodes can each create a document for one id
+    /// The documents claiming each cartridge id. Two nodes can each create a document for one id
     /// before they sync, so the first (lowest) is served and the rest reported as duplicates.
-    claims: BTreeMap<PlugId, BTreeSet<DocId>>,
-    /// The incarnation `seq` counts in; see [`PlugsCursor`].
+    claims: BTreeMap<CartridgeId, BTreeSet<DocId>>,
+    /// The incarnation `seq` counts in; see [`CartridgesCursor`].
     epoch: Uuid7,
     seq: u64,
     seq_tx: watch::Sender<u64>,
-    /// The sequence each plug last changed at, tombstones included, for the watch.
-    changes: BTreeMap<PlugId, (u64, bool)>,
+    /// The sequence each cartridge last changed at, tombstones included, for the watch.
+    changes: BTreeMap<CartridgeId, (u64, bool)>,
 }
 
-/// Whether `envelope` is what the document slot `version` of plug `id` claims to hold.
-fn check_envelope(envelope: &Plug, id: &PlugId, version: &Version) -> Result<(), String> {
+/// Whether `envelope` is what the document slot `version` of cartridge `id` claims to hold.
+fn check_envelope(envelope: &Cartridge, id: &CartridgeId, version: &Version) -> Result<(), String> {
     if envelope.id != *id {
-        return Err(format!("the envelope is for plug `{}`", envelope.id));
+        return Err(format!("the envelope is for cartridge `{}`", envelope.id));
     }
     if envelope.version != *version {
         return Err(format!("the envelope is version {}", envelope.version));
@@ -141,13 +141,13 @@ fn check_envelope(envelope: &Plug, id: &PlugId, version: &Version) -> Result<(),
 }
 
 /// Folds one registry document into what it serves, plus the envelopes seen for the first time
-/// (which the caller records before serving them). `None` for a document with no readable plug
-/// identity: it is not a plug.
-fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Vec<Plug>)> {
+/// (which the caller records before serving them). `None` for a document with no readable cartridge
+/// identity: it is not a cartridge.
+fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Vec<Cartridge>)> {
     let DatumRead::Accepted { value, .. } = read.datums.get(&identity_key())? else {
         return None;
     };
-    let id = serde_json::from_value::<PlugIdentity>(value.clone())
+    let id = serde_json::from_value::<CartridgeIdentity>(value.clone())
         .ok()?
         .id;
     let mut view = DocView {
@@ -157,7 +157,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
     };
     let mut fresh = Vec::new();
     for (key, datum) in &read.datums {
-        if key.tag().as_str() != Plug::ID {
+        if key.tag().as_str() != Cartridge::ID {
             continue;
         }
         let slot = String::from_utf8_lossy(key.slot_bytes()).into_owned();
@@ -171,7 +171,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
         };
         let content = match datum {
             DatumRead::Absent { .. } => continue,
-            DatumRead::Accepted { value, .. } => serde_json::from_value::<Plug>(value.clone())
+            DatumRead::Accepted { value, .. } => serde_json::from_value::<Cartridge>(value.clone())
                 .map_err(|error| format!("the envelope does not decode: {error}"))
                 .and_then(|envelope| {
                     check_envelope(&envelope, &id, &version)?;
@@ -245,21 +245,21 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
 }
 
 impl State {
-    fn primary_doc(&self, id: &PlugId) -> Option<&DocId> {
+    fn primary_doc(&self, id: &CartridgeId) -> Option<&DocId> {
         self.claims.get(id)?.first()
     }
 
-    fn record(&self, id: &PlugId) -> Option<PlugRecord> {
+    fn record(&self, id: &CartridgeId) -> Option<CartridgeRecord> {
         let claims = self.claims.get(id)?;
         let doc_id = claims.first()?;
         let view = &self.views[doc_id];
-        Some(PlugRecord {
+        Some(CartridgeRecord {
             id: id.clone(),
             doc_id: doc_id.clone(),
             versions: view
                 .versions
                 .iter()
-                .map(|(version, state)| PlugVersionSummary {
+                .map(|(version, state)| CartridgeVersionSummary {
                     version: version.clone(),
                     revision: state.envelope.revision(),
                     conflict: state.conflict.clone(),
@@ -271,26 +271,28 @@ impl State {
         })
     }
 
-    fn version(&self, id: &PlugId, version: &Version) -> Result<PlugVersionRecord, PlugsError> {
+    fn version(
+        &self,
+        id: &CartridgeId,
+        version: &Version,
+    ) -> Result<CartridgeVersionRecord, CartridgesError> {
         let doc_id = self
             .primary_doc(id)
-            .ok_or_else(|| PlugsError::UnknownPlug(id.clone()))?;
-        let state =
-            self.views[doc_id]
-                .versions
-                .get(version)
-                .ok_or_else(|| PlugsError::UnknownVersion {
-                    id: id.clone(),
-                    version: Box::new(version.clone()),
-                })?;
+            .ok_or_else(|| CartridgesError::UnknownCartridge(id.clone()))?;
+        let state = self.views[doc_id].versions.get(version).ok_or_else(|| {
+            CartridgesError::UnknownVersion {
+                id: id.clone(),
+                version: Box::new(version.clone()),
+            }
+        })?;
         if let Some(reason) = &state.unverified {
-            return Err(PlugsError::Unverified {
+            return Err(CartridgesError::Unverified {
                 id: id.clone(),
                 version: Box::new(version.clone()),
                 reason: reason.clone(),
             });
         }
-        Ok(PlugVersionRecord {
+        Ok(CartridgeVersionRecord {
             id: id.clone(),
             version: version.clone(),
             revision: state.envelope.revision(),
@@ -300,20 +302,25 @@ impl State {
     }
 
     /// Re-reads `doc` from the drawer at its current heads and folds it in.
-    async fn refresh(&mut self, doc: &DocId) -> Result<(), PlugsError> {
+    async fn refresh(&mut self, doc: &DocId) -> Result<(), CartridgesError> {
         let read = read_doc(&self.docs, self.capability, doc).await?;
         self.apply(doc.clone(), Some(&read)).await
     }
 
     /// Replaces what `doc` contributes with the fold of `read` (nothing for `None`), records any
-    /// first-seen envelope before it is served, and advances the change sequence for every plug
+    /// first-seen envelope before it is served, and advances the change sequence for every cartridge
     /// whose record differs.
-    async fn apply(&mut self, doc: DocId, read: Option<&DatumsRead>) -> Result<(), PlugsError> {
+    async fn apply(
+        &mut self,
+        doc: DocId,
+        read: Option<&DatumsRead>,
+    ) -> Result<(), CartridgesError> {
         let folded = read.and_then(|read| fold_doc(read, &self.first_seen));
         let previous = self.views.get(&doc).map(|view| view.id.clone());
         let next = folded.as_ref().map(|(view, _)| view.id.clone());
-        let affected: BTreeSet<PlugId> = previous.iter().chain(next.iter()).cloned().collect();
-        let before: Vec<Option<PlugRecord>> = affected.iter().map(|id| self.record(id)).collect();
+        let affected: BTreeSet<CartridgeId> = previous.iter().chain(next.iter()).cloned().collect();
+        let before: Vec<Option<CartridgeRecord>> =
+            affected.iter().map(|id| self.record(id)).collect();
         if let Some(previous) = &previous
             && let Some(claims) = self.claims.get_mut(previous)
         {
@@ -359,14 +366,14 @@ impl State {
         Ok(())
     }
 
-    fn claiming(&self, id: &PlugId) -> Result<Vec<DocId>, PlugsError> {
+    fn claiming(&self, id: &CartridgeId) -> Result<Vec<DocId>, CartridgesError> {
         self.claims
             .get(id)
             .map(|docs| docs.iter().cloned().collect())
-            .ok_or_else(|| PlugsError::UnknownPlug(id.clone()))
+            .ok_or_else(|| CartridgesError::UnknownCartridge(id.clone()))
     }
 
-    fn changes_after(&self, after: Option<PlugsCursor>, limit: u32) -> PlugChanges {
+    fn changes_after(&self, after: Option<CartridgesCursor>, limit: u32) -> CartridgeChanges {
         let (from, reset) = match after {
             Some(cursor) if cursor.epoch == self.epoch => (cursor.seq, false),
             _ => (0, true),
@@ -375,13 +382,13 @@ impl State {
             0 => WATCH_MAX_LIMIT,
             limit => limit.min(WATCH_MAX_LIMIT),
         } as usize;
-        let mut pending: Vec<PlugChange> = self
+        let mut pending: Vec<CartridgeChange> = self
             .changes
             .iter()
             .filter(|(_, (seq, _))| *seq > from)
-            .map(|(id, (seq, removed))| PlugChange {
+            .map(|(id, (seq, removed))| CartridgeChange {
                 seq: *seq,
-                plug_id: id.clone(),
+                cartridge_id: id.clone(),
                 removed: *removed,
             })
             .collect();
@@ -392,9 +399,9 @@ impl State {
             Some(last) if !caught_up => last.seq,
             _ => self.seq,
         };
-        PlugChanges {
+        CartridgeChanges {
             changes: pending,
-            through: PlugsCursor {
+            through: CartridgesCursor {
                 epoch: self.epoch,
                 seq: through,
             },
@@ -408,7 +415,7 @@ async fn read_doc(
     docs: &Client<DocsProtocol>,
     capability: CapId,
     doc: &DocId,
-) -> Result<DatumsRead, PlugsError> {
+) -> Result<DatumsRead, CartridgesError> {
     docs.call(
         RequestContext::root(),
         ReadDatums {
@@ -431,7 +438,7 @@ enum Command {
     Fold {
         touched: BTreeSet<DocId>,
         left: BTreeSet<DocId>,
-        reply: oneshot::Sender<Result<(), PlugsError>>,
+        reply: oneshot::Sender<Result<(), CartridgesError>>,
     },
 }
 
@@ -446,7 +453,7 @@ pub(crate) struct DocImport {
 }
 
 /// The registry: a handle to the task that owns the derived [`State`], plus the means to write
-/// the drawer. `gate` serializes publishes and removals so two of them never both decide a plug
+/// the drawer. `gate` serializes publishes and removals so two of them never both decide a cartridge
 /// has no document yet.
 pub(crate) struct Registry {
     commands: mpsc::Sender<Command>,
@@ -470,7 +477,7 @@ impl Registry {
         import: DocImport,
         blobs: Arc<BlobService>,
         sql: Database,
-    ) -> Result<Self, PlugsError> {
+    ) -> Result<Self, CartridgesError> {
         let first_seen = store::first_seen(&sql)
             .await?
             .into_iter()
@@ -556,17 +563,21 @@ impl Registry {
         self.query(|state| state.seq_tx.subscribe()).await
     }
 
-    pub(crate) async fn record(&self, id: &PlugId) -> Option<PlugRecord> {
+    pub(crate) async fn record(&self, id: &CartridgeId) -> Option<CartridgeRecord> {
         let id = id.clone();
         self.query(move |state| state.record(&id)).await
     }
 
-    pub(crate) async fn records(&self) -> Vec<PlugRecord> {
+    pub(crate) async fn records(&self) -> Vec<CartridgeRecord> {
         self.query(|state| {
             state
                 .claims
                 .keys()
-                .map(|id| state.record(id).expect("a claimed plug id has a record"))
+                .map(|id| {
+                    state
+                        .record(id)
+                        .expect("a claimed cartridge id has a record")
+                })
                 .collect()
         })
         .await
@@ -574,18 +585,18 @@ impl Registry {
 
     pub(crate) async fn version(
         &self,
-        id: &PlugId,
+        id: &CartridgeId,
         version: &Version,
-    ) -> Result<PlugVersionRecord, PlugsError> {
+    ) -> Result<CartridgeVersionRecord, CartridgesError> {
         let (id, version) = (id.clone(), version.clone());
         self.query(move |state| state.version(&id, &version)).await
     }
 
     pub(crate) async fn changes_after(
         &self,
-        after: Option<PlugsCursor>,
+        after: Option<CartridgesCursor>,
         limit: u32,
-    ) -> PlugChanges {
+    ) -> CartridgeChanges {
         self.query(move |state| state.changes_after(after, limit))
             .await
     }
@@ -607,10 +618,13 @@ impl Registry {
         }
     }
 
-    pub(crate) async fn publish(&self, envelope: Plug) -> Result<PublishedPlugVersion, PlugsError> {
+    pub(crate) async fn publish(
+        &self,
+        envelope: Cartridge,
+    ) -> Result<PublishedCartridgeVersion, CartridgesError> {
         envelope
             .validate()
-            .map_err(|error| PlugsError::Rejected(error.to_string()))?;
+            .map_err(|error| CartridgesError::Rejected(error.to_string()))?;
         // Signature checking is CPU work with no registry state in it, so it runs before the gate.
         // It also runs for an envelope the service just signed for the node: acceptance never
         // assumes who produced the signature.
@@ -627,7 +641,7 @@ impl Registry {
             self.query(move |state| {
                 match state.first_seen.get(&(id.clone(), version.clone())) {
                     Some(seen) if seen.revision != revision => {
-                        return Err(PlugsError::VersionExists {
+                        return Err(CartridgesError::VersionExists {
                             id,
                             version: Box::new(version),
                             existing: seen.revision,
@@ -637,12 +651,12 @@ impl Registry {
                     // An existing or tombstoned label with identical content is a republish,
                     // which is allowed whatever its position in the version order.
                     Some(_) => {}
-                    // A new label must order after every label this plug has or had, tombstones
+                    // A new label must order after every label this cartridge has or had, tombstones
                     // included (the first-seen record outlives removal), so a validly signed
                     // older version cannot be published as if it were an upgrade.
                     None => {
                         // `0.0.0-0` is the lowest semver precedence, so the range starts at the
-                        // plug's first possible version.
+                        // cartridge's first possible version.
                         let lowest: Version = "0.0.0-0".parse().expect("a valid semver");
                         let newest = state
                             .first_seen
@@ -653,7 +667,7 @@ impl Registry {
                         if let Some(newest) = newest
                             && version <= *newest
                         {
-                            return Err(PlugsError::Downgrade {
+                            return Err(CartridgesError::Downgrade {
                                 id,
                                 version: Box::new(version),
                                 newest: Box::new(newest.clone()),
@@ -665,7 +679,7 @@ impl Registry {
                     && record.revision == revision
                     && record.conflict.is_none()
                 {
-                    return Ok(Err(PublishedPlugVersion {
+                    return Ok(Err(PublishedCartridgeVersion {
                         record,
                         unchanged: true,
                     }));
@@ -684,15 +698,15 @@ impl Registry {
                 .blobs
                 .stat(&BlobId::new(artifact.digest.0))
                 .await
-                .map_err(|error| PlugsError::Storage(error.to_string()))?
-                .ok_or_else(|| PlugsError::ArtifactUnavailable {
+                .map_err(|error| CartridgesError::Storage(error.to_string()))?
+                .ok_or_else(|| CartridgesError::ArtifactUnavailable {
                     id: id.clone(),
                     artifact: artifact.key.clone(),
                 })?;
             if let Some(size) = artifact.size
                 && size != info.length_octets
             {
-                return Err(PlugsError::Rejected(format!(
+                return Err(CartridgesError::Rejected(format!(
                     "artifact `{}` declares {size} octets, the stored blob has {}",
                     artifact.key, info.length_octets
                 )));
@@ -724,7 +738,7 @@ impl Registry {
             None => {
                 set.insert(
                     identity_key(),
-                    serde_json::to_value(PlugIdentity {
+                    serde_json::to_value(CartridgeIdentity {
                         id: id.clone(),
                         extra: Default::default(),
                     })
@@ -740,14 +754,14 @@ impl Registry {
                 .is_ok_and(|record| record.revision == revision && record.conflict.is_none())
         })
         .await;
-        Ok(PublishedPlugVersion {
+        Ok(PublishedCartridgeVersion {
             record: self.version(&id, &version).await?,
             unchanged: false,
         })
     }
 
     /// Retracts a handle this registry minted for one call; a handle is its own `via`.
-    async fn retract(&self, capability: CapId) -> Result<(), PlugsError> {
+    async fn retract(&self, capability: CapId) -> Result<(), CartridgesError> {
         self.import
             .authority
             .call(
@@ -758,11 +772,11 @@ impl Registry {
                 },
             )
             .await
-            .map_err(|error| PlugsError::AuthorityUnavailable(error.to_string()))
+            .map_err(|error| CartridgesError::AuthorityUnavailable(error.to_string()))
     }
 
     /// Enters an existing document in the registry drawer at Read, after checking through the
-    /// caller's `read` handle that it is a plug document and that `permitted` accepts its plug id.
+    /// caller's `read` handle that it is a cartridge document and that `permitted` accepts its cartridge id.
     /// The version contents are not looked at: the follower folds the document like any other that
     /// arrives in the drawer, which is where each version's signature is verified. Returns once the
     /// registry serves the document.
@@ -771,8 +785,8 @@ impl Registry {
         doc: &DocId,
         read: CapId,
         reach: CapId,
-        permitted: impl Fn(&PlugId) -> Result<(), PlugsError>,
-    ) -> Result<PlugRecord, PlugsError> {
+        permitted: impl Fn(&CartridgeId) -> Result<(), CartridgesError>,
+    ) -> Result<CartridgeRecord, CartridgesError> {
         let _gate = self
             .gate
             .acquire()
@@ -780,13 +794,15 @@ impl Registry {
             .expect("the registry's gate is never closed");
         let read = read_doc(&self.docs, read, doc).await?;
         let Some(DatumRead::Accepted { value, .. }) = read.datums.get(&identity_key()) else {
-            return Err(PlugsError::Rejected(format!(
-                "document {doc} has no readable plug identity datum"
+            return Err(CartridgesError::Rejected(format!(
+                "document {doc} has no readable cartridge identity datum"
             )));
         };
-        let id = serde_json::from_value::<PlugIdentity>(value.clone())
+        let id = serde_json::from_value::<CartridgeIdentity>(value.clone())
             .map_err(|error| {
-                PlugsError::Rejected(format!("the plug identity does not decode: {error}"))
+                CartridgesError::Rejected(format!(
+                    "the cartridge identity does not decode: {error}"
+                ))
             })?
             .id;
         permitted(&id)?;
@@ -808,7 +824,7 @@ impl Registry {
                 },
             )
             .await
-            .map_err(|error| PlugsError::Storage(error.to_string()))?
+            .map_err(|error| CartridgesError::Storage(error.to_string()))?
             .capability_id;
         let entered = self
             .import
@@ -820,12 +836,15 @@ impl Registry {
                     reach,
                     // Entering a document is idempotent, so a fresh command per call costs
                     // nothing and never replays a stale ledger answer.
-                    command: CommandId::try_from(format!("plug registry import {}", Uuid7::new()))
-                        .expect("an import command is within bounds"),
+                    command: CommandId::try_from(format!(
+                        "cartridge registry import {}",
+                        Uuid7::new()
+                    ))
+                    .expect("an import command is within bounds"),
                     drawer_id: self.drawer.clone(),
                     doc_id: doc.clone(),
                     // Read is all the registry needs to serve the document, and the author's
-                    // document is not the registry's to write: see `ImportPlugDocument`.
+                    // document is not the registry's to write: see `ImportCartridgeDocument`.
                     access: DrawerAccess::Read,
                 },
             )
@@ -833,8 +852,8 @@ impl Registry {
             .map_err(|error| match error {
                 service_utils_rs::ClientError::Method(
                     big_cabinet_core::drawer::protocol::DrawersError::Denied,
-                ) => PlugsError::Denied,
-                other => PlugsError::Storage(other.to_string()),
+                ) => CartridgesError::Denied,
+                other => CartridgesError::Storage(other.to_string()),
             });
         // Retracted whether or not the entry succeeded.
         self.retract(entry).await?;
@@ -850,16 +869,16 @@ impl Registry {
         Ok(self
             .record(&id)
             .await
-            .expect("a plug whose document was just folded in has a record"))
+            .expect("a cartridge whose document was just folded in has a record"))
     }
 
-    /// Drops one version from every document claiming the plug, and forgets what the node first
+    /// Drops one version from every document claiming the cartridge, and forgets what the node first
     /// saw for it: removing a version is the operator's explicit act, so the label is free again.
     pub(crate) async fn remove_version(
         &self,
-        id: &PlugId,
+        id: &CartridgeId,
         version: &Version,
-    ) -> Result<(), PlugsError> {
+    ) -> Result<(), CartridgesError> {
         let _gate = self
             .gate
             .acquire()
@@ -879,7 +898,7 @@ impl Registry {
                 if known {
                     Ok(docs)
                 } else {
-                    Err(PlugsError::UnknownVersion {
+                    Err(CartridgesError::UnknownVersion {
                         id,
                         version: Box::new(version),
                     })
@@ -889,7 +908,7 @@ impl Registry {
         };
         for doc in docs {
             self.drop_datums(&doc, |key| {
-                (key.tag().as_str() == Plug::ID && key.slot_bytes() == label.as_bytes())
+                (key.tag().as_str() == Cartridge::ID && key.slot_bytes() == label.as_bytes())
                     || artifact_slot_version(key).as_deref() == Some(label.as_str())
             })
             .await?;
@@ -909,8 +928,8 @@ impl Registry {
         Ok(())
     }
 
-    /// Drops every version and the identity from every document claiming the plug.
-    pub(crate) async fn remove_plug(&self, id: &PlugId) -> Result<(), PlugsError> {
+    /// Drops every version and the identity from every document claiming the cartridge.
+    pub(crate) async fn remove_cartridge(&self, id: &CartridgeId) -> Result<(), CartridgesError> {
         let _gate = self
             .gate
             .acquire()
@@ -922,7 +941,7 @@ impl Registry {
         };
         for doc in docs {
             self.drop_datums(&doc, |key| {
-                matches!(key.tag().as_str(), Plug::ID | PlugIdentity::ID)
+                matches!(key.tag().as_str(), Cartridge::ID | CartridgeIdentity::ID)
                     || artifact_slot_version(key).is_some()
             })
             .await?;
@@ -940,7 +959,7 @@ impl Registry {
         &self,
         doc: &DocId,
         selects: impl Fn(&DatumKey) -> bool,
-    ) -> Result<(), PlugsError> {
+    ) -> Result<(), CartridgesError> {
         let read = read_doc(&self.docs, self.capability, doc).await?;
         let remove: BTreeSet<DatumKey> = read
             .datums
@@ -959,7 +978,7 @@ impl Registry {
         doc: &DocId,
         set: BTreeMap<DatumKey, Json>,
         remove: BTreeSet<DatumKey>,
-    ) -> Result<(), PlugsError> {
+    ) -> Result<(), CartridgesError> {
         self.docs
             .call(
                 RequestContext::root(),
@@ -979,13 +998,13 @@ impl Registry {
 
     /// A new document in the registry drawer carrying `datums`: its placement enters it in the
     /// drawer, so it is part of the registry from its first write.
-    async fn create(&self, datums: BTreeMap<DatumKey, Json>) -> Result<(), PlugsError> {
+    async fn create(&self, datums: BTreeMap<DatumKey, Json>) -> Result<(), CartridgesError> {
         self.docs
             .call(
                 RequestContext::root(),
                 CreateDoc {
                     capability: self.capability,
-                    command: CommandId::try_from(format!("plugs/create/{}", Uuid7::new()))
+                    command: CommandId::try_from(format!("cartridges/create/{}", Uuid7::new()))
                         .expect("a generated command id is within bounds"),
                     placement: format!("drawer {}", self.drawer),
                     datums,
@@ -1002,8 +1021,8 @@ impl Registry {
         &self,
         ready: oneshot::Sender<()>,
         cancelled: impl Future<Output = ()>,
-    ) -> Result<(), PlugsError> {
-        let identity_tag = DatumTag::new(PlugIdentity::ID).expect("the identity tag is valid");
+    ) -> Result<(), CartridgesError> {
+        let identity_tag = DatumTag::new(CartridgeIdentity::ID).expect("the identity tag is valid");
         let predicate = Predicate::And {
             clauses: vec![
                 Predicate::InDrawer {
@@ -1019,7 +1038,7 @@ impl Registry {
         let datums = DatumSelection::Of {
             tags: BTreeSet::from([
                 identity_tag,
-                DatumTag::new(Plug::ID).expect("the plug tag is valid"),
+                DatumTag::new(Cartridge::ID).expect("the cartridge tag is valid"),
             ]),
             keys: BTreeSet::new(),
         };
@@ -1091,9 +1110,9 @@ impl Registry {
 mod tests {
     use super::*;
     use big_cabinet_core::doc::DatumVersion;
-    use big_plugs_core::test_support::plug_id;
-    use big_plugs_core::test_support::sign_as_example;
-    use big_plugs_core::test_support::sign_with_seed;
+    use big_cartridges_core::test_support::cartridge_id;
+    use big_cartridges_core::test_support::sign_as_example;
+    use big_cartridges_core::test_support::sign_with_seed;
     use serde_json::json;
 
     fn accepted(value: Json) -> DatumRead {
@@ -1103,20 +1122,20 @@ mod tests {
         }
     }
 
-    fn plug(version: &str, title: &str) -> Plug {
-        let mut plug = Plug::new(plug_id("photos"), version.parse().unwrap());
-        plug.title = Some(title.into());
-        sign_as_example(plug)
+    fn cartridge(version: &str, title: &str) -> Cartridge {
+        let mut cartridge = Cartridge::new(cartridge_id("photos"), version.parse().unwrap());
+        cartridge.title = Some(title.into());
+        sign_as_example(cartridge)
     }
 
     /// A registry document for `photos` holding `versions` as `(slot, datum)`.
     fn document(versions: Vec<(&str, DatumRead)>) -> DatumsRead {
         let mut datums = BTreeMap::from([(
             identity_key(),
-            accepted(json!({ "id": plug_id("photos").to_string() })),
+            accepted(json!({ "id": cartridge_id("photos").to_string() })),
         )]);
         for (slot, datum) in versions {
-            datums.insert(DatumKey::from_text(Plug::ID, slot).unwrap(), datum);
+            datums.insert(DatumKey::from_text(Cartridge::ID, slot).unwrap(), datum);
         }
         DatumsRead {
             heads: Vec::new(),
@@ -1124,28 +1143,28 @@ mod tests {
         }
     }
 
-    fn pins(plugs: &[&Plug]) -> FirstSeenMap {
-        plugs
+    fn pins(cartridges: &[&Cartridge]) -> FirstSeenMap {
+        cartridges
             .iter()
-            .map(|plug| {
+            .map(|cartridge| {
                 (
-                    (plug.id.clone(), plug.version.clone()),
+                    (cartridge.id.clone(), cartridge.version.clone()),
                     FirstSeen {
-                        revision: plug.revision(),
-                        envelope: (*plug).clone(),
+                        revision: cartridge.revision(),
+                        envelope: (*cartridge).clone(),
                     },
                 )
             })
             .collect()
     }
 
-    fn datum(plug: &Plug) -> DatumRead {
-        accepted(serde_json::to_value(plug).unwrap())
+    fn datum(cartridge: &Cartridge) -> DatumRead {
+        accepted(serde_json::to_value(cartridge).unwrap())
     }
 
     #[test]
-    fn an_unseen_version_is_first_seen_and_a_document_without_identity_is_no_plug() {
-        let v1 = plug("1.0.0", "Photos");
+    fn an_unseen_version_is_first_seen_and_a_document_without_identity_is_no_cartridge() {
+        let v1 = cartridge("1.0.0", "Photos");
         let (view, fresh) = fold_doc(&document(vec![("1.0.0", datum(&v1))]), &pins(&[])).unwrap();
         assert_eq!(fresh, std::slice::from_ref(&v1));
         assert_eq!(view.versions[&v1.version].conflict, None);
@@ -1158,8 +1177,8 @@ mod tests {
 
     #[test]
     fn a_changed_datum_is_conflicted_and_the_first_seen_envelope_is_served() {
-        let seen = plug("1.0.0", "Photos");
-        let rewritten = plug("1.0.0", "Rewritten");
+        let seen = cartridge("1.0.0", "Photos");
+        let rewritten = cartridge("1.0.0", "Rewritten");
         let (view, fresh) = fold_doc(
             &document(vec![("1.0.0", datum(&rewritten))]),
             &pins(&[&seen]),
@@ -1177,8 +1196,8 @@ mod tests {
 
     #[test]
     fn unreadable_slots_are_reported_and_an_unreadable_pinned_version_is_conflicted() {
-        let seen = plug("1.0.0", "Photos");
-        let mislabelled = plug("2.0.0", "Photos");
+        let seen = cartridge("1.0.0", "Photos");
+        let mislabelled = cartridge("2.0.0", "Photos");
         let view = fold_doc(
             &document(vec![
                 ("1.0", datum(&seen)),
@@ -1210,12 +1229,12 @@ mod tests {
 
     #[test]
     fn an_unseen_version_with_a_bad_signature_is_listed_unverified_and_never_pinned() {
-        let genuine = plug("1.0.0", "Photos");
-        let forged = sign_with_seed(plug("1.1.0", "Photos"), &[9; 32]);
-        let mut unsigned = plug("1.2.0", "Photos");
+        let genuine = cartridge("1.0.0", "Photos");
+        let forged = sign_with_seed(cartridge("1.1.0", "Photos"), &[9; 32]);
+        let mut unsigned = cartridge("1.2.0", "Photos");
         unsigned.signature = None;
-        let mut web = plug("1.3.0", "Photos");
-        web.id = big_plugs_core::PlugId::new("did:web:example.com", "photos").unwrap();
+        let mut web = cartridge("1.3.0", "Photos");
+        web.id = big_cartridges_core::CartridgeId::new("did:web:example.com", "photos").unwrap();
         let (view, fresh) = fold_doc(
             &document(vec![
                 ("1.0.0", datum(&genuine)),

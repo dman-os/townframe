@@ -19,7 +19,7 @@ pub(super) async fn boot(
     docs: &DocsRepo,
     drawers: &Drawers,
     drawers_actor: &Actor,
-    plugs_actor: &Actor,
+    cartridges_actor: &Actor,
     access: &Arc<DrawerAccess>,
     repo: &SharedBigRepo,
     scope_key: Arc<str>,
@@ -27,8 +27,14 @@ pub(super) async fn boot(
     stop: &mut StopToken,
 ) -> Res<(big_blobs::workers::BlobWorkers, DrawerId)> {
     let signer = drawers_actor.capability;
-    let registry_drawer =
-        ensure_registry_drawer(drawers, drawers_actor, plugs_actor, access, sql.clone()).await?;
+    let registry_drawer = ensure_registry_drawer(
+        drawers,
+        drawers_actor,
+        cartridges_actor,
+        access,
+        sql.clone(),
+    )
+    .await?;
     let local = drawers.local();
     let capability = docs
         .client
@@ -45,8 +51,8 @@ pub(super) async fn boot(
                         // the workers retain them and write their cipherBlob/jwk representation
                         // there like in any other document they maintain.
                         (local.config_id.clone(), Access::Write),
-                        // The plug registry's grouped drawer: its documents carry the `Blob`
-                        // datums for plug artifacts.
+                        // The cartridge registry's grouped drawer: its documents carry the `Blob`
+                        // datums for cartridge artifacts.
                         (registry_drawer.clone(), Access::Write),
                     ]),
                     ..Default::default()
@@ -89,23 +95,23 @@ pub(super) async fn boot(
     Ok((workers, registry_drawer))
 }
 
-/// Creates the plug registry drawer on the first boot (owned by the drawers actor, which is also
-/// the identity the blob workers sign as) and grants the plugs actor admin over it.
+/// Creates the cartridge registry drawer on the first boot (owned by the drawers actor, which is also
+/// the identity the blob workers sign as) and grants the cartridges actor admin over it.
 async fn ensure_registry_drawer(
     drawers: &Drawers,
     drawers_actor: &Actor,
-    plugs_actor: &Actor,
+    cartridges_actor: &Actor,
     access: &DrawerAccess,
     sql: Database,
 ) -> Res<DrawerId> {
-    let drawer = big_plugs::ensure_registry_drawer(RegistryDrawerConfig {
+    let drawer = big_cartridges::ensure_registry_drawer(RegistryDrawerConfig {
         drawers,
         actor: drawers_actor,
         access,
         sql,
     })
     .await?;
-    grant_drawer_admin(drawers, drawers_actor, plugs_actor, &drawer).await?;
+    grant_drawer_admin(drawers, drawers_actor, cartridges_actor, &drawer).await?;
     Ok(drawer)
 }
 

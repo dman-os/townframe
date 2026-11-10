@@ -6,14 +6,14 @@
 pub big_ndk_testing::fn node () -> TestNodeBuilder
 pub enum big_ndk_testing::CallError< E > { # [doc = " The method's own typed error, from the handler."] Method (E), # [doc = " Dispatch refused or could not complete the call (denied, not ready, a provider failure"] # [doc = " that is not the method's error, ..)."] Dispatch (DispatchError) }
 pub impl big_ndk_testing::TestNode::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , CallError < M :: Error > >
-pub impl big_ndk_testing::TestNode::async fn enable (& self , plug_id : & PlugId) -> NoduleRecord
-pub impl big_ndk_testing::TestNode::async fn grant (& self , plug_id : & PlugId , operations : DispatchScope) -> NoduleRecord
+pub impl big_ndk_testing::TestNode::async fn enable (& self , cartridge_id : & CartridgeId) -> NoduleRecord
+pub impl big_ndk_testing::TestNode::async fn grant (& self , cartridge_id : & CartridgeId , operations : DispatchScope ,) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn invoke (& self , operation : & str , input : Value , context : InvocationContext , request : RequestContext ,) -> Result < Value , DispatchError >
-pub impl big_ndk_testing::TestNode::async fn set_enabled (& self , plug_id : & PlugId , enabled : bool) -> NoduleRecord
+pub impl big_ndk_testing::TestNode::async fn set_enabled (& self , cartridge_id : & CartridgeId , enabled : bool) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn stop (self)
 pub impl big_ndk_testing::TestNode::fn big_node (& self) -> & BigNode
 pub impl big_ndk_testing::TestNodeBuilder::async fn boot (self) -> TestNode
-pub impl big_ndk_testing::TestNodeBuilder::fn with_nodule < N > (mut self , plug : Plug , nodule : N) -> Self where N : big_ndk :: Nodule + Clone + Send + 'static ,
+pub impl big_ndk_testing::TestNodeBuilder::fn with_nodule < N > (mut self , cartridge : Cartridge , nodule : N) -> Self where N : big_ndk :: Nodule + Clone + Send + 'static ,
 pub impl big_ndk_testing::TestNodeBuilder::fn with_operation_ceiling (mut self , ceiling : DispatchScope) -> Self
 pub struct big_ndk_testing::TestNode  {  }
 pub struct big_ndk_testing::TestNodeBuilder  {  }

@@ -1,25 +1,25 @@
 //! The native test harness for nodule authors: test a [`big_ndk::Nodule`]'s handlers against a
 //! real booted node, natively, without building wasm.
 //!
-//! [`node`] starts a builder; each registered nodule is a plug manifest and the Rust value that
+//! [`node`] starts a builder; each registered nodule is a cartridge manifest and the Rust value that
 //! serves it. [`TestNodeBuilder::boot`] boots a real in-memory `BigNode`, hosting the nodules
 //! with an executor that serves them in-process in place of the wasm component, and admits their
-//! plugs. Everything else is the production path: enabling, grants, dispatch authorization and
-//! the nodule's own outgoing calls (see [`executor`]). It is for tests only (plug authoring
+//! cartridges. Everything else is the production path: enabling, grants, dispatch authorization and
+//! the nodule's own outgoing calls (see [`executor`]). It is for tests only (cartridge authoring
 //! principle 6): no node outside a test is built with it.
 //!
 //! ```ignore
-//! let plug = my_plug_manifest(); // declares a nodule with a `handler` artifact
+//! let cartridge = my_cartridge_manifest(); // declares a nodule with a `handler` artifact
 //! let node = big_ndk_testing::node()
-//!     .with_nodule(plug.clone(), MyNodule::default())
+//!     .with_nodule(cartridge.clone(), MyNodule::default())
 //!     .boot()
 //!     .await;
-//! node.enable(&plug.id).await;
+//! node.enable(&cartridge.id).await;
 //! let reply = node.call(CreateReview { /* .. */ }).await.unwrap();
 //! node.stop().await;
 //! ```
 //!
-//! The plug needs a `handler` artifact entry for the node to host the nodule, but the harness
+//! The cartridge needs a `handler` artifact entry for the node to host the nodule, but the harness
 //! never reads its bytes, so a placeholder digest is fine.
 
 #![recursion_limit = "256"]
@@ -31,6 +31,8 @@ mod smoke;
 
 use big_cabinet::SchemaRepo;
 use big_cabinet_core::authority::Authorization;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -44,8 +46,6 @@ use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
 use executor::Hosting;
 use executor::NativeExecutor;
 use executor::Registered;
@@ -71,45 +71,47 @@ pub fn node() -> TestNodeBuilder {
 }
 
 pub struct TestNodeBuilder {
-    nodules: Vec<(Plug, Box<dyn Registered>)>,
+    nodules: Vec<(Cartridge, Box<dyn Registered>)>,
     ceiling: DispatchScope,
 }
 
 impl TestNodeBuilder {
-    /// Registers a nodule: `plug` is its manifest, which must declare a nodule contribution with
+    /// Registers a nodule: `cartridge` is its manifest, which must declare a nodule contribution with
     /// a handler, and `nodule` is what serves it. Every request is served by a clone of
     /// `nodule`, as the wasm component serves each from a fresh value, so state does not
     /// carry from one call to the next.
-    pub fn with_nodule<N>(mut self, plug: Plug, nodule: N) -> Self
+    pub fn with_nodule<N>(mut self, cartridge: Cartridge, nodule: N) -> Self
     where
         N: big_ndk::Nodule + Clone + Send + 'static,
     {
         self.nodules
-            .push((plug, Box::new(Hosting(Mutex::new(nodule)))));
+            .push((cartridge, Box::new(Hosting(Mutex::new(nodule)))));
         self
     }
 
     /// Widens the ceiling of what a nodule can be granted to invoke beyond the authorities of
-    /// the registered plugs, which it always covers.
+    /// the registered cartridges, which it always covers.
     pub fn with_operation_ceiling(mut self, ceiling: DispatchScope) -> Self {
         self.ceiling.operations.extend(ceiling.operations);
         self.ceiling.authorities.extend(ceiling.authorities);
         self
     }
 
-    /// Boots the node and admits every registered plug. The nodules are not enabled: grants are
+    /// Boots the node and admits every registered cartridge. The nodules are not enabled: grants are
     /// set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
     pub async fn boot(self) -> TestNode {
         let Self {
             nodules,
             mut ceiling,
         } = self;
-        let mut plugs = Vec::new();
+        let mut cartridges = Vec::new();
         let mut registered = BTreeMap::new();
-        for (plug, nodule) in nodules {
-            ceiling.authorities.extend(plug.authority.iter().cloned());
-            registered.insert(plug.id.clone(), nodule);
-            plugs.push(plug);
+        for (cartridge, nodule) in nodules {
+            ceiling
+                .authorities
+                .extend(cartridge.authority.iter().cloned());
+            registered.insert(cartridge.id.clone(), nodule);
+            cartridges.push(cartridge);
         }
         let secrets = secrets().await;
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
@@ -144,9 +146,9 @@ impl TestNodeBuilder {
             stop,
             _runtime: runtime,
         };
-        for plug in plugs {
+        for cartridge in cartridges {
             node.nodules(AdmitNodule {
-                plug,
+                cartridge,
                 drawers: None,
             })
             .await;
@@ -236,25 +238,29 @@ impl TestNode {
             })
     }
 
-    /// Enables the nodule of `plug_id`, which starts hosting it.
-    pub async fn enable(&self, plug_id: &PlugId) -> NoduleRecord {
-        self.set_enabled(plug_id, true).await
+    /// Enables the nodule of `cartridge_id`, which starts hosting it.
+    pub async fn enable(&self, cartridge_id: &CartridgeId) -> NoduleRecord {
+        self.set_enabled(cartridge_id, true).await
     }
 
-    pub async fn set_enabled(&self, plug_id: &PlugId, enabled: bool) -> NoduleRecord {
+    pub async fn set_enabled(&self, cartridge_id: &CartridgeId, enabled: bool) -> NoduleRecord {
         self.nodules(SetNoduleEnabled {
-            plug_id: plug_id.clone(),
+            cartridge_id: cartridge_id.clone(),
             enabled,
         })
         .await
     }
 
-    /// Sets the operations the nodule of `plug_id` may invoke, which it holds as a dispatch
-    /// capability minted from them. The grant is bounded by what the nodule's plug requested and
+    /// Sets the operations the nodule of `cartridge_id` may invoke, which it holds as a dispatch
+    /// capability minted from them. The grant is bounded by what the nodule's cartridge requested and
     /// by the node's ceiling, and the record says whether it was applied.
-    pub async fn grant(&self, plug_id: &PlugId, operations: DispatchScope) -> NoduleRecord {
+    pub async fn grant(
+        &self,
+        cartridge_id: &CartridgeId,
+        operations: DispatchScope,
+    ) -> NoduleRecord {
         self.nodules(SetNoduleOperationGrants {
-            plug_id: plug_id.clone(),
+            cartridge_id: cartridge_id.clone(),
             operations,
         })
         .await

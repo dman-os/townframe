@@ -348,7 +348,7 @@ impl AuthorityService {
     /// an operation of the authority protocol, so only code the embedder hands this service to can
     /// sign as the node. The same key issues attribution certificates, so this never signs bare
     /// bytes: every signature is bound to a caller-named domain (a non-empty, NUL-terminated label
-    /// such as the plug registry's `org.example.daybook.plug.signature.v1\0`), and a signature made
+    /// such as the cartridge registry's `org.example.daybook.cartridge.signature.v1\0`), and a signature made
     /// here is never valid as an attribution certificate or as another domain's structure.
     pub fn sign_as_node(&self, domain: &[u8], payload: &[u8]) -> [u8; 64] {
         use ed25519_dalek::Signer;

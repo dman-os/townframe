@@ -3,20 +3,20 @@
 //! node, with the native executor in place of the wasm one.
 
 use big_cabinet_core::datum::DatumMember;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::request::Necessity;
+use big_cartridges_core::request::Request;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::request::Necessity;
-use big_plugs_core::request::Request;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
@@ -29,7 +29,7 @@ const OUTER_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b71692
 
 /// One nodule running the fixture under `authority`.
 struct Spec {
-    plug: PlugId,
+    cartridge: CartridgeId,
     authority: &'static str,
 }
 
@@ -45,7 +45,7 @@ impl Spec {
 
 fn caller() -> Spec {
     Spec {
-        plug: big_plugs_core::example_plug!("native-test")
+        cartridge: big_cartridges_core::example_cartridge!("native-test")
             .parse()
             .unwrap(),
         authority: "org.example.test",
@@ -54,7 +54,7 @@ fn caller() -> Spec {
 
 fn callee() -> Spec {
     Spec {
-        plug: big_plugs_core::example_plug!("native-callee")
+        cartridge: big_cartridges_core::example_cartridge!("native-callee")
             .parse()
             .unwrap(),
         authority: "org.example.callee",
@@ -79,9 +79,9 @@ fn procedure(nsid: &str) -> Value {
     })
 }
 
-/// The plug declaring `spec`'s echo and relay, with a handler artifact whose digest is a
+/// The cartridge declaring `spec`'s echo and relay, with a handler artifact whose digest is a
 /// placeholder (its bytes are never put), requesting each of `calls`.
-fn plug(spec: &Spec, calls: &[String]) -> Plug {
+fn cartridge(spec: &Spec, calls: &[String]) -> Cartridge {
     let mut nodule = Nodule {
         requires: calls
             .iter()
@@ -104,22 +104,23 @@ fn plug(spec: &Spec, calls: &[String]) -> Plug {
         extra: Default::default(),
     });
     nodule.implements = operations.into();
-    let mut plug = Plug::new(spec.plug.clone(), "1.0.0".parse().unwrap());
-    plug.authority = Some(spec.authority.to_owned());
-    plug.artifacts.push(Artifact {
+    let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
+    cartridge.authority = Some(spec.authority.to_owned());
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(b"placeholder: the native executor never reads the handler"),
         size: Some(1),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
 /// The error of [`CallRelay`], shaped as the fixture's own (serde matches by variant name).
@@ -199,14 +200,14 @@ async fn relay(
 async fn admit_accepts_a_placeholder_handler_digest_whose_bytes_were_never_put() {
     let spec = caller();
     let node = super::node()
-        .with_nodule(plug(&spec, &[]), Fixture)
+        .with_nodule(cartridge(&spec, &[]), Fixture)
         .boot()
         .await;
     // Admitted at boot with a digest no blob has: the native executor never reads it, so the
     // nodule is ready the moment it is enabled.
-    let enabled = node.enable(&spec.plug).await;
+    let enabled = node.enable(&spec.cartridge).await;
     assert_eq!(enabled.readiness, Readiness::Ready);
-    assert!(node.big_node().executor.hosts(&spec.plug));
+    assert!(node.big_node().executor.hosts(&spec.cartridge));
     node.stop().await;
 }
 
@@ -214,10 +215,10 @@ async fn admit_accepts_a_placeholder_handler_digest_whose_bytes_were_never_put()
 async fn a_native_handler_is_served_the_production_delivery_contract() {
     let spec = caller();
     let node = super::node()
-        .with_nodule(plug(&spec, &[]), Fixture)
+        .with_nodule(cartridge(&spec, &[]), Fixture)
         .boot()
         .await;
-    node.enable(&spec.plug).await;
+    node.enable(&spec.cartridge).await;
     let echo = spec.echo();
 
     // The operator's capability as a bare `Bearer` token (no signer), the idempotency key, a
@@ -258,13 +259,13 @@ async fn a_native_handler_is_served_the_production_delivery_contract() {
     );
 
     // Disabling unbinds the operations and stops the thread; enabling starts it again.
-    node.set_enabled(&spec.plug, false).await;
+    node.set_enabled(&spec.cartridge, false).await;
     assert_eq!(
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::UnknownOperation)
     );
-    assert!(!node.big_node().executor.hosts(&spec.plug));
-    node.enable(&spec.plug).await;
+    assert!(!node.big_node().executor.hosts(&spec.cartridge));
+    node.enable(&spec.cartridge).await;
     assert_eq!(
         invoke(&node, &echo, json!({ "n": 2 }), Default::default())
             .await
@@ -278,12 +279,15 @@ async fn a_native_handler_is_served_the_production_delivery_contract() {
 async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() {
     let (a, b) = (caller(), callee());
     let node = super::node()
-        .with_nodule(plug(&a, &[b.echo(), b.relay()]), Fixture)
-        .with_nodule(plug(&b, &[a.echo()]), Fixture)
+        .with_nodule(cartridge(&a, &[b.echo(), b.relay()]), Fixture)
+        .with_nodule(cartridge(&b, &[a.echo()]), Fixture)
         .boot()
         .await;
     for spec in [&a, &b] {
-        assert_eq!(node.enable(&spec.plug).await.readiness, Readiness::Ready);
+        assert_eq!(
+            node.enable(&spec.cartridge).await.readiness,
+            Readiness::Ready
+        );
     }
     let target = b.echo();
     let context = InvocationContext {
@@ -294,7 +298,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     // echo: dispatch denies the nested call and the handler sees a 403, which is how a missing
     // grant is observed.
     node.grant(
-        &a.plug,
+        &a.cartridge,
         DispatchScope {
             operations: [b.relay()].into(),
             ..Default::default()
@@ -310,7 +314,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     // Granted the callee's authority, the same relay succeeds, and B sees the nodule's own
     // capability as the caller's `authorization`.
     node.grant(
-        &a.plug,
+        &a.cartridge,
         DispatchScope {
             authorities: [b.authority.to_owned()].into(),
             ..Default::default()
@@ -359,7 +363,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     // It permits A's echo (which B requested), so only its holder binding can refuse A's use of
     // it.
     node.grant(
-        &b.plug,
+        &b.cartridge,
         DispatchScope {
             authorities: [a.authority.to_owned()].into(),
             ..Default::default()
@@ -374,7 +378,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     assert_eq!(own["status"], 200, "{own}");
 
     // Revoking takes effect: the handler is told no capability and the one it remembered is dead.
-    node.grant(&a.plug, DispatchScope::default()).await;
+    node.grant(&a.cartridge, DispatchScope::default()).await;
     assert_eq!(own_capability(&node, &a).await, None);
     let stale = relay(&node, &a, &target, Some(&granted), context).await;
     assert_eq!(stale["status"], 403, "{stale}");
@@ -385,10 +389,10 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
 async fn a_handlers_domain_error_reaches_the_caller_typed() {
     let spec = caller();
     let node = super::node()
-        .with_nodule(plug(&spec, &[]), Fixture)
+        .with_nodule(cartridge(&spec, &[]), Fixture)
         .boot()
         .await;
-    node.enable(&spec.plug).await;
+    node.enable(&spec.cartridge).await;
     // No authority and no capability of its own (nothing granted): the fixture's own
     // `InvalidRequest` domain error, which must not be flattened into a dispatch input refusal.
     let refused = node

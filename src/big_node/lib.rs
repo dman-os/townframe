@@ -33,6 +33,9 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cartridges::Cartridges;
+use big_cartridges::CartridgesConfig;
+use big_cartridges::RegistryDrawerConfig;
 use big_dispatch::Dispatch;
 use big_dispatch::DispatchConfig;
 use big_dispatch::ServiceProvider;
@@ -42,9 +45,6 @@ use big_dispatch_core::MintDispatchCapability;
 use big_nodule::Nodules;
 use big_nodule::NodulesConfig;
 use big_nodule::executor::NoduleExecutor;
-use big_plugs::Plugs;
-use big_plugs::PlugsConfig;
-use big_plugs::RegistryDrawerConfig;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::SharedBigRepo;
@@ -93,7 +93,7 @@ impl ExecutorDeps {
 pub struct Config {
     /// The repo's tuning and its bindings, [`big_repo::Config::storage`].
     pub repo: big_repo::Config,
-    /// The node's own database: authority, blobs, cabinet, indexes, plugs and nodules. One per
+    /// The node's own database: authority, blobs, cabinet, indexes, cartridges and nodules. One per
     /// node.
     pub sql: Database,
     pub schemas: Arc<SchemaRepo>,
@@ -194,7 +194,7 @@ pub struct BigNode {
     pub blobs: big_blobs::Blobs,
     pub blob_workers: big_blobs::workers::BlobWorkers,
     pub nodules_actor: Actor,
-    pub plugs_actor: Actor,
+    pub cartridges_actor: Actor,
     pub dispatch_actor: Actor,
     pub indexes: Arc<Indexes>,
     pub drawer_access: Arc<DrawerAccess>,
@@ -205,8 +205,8 @@ pub struct BigNode {
     /// [`BigNode::boot_with`] was given.
     pub executor: Arc<dyn NoduleExecutor>,
     pub nodules: Nodules,
-    /// The plug registry service and the grouped drawer it keeps its plugs in.
-    pub plugs: Plugs,
+    /// The cartridge registry service and the grouped drawer it keeps its cartridges in.
+    pub cartridges: Cartridges,
     pub registry_drawer: DrawerId,
     /// What the node listens on, as bound (a TCP port of `0` in the config is resolved here).
     pub listeners: Listeners,
@@ -289,14 +289,15 @@ impl BigNode {
             let schemas = Arc::new(config.schemas.with_groups([
                 big_blobs::schema::registration(),
                 big_nodule::schema_group(),
-                big_plugs::schema_group(),
+                big_cartridges::schema_group(),
             ])?);
             let node_id = node_id(&config.repo.node_identity_seed);
             let authority = boot_authority(&config, &node_id, &mut stop).await?;
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
             let (drawers_actor, drawers_namespace) = open_actor(&authority, "drawers").await?;
             let (nodules_actor, nodules_namespace) = open_actor(&authority, "nodules").await?;
-            let (plugs_actor, plugs_namespace) = open_actor(&authority, "plugs").await?;
+            let (cartridges_actor, cartridges_namespace) =
+                open_actor(&authority, "cartridges").await?;
             let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
             let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
 
@@ -350,7 +351,7 @@ impl BigNode {
                 &docs,
                 &drawers,
                 &drawers_actor,
-                &plugs_actor,
+                &cartridges_actor,
                 &drawer_access,
                 &repo,
                 Arc::clone(&attachments.scope_key),
@@ -361,13 +362,13 @@ impl BigNode {
             // The registry reads artifact bytes from the blob service and keeps them pinned
             // through the workers, so it boots after both and stops before either. Dispatch and
             // the nodule service, its future consumers, boot after it.
-            let plugs = boot_plugs(
+            let cartridges = boot_cartridges(
                 &authority,
                 &docs,
                 &drawers,
                 &registry_drawer,
-                &plugs_actor,
-                plugs_namespace,
+                &cartridges_actor,
+                cartridges_namespace,
                 &blobs,
                 config.sql.clone(),
                 &mut stop,
@@ -413,7 +414,7 @@ impl BigNode {
                 blobs,
                 blob_workers,
                 nodules_actor,
-                plugs_actor,
+                cartridges_actor,
                 dispatch_actor,
                 indexes,
                 drawer_access,
@@ -422,7 +423,7 @@ impl BigNode {
                 dispatch,
                 executor,
                 nodules,
-                plugs,
+                cartridges,
                 registry_drawer,
                 listeners: Listeners::default(),
                 peers: None,
@@ -467,8 +468,8 @@ impl BigNode {
                 ServiceProvider::default().serve(&self.blobs.client),
             ),
             (
-                "builtin:plugs",
-                ServiceProvider::default().serve(&self.plugs.client),
+                "builtin:cartridges",
+                ServiceProvider::default().serve(&self.cartridges.client),
             ),
             (
                 "builtin:nodules",
@@ -516,7 +517,7 @@ async fn boot_repo(config: big_repo::Config, stop: &mut StopToken) -> Res<Shared
     clippy::too_many_arguments,
     reason = "boot wiring of already-built services"
 )]
-async fn boot_plugs(
+async fn boot_cartridges(
     authority: &Authority,
     docs: &DocsRepo,
     drawers: &Drawers,
@@ -526,8 +527,8 @@ async fn boot_plugs(
     blobs: &big_blobs::Blobs,
     sql: Database,
     stop: &mut StopToken,
-) -> Res<Plugs> {
-    let (plugs, plugs_stop) = big_plugs::boot(PlugsConfig {
+) -> Res<Cartridges> {
+    let (cartridges, cartridges_stop) = big_cartridges::boot(CartridgesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
         drawers: drawers.client.clone(),
@@ -536,25 +537,25 @@ async fn boot_plugs(
         namespace,
         operator: authority.service.operator_uuid(),
         blobs: Arc::clone(&blobs.service),
-        node_key: big_plugs::NodeKey {
+        node_key: big_cartridges::NodeKey {
             public_key: authority.service.node_public_key(),
             sign: Arc::new({
                 let service = Arc::clone(&authority.service);
                 // The registry hands over its whole signing message; the authority re-binds the
-                // plug domain itself, so this closure cannot sign anything outside that domain.
+                // cartridge domain itself, so this closure cannot sign anything outside that domain.
                 move |message: &[u8]| {
                     let payload = message
-                        .strip_prefix(big_plugs_core::signature::SIGNING_DOMAIN)
-                        .expect("the registry only signs plug signing messages");
-                    service.sign_as_node(big_plugs_core::signature::SIGNING_DOMAIN, payload)
+                        .strip_prefix(big_cartridges_core::signature::SIGNING_DOMAIN)
+                        .expect("the registry only signs cartridge signing messages");
+                    service.sign_as_node(big_cartridges_core::signature::SIGNING_DOMAIN, payload)
                 }
             }),
         },
         sql,
     })
     .await?;
-    stop.stages.push(Stage::Service(plugs_stop));
-    Ok(plugs)
+    stop.stages.push(Stage::Service(cartridges_stop));
+    Ok(cartridges)
 }
 
 /// Opens the drawer access policy the docs service consults, as the drawers actor. The
@@ -780,7 +781,7 @@ async fn boot_dispatch(
 
 /// Mints the drawers actor's admin capability over `drawer` and grants admin to `subject`, which
 /// is how a service's actor becomes able to write a drawer the drawers actor owns: the nodule
-/// service over the node's config drawer, the plug registry over its registry drawer.
+/// service over the node's config drawer, the cartridge registry over its registry drawer.
 async fn grant_drawer_admin(
     drawers: &Drawers,
     issuer: &Actor,

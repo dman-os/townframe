@@ -1,7 +1,7 @@
 //! The Wasm executor for nodule handlers: the [`NoduleExecutor`] of kind `"wasm"`.
 //!
 //! One wash-runtime [`Host`] runs every nodule handler as a workload of its own: one
-//! `wasi:http/handler@0.3.0` component per (plug, revision). A call enters the workload through
+//! `wasi:http/handler@0.3.0` component per (cartridge, revision). A call enters the workload through
 //! [`Ingress::dispatch_request`], the in-process entry point of our wash-runtime fork, so
 //! nothing here is reachable over the network:
 //!
@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
 use big_cabinet_core::authority::CapId;
+use big_cartridges_core::CartridgeId;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -42,7 +43,6 @@ use big_nodule::executor::Reensure;
 use big_nodule::wire::delivery_headers;
 use big_nodule::wire::gateway_error;
 use big_nodule::wire::provider_result;
-use big_plugs_core::PlugId;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
@@ -85,7 +85,7 @@ use wasmtime_wasi_http::WasiBody;
 const KIND: &str = "wasm";
 
 /// The authority every request is addressed to. The workload is picked by id, not by `Host`
-/// (a plug id like `did:key:z6Mk.../photos` is not a valid URI authority), so this is only what the
+/// (a cartridge id like `did:key:z6Mk.../photos` is not a valid URI authority), so this is only what the
 /// guest sees in its `Host` header.
 const AUTHORITY: &str = "nodule.local";
 
@@ -108,14 +108,14 @@ pub struct WasmExecutor {
     host: Arc<Host>,
     ingress: Arc<Ingress<Sealed, Egress>>,
     blobs: Arc<BlobService>,
-    /// What `ensure` started, by plug. Never locked across an await: `ensure` and `retire` are
+    /// What `ensure` started, by cartridge. Never locked across an await: `ensure` and `retire` are
     /// only called from the nodule service's state actor, one at a time, so the check, start
-    /// and insert in `ensure` cannot interleave with another call for the same plug.
-    hosted: Mutex<BTreeMap<PlugId, Running>>,
+    /// and insert in `ensure` cannot interleave with another call for the same cartridge.
+    hosted: Mutex<BTreeMap<CartridgeId, Running>>,
     /// The signer of each running workload's outgoing calls, shared with [`Egress`].
     signers: Signers,
-    /// The plugs waiting on a blob that was not in the store, to be woken on its arrival.
-    arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<PlugId, Reensure>>>>,
+    /// The cartridges waiting on a blob that was not in the store, to be woken on its arrival.
+    arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<CartridgeId, Reensure>>>>,
 }
 
 struct Running {
@@ -239,11 +239,11 @@ impl NoduleExecutor for WasmExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
-        let workload_id = format!("nodule/{}/{}", spec.plug_id, spec.revision);
+        let workload_id = format!("nodule/{}/{}", spec.cartridge_id, spec.revision);
         let handler = BlobId::new(spec.handler.digest.0);
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
-            match hosted.get(&spec.plug_id) {
+            match hosted.get(&spec.cartridge_id) {
                 Some(running)
                     if running.workload_id == workload_id && running.handler == handler =>
                 {
@@ -252,9 +252,9 @@ impl NoduleExecutor for WasmExecutor {
                     running.provider.set_capability(spec.capability);
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
-                // Another revision (or handler) of the plug: the reconciler retires first, but
-                // an executor does not rely on that to keep one workload per plug.
-                Some(_) => hosted.remove(&spec.plug_id),
+                // Another revision (or handler) of the cartridge: the reconciler retires first, but
+                // an executor does not rely on that to keep one workload per cartridge.
+                Some(_) => hosted.remove(&spec.cartridge_id),
                 None => None,
             }
         };
@@ -268,12 +268,12 @@ impl NoduleExecutor for WasmExecutor {
             .expect("arrivals lock")
             .entry(handler)
             .or_default()
-            .insert(spec.plug_id.clone(), spec.reensure.clone());
+            .insert(spec.cartridge_id.clone(), spec.reensure.clone());
         let Some(info) = self.blobs.stat(&handler).await.expect("blob store stat") else {
             return Hosted::NotReady(Readiness::ArtifactsUnavailable);
         };
         if info.length_octets > MAX_HANDLER_OCTETS {
-            tracing::warn!(plug = %spec.plug_id, octets = info.length_octets, "handler artifact over the size cap");
+            tracing::warn!(cartridge = %spec.cartridge_id, octets = info.length_octets, "handler artifact over the size cap");
             return Hosted::NotReady(Readiness::ExecutorUnavailable);
         }
         let Some(bytes) = self
@@ -304,7 +304,7 @@ impl NoduleExecutor for WasmExecutor {
             .workload_start(WorkloadStartRequest {
                 workload_id: workload_id.clone(),
                 workload: Workload {
-                    namespace: spec.plug_id.to_string(),
+                    namespace: spec.cartridge_id.to_string(),
                     name: spec.revision.to_string(),
                     annotations: Default::default(),
                     service: None,
@@ -327,21 +327,21 @@ impl NoduleExecutor for WasmExecutor {
                 .lock()
                 .expect("signers lock")
                 .remove(&workload_id);
-            tracing::warn!(plug = %spec.plug_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
+            tracing::warn!(cartridge = %spec.cartridge_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
             return Hosted::NotReady(Readiness::ExecutorUnavailable);
         }
         self.arrivals
             .lock()
             .expect("arrivals lock")
             .get_mut(&handler)
-            .map(|waiting| waiting.remove(&spec.plug_id));
+            .map(|waiting| waiting.remove(&spec.cartridge_id));
         let provider = Arc::new(WasmProvider {
             ingress: Arc::clone(&self.ingress),
             workload_id: workload_id.clone(),
             capability: Mutex::new(spec.capability),
         });
         self.hosted.lock().expect("hosted lock").insert(
-            spec.plug_id.clone(),
+            spec.cartridge_id.clone(),
             Running {
                 workload_id,
                 handler,
@@ -351,21 +351,25 @@ impl NoduleExecutor for WasmExecutor {
         Hosted::Ready(provider)
     }
 
-    fn hosts(&self, plug_id: &PlugId) -> bool {
+    fn hosts(&self, cartridge_id: &CartridgeId) -> bool {
         self.hosted
             .lock()
             .expect("hosted lock")
-            .contains_key(plug_id)
+            .contains_key(cartridge_id)
     }
 
-    async fn retire(&self, plug_id: &PlugId) {
-        let running = self.hosted.lock().expect("hosted lock").remove(plug_id);
+    async fn retire(&self, cartridge_id: &CartridgeId) {
+        let running = self
+            .hosted
+            .lock()
+            .expect("hosted lock")
+            .remove(cartridge_id);
         if let Some(running) = running {
             self.stop_workload(&running).await;
         }
         let mut arrivals = self.arrivals.lock().expect("arrivals lock");
         arrivals.retain(|_, waiting| {
-            waiting.remove(plug_id);
+            waiting.remove(cartridge_id);
             !waiting.is_empty()
         });
     }
