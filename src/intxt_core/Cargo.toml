@@ -1,0 +1,27 @@
+[package]
+name = "intxt_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+# `#[macros::datum]` emits open vocabularies' JSON Schema under this crate's `schemars` feature,
+# and a vocabulary crate always needs its schemas.
+[features]
+default = ["schemars"]
+schemars = []
+
+[dependencies]
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
+macros = { path = "../macros" }
+automerge.workspace = true
+jiff.workspace = true
+schemars = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
