@@ -33,8 +33,11 @@ pub use attribution::Attribution;
 pub use attribution::AttributionError;
 #[cfg(feature = "schemars")]
 pub use storage::DmetaSchema;
+#[cfg(feature = "schemars")]
 pub use storage::DmetaRead;
+#[cfg(feature = "schemars")]
 pub use storage::DmetaWrite;
+#[cfg(feature = "schemars")]
 pub use storage::StorageError;
 
 use jiff::Timestamp;
