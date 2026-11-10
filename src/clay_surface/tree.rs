@@ -64,6 +64,10 @@ pub struct SurfaceTree<C = ()> {
     pub(crate) revision: u64,
     retained_bytes: usize,
     failure: Option<PresentationError>,
+    /// Guest element ids whose element left the tree (removed, replaced, its id taken by another
+    /// node, or the tree cleared) since the last [`Self::take_retired_elements`]. A set, so it
+    /// is bounded by the element id space whether or not anyone drains it.
+    retired_elements: BTreeSet<NodeId>,
 }
 
 impl<C: Clone> Default for SurfaceTree<C> {
@@ -111,6 +115,7 @@ impl<C: Clone> SurfaceTree<C> {
             revision: 0,
             retained_bytes: 0,
             failure: None,
+            retired_elements: BTreeSet::new(),
         }
     }
 
@@ -182,10 +187,29 @@ impl<C: Clone> SurfaceTree<C> {
         let revision = self.revision.saturating_add(1);
         let failure = self.failure.take();
         let next_generation = self.next_generation;
+        let mut retired = std::mem::take(&mut self.retired_elements);
+        retired.extend(
+            self.nodes
+                .iter()
+                .flatten()
+                .filter_map(|node| match &node.kind {
+                    SurfaceNodeKind::Element { element_id, .. } => *element_id,
+                    _ => None,
+                })
+                .map(|id| NodeId::try_from(id.raw()).expect("element id fits NodeId")),
+        );
         *self = Self::new();
+        self.retired_elements = retired;
         self.revision = revision;
         self.next_generation = next_generation;
         self.failure = failure;
+    }
+
+    /// The guest element ids that left the tree since the last call. A renderer that keeps
+    /// per-element state (host handles, mounted flags) drops it for these: Dioxus recycles element
+    /// ids, so an entry kept past its element would later address a different or detached node.
+    pub fn take_retired_elements(&mut self) -> BTreeSet<NodeId> {
+        std::mem::take(&mut self.retired_elements)
     }
 
     pub fn revision(&self) -> u64 {
@@ -305,6 +329,8 @@ impl<C: Clone> SurfaceTree<C> {
             && *element_id == Some(id)
         {
             *element_id = None;
+            self.retired_elements
+                .insert(NodeId::try_from(id.raw()).expect("element id fits NodeId"));
         }
         self.element_to_node[index] = Some(node);
         if let SurfaceNodeKind::Element { element_id, .. } = &mut self.node_mut(node).kind {
@@ -359,6 +385,8 @@ impl<C: Clone> SurfaceTree<C> {
             && *slot == Some(root)
         {
             *slot = None;
+            self.retired_elements
+                .insert(NodeId::try_from(id.raw()).expect("element id fits NodeId"));
         }
         for child in node.children {
             self.drop_subtree(child);

@@ -1123,3 +1123,47 @@ fn short_adversarial_instruction_sequences_preserve_invariants_without_unwinding
         }
     }
 }
+
+#[test]
+fn elements_leaving_the_tree_are_retired_by_id_through_remove_replace_steal_and_clear() {
+    let create = |id: u32| {
+        vec![
+            Mutation::PushId(0),
+            Mutation::CreateElement(("div".into(), None)),
+            Mutation::SetId(id),
+            Mutation::AppendChildren(1),
+            Mutation::Pop,
+        ]
+    };
+    let mut tree = SurfaceTree::new();
+    for id in 1..=3 {
+        tree.apply(&create(id)).unwrap();
+    }
+    assert!(tree.take_retired_elements().is_empty());
+    // Remove.
+    tree.apply(&[Mutation::PushId(1), Mutation::Remove])
+        .unwrap();
+    assert_eq!(tree.take_retired_elements(), [1].into());
+    // ReplaceWith: the replaced element retires, its replacement does not.
+    tree.apply(&[
+        Mutation::PushId(2),
+        Mutation::CreateElement(("span".into(), None)),
+        Mutation::SetId(4),
+        Mutation::ReplaceWith(1),
+    ])
+    .unwrap();
+    assert_eq!(tree.take_retired_elements(), [2].into());
+    // A recycled id taken by another node retires the node that held it.
+    tree.apply(&[
+        Mutation::PushId(0),
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetId(3),
+        Mutation::AppendChildren(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.take_retired_elements(), [3].into());
+    // Clear retires everything still in the tree.
+    tree.clear();
+    assert_eq!(tree.take_retired_elements(), [3, 4].into());
+}
