@@ -127,6 +127,18 @@ for (const [file, member, reason] of dropped) {
   markdown += `| \`${file}\` | ${member.replaceAll("|", "\\|")} | ${reason.replaceAll("|", "\\|")} |\n`;
 }
 
+// The import closure of FileDiff.ts and VirtualizedFileDiff.ts (value imports,
+// transitively, down to ported code), classified PORT / ALREADY PORTED / DROP /
+// DEFER; kept in parity/closure.psv, with the editor and worker reference
+// audit in parity/closure_notes.md.
+const closure = readPsv("parity/closure.psv");
+markdown += `\n## FileDiff closure (${closure.length} modules)\n\n`;
+markdown += readFileSync(join(crateDir, "parity/closure_notes.md"), "utf8");
+markdown += "\n| upstream file | LOC | class | slice | reason | first imported by |\n|---|---:|---|---|---|---|\n";
+for (const [file, loc, cls, slice, reason, from] of closure) {
+  markdown += `| \`${file}\` | ${loc} | ${cls} | ${slice} | ${reason.replaceAll("|", "\\|")} | \`${from}\` |\n`;
+}
+
 const outputs = { "parity/matrix.psv": psv, "PARITY.md": markdown };
 for (const [name, text] of Object.entries(outputs)) {
   const path = join(crateDir, name);

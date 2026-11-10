@@ -22,11 +22,11 @@ use crate::types::patch::HunkContent;
 use crate::types::patch::ParseDiffOptions;
 use crate::types::patch::ParsePatchOptions;
 use crate::types::patch::signed;
-use crate::utils::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::compose_cache_key::compose_cache_key;
 use crate::utils::hydrate_partial_diff::hydrate_partial_diff_clone;
 use crate::utils::hydrate_partial_diff::hydrate_partial_diff_merge;
 use crate::utils::parse_patch_files::parse_patch_files;
+use crate::utils::predicates::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::split_file_contents::split_file_contents;
 
 fn parse_single_file(patch: &str, cache_key_prefix: Option<&str>) -> FileDiffMetadata {

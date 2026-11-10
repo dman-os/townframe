@@ -45,9 +45,9 @@ use crate::managers::universal_rendering_manager::AnimationFrames;
 use crate::managers::universal_rendering_manager::RenderCallback;
 use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::types::layout::VirtualWindowSpecs;
-use crate::utils::are_virtual_window_specs_equal::are_virtual_window_specs_equal;
 use crate::utils::create_window_from_scroll_position::WindowFromScrollPositionProps;
 use crate::utils::create_window_from_scroll_position::create_window_from_scroll_position;
+use crate::utils::predicates::are_virtual_window_specs_equal::are_virtual_window_specs_equal;
 
 /// `SubscribedInstance`: a file or diff the virtualizer drives.
 pub trait SubscribedInstance {

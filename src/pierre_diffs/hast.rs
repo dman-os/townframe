@@ -87,6 +87,61 @@ impl Properties {
         }
     }
 
+    /// `removeAttribute(key)`: drops the entry (unlike setting `Undefined`,
+    /// which keeps its position for a later spread).
+    pub fn remove(&mut self, key: &str) {
+        self.0.retain(|(existing, _)| existing != key);
+    }
+
+    /// `el.style.setProperty(name, value)` over the `style` property, kept as
+    /// `name:value;` declarations in insertion order (a present name keeps its
+    /// position). Original to this crate: a DOM `CSSStyleDeclaration`
+    /// serializes with spaces and normalized values; the canonical form here
+    /// is the one the renderers already emit.
+    pub fn set_style_property(&mut self, name: &str, value: &str) {
+        let mut declarations = self.style_declarations();
+        match declarations
+            .iter_mut()
+            .find(|(existing, _)| existing == name)
+        {
+            Some((_, slot)) => *slot = value.to_owned(),
+            None => declarations.push((name.to_owned(), value.to_owned())),
+        }
+        self.write_style_declarations(declarations);
+    }
+
+    /// `el.style.removeProperty(name)`; the `style` attribute disappears with
+    /// its last declaration, as an empty `style=""` is not emitted.
+    pub fn remove_style_property(&mut self, name: &str) {
+        let mut declarations = self.style_declarations();
+        declarations.retain(|(existing, _)| existing != name);
+        self.write_style_declarations(declarations);
+    }
+
+    fn style_declarations(&self) -> Vec<(String, String)> {
+        match self.get("style") {
+            Some(PropValue::Str(style)) => style
+                .split(';')
+                .filter(|declaration| !declaration.is_empty())
+                .filter_map(|declaration| declaration.split_once(':'))
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn write_style_declarations(&mut self, declarations: Vec<(String, String)>) {
+        if declarations.is_empty() {
+            self.remove("style");
+        } else {
+            let style: String = declarations
+                .iter()
+                .map(|(name, value)| format!("{name}:{value};"))
+                .collect();
+            self.set("style", style);
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&PropValue> {
         self.0
             .iter()

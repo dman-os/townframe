@@ -6,11 +6,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 87 | 21095 |
+| PORTED | 109 | 22277 |
 | REPLACED | 10 | 1817 |
-| PENDING | 125 | 44077 |
-| OUT | 246 | 98243 |
-| DEFER | 16 | 5196 |
+| PENDING | 95 | 37315 |
+| OUT | 248 | 98288 |
+| DEFER | 22 | 10731 |
 
 | upstream file | LOC | status | slice | Rust location | note |
 |---|---:|---|---|---|---|
@@ -36,12 +36,12 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `jsdiff/libesm/util/params.js` | 15 | OUT | - |  | option plumbing |
 | `jsdiff/libesm/util/string.js` | 185 | OUT | - |  | helpers of jsdiff word post-processing, not needed with similar |
 | `pierre/src/components/CodeView.ts` | 4643 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
-| `pierre/src/components/File.ts` | 2370 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
-| `pierre/src/components/FileDiff.ts` | 4312 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
+| `pierre/src/components/File.ts` | 2370 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
+| `pierre/src/components/FileDiff.ts` | 4312 | PENDING | S12 |  | PORT as Dioxus components (semantics, not code shape) |
 | `pierre/src/components/FileStream.ts` | 398 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
 | `pierre/src/components/UnresolvedFile.ts` | 940 | DEFER | - |  | DEFER (not needed for PR review v1) |
-| `pierre/src/components/VirtualizedFile.ts` | 1390 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
-| `pierre/src/components/VirtualizedFileDiff.ts` | 2452 | PENDING | S10-S12 |  | PORT as Dioxus components (semantics, not code shape) |
+| `pierre/src/components/VirtualizedFile.ts` | 1390 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
+| `pierre/src/components/VirtualizedFileDiff.ts` | 2452 | PENDING | S12 |  | PORT as Dioxus components (semantics, not code shape) |
 | `pierre/src/components/Virtualizer.ts` | 723 | PORTED | S10 | `components/virtualizer.rs`, `../pierre_diffs_dioxus/host.rs`, `../pierre_diffs_dioxus/lib.rs` | logic mirrors the class statement for statement against a `VirtualizerHost` trait (components/virtualizer.rs, oracle-tested against the published class under a scripted fake DOM); the web-sys host and the Dioxus `VirtualizerRoot`/hooks are the thin layer in pierre_diffs_dioxus (compile-checked only). Dev hooks (`__STOP`, `__INSTANCE`, `__TOGGLE`) not ported |
 | `pierre/src/components/VirtulizerDevelopment.d.ts` | 13 | OUT | - |  | OUT |
 | `pierre/src/components/web-components.ts` | 39 | OUT | - |  | OUT |
@@ -110,9 +110,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/highlighter/tokenizer-types.ts` | 41 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/types.ts` | 52 | PORTED | S5 | `highlighter_types.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/index.ts` | 115 | OUT | - |  | OUT |
-| `pierre/src/managers/InteractionManager.ts` | 2510 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
-| `pierre/src/managers/ResizeManager.ts` | 494 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
-| `pierre/src/managers/ScrollSyncManager.ts` | 102 | PENDING | S11-S12 |  | PORT as Dioxus handlers/hooks (partial) |
+| `pierre/src/managers/InteractionManager.ts` | 2510 | PENDING | S11b |  | PORT as Dioxus handlers/hooks (partial) |
+| `pierre/src/managers/ResizeManager.ts` | 494 | PORTED | S11a | `managers/resize_manager.rs` | DOM behind ResizeManagerHost, the shared static observer is a ResizeObserverHub; oracle-tested against a fake DOM (scenarios + seeded sequences); a real ResizeObserver is unverified |
+| `pierre/src/managers/ScrollSyncManager.ts` | 102 | PORTED | S11a | `managers/scroll_sync_manager.rs` | DOM, listeners and timers behind ScrollSyncHost; oracle-tested against a fake DOM with fake timers |
 | `pierre/src/managers/UniversalRenderingManager.ts` | 48 | PORTED | S10 | `managers/universal_rendering_manager.rs` | module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch |
 | `pierre/src/react/CodeView.tsx` | 1106 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/react/EditContext.tsx` | 46 | OUT | - |  | OUT (framework adapter) |
@@ -138,7 +138,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/react/utils/useStableCallback.ts` | 14 | OUT | - |  | OUT (framework adapter) |
 | `pierre/src/react/utils/useUnresolvedFileInstance.ts` | 228 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/renderers/DiffHunksRenderer.ts` | 2782 | PORTED | S6 | `renderers/diff_hunks_renderer.rs`, `renderers/diff_hunks_renderer/process.rs` | unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json) |
-| `pierre/src/renderers/FileRenderer.ts` | 1219 | PENDING | unassigned |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/renderers/FileRenderer.ts` | 1219 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
 | `pierre/src/renderers/UnresolvedFileHunksRenderer.ts` | 421 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/shiki-stream/index.ts` | 3 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/shiki-stream/stream.ts` | 68 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
@@ -156,24 +156,24 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/annotationHelpers.ts` | 38 | OUT | S6 |  | type guards that tell `LineAnnotation` from `DiffLineAnnotation` by a `side` key; the port has two typed structs (and `AnnotationName`), so there is nothing to discriminate |
 | `pierre/src/utils/appendItems.ts` | 10 | OUT | - |  | engine argument-count workaround for push(...items); Vec::extend (noted in trim_patch_context.rs) |
 | `pierre/src/utils/applyLineTextWithNewline.ts` | 20 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areDiffLineAnnotationsEqual.ts` | 13 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/areDiffLineAnnotationsEqual.ts` | 13 | PORTED | S11a | `utils/predicates/are_diff_line_annotations_equal.rs` | metadata `===` is `PartialEq`; oracle-tested |
 | `pierre/src/utils/areDiffRenderOptionsEqual.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areDiffTargetsEqual.ts` | 14 | PORTED | S3 | `utils/are_diff_targets_equal.rs` | identity is std::ptr::eq |
+| `pierre/src/utils/areDiffTargetsEqual.ts` | 14 | PORTED | S3 | `utils/predicates/are_diff_targets_equal.rs` | identity is std::ptr::eq |
 | `pierre/src/utils/areFileRenderOptionsEqual.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areFileTargetsEqual.ts` | 15 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areFilesEqual.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areHunkDataEqual.ts` | 15 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/areFilesEqual.ts` | 14 | PORTED | S11a | `utils/predicates/are_files_equal.rs` | oracle-tested |
+| `pierre/src/utils/areHunkDataEqual.ts` | 15 | PORTED | S11a | `utils/predicates/are_hunk_data_equal.rs` | oracle-tested |
 | `pierre/src/utils/areLineAnnotationsEqual.ts` | 12 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areManagedSnapshotsEqual.ts` | 51 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areMergeConflictActionsEqual.ts` | 34 | DEFER | - |  | DEFER (not needed for PR review v1) |
-| `pierre/src/utils/areObjectsEqual.ts` | 38 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areOptionsEqual.ts` | 41 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/arePrePropertiesEqual.ts` | 46 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areRenderRangesEqual.ts` | 17 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/areObjectsEqual.ts` | 38 | PORTED | S11a | `utils/predicates/are_objects_equal.rs` | over `HashMap<String, Value>`; oracle-tested |
+| `pierre/src/utils/areOptionsEqual.ts` | 41 | PENDING | S12 |  | maps FileDiffOptions, which ports with FileDiff; its helpers areObjectsEqual and areThemesEqual are ported (S11a) |
+| `pierre/src/utils/arePrePropertiesEqual.ts` | 46 | PORTED | S11a | `utils/predicates/are_pre_properties_equal.rs` | oracle-tested |
+| `pierre/src/utils/areRenderRangesEqual.ts` | 17 | PORTED | S11a | `utils/predicates/are_render_ranges_equal.rs` | oracle-tested |
 | `pierre/src/utils/areSelectionPointsEqual.ts` | 9 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/areSelectionsEqual.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areThemesEqual.ts` | 17 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areVirtualWindowSpecsEqual.ts` | 15 | PORTED | S10 | `utils/are_virtual_window_specs_equal.rs` | oracle-tested over undefined/equal/unequal pairs |
+| `pierre/src/utils/areThemesEqual.ts` | 17 | PORTED | S11a | `utils/predicates/are_themes_equal.rs` | oracle-tested |
+| `pierre/src/utils/areVirtualWindowSpecsEqual.ts` | 15 | PORTED | S10 | `utils/predicates/are_virtual_window_specs_equal.rs` | oracle-tested over undefined/equal/unequal pairs |
 | `pierre/src/utils/areWorkerStatsEqual.ts` | 22 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/awaitWithTimeout.ts` | 19 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/utils/canUseWASM.ts` | 36 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
@@ -184,12 +184,12 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/computeFileOffsets.ts` | 100 | PORTED | S4 | `utils/compute_file_offsets.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/computeVirtualFileMetrics.ts` | 56 | PORTED | S4 | `utils/compute_virtual_file_metrics.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/createAnnotationElement.ts` | 23 | PORTED | S5 | `utils/render/create_annotation_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
-| `pierre/src/utils/createAnnotationWrapperNode.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/createAnnotationWrapperNode.ts` | 8 | PORTED | S11a | `utils/dom/create_annotation_wrapper_node.rs` | returns a hast Element; oracle-tested against a fake DOM |
 | `pierre/src/utils/createCodeViewHeaderFooterHostElement.ts` | 26 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/createContentColumn.ts` | 18 | PORTED | S5 | `utils/render/create_content_column.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createEmptyRowBuffer.ts` | 15 | PORTED | S5 | `utils/render/create_empty_row_buffer.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createFileHeaderElement.ts` | 172 | PORTED | S5 | `utils/render/create_file_header_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
-| `pierre/src/utils/createGutterUtilityContentNode.ts` | 12 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/createGutterUtilityContentNode.ts` | 12 | PORTED | S11a | `utils/dom/create_gutter_utility_content_node.rs` | returns a hast Element; oracle-tested against a fake DOM |
 | `pierre/src/utils/createGutterUtilityElement.ts` | 17 | PENDING | - |  | port or replace per slice notes (DOM helper) |
 | `pierre/src/utils/createNoNewlineElement.ts` | 22 | PORTED | S5 | `utils/render/create_no_newline_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createPreElement.ts` | 47 | PORTED | S5 | `utils/render/create_pre_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
@@ -197,18 +197,18 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/createSeparator.ts` | 136 | PORTED | S5 | `utils/render/create_separator.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createSpanNodeFromToken.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/createStyleElement.ts` | 38 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/createUnsafeCSSStyleNode.ts` | 8 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/createUnsafeCSSStyleNode.ts` | 8 | PORTED | S11a | `utils/dom/create_unsafe_css_style_node.rs` | returns a hast Element; oracle-tested against a fake DOM |
 | `pierre/src/utils/createWindowFromScrollPosition.ts` | 50 | PORTED | S4 | `utils/create_window_from_scroll_position.rs` | exact oracle parity (layout.json) plus ported upstream tests |
-| `pierre/src/utils/cssWrappers.ts` | 81 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/cssWrappers.ts` | 81 | PORTED | S11a | `utils/dom/css_wrappers.rs` | raw CSS is assets/style.css exported from the pinned dist; the gutter-declaration RegExp is a hand-written scan; oracle-tested |
 | `pierre/src/utils/detachString.ts` | 42 | OUT | - |  | V8 substring-retention workaround; Rust strings own their data |
 | `pierre/src/utils/diffAcceptRejectHunk.ts` | 41 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/utils/editSessionAnnotations.ts` | 121 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/utils/editSessionHunks.ts` | 884 | OUT | - |  | OUT for v1 (edit mode; later with CM6 lane) |
 | `pierre/src/utils/formatCSSVariablePrefix.ts` | 4 | PORTED | S5 | `utils/render/format_css_variable_prefix.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getCodeViewItemRenderData.ts` | 37 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/getDiffFileInput.ts` | 31 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/getFileRendererOptions.ts` | 29 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/getDiffFileInput.ts` | 31 | PORTED | S11a | `utils/options/get_diff_file_input.rs` | `undefined`/`null` sides are `Option<Option<_>>`; throws are panics; oracle-tested |
+| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PENDING | S12 |  | maps FileDiffOptions, which ports with FileDiff; its helper shouldUseTokenTransformer is ported (S11a) |
+| `pierre/src/utils/getFileRendererOptions.ts` | 29 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
 | `pierre/src/utils/getFiletypeFromFileName.ts` | 460 | PORTED | S3 | `utils/get_filetype_from_file_name.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/getHighlighterOptions.ts` | 31 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/getHighlighterThemeStyles.ts` | 83 | PORTED | S5 | `utils/render/get_highlighter_theme_styles.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
@@ -220,22 +220,22 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/getLineNodes.ts` | 18 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
 | `pierre/src/utils/getMergeConflictActionSlotName.ts` | 14 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/utils/getMergeConflictLineTypes.ts` | 117 | DEFER | - |  | DEFER (not needed for PR review v1) |
-| `pierre/src/utils/getOrCreateCodeNode.ts` | 36 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/getOrCreateCodeNode.ts` | 36 | PORTED | S11a | `utils/dom/get_or_create_code_node.rs` | hast Element; the caller appends it to the pre; oracle-tested |
 | `pierre/src/utils/getSingularPatch.ts` | 21 | PORTED | S3 | `utils/get_singular_patch.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/getThemes.ts` | 16 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/getTokenOptions.ts` | 24 | PORTED | S5 | `utils/render/get_token_options.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/getTotalLineCountFromHunks.ts` | 14 | PORTED | S3 | `utils/get_total_line_count_from_hunks.rs` | exact oracle parity (patches.json, utilities.json) |
-| `pierre/src/utils/guardWebKitScrollDuringRebuild.ts` | 33 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/guardWebKitScrollDuringRebuild.ts` | 33 | OUT | S11a |  | Safari workaround for bulk innerHTML rebuilds, reached only in edit mode (edit mode is OUT) |
 | `pierre/src/utils/hastToHtml.ts` | 182 | DEFER | S5 |  | no Rust consumer: the UI renders hast directly, and the module is a speed-up equivalent of hast-util-to-html whose upstream tests need the FileRenderer and Shiki; revisit with S7 if a serializer is wanted |
 | `pierre/src/utils/hast_utils.ts` | 142 | PORTED | S5 | `utils/render/hast_utils.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
-| `pierre/src/utils/hostTheme.ts` | 34 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
+| `pierre/src/utils/hostTheme.ts` | 34 | PORTED | S11a | `utils/dom/host_theme.rs` | no ShadowRoot: the caller owns the style node as an Option<Element>; oracle-tested |
 | `pierre/src/utils/hydratePartialDiff.ts` | 268 | PORTED | S4 | `utils/hydrate_partial_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/includesFileAnnotations.ts` | 36 | PORTED | S5 | `utils/render/includes_file_annotations.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
-| `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/isDiffPlainText.ts` | 11 | PORTED | S6 | `utils/is_diff_plain_text.rs` | none beyond the language |
+| `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PORTED | S11a | `utils/predicates/is_default_render_range.rs` | oracle-tested |
+| `pierre/src/utils/isDiffPlainText.ts` | 11 | PORTED | S6 | `utils/predicates/is_diff_plain_text.rs` | none beyond the language |
 | `pierre/src/utils/isFilePlainText.ts` | 7 | PENDING | - |  | PORT (Rust, oracle-tested) |
 | `pierre/src/utils/isGutterUtilityPath.ts` | 21 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/isStyleNode.ts` | 12 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/isStyleNode.ts` | 12 | PORTED | S11a | `utils/dom/is_style_node.rs` | tag-name test on a hast Element; oracle-tested |
 | `pierre/src/utils/isWorkerContext.ts` | 10 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/utils/iterateOverDiff.ts` | 1045 | PORTED | S4 | `utils/iterate_over_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
 | `pierre/src/utils/lineAnnotationIdentity.ts` | 37 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -246,9 +246,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/parseMergeConflictDiffFromFile.ts` | 1228 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/utils/parsePatchFiles.ts` | 1108 | PORTED | S3 | `utils/parse_patch_files.rs`, `utils/parse_patch_files/hunk_split.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/parseQuotedDiffFileName.ts` | 79 | PORTED | S3 | `utils/parse_quoted_diff_file_name.rs` | exact oracle parity (patches.json, utilities.json) |
-| `pierre/src/utils/platform.ts` | 48 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/platform.ts` | 48 | PORTED | S11a | `utils/dom/platform.rs` | pure functions of PlatformInfo (no navigator/window, no memoization); oracle-tested over user-agent and platform strings |
 | `pierre/src/utils/prefersReducedMotion.ts` | 10 | PENDING | - |  | port or replace per slice notes (DOM helper) |
-| `pierre/src/utils/prerenderHTMLIfNecessary.ts` | 12 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/prerenderHTMLIfNecessary.ts` | 12 | OUT | S11a |  | shadow-root innerHTML hydration of server-rendered HTML; Dioxus renders the hast |
 | `pierre/src/utils/processLine.ts` | 36 | PORTED | S5 | `utils/render/process_line.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/realignChangeContent.ts` | 308 | PORTED | S3 | `utils/realign_change_content.rs` | realignChangeContentBySimilarity only; slideBlankBoundaryBlocksUp is editor-only (OUT) |
 | `pierre/src/utils/renderDiffWithHighlighter.ts` | 512 | PORTED | S5 | `utils/render/render_diff_with_highlighter.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
@@ -258,11 +258,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/resolvePreferredHighlighter.ts` | 14 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/utils/resolveRegion.ts` | 419 | DEFER | - |  | DEFER (not needed for PR review v1) |
 | `pierre/src/utils/roundToDevicePixel.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/scrollbarGutter.ts` | 55 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/scrollbarGutter.ts` | 55 | PORTED | S11a | `utils/dom/scrollbar_gutter.rs` | the probe is measured through ScrollbarGutterHost; cache is a thread-local; oracle-tested over a scripted sequence |
 | `pierre/src/utils/setDeferredArrayItem.ts` | 56 | OUT | - |  | JS getter-defined lazy array element (Object.defineProperty); no Rust analogue needed, lazy rows arrive with the renderer |
 | `pierre/src/utils/setLanguageOverride.ts` | 21 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/setWrapperNodeProps.ts` | 65 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
-| `pierre/src/utils/shouldUseTokenTransformer.ts` | 25 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/setWrapperNodeProps.ts` | 65 | PORTED | S11a | `utils/dom/set_wrapper_node_props.rs` | edits a hast pre Element in place; custom properties apply in sorted key order; oracle-tested |
+| `pierre/src/utils/shouldUseTokenTransformer.ts` | 25 | PORTED | S11a | `utils/options/should_use_token_transformer.rs` | callbacks are presence flags; oracle-tested |
 | `pierre/src/utils/splitFileContents.ts` | 13 | PORTED | S3 | `utils/split_file_contents.rs` | exact oracle parity (patches.json, utilities.json) |
 | `pierre/src/utils/tokenStyle.ts` | 39 | PORTED | S5 | `utils/render/token_style.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/tokensToHtml.ts` | 72 | PENDING | - |  | PORT (Rust, oracle-tested on hast JSON) |
@@ -312,8 +312,8 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/FileDiff.rerenderInputs.test.ts` | 233 | PENDING | S9 |  |  |
 | `pierre/test/FileDiff.unifiedEditSeparators.test.ts` | 111 | OUT | - |  | edit mode is out of scope for v1 |
 | `pierre/test/FileDiff.workerRendering.test.ts` | 485 | OUT | - |  | worker pool |
-| `pierre/test/FileRenderer.ast.test.ts` | 241 | PENDING | unassigned |  |  |
-| `pierre/test/FileRenderer.test.ts` | 286 | PENDING | unassigned |  |  |
+| `pierre/test/FileRenderer.ast.test.ts` | 241 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
+| `pierre/test/FileRenderer.test.ts` | 286 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
 | `pierre/test/FileStream.test.ts` | 154 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/InjectedRowHooks.test.ts` | 240 | PORTED | S6 | `renderers/injected_row_hooks_test.rs` | two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer |
 | `pierre/test/InteractionManager.gutterUtility.test.ts` | 1072 | PENDING | S11 |  |  |
@@ -528,7 +528,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/Virtualizer.reconcileQueue.test.ts` | requestHeightReconcile reconciles instances the pass did not repaint | jsdom root/content/container are FakeHost elements; `await wait(20)` flushes the fake frame queue |
 | `pierre/test/Virtualizer.scrollState.test.ts` | reads and restores an element / document root logical scroll position | jsdom `scrollTo` stubs and `window.scrollY` / `innerHeight` overrides are the FakeHost world; its `scrollTo` clamps to the scrollable range as a browser does (no assertion can tell: every target is in range or already clamped by the virtualizer); `toEqual` on recorded scroll calls compares the host trace |
 
-## Dropped branches (26)
+## Dropped branches (31)
 
 | upstream file | dropped | reason |
 |---|---|---|
@@ -558,3 +558,75 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/components/Virtualizer.ts` | `Virtualizer.__STOP`, `__lastScrollPosition`, `window.__INSTANCE`, `window.__TOGGLE` and the `__STOP` early returns of the scroll/resize/render handlers | development hooks that upstream marks "Remove me before release"; they are window globals with no mapping |
 | `pierre/src/components/Virtualizer.ts` | `target instanceof HTMLElement` throw in `handleIntersectionChange`, `contentContainer instanceof HTMLElement`, `line instanceof HTMLElement` | type-level in Rust: the host hands over elements only (the web host downcasts and panics on a non-HTMLElement target) |
 | `pierre/src/managers/UniversalRenderingManager.ts` | try/catch + `console.error` around each queued callback | a panicking render callback propagates; a render callback failing is an invariant break |
+| `pierre/src/utils/platform.ts` | `_isMacLike`/`_isLinux`/`_isSafari`/`_isFirefox` memoization, `resetPlatformDetection`, the `navigator`/`window` reads | detection is a pure function of `PlatformInfo` supplied by the host; there is no global to cache or reset |
+| `pierre/src/utils/hostTheme.ts` | `shadowRoot.appendChild(currentNode)` and `currentNode?.remove()` | the caller owns the style node as an `Option<Element>` and renders it; returning `None` is removal |
+| `pierre/src/utils/getOrCreateCodeNode.ts` | `pre?.appendChild(code)` | an `Element` cannot be appended to a parent it does not own; the caller places the returned element |
+| `pierre/src/utils/scrollbarGutter.ts` | `document.createElement`, `shadowRoot.appendChild`, `offsetHeight`/`clientHeight` reads | the probe is a hast `Element` measured by a `ScrollbarGutterHost` |
+| `pierre/src/managers/ResizeManager.ts` | `target instanceof HTMLElement` "Invalid element for ResizeObserver" branch and the `instanceof HTMLElement` filters | the host hands over HTML elements only |
+
+## FileDiff closure (58 modules)
+
+Every value import of `FileDiff.ts` and `VirtualizedFileDiff.ts` (type-only imports are erased and not followed), followed transitively until ported code, with the class each module gets. PORT rows name the slice: S11a (small utils, `ResizeManager`, `ScrollSyncManager`), S11b (`InteractionManager`, the methods FileDiff calls), S12 (`FileDiff`, `VirtualizedFileDiff`, the Dioxus rendering).
+
+Editor and worker references in the FileDiff path (audited by name over both files): 306 lines mention the editor (`editor`, `editSession*`, `textDocument`, `__attachEditor`, `installEditSession`, `syncRenderViewToEditor`, `onEditChange`, `onEditComplete`, ...) and 22 the worker pool (`workerManager` 18, `WorkerPoolManager`, `isHandledWorkerPoolError`). All of them are edit-session install/attach/sync/complete plumbing or the worker-pool highlight path; edit mode and the worker pool are OUT (see the matrix), so the references are DROP. No reference was found to be load-bearing for diff rendering: with the editor absent every branch takes the "no edit session" arm, and with no worker manager rendering takes the synchronous `DiffHunksRenderer` path that S6 ported (`shouldHighlightOnMainThread` and friends are in the dropped list). They are dropped one by one when `FileDiff.ts` itself is ported (S12) and recorded in the dropped table then.
+
+| upstream file | LOC | class | slice | reason | first imported by |
+|---|---:|---|---|---|---|
+| `pierre/src/components/FileDiff.ts` | 4312 | PORT | S12 | the component: logic against a host trait, then Dioxus rendering | `-` |
+| `pierre/src/components/VirtualizedFileDiff.ts` | 2452 | PORT | S12 | the Virtualizer instance for a diff | `-` |
+| `pierre/src/components/web-components.ts` | 39 | DROP | - | custom element registration; the host element is the Dioxus component | `src/components/FileDiff.ts` |
+| `pierre/src/constants.ts` | 108 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/highlighter/shared_highlighter.ts` | 166 | DROP | - | highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter | `src/components/FileDiff.ts` |
+| `pierre/src/managers/InteractionManager.ts` | 2510 | PORT | S11b | the methods FileDiff calls (line selection, hover, gutter utility: the annotate flow), statement for statement | `src/components/FileDiff.ts` |
+| `pierre/src/managers/ResizeManager.ts` | 494 | PORT | S11a | behind ResizeManagerHost + ResizeObserverHub (managers/resize_manager.rs) | `src/components/FileDiff.ts` |
+| `pierre/src/managers/ScrollSyncManager.ts` | 102 | PORT | S11a | behind ScrollSyncHost (managers/scroll_sync_manager.rs); not in the brief list but FileDiff calls it for split-view scroll sync and it is 102 LOC | `src/components/FileDiff.ts` |
+| `pierre/src/managers/UniversalRenderingManager.ts` | 48 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/renderers/DiffHunksRenderer.ts` | 2782 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/sprite.ts` | 149 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/style.css?inline.ts` | ? | PORT | S11a | exported from the pinned dist as assets/style.css, embedded by utils/dom/css_wrappers.rs | `src/utils/cssWrappers.ts` |
+| `pierre/src/utils/areDiffLineAnnotationsEqual.ts` | 13 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/areDiffTargetsEqual.ts` | 14 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/areFilesEqual.ts` | 14 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/areHunkDataEqual.ts` | 15 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/areObjectsEqual.ts` | 38 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/VirtualizedFileDiff.ts` |
+| `pierre/src/utils/areOptionsEqual.ts` | 41 | PORT | S12 | maps FileDiffOptions, which ports with FileDiff; areObjectsEqual (its helper) is ported in S11a | `src/components/VirtualizedFileDiff.ts` |
+| `pierre/src/utils/arePrePropertiesEqual.ts` | 46 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/areRenderRangesEqual.ts` | 17 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/areThemesEqual.ts` | 17 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/awaitWithTimeout.ts` | 19 | DROP | - | highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter | `src/components/FileDiff.ts` |
+| `pierre/src/utils/cloneFileDiffMetadata.ts` | 20 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/computeEstimatedDiffHeights.ts` | 175 | ALREADY PORTED | - |  | `src/components/VirtualizedFileDiff.ts` |
+| `pierre/src/utils/computeVirtualFileMetrics.ts` | 56 | ALREADY PORTED | - |  | `src/components/VirtualizedFileDiff.ts` |
+| `pierre/src/utils/createAnnotationWrapperNode.ts` | 8 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/createGutterUtilityContentNode.ts` | 12 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/createUnsafeCSSStyleNode.ts` | 8 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/cssWrappers.ts` | 81 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/editSessionAnnotations.ts` | 121 | DROP | - | edit mode is OUT for v1 (CM6 lane) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/editSessionHunks.ts` | 884 | DROP | - | edit mode is OUT for v1 (CM6 lane) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getDiffFileInput.ts` | 31 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getDiffHunksRendererOptions.ts` | 41 | PORT | S12 | maps FileDiffOptions, which ports with FileDiff; shouldUseTokenTransformer (its helper) is ported in S11a | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getFiletypeFromFileName.ts` | 460 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getHunkSideBoundaries.ts` | 9 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getLineAnnotationName.ts` | 8 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getOrCreateCodeNode.ts` | 36 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/getThemes.ts` | 16 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/guardWebKitScrollDuringRebuild.ts` | 33 | DROP | - | Safari workaround for bulk innerHTML rebuilds, only reached through shouldGuardRebuildScroll (editor != null && isSafari()); edit mode is OUT and Dioxus does not rebuild columns by innerHTML | `src/components/FileDiff.ts` |
+| `pierre/src/utils/hastToHtml.ts` | 182 | DEFER | - | FileDiff uses it only to set innerHTML (column and header rebuilds, prerender); the Dioxus layer renders hast nodes directly, so it is not needed (also reachable from File.ts, which is DEFER) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/hostTheme.ts` | 34 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/hydratePartialDiff.ts` | 268 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/includesFileAnnotations.ts` | 36 | ALREADY PORTED | - |  | `src/components/VirtualizedFileDiff.ts` |
+| `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/isDiffPlainText.ts` | 11 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/isStyleNode.ts` | 12 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/iterateOverDiff.ts` | 1045 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/parseDiffFromFile.ts` | 85 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/platform.ts` | 48 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/prerenderHTMLIfNecessary.ts` | 12 | DROP | - | attaches a shadow root and sets innerHTML from server-rendered HTML; the Dioxus layer renders the hast, there is no HTML-string hydration | `src/components/FileDiff.ts` |
+| `pierre/src/utils/resolvePreferredHighlighter.ts` | 14 | DROP | - | highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter | `src/components/FileDiff.ts` |
+| `pierre/src/utils/scrollbarGutter.ts` | 55 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/utils/cssWrappers.ts` |
+| `pierre/src/utils/setWrapperNodeProps.ts` | 65 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/shouldUseTokenTransformer.ts` | 25 | PORT | S11a | small util; utils/ (predicates, options, dom) | `src/utils/getDiffHunksRendererOptions.ts` |
+| `pierre/src/utils/splitFileContents.ts` | 13 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/utils/updateDiffHunks.ts` | 514 | DROP | - | edit mode is OUT for v1 (CM6 lane) | `src/components/FileDiff.ts` |
+| `pierre/src/utils/virtualDiffLayout.ts` | 485 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
+| `pierre/src/worker/errors.ts` | 67 | DROP | - | worker pool is OUT; the renderer's synchronous path is what S6 ported | `src/components/FileDiff.ts` |

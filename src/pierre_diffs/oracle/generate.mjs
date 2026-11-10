@@ -14,6 +14,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensureOracle, pins } from "./ensure.mjs";
 import { buildVirtualizer } from "./virtualizer_scenarios.mjs";
+import { buildS11aUtils } from "./s11a_cases.mjs";
+import { buildS11aManagers } from "./s11a_managers.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const goldenDir = join(here, "golden");
@@ -2116,6 +2118,10 @@ const outputs = {
   "render_s6.json": buildRenderS6(sharedDiffs()),
   "highlights.json": await buildHighlights(),
   "virtualizer.json": await buildVirtualizer(oracle, makeRandom(0x5eed09)),
+  "s11a.json": {
+    ...(await buildS11aUtils(oracle, makeRandom(0x5eed0a))),
+    managers: await buildS11aManagers(oracle, makeRandom(0x5eed0b)),
+  },
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 
@@ -2137,6 +2143,27 @@ for (const [name, value] of Object.entries(outputs)) {
   } else {
     writeFileSync(path, text);
     console.log(`${name}: ${text.length} bytes`);
+  }
+}
+// Raw (non-JSON) assets exported from the pinned dist: the package stylesheet
+// (`src/style.css?inline`), embedded by utils/dom/css_wrappers.rs.
+{
+  const { default: styleCss } = await import(oracle.pierre("style.js"));
+  const path = join(here, "..", "assets/style.css");
+  if (check) {
+    let current = "";
+    try {
+      current = readFileSync(path, "utf8");
+    } catch {
+      // missing asset counts as drift
+    }
+    if (current !== styleCss) {
+      console.error("asset drift: assets/style.css");
+      drift = true;
+    }
+  } else {
+    writeFileSync(path, styleCss);
+    console.log(`assets/style.css: ${styleCss.length} bytes`);
   }
 }
 if (drift) {

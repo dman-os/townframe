@@ -36,7 +36,7 @@ use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::oracle_testing::assert_json_eq;
 use crate::oracle_testing::load_golden;
 use crate::types::layout::VirtualWindowSpecs;
-use crate::utils::are_virtual_window_specs_equal::are_virtual_window_specs_equal;
+use crate::utils::predicates::are_virtual_window_specs_equal::are_virtual_window_specs_equal;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

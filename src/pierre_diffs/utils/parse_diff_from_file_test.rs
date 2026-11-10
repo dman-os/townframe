@@ -18,9 +18,9 @@ use crate::types::patch::FileContents;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
 use crate::types::patch::ParseDiffOptions;
-use crate::utils::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::get_filetype_from_file_name::get_filetype_from_file_name;
 use crate::utils::parse_diff_from_file::parse_diff_from_file;
+use crate::utils::predicates::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::split_file_contents::split_file_contents;
 
 const FILE_OLD: &str = include_str!("../oracle/corpus/diff_row_buffer_old.tsx");

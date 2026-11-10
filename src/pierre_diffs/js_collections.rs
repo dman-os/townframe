@@ -49,6 +49,11 @@ impl<K: Clone + Eq + Hash, V> InsertionMap<K, V> {
         self.slots[slot].as_ref().map(|(_, value)| value)
     }
 
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let slot = *self.index.get(key)?;
+        self.slots[slot].as_mut().map(|(_, value)| value)
+    }
+
     pub fn insert(&mut self, key: K, value: V) {
         if let Some(&slot) = self.index.get(&key) {
             self.slots[slot] = Some((key, value));
