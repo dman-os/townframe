@@ -3,7 +3,7 @@
 // One entry point for running Dayframe locally. `--help` lists the commands.
 
 import { prepareDayframePackages } from "./dayframe-packages.ts";
-import { $, useDotenvTargetDir } from "./utils.ts";
+import { $ } from "./utils.ts";
 
 const root = $.relativeDir("../");
 const [command, ...rest] = Deno.args;
@@ -42,7 +42,6 @@ function dx(...args: string[]) {
 
 switch (command) {
   case "desktop": {
-    await useDotenvTargetDir();
     const env = await prepareDayframePackages({ testFixtures: false });
     const storeFlag = rest.indexOf("--store");
     if (flag("--fresh") && storeFlag >= 0) {
@@ -168,7 +167,6 @@ switch (command) {
     await dx("-p", "dayframe_showcase", "--renderer", "native");
     break;
   case "packages":
-    await useDotenvTargetDir();
     await prepareDayframePackages({ testFixtures: true });
     break;
   case "test":

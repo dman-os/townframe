@@ -6,6 +6,12 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     rust-overlay.url = "github:oxalica/rust-overlay";
     crane.url = "github:ipetkov/crane";
+    # mbx shares compiler outputs and one memory-aware build scheduler between every
+    # checkout on the machine. Its shim and cache agent refuse to talk across mbx
+    # versions, so every worktree must pin the same tag: bump it on main and rebase.
+    # nixpkgs deliberately does not follow ours, so the store path is the one
+    # `nix run github:jdx/mr-boxington/<tag>` produces.
+    mr-boxington.url = "github:jdx/mr-boxington/v1.30.0";
   };
 
   outputs =
