@@ -297,7 +297,7 @@ pierre/test/InjectedRowHooks.test.ts|PORTED|S6|renderers/injected_row_hooks_test
 pierre/test/patchFileRender.test.ts|PORTED|S6|renderers/patch_file_render_test.rs|digest snapshots became invariants over the parsed patch and the rendered rows
 pierre/test/FileRenderer*|DEFER|-||single-file view deferred; review loop uses FileDiff
 pierre/test/CodeView*|PENDING|S12||
-pierre/test/FileDiff*|PENDING|S9||
+pierre/test/FileDiff*|PENDING|S12a||PARTIAL. Ported with their names (in components/file_diff_upstream_tests.rs): headerSlots 2 of 3 (the third is edit-session), rerenderInputs 2 of 3 (the third is edit-session), partialRender 4 of 4. Waiting: themeTypeUpdates (the FileDiff.setThemeType and render-themeType tests read `style[data-theme-css]` text over a real highlighter theme and need `cleanUp`; CodeView/File cases are OUT), partialHydration (expandHunk and hydrate cases need `cleanUp` and a loader harness; the worker-priming and edit cases are OUT), editSessionOwnership, unifiedEditSeparators and workerRendering (OUT)
 pierre/test/Virtualizer.reconcileQueue.test.ts|PORTED|S10|components/virtualizer_reconcile_queue_test.rs|the one case; jsdom elements are FakeHost names, `wait(20)` is flushing fake frames
 pierre/test/Virtualizer.scrollState.test.ts|PORTED|S10|components/virtualizer_scroll_state_test.rs|both cases (element root, document root); scrollTo stubs are the FakeHost world
 pierre/test/Virtualizer.strictMode.test.ts|PENDING|S11||drives VirtualizedFileDiff hydrate/render/cleanUp over jsdom; ports with S11

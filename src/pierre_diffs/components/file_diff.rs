@@ -1100,14 +1100,8 @@ impl<
         }
         // Every manager has set up against the current rows and dropped the
         // keys of the nodes this render replaced.
-        let retired = {
-            let mut state = self.state.borrow_mut();
-            state.managers_dirty = false;
-            std::mem::take(&mut state.retired)
-        };
-        for node in retired {
-            self.document().discard(node);
-        }
+        self.state.borrow_mut().managers_dirty = false;
+        Nodes(self).discard_retired();
     }
 
     /// A node a render replaced (the render detached it with its own `remove` or

@@ -56,6 +56,16 @@ where
         self.retire(node);
     }
 
+    /// Discards what renders retired. Only for a moment when no manager holds a
+    /// key of the retired nodes: right after their `clean_up`s (`flush_managers`
+    /// discards after their `setup`s).
+    pub(super) fn discard_retired(&self) {
+        let retired = std::mem::take(&mut self.state.borrow_mut().retired);
+        for node in retired {
+            self.document().discard(node);
+        }
+    }
+
     pub(super) fn drop_optional(&self, node: Option<NodeKey>) {
         if let Some(node) = node {
             self.drop_node(node);

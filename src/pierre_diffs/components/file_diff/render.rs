@@ -304,6 +304,10 @@ where
         nodes.render_separators(&[]);
         self.adopt_render_data(Rc::clone(working_diff));
         Theme(self.0).inject_unsafe_css();
+        // The collapsed render never sets the managers up again, and
+        // `remove_rendered_code` cleaned all of them up: nothing holds a key of
+        // the nodes this render retired.
+        nodes.discard_retired();
     }
 
     /// `flags`: `forceRender`, `annotationsChanged`, `filesDidChange ||
