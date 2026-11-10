@@ -128,6 +128,15 @@ Prior art: OSGi's `Import-Package` over `Require-Bundle`, and Debian's virtual p
   their `.proto` copies. An incompatible view of an NSID is then detected when the cartridge is
   catalogued, not at runtime. AT Protocol Lexicon resolution becomes the arbiter between copies
   once it is built.
+- **A cartridge carries the sidecar of each record it holds** (amended 2026-11-11, operator). A
+  datum is a Lexicon plus a sidecar JSON Schema (ADR 021 §1), and only the sidecar can say how a
+  value is stored in Automerge: collaborative text, counters, floats. A Lexicon cannot carry that,
+  so a record registered from its Lexicon alone falls back to the plain JSON kind at every
+  position. The nodule description's `sidecar` member maps each held record's NSID to its sidecar
+  document, the form `Bundle::document` renders. Admission refuses a key that is not a record the
+  cartridge holds: a vendored copy is its holder's to describe. Registration admits the document
+  against the record's Lexicon, where it may narrow the Lexicon and never admit a value the
+  Lexicon refuses; it is a peer's data, so its shape and size are checked, not assumed.
 - **Resolution is recorded at enable time,** in the runtime's install datum, like a lockfile:
   each NSID maps to its provider cartridge id, version and schema revision. A change of provider is a
   change of grant and is re-consented.
