@@ -15,7 +15,8 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 --fresh          start from an empty store in a new temp file
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
   web         build and serve dayframe_web (--build: build only)
-  showcase    run the design showcase (dayframe_showcase) natively
+  showcase    run the design showcase (dayframe_showcase) in a webview (Wry)
+                --native         the Blitz renderer instead
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
   test        x/check-dayframe.ts, then the dayframe_web Playwright e2e
                 --no-e2e         skip the browser part
@@ -70,7 +71,12 @@ switch (command) {
     }`;
     break;
   case "showcase":
-    await dx("-p", "dayframe_showcase", "--renderer", "native");
+    await dx(
+      "-p",
+      "dayframe_showcase",
+      "--renderer",
+      flag("--native") ? "native" : "webview",
+    ).env(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {});
     break;
   case "packages":
     await prepareDayframePackages({ testFixtures: true });

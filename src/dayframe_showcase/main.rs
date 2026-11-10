@@ -49,8 +49,23 @@ struct MaterialTheme {
     palettes: BTreeMap<String, BTreeMap<String, String>>,
 }
 
+/// Wry unless `DAYFRAME_RENDERER=blitz`. `dioxus::launch` would pick Blitz whenever any crate in
+/// the build turns on `dioxus/native` (feature unification), so each renderer is named.
 fn main() {
-    dioxus::launch(App);
+    match std::env::var("DAYFRAME_RENDERER").as_deref() {
+        #[cfg(feature = "desktop")]
+        Err(std::env::VarError::NotPresent) | Ok("wry") => dioxus::LaunchBuilder::desktop()
+            .with_cfg(
+                dioxus::desktop::Config::new()
+                    .with_window(dioxus::desktop::WindowBuilder::new().with_title("Theme lab"))
+                    .with_menu(None),
+            )
+            .launch(App),
+        #[cfg(not(feature = "desktop"))]
+        Err(std::env::VarError::NotPresent) => dioxus_native::launch(App),
+        Ok("blitz") => dioxus_native::launch(App),
+        other => panic!("DAYFRAME_RENDERER must be `wry` or `blitz`, got {other:?}"),
+    }
 }
 
 #[component]
