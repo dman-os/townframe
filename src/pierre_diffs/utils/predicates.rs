@@ -9,6 +9,8 @@ pub mod are_hunk_data_equal;
 pub mod are_objects_equal;
 pub mod are_pre_properties_equal;
 pub mod are_render_ranges_equal;
+pub mod are_selection_points_equal;
+pub mod are_selections_equal;
 pub mod are_themes_equal;
 pub mod are_virtual_window_specs_equal;
 pub mod is_default_render_range;

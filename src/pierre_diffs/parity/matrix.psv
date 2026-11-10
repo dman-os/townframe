@@ -94,7 +94,7 @@ pierre/src/highlighter/themes/types.ts|22|PORTED|S7|highlights/themes.rs|`DiffsT
 pierre/src/highlighter/tokenizer-types.ts|41|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/types.ts|52|PORTED|S5|highlighter_types.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/index.ts|115|OUT|-||OUT
-pierre/src/managers/InteractionManager.ts|2510|PENDING|S11b||PORT as Dioxus handlers/hooks (partial)
+pierre/src/managers/InteractionManager.ts|2510|PORTED|S11b|managers/interaction_manager.rs|PARTIAL: line hover (`data-hovered`), line and range selection (click, shift-extend, drag, touch, controlled selection, the pending single-line unselect), the selection renderer (`data-selected-line`), the gutter utility (built-in button and custom slot, selection and hover placement, utility drag), hunk-expand clicks, `onLine*` and selection callbacks, `pluckInteractionOptions`; structural reads go through InteractionHost over the rendered model and events carry their target as a node key. Left out: token events, merge-conflict actions, the editor active line, `__debugPointerEvents`. Oracle-tested against a fake DOM (scenarios + seeded sequences); real hit-testing and pointer capture are unverified
 pierre/src/managers/ResizeManager.ts|494|PORTED|S11a|managers/resize_manager.rs|DOM behind ResizeManagerHost, the shared static observer is a ResizeObserverHub; oracle-tested against a fake DOM (scenarios + seeded sequences); a real ResizeObserver is unverified
 pierre/src/managers/ScrollSyncManager.ts|102|PORTED|S11a|managers/scroll_sync_manager.rs|DOM, listeners and timers behind ScrollSyncHost; oracle-tested against a fake DOM with fake timers
 pierre/src/managers/UniversalRenderingManager.ts|48|PORTED|S10|managers/universal_rendering_manager.rs|module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch
@@ -154,8 +154,8 @@ pierre/src/utils/areObjectsEqual.ts|38|PORTED|S11a|utils/predicates/are_objects_
 pierre/src/utils/areOptionsEqual.ts|41|PENDING|S12||maps FileDiffOptions, which ports with FileDiff; its helpers areObjectsEqual and areThemesEqual are ported (S11a)
 pierre/src/utils/arePrePropertiesEqual.ts|46|PORTED|S11a|utils/predicates/are_pre_properties_equal.rs|oracle-tested
 pierre/src/utils/areRenderRangesEqual.ts|17|PORTED|S11a|utils/predicates/are_render_ranges_equal.rs|oracle-tested
-pierre/src/utils/areSelectionPointsEqual.ts|9|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/areSelectionsEqual.ts|14|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areSelectionPointsEqual.ts|9|PORTED|S11b|utils/predicates/are_selection_points_equal.rs|oracle-tested
+pierre/src/utils/areSelectionsEqual.ts|14|PORTED|S11b|utils/predicates/are_selections_equal.rs|oracle-tested
 pierre/src/utils/areThemesEqual.ts|17|PORTED|S11a|utils/predicates/are_themes_equal.rs|oracle-tested
 pierre/src/utils/areVirtualWindowSpecsEqual.ts|15|PORTED|S10|utils/predicates/are_virtual_window_specs_equal.rs|oracle-tested over undefined/equal/unequal pairs
 pierre/src/utils/areWorkerStatsEqual.ts|22|PENDING|-||PORT (Rust, oracle-tested)
@@ -174,7 +174,7 @@ pierre/src/utils/createContentColumn.ts|18|PORTED|S5|utils/render/create_content
 pierre/src/utils/createEmptyRowBuffer.ts|15|PORTED|S5|utils/render/create_empty_row_buffer.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createFileHeaderElement.ts|172|PORTED|S5|utils/render/create_file_header_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createGutterUtilityContentNode.ts|12|PORTED|S11a|utils/dom/create_gutter_utility_content_node.rs|returns a hast Element; oracle-tested against a fake DOM
-pierre/src/utils/createGutterUtilityElement.ts|17|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createGutterUtilityElement.ts|17|PORTED|S11b|utils/render/create_gutter_utility_element.rs|compared with the dist's hast
 pierre/src/utils/createNoNewlineElement.ts|22|PORTED|S5|utils/render/create_no_newline_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createPreElement.ts|47|PORTED|S5|utils/render/create_pre_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createRowNodes.ts|19|PENDING|-||port or replace per slice notes (DOM helper)
@@ -218,7 +218,7 @@ pierre/src/utils/includesFileAnnotations.ts|36|PORTED|S5|utils/render/includes_f
 pierre/src/utils/isDefaultRenderRange.ts|11|PORTED|S11a|utils/predicates/is_default_render_range.rs|oracle-tested
 pierre/src/utils/isDiffPlainText.ts|11|PORTED|S6|utils/predicates/is_diff_plain_text.rs|none beyond the language
 pierre/src/utils/isFilePlainText.ts|7|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/isGutterUtilityPath.ts|21|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/isGutterUtilityPath.ts|21|PORTED|S11b|utils/dom/is_gutter_utility_path.rs|over a model path with an attribute reader; oracle-tested
 pierre/src/utils/isStyleNode.ts|12|PORTED|S11a|utils/dom/is_style_node.rs|tag-name test on a hast Element; oracle-tested
 pierre/src/utils/isWorkerContext.ts|10|OUT|-||OUT (Clay guest + wasm component replaces)
 pierre/src/utils/iterateOverDiff.ts|1045|PORTED|S4|utils/iterate_over_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
@@ -300,7 +300,7 @@ pierre/test/FileRenderer.ast.test.ts|241|DEFER|-||single-file view deferred; rev
 pierre/test/FileRenderer.test.ts|286|DEFER|-||single-file view deferred; review loop uses FileDiff
 pierre/test/FileStream.test.ts|154|PENDING|-||not yet assigned to a slice; triage in the owning slice
 pierre/test/InjectedRowHooks.test.ts|240|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
-pierre/test/InteractionManager.gutterUtility.test.ts|1072|PENDING|S11||
+pierre/test/InteractionManager.gutterUtility.test.ts|1072|PORTED|S11b|managers/interaction_manager_gutter_utility_test.rs|the 17 tests of `InteractionManager gutter utility`; the six editor active-line tests are dropped with the editor active line
 pierre/test/README.md|105|OUT|-||upstream test instructions (bun)
 pierre/test/UniversalRenderingManager.test.ts|156|PORTED|S10|managers/universal_rendering_manager_test.rs|all six cases; the module-level queue is a manager value; one added case pins clearRenderQueue
 pierre/test/UnresolvedFile.sequentialResolve.test.ts|241|DEFER|-||merge-conflict UI

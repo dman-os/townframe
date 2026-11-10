@@ -31,6 +31,8 @@ pub mod utils;
 #[cfg(test)]
 mod fake_dom;
 #[cfg(test)]
+mod fake_interaction_dom;
+#[cfg(test)]
 mod oracle_testing;
 #[cfg(test)]
 mod parity;

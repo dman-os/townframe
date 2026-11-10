@@ -5,6 +5,7 @@ pub mod create_annotation_element;
 pub mod create_content_column;
 pub mod create_empty_row_buffer;
 pub mod create_file_header_element;
+pub mod create_gutter_utility_element;
 pub mod create_no_newline_element;
 pub mod create_pre_element;
 pub mod create_separator;

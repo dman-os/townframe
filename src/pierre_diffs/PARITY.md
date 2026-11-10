@@ -6,9 +6,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 109 | 22277 |
+| PORTED | 115 | 25920 |
 | REPLACED | 10 | 1817 |
-| PENDING | 95 | 37315 |
+| PENDING | 89 | 33672 |
 | OUT | 248 | 98288 |
 | DEFER | 22 | 10731 |
 
@@ -110,7 +110,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/highlighter/tokenizer-types.ts` | 41 | OUT | - |  | OUT (use highlights.wasm component; thin adapter in slice S9) |
 | `pierre/src/highlighter/types.ts` | 52 | PORTED | S5 | `highlighter_types.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/index.ts` | 115 | OUT | - |  | OUT |
-| `pierre/src/managers/InteractionManager.ts` | 2510 | PENDING | S11b |  | PORT as Dioxus handlers/hooks (partial) |
+| `pierre/src/managers/InteractionManager.ts` | 2510 | PORTED | S11b | `managers/interaction_manager.rs` | PARTIAL: line hover (`data-hovered`), line and range selection (click, shift-extend, drag, touch, controlled selection, the pending single-line unselect), the selection renderer (`data-selected-line`), the gutter utility (built-in button and custom slot, selection and hover placement, utility drag), hunk-expand clicks, `onLine*` and selection callbacks, `pluckInteractionOptions`; structural reads go through InteractionHost over the rendered model and events carry their target as a node key. Left out: token events, merge-conflict actions, the editor active line, `__debugPointerEvents`. Oracle-tested against a fake DOM (scenarios + seeded sequences); real hit-testing and pointer capture are unverified |
 | `pierre/src/managers/ResizeManager.ts` | 494 | PORTED | S11a | `managers/resize_manager.rs` | DOM behind ResizeManagerHost, the shared static observer is a ResizeObserverHub; oracle-tested against a fake DOM (scenarios + seeded sequences); a real ResizeObserver is unverified |
 | `pierre/src/managers/ScrollSyncManager.ts` | 102 | PORTED | S11a | `managers/scroll_sync_manager.rs` | DOM, listeners and timers behind ScrollSyncHost; oracle-tested against a fake DOM with fake timers |
 | `pierre/src/managers/UniversalRenderingManager.ts` | 48 | PORTED | S10 | `managers/universal_rendering_manager.rs` | module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch |
@@ -170,8 +170,8 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/areOptionsEqual.ts` | 41 | PENDING | S12 |  | maps FileDiffOptions, which ports with FileDiff; its helpers areObjectsEqual and areThemesEqual are ported (S11a) |
 | `pierre/src/utils/arePrePropertiesEqual.ts` | 46 | PORTED | S11a | `utils/predicates/are_pre_properties_equal.rs` | oracle-tested |
 | `pierre/src/utils/areRenderRangesEqual.ts` | 17 | PORTED | S11a | `utils/predicates/are_render_ranges_equal.rs` | oracle-tested |
-| `pierre/src/utils/areSelectionPointsEqual.ts` | 9 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/areSelectionsEqual.ts` | 14 | PENDING | - |  | PORT (Rust, oracle-tested) |
+| `pierre/src/utils/areSelectionPointsEqual.ts` | 9 | PORTED | S11b | `utils/predicates/are_selection_points_equal.rs` | oracle-tested |
+| `pierre/src/utils/areSelectionsEqual.ts` | 14 | PORTED | S11b | `utils/predicates/are_selections_equal.rs` | oracle-tested |
 | `pierre/src/utils/areThemesEqual.ts` | 17 | PORTED | S11a | `utils/predicates/are_themes_equal.rs` | oracle-tested |
 | `pierre/src/utils/areVirtualWindowSpecsEqual.ts` | 15 | PORTED | S10 | `utils/predicates/are_virtual_window_specs_equal.rs` | oracle-tested over undefined/equal/unequal pairs |
 | `pierre/src/utils/areWorkerStatsEqual.ts` | 22 | PENDING | - |  | PORT (Rust, oracle-tested) |
@@ -190,7 +190,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/createEmptyRowBuffer.ts` | 15 | PORTED | S5 | `utils/render/create_empty_row_buffer.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createFileHeaderElement.ts` | 172 | PORTED | S5 | `utils/render/create_file_header_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createGutterUtilityContentNode.ts` | 12 | PORTED | S11a | `utils/dom/create_gutter_utility_content_node.rs` | returns a hast Element; oracle-tested against a fake DOM |
-| `pierre/src/utils/createGutterUtilityElement.ts` | 17 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/createGutterUtilityElement.ts` | 17 | PORTED | S11b | `utils/render/create_gutter_utility_element.rs` | compared with the dist's hast |
 | `pierre/src/utils/createNoNewlineElement.ts` | 22 | PORTED | S5 | `utils/render/create_no_newline_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createPreElement.ts` | 47 | PORTED | S5 | `utils/render/create_pre_element.rs` | oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter |
 | `pierre/src/utils/createRowNodes.ts` | 19 | PENDING | - |  | port or replace per slice notes (DOM helper) |
@@ -234,7 +234,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/isDefaultRenderRange.ts` | 11 | PORTED | S11a | `utils/predicates/is_default_render_range.rs` | oracle-tested |
 | `pierre/src/utils/isDiffPlainText.ts` | 11 | PORTED | S6 | `utils/predicates/is_diff_plain_text.rs` | none beyond the language |
 | `pierre/src/utils/isFilePlainText.ts` | 7 | PENDING | - |  | PORT (Rust, oracle-tested) |
-| `pierre/src/utils/isGutterUtilityPath.ts` | 21 | PENDING | - |  | port or replace per slice notes (DOM helper) |
+| `pierre/src/utils/isGutterUtilityPath.ts` | 21 | PORTED | S11b | `utils/dom/is_gutter_utility_path.rs` | over a model path with an attribute reader; oracle-tested |
 | `pierre/src/utils/isStyleNode.ts` | 12 | PORTED | S11a | `utils/dom/is_style_node.rs` | tag-name test on a hast Element; oracle-tested |
 | `pierre/src/utils/isWorkerContext.ts` | 10 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/utils/iterateOverDiff.ts` | 1045 | PORTED | S4 | `utils/iterate_over_diff.rs` | exact oracle parity (layout.json) plus ported upstream tests |
@@ -316,7 +316,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/FileRenderer.test.ts` | 286 | DEFER | - |  | single-file view deferred; review loop uses FileDiff |
 | `pierre/test/FileStream.test.ts` | 154 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
 | `pierre/test/InjectedRowHooks.test.ts` | 240 | PORTED | S6 | `renderers/injected_row_hooks_test.rs` | two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer |
-| `pierre/test/InteractionManager.gutterUtility.test.ts` | 1072 | PENDING | S11 |  |  |
+| `pierre/test/InteractionManager.gutterUtility.test.ts` | 1072 | PORTED | S11b | `managers/interaction_manager_gutter_utility_test.rs` | the 17 tests of `InteractionManager gutter utility`; the six editor active-line tests are dropped with the editor active line |
 | `pierre/test/README.md` | 105 | OUT | - |  | upstream test instructions (bun) |
 | `pierre/test/UniversalRenderingManager.test.ts` | 156 | PORTED | S10 | `managers/universal_rendering_manager_test.rs` | all six cases; the module-level queue is a manager value; one added case pins clearRenderQueue |
 | `pierre/test/UnresolvedFile.sequentialResolve.test.ts` | 241 | DEFER | - |  | merge-conflict UI |
@@ -499,7 +499,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `highlights/dist/highlights.wasm` | 0 | OUT | S7 |  | unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern |
 | `theming/dist/modules/createThemeResolver.js` | 116 | PORTED | S7 | `highlights/theming.rs` | synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed |
 
-## Assertions converted to invariants (24)
+## Assertions converted to invariants (26)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -527,8 +527,10 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/UniversalRenderingManager.test.ts` | all cases | the module-level queue is a `UniversalRenderingManager` over `FakeFrames`; bun `mock()` is a call log of the times received |
 | `pierre/test/Virtualizer.reconcileQueue.test.ts` | requestHeightReconcile reconciles instances the pass did not repaint | jsdom root/content/container are FakeHost elements; `await wait(20)` flushes the fake frame queue |
 | `pierre/test/Virtualizer.scrollState.test.ts` | reads and restores an element / document root logical scroll position | jsdom `scrollTo` stubs and `window.scrollY` / `innerHeight` overrides are the FakeHost world; its `scrollTo` clamps to the scrollable range as a browser does (no assertion can tell: every target is in range or already clamped by the virtualizer); `toEqual` on recorded scroll calls compares the host trace |
+| `pierre/test/InteractionManager.gutterUtility.test.ts` | all 17 tests of `InteractionManager gutter utility` | jsdom is the FakeDom model; `dispatchPointer` routes to the `pre` handlers then the document handlers and returns `defaultPrevented`; `setElementFromPoint` is the fake's hit table; `querySelector('[data-gutter-utility-slot]')` is `has_descendant` |
+| `pierre/test/InteractionManager.gutterUtility.test.ts` | InteractionManager editor active-line state (6 tests) | dropped with the editor active line (edit mode is OUT) |
 
-## Dropped branches (31)
+## Dropped branches (37)
 
 | upstream file | dropped | reason |
 |---|---|---|
@@ -563,12 +565,20 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/utils/getOrCreateCodeNode.ts` | `pre?.appendChild(code)` | an `Element` cannot be appended to a parent it does not own; the caller places the returned element |
 | `pierre/src/utils/scrollbarGutter.ts` | `document.createElement`, `shadowRoot.appendChild`, `offsetHeight`/`clientHeight` reads | the probe is a hast `Element` measured by a `ScrollbarGutterHost` |
 | `pierre/src/managers/ResizeManager.ts` | `target instanceof HTMLElement` "Invalid element for ResizeObserver" branch and the `instanceof HTMLElement` filters | the host hands over HTML elements only |
+| `pierre/src/managers/InteractionManager.ts` | token interactions: `onTokenClick`/`onTokenEnter`/`onTokenLeave`, `hoveredToken`, `TokenCache`, `ResolvedTokenTarget`, `enableTokenInteractionsOnWhitespace`, `toTokenEventBaseProps` | no review-loop use yet (DEFER); the `data-char` skip in `resolvePointerTarget` stays because it decides which attributes a node contributes to the line target |
+| `pierre/src/managers/InteractionManager.ts` | merge-conflict actions: `onMergeConflictActionClick`, `MergeConflictActionTarget`, `isMergeConflictResolution`, the `data-merge-conflict-action(s)` reads | merge-conflict UI is DEFER |
+| `pierre/src/managers/InteractionManager.ts` | editor active line: `setEditorActiveLine`, `editorActiveLine*`, its render channel, `data-editor-active-line`, `EditorActiveLineWriteOptions` | edit mode is OUT; its "clean" flag survives as `rendered_editor_clean` because `isSelectionDirty` reads it |
+| `pierre/src/managers/InteractionManager.ts` | `__debugPointerEvents`, `debugLogIfEnabled`, `LogTypes` | debug logging |
+| `pierre/src/managers/InteractionManager.ts` | `hastToHtml` + `innerHTML` + `firstElementChild instanceof HTMLButtonElement` for the utility button | the host builds the detached button element from the hast (`create_element_from_hast`) |
+| `pierre/src/managers/InteractionManager.ts` | `pre.getRootNode()` / `document` `elementFromPoint` root choice | `InteractionHost::element_from_point` answers `Unavailable` when hit-testing cannot run |
 
 ## FileDiff closure (58 modules)
 
 Every value import of `FileDiff.ts` and `VirtualizedFileDiff.ts` (type-only imports are erased and not followed), followed transitively until ported code, with the class each module gets. PORT rows name the slice: S11a (small utils, `ResizeManager`, `ScrollSyncManager`), S11b (`InteractionManager`, the methods FileDiff calls), S12 (`FileDiff`, `VirtualizedFileDiff`, the Dioxus rendering).
 
 Editor and worker references in the FileDiff path (audited by name over both files): 306 lines mention the editor (`editor`, `editSession*`, `textDocument`, `__attachEditor`, `installEditSession`, `syncRenderViewToEditor`, `onEditChange`, `onEditComplete`, ...) and 22 the worker pool (`workerManager` 18, `WorkerPoolManager`, `isHandledWorkerPoolError`). All of them are edit-session install/attach/sync/complete plumbing or the worker-pool highlight path; edit mode and the worker pool are OUT (see the matrix), so the references are DROP. No reference was found to be load-bearing for diff rendering: with the editor absent every branch takes the "no edit session" arm, and with no worker manager rendering takes the synchronous `DiffHunksRenderer` path that S6 ported (`shouldHighlightOnMainThread` and friends are in the dropped list). They are dropped one by one when `FileDiff.ts` itself is ported (S12) and recorded in the dropped table then.
+
+`InteractionManager.ts` (S11b), what FileDiff and VirtualizedFileDiff reach and what the port does with it. Ported: `setOptions`, `setup`, `cleanUp`, `setSelection`, `setSelectionDirty`, `isSelectionDirty`, `getSelection`, `getHoveredLine`, `handlePointerClick`/`Move`/`Leave`/`Down` and the document `pointermove`/`pointerup`/`pointercancel` handlers, hover and its `data-hovered` attributes, line and gutter selection sessions, the selection renderer (`data-selected-line`), the gutter utility (built-in button, custom slot, placement from selection and hover, tap-reveal on touch), `data-interactive-lines`/`data-interactive-line-numbers`, hunk-expand clicks, and `pluckInteractionOptions`. Left out, each recorded in `parity/dropped.psv`: token events (DEFER, no review-loop use yet), merge-conflict actions (DEFER), the editor active line (DROP, edit mode), and `__debugPointerEvents` logging. `setEditorActiveLine`, which FileDiff calls, is therefore not ported either.
 
 | upstream file | LOC | class | slice | reason | first imported by |
 |---|---:|---|---|---|---|
@@ -577,7 +587,7 @@ Editor and worker references in the FileDiff path (audited by name over both fil
 | `pierre/src/components/web-components.ts` | 39 | DROP | - | custom element registration; the host element is the Dioxus component | `src/components/FileDiff.ts` |
 | `pierre/src/constants.ts` | 108 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |
 | `pierre/src/highlighter/shared_highlighter.ts` | 166 | DROP | - | highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter | `src/components/FileDiff.ts` |
-| `pierre/src/managers/InteractionManager.ts` | 2510 | PORT | S11b | the methods FileDiff calls (line selection, hover, gutter utility: the annotate flow), statement for statement | `src/components/FileDiff.ts` |
+| `pierre/src/managers/InteractionManager.ts` | 2510 | PORT | S11b | PARTIAL (see closure notes): the methods and handlers FileDiff reaches, minus token, merge-conflict and editor paths | `src/components/FileDiff.ts` |
 | `pierre/src/managers/ResizeManager.ts` | 494 | PORT | S11a | behind ResizeManagerHost + ResizeObserverHub (managers/resize_manager.rs) | `src/components/FileDiff.ts` |
 | `pierre/src/managers/ScrollSyncManager.ts` | 102 | PORT | S11a | behind ScrollSyncHost (managers/scroll_sync_manager.rs); not in the brief list but FileDiff calls it for split-view scroll sync and it is 102 LOC | `src/components/FileDiff.ts` |
 | `pierre/src/managers/UniversalRenderingManager.ts` | 48 | ALREADY PORTED | - |  | `src/components/FileDiff.ts` |

@@ -6,7 +6,7 @@ pierre/src/components/VirtualizedFileDiff.ts|2452|PORT|S12|the Virtualizer insta
 pierre/src/components/web-components.ts|39|DROP|-|custom element registration; the host element is the Dioxus component|src/components/FileDiff.ts
 pierre/src/constants.ts|108|ALREADY PORTED|-||src/components/FileDiff.ts
 pierre/src/highlighter/shared_highlighter.ts|166|DROP|-|highlighter loading/selection and worker timeouts: the highlights backend (S7) is synchronous behind DiffsHighlighter|src/components/FileDiff.ts
-pierre/src/managers/InteractionManager.ts|2510|PORT|S11b|the methods FileDiff calls (line selection, hover, gutter utility: the annotate flow), statement for statement|src/components/FileDiff.ts
+pierre/src/managers/InteractionManager.ts|2510|PORT|S11b|PARTIAL (see closure notes): the methods and handlers FileDiff reaches, minus token, merge-conflict and editor paths|src/components/FileDiff.ts
 pierre/src/managers/ResizeManager.ts|494|PORT|S11a|behind ResizeManagerHost + ResizeObserverHub (managers/resize_manager.rs)|src/components/FileDiff.ts
 pierre/src/managers/ScrollSyncManager.ts|102|PORT|S11a|behind ScrollSyncHost (managers/scroll_sync_manager.rs); not in the brief list but FileDiff calls it for split-view scroll sync and it is 102 LOC|src/components/FileDiff.ts
 pierre/src/managers/UniversalRenderingManager.ts|48|ALREADY PORTED|-||src/components/FileDiff.ts

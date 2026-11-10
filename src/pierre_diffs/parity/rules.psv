@@ -86,7 +86,7 @@ pierre/src/highlighter/themes/types.ts|PORTED|S7|highlights/themes.rs|`DiffsThem
 pierre/src/highlighter/tokenizer-types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
 pierre/src/highlighter/types.ts|PORTED|S5|highlighter_types.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/index.ts|OUT|-||OUT
-pierre/src/managers/InteractionManager.ts|PENDING|S11b||PORT as Dioxus handlers/hooks (partial)
+pierre/src/managers/InteractionManager.ts|PORTED|S11b|managers/interaction_manager.rs|PARTIAL: line hover (`data-hovered`), line and range selection (click, shift-extend, drag, touch, controlled selection, the pending single-line unselect), the selection renderer (`data-selected-line`), the gutter utility (built-in button and custom slot, selection and hover placement, utility drag), hunk-expand clicks, `onLine*` and selection callbacks, `pluckInteractionOptions`; structural reads go through InteractionHost over the rendered model and events carry their target as a node key. Left out: token events, merge-conflict actions, the editor active line, `__debugPointerEvents`. Oracle-tested against a fake DOM (scenarios + seeded sequences); real hit-testing and pointer capture are unverified
 pierre/src/managers/ResizeManager.ts|PORTED|S11a|managers/resize_manager.rs|DOM behind ResizeManagerHost, the shared static observer is a ResizeObserverHub; oracle-tested against a fake DOM (scenarios + seeded sequences); a real ResizeObserver is unverified
 pierre/src/managers/ScrollSyncManager.ts|PORTED|S11a|managers/scroll_sync_manager.rs|DOM, listeners and timers behind ScrollSyncHost; oracle-tested against a fake DOM with fake timers
 pierre/src/managers/UniversalRenderingManager.ts|PORTED|S10|managers/universal_rendering_manager.rs|module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch
@@ -146,8 +146,8 @@ pierre/src/utils/areObjectsEqual.ts|PORTED|S11a|utils/predicates/are_objects_equ
 pierre/src/utils/areOptionsEqual.ts|PENDING|S12||maps FileDiffOptions, which ports with FileDiff; its helpers areObjectsEqual and areThemesEqual are ported (S11a)
 pierre/src/utils/arePrePropertiesEqual.ts|PORTED|S11a|utils/predicates/are_pre_properties_equal.rs|oracle-tested
 pierre/src/utils/areRenderRangesEqual.ts|PORTED|S11a|utils/predicates/are_render_ranges_equal.rs|oracle-tested
-pierre/src/utils/areSelectionPointsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/areSelectionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areSelectionPointsEqual.ts|PORTED|S11b|utils/predicates/are_selection_points_equal.rs|oracle-tested
+pierre/src/utils/areSelectionsEqual.ts|PORTED|S11b|utils/predicates/are_selections_equal.rs|oracle-tested
 pierre/src/utils/areThemesEqual.ts|PORTED|S11a|utils/predicates/are_themes_equal.rs|oracle-tested
 pierre/src/utils/areVirtualWindowSpecsEqual.ts|PORTED|S10|utils/predicates/are_virtual_window_specs_equal.rs|oracle-tested over undefined/equal/unequal pairs
 pierre/src/utils/areWorkerStatsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
@@ -166,7 +166,7 @@ pierre/src/utils/createContentColumn.ts|PORTED|S5|utils/render/create_content_co
 pierre/src/utils/createEmptyRowBuffer.ts|PORTED|S5|utils/render/create_empty_row_buffer.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createFileHeaderElement.ts|PORTED|S5|utils/render/create_file_header_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createGutterUtilityContentNode.ts|PORTED|S11a|utils/dom/create_gutter_utility_content_node.rs|returns a hast Element; oracle-tested against a fake DOM
-pierre/src/utils/createGutterUtilityElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createGutterUtilityElement.ts|PORTED|S11b|utils/render/create_gutter_utility_element.rs|compared with the dist's hast
 pierre/src/utils/createNoNewlineElement.ts|PORTED|S5|utils/render/create_no_newline_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createPreElement.ts|PORTED|S5|utils/render/create_pre_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
 pierre/src/utils/createRowNodes.ts|PENDING|-||port or replace per slice notes (DOM helper)
@@ -210,7 +210,7 @@ pierre/src/utils/includesFileAnnotations.ts|PORTED|S5|utils/render/includes_file
 pierre/src/utils/isDefaultRenderRange.ts|PORTED|S11a|utils/predicates/is_default_render_range.rs|oracle-tested
 pierre/src/utils/isDiffPlainText.ts|PORTED|S6|utils/predicates/is_diff_plain_text.rs|none beyond the language
 pierre/src/utils/isFilePlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
-pierre/src/utils/isGutterUtilityPath.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/isGutterUtilityPath.ts|PORTED|S11b|utils/dom/is_gutter_utility_path.rs|over a model path with an attribute reader; oracle-tested
 pierre/src/utils/isStyleNode.ts|PORTED|S11a|utils/dom/is_style_node.rs|tag-name test on a hast Element; oracle-tested
 pierre/src/utils/isWorkerContext.ts|OUT|-||OUT (Clay guest + wasm component replaces)
 pierre/src/utils/iterateOverDiff.ts|PORTED|S4|utils/iterate_over_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
@@ -304,7 +304,7 @@ pierre/test/Virtualizer.strictMode.test.ts|PENDING|S11||drives VirtualizedFileDi
 pierre/test/Virtualizer.offscreenPlaceholder.test.ts|PENDING|S11||drives VirtualizedFile and VirtualizedFileDiff placeholders over jsdom; ports with S11
 pierre/test/Virtualiz*|PENDING|S10||
 pierre/test/virtualiz*|PENDING|S10||
-pierre/test/Interaction*|PENDING|S11||
+pierre/test/InteractionManager.gutterUtility.test.ts|PORTED|S11b|managers/interaction_manager_gutter_utility_test.rs|the 17 tests of `InteractionManager gutter utility`; the six editor active-line tests are dropped with the editor active line
 pierre/test/getChangedDocumentLines*|OUT|-||edit session helper
 pierre/test/updateDiffHunks*|OUT|-||edit session hunk recompute
 pierre/test/realignChangeContent*|PENDING|S3||

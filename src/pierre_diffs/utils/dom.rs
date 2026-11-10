@@ -12,6 +12,7 @@ pub mod create_unsafe_css_style_node;
 pub mod css_wrappers;
 pub mod get_or_create_code_node;
 pub mod host_theme;
+pub mod is_gutter_utility_path;
 pub mod is_style_node;
 pub mod platform;
 pub mod scrollbar_gutter;

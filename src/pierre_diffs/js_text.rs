@@ -54,6 +54,28 @@ pub fn contains_whitespace(text: &str) -> bool {
     text.chars().any(is_whitespace)
 }
 
+/// `Number.parseInt(text, 10)`: leading whitespace, an optional sign, then the
+/// ASCII digits up to the first other character. `None` is `NaN` (no digits),
+/// and also a value past `i64` (JavaScript would return an imprecise float;
+/// no attribute this crate reads holds one).
+pub fn parse_int(text: &str) -> Option<i64> {
+    let text = trim_start(text);
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let end = digits
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return None;
+    }
+    let magnitude: i64 = digits[..end].parse().ok()?;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
