@@ -554,7 +554,7 @@ fn view() -> Element {
                                                 .expect("the host corrected the scroller");
                                         });
                                     }
-                                    _ => {
+                                    2 => {
                                         spawn(async move {
                                             let at = handle.get_scroll_offset().await.expect("the host read the offset");
                                             handle
@@ -563,6 +563,8 @@ fn view() -> Element {
                                                 .expect("the host corrected the scroller");
                                         });
                                     }
+                                    // 3: the thread's resize event drives the correction (`on_size`).
+                                    _ => {}
                                 }
                             }
                         },

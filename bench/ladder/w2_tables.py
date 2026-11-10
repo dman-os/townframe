@@ -29,10 +29,11 @@ def metrics(r, source):
     e = series(r, source)
     if not e:
         return None
+    e = [(r["clickN"], 0.0)] + e  # the position just before the click is the zero of the error
     displaced = [n for n, v in e if abs(v) >= thr]
     steps = [(n, e[i][1] - e[i - 1][1]) for i, (n, _) in enumerate(e) if i and abs(e[i][1] - e[i - 1][1]) >= thr]
     return {
-        "frames": len(e),
+        "frames": len(e) - 1,
         "displaced": len(displaced),
         "first": (displaced[0] - r["clickN"]) if displaced else None,
         "steps": len(steps),
