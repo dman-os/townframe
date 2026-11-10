@@ -300,6 +300,7 @@ fn supported_attributes_are_reviewable() {
         "overflow",
         "overflow-x",
         "overflow-y",
+        "overflow-anchor",
         "color",
         "background",
         "background-color",
@@ -501,6 +502,14 @@ fn data_attribute_interner_is_bounded_and_deduplicates() {
 }
 
 #[test]
+fn overflow_anchor_is_an_allowed_style_property() {
+    assert_eq!(
+        static_attribute(&DATA_ATTRIBUTES, "overflow-anchor", Some("style")),
+        Ok(Some(("overflow-anchor", Some("style"))))
+    );
+}
+
+#[test]
 fn supported_listeners_are_reviewable() {
     let probes = [
         // clipboard
@@ -606,6 +615,7 @@ fn supported_listeners_are_reviewable() {
         "error",
         "mounted",
         "resize",
+        "visible",
         "visibilitychange",
     ];
     assert!(!supported_listener("unknown-event"));
@@ -717,4 +727,100 @@ fn listener_events_carry_guest_identity_revision_and_serialized_data() {
         "keydown_data_json",
         serde_json::from_str::<serde_json::Value>(&keydown.data_json).unwrap()
     );
+}
+
+/// `visible` crosses the whole boundary: the host serializes the platform's visible data as the
+/// event group's `data_json`, and the guest rebuilds a `VisibleData` from that JSON through
+/// the same `HtmlEvent` envelope `clay_mdk`'s `GuestDom::dispatch` uses, so a standard
+/// `onvisible` handler sees `is_intersecting`, the ratio, and the rects.
+#[test]
+fn visible_events_reach_a_guest_onvisible_handler() {
+    let rect = |x: f64, y: f64, width: f64, height: f64| {
+        serde_json::json!({
+            "bottom": y + height, "height": height, "left": x, "right": x + width,
+            "top": y, "width": width, "x": x, "y": y,
+        })
+    };
+    let platform: dioxus_html::SerializedVisibleData = serde_json::from_value(serde_json::json!({
+        "bounding_client_rect": rect(0.0, 10.0, 100.0, 40.0),
+        "intersection_ratio": 0.5,
+        "intersection_rect": rect(0.0, 10.0, 100.0, 20.0),
+        "is_intersecting": true,
+        "root_bounds": rect(0.0, 0.0, 200.0, 30.0),
+        "time_ms": 7,
+    }))
+    .unwrap();
+
+    // Host half: a surface element with a `visible` listener.
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetId(1),
+        Mutation::AddEventListener("visible".into()),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    let mut dom = VirtualDom::new_with_props(
+        listener_app,
+        ListenerProps {
+            tree,
+            events: events.clone(),
+        },
+    );
+    let mut host_tree: SurfaceTree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let host_element = host_tree
+        .listener_id("div", "visible")
+        .expect("host listener mounted");
+    dom.runtime().handle_event_for_target(
+        dioxus_core::RenderTargetId::ROOT,
+        "visible",
+        dioxus_core::Event::new(EventData::Visible(platform).into_any(), true),
+        host_element,
+    );
+    let wire_event = events.borrow()[0].clone();
+    assert_eq!(wire_event.name, "visible");
+
+    // Guest half: a plain Dioxus `onvisible` handler fed by the envelope the guest builds.
+    dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+    let seen = Rc::new(RefCell::new(None));
+    #[derive(Clone)]
+    struct GuestProps(Rc<RefCell<Option<Rc<dioxus_html::VisibleData>>>>);
+    impl PartialEq for GuestProps {
+        fn eq(&self, other: &Self) -> bool {
+            Rc::ptr_eq(&self.0, &other.0)
+        }
+    }
+    fn guest_app(props: GuestProps) -> Element {
+        rsx! {
+            div { onvisible: move |event| *props.0.borrow_mut() = Some(event.data()) }
+        }
+    }
+    let mut guest = VirtualDom::new_with_props(guest_app, GuestProps(seen.clone()));
+    let mut guest_edits: SurfaceTree = SurfaceTree::new();
+    guest.rebuild(&mut guest_edits);
+    let guest_element = guest_edits
+        .listener_id("div", "visible")
+        .expect("guest listener mounted");
+    let html_event: dioxus_html::HtmlEvent = serde_json::from_value(serde_json::json!({
+        "element": guest_element.raw(),
+        "name": wire_event.name,
+        "bubbles": wire_event.bubbles,
+        "data": serde_json::from_str::<serde_json::Value>(&wire_event.data_json).unwrap(),
+    }))
+    .unwrap();
+    guest.runtime().handle_event_for_target(
+        dioxus_core::RenderTargetId::ROOT,
+        &html_event.name,
+        dioxus_core::Event::new(html_event.data.into_any(), html_event.bubbles),
+        guest_element,
+    );
+    let visible = seen.borrow_mut().take().expect("onvisible handler ran");
+    assert!(visible.is_intersecting().unwrap());
+    assert_eq!(visible.get_intersection_ratio().unwrap(), 0.5);
+    let bounding = visible.get_bounding_client_rect().unwrap();
+    assert_eq!((bounding.origin.y, bounding.size.height), (10.0, 40.0));
+    let root = visible.get_root_bounds().unwrap();
+    assert_eq!(root.size.width, 200.0);
 }

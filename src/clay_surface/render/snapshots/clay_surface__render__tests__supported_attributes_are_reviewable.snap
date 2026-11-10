@@ -176,6 +176,7 @@ expression: supported
 - "style:overflow"
 - "style:overflow-x"
 - "style:overflow-y"
+- "style:overflow-anchor"
 - "style:color"
 - "style:background"
 - "style:background-color"

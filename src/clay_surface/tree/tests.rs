@@ -838,7 +838,7 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
 }
 
 #[test]
-fn open_data_attributes_pass_ingress_and_render() {
+fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
     #[derive(Clone, PartialEq)]
     struct Props {
         tree: SurfaceTree,
@@ -856,6 +856,11 @@ fn open_data_attributes_pass_ingress_and_render() {
             "data-line-index".into(),
             None,
             AttributeValue::Text("3,1".into()),
+        )),
+        Mutation::SetAttribute((
+            "overflow-anchor".into(),
+            Some("style".into()),
+            AttributeValue::Text("none".into()),
         )),
         Mutation::AppendChildren(1),
     ])
