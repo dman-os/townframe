@@ -16,12 +16,13 @@ use crate::doc::DocAvailability;
 use crate::doc::DocsProtocol;
 use crate::doc::GetDocAvailability;
 use crate::doc::LocalDocUsability;
-use crate::doc::ObserveDatums;
 use crate::doc::ObserveDocAvailability;
-use crate::doc::ObserveScope;
+use crate::doc::PollDatums;
 use crate::doc::ReadDatums;
 use crate::drawer::protocol::DrawersProtocol;
 use crate::drawer::protocol::GetDrawer;
+use crate::query::DatumSelection;
+use crate::query::Predicate;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -95,13 +96,10 @@ fn core_protocol_metadata_wire() {
             .contains(&MintCapability::XRPC)
     );
     assert!(DocsProtocol::OPERATIONS.unary.contains(&ReadDatums::XRPC));
-    assert!(
-        DocsProtocol::OPERATIONS
-            .stream
-            .contains(&ObserveDatums::XRPC)
-    );
+    assert!(DocsProtocol::OPERATIONS.unary.contains(&PollDatums::XRPC));
     assert!(DrawersProtocol::OPERATIONS.unary.contains(&GetDrawer::XRPC));
-    assert_eq!(ObserveDatums::XRPC.output_schema, "DatumObserved");
+    assert_eq!(PollDatums::XRPC.output_schema, "DatumPage");
+    assert_eq!(PollDatums::XRPC.nsid, "org.example.daybook.docs.pollDatums");
     assert!(
         AuthorityProtocol::OPERATIONS
             .unary
@@ -147,7 +145,7 @@ fn core_protocol_channels_wire() {
     unary::<ReadDatums, DocsProtocol>();
     unary::<GetDocAvailability, DocsProtocol>();
     unary::<GetDrawer, DrawersProtocol>();
-    stream::<ObserveDatums, DocsProtocol>();
+    unary::<PollDatums, DocsProtocol>();
     stream::<ObserveDocAvailability, DocsProtocol>();
 }
 
@@ -415,23 +413,43 @@ fn core_protocol_envelopes_wire() {
             }),
         ),
     );
-    let observed = DocsProtocol::from(Envelope::new(
+    let polled = DocsProtocol::from(Envelope::new(
         context.clone(),
-        ObserveDatums {
+        PollDatums {
             capability,
-            scope: ObserveScope::Doc {
-                doc_id: doc_id.clone(),
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::InDrawer {
+                        drawer_id: doc_id.clone(),
+                        transitive: false,
+                        at_least: crate::drawer::DrawerAccess::Read,
+                    },
+                    Predicate::HasTag {
+                        tag: crate::DatumTag::new("entry").unwrap(),
+                    },
+                ],
             },
-            after: 0,
+            datums: DatumSelection::Of {
+                tags: std::collections::BTreeSet::from([crate::DatumTag::new("entry").unwrap()]),
+                keys: std::collections::BTreeSet::new(),
+            },
+            after: 12,
+            limit: 64,
+            hold_ms: 500,
         },
     ));
     wire(
-        &observed,
+        &polled,
         expected(
-            "ObserveDatums",
+            "PollDatums",
             json!({
                 "capability": capability,
-                "scope": {"scope": "doc", "docId": doc_id}, "after": 0,
+                "predicate": {"clause": "and", "clauses": [
+                    {"clause": "inDrawer", "drawerId": doc_id, "transitive": false, "atLeast": "Read"},
+                    {"clause": "hasTag", "tag": "entry"},
+                ]},
+                "datums": {"selection": "of", "tags": ["entry"], "keys": []},
+                "after": 12, "limit": 64, "holdMs": 500,
             }),
         ),
     );

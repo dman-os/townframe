@@ -549,6 +549,11 @@ impl Node {
             .await
             .inspect_err(|err| error!("shutdown err: {err}"))
             .ok();
+        // Statements cancelled by the stops above finish on the sqlite workers
+        // and own a database handle (so, for memory storage, the ephemeral
+        // directory) until they do. A test returning right after shutdown would
+        // race process exit and leave that directory behind.
+        self.store.sql.drain_workers().await;
     }
 }
 

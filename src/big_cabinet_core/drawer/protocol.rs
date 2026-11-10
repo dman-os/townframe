@@ -4,6 +4,7 @@ use super::DrawerGroups;
 use super::DrawerLayout;
 use super::GroupKey;
 use super::LayoutKind;
+use super::MetaRoot;
 use crate::authority::AuthorityServiceError;
 use crate::authority::Authorization;
 use crate::authority::CapId;
@@ -31,6 +32,7 @@ pub struct LocalDrawers {
     pub present_id: DrawerId,
     pub originated_id: DrawerId,
     pub registry_id: DrawerId,
+    pub config_id: DrawerId,
 }
 
 impl LocalDrawers {
@@ -92,6 +94,15 @@ pub enum DrawersError {
     CommandReused { command: CommandId },
     #[error("the drawer's roster could not be read: {0}")]
     RosterUnreadable(String),
+    #[error("{0} is not a valid meta-doc kind/name slot")]
+    InvalidMetaDocSlot(String),
+    #[error("successor resolution from {start} revisited {revisited}: the chain is a cycle")]
+    SuccessorCycle {
+        start: DrawerId,
+        revisited: DrawerId,
+    },
+    #[error("{drawer_id} names itself as its successor")]
+    SuccessorSelf { drawer_id: DrawerId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +155,30 @@ pub struct AddDoc {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateMetaDoc {
+    pub capability: CapId,
+    pub command: CommandId,
+    pub drawer_id: DrawerId,
+    pub kind: String,
+    /// One slot inside `kind`: the reference lands on `metaDoc/<kind>/<name>`, so two names
+    /// of one kind name two docs and concurrent creators of a name converge on one.
+    pub name: String,
+    /// Which metadata root publishes the reference, which decides the group granted on the
+    /// new doc and the group whose delegation admits the reference in projection.
+    pub root: MetaRoot,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaDocCreated {
+    pub drawer_id: DrawerId,
+    pub kind: String,
+    pub name: String,
+    pub root: MetaRoot,
+    pub doc_id: DocId,
+    pub heads: Vec<ChangeHash>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoveDoc {
     pub capability: CapId,
     pub command: CommandId,
@@ -175,6 +210,41 @@ pub struct GetDrawer {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SetDrawerPolicy {
+    pub capability: CapId,
+    pub drawer_id: DrawerId,
+    pub mirror: bool,
+}
+/// Publish a successor pointer on a drawer's descriptor-bearing doc. Write+ on that drawer;
+/// the successor itself is never granted or copied by this operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDrawerSuccessor {
+    pub capability: CapId,
+    pub drawer_id: DrawerId,
+    pub successor: DrawerId,
+}
+/// Follow the successor chain with Read access at every hop; stop with AccessRequired before
+/// reading an inaccessible hop. Cycle-checked; creates nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveDrawerSuccessor {
+    pub capability: CapId,
+    pub drawer_id: DrawerId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SuccessorResolution {
+    NoSuccessor,
+    Resolved { drawer_id: DrawerId },
+    AccessRequired { drawer_id: DrawerId },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DrawerView {
     pub drawer_id: DrawerId,
     pub layout: DrawerLayout,
@@ -182,6 +252,10 @@ pub struct DrawerView {
     pub access: Access,
     pub docs: BTreeMap<DocId, Access>,
     pub children: BTreeMap<DrawerId, Access>,
+    /// The admitted `metaDoc` references, per root and keyed by their `kind/name` slot. The
+    /// roots are kept apart because a name on the public root and the same name on the
+    /// sensitive root name different docs.
+    pub meta_docs: BTreeMap<MetaRoot, BTreeMap<String, DocId>>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -223,13 +297,6 @@ pub struct ListKnownDrawers {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnownDrawer {
-    pub drawer_id: DrawerId,
-    pub mirror: bool,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetDrawerPolicy {
-    pub capability: CapId,
     pub drawer_id: DrawerId,
     pub mirror: bool,
 }
@@ -302,6 +369,7 @@ operations! {
     MintDrawerCapability => Capability, procedure, "mintDrawerCapability";
     CreateDrawer => DrawerCreated, procedure, "createDrawer";
     AddDoc => WriteReceipt, procedure, "addDoc";
+    CreateMetaDoc => MetaDocCreated, procedure, "createMetaDoc";
     RemoveDoc => WriteReceipt, procedure, "removeDoc";
     AddChild => WriteReceipt, procedure, "addChild";
     RemoveChild => WriteReceipt, procedure, "removeChild";
@@ -311,6 +379,8 @@ operations! {
     ForgetDrawer => (), procedure, "forgetDrawer";
     ListKnownDrawers => Vec<KnownDrawer>, query, "listKnownDrawers";
     SetDrawerPolicy => (), procedure, "setDrawerPolicy";
+    SetDrawerSuccessor => (), procedure, "setDrawerSuccessor";
+    ResolveDrawerSuccessor => SuccessorResolution, query, "resolveDrawerSuccessor";
     ListDrawers => Vec<ListedDrawer>, query, "listDrawers";
     GrantDrawer => (), procedure, "grantDrawer";
     RevokeDrawer => (), procedure, "revokeDrawer";
@@ -324,6 +394,7 @@ declare_service_protocol! {
             MintDrawerCapability(MintDrawerCapability),
             CreateDrawer(CreateDrawer),
             AddDoc(AddDoc),
+            CreateMetaDoc(CreateMetaDoc),
             RemoveDoc(RemoveDoc),
             AddChild(AddChild),
             RemoveChild(RemoveChild),
@@ -333,6 +404,8 @@ declare_service_protocol! {
             ForgetDrawer(ForgetDrawer),
             ListKnownDrawers(ListKnownDrawers),
             SetDrawerPolicy(SetDrawerPolicy),
+            SetDrawerSuccessor(SetDrawerSuccessor),
+            ResolveDrawerSuccessor(ResolveDrawerSuccessor),
             ListDrawers(ListDrawers),
             GrantDrawer(GrantDrawer),
             RevokeDrawer(RevokeDrawer),

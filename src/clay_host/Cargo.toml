@@ -10,10 +10,10 @@ path = "lib.rs"
 [dependencies]
 clay_collection = { workspace = true }
 thiserror.workspace = true
+futures.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 
 [dev-dependencies]
-serde_json.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 

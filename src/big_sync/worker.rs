@@ -1633,7 +1633,7 @@ impl SyncTaskWorker {
                     parts.dedup();
                     match self
                         .backend
-                        .remove_obj_from_parts(obj_id.clone(), parts)
+                        .remove_obj_from_parts(peer_id.clone(), obj_id.clone(), parts)
                         .await
                     {
                         Ok(()) => {

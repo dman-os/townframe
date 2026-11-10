@@ -1,31 +1,15 @@
-//! QueryDatums and QueryDatumRefs: authority-filtered queries over the `datum_set` and
-//! `datum_ref` projections (ADR 009, ADR 019).
+//! QueryDatumRefs: authority-filtered point queries over the `datum_ref` projection (ADR 019).
+//! Cross-document datum reads are `PollDatums` (ADR 025).
 //!
 //! When `drawer_id` is given, membership is decided by the drawer policy's verified roster
-//! projection (`DocAccess::readable_in_drawer`), never by unverified `datum_set` tag presence:
-//! one drawer-level walk with weakest-link attenuation, joined against the index. When
-//! `drawer_id` is omitted, each candidate document is checked against `AccessRequest::Read`.
+//! projection (`DocAccess::readable_in_drawer`), never by unverified index presence: one
+//! drawer-level walk with weakest-link attenuation, joined against the index. When `drawer_id`
+//! is omitted, each candidate document is checked against `AccessRequest::Read`.
 
 use super::*;
 use crate::index::datum_ref::DatumRefEdge;
 use crate::index::datum_ref::DatumRefQuery;
-use crate::index::datum_set::DatumRecord;
 use crate::index::datum_set::DatumRoute;
-use crate::index::datum_set::DatumSetQuery;
-
-impl From<DatumRecord> for QueriedDatum {
-    fn from(record: DatumRecord) -> Self {
-        Self {
-            doc_id: record.route.doc_id,
-            datum_key: record.route.datum_key,
-            doc_heads: record.doc_heads,
-            version: DatumVersion {
-                heads: record.datum_heads,
-                clock: record.clock,
-            },
-        }
-    }
-}
 
 trait DatumRefSelectorQuery {
     fn doc_id(&self) -> &DocId;
@@ -75,152 +59,6 @@ impl From<DatumRefEdge> for QueriedDatumRef {
 }
 
 impl DocsService {
-    pub(crate) async fn readable_in_drawer(
-        access_policy: &dyn DocAccess,
-        context: &RequestContext,
-        authority: &DomainAuthority<DocScope>,
-        drawer_id: &DocId,
-    ) -> Result<BTreeSet<DocId>, DocsError> {
-        match authority {
-            DomainAuthority::Identity(actor) => access_policy
-                .readable_in_drawer(context, *actor, drawer_id)
-                .await
-                .map_err(access_error)?
-                .ok_or(DocsError::Denied),
-            DomainAuthority::Scoped(scope) => {
-                let access = scope
-                    .drawers
-                    .get(drawer_id)
-                    .copied()
-                    .filter(|held| *held >= big_cabinet_core::drawer::DrawerAccess::Read)
-                    .ok_or(DocsError::Denied)?;
-                Ok(access_policy
-                    .scoped_docs(
-                        context,
-                        &BTreeMap::from([(drawer_id.clone(), access)]),
-                        None,
-                    )
-                    .await
-                    .map_err(access_error)?
-                    .into_iter()
-                    .filter_map(|(doc, held)| {
-                        (held >= big_cabinet_core::drawer::DrawerAccess::Read).then_some(doc)
-                    })
-                    .collect())
-            }
-        }
-    }
-
-    async fn query_datums(
-        &self,
-        context: &RequestContext,
-        params: QueryDatums,
-    ) -> Result<Vec<QueriedDatum>, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
-        let Some(store) = &self.datum_set else {
-            return Err(DocsError::Repository(
-                "datum-set index is not configured on this repository".into(),
-            ));
-        };
-        if let Some(drawer_id) = &params.drawer_id {
-            // The policy decides which documents the caller reads through the drawer; the index
-            // is only ever asked about that set. Which tables say what a drawer contains is the
-            // policy's business, not the index's.
-            let mut docs = Self::readable_in_drawer(
-                self.access.as_ref(),
-                context,
-                &caller.authority,
-                drawer_id,
-            )
-            .await?;
-            let (tag, key) = match &params.selector {
-                DatumSelector::All => (None, None),
-                DatumSelector::Tag { tag } => (Some(tag), None),
-                DatumSelector::Key { datum_key } => (None, Some(datum_key)),
-                DatumSelector::Doc { doc_id } => {
-                    docs.retain(|doc| doc == doc_id);
-                    (None, None)
-                }
-                DatumSelector::Route { doc_id, datum_key } => {
-                    docs.retain(|doc| doc == doc_id);
-                    (None, Some(datum_key))
-                }
-            };
-            let records = store
-                .query_docs(&docs, tag, key)
-                .await
-                .map_err(repository)?;
-            return Ok(records.into_iter().map(QueriedDatum::from).collect());
-        }
-
-        match params.selector {
-            DatumSelector::All => Err(DocsError::Denied),
-            DatumSelector::Doc { doc_id } => {
-                self.authorize(context, &caller.authority, AccessRequest::Read(&doc_id))
-                    .await?;
-                Ok(store
-                    .query(DatumSetQuery::Doc(doc_id))
-                    .await
-                    .map_err(repository)?
-                    .into_iter()
-                    .map(QueriedDatum::from)
-                    .collect())
-            }
-            DatumSelector::Route { doc_id, datum_key } => {
-                self.authorize(context, &caller.authority, AccessRequest::Read(&doc_id))
-                    .await?;
-                Ok(store
-                    .query(DatumSetQuery::Route(DatumRoute { doc_id, datum_key }))
-                    .await
-                    .map_err(repository)?
-                    .into_iter()
-                    .map(QueriedDatum::from)
-                    .collect())
-            }
-            DatumSelector::Tag { tag } => {
-                let records = store
-                    .query(DatumSetQuery::Tag(tag))
-                    .await
-                    .map_err(repository)?;
-                self.filter_records(context, &caller.authority, records)
-                    .await
-            }
-            DatumSelector::Key { datum_key } => {
-                let records = store
-                    .query(DatumSetQuery::Key(datum_key))
-                    .await
-                    .map_err(repository)?;
-                self.filter_records(context, &caller.authority, records)
-                    .await
-            }
-        }
-    }
-
-    async fn filter_records(
-        &self,
-        context: &RequestContext,
-        authority: &DomainAuthority<DocScope>,
-        records: Vec<DatumRecord>,
-    ) -> Result<Vec<QueriedDatum>, DocsError> {
-        let candidates = records
-            .iter()
-            .map(|record| record.route.doc_id.clone())
-            .collect();
-        let readable = Self::allowed_docs(
-            self.access.as_ref(),
-            context,
-            authority,
-            &candidates,
-            big_cabinet_core::drawer::DrawerAccess::Read,
-        )
-        .await?;
-        Ok(records
-            .into_iter()
-            .filter(|record| readable.contains(&record.route.doc_id))
-            .map(QueriedDatum::from)
-            .collect())
-    }
-
     async fn query_datum_refs(
         &self,
         context: &RequestContext,
@@ -311,18 +149,6 @@ impl DocsService {
     }
 }
 
-impl Handler<QueryDatums> for DocsService {
-    async fn call(
-        &self,
-        request: Envelope<QueryDatums>,
-    ) -> Result<ResponseEnvelope<Vec<QueriedDatum>>, DocsError> {
-        Ok(self
-            .query_datums(&request.context, request.params)
-            .await?
-            .into())
-    }
-}
-
 impl Handler<QueryDatumRefs> for DocsService {
     async fn call(
         &self,
@@ -338,31 +164,9 @@ impl Handler<QueryDatumRefs> for DocsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_cabinet_core::DatumTag;
 
     #[test]
-    fn query_datums_and_refs_wire_shapes() {
-        let query = QueryDatums {
-            capability: CapId::from_bytes([1; 16]),
-            drawer_id: Some(DocId::new([2; 32])),
-            selector: DatumSelector::Tag {
-                tag: DatumTag::new("org.example.note").unwrap(),
-            },
-        };
-        let value = serde_json::to_value(&query).unwrap();
-        assert_eq!(
-            value,
-            serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
-                "drawerId": DocId::new([2; 32]).to_string(),
-                "selector": {
-                    "by": "tag",
-                    "tag": "org.example.note",
-                },
-            })
-        );
-        assert_eq!(serde_json::from_value::<QueryDatums>(value).unwrap(), query);
-
+    fn query_datum_refs_wire_shape() {
         let refs = QueryDatumRefs {
             capability: CapId::from_bytes([1; 16]),
             drawer_id: None,

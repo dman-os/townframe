@@ -28,4 +28,4 @@ displaydoc.workspace = true
 
 #
 # wit
-wit-bindgen.workspace = true
+wit-bindgen = { workspace = true, features = ["async", "macros", "realloc"] }

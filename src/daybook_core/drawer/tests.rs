@@ -3883,9 +3883,9 @@ async fn the_drawer_commit_failure_pins_the_granted_not_registered_window() -> R
 /// Write `key` as the worker's own JWK facet (the same shape
 /// `Ctx::create_representation` stages) so the facet the claim names exists.
 fn staging_jwk_facet(
-    key: &crate::blobs::encrypt::MasterKey,
+    key: &big_blobs::encrypt::MasterKey,
 ) -> (daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw) {
-    let jwk = crate::blobs::encrypt::JwkOct::from_master_key(key);
+    let jwk = big_blobs::encrypt::JwkOct::from_master_key(key);
     let key = daybook_types::doc::FacetKey {
         tag: WellKnownFacetTag::Jwk.into(),
         id: "grp:testdomain".into(),
@@ -4180,11 +4180,10 @@ async fn write_claim(
             digest: crate::blobs::blob_id_to_digest_str(crate::blobs::BlobId::new([9_u8; 32])),
             length_octets: 4,
         },
-        content_encoding: crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
+        content_encoding: big_blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
         key_ref: format!("db+facet:///{}/{jwk_key}", staged.doc_id).parse()?,
         key_ref_heads: staged.branch_heads.clone(),
-        encoding_parameters: crate::blobs::encrypt::EncodingParams::DEFAULT
-            .to_encoding_parameters(),
+        encoding_parameters: big_blobs::encrypt::EncodingParams::DEFAULT.to_encoding_parameters(),
     };
     node.repo
         .update_at_heads_with_scope(
@@ -4299,7 +4298,7 @@ async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery
             idempotency_key: None,
         })
         .await?;
-    let key = crate::blobs::encrypt::MasterKey::random();
+    let key = big_blobs::encrypt::MasterKey::random();
     let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
     let staged = node
         .repo
@@ -4368,11 +4367,10 @@ async fn the_claim_scan_skips_malformed_cipher_blobs_and_keeps_valid_claims() ->
             digest: crate::blobs::blob_id_to_digest_str(crate::blobs::BlobId::new([9_u8; 32])),
             length_octets: 4,
         },
-        content_encoding: crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
+        content_encoding: big_blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
         key_ref: format!("db+facet:///{candidate}/grp:testdomain/key").parse()?,
         key_ref_heads: ChangeHashSet(Vec::new().into()),
-        encoding_parameters: crate::blobs::encrypt::EncodingParams::DEFAULT
-            .to_encoding_parameters(),
+        encoding_parameters: big_blobs::encrypt::EncodingParams::DEFAULT.to_encoding_parameters(),
     };
     let malformed_key = FacetKey {
         tag: WellKnownFacetTag::CipherBlob.into(),
@@ -4436,7 +4434,7 @@ async fn the_reconciliation_registers_a_found_claim_even_when_the_claim_scan_is_
             idempotency_key: None,
         })
         .await?;
-    let key = crate::blobs::encrypt::MasterKey::random();
+    let key = big_blobs::encrypt::MasterKey::random();
     let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
     let staged = node
         .repo
@@ -4639,7 +4637,7 @@ async fn cross_restart_reconciliation_replays_surviving_rows() -> Res<()> {
                 idempotency_key: None,
             })
             .await?;
-        let key = crate::blobs::encrypt::MasterKey::random();
+        let key = big_blobs::encrypt::MasterKey::random();
         let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
         let staged = node
             .repo

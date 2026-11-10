@@ -1,511 +1,583 @@
-//! ObserveDatums: doc-scoped observation over the ungated `datum_set` projection,
-//! filtered by the same read access as gated reads (ADR 009 §6).
+//! `PollDatums`: one long poll over the datum-set frontier that selects documents with a
+//! predicate and delivers the selected datums of the ones the caller may read (ADR 025).
+//!
+//! The frontier is the cursor, so replay from `after = 0` yields the current state and a
+//! later poll yields only what changed after `through`. The predicate is re-evaluated for the
+//! documents a page names, in SQL, so nothing a clause can select needs a document hydrated.
+//! Every event is stamped with the revision of the page it came from; the server keeps no
+//! state between polls.
 
 use super::*;
+use crate::drawer::entry_target;
 use crate::index::datum_set::DatumMembership;
 use crate::index::datum_set::DatumRoute;
+use crate::index::datum_set::DatumSetStore;
 use big_cabinet_core::DatumTag;
-use big_cabinet_core::authority::CapabilityStatus;
-use big_cabinet_core::authority::ObserveCapability;
+use big_cabinet_core::doc::DatumEvent;
+use big_cabinet_core::doc::DatumPage;
+use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::PollDatums;
+use big_cabinet_core::drawer::Drawer;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::DrawerChildEntry;
+use big_cabinet_core::drawer::DrawerDocEntry;
+use big_cabinet_core::drawer::DrawerMetaDoc;
+use big_cabinet_core::drawer::DrawerRoster;
+use big_cabinet_core::query::Anchor;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 use big_sync_core::keyed_frontier::FrontierEntry;
-use big_sync_core::keyed_frontier::KeyedFrontierError;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
-use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
-use futures::StreamExt;
+use std::num::NonZeroUsize;
+use std::time::Duration;
 
-impl Handler<ObserveDatums> for DocsService {
+/// The page size a request that names none asks for.
+const DEFAULT_PAGE: u32 = 256;
+
+/// The longest a poll holds an otherwise empty page open. ADR 023: the hold is pacing, so a
+/// caller that is revoked does not wait out a hold longer than this before re-authorizing.
+const MAX_HOLD: Duration = Duration::from_secs(15);
+
+/// The tags the drawer projection is fed by (ADR 024). A page carries them on the drawer doc, so
+/// a roster edit names the drawer, not the documents whose membership it changed.
+const ROSTER_TAGS: [&str; 5] = [
+    Drawer::ID,
+    DrawerRoster::ID,
+    DrawerDocEntry::ID,
+    DrawerChildEntry::ID,
+    DrawerMetaDoc::ID,
+];
+
+impl Handler<PollDatums> for DocsService {
     async fn call(
         &self,
-        request: Envelope<ObserveDatums>,
-    ) -> Result<ResponseEnvelope<EventStream<DatumObserved, DocsError>>, DocsError> {
+        request: Envelope<PollDatums>,
+    ) -> Result<ResponseEnvelope<DatumPage>, DocsError> {
         let params = request.params;
-        let authority_changes = self
-            .authority
-            .subscribe(
-                request.context.child(),
-                ObserveCapability {
-                    capability: params.capability,
-                },
-            )
-            .await
-            .map_err(authority_error)?;
         let caller = self.invocation(&request.context, params.capability).await?;
-        let changes = self.access.subscribe_changes();
-        let drawer_readable = match &params.scope {
-            ObserveScope::Doc { doc_id } => {
-                self.authorize(
-                    &request.context,
-                    &caller.authority,
-                    AccessRequest::Read(doc_id),
-                )
-                .await?;
-                None
-            }
-            ObserveScope::Tag { .. } => None,
-            ObserveScope::Drawer { drawer_id, .. } => {
-                let readable = Self::readable_in_drawer(
-                    self.access.as_ref(),
-                    &request.context,
-                    &caller.authority,
+        let anchors = params.predicate.anchors().map_err(|_| DocsError::Denied)?;
+        // An unanchored predicate is a node-wide request; a scoped caller may not make one.
+        if anchors.is_empty() && matches!(caller.authority, DomainAuthority::Scoped(_)) {
+            return Err(DocsError::Denied);
+        }
+        for anchor in &anchors {
+            match anchor {
+                Anchor::Doc { doc_id } => {
+                    self.authorize(
+                        &request.context,
+                        &caller.authority,
+                        AccessRequest::Read(doc_id),
+                    )
+                    .await?;
+                }
+                Anchor::Drawer {
                     drawer_id,
-                )
-                .await?;
-                Some(readable)
+                    at_least,
+                } => {
+                    self.authorize_drawer(
+                        &request.context,
+                        &caller.authority,
+                        drawer_id,
+                        *at_least,
+                    )
+                    .await?;
+                }
             }
-        };
-        let Some(store) = self.datum_set.clone() else {
+        }
+        let Some(store) = self.datum_set.as_ref() else {
             return Err(DocsError::Repository(
-                "datum observation is not configured on this repository".into(),
+                "datum polling is not configured on this repository".into(),
             ));
         };
-        let interest = match &params.scope {
-            ObserveScope::Doc { doc_id } => Some(
-                self.big_repo
-                    .interest(doc_id.clone())
-                    .await
-                    .map_err(repository)?,
-            ),
-            ObserveScope::Tag { .. } | ObserveScope::Drawer { .. } => None,
-        };
-        let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        let pump = DatumPump {
-            delivered: Delivered::new(&params.scope),
-            params,
-            repo: Arc::clone(&self.big_repo),
-            access: Arc::clone(&self.access),
-            capabilities: self.capabilities.clone(),
-            context: request.context.child(),
-            sender,
-            drawer_readable,
-            interest,
-        };
-        let tasks = self.tasks.clone();
-        let Some(_pump) = self
-            .tasks
-            .spawn(pump.run(store, tasks, authority_changes, changes))
-        else {
-            return Err(DocsError::Repository(
-                "documents service is shutting down".into(),
-            ));
-        };
-        let stream: EventStream<DatumObserved, DocsError> = Box::pin(futures::stream::unfold(
-            receiver,
-            |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
-        ));
-        Ok(stream.into())
-    }
-}
-
-/// Why a [`DatumPump`] stops.
-enum Halt {
-    /// The stream ends with this error as its last item.
-    Fail(DocsError),
-    /// The service is stopping or the consumer dropped the stream: nothing is left to tell.
-    Stop,
-}
-
-impl From<DocsError> for Halt {
-    fn from(error: DocsError) -> Self {
-        Self::Fail(error)
-    }
-}
-
-/// What one `ObserveDatums` stream has handed its consumer, so access changes are reported only
-/// about documents the consumer already knows of, and a re-published state is not repeated.
-struct Delivered {
-    /// Documents this stream has delivered an entry for. `AccessLost` is only meaningful — and
-    /// only non-leaking — for those: naming a document the observer never saw would disclose
-    /// its existence. A `Doc` scope names its document itself, so it starts delivered.
-    docs: BTreeSet<DocId>,
-    /// The first datum key delivered per document, which [`Self::access_lost`] reports under.
-    first_keys: BTreeMap<DocId, DatumKey>,
-    last_present: BTreeMap<(DocId, DatumKey), (Vec<ChangeHash>, DatumVersion)>,
-    /// Delivered documents whose loss of access has been reported and not yet restored.
-    lost: BTreeSet<DocId>,
-}
-
-impl Delivered {
-    fn new(scope: &ObserveScope) -> Self {
-        let mut docs = BTreeSet::new();
-        if let ObserveScope::Doc { doc_id } = scope {
-            docs.insert(doc_id.clone());
-        }
-        Self {
-            docs,
-            first_keys: BTreeMap::new(),
-            last_present: BTreeMap::new(),
-            lost: BTreeSet::new(),
-        }
-    }
-
-    /// Forgets the present datums of a document the caller can no longer read, and reports
-    /// whether the stream owes it an `AccessLost`: only for a delivered document, once per loss.
-    fn lose(&mut self, doc_id: &DocId) -> bool {
-        self.last_present.retain(|(doc, _), _| doc != doc_id);
-        self.docs.contains(doc_id) && self.lost.insert(doc_id.clone())
-    }
-
-    /// The `AccessLost` an access change, rather than a frontier entry, owes `doc_id`: reported
-    /// under the first datum key the stream delivered for it.
-    fn access_lost(&mut self, revision: u64, doc_id: DocId) -> Option<DatumObserved> {
-        if self.lose(&doc_id)
-            && let Some(datum_key) = self.first_keys.get(&doc_id).cloned()
-        {
-            return Some(DatumObserved::Entry {
-                revision,
-                doc_id,
-                datum_key,
-                datum: ObservedDatum::AccessLost,
-            });
-        }
-        None
-    }
-
-    /// Records a readable datum's membership and returns what to deliver for it, or `None` when
-    /// it repeats the datum's last delivered present state.
-    fn admit(&mut self, route: &DatumRoute, membership: DatumMembership) -> Option<ObservedDatum> {
-        let datum = match membership {
-            DatumMembership::Present {
-                doc_heads,
-                datum_heads,
-                clock,
-            } => {
-                let version = DatumVersion {
-                    heads: datum_heads,
-                    clock,
-                };
-                let pair = (route.doc_id.clone(), route.datum_key.clone());
-                let state = (doc_heads.clone(), version.clone());
-                if self.last_present.get(&pair) == Some(&state) {
-                    return None;
-                }
-                self.last_present.insert(pair, state);
-                ObservedDatum::Present { doc_heads, version }
-            }
-            DatumMembership::Removed {
-                doc_heads,
-                datum_heads,
-                clock,
-            } => {
-                self.last_present
-                    .remove(&(route.doc_id.clone(), route.datum_key.clone()));
-                ObservedDatum::Removed {
-                    doc_heads,
-                    version: DatumVersion {
-                        heads: datum_heads,
-                        clock,
-                    },
-                }
-            }
-        };
-        self.docs.insert(route.doc_id.clone());
-        self.first_keys
-            .entry(route.doc_id.clone())
-            .or_insert_with(|| route.datum_key.clone());
-        self.lost.remove(&route.doc_id);
-        Some(datum)
-    }
-}
-
-/// The task behind one `ObserveDatums` stream: it replays and then follows the datum-set
-/// frontier, and re-evaluates read access whenever the capability or the access policy changes.
-struct DatumPump {
-    params: ObserveDatums,
-    repo: SharedBigRepo,
-    access: Arc<dyn DocAccess>,
-    capabilities: DomainCapabilities,
-    context: RequestContext,
-    sender: tokio::sync::mpsc::Sender<Result<DatumObserved, DocsError>>,
-    /// The readable documents of a `Drawer` scope, kept current across access changes; `None`
-    /// for the other scopes, which check each batch of entries instead.
-    drawer_readable: Option<BTreeSet<DocId>>,
-    /// Keeps a `Doc` scope's document synced while the caller can read it.
-    interest: Option<big_repo::DocInterest>,
-    delivered: Delivered,
-}
-
-impl DatumPump {
-    async fn run(
-        mut self,
-        store: Arc<DatumSetStore>,
-        tasks: Spawner,
-        authority_changes: service_utils_rs::ClientStream<ObserveCapability>,
-        changes: Option<tokio::sync::watch::Receiver<u64>>,
-    ) {
-        if let Err(Halt::Fail(error)) = self.pump(&store, &tasks, authority_changes, changes).await
-        {
-            drop(self.sender.send(Err(error)).await);
-        }
-    }
-
-    async fn pump(
-        &mut self,
-        store: &DatumSetStore,
-        tasks: &Spawner,
-        mut authority_changes: service_utils_rs::ClientStream<ObserveCapability>,
-        mut changes: Option<tokio::sync::watch::Receiver<u64>>,
-    ) -> Result<(), Halt> {
-        enum Wake {
-            Frontier(
-                Result<
-                    RevisionRead<u64, FrontierEntry<DatumRoute, DatumMembership>>,
-                    KeyedFrontierError,
-                >,
-            ),
-            MembershipChanged,
-        }
-        // Tag scope (and tag-filtered Drawer scope) opens only its own frontier namespace; Doc
-        // and unfiltered Drawer scopes open everything and filter by document below.
-        let mut reader = match &self.params.scope {
-            ObserveScope::Doc { .. } | ObserveScope::Drawer { tag: None, .. } => {
-                store.open_all(self.params.after).await
-            }
-            ObserveScope::Tag { tag } | ObserveScope::Drawer { tag: Some(tag), .. } => {
-                store.open_tags([(tag.clone(), self.params.after)]).await
-            }
-        }
-        .map_err(repository)?;
-        let mut replay_complete = false;
-        loop {
-            let wake = tokio::select! {
-                _ = tasks.cancelled() => return Err(Halt::Stop),
-                _ = self.sender.closed() => return Err(Halt::Stop),
-                Ok(()) = async {
-                    match changes.as_mut() {
-                        Some(rx) => rx.changed().await,
-                        None => std::future::pending().await,
-                    }
-                }, if replay_complete => Wake::MembershipChanged,
-                change = authority_changes.next() => match change {
-                    Some(Ok(CapabilityStatus::Live)) => Wake::MembershipChanged,
-                    Some(Ok(CapabilityStatus::Retracted)) => return Err(DocsError::Denied.into()),
-                    Some(Err(error)) => return Err(authority_error(error).into()),
-                    None => return Err(DocsError::AuthorityUnavailable(
-                        "authority change stream ended without retraction".into(),
-                    ).into()),
-                },
-                read = reader.next(RevisionReadLimits::default()) => Wake::Frontier(read),
-            };
-            let caller = self
-                .capabilities
-                .resolve::<DocScope>(&self.context, self.params.capability)
-                .await
-                .map_err(authority_error)?;
-            let entries = match wake {
-                Wake::MembershipChanged if self.drawer_readable.is_none() => {
-                    self.recheck_delivered(store, &caller.authority).await?
-                }
-                Wake::MembershipChanged => self.recheck_drawer(store, &caller.authority).await?,
-                Wake::Frontier(Ok(RevisionRead::Entries { entries, .. })) => entries,
-                Wake::Frontier(Ok(RevisionRead::ReplayComplete { through })) => {
-                    replay_complete = true;
-                    self.emit(DatumObserved::ReplayComplete { through }).await?;
-                    continue;
-                }
-                Wake::Frontier(Err(error)) => return Err(repository(error).into()),
-            };
-            self.deliver(entries, &caller.authority).await?;
-        }
-    }
-
-    async fn emit(&self, event: DatumObserved) -> Result<(), Halt> {
-        self.sender.send(Ok(event)).await.map_err(|_| Halt::Stop)
-    }
-
-    /// Re-checks read access to every delivered document of a `Doc` or `Tag` scope after an
-    /// access change. Lost documents get their `AccessLost`; the current datums of documents
-    /// readable again are returned for delivery.
-    async fn recheck_delivered(
-        &mut self,
-        store: &DatumSetStore,
-        authority: &DomainAuthority<DocScope>,
-    ) -> Result<Vec<FrontierEntry<DatumRoute, DatumMembership>>, Halt> {
-        let revision = store.latest_revision().await.map_err(repository)?;
-        let readable = DocsService::allowed_docs(
-            self.access.as_ref(),
-            &self.context,
-            authority,
-            &self.delivered.docs,
-            big_cabinet_core::drawer::DrawerAccess::Read,
-        )
-        .await?;
-        // A `Doc` scope has delivered only its own document.
-        if let ObserveScope::Doc { doc_id } = &self.params.scope {
-            if !readable.contains(doc_id) {
-                self.interest = None;
-            } else if self.interest.is_none() {
-                self.interest = Some(
-                    self.repo
+        // A held poll keeps a named document in sync for its duration; the grace on a dropped
+        // interest is longer than `MAX_HOLD`, so a caller that keeps polling stays synced.
+        let mut interests = Vec::new();
+        for anchor in &anchors {
+            if let Anchor::Doc { doc_id } = anchor {
+                interests.push(
+                    self.big_repo
                         .interest(doc_id.clone())
                         .await
                         .map_err(repository)?,
                 );
             }
         }
-        let restored: BTreeSet<DocId> = self
-            .delivered
-            .lost
-            .intersection(&readable)
-            .cloned()
-            .collect();
-        let revoked: Vec<DocId> = self.delivered.docs.difference(&readable).cloned().collect();
-        for doc_id in revoked {
-            if let Some(event) = self.delivered.access_lost(revision, doc_id) {
-                self.emit(event).await?;
-            }
-        }
-        let tag = match &self.params.scope {
-            ObserveScope::Tag { tag } => Some(tag),
-            ObserveScope::Doc { .. } | ObserveScope::Drawer { .. } => None,
-        };
-        Self::present_entries(store, &restored, tag, revision).await
+        let page = self.poll_datums(params, store).await?;
+        drop(interests);
+        Ok(page.into())
     }
+}
 
-    /// Re-reads a `Drawer` scope's readable documents after an access change. Documents that
-    /// left it get their `AccessLost`; the current datums of documents that joined are returned
-    /// for delivery.
-    async fn recheck_drawer(
-        &mut self,
-        store: &DatumSetStore,
+impl DocsService {
+    /// Requires the caller to hold at least `at_least` on the anchor drawer. The reach SQL in
+    /// the predicate attenuates documents by this same level, so the check is the authorization
+    /// and not a post-filter.
+    async fn authorize_drawer(
+        &self,
+        context: &RequestContext,
         authority: &DomainAuthority<DocScope>,
-    ) -> Result<Vec<FrontierEntry<DatumRoute, DatumMembership>>, Halt> {
-        let ObserveScope::Drawer { drawer_id, tag } = &self.params.scope else {
-            return Ok(Vec::new());
-        };
-        let next_readable = match DocsService::readable_in_drawer(
-            self.access.as_ref(),
-            &self.context,
-            authority,
-            drawer_id,
-        )
-        .await
-        {
-            Ok(docs) => docs,
-            Err(DocsError::Denied) => BTreeSet::new(),
-            Err(error) => return Err(error.into()),
-        };
-        let revision = store.latest_revision().await.map_err(repository)?;
-        let current_readable = self
-            .drawer_readable
-            .as_mut()
-            .expect("drawer scope initializes readable set");
-        let removed_docs: Vec<DocId> = current_readable
-            .difference(&next_readable)
-            .cloned()
-            .collect();
-        let added_docs: BTreeSet<DocId> = next_readable
-            .difference(current_readable)
-            .cloned()
-            .collect();
-        *current_readable = next_readable;
-        for doc_id in removed_docs {
-            if let Some(event) = self.delivered.access_lost(revision, doc_id) {
-                self.emit(event).await?;
+        drawer_id: &DocId,
+        at_least: big_cabinet_core::drawer::DrawerAccess,
+    ) -> Result<(), DocsError> {
+        match authority {
+            DomainAuthority::Scoped(scope) => scope
+                .drawers
+                .get(drawer_id)
+                .copied()
+                .filter(|held| *held >= at_least)
+                .map(|_| ())
+                .ok_or(DocsError::Denied),
+            DomainAuthority::Identity(actor) => {
+                let readable = self
+                    .access
+                    .readable_in_drawer(context, *actor, drawer_id)
+                    .await
+                    .map_err(access_error)?;
+                if readable.is_none() {
+                    return Err(DocsError::Denied);
+                }
+                // The predicate's reach CTE is rooted at `at_least`, which a caller can only
+                // ask for if it holds that level. `readable_in_drawer` proves `Read`; anything
+                // stronger is proved by the drawer policy itself.
+                if at_least > big_cabinet_core::drawer::DrawerAccess::Read {
+                    return Err(DocsError::Denied);
+                }
+                Ok(())
             }
         }
-        Self::present_entries(store, &added_docs, tag.as_ref(), revision).await
     }
 
-    /// The current datums of `docs`, as frontier entries stamped with `revision`.
-    async fn present_entries(
+    async fn poll_datums(
+        &self,
+        params: PollDatums,
         store: &DatumSetStore,
-        docs: &BTreeSet<DocId>,
-        tag: Option<&DatumTag>,
+    ) -> Result<DatumPage, DocsError> {
+        let limit = NonZeroUsize::new(
+            usize::try_from(if params.limit == 0 {
+                DEFAULT_PAGE
+            } else {
+                params.limit
+            })
+            .unwrap_or(usize::MAX),
+        )
+        .unwrap_or(NonZeroUsize::MIN);
+        let selection = &params.datums;
+        let all = selection.tags().is_none();
+        // The reader opens on the selection's tags, the tags the predicate names, and the roster
+        // tags: a roster edit is the only frontier fact that can change membership, so a poll
+        // that left those namespaces out would never see a document join or leave.
+        let mut namespaces: BTreeSet<DatumTag> = params.predicate.tags();
+        if let Some(tags) = selection.tags() {
+            namespaces.extend(tags.iter().cloned());
+        }
+        if let DatumSelection::Of { keys, .. } = selection {
+            namespaces.extend(keys.iter().map(|key| key.tag().clone()));
+        }
+        if !predicate_drawers(&params.predicate).is_empty() {
+            namespaces.extend(
+                ROSTER_TAGS
+                    .iter()
+                    .map(|tag| DatumTag::new(*tag).expect("a roster tag is well formed")),
+            );
+        }
+        let mut reader = if all {
+            store.open_all(params.after).await
+        } else {
+            store
+                .open_tags(namespaces.into_iter().map(|tag| (tag, params.after)))
+                .await
+        }
+        .map_err(repository)?;
+
+        let limit_reads = RevisionReadLimits { max_entries: limit };
+        let mut events = Vec::new();
+        let mut through = params.after;
+        let mut caught_up = false;
+        let mut depth: BTreeMap<DocId, bool> = BTreeMap::new();
+        loop {
+            match reader.next(limit_reads).await.map_err(repository)? {
+                RevisionRead::ReplayComplete { through: boundary } => {
+                    through = through.max(boundary);
+                    caught_up = true;
+                    break;
+                }
+                RevisionRead::Entries { revision, entries } => {
+                    through = through.max(revision);
+                    self.page_events(
+                        store,
+                        &params.predicate,
+                        selection,
+                        revision,
+                        entries,
+                        &mut depth,
+                        &mut events,
+                    )
+                    .await?;
+                    if events.len() >= limit.get() {
+                        break;
+                    }
+                }
+            }
+        }
+        let hold = Duration::from_millis(u64::from(params.hold_ms)).min(MAX_HOLD);
+        if caught_up && events.is_empty() && !hold.is_zero() {
+            // A live revision may only touch documents the predicate does not select, so
+            // keep reading against the same deadline until there is something to answer.
+            let deadline = tokio::time::Instant::now() + hold;
+            // The hold expiring with nothing to answer ends the loop as a normal empty page,
+            // not an error.
+            while let Ok(read) = tokio::time::timeout_at(deadline, reader.next(limit_reads)).await {
+                let read = read.map_err(repository)?;
+                match read {
+                    RevisionRead::Entries { revision, entries } => {
+                        through = through.max(revision);
+                        self.page_events(
+                            store,
+                            &params.predicate,
+                            selection,
+                            revision,
+                            entries,
+                            &mut depth,
+                            &mut events,
+                        )
+                        .await?;
+                        if !events.is_empty() {
+                            break;
+                        }
+                    }
+                    RevisionRead::ReplayComplete { .. } => {
+                        unreachable!("a frontier reader emits its replay boundary once")
+                    }
+                }
+            }
+        }
+        Ok(DatumPage {
+            events,
+            through,
+            caught_up,
+        })
+    }
+
+    /// Turns one revision's frontier entries into `enter`, `datum` and `leave` events.
+    ///
+    /// A page carries two kinds of fact. A document's own datum entry says that document
+    /// changed. A roster entry says a drawer projection changed: the document whose membership
+    /// it moved then joins or leaves the predicate without any entry of its own, so the poll
+    /// re-evaluates the documents the entry affects. Without that, a caller watching a drawer
+    /// would never see an already-settled document added to it, nor see it leave when the
+    /// roster withdrew its access.
+    ///
+    /// Documents are deduplicated: the first event for a document that matches the predicate
+    /// delivers its whole selected state as `enter`, and later entries for that document deliver
+    /// only the changed datum. A document that no longer matches leaves.
+    #[expect(clippy::too_many_arguments, reason = "the page context is one unit")]
+    async fn page_events(
+        &self,
+        store: &DatumSetStore,
+        predicate: &Predicate,
+        selection: &DatumSelection,
         revision: u64,
-    ) -> Result<Vec<FrontierEntry<DatumRoute, DatumMembership>>, Halt> {
-        let records = store
-            .query_docs(docs, tag, None)
+        entries: Vec<FrontierEntry<DatumRoute, DatumMembership>>,
+        depth: &mut BTreeMap<DocId, bool>,
+        events: &mut Vec<DatumEvent>,
+    ) -> Result<(), DocsError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let drawers = predicate_drawers(predicate);
+        let predicate_tags = predicate.tags();
+        let sole_doc = predicate.sole_doc();
+        let mut changed: BTreeMap<DocId, Vec<FrontierEntry<DatumRoute, DatumMembership>>> =
+            BTreeMap::new();
+        let mut affected: BTreeSet<DocId> = BTreeSet::new();
+        for entry in entries {
+            if ROSTER_TAGS.contains(&entry.key.datum_key.tag().as_str()) {
+                if !drawers.is_empty() {
+                    affected.extend(
+                        Self::roster_affected(
+                            store,
+                            &entry.key.doc_id,
+                            &entry.key.datum_key,
+                            &drawers,
+                        )
+                        .await?,
+                    );
+                }
+                if !Self::selects(selection, &entry.key.datum_key)
+                    && !predicate_tags.contains(entry.key.datum_key.tag())
+                {
+                    continue;
+                }
+            }
+            // A predicate that names one document can only match that document, so the frontier
+            // entries of every other document on the node are not this poll's business.
+            if sole_doc.is_some_and(|only| *only != entry.key.doc_id) {
+                continue;
+            }
+            changed
+                .entry(entry.key.doc_id.clone())
+                .or_default()
+                .push(entry);
+        }
+        let own: BTreeSet<DocId> = changed.keys().cloned().collect();
+        let candidates: BTreeSet<DocId> = own.union(&affected).cloned().collect();
+        let matching = store
+            .matching_docs(predicate, &candidates)
             .await
             .map_err(repository)?;
-        Ok(records
-            .into_iter()
-            .map(|record| FrontierEntry {
-                revision,
-                key: record.route,
-                value: Some(DatumMembership::Present {
-                    doc_heads: record.doc_heads,
-                    datum_heads: record.datum_heads,
-                    clock: record.clock,
-                }),
-            })
-            .collect())
-    }
-
-    /// Delivers the entries in scope that the caller can read. An unreadable entry of a
-    /// delivered document raises one `AccessLost` per loss; one of a never-delivered document
-    /// is dropped silently.
-    async fn deliver(
-        &mut self,
-        entries: Vec<FrontierEntry<DatumRoute, DatumMembership>>,
-        authority: &DomainAuthority<DocScope>,
-    ) -> Result<(), Halt> {
-        let entries: Vec<_> = entries
-            .into_iter()
-            .filter(|entry| match &self.params.scope {
-                ObserveScope::Doc { doc_id } => &entry.key.doc_id == doc_id,
-                ObserveScope::Tag { tag } => entry.key.datum_key.tag() == tag,
-                ObserveScope::Drawer { tag, .. } => tag
-                    .as_ref()
-                    .is_none_or(|tag| entry.key.datum_key.tag() == tag),
-            })
-            .collect();
-        let batch_readable;
-        let readable = if let Some(readable) = &self.drawer_readable {
-            readable
-        } else {
-            let candidates = entries
-                .iter()
-                .map(|entry| entry.key.doc_id.clone())
-                .collect();
-            batch_readable = DocsService::allowed_docs(
-                self.access.as_ref(),
-                &self.context,
-                authority,
-                &candidates,
-                big_cabinet_core::drawer::DrawerAccess::Read,
-            )
-            .await?;
-            &batch_readable
-        };
-        for entry in entries {
-            let FrontierEntry {
-                revision,
-                key: route,
-                value,
-            } = entry;
-            if !readable.contains(&route.doc_id) {
-                if self.delivered.lose(&route.doc_id) {
-                    self.emit(DatumObserved::Entry {
-                        revision,
-                        doc_id: route.doc_id,
-                        datum_key: route.datum_key,
-                        datum: ObservedDatum::AccessLost,
-                    })
-                    .await?;
+        for (doc_id, entries) in changed {
+            if !matching.contains(&doc_id) {
+                let known = depth.insert(doc_id.clone(), false);
+                if known != Some(false) {
+                    events.push(DatumEvent::Leave { revision, doc_id });
                 }
                 continue;
             }
-            // The frontier only ever applies membership values; a tombstone row here means the
-            // projection broke its own contract, so fail the stream rather than forge a clock-0
-            // removal.
-            let Some(membership) = value else {
-                return Err(
-                    repository("datum-set frontier published an entry without membership").into(),
-                );
-            };
-            let Some(datum) = self.delivered.admit(&route, membership) else {
+            let entered = depth.insert(doc_id.clone(), true) == Some(true);
+            if !entered {
+                // A doc first named by this page delivers its current selected state as
+                // `enter`. Removals are absent from that state, so a resumed caller that
+                // already knew the doc would otherwise never see them; deliver those from
+                // the page's own entries.
+                let datums = Self::selected_datums(store, &doc_id, selection).await?;
+                events.push(DatumEvent::Enter {
+                    revision,
+                    doc_id: doc_id.clone(),
+                    datums,
+                });
+            }
+            for entry in entries {
+                if !Self::selects(selection, &entry.key.datum_key) {
+                    continue;
+                }
+                let Some(membership) = entry.value else {
+                    return Err(repository(
+                        "datum-set frontier published an entry without membership",
+                    ));
+                };
+                // A present entry already reached the caller inside `enter`; only a removal
+                // is new information on a doc whose current state was just delivered.
+                if !matches!(membership, DatumMembership::Removed { .. }) {
+                    continue;
+                }
+                let datum = observed(membership);
+                events.push(DatumEvent::Datum {
+                    revision,
+                    doc_id: doc_id.clone(),
+                    datum_key: entry.key.datum_key,
+                    datum,
+                });
+            }
+        }
+        // A membership move names only the drawer, so these documents have no entry in this
+        // page to carry the event. The predicate decides both directions: a document that now
+        // matches enters with its current selected state, one that stopped matching leaves.
+        for doc_id in affected {
+            if own.contains(&doc_id) {
                 continue;
-            };
-            self.emit(DatumObserved::Entry {
-                revision,
-                doc_id: route.doc_id,
-                datum_key: route.datum_key,
-                datum,
-            })
-            .await?;
+            }
+            if matching.contains(&doc_id) {
+                let entered = depth.insert(doc_id.clone(), true) == Some(true);
+                if !entered {
+                    let datums = Self::selected_datums(store, &doc_id, selection).await?;
+                    events.push(DatumEvent::Enter {
+                        revision,
+                        doc_id,
+                        datums,
+                    });
+                }
+            } else {
+                let known = depth.insert(doc_id.clone(), false);
+                if known != Some(false) {
+                    events.push(DatumEvent::Leave { revision, doc_id });
+                }
+            }
         }
         Ok(())
     }
+
+    /// The documents a roster entry can change membership for.
+    ///
+    /// A `docEntry` names its document in the key, so adding, narrowing or removing it
+    /// re-evaluates exactly that document. A `childEntry` names a drawer whose link moved:
+    /// transitively the child's whole reachable set joins or leaves with it, so that set is
+    /// re-evaluated even after the link is gone (the child still reaches its own documents);
+    /// non-transitively only a self-doc child moves, as one of the drawer's own docs. The
+    /// drawer's descriptor, roster and meta datums can change what its layout reaches, so
+    /// those re-evaluate the drawer's own reach at the clause's transitivity.
+    ///
+    /// A roster edit is only re-evaluated when its drawer and the predicate's drawer can see
+    /// each other in the containment tree, so an unrelated drawer's edit costs nothing.
+    async fn roster_affected(
+        store: &DatumSetStore,
+        owner: &DocId,
+        key: &DatumKey,
+        drawers: &[(DocId, bool, DrawerAccess)],
+    ) -> Result<BTreeSet<DocId>, DocsError> {
+        let target = entry_target(key);
+        let owner_ancestors = store.drawer_ancestors(owner).await.map_err(repository)?;
+        let mut affected = BTreeSet::new();
+        for (drawer_id, transitive, at_least) in drawers {
+            let related = owner == drawer_id
+                || owner_ancestors.contains(drawer_id)
+                || store
+                    .drawer_ancestors(drawer_id)
+                    .await
+                    .map_err(repository)?
+                    .contains(owner);
+            if !related {
+                continue;
+            }
+            // Non-transitively a drawer reaches only its own entries and its own self-doc
+            // children (ADR 026 §6), so a roster move in a descendant drawer cannot move
+            // membership here at all. Pulling the descendant's reachable set in anyway
+            // would make `page_events` emit `leave` for documents that never entered.
+            if !transitive && owner != drawer_id {
+                continue;
+            }
+            match key.tag().as_str() {
+                DrawerDocEntry::ID => {
+                    if let Some(doc_id) = &target {
+                        affected.insert(doc_id.clone());
+                    }
+                }
+                DrawerChildEntry::ID => {
+                    if let Some(child) = &target {
+                        if *transitive {
+                            affected.extend(
+                                store
+                                    .reachable_docs(child, true, *at_least)
+                                    .await
+                                    .map_err(repository)?,
+                            );
+                        } else if store.is_self_doc(child).await.map_err(repository)? {
+                            affected.insert(child.clone());
+                        }
+                    }
+                }
+                _ => {
+                    affected.extend(
+                        store
+                            .reachable_docs(owner, *transitive, *at_least)
+                            .await
+                            .map_err(repository)?,
+                    );
+                }
+            }
+        }
+        Ok(affected)
+    }
+
+    /// The caller's current selected datums of one document, keyed by datum key.
+    async fn selected_datums(
+        store: &DatumSetStore,
+        doc_id: &DocId,
+        selection: &DatumSelection,
+    ) -> Result<BTreeMap<DatumKey, ObservedDatum>, DocsError> {
+        let docs = BTreeSet::from([doc_id.clone()]);
+        let mut records = Vec::new();
+        match selection {
+            DatumSelection::All => {
+                records.extend(
+                    store
+                        .query_docs(&docs, None, None)
+                        .await
+                        .map_err(repository)?,
+                );
+            }
+            DatumSelection::Of { tags, keys } => {
+                for tag in tags {
+                    records.extend(
+                        store
+                            .query_docs(&docs, Some(tag), None)
+                            .await
+                            .map_err(repository)?,
+                    );
+                }
+                for key in keys {
+                    records.extend(
+                        store
+                            .query_docs(&docs, None, Some(key))
+                            .await
+                            .map_err(repository)?,
+                    );
+                }
+            }
+        }
+        let mut datums = BTreeMap::new();
+        for record in records {
+            datums.insert(
+                record.route.datum_key,
+                ObservedDatum::Present {
+                    doc_heads: record.doc_heads,
+                    version: DatumVersion {
+                        heads: record.datum_heads,
+                        clock: record.clock,
+                    },
+                },
+            );
+        }
+        Ok(datums)
+    }
+
+    fn selects(selection: &DatumSelection, key: &DatumKey) -> bool {
+        selection.selects(key)
+    }
+}
+
+fn observed(membership: DatumMembership) -> ObservedDatum {
+    match membership {
+        DatumMembership::Present {
+            doc_heads,
+            datum_heads,
+            clock,
+        } => ObservedDatum::Present {
+            doc_heads,
+            version: DatumVersion {
+                heads: datum_heads,
+                clock,
+            },
+        },
+        DatumMembership::Removed {
+            doc_heads,
+            datum_heads,
+            clock,
+        } => ObservedDatum::Removed {
+            doc_heads,
+            version: DatumVersion {
+                heads: datum_heads,
+                clock,
+            },
+        },
+    }
+}
+
+/// Every `InDrawer` clause the predicate names, nested ones included, with the transitivity
+/// and level it asks for. A roster change is re-evaluated against this set: a drawer under a `Not` or an `Or`
+/// still decides membership, so collecting only the anchors would miss it.
+fn predicate_drawers(predicate: &Predicate) -> Vec<(DocId, bool, DrawerAccess)> {
+    fn collect(predicate: &Predicate, drawers: &mut Vec<(DocId, bool, DrawerAccess)>) {
+        match predicate {
+            Predicate::InDrawer {
+                drawer_id,
+                transitive,
+                at_least,
+            } => drawers.push((drawer_id.clone(), *transitive, *at_least)),
+            Predicate::And { clauses } | Predicate::Or { clauses } => {
+                for clause in clauses {
+                    collect(clause, drawers);
+                }
+            }
+            Predicate::Not { inner } => collect(inner, drawers),
+            Predicate::HasTag { .. }
+            | Predicate::HasKey { .. }
+            | Predicate::IsDoc { .. }
+            | Predicate::HasReferenceTo { .. } => {}
+        }
+    }
+    let mut drawers = Vec::new();
+    collect(predicate, &mut drawers);
+    drawers
 }

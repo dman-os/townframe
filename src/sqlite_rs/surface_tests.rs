@@ -677,3 +677,55 @@ async fn migration_status_is_read_only_and_embedded_migrations_apply() -> SqlRes
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn ephemeral_directory_is_removed_when_last_handle_drops() -> SqlResult<()> {
+    let runtime = SqliteRuntime::new(Default::default());
+    let database = runtime.ephemeral(MIGRATIONS).expect("ephemeral");
+    let directory = database
+        .inner
+        .path
+        .parent()
+        .expect("database path has a parent")
+        .to_path_buf();
+    database
+        .execute_batch("CREATE TABLE retained (id INTEGER)")
+        .await?;
+    let clone = database.clone();
+    assert_eq!(runtime.live_database_count(), 1);
+    drop(database);
+    assert!(directory.exists(), "a live clone retains the directory");
+    drop(clone);
+    assert_eq!(runtime.live_database_count(), 0);
+    assert!(
+        !directory.exists(),
+        "ephemeral directory leaked: {directory:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn drain_workers_waits_for_cancelled_jobs_on_every_worker() -> SqlResult<()> {
+    let runtime = SqliteRuntime::new(RuntimeConfig {
+        workers: 3,
+        ..Default::default()
+    });
+    let database = runtime.ephemeral(&[]).expect("test db");
+    let directory = database
+        .inner
+        .path
+        .parent()
+        .expect("database parent")
+        .to_owned();
+    let blockers = tests::block_workers(&runtime).await;
+    let mut pending = Box::pin(database.query("SELECT 1", ()));
+    assert_pending(pending.as_mut()).await;
+    drop(pending);
+    drop(database);
+    assert_eq!(runtime.live_database_count(), 1);
+    drop(blockers);
+    runtime.drain_workers().await;
+    assert_eq!(runtime.live_database_count(), 0);
+    assert!(!directory.exists());
+    Ok(())
+}

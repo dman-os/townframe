@@ -356,6 +356,26 @@ impl RuntimeInner {
         }
     }
 
+    async fn drain_workers(&self) {
+        let workers = self.cfg.workers.max(1);
+        let rendezvous = Arc::new(std::sync::Barrier::new(workers));
+        let mut done = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let (reply, replied) = oneshot::channel();
+            let rendezvous = Arc::clone(&rendezvous);
+            self.tx
+                .send(Box::new(move || {
+                    rendezvous.wait();
+                    reply.send(()).expect("drain_workers receiver dropped");
+                }))
+                .expect("sqlite worker pool closed while its runtime is alive");
+            done.push(replied);
+        }
+        for replied in done {
+            replied.await.expect("sqlite worker dropped a drain job");
+        }
+    }
+
     #[cfg(test)]
     fn try_call<F>(&self, operation: F) -> bool
     where
@@ -381,13 +401,32 @@ impl ConnSlot {
     ) -> SqlResult<Self> {
         let conn = RusConnection::open(path).map_err(SqlError::from)?;
         for (pragma, value) in [
-            ("journal_mode", "WAL"),
-            ("foreign_keys", "ON"),
             ("busy_timeout", "5000"),
+            ("foreign_keys", "ON"),
             ("synchronous", "NORMAL"),
         ] {
             conn.pragma_update(None, pragma, value)
                 .map_err(SqlError::from)?;
+        }
+        // Two connections opened concurrently on the same fresh file both try
+        // the rollback->WAL transition. SQLite refuses the loser with
+        // `SQLITE_BUSY` without consulting the busy handler, so retry until
+        // the winner's conversion is visible. The busy handler above still
+        // covers the case where the winner holds a write transaction.
+        for attempt in 0..100 {
+            match conn.pragma_update(None, "journal_mode", "WAL") {
+                Ok(()) => break,
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                    if attempt < 99
+                        && matches!(
+                            err.code,
+                            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                        ) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
         conn.pragma_update(None, "cache_size", cfg.cache_size_kib)
             .map_err(SqlError::from)?;
@@ -591,6 +630,20 @@ impl Database {
         let params = params.into_params();
         self.run(true, move |conn| run_execute(conn, &sql, &params))
             .await
+    }
+
+    /// Resolves once every job queued before this call has finished on the
+    /// workers.
+    ///
+    /// A statement cancelled by its caller (an aborted task, a dropped
+    /// future) still runs to completion on a worker, and its closure owns the
+    /// lease, and so a database handle, until it does. A handle count or an
+    /// ephemeral directory observed right after such a cancellation is
+    /// therefore still retained; this is the barrier that makes it
+    /// deterministic. It parks one rendezvous job per worker, which can only
+    /// all start once each worker is done with whatever it held before.
+    pub async fn drain_workers(&self) {
+        self.runtime.drain_workers().await;
     }
 
     /// Execute a batch of statements with no parameters (DDL, pragmas).
@@ -851,6 +904,26 @@ impl SqliteRuntime {
         let directory = tempfile::tempdir().wrap_err("failed creating sqlite temp directory")?;
         let path = directory.path().join("database.sqlite");
         Ok(self.register(path, migrations, "_sqlite_rs_migrations", Some(directory)))
+    }
+
+    /// Number of registered databases that still have a live handle (or lease).
+    /// A database whose last handle dropped is gone and does not count, so a
+    /// non-zero count after everything should have shut down names a retained
+    /// handle (and, for an ephemeral database, its retained temp directory).
+    pub fn live_database_count(&self) -> usize {
+        self.inner
+            .databases
+            .lock()
+            .expect(ERROR_MUTEX)
+            .iter()
+            .filter(|database| database.strong_count() > 0)
+            .count()
+    }
+
+    /// See [`Database::drain_workers`]; this is the same barrier for a
+    /// holder of the runtime handle.
+    pub async fn drain_workers(&self) {
+        self.inner.drain_workers().await;
     }
 
     pub fn open_connection_count(&self) -> usize {

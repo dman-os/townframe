@@ -10,9 +10,18 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+big_blobs = { path = "../big_blobs" }
+big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
+big_nodule.workspace = true
+big_nodule_wasm.workspace = true
+big_plugs.workspace = true
+big_plugs_core.workspace = true
 big_repo.workspace = true
+big_nodule_core.workspace = true
+big_sync.workspace = true
+big_sync_core.workspace = true
 secrets_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
@@ -20,7 +29,10 @@ utils_rs.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
-big_sync_core.workspace = true
+big_plugs_core = { workspace = true, features = ["test-support"] }
+iroh.workspace = true
+iroh-blobs.workspace = true
+subduction_iroh.workspace = true
 serde_json.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true

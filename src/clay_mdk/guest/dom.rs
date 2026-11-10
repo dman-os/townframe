@@ -4,6 +4,37 @@ use crate::presentation;
 use crate::presentation_events;
 use crate::wire;
 
+/// The component references the slots of one [`GuestDom`] mount, by slot id. A slot element
+/// names its component by id (see [`wire::SLOT_ATTRIBUTE`]) because a reference is a host
+/// resource that no Dioxus attribute can carry; the flush that writes the element looks the
+/// reference up here and sends it with `mount-component`.
+#[derive(Default)]
+pub(crate) struct Slots {
+    next: std::cell::Cell<u64>,
+    held: std::cell::RefCell<
+        std::collections::BTreeMap<u64, std::rc::Rc<presentation::ComponentRef>>,
+    >,
+    /// Ids whose slot element is gone. Their reference is released after the flush rather than
+    /// at once, because that flush may still carry the mutation that created the element
+    /// (a slot created and dropped between two flushes).
+    retired: std::cell::RefCell<Vec<u64>>,
+}
+
+impl Slots {
+    /// Hold `component` for the slot element about to be created and return its id.
+    pub(crate) fn hold(&self, component: std::rc::Rc<presentation::ComponentRef>) -> u64 {
+        let id = self.next.get();
+        self.next.set(id + 1);
+        self.held.borrow_mut().insert(id, component);
+        id
+    }
+
+    /// The slot element of `id` is gone; release its reference after the next flush.
+    pub(crate) fn retire(&self, id: u64) {
+        self.retired.borrow_mut().push(id);
+    }
+}
+
 /// The guest owns its `VirtualDom` and event closures in linear memory; only typed `WriteMutations`
 /// batches cross `surface.apply`.
 pub struct GuestDom {
@@ -12,6 +43,7 @@ pub struct GuestDom {
     pub(crate) edits:
         std::collections::BTreeMap<dioxus_core::RenderTargetId, wire::WireMutations<'static>>,
     surfaces: std::collections::BTreeMap<u64, (dioxus_core::RenderTargetId, presentation::Surface)>,
+    slots: std::rc::Rc<Slots>,
 }
 
 impl GuestDom {
@@ -35,8 +67,11 @@ impl GuestDom {
             dioxus_core::RenderTargetId,
         )>::new()));
         let root_targets = targets.clone();
+        let slots = std::rc::Rc::new(Slots::default());
+        let root_slots = slots.clone();
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {
+                use_context_provider(|| root_slots.clone());
                 let children = app();
                 let targets = root_targets.borrow();
                 rsx! {
@@ -58,6 +93,7 @@ impl GuestDom {
             targets,
             edits,
             surfaces: std::collections::BTreeMap::new(),
+            slots,
         }
     }
 
@@ -128,19 +164,30 @@ impl GuestDom {
         loop {
             self.dom.render_immediate(&mut self.edits);
             let mut revoked = Vec::new();
+            let held = self.slots.held.borrow();
             for (&identity, (target, surface)) in &self.surfaces {
                 let edits = self
                     .edits
                     .get_mut(target)
                     .expect("mounted target must have a writer");
                 if !edits.is_empty() {
-                    match surface.apply(&edits.take()) {
+                    let batch = edits.take_resolving(|id| {
+                        held.get(&id)
+                            .unwrap_or_else(|| panic!("slot {id} was written without a reference"))
+                    });
+                    match surface.apply(&batch) {
                         Ok(_) => {}
                         Err(presentation::PresentationError::Revoked) => revoked.push(identity),
                         Err(error) => return Err(error),
                     }
                 }
             }
+            drop(held);
+            let mut held = self.slots.held.borrow_mut();
+            for id in self.slots.retired.take() {
+                held.remove(&id);
+            }
+            drop(held);
             if revoked.is_empty() {
                 return Ok(());
             }

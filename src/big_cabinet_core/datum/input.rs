@@ -1,14 +1,30 @@
 use super::Bundle;
 use super::CodecError;
 use super::CompiledSchema;
+use super::grammar::GrammarError;
+use super::grammar::check_position;
+use super::grammar::names;
+use super::grammar::string;
 use super::is_nsid;
+use super::value::bytes_value;
+use super::value::check_boolean_constraints;
+use super::value::check_bytes_length;
+use super::value::check_integer_constraints;
+use super::value::check_string_constraints;
+#[cfg(test)]
+use super::value::datetime;
+use super::value::decode_base64;
+use super::value::record_key;
+use super::value::valid_tag;
+use super::value::validate_data_model;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use unicode_segmentation::UnicodeSegmentation;
+
+mod integers;
 
 pub(super) const KEYWORD: &str = "x-cabinet-lexicon";
 pub(super) const DATA: &str = "x-cabinet-lexicon-data";
@@ -24,6 +40,15 @@ pub enum LexiconAdmissionError {
 }
 
 type Result<T> = std::result::Result<T, LexiconAdmissionError>;
+
+impl From<GrammarError> for LexiconAdmissionError {
+    fn from(error: GrammarError) -> Self {
+        Self::Invalid {
+            path: error.path,
+            reason: error.reason,
+        }
+    }
+}
 
 fn invalid(path: &str, reason: impl Into<String>) -> LexiconAdmissionError {
     LexiconAdmissionError::Invalid {
@@ -58,7 +83,7 @@ impl Bundle<'_> {
                 .ok_or_else(|| invalid("$", "a Lexicon file is an object"))?;
             check_keys(
                 object,
-                &["lexicon", "id", "description", "defs", "$type"],
+                &["lexicon", "id", "revision", "description", "defs", "$type"],
                 "$",
             )?;
             if object.get("lexicon") != Some(&json!(1)) {
@@ -239,96 +264,28 @@ impl Compiler<'_> {
         if depth > 128 {
             return Err(invalid(path, "schema depth exceeded"));
         }
-        let object = value
-            .as_object()
-            .ok_or_else(|| invalid(path, "a schema position is an object"))?;
-        let kind = string(object, "type", path)?;
-        let fields: &[&str] = match kind {
-            "record" => &["key", "record"],
-            "object" => &["properties", "required", "nullable"],
-            "array" => &["items", "minLength", "maxLength"],
-            "string" => &[
-                "format",
-                "minLength",
-                "maxLength",
-                "minGraphemes",
-                "maxGraphemes",
-                "knownValues",
-                "enum",
-                "const",
-                "default",
-            ],
-            "integer" => &["minimum", "maximum", "enum", "const", "default"],
-            "boolean" => &["const", "default"],
-            "bytes" => &["minLength", "maxLength"],
-            "cid-link" | "unknown" => &[],
-            "ref" => &["ref"],
-            "union" => &["refs", "closed"],
-            "blob" => {
-                return Err(invalid(
-                    path,
-                    "blob schemas are deliberately unsupported in this compiler",
-                ));
-            }
-            _ => return Err(invalid(path, format!("unsupported Lexicon type `{kind}`"))),
-        };
-        for key in object.keys() {
-            if !matches!(key.as_str(), "type" | "description") && !fields.contains(&key.as_str()) {
-                return Err(invalid(path, format!("`{key}` is not a field of `{kind}`")));
-            }
-        }
-        if object
-            .get("description")
-            .is_some_and(|value| !value.is_string())
-        {
-            return Err(invalid(path, "description must be a string"));
-        }
-        for (min, max) in [("minLength", "maxLength"), ("minGraphemes", "maxGraphemes")] {
-            for key in [min, max] {
-                if object
-                    .get(key)
-                    .is_some_and(|value| value.as_u64().is_none())
-                {
-                    return Err(invalid(
-                        path,
-                        format!("`{key}` must be a non-negative integer"),
-                    ));
-                }
-            }
-            if let (Some(minimum), Some(maximum)) = (
-                object.get(min).and_then(Value::as_u64),
-                object.get(max).and_then(Value::as_u64),
-            ) && minimum > maximum
-            {
-                return Err(invalid(path, "inverted length bounds"));
-            }
-        }
+        let kind = check_position(value, path)?;
+        let object = value.as_object().expect("a checked position is an object");
         match kind {
             "record" => {
+                // Only the named main (depth 0) may be a record; a nested record is another file.
                 if depth != 0 {
                     return Err(invalid(path, "a record must be a named main definition"));
                 }
-                let key = string(object, "key", path)?;
+                let key = object["key"].as_str().expect("checked record key");
                 if !matches!(key, "tid" | "nsid" | "any")
                     && !key.strip_prefix("literal:").is_some_and(record_key)
                 {
                     return Err(invalid(path, "invalid record key declaration"));
                 }
-                let record = object
-                    .get("record")
-                    .filter(|record| record["type"] == "object")
-                    .ok_or_else(|| invalid(path, "record requires an object schema"))?;
                 let mut compiled =
-                    self.position(id, record, &format!("{path}.record"), depth + 1)?;
+                    self.position(id, &object["record"], &format!("{path}.record"), depth + 1)?;
                 add_tag(&mut compiled, id);
                 Ok(compiled)
             }
             "object" => self.object_position(id, object, path, depth),
             "array" => {
-                let items = object
-                    .get("items")
-                    .ok_or_else(|| invalid(path, "array items are required"))?;
-                let mut out = json!({"type": "array", "items": self.position(id, items, &format!("{path}.items"), depth + 1)?});
+                let mut out = json!({"type": "array", "items": self.position(id, &object["items"], &format!("{path}.items"), depth + 1)?});
                 for (from, to) in [("minLength", "minItems"), ("maxLength", "maxItems")] {
                     if let Some(value) = object.get(from) {
                         out[to] = value.clone();
@@ -337,7 +294,8 @@ impl Compiler<'_> {
                 Ok(out)
             }
             "ref" => {
-                let (key, _, _) = self.target(id, string(object, "ref", path)?, path)?;
+                let target = object["ref"].as_str().expect("checked ref");
+                let (key, _, _) = self.target(id, target, path)?;
                 Ok(json!({"$ref": format!("#/$defs/{key}")}))
             }
             "union" => self.union_position(id, object, path),
@@ -348,13 +306,13 @@ impl Compiler<'_> {
                 json!({"type": "object", "properties": {"$link": {"type": "string", KEYWORD: {"type": "string", "format": "cid"}}}, "required": ["$link"], "additionalProperties": false}),
             ),
             "unknown" => Ok(json!({"type": "object", KEYWORD: {"type": "unknown"}})),
-            "string" | "integer" | "boolean" => Self::primitive_position(kind, object, value, path),
-            _ => unreachable!(),
+            "string" | "integer" | "boolean" => Ok(Self::primitive_position(kind, value)),
+            _ => unreachable!("the grammar admitted this kind"),
         }
     }
 
-    /// An object position: its properties compiled in order, a nullable one as an `anyOf` with
-    /// its null, its `required` names restated.
+    /// An object position, grammar-checked: its properties compiled in order, a nullable one as an
+    /// `anyOf` with its null, its `required` names restated.
     fn object_position(
         &self,
         id: &str,
@@ -362,30 +320,13 @@ impl Compiler<'_> {
         path: &str,
         depth: usize,
     ) -> Result<Value> {
-        let properties = object
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or_else(|| invalid(path, "object properties are required"))?;
+        let properties = object["properties"]
+            .as_object()
+            .expect("checked object properties");
         let required = names(object, "required", path)?;
         let nullable = names(object, "nullable", path)?;
-        if required
-            .iter()
-            .chain(&nullable)
-            .any(|name| !properties.contains_key(*name))
-        {
-            return Err(invalid(
-                path,
-                "required/nullable names must identify properties",
-            ));
-        }
         let mut compiled = Map::new();
         for (name, property) in properties {
-            if name.starts_with('$') {
-                return Err(invalid(
-                    path,
-                    "application properties cannot use reserved dollar keys",
-                ));
-            }
             let mut property = self.position(
                 id,
                 property,
@@ -400,27 +341,19 @@ impl Compiler<'_> {
         Ok(json!({"type": "object", "properties": compiled, "required": required}))
     }
 
-    /// A union position: one `$ref` branch per member, each pinned by its tagged definition, and
-    /// — unless the union is closed — the fallback branch any other discriminant is carried by.
+    /// A union position, grammar-checked: one `$ref` branch per member, each pinned by its tagged
+    /// definition, and — unless the union is closed — the fallback branch any other discriminant
+    /// is carried by.
     fn union_position(&self, id: &str, object: &Map<String, Value>, path: &str) -> Result<Value> {
-        let refs = object
-            .get("refs")
-            .and_then(Value::as_array)
-            .ok_or_else(|| invalid(path, "union refs must be an array"))?;
-        let closed = match object.get("closed") {
-            None => false,
-            Some(Value::Bool(closed)) => *closed,
-            _ => return Err(invalid(path, "closed must be boolean")),
-        };
-        if closed && refs.is_empty() {
-            return Err(invalid(path, "a closed union cannot be empty"));
-        }
+        let refs = object["refs"].as_array().expect("checked union refs");
+        let closed = object
+            .get("closed")
+            .map(|closed| closed.as_bool().expect("checked closed"))
+            .unwrap_or(false);
         let mut branches = Vec::new();
         let mut tags = BTreeSet::new();
         for reference in refs {
-            let reference = reference
-                .as_str()
-                .ok_or_else(|| invalid(path, "union references must be strings"))?;
+            let reference = reference.as_str().expect("checked union ref");
             let (key, tag, kind) = self.target(id, reference, path)?;
             if !matches!(kind.as_str(), "object" | "record") {
                 return Err(invalid(path, "union variants must be objects or records"));
@@ -441,68 +374,11 @@ impl Compiler<'_> {
         Ok(json!({"anyOf": branches}))
     }
 
-    /// A string, integer or boolean position: its constraint values checked against the kind,
-    /// its format checked against the supported vocabulary, and the Lexicon itself carried under
-    /// [`KEYWORD`] for the constraint keyword to read.
-    fn primitive_position(
-        kind: &str,
-        object: &Map<String, Value>,
-        value: &Value,
-        path: &str,
-    ) -> Result<Value> {
-        if object.contains_key("const") && object.contains_key("default") {
-            return Err(invalid(path, "const and default are mutually exclusive"));
-        }
-        let fits = |value: &Value| match kind {
-            "string" => value.is_string(),
-            "integer" => value.as_i64().is_some(),
-            "boolean" => value.is_boolean(),
-            _ => unreachable!(),
-        };
-        for key in ["const", "default", "minimum", "maximum"] {
-            if object.get(key).is_some_and(|value| !fits(value)) {
-                return Err(invalid(path, format!("invalid `{key}` value")));
-            }
-        }
-        if let (Some(min), Some(max)) = (
-            object.get("minimum").and_then(Value::as_i64),
-            object.get("maximum").and_then(Value::as_i64),
-        ) && min > max
-        {
-            return Err(invalid(path, "inverted integer bounds"));
-        }
-        for key in ["enum", "knownValues"] {
-            if let Some(values) = object.get(key)
-                && !values
-                    .as_array()
-                    .is_some_and(|values| values.iter().all(fits))
-            {
-                return Err(invalid(path, format!("invalid `{key}` list")));
-            }
-        }
-        if let Some(format) = object.get("format") {
-            let format = format
-                .as_str()
-                .ok_or_else(|| invalid(path, "format must be a string"))?;
-            if !matches!(
-                format,
-                "at-identifier"
-                    | "at-uri"
-                    | "cid"
-                    | "datetime"
-                    | "did"
-                    | "handle"
-                    | "nsid"
-                    | "tid"
-                    | "record-key"
-                    | "uri"
-            ) {
-                return Err(invalid(
-                    path,
-                    format!("unsupported Lexicon string format `{format}`"),
-                ));
-            }
-        }
+    /// A string, integer or boolean position, grammar-checked: the Lexicon itself is carried under
+    /// [`KEYWORD`] for the constraint keyword to read, and the JSON Schema constraint keywords the
+    /// validator applies directly are restated.
+    fn primitive_position(kind: &str, value: &Value) -> Value {
+        let object = value.as_object().expect("a checked position is an object");
         let mut out = json!({"type": kind, KEYWORD: value});
         for key in ["enum", "const", "minimum", "maximum"] {
             if let Some(value) = object.get(key) {
@@ -529,7 +405,7 @@ impl Compiler<'_> {
                 out["x-automerge"] = json!("datetime");
             }
         }
-        Ok(out)
+        out
     }
 }
 
@@ -554,32 +430,6 @@ fn check_keys(object: &Map<String, Value>, allowed: &[&str], path: &str) -> Resu
         return Err(invalid(path, format!("unsupported keyword `{key}`")));
     }
     Ok(())
-}
-
-fn string<'a>(object: &'a Map<String, Value>, key: &str, path: &str) -> Result<&'a str> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| invalid(path, format!("`{key}` must be a string")))
-}
-
-fn names<'a>(object: &'a Map<String, Value>, key: &str, path: &str) -> Result<BTreeSet<&'a str>> {
-    let Some(values) = object.get(key) else {
-        return Ok(BTreeSet::new());
-    };
-    let values = values
-        .as_array()
-        .ok_or_else(|| invalid(path, format!("`{key}` must be a string array")))?;
-    let mut out = BTreeSet::new();
-    for name in values {
-        let name = name
-            .as_str()
-            .ok_or_else(|| invalid(path, format!("`{key}` names must be strings")))?;
-        if !out.insert(name) {
-            return Err(invalid(path, format!("duplicate `{key}` name")));
-        }
-    }
-    Ok(out)
 }
 
 /// The keywords a sidecar position may state. Beyond the JSON Schema structure the overlay reads,
@@ -612,6 +462,8 @@ const SUPPLEMENT_KEYS: &[&str] = &[
     "knownValues",
     "const",
     "not",
+    "minimum",
+    "maximum",
 ];
 
 fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str) -> Result<()> {
@@ -676,6 +528,21 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     Ok(())
 }
 
+/// Whether a sidecar `type` is a string position: a plain `"string"`, or the nullable spelling
+/// `["string", "null"]` an `Option` field's sidecar emits (the nullable overlay strips `null`).
+fn is_string_position(kind: Option<&Value>) -> bool {
+    match kind {
+        Some(Value::String(kind)) => kind == "string",
+        Some(Value::Array(kinds)) => {
+            kinds.iter().any(|kind| kind == "string")
+                && kinds
+                    .iter()
+                    .all(|kind| matches!(kind.as_str(), Some("string" | "null")))
+        }
+        _ => false,
+    }
+}
+
 /// The values a supplement position's own keywords may take: the storage markers, formats and
 /// encodings a native spelling uses, the `not`/`const`/vocabulary spellings a union or string
 /// vocabulary states, and the JSON types a position may declare. Its subschemas are the walk's
@@ -702,11 +569,14 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
     if object.get("format").is_some_and(|format| {
         !matches!(
             format.as_str(),
-            Some("float" | "double" | "uint64" | "date-time" | "datetime" | "uuid")
-        )
+            Some("float" | "double" | "date-time" | "datetime" | "uuid")
+        ) && !format
+            .as_str()
+            .is_some_and(|format| integers::FORMATS.contains(&format))
     }) {
         return Err(invalid(path, "unsupported supplement format"));
     }
+    integers::check_supplement(object, path)?;
     // `pattern` is not a generally admissible constraint: the one spelling the declarations carry
     // is the `Uuid7` definition's, a `uuid`-formatted string, and anything else is refused.
     if let Some(pattern) = object.get("pattern")
@@ -767,10 +637,12 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
         }
     }
     // A string vocabulary spells its values as `enum` (closed) or `knownValues` (open), the
-    // same list its Lexicon projection carries; the overlay holds the two to agreement.
+    // same list its Lexicon projection carries; the overlay holds the two to agreement. An
+    // optional field's sidecar is a nullable string (`type: ["string", "null"]`), which the
+    // nullable overlay already strips to the non-null branch before it reaches the primary.
     for key in ["enum", "knownValues"] {
         if let Some(values) = object.get(key)
-            && (object.get("type").and_then(Value::as_str) != Some("string")
+            && (!is_string_position(object.get("type"))
                 || !values.as_array().is_some_and(|values| {
                     !values.is_empty() && values.iter().all(Value::is_string)
                 }))
@@ -1022,7 +894,7 @@ impl Overlay<'_> {
                     format!("union member `{tag}` is absent from the primary union"),
                 ));
             };
-            let mut member = self.union_member(target, tag, path)?;
+            let mut member = self.union_member(target);
             let mut payload = branch.clone();
             if let Some(properties) = payload.get_mut("properties").and_then(Value::as_object_mut) {
                 properties.remove("$type");
@@ -1045,87 +917,15 @@ impl Overlay<'_> {
         Ok(())
     }
 
-    /// The definition a union member's supplement is overlaid onto, with its discriminant
-    /// restated and required: the compiled copy the primary branch `target` references with the
-    /// member's declared properties restated on it, or — when the supplement declares no member
-    /// with that discriminant — the compiled definition that pins `tag`.
-    fn union_member(&self, target: &Value, tag: &str, path: &str) -> Result<Value> {
-        // The member's declared definition lives in the supplement's `$defs` under its type name;
-        // its discriminant (`$type` const) names which one `tag` is.
-        let member_name = self
-            .source
-            .iter()
-            .find(|(_, definition)| {
-                definition
-                    .get("properties")
-                    .and_then(|properties| properties.get("$type"))
-                    .and_then(|tagged| tagged.get("const"))
-                    .and_then(Value::as_str)
-                    == Some(tag)
-            })
-            .map(|(name, _)| name.clone());
-        let mut member = match member_name {
-            Some(name) => {
-                // The compiled copy the branch `$ref`s carries the discriminant and the member's
-                // primary constraints; the declared definition adds nothing the copy does not
-                // state except what the overlay is about to restate.
-                let reference = target
-                    .get("$ref")
-                    .and_then(Value::as_str)
-                    .and_then(|reference| reference.strip_prefix("#/$defs/"))
-                    .expect("a compiled union branch is a member `$ref`")
-                    .to_owned();
-                let mut compiled = self
-                    .base
-                    .get(&reference)
-                    .cloned()
-                    .unwrap_or_else(|| self.source.get(&name).cloned().expect("declared"));
-                let declared = self.source.get(&name).cloned().expect("declared");
-                // The compiled `T…` copy pins the tag; restate only what the overlay is for: the
-                // member's own properties, from its declaration.
-                for (key, property) in declared
-                    .get("properties")
-                    .and_then(Value::as_object)
-                    .into_iter()
-                    .flatten()
-                {
-                    if key != "$type" {
-                        compiled["properties"][key] = property.clone();
-                    }
-                }
-                compiled
-            }
-            None => self
-                .base
-                .iter()
-                .find(|(_, definition)| {
-                    definition
-                        .get("properties")
-                        .and_then(|properties| properties.get("$type"))
-                        .and_then(|tagged| tagged.get("const"))
-                        .and_then(Value::as_str)
-                        == Some(tag)
-                })
-                .map(|(_, definition)| definition.clone())
-                .ok_or_else(|| {
-                    invalid(
-                        path,
-                        format!("union member `{tag}` has no carried declaration"),
-                    )
-                })?,
-        };
-        member["properties"]["$type"] = json!({"type": "string", "const": tag});
-        let required = member
-            .get("required")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if !required.iter().any(|name| name.as_str() == Some("$type")) {
-            let mut names = required;
-            names.push(json!("$type"));
-            member["required"] = Value::Array(names);
-        }
-        Ok(member)
+    /// The compiled member the primary branch references already pins its discriminant and
+    /// carries its Lexicon constraints; the supplement must restate them, never replace them.
+    fn union_member(&self, target: &Value) -> Value {
+        let reference = target
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            .expect("a compiled union branch is a member `$ref`");
+        self.base[reference].clone()
     }
 
     /// Hold a typed position's supplement to the vocabulary the primary states — its type, its
@@ -1144,6 +944,7 @@ impl Overlay<'_> {
                 format!("supplement type {stated} contradicts primary `{kind}`"),
             ));
         }
+        integers::check_overlay(primary, object, path)?;
         if let Some(values) = object.get("enum")
             && primary.get("enum") != Some(values)
         {
@@ -1240,6 +1041,9 @@ impl Overlay<'_> {
                     matches!(format.as_str(), Some("date-time" | "datetime"))
                 }
                 None if kind == "string" && format.as_str() == Some("uuid") => true,
+                None | Some("counter") if kind == "integer" => format
+                    .as_str()
+                    .is_some_and(|format| integers::FORMATS.contains(&format)),
                 _ => false,
             };
             if !allowed {
@@ -1247,11 +1051,13 @@ impl Overlay<'_> {
             }
             if marker == Some("float") {
                 primary["format"] = format.clone();
+            }
+            if marker == Some("float") {
                 primary[KEYWORD]["width"] = format.clone();
             }
             // `uuid` is not a storage form and not a `Constraint` format; it is the declaration's
             // own annotation on the one string spelling that carries a `pattern`.
-            if format.as_str() == Some("uuid") {
+            if format.as_str() == Some("uuid") || kind == "integer" {
                 primary["format"] = format.clone();
             }
         }
@@ -1462,7 +1268,14 @@ impl Overlay<'_> {
             }
             "string" => json!({"type": "string", KEYWORD: {"type": "string"}}),
             "integer" => {
-                json!({"type": "integer", "minimum": i64::MIN, "maximum": i64::MAX, KEYWORD: {"type": "integer"}})
+                let mut lexicon = json!({"type": "integer"});
+                for key in ["minimum", "maximum"] {
+                    if let Some(value) = schema.get(key) {
+                        lexicon[key] = value.clone();
+                    }
+                }
+                check_position(&lexicon, path)?;
+                Compiler::primitive_position("integer", &lexicon)
             }
             "boolean" => json!({"type": "boolean"}),
             "object" if schema.get("x-automerge").and_then(Value::as_str) == Some("bytes") => {
@@ -1596,17 +1409,7 @@ impl jsonschema::Keyword for Constraint {
                 let Some(value) = instance.as_str() else {
                     return false;
                 };
-                if !length(&self.0, "minLength", "maxLength", value.len()) {
-                    return false;
-                }
-                if (self.0.get("minGraphemes").is_some() || self.0.get("maxGraphemes").is_some())
-                    && !length(
-                        &self.0,
-                        "minGraphemes",
-                        "maxGraphemes",
-                        value.graphemes(true).count(),
-                    )
-                {
+                if !check_string_constraints(&self.0, value) {
                     return false;
                 }
                 if self.0["native"] == "uint"
@@ -1624,30 +1427,22 @@ impl jsonschema::Keyword for Constraint {
                 {
                     return false;
                 }
-                self.0
-                    .get("format")
-                    .and_then(Value::as_str)
-                    .is_none_or(|format| valid_format(format, value))
+                true
             }
-            Some("integer") => instance.as_i64().is_some(),
-            Some("boolean") => instance.is_boolean(),
+            Some("integer") => check_integer_constraints(&self.0, instance),
+            Some("boolean") => check_boolean_constraints(&self.0, instance),
             Some("base64") => instance
                 .as_str()
-                .is_some_and(|value| super::codec::decode_base64(value).is_some()),
-            Some("bytes") => super::codec::bytes_value(instance)
-                .is_some_and(|bytes| length(&self.0, "minLength", "maxLength", bytes.len())),
+                .is_some_and(|value| decode_base64(value).is_some()),
+            Some("bytes") => {
+                bytes_value(instance).is_some_and(|bytes| check_bytes_length(&self.0, &bytes))
+            }
             Some("unknown") => instance.as_object().is_some_and(|object| {
                 !object.contains_key("$bytes")
                     && !object.contains_key("$link")
                     && object.get("$type").and_then(Value::as_str) != Some("blob")
             }),
-            Some("tag") => instance.as_str().is_some_and(|value| {
-                let (id, name) = value.split_once('#').unwrap_or((value, ""));
-                is_nsid(id)
-                    && name != "main"
-                    && !name.contains('#')
-                    && (!value.contains('#') || !name.is_empty())
-            }),
+            Some("tag") => instance.as_str().is_some_and(valid_tag),
             _ => false,
         }
     }
@@ -1670,225 +1465,8 @@ impl jsonschema::Keyword for Data {
     }
 
     fn is_valid(&self, instance: &Value) -> bool {
-        let mut pending = vec![(instance, 0)];
-        let mut visits = 0;
-        while let Some((value, depth)) = pending.pop() {
-            visits += 1;
-            if visits > 1_000_000 || depth > 1024 {
-                return false;
-            }
-            match value {
-                Value::Number(number) if number.as_i64().is_none() => return false,
-                Value::Object(object) => {
-                    if object.contains_key("$bytes") {
-                        if super::codec::bytes_value(value).is_none() {
-                            return false;
-                        }
-                    } else if object.contains_key("$link") {
-                        if object.len() != 1 || !object["$link"].as_str().is_some_and(cid) {
-                            return false;
-                        }
-                    } else {
-                        if object.get("$type").is_some_and(|value| !value.is_string()) {
-                            return false;
-                        }
-                        if object.get("$type").and_then(Value::as_str) == Some("blob") {
-                            return false;
-                        }
-                        pending.extend(object.values().map(|value| (value, depth + 1)));
-                    }
-                }
-                Value::Array(array) => pending.extend(array.iter().map(|value| (value, depth + 1))),
-                _ => {}
-            }
-        }
-        true
+        validate_data_model(instance)
     }
-}
-
-fn length(schema: &Value, min: &str, max: &str, length: usize) -> bool {
-    schema
-        .get(min)
-        .and_then(Value::as_u64)
-        .is_none_or(|min| length as u64 >= min)
-        && schema
-            .get(max)
-            .and_then(Value::as_u64)
-            .is_none_or(|max| length as u64 <= max)
-}
-
-fn cid(value: &str) -> bool {
-    let Some(value) = value.strip_prefix('b') else {
-        return false;
-    };
-    if value.len() != 58
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
-    {
-        return false;
-    }
-    data_encoding::BASE32_NOPAD
-        .decode(value.to_ascii_uppercase().as_bytes())
-        .is_ok_and(|bytes| {
-            bytes.len() == 36
-                && bytes[0] == 1
-                && matches!(bytes[1], 0x55 | 0x71)
-                && bytes[2..4] == [0x12, 0x20]
-        })
-}
-
-fn label(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 63
-        && !value.starts_with('-')
-        && !value.ends_with('-')
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
-fn handle(value: &str) -> bool {
-    value.len() <= 253
-        && value.contains('.')
-        && value.split('.').all(label)
-        && value
-            .rsplit('.')
-            .next()
-            .is_some_and(|last| last.starts_with(|character: char| character.is_ascii_alphabetic()))
-}
-
-fn did(value: &str) -> bool {
-    let Some((method, identifier)) = value
-        .strip_prefix("did:")
-        .and_then(|value| value.split_once(':'))
-    else {
-        return false;
-    };
-    value.len() <= 2048
-        && !method.is_empty()
-        && method.bytes().all(|byte| byte.is_ascii_lowercase())
-        && !identifier.is_empty()
-        && !identifier.ends_with([':', '%'])
-        && identifier
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:%-".contains(&byte))
-}
-
-fn record_key(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && !matches!(value, "." | "..")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b".-_:~".contains(&byte))
-}
-
-fn valid_format(format: &str, value: &str) -> bool {
-    match format {
-        "cid" => cid(value),
-        "nsid" => is_nsid(value),
-        "did" => did(value),
-        "handle" => handle(value),
-        "at-identifier" => did(value) || handle(value),
-        "record-key" => record_key(value),
-        "tid" => {
-            value.len() == 13
-                && value
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| b"234567abcdefghij".contains(&byte))
-                && value
-                    .bytes()
-                    .all(|byte| b"234567abcdefghijklmnopqrstuvwxyz".contains(&byte))
-        }
-        "at-uri" => {
-            let Some(rest) = value.strip_prefix("at://") else {
-                return false;
-            };
-            if value.len() > 8192 {
-                return false;
-            }
-            let mut parts = rest.split('/');
-            let authority = parts.next().expect("split has first entry");
-            (did(authority) || handle(authority))
-                && parts.next().is_none_or(is_nsid)
-                && parts.next().is_none_or(record_key)
-                && parts.next().is_none()
-        }
-        "datetime" => datetime(value),
-        "uri" => {
-            static VALIDATOR: std::sync::OnceLock<jsonschema::Validator> =
-                std::sync::OnceLock::new();
-            value.len() <= 8192
-                && VALIDATOR
-                    .get_or_init(|| {
-                        jsonschema::options()
-                            .should_validate_formats(true)
-                            .build(&json!({"type": "string", "format": "uri"}))
-                            .expect("URI format schema")
-                    })
-                    .is_valid(&json!(value))
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn datetime(value: &str) -> bool {
-    if !value.is_ascii()
-        || value.len() < 20
-        || value.as_bytes()[10] != b'T'
-        || value.ends_with("-00:00")
-    {
-        return false;
-    }
-    let bytes = value.as_bytes();
-    for (index, byte) in bytes.iter().take(19).enumerate() {
-        if !match index {
-            4 | 7 => *byte == b'-',
-            10 => *byte == b'T',
-            13 | 16 => *byte == b':',
-            _ => byte.is_ascii_digit(),
-        } {
-            return false;
-        }
-    }
-    let tail = &value[19..];
-    let (fraction, zone) = if let Some(fraction) = tail.strip_prefix('.') {
-        let end = fraction
-            .find(|character: char| !character.is_ascii_digit())
-            .unwrap_or(fraction.len());
-        if end == 0 {
-            return false;
-        }
-        (&fraction[..end], &fraction[end..])
-    } else {
-        ("", tail)
-    };
-    if zone != "Z"
-        && !(zone.len() == 6
-            && matches!(zone.as_bytes()[0], b'+' | b'-')
-            && zone.as_bytes()[3] == b':'
-            && zone[1..3].bytes().all(|byte| byte.is_ascii_digit())
-            && zone[4..].bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return false;
-    }
-    let normalized = if fraction.is_empty() {
-        value.to_owned()
-    } else {
-        format!(
-            "{}.{}{zone}",
-            &value[..19],
-            &fraction[..fraction.len().min(9)]
-        )
-    };
-    normalized.parse::<jiff::Timestamp>().is_ok_and(|instant| {
-        instant
-            >= "0000-01-01T00:00:00Z"
-                .parse::<jiff::Timestamp>()
-                .expect("minimum Lexicon datetime")
-    })
 }
 
 #[cfg(test)]

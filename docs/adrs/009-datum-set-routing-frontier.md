@@ -1,8 +1,11 @@
 # ADR 009: Datum-Set Routing Frontier
 
 **Status:** Implemented — `DatumSetStore` (`src/big_cabinet/index/datum_set.rs`)
-is the AFW-fed projection described here, and doc-scoped observation
-(`ObserveDatums`, §6) is implemented in DocsRepo.
+is the AFW-fed projection described here. Doc-scoped observation is implemented
+in DocsRepo as the `ObserveDatums` subscription §6 originally described, and is
+being replaced by the `PollDatums` long poll of
+[ADR 025](025-cabinet-datum-predicates-and-polling.md); §6 and §8 carry the
+amendments.
 
 ## Context
 
@@ -131,42 +134,45 @@ tags and receives the current matching set, then follows new revisions.
 
 As in ADR 008, a commit notification is only a wakeup; durable frontier state
 and the reader's cursor decide what is read. There is no separate lossy watch:
-a UI that wants refresh latency observes through `ObserveDatums` (§6) like any
-other caller. **Deferred:** a lossy watch for UI refresh, added only where its
-latency benefit over the durable stream is shown.
+a UI that wants refresh latency polls the frontier (§6) like any other caller.
+**Deferred:** a lossy watch for UI refresh, added only where its latency benefit
+over the durable cursor is shown.
 
 ### 6. Observation and queries are DocsRepo operations
 
 `DatumSetStore` is trusted-subsystem-only and is never exposed to callers
 directly. Callers reach it through DocsRepo operations carrying the same
-authority model as doc reads:
+authority model as doc reads.
 
-- `QueryDatums` and `QueryDatumRefs` answer current-state queries over the
-  datum-set and `datum_ref` projections. With a `drawer_id`, membership comes
-  from the drawer's verified roster (`readable_in_drawer`), never from
-  unverified datum-set tag presence; without one, each candidate document is
-  checked for read access.
-- `ObserveDatums` subscribes to the frontier, resuming after a frontier
-  revision, with one of three scopes:
-  - `Doc { doc_id }` is authorized before the stream opens and holds a sync
-    interest in the document while the caller can read it;
-  - `Tag { tag }` opens only its tag's frontier namespace and checks each batch
-    of entries as it arrives;
-  - `Drawer { drawer_id, tag }` resolves the drawer's readable documents when
-    the stream opens and keeps that set current across access changes; the
-    optional tag narrows it to one namespace.
+**Amended.** This section described `QueryDatums` plus `ObserveDatums` as a
+subscription stream. [ADR 023](023-cursor-consumption-is-long-poll.md) makes
+cursor consumption long polling repo-wide, and
+[ADR 025](025-cabinet-datum-predicates-and-polling.md) replaces both operations
+with one unary long poll:
 
-  The stream marks the end of its opening replay with `ReplayComplete`.
+- `PollDatums { capability, predicate, datums, after, limit, holdMs }` answers
+  `DatumPage { events, through, caughtUp }`. A current-state query is a poll
+  from `after = 0` with `holdMs = 0`, paged until `caughtUp`; a watcher is the
+  same poll with a hold once caught up. There is no per-consumer task, channel
+  or delivered set, and every poll re-authorizes.
+- The single optional `drawer_id` and the single-tag selector become a
+  **predicate** in `big_cabinet_core::query`: `HasTag`, `HasKey`, `IsDoc`,
+  `InDrawer { drawerId, transitive, atLeast }`, `HasReferenceTo`, and the
+  boolean connectives, every clause answerable from indexes. The predicate
+  carries its own authorization through an anchor clause.
+- Membership changes travel on the same cursor, because the drawer projection
+  is itself frontier-fed
+  ([ADR 024](024-indexes-are-fed-by-the-change-stream.md)). That closes the
+  resume gap where a `Drawer` scope resolved its readable set only when the
+  stream opened.
+- `AccessLost` and `ReplayComplete` are gone. Losing access is the next poll
+  answering `Denied`, and the end of the opening replay is `caughtUp`.
+- `QueryDatumRefs` stays as the edge point-query surface. `DatumSetStore::query`
+  stays as an internal point lookup and is not a protocol operation.
 
-Entries for documents the observer has never been delivered are silently
-omitted — naming one would disclose its existence. Losing access to a document
-the stream has delivered (a `Doc` scope names its own document) emits one
-`AccessLost` per loss, either when a capability or access-policy change is
-re-checked against the delivered documents (policy changes are re-checked once
-the opening replay completes) or on the next entry for that document, whichever
-comes first. If access returns, the stream delivers the document's current
-datums and observation resumes. This keeps the index ungated while making every
-caller-visible read and stream authority-filtered.
+Disclosure still works the same way: entries for documents the caller has never
+been delivered are silently omitted, because naming one would disclose its
+existence. A `leave` for a document it did hold is delivered, as it was before.
 
 ### 7. Broad consumers run downstream of the routing frontier
 
@@ -180,20 +186,26 @@ consumer owns the mapping from explicit document versions to its typed domain
 events or index rows.
 
 A consumer interested in one document does not need a tag filter, but it still
-reads the corpus-wide frontier: a `Doc` scope (and a `Drawer` scope without a
-tag) opens every tag namespace and filters entries by document, so its opening
-replay reads every route committed after its resume revision. **Deferred:** a
-per-document frontier selector, so a single-document observer's cost tracks its
-document rather than the corpus.
+reads the corpus-wide frontier: an `IsDoc` anchor (and an `InDrawer` anchor
+without tags) opens every tag namespace and filters entries by document, so its
+opening replay reads every route committed after its resume revision.
+**Deferred:** a per-document frontier selector, so a single-document observer's
+cost tracks its document rather than the corpus.
 
 ### 8. Tag filters are independent consumer scopes
 
 A durable consumer owns its own scope and progress: the set of tags it follows
 and one cursor per tag. It opens the frontier with `open_tags`, one resume
-revision per tag namespace, and commits its cursors with its derived state;
-`datum_ref` keeps one cursor per reference-declaring tag and advances it in the
-transaction that replaces the route's edges. The projection stores routes only
-and keeps no outbox or acknowledgement state per consumer.
+revision per tag namespace, and commits its cursors with its derived state. The
+projection stores routes only and keeps no outbox or acknowledgement state per
+consumer.
+
+**Amended.** `datum_ref` no longer keeps one cursor per reference-declaring tag.
+[ADR 024](024-indexes-are-fed-by-the-change-stream.md) folds edge extraction
+into the datum-set worker, so edges are written in the same transaction as the
+routes that entail them and share one revision. Its parking and `settled` watch
+go away with it, and a build that newly declares references on a tag backfills
+once at boot from the routes already stored.
 
 - Adding a tag to a consumer's scope starts that tag at cursor zero and replays
   its current routes; `datum_ref` does this on its next run after a schema

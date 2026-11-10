@@ -221,6 +221,62 @@ fn migration_table(root: &Path, dir: &Path) -> Res<String> {
     Ok(name)
 }
 
+/// Resolve a unit's declared schema dependencies in dependency-first order.
+/// Dependencies are paths relative to the unit's `sqlite` directory and must
+/// remain inside this workspace's `src` tree.
+fn schema_units(root: &Path, dir: &Path) -> Res<Vec<PathBuf>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        visiting: &mut std::collections::HashSet<PathBuf>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+        ordered: &mut Vec<PathBuf>,
+    ) -> Res<()> {
+        let dir = dir.canonicalize()?;
+        if visited.contains(&dir) {
+            return Ok(());
+        }
+        if !visiting.insert(dir.clone()) {
+            eyre::bail!("SQL schema dependency cycle at {}", dir.display());
+        }
+        let dependency_file = dir.join("sqlite/dependencies.txt");
+        if dependency_file.is_file() {
+            for line in std::fs::read_to_string(&dependency_file)?.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let dependency = dir.join("sqlite").join(line).canonicalize()?;
+                let src = root.canonicalize()?.join("src");
+                eyre::ensure!(
+                    dependency.starts_with(&src),
+                    "{}: dependency {} is outside {}/src",
+                    dependency_file.display(),
+                    line,
+                    root.display()
+                );
+                eyre::ensure!(
+                    dependency.join("sqlite/migrations").is_dir(),
+                    "{}: dependency {} is not a SQL unit",
+                    dependency_file.display(),
+                    line
+                );
+                visit(root, &dependency, visiting, visited, ordered)?;
+            }
+        }
+        visiting.remove(&dir);
+        visited.insert(dir.clone());
+        ordered.push(dir);
+        Ok(())
+    }
+
+    let mut visiting = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut ordered = Vec::new();
+    visit(root, dir, &mut visiting, &mut visited, &mut ordered)?;
+    Ok(ordered)
+}
+
 fn migrate(
     root: &Path,
     dir: &Path,
@@ -304,6 +360,7 @@ fn process_unit(mode: Mode, root: &Path, dir: &Path) -> Res<()> {
     }
     let table = migration_table(root, dir)?;
     let migrations = read_migrations(&mig_dir)?;
+    let schema = schema_units(root, dir)?;
     let mut queries = Vec::new();
     if query_dir.is_dir() {
         for path in read_sql_paths(&query_dir)? {
@@ -319,16 +376,21 @@ fn process_unit(mode: Mode, root: &Path, dir: &Path) -> Res<()> {
     let mut conn = RusqliteConnection::open(&db_path).wrap_err("opening temp database")?;
     // Reuse the runtime's migration runner so checker and runtime cannot
     // disagree about how migrations are applied.
-    let owned: Vec<sqlite_rs::Migration> = migrations
-        .iter()
-        .map(|migration| sqlite_rs::Migration {
-            version: migration.version,
-            name: &migration.file_name,
-            sql: &migration.sql,
-        })
-        .collect();
-    sqlite_rs::run_migrations(&mut conn, &table, &owned)
-        .map_err(|err| eyre::eyre!("applying migrations: {err}"))?;
+    for unit in &schema {
+        let unit_migrations = read_migrations(&unit.join("sqlite/migrations"))?;
+        let unit_table = migration_table(root, unit)?;
+        let owned: Vec<sqlite_rs::Migration> = unit_migrations
+            .iter()
+            .map(|migration| sqlite_rs::Migration {
+                version: migration.version,
+                name: &migration.file_name,
+                sql: &migration.sql,
+            })
+            .collect();
+        sqlite_rs::run_migrations(&mut conn, &unit_table, &owned)
+            .map_err(|err| eyre::eyre!("applying migrations for {}: {err}", unit.display()))?;
+    }
+
     let mut names = std::collections::HashSet::new();
     for query in &mut queries {
         if !names.insert(query.name.clone()) {

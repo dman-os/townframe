@@ -1,0 +1,53 @@
+---
+source: src/micro_layout_manifest/lib.rs
+expression: sidecar()
+---
+id: dayframe.layout
+package_version: 1
+authority: org.example.dayframe.layout
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+publications:
+  - name: view
+    kind: presentation
+    contract: ~
+requires: []
+configuration_requests:
+  - binding: layout
+    facets:
+      - tag: org.example.dayframe.layout.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
+collection_contracts:
+  - id: org.example.dayframe.layout.panels
+    selector_schema: org.example.dayframe.layout.panelSelector
+    key_schema: org.example.dayframe.layout.panelKey
+    value_schema: org.example.dayframe.layout.panel
+    write_context_schema: ~
+    offered:
+      - read
+      - register
+collection_requests:
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: read
+  - binding: roots
+    contract: org.example.clay.shell.roots
+    access: write
+contributions:
+  - id: root
+    binding: roots
+    key: dayframe.layout
+    payload:
+      content:
+        $attachment: 0
+      pinned: true
+      title: Layout
+    attachments:
+      - index: 0
+        publication: view

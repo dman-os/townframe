@@ -1,0 +1,55 @@
+version = 1
+role = "runtime"
+dependency_reason = "Blob storage, encryption and retention compose repository reads, Cabinet drawers and datum indexes, and the big_sync blob partitions they project into."
+allowed_dependencies = [
+    "big_blobs_core",
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_repo",
+    "big_sync",
+    "big_sync_core",
+    "service_utils_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/big_blobs/interlude.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: crate-private prelude module carried over with the encrypt files from daybook_core's interlude; export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_blobs/encrypt/download.rs"
+symbol = "module::download_encrypted"
+ceiling = 186
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
+
+[migrations]
+"src/big_blobs/admission/discovery/sqlite/migrations/001_drawer_inventory_discovery.sql" = "87e14dd14cd402d624601aa65e3ee0b22ccde7c297aa40082c97b7ac2e101a22"
+"src/big_blobs/admission/discovery/sqlite/migrations/002_reconciliation_scratch.sql" = "e066a57c57f8cfc2debe1cedc4a3e6408a7fe9506aeddc7a2ac5e92e875e3139"
+"src/big_blobs/admission/sqlite/migrations/001_inventory_pair_admission.sql" = "ac1c706af2b5e8849d7f4058d292cfc285d90c409ef70c54cb84501fd18aa438"
+"src/big_blobs/ownership/sqlite/migrations/001_byte_owners_and_effects.sql" = "bf7b0f086613a73cfc4b7aa195950f7a029c5c33ea1be2fbd3aa0786bbb1b260"
+"src/big_blobs/ownership/sqlite/migrations/002_upload_receipts.sql" = "5dc01efec2eef4950d2b27d82879e142f4cf4af00fdabccac48851d7a55a6e0f"
+"src/big_blobs/ownership/sqlite/migrations/003_pair_root_triggers.sql" = "fe8120b73359d7b1d82ddd34b2708521286656ffed77bd184ffaef939d39a309"
+"src/big_blobs/pair_roots/sqlite/migrations/001_pair_root.sql" = "70620dea815704cdd8988550a793ecdc7e7678028026671e82eba89eb51285a7"
+"src/big_blobs/pair_roots/sqlite/migrations/002_virtual_pairs.sql" = "ae1bc555c9f78cd3072de15ae3f111a668287b1c5bc6bb8e8b96dd475aa6e7e7"
+"src/big_blobs/projection/sqlite/migrations/001_blob_projection.sql" = "f79252412463d3774fdeea4c6a6b40a258a9c233501fdb46f6df1006669c04f8"
+"src/big_blobs/retention/sqlite/migrations/001_representation_retention.sql" = "815ef59fe4e4c4e7b20583221d28325d03a937e1d0a58bfe6a83e274f1ae7954"
+"src/big_blobs/retention/sqlite/migrations/002_root_aware_writer_targets.sql" = "9877bd324eceef5dbd6d80248f0d15d6b7fc4681f59b8b47cccc60c5c92b33cf"
+"src/big_blobs/work_queue/sqlite/migrations/001_durable_blob_work.sql" = "f156f6b4f4b183b715d37f736e206e68a502c99963b5c41a945ba570a0083f0c"
+"src/big_blobs/workers/sqlite/migrations/001_document_pins.sql" = "88015835eb1d5c43089d496c666cced9de3ab0b032027390e8f0c387786a99b6"

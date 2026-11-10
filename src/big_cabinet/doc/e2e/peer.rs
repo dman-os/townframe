@@ -1,7 +1,6 @@
 use super::*;
 use crate::peer_net::Network;
 use crate::peer_net::link;
-use futures::StreamExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -89,29 +88,12 @@ async fn observation_fetches_remote_document_without_manual_document_sync() {
             .sync_demand()
             .drive(reader_net.worker.subscription_source(), peer_rx),
     );
-    let mut observations = reader
-        .client()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability,
-                scope: ObserveScope::Doc {
-                    doc_id: created.doc_id.clone(),
-                },
-                after: 0,
-            },
-        )
-        .await
-        .unwrap();
+    let mut poll =
+        crate::test_poll::Poller::doc(reader.client(), capability, created.doc_id.clone());
     loop {
-        match observations.next().await.unwrap().unwrap() {
-            DatumObserved::Entry {
-                doc_id,
-                datum_key,
-                datum: ObservedDatum::Present { .. },
-                ..
-            } if doc_id == created.doc_id && datum_key == key("main") => break,
-            DatumObserved::Entry { .. } | DatumObserved::ReplayComplete { .. } => {}
+        let (doc_id, datum_key, _) = poll.next_datum().await;
+        if doc_id == created.doc_id && datum_key == key("main") {
+            break;
         }
     }
     let expected = owner
@@ -129,7 +111,6 @@ async fn observation_fetches_remote_document_without_manual_document_sync() {
     );
     let mut demand = reader.repo.sync_demand();
     assert!(demand.documents().contains(&created.doc_id));
-    drop(observations);
     assert!(demand.documents().contains(&created.doc_id));
     while demand.documents().contains(&created.doc_id) {
         demand.changed().await.unwrap();

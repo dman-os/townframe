@@ -1,9 +1,11 @@
 use super::*;
+use crate::test_poll::Poller;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::RetractCapability;
-use futures::StreamExt;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 
 async fn actor(node: &Node, path: &str, rights: Rights) -> Actor {
     node.authority
@@ -37,22 +39,6 @@ async fn mint(
         )
         .await
         .unwrap()
-}
-
-async fn next_datum(
-    events: &mut (impl futures::Stream<Item = Result<DatumObserved, ClientError<DocsError>>> + Unpin),
-) -> (DocId, DatumKey, ObservedDatum) {
-    loop {
-        match events.next().await.unwrap().unwrap() {
-            DatumObserved::Entry {
-                doc_id,
-                datum_key,
-                datum,
-                ..
-            } => return (doc_id, datum_key, datum),
-            DatumObserved::ReplayComplete { .. } => {}
-        }
-    }
 }
 
 #[tokio::test]
@@ -445,12 +431,15 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 .client()
                 .call(
                     RequestContext::root(),
-                    QueryDatums {
+                    PollDatums {
                         capability,
-                        drawer_id: None,
-                        selector: DatumSelector::Doc {
+                        predicate: Predicate::IsDoc {
                             doc_id: created.doc_id.clone()
                         },
+                        datums: DatumSelection::All,
+                        after: 0,
+                        limit: 0,
+                        hold_ms: 0,
                     }
                 )
                 .await),
@@ -477,14 +466,17 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
         }
         assert!(matches!(
             node.client()
-                .subscribe(
+                .call(
                     RequestContext::root(),
-                    ObserveDatums {
+                    PollDatums {
                         capability,
-                        scope: ObserveScope::Doc {
+                        predicate: Predicate::IsDoc {
                             doc_id: created.doc_id.clone()
                         },
+                        datums: DatumSelection::All,
                         after: 0,
+                        limit: 0,
+                        hold_ms: 0,
                     }
                 )
                 .await,
@@ -1632,22 +1624,13 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             .unwrap();
         assert_eq!(attenuated.object, narrowed.object);
         assert_eq!(attenuated.issuer_id, node.docs_namespace.namespace_id);
-        let mut events = node
-            .client()
-            .subscribe(
-                RequestContext::root(),
-                ObserveDatums {
-                    capability: attenuated.capability_id,
-                    scope: ObserveScope::Doc {
-                        doc_id: created.doc_id,
-                    },
-                    after: 0,
-                },
-            )
-            .await
-            .unwrap();
+        let mut poll = Poller::doc(
+            node.client(),
+            attenuated.capability_id,
+            created.doc_id.clone(),
+        );
         assert!(matches!(
-            next_datum(&mut events).await.2,
+            poll.next_datum().await.2,
             ObservedDatum::Present { .. }
         ));
         let retracted = match target {
@@ -1678,25 +1661,16 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
                 .await
                 .unwrap();
         }
-        loop {
-            match events.next().await {
-                Some(Ok(DatumObserved::ReplayComplete { .. })) => {}
-                terminal => {
-                    assert_eq!(
-                        terminal,
-                        Some(Err(ClientError::Operation(DocsError::Denied)))
-                    );
-                    break;
-                }
-            }
-        }
-        assert_eq!(events.next().await, None);
+        assert_eq!(
+            poll.page(0).await,
+            Err(ClientError::Operation(DocsError::Denied))
+        );
         node.stop().await;
     }
 }
 
 #[tokio::test]
-async fn authorized_absent_document_observation_acquires_interest_but_tag_observation_does_not() {
+async fn a_held_document_poll_acquires_interest_in_an_absent_document() {
     let node = Node::boot().await;
     let reader = actor(&node, "reader", Rights::USE | Rights::NARROW).await;
     let absent = DocId::new([73; 32]);
@@ -1713,45 +1687,25 @@ async fn authorized_absent_document_observation_acquires_interest_but_tag_observ
         .await
         .unwrap();
     assert!(!node.repo.sync_demand().documents().contains(&absent));
-    let mut tags = node
-        .client()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability,
-                scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
-                },
-                after: 0,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        tags.next().await,
-        Some(Ok(DatumObserved::ReplayComplete { .. }))
-    ));
-    assert!(!node.repo.sync_demand().documents().contains(&absent));
-    let mut document = node
-        .client()
-        .subscribe(
-            RequestContext::root(),
-            ObserveDatums {
-                capability,
-                scope: ObserveScope::Doc {
-                    doc_id: absent.clone(),
-                },
-                after: 0,
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        document.next().await,
-        Some(Ok(DatumObserved::ReplayComplete { .. }))
-    ));
-    assert!(node.repo.sync_demand().documents().contains(&absent));
-    drop(document);
-    drop(tags);
+    // `IsDoc` takes a `DocInterest` for the poll's duration (ADR 025 §6), so holding an empty
+    // page open puts the absent document into the sync demand set.
+    let mut held = Poller::doc(node.client(), capability, absent.clone());
+    let mut page = Box::pin(held.page(1_000));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::select! {
+            result = &mut page => panic!("the held poll answered before interest was observed: {result:?}"),
+            () = async {
+                loop {
+                    if node.repo.sync_demand().documents().contains(&absent) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .expect("the held poll never put the document in the sync demand set");
+    drop(page);
     node.stop().await;
 }

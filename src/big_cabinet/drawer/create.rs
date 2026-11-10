@@ -1,16 +1,27 @@
-//! CreateDrawer: a new single-group drawer (two Keyhive groups and a metadata doc), or an existing
-//! doc declared a self-doc drawer.
+//! CreateDrawer: a new single-group drawer (three Keyhive groups, its two metadata roots and the
+//! metadata docs they name), or an existing doc declared a self-doc drawer.
 
+use super::principal::hex_digest;
 use super::*;
 use crate::doc::pipeline::digest;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerRoster;
+use big_cabinet_core::drawer::MetaRoot;
 use ledger::Op;
 
 fn datum_value(datum: &impl Serialize) -> serde_json::Value {
     serde_json::to_value(datum).expect("a drawer datum serializes")
+}
+
+/// The DocsRepo command the sensitive metadata root of `command` is created under: derived
+/// from the drawer's own command so a replay lands on the same doc, and distinct from it so
+/// the two creations are two commands with two ledgers.
+pub(super) fn sensitive_root_command(command: &CommandId) -> CommandId {
+    let suffix = digest(&("sensitiveRoot", command.as_str()));
+    CommandId::try_from(format!("sensitiveRoot/{}", hex_digest(&suffix)))
+        .expect("a derived command id is within bounds")
 }
 
 /// The record a descriptor states. Carrying, not operating: a foreign layout is stored as it
@@ -19,6 +30,30 @@ pub(crate) fn record_of(drawer_id: &DrawerId, descriptor: &Drawer) -> DrawerReco
     DrawerRecord {
         drawer_id: drawer_id.clone(),
         descriptor: descriptor.clone(),
+    }
+}
+
+impl Core {
+    /// Whether Keyhive shows `doc` delegated to the drawer's meta group, which is the only
+    /// evidence that admits a `metaDoc` reference. A writer can put any doc id in the slot; without
+    /// this check the reference would hand every drawer writer Cabinet reach to that doc.
+    pub(crate) async fn meta_doc_admitted(
+        &self,
+        meta: &BigKeyhiveGroup,
+        doc: &DocId,
+    ) -> Result<bool, DrawersError> {
+        let key =
+            ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32().map_err(keyhive_error)?)
+                .map_err(|_| keyhive_error(format!("{doc} is not a valid Ed25519 point")))?;
+        Ok(self
+            .big_repo
+            .keyhive()
+            .direct_access_on(
+                &meta.id().into(),
+                big_repo::keyhive_core::principal::identifier::Identifier::from(key),
+            )
+            .await
+            .is_some_and(|access| access >= KeyhiveAccess::Admin))
     }
 }
 
@@ -192,6 +227,7 @@ impl Core {
                 actor,
                 Op::Create {
                     groups: None,
+                    sensitive_root: None,
                     owner_id,
                 },
                 |op| self.create_collection(context, command, op),
@@ -199,30 +235,32 @@ impl Core {
             .await
     }
 
-    /// Everything after the row exists: make or look up the groups, create the metadata doc as
-    /// this service under `command` (DocsRepo's own ledger replays it if a crash already created
-    /// it), put the meta group in charge of that doc, record the drawer, and grant `actor` Admin.
+    /// Everything after the row exists: make or look up the three groups, make or look up the
+    /// sensitive metadata root, then create the drawer doc as this service under `command`
+    /// (DocsRepo's own ledger replays it if a crash already created it) — that doc *is* the
+    /// public metadata root — put the public metadata group in charge of it, record the drawer,
+    /// and grant `actor` Admin.
     pub(crate) async fn create_collection(
         &self,
         context: &RequestContext,
         command: &CommandId,
         op: Op,
     ) -> Result<DrawerCreated, DrawersError> {
-        let Op::Create { groups, owner_id } = op else {
+        let Op::Create {
+            groups: recorded_groups,
+            sensitive_root,
+            owner_id,
+        } = op
+        else {
             unreachable!("create_collection runs under a create row: {op:?}")
         };
-        let (meta, docs) = match groups {
-            Some(DrawerGroups {
-                meta_group,
-                docs_group,
-            }) => {
-                let group = |key: GroupKey| async move {
-                    self.big_repo.get_group_by_id(key.0).await.ok_or_else(|| {
-                        DrawersError::Keyhive(format!("group {key} is not in keyhive"))
-                    })
-                };
-                (group(meta_group).await?, group(docs_group).await?)
-            }
+        let (meta, _docs, sensitive, groups) = match recorded_groups {
+            Some(groups) => (
+                self.group(groups.meta_group).await?,
+                self.group(groups.docs_group).await?,
+                self.group(groups.sensitive_group).await?,
+                groups,
+            ),
             None => {
                 let meta = self
                     .big_repo
@@ -234,22 +272,56 @@ impl Core {
                     .create_group_with_parents(Vec::new())
                     .await
                     .map_err(keyhive_error)?;
+                let sensitive = self
+                    .big_repo
+                    .create_group_with_parents(Vec::new())
+                    .await
+                    .map_err(keyhive_error)?;
+                let groups = DrawerGroups {
+                    meta_group: group_key(&meta),
+                    docs_group: group_key(&docs),
+                    sensitive_group: group_key(&sensitive),
+                };
                 self.ledger
                     .record(
                         command,
                         &Op::Create {
+                            groups: Some(groups),
+                            sensitive_root: None,
                             owner_id,
-                            groups: Some(DrawerGroups {
-                                meta_group: group_key(&meta),
-                                docs_group: group_key(&docs),
-                            }),
                         },
                     )
                     .await?;
-                (meta, docs)
+                (meta, docs, sensitive, groups)
             }
         };
-        let descriptor = Drawer::single_group(group_key(&meta), group_key(&docs));
+        let sensitive_root = match sensitive_root {
+            Some(sensitive_root) => sensitive_root,
+            None => {
+                let sensitive_root = self
+                    .create_metadata_root(context, command, &sensitive)
+                    .await?;
+                self.ledger
+                    .record(
+                        command,
+                        &Op::Create {
+                            groups: Some(groups),
+                            sensitive_root: Some(sensitive_root.clone()),
+                            owner_id,
+                        },
+                    )
+                    .await?;
+                #[cfg(test)]
+                self.crash_at(super::CrashPoint::MetadataDocRecorded)?;
+                sensitive_root
+            }
+        };
+        let descriptor = Drawer::single_group(
+            groups.meta_group,
+            groups.docs_group,
+            groups.sensitive_group,
+            sensitive_root,
+        );
         let receipt = self
             .as_signer(
                 context,
@@ -284,6 +356,8 @@ impl Core {
             .grant_doc_access(receipt.doc_id.clone(), meta, KeyhiveAccess::Admin)
             .await
             .map_err(keyhive_error)?;
+        #[cfg(test)]
+        self.crash_at(super::CrashPoint::MetadataDocPublished)?;
         self.state.put_drawer(&receipt.doc_id, &descriptor).await?;
         if let Some(owner_id) = owner_id {
             self.grant(
@@ -300,6 +374,56 @@ impl Core {
         })
     }
 
+    /// The sensitive metadata root: a metadata doc carrying no descriptor, roster, entries or
+    /// child entries, created as this service under a command derived from the drawer's own so
+    /// a replay lands on the same doc while the two creations stay two commands with two
+    /// ledgers. The sensitive metadata group takes Admin on it the way the public metadata group
+    /// takes Admin on the drawer doc; principal access is attenuated by membership level.
+    async fn create_metadata_root(
+        &self,
+        context: &RequestContext,
+        command: &CommandId,
+        sensitive: &BigKeyhiveGroup,
+    ) -> Result<DocId, DrawersError> {
+        let receipt = self
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    create: [METADATA_PLACEMENT.into()].into(),
+                    ..Default::default()
+                },
+                |capability| async move {
+                    self.docs()
+                        .call(
+                            context.child(),
+                            CreateDoc {
+                                capability,
+                                command: sensitive_root_command(command),
+                                placement: METADATA_PLACEMENT.into(),
+                                datums: BTreeMap::new(),
+                            },
+                        )
+                        .await
+                        .map_err(docs_error)
+                },
+            )
+            .await?;
+        #[cfg(test)]
+        self.crash_at(super::CrashPoint::MetadataDocCreated)?;
+        self.big_repo
+            .grant_doc_access(
+                receipt.doc_id.clone(),
+                sensitive.clone(),
+                KeyhiveAccess::Admin,
+            )
+            .await
+            .map_err(keyhive_error)?;
+        #[cfg(test)]
+        self.crash_at(super::CrashPoint::MetadataDocGranted)?;
+        Ok(receipt.doc_id)
+    }
+
     pub(crate) async fn resume_create(
         &self,
         context: &RequestContext,
@@ -307,6 +431,139 @@ impl Core {
     ) -> Result<(), DrawersError> {
         let created = self
             .create_collection(context, &row.command, row.op.clone())
+            .await?;
+        self.ledger.finish(&row.command, &created).await
+    }
+
+    pub(crate) async fn create_meta_doc(
+        &self,
+        context: &RequestContext,
+        command: &CommandId,
+        op: Op,
+    ) -> Result<MetaDocCreated, DrawersError> {
+        let Op::CreateMetaDoc {
+            drawer_id,
+            kind,
+            name,
+            root,
+            doc_id,
+        } = op
+        else {
+            unreachable!("create_meta_doc runs under a create-meta-doc row: {op:?}")
+        };
+        let slot = meta_doc_key(&kind, &name)?;
+        let record = self
+            .state
+            .drawer(&drawer_id)
+            .await?
+            .ok_or_else(|| DrawersError::UnknownDrawer(drawer_id.clone()))?;
+        let groups = record.groups().ok_or_else(|| match record.layout_kind() {
+            None => DrawersError::ForeignLayout(
+                record
+                    .descriptor
+                    .layout
+                    .tag()
+                    .unwrap_or("unknown")
+                    .to_owned(),
+            ),
+            Some(_) => DrawersError::SelfDoc(drawer_id.clone()),
+        })?;
+        // The reference lands on the root doc: Public names the drawer doc itself, Sensitive
+        // names the separate sensitive root the descriptor carries. The group granted on the
+        // new doc and the group whose delegation admits the reference are that root's own.
+        let root_doc = match root {
+            MetaRoot::Public => drawer_id.clone(),
+            MetaRoot::Sensitive => record
+                .descriptor
+                .sensitive_root()
+                .ok_or_else(|| DrawersError::UnknownDrawer(drawer_id.clone()))?,
+        };
+        let named_group = match root {
+            MetaRoot::Public => groups.meta_group,
+            MetaRoot::Sensitive => groups.sensitive_group,
+        };
+        let group = self.group(named_group).await?;
+        let doc_id = match doc_id {
+            Some(doc_id) => doc_id,
+            None => {
+                let receipt = self
+                    .as_signer(
+                        context,
+                        self.issuer,
+                        DocScope {
+                            create: [METADATA_PLACEMENT.into()].into(),
+                            ..Default::default()
+                        },
+                        |capability| async move {
+                            self.docs()
+                                .call(
+                                    context.child(),
+                                    CreateDoc {
+                                        capability,
+                                        command: command.clone(),
+                                        placement: METADATA_PLACEMENT.into(),
+                                        datums: BTreeMap::new(),
+                                    },
+                                )
+                                .await
+                                .map_err(docs_error)
+                        },
+                    )
+                    .await?;
+                #[cfg(test)]
+                self.crash_at(super::CrashPoint::MetadataDocCreated)?;
+                self.big_repo
+                    .grant_doc_access(receipt.doc_id.clone(), group, KeyhiveAccess::Admin)
+                    .await
+                    .map_err(keyhive_error)?;
+                #[cfg(test)]
+                self.crash_at(super::CrashPoint::MetadataDocGranted)?;
+                self.ledger
+                    .record(
+                        command,
+                        &Op::CreateMetaDoc {
+                            drawer_id: drawer_id.clone(),
+                            kind: kind.clone(),
+                            name: name.clone(),
+                            root,
+                            doc_id: Some(receipt.doc_id.clone()),
+                        },
+                    )
+                    .await?;
+                #[cfg(test)]
+                self.crash_at(super::CrashPoint::MetadataDocRecorded)?;
+                receipt.doc_id
+            }
+        };
+        let entry = DrawerMetaDoc::new(doc_id.clone());
+        let receipt = self
+            .write_roster(
+                context,
+                &root_doc,
+                None,
+                BTreeMap::from([(slot, datum_value(&entry))]),
+                std::collections::BTreeSet::new(),
+            )
+            .await?;
+        #[cfg(test)]
+        self.crash_at(super::CrashPoint::MetadataDocPublished)?;
+        Ok(MetaDocCreated {
+            drawer_id: drawer_id.clone(),
+            kind,
+            name,
+            root,
+            doc_id,
+            heads: receipt.heads,
+        })
+    }
+
+    pub(crate) async fn resume_create_meta_doc(
+        &self,
+        context: &RequestContext,
+        row: &ledger::Row,
+    ) -> Result<(), DrawersError> {
+        let created = self
+            .create_meta_doc(context, &row.command, row.op.clone())
             .await?;
         self.ledger.finish(&row.command, &created).await
     }
@@ -360,63 +617,71 @@ impl DrawerService {
                     .drawer_id,
             );
         }
-        // The registry is a fresh self-doc drawer: a metadata doc that is its own drawer, its
-        // known entries are bookkeeping datums on it, and a foreign layout arriving from a
-        // peer is carried rather than operated, as anywhere else.
-        let command = CommandId::try_from("local drawer registry".to_owned())
-            .expect("the registry command is within bounds");
-        let receipt = self
-            .core
-            .as_signer(
-                &context,
-                self.core.issuer,
-                DocScope {
-                    create: [METADATA_PLACEMENT.into()].into(),
-                    ..Default::default()
-                },
-                |capability| {
-                    let (command, context) = (&command, &context);
-                    async move {
-                        self.core
-                            .docs()
-                            .call(
-                                context.child(),
-                                CreateDoc {
-                                    capability,
-                                    command: command.clone(),
-                                    placement: METADATA_PLACEMENT.into(),
-                                    datums: BTreeMap::from([(
-                                        drawer_key(),
-                                        datum_value(&Drawer::self_doc()),
-                                    )]),
-                                },
-                            )
-                            .await
-                            .map_err(docs_error)
-                    }
-                },
-            )
-            .await?;
-        self.core
-            .state
-            .put_drawer(&receipt.doc_id, &Drawer::self_doc())
-            .await?;
-        self.core
-            .grant(
-                &context,
-                actor,
-                drawer_object(Access::Admin, &receipt.doc_id),
-                None,
-            )
-            .await?;
+        // The registry and node config drawers are fresh self-doc drawers: metadata docs that are
+        // their own drawers, whose entries are bookkeeping/config datums on them, and a foreign
+        // layout arriving from a peer is carried rather than operated, as anywhere else.
+        let mut self_docs = Vec::with_capacity(2);
+        for command in ["local drawer registry", "local drawer config"] {
+            let command = CommandId::try_from(command.to_owned())
+                .expect("the local self-doc drawer commands are within bounds");
+            let receipt = self
+                .core
+                .as_signer(
+                    &context,
+                    self.core.issuer,
+                    DocScope {
+                        create: [METADATA_PLACEMENT.into()].into(),
+                        ..Default::default()
+                    },
+                    |capability| {
+                        let (command, context) = (&command, &context);
+                        async move {
+                            self.core
+                                .docs()
+                                .call(
+                                    context.child(),
+                                    CreateDoc {
+                                        capability,
+                                        command: command.clone(),
+                                        placement: METADATA_PLACEMENT.into(),
+                                        datums: BTreeMap::from([(
+                                            drawer_key(),
+                                            datum_value(&Drawer::self_doc()),
+                                        )]),
+                                    },
+                                )
+                                .await
+                                .map_err(docs_error)
+                        }
+                    },
+                )
+                .await?;
+            self.core
+                .state
+                .put_drawer(&receipt.doc_id, &Drawer::self_doc())
+                .await?;
+            self.core
+                .grant(
+                    &context,
+                    actor,
+                    drawer_object(Access::Admin, &receipt.doc_id),
+                    None,
+                )
+                .await?;
+            self_docs.push(receipt.doc_id);
+        }
         let [present, originated]: [DrawerId; 2] =
             created.try_into().expect("two local drawers were created");
+        let [registry_id, config_id]: [DrawerId; 2] = self_docs
+            .try_into()
+            .expect("two local self-doc drawers were created");
         self.core
             .state
             .set_local(LocalDrawers {
                 present_id: present,
                 originated_id: originated,
-                registry_id: receipt.doc_id,
+                registry_id,
+                config_id,
             })
             .await
     }
@@ -428,6 +693,55 @@ impl Handler<CreateDrawer> for DrawerService {
         request: Envelope<CreateDrawer>,
     ) -> Result<ResponseEnvelope<DrawerCreated>, DrawersError> {
         Ok(self.create(&request.context, request.params).await?.into())
+    }
+}
+
+impl DrawerService {
+    async fn create_meta_doc(
+        &self,
+        context: &RequestContext,
+        params: CreateMetaDoc,
+    ) -> Result<MetaDocCreated, DrawersError> {
+        let caller = self.core.invocation(context, params.capability).await?;
+        let actor = &caller.signer;
+        self.core
+            .authorize(context, &caller.authority, &params.drawer_id, Access::Write)
+            .await?;
+        let slot = meta_doc_key(&params.kind, &params.name)?;
+        drop(slot);
+        let request_digest = digest(&(
+            "createMetaDoc",
+            actor.actor_id,
+            &params.drawer_id,
+            &params.kind,
+            &params.name,
+            params.root,
+        ));
+        let op = Op::CreateMetaDoc {
+            drawer_id: params.drawer_id.clone(),
+            kind: params.kind.clone(),
+            name: params.name.clone(),
+            root: params.root,
+            doc_id: None,
+        };
+        self.core
+            .ledger
+            .run(&params.command, request_digest, actor.actor_id, op, |op| {
+                self.core.create_meta_doc(context, &params.command, op)
+            })
+            .await
+    }
+}
+
+impl Handler<CreateMetaDoc> for DrawerService {
+    async fn call(
+        &self,
+        request: Envelope<CreateMetaDoc>,
+    ) -> Result<ResponseEnvelope<MetaDocCreated>, DrawersError> {
+        Ok(self
+            .create_meta_doc(&request.context, request.params)
+            .await?
+            .into())
     }
 }
 

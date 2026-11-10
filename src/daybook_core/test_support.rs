@@ -162,7 +162,7 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
 /// heads is the same thing the encryption worker does in production.
 pub async fn stage_key_doc(
     drawer: &DrawerRepo,
-    key: &crate::blobs::encrypt::MasterKey,
+    key: &big_blobs::encrypt::MasterKey,
 ) -> Res<(daybook_types::doc::DocId, daybook_types::doc::ChangeHashSet)> {
     let key_doc_id = drawer
         .add(daybook_types::doc::AddDocArgs {
@@ -182,10 +182,10 @@ pub async fn stage_key_doc(
 pub async fn write_jwk_facet(
     drawer: &DrawerRepo,
     doc_id: &daybook_types::doc::DocId,
-    key: &crate::blobs::encrypt::MasterKey,
+    key: &big_blobs::encrypt::MasterKey,
 ) -> Res<daybook_types::doc::ChangeHashSet> {
     // The JWK facet is system-managed like the cipherBlob that references it.
-    let jwk = crate::blobs::encrypt::JwkOct::from_master_key(key);
+    let jwk = big_blobs::encrypt::JwkOct::from_master_key(key);
     drawer
         .update_at_heads_with_scope(
             daybook_types::doc::DocPatch {

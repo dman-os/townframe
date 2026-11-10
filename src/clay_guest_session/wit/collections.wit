@@ -1,0 +1,148 @@
+package townframe:dayframe@0.4.0;
+
+interface collections {
+    use capability-bank.{capability-ref};
+
+    record encoded-value {
+        body: list<u8>,
+        capabilities: list<capability-ref>,
+    }
+
+    record version {
+        incarnation: u64,
+        sequence: u64,
+    }
+
+    /// The causal position of one write to one key: the highest stamp among a key's live
+    /// candidates is the visible row, a deletion included. `writer` is the stable identity of the writing micro.
+    record stamp {
+        lamport: u64,
+        writer: list<u8>,
+    }
+
+    enum row-evidence {
+        authoritative,
+        pending,
+    }
+
+    record upsert {
+        key: encoded-value,
+        row-version: version,
+        stamp: stamp,
+        /// `none`: the key is deleted. The row still carries the deleting write's stamp, so a
+        /// writer that re-creates the key can name what it saw.
+        value: option<encoded-value>,
+        evidence: row-evidence,
+        write-context: option<list<u8>>,
+    }
+
+    record removal {
+        key: encoded-value,
+        row-version: version,
+    }
+
+    variant change {
+        upsert(upsert),
+        remove(removal),
+    }
+
+    record transaction {
+        changes: list<change>,
+    }
+
+    record page {
+        transactions: list<transaction>,
+        through: list<u8>,
+        bootstrap-complete: bool,
+    }
+
+    record read-limits {
+        max-transactions: option<u32>,
+        max-changes: option<u32>,
+        poll-timeout-ms: u32,
+    }
+
+    variant acquire-error {
+        reset-required,
+        source-unavailable,
+        revoked,
+        invalid-selector,
+        unauthorized-selector,
+    }
+
+    variant read-error {
+        reset-required,
+        source-unavailable,
+        revoked,
+    }
+
+    resource projection-lease {
+        read: async func(committed: option<list<u8>>, limits: read-limits) -> result<page, read-error>;
+    }
+
+    resource collection-reader {
+        acquire: async func(selector: list<u8>, resume: option<list<u8>>) -> result<projection-lease, acquire-error>;
+    }
+
+    record collection-binding {
+        name: string,
+        reader: collection-reader,
+    }
+}
+
+@since(version = 0.2.0)
+interface collection-registration {
+    use collections.{stamp};
+    use capability-bank.{capability-ref};
+
+    /// What a writer claims to have seen when it writes a key.
+    variant write-basis {
+        /// No claim: stamped as a fresh creation, so a later stamp the key already holds wins
+        /// and an equal one breaks by writer.
+        concurrent,
+        /// The writer saw this stamp; the write supersedes it and is always accepted.
+        observed(stamp),
+        /// Accepted only if the visible row's stamp is exactly this one (`none`: the key
+        /// is absent).
+        compare-and-set(option<stamp>),
+    }
+
+    variant mutation-error {
+        /// The visible row's stamp, or `none` if the key is absent.
+        conflict(option<stamp>),
+        revoked,
+        key-too-large,
+        value-too-large,
+        row-limit,
+        invalid-attachment,
+        capability-limit,
+    }
+
+    /// What one attachment slot of a written value holds. A durable row persists endpoints and
+    /// never references (ADR 031 §7), so a row names its own publications; the host turns the
+    /// name into the endpoint of the writer's own micro and manifest-declared contract.
+    variant row-attachment {
+        /// A held reference, forwarded as it is.
+        reference(capability-ref),
+        /// One of the writer's own manifest-declared publications, by name. Naming one the
+        /// manifest does not declare is `invalid-attachment`. The publication needs no live
+        /// incarnation or `initialize` handle, so a row may attach it at any time.
+        own-publication(string),
+    }
+
+    /// A value as written: the body names attachments by index into `attachments`.
+    record written-value {
+        body: list<u8>,
+        attachments: list<row-attachment>,
+    }
+
+    resource registration-writer {
+        put: async func(key: list<u8>, basis: write-basis, value: written-value) -> result<stamp, mutation-error>;
+        delete: async func(key: list<u8>, basis: write-basis) -> result<stamp, mutation-error>;
+    }
+
+    record registration-binding {
+        name: string,
+        writer: registration-writer,
+    }
+}

@@ -18,6 +18,7 @@ use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::DrawerGroups;
+use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersError;
 use serde::Deserialize;
@@ -55,11 +56,14 @@ pub(crate) enum Op {
         parent_id: DrawerId,
         child_id: DrawerId,
     },
-    /// A single-group drawer. `groups` is recorded once the two groups exist, so a resume reuses
-    /// them; the metadata doc is the DocsRepo command of the same id, whose own ledger says
-    /// whether it was created.
+    /// A single-group drawer. `groups` is recorded once the three groups exist and
+    /// `sensitive_root` once the sensitive metadata root doc does, so a resume reuses both; the
+    /// public metadata root is the drawer doc itself, whose id is the receipt's. Both metadata
+    /// docs are created under DocsRepo commands derived from this one, whose own ledgers say
+    /// whether they were created.
     Create {
         groups: Option<DrawerGroups>,
+        sensitive_root: Option<DocId>,
         owner_id: Option<Uuid7>,
     },
     /// A self-doc drawer declaration on an existing doc.
@@ -67,7 +71,14 @@ pub(crate) enum Op {
         doc_id: DocId,
         owner_id: Option<Uuid7>,
     },
-    /// A principal invited to a drawer's groups. Both memberships are re-asserted by a resume;
+    CreateMetaDoc {
+        drawer_id: DrawerId,
+        kind: String,
+        name: String,
+        root: MetaRoot,
+        doc_id: Option<DocId>,
+    },
+    /// A principal invited to a drawer's groups. Memberships are re-asserted by a resume;
     /// adding a member that is already there is a no-op in Keyhive.
     Invite {
         drawer_id: DrawerId,
@@ -93,6 +104,10 @@ pub(crate) enum CrashPoint {
     RosterRemoved,
     /// An invite's docs membership landed; the meta membership never did.
     DocsMembershipAdded,
+    MetadataDocCreated,
+    MetadataDocGranted,
+    MetadataDocRecorded,
+    MetadataDocPublished,
 }
 
 trait LedgerFailure {
@@ -128,7 +143,10 @@ impl LedgerFailure for DrawersError {
             | Self::SelfChild
             | Self::NotAnEntry(_)
             | Self::CommandInFlight { .. }
-            | Self::CommandReused { .. } => false,
+            | Self::CommandReused { .. }
+            | Self::InvalidMetaDocSlot(_)
+            | Self::SuccessorCycle { .. }
+            | Self::SuccessorSelf { .. } => false,
         }
     }
 }
@@ -397,13 +415,16 @@ mod tests {
         let actor = Uuid7::new();
         let op = Op::Create {
             groups: None,
+            sensitive_root: None,
             owner_id: Some(actor),
         };
         let recorded = Op::Create {
             groups: Some(DrawerGroups {
                 meta_group: GroupKey([1; 32]),
                 docs_group: GroupKey([2; 32]),
+                sensitive_group: GroupKey([4; 32]),
             }),
+            sensitive_root: Some(DocId::new([7; 32])),
             owner_id: Some(actor),
         };
         let failure = DrawersError::Storage("interrupted".to_owned());

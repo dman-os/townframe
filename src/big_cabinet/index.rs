@@ -12,20 +12,22 @@ pub use datum_set::DatumSetStore;
 
 use crate::schema::SchemaRepo;
 use big_repo::SharedBigRepo;
-use futures::FutureExt;
 use service_utils_rs::Spawner;
 use service_utils_rs::StopToken as ComponentStopToken;
 use sqlite_rs::Database;
 use std::num::NonZeroUsize;
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use utils_rs::prelude::Res;
 
+/// The change-stream-fed indexes of one cabinet.
+///
+/// `datum_set` is the only worker: it projects each document once and, from that read, writes both
+/// the predicate entries and the declared-reference edges (ADR 024). `datum_ref` is left here as the
+/// read surface over the edge table those projections fill.
 pub struct Indexes {
     pub datum_set: Arc<DatumSetStore>,
     pub datum_ref: Arc<DatumRefStore>,
     set_tasks: Spawner,
-    ref_tasks: Spawner,
 }
 
 impl Indexes {
@@ -35,18 +37,17 @@ impl Indexes {
         sql: Database,
         concurrency: NonZeroUsize,
     ) -> Res<(Arc<Self>, StopToken)> {
-        let datum_set = Arc::new(DatumSetStore::new(sql.clone()).await?);
+        let datum_set = Arc::new(DatumSetStore::new(sql.clone(), schemas).await?);
         let datum_ref = Arc::new(DatumRefStore::new(sql).await?);
         let (set_stop, set_tasks) = ComponentStopToken::new();
         let (ready, started) = tokio::sync::oneshot::channel();
         let store = Arc::clone(&datum_set);
-        let set_repo = Arc::clone(&repo);
         let owner = set_tasks.clone();
         set_tasks
             .spawn(async move {
                 let mut ready = Some(ready);
                 let result = store
-                    .run_until(set_repo, concurrency, owner.cancelled(), &mut ready)
+                    .run_until(repo, concurrency, owner.cancelled(), &mut ready)
                     .await;
                 if let Some(ready) = ready {
                     ready.send(result).expect("index boot waits for readiness");
@@ -55,33 +56,7 @@ impl Indexes {
                 }
             })
             .expect("index worker starts before shutdown");
-        if let Err(error) = started
-            .await
-            .expect("index initialization reports its result")
-        {
-            set_stop.stop().await;
-            return Err(error);
-        }
-
-        let (ref_stop, ref_tasks) = ComponentStopToken::new();
-        let (ready, started) = tokio::sync::oneshot::channel();
-        let store = Arc::clone(&datum_ref);
-        let set = (*datum_set).clone();
-        let owner = ref_tasks.clone();
-        ref_tasks
-            .spawn(async move {
-                let mut ready = Some(ready);
-                let result = store
-                    .run_until(repo, schemas, set, owner.cancelled(), &mut ready)
-                    .await;
-                if let Some(ready) = ready {
-                    ready.send(result).expect("index boot waits for readiness");
-                } else {
-                    result.unwrap();
-                }
-            })
-            .expect("index worker starts before shutdown");
-        let stop = StopToken { ref_stop, set_stop };
+        let stop = StopToken { set_stop };
         if let Err(error) = started
             .await
             .expect("index initialization reports its result")
@@ -94,32 +69,24 @@ impl Indexes {
                 datum_set,
                 datum_ref,
                 set_tasks,
-                ref_tasks,
             }),
             stop,
         ))
     }
 
     pub fn live_tasks(&self) -> usize {
-        self.set_tasks.live_tasks() + self.ref_tasks.live_tasks()
+        self.set_tasks.live_tasks()
     }
 }
 
 #[must_use]
 pub struct StopToken {
-    ref_stop: ComponentStopToken,
     set_stop: ComponentStopToken,
 }
 
 impl StopToken {
     pub async fn stop(self) {
-        let reference = AssertUnwindSafe(self.ref_stop.stop()).catch_unwind().await;
-        let datums = AssertUnwindSafe(self.set_stop.stop()).catch_unwind().await;
-        for result in [reference, datums] {
-            if let Err(panic) = result {
-                std::panic::resume_unwind(panic);
-            }
-        }
+        self.set_stop.stop().await;
     }
 }
 

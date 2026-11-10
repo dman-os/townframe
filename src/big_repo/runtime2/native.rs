@@ -2528,10 +2528,7 @@ mod tests {
     ) {
         let (evt_tx, evt_rx) = async_channel::unbounded();
         (
-            BigRepoKeyhiveListener {
-                evt_tx,
-                storage: BigRepoKeyhiveStorage::memory(),
-            },
+            BigRepoKeyhiveListener::new(evt_tx, BigRepoKeyhiveStorage::memory()),
             evt_rx,
         )
     }

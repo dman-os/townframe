@@ -2038,3 +2038,91 @@ async fn the_protocol_answers_alike_over_every_transport() {
     irpc_stop.stop().await;
     test.stop.stop().await;
 }
+
+#[tokio::test]
+async fn cached_actor_rows_never_outlive_the_capability_that_names_them() {
+    let test = boot_authority().await;
+    let cached = || test.authority.service.actor_rows.lock().unwrap().len();
+    assert_eq!(cached(), 0);
+
+    // The first resolution reads the row; later ones, including through other capabilities of
+    // the same actor, are served from memory without growing the cache.
+    let docs = test.subsystem("docs").await;
+    let resolved = test
+        .call(ResolveActor {
+            capability: docs.capability,
+        })
+        .await
+        .unwrap();
+    assert_eq!(resolved, docs);
+    assert_eq!(cached(), 1);
+    for _ in 0..3 {
+        assert_eq!(
+            test.call(ResolveActor {
+                capability: docs.capability
+            })
+            .await
+            .unwrap(),
+            docs
+        );
+        test.call(ResolveAuthority {
+            capability: docs.capability,
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(cached(), 1);
+
+    // A write after the cache is warm is visible to the next read: a new actor resolves to its
+    // own row, and opening the same path again names the same identity.
+    let photos = test.subsystem("photos").await;
+    let photos_resolved = test
+        .call(ResolveActor {
+            capability: photos.capability,
+        })
+        .await
+        .unwrap();
+    assert_eq!(photos_resolved, photos);
+    assert_ne!(photos.actor_id, docs.actor_id);
+    assert_eq!(cached(), 2);
+
+    // Retiring the actor's capability refuses it even though its row is still cached: liveness
+    // is the ledger's, checked before any row lookup.
+    test.retract(docs.capability, docs.capability)
+        .await
+        .unwrap();
+    assert_eq!(cached(), 2);
+    for refused in [
+        test.call(ResolveActor {
+            capability: docs.capability,
+        })
+        .await
+        .map(|_| ()),
+        test.call(ResolveAuthority {
+            capability: docs.capability,
+        })
+        .await
+        .map(|_| ()),
+        test.sign(docs.capability, datum_claim(docs.actor_id, 3))
+            .await
+            .map(|_| ()),
+    ] {
+        assert_refused!(refused, AuthorityServiceError::InvalidCapability);
+    }
+
+    // Reopening the retired path names the same actor under a fresh capability, served by the
+    // same cached row.
+    let reopened = test.subsystem("docs").await;
+    assert_eq!(reopened.actor_id, docs.actor_id);
+    assert_ne!(reopened.capability, docs.capability);
+    assert_eq!(
+        test.call(ResolveActor {
+            capability: reopened.capability
+        })
+        .await
+        .unwrap(),
+        reopened
+    );
+    assert_eq!(cached(), 2);
+    test.stop.stop().await;
+}

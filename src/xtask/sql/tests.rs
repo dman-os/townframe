@@ -363,3 +363,27 @@ fn migration_cli_inspection_does_not_write_and_discovery_is_sorted() -> Res<()> 
     assert_eq!(applied, 1);
     Ok(())
 }
+
+#[test]
+fn schema_dependencies_are_ordered_and_cycles_rejected() -> Res<()> {
+    let root = tempfile::tempdir()?;
+    let alpha = root.path().join("src/alpha");
+    let beta = root.path().join("src/beta");
+    std::fs::create_dir_all(alpha.join("sqlite/migrations"))?;
+    std::fs::create_dir_all(beta.join("sqlite/migrations"))?;
+    std::fs::write(
+        alpha.join("sqlite/migrations/001_parent.sql"),
+        "CREATE TABLE parent (id INTEGER PRIMARY KEY) STRICT;",
+    )?;
+    std::fs::write(
+        beta.join("sqlite/migrations/001_child.sql"),
+        "CREATE TABLE child (parent_id INTEGER REFERENCES parent(id)) STRICT;",
+    )?;
+    std::fs::write(beta.join("sqlite/dependencies.txt"), "../../alpha\n")?;
+    assert_eq!(schema_units(root.path(), &beta)?, vec![alpha.clone(), beta.clone()]);
+    process_unit(Mode::Check, root.path(), &beta)?;
+    std::fs::write(alpha.join("sqlite/dependencies.txt"), "../../beta\n")?;
+    let error = schema_units(root.path(), &beta).expect_err("dependency cycle");
+    assert!(error.to_string().contains("dependency cycle"), "{error}");
+    Ok(())
+}

@@ -6,23 +6,29 @@ pub const MIGRATION_TABLE: &str = "_big_cabinet_drawer_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_drawers.sql", sql: include_str!("migrations/001_drawers.sql") },
+    Migration { version: 2, name: "002_meta_docs.sql", sql: include_str!("migrations/002_meta_docs.sql") },
+    Migration { version: 3, name: "003_meta_doc_roots.sql", sql: include_str!("migrations/003_meta_doc_roots.sql") },
+    Migration { version: 4, name: "004_sensitive_root_index.sql", sql: include_str!("migrations/004_sensitive_root_index.sql") },
+    Migration { version: 5, name: "005_config_drawer.sql", sql: include_str!("migrations/005_config_drawer.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AncestorsRow {
     pub drawer_id: String,
-    pub level: i64,
+    pub ordinary: Option<i64>,
+    pub public: Option<i64>,
+    pub sensitive: Option<i64>,
 }
 impl crate::sqlite_rs_alias::FromRow for AncestorsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
-        row.require_width(2)?;
-        Ok(AncestorsRow { drawer_id: row.get::<String>("drawer_id")?, level: row.get::<i64>("level")? })
+        row.require_width(4)?;
+        Ok(AncestorsRow { drawer_id: row.get::<String>("drawer_id")?, ordinary: row.get::<Option<i64>>("ordinary")?, public: row.get::<Option<i64>>("public")?, sensitive: row.get::<Option<i64>>("sensitive")? })
     }
 }
 
 pub const ANCESTORS_SQL: &str = include_str!("queries/ancestors.sql");
-pub async fn ancestors(db: &impl crate::sqlite_rs_alias::QueryExecutor, target_id: String, document: bool) -> SqlResult<Vec<AncestorsRow>> {
-    let set = db.query(ANCESTORS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(target_id), crate::sqlite_rs_alias::IntoValue::into_value(document)]).await?;
+pub async fn ancestors(db: &impl crate::sqlite_rs_alias::QueryExecutor, document: bool, target_id: String) -> SqlResult<Vec<AncestorsRow>> {
+    let set = db.query(ANCESTORS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(document), crate::sqlite_rs_alias::IntoValue::into_value(target_id)]).await?;
     set.all()
 }
 
@@ -63,6 +69,11 @@ pub async fn clear_children(db: &impl crate::sqlite_rs_alias::Executor, parent_i
 pub const CLEAR_DOCS_SQL: &str = include_str!("queries/clear_docs.sql");
 pub async fn clear_docs(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(CLEAR_DOCS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
+}
+
+pub const CLEAR_META_DOCS_SQL: &str = include_str!("queries/clear_meta_docs.sql");
+pub async fn clear_meta_docs(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(CLEAR_META_DOCS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
 }
 
 pub const DOC_ENTRY_SQL: &str = include_str!("queries/doc_entry.sql");
@@ -161,6 +172,26 @@ impl crate::sqlite_rs_alias::FromRow for LoadLocalRow {
 pub const LOAD_LOCAL_SQL: &str = include_str!("queries/load_local.sql");
 pub async fn load_local(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<LoadLocalRow>> {
     let set = db.query(LOAD_LOCAL_SQL, &[]).await?;
+    set.all()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetaDocsRow {
+    pub root: String,
+    pub kind: String,
+    pub name: String,
+    pub doc_id: String,
+}
+impl crate::sqlite_rs_alias::FromRow for MetaDocsRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(4)?;
+        Ok(MetaDocsRow { root: row.get::<String>("root")?, kind: row.get::<String>("kind")?, name: row.get::<String>("name")?, doc_id: row.get::<String>("doc_id")? })
+    }
+}
+
+pub const META_DOCS_SQL: &str = include_str!("queries/meta_docs.sql");
+pub async fn meta_docs(db: &impl crate::sqlite_rs_alias::QueryExecutor, drawer_id: String) -> SqlResult<Vec<MetaDocsRow>> {
+    let set = db.query(META_DOCS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await?;
     set.all()
 }
 

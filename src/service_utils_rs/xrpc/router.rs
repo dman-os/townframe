@@ -219,11 +219,15 @@ pub struct XrpcRouter {
     subscriptions: Arc<BTreeMap<String, XrpcSubscriptionHandler>>,
     max_body_bytes: usize,
     admission: Arc<Semaphore>,
+    long_poll_admission: Arc<Semaphore>,
     #[cfg(test)]
     body_drop_observer: Option<Arc<std::sync::atomic::AtomicBool>>,
     #[cfg(test)]
     body_drop_notifier: Option<Arc<tokio::sync::Notify>>,
 }
+
+const DEFAULT_MAX_CONCURRENT_HANDLERS: usize = 64;
+const DEFAULT_MAX_CONCURRENT_LONG_POLLS: usize = 32;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum XrpcRegistrationError {
@@ -235,24 +239,52 @@ pub enum XrpcRegistrationError {
 
 impl XrpcRouter {
     pub fn new(max_body_bytes: usize) -> Self {
-        Self::with_limits(max_body_bytes, 64)
+        Self::with_limits(max_body_bytes, DEFAULT_MAX_CONCURRENT_HANDLERS)
     }
 
     pub fn with_limits(max_body_bytes: usize, max_concurrent_handlers: usize) -> Self {
+        Self::with_admission_limits(
+            max_body_bytes,
+            max_concurrent_handlers,
+            DEFAULT_MAX_CONCURRENT_LONG_POLLS,
+        )
+    }
+
+    pub fn with_admission_limits(
+        max_body_bytes: usize,
+        max_concurrent_handlers: usize,
+        max_concurrent_long_polls: usize,
+    ) -> Self {
         assert!(max_body_bytes > 0, "XRPC body limit must be positive");
         assert!(
             max_concurrent_handlers > 0,
             "XRPC handler limit must be positive"
+        );
+        assert!(
+            max_concurrent_long_polls > 0,
+            "XRPC long-poll handler limit must be positive"
         );
         Self {
             operations: Arc::new(BTreeMap::new()),
             subscriptions: Arc::new(BTreeMap::new()),
             max_body_bytes,
             admission: Arc::new(Semaphore::new(max_concurrent_handlers)),
+            long_poll_admission: Arc::new(Semaphore::new(max_concurrent_long_polls)),
             #[cfg(test)]
             body_drop_observer: None,
             #[cfg(test)]
             body_drop_notifier: None,
+        }
+    }
+
+    /// Selects the admission pool for an operation. A long poll may occupy its
+    /// permit for the whole hold, so it must not compete with ordinary unary
+    /// calls for the same slots.
+    fn admission_pool(&self, long_poll: bool) -> Arc<Semaphore> {
+        if long_poll {
+            Arc::clone(&self.long_poll_admission)
+        } else {
+            Arc::clone(&self.admission)
         }
     }
 
@@ -443,7 +475,7 @@ async fn dispatch(
     if let Some(subscription) = router.subscriptions.get(&nsid) {
         return dispatch_subscription(
             subscription.clone(),
-            Arc::clone(&router.admission),
+            router.admission_pool(subscription.operation().long_poll),
             nsid,
             raw_query,
             parts,
@@ -490,7 +522,10 @@ async fn dispatch(
             &message,
         );
     }
-    let _admission = match Arc::clone(&router.admission).try_acquire_owned() {
+    let _admission = match router
+        .admission_pool(operation.long_poll)
+        .try_acquire_owned()
+    {
         Ok(permit) => permit,
         Err(_) => {
             return error_response(

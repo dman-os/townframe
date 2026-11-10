@@ -1,0 +1,18 @@
+[package]
+name = "test_nodule_guest"
+workspace = "../wasm_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+# The workspace pins wit-bindgen with default features off (the `std` feature breaks per-task
+# export state, see the root Cargo.toml), so the generator and async runtime are named here.
+wit-bindgen = { workspace = true, features = ["macros", "realloc", "async", "async-spawn", "futures-stream", "inter-task-wakeup"] }
