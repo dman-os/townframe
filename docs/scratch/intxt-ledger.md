@@ -146,4 +146,10 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 
 ## In flight
 
-- Nothing building. `feat/intxt` has `chore/mbx` merged (2d0f3ff1); p3N-4 since rebased `chore/mbx` as `adfd2778` with the same fixes. Build with `env -u CARGO_TARGET_DIR nix develop -c …`.
+(2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
+
+- **Next: implementation**, stacked on origin/feat/big-node once the nodules lane pushes the dtxt migration (head was 9c3b88c9) with the cherry-picked write_costs commits. Plan: (1) bring `src/intxt_core` (feat/intxt d43d9282 + a04b9646, WIP) onto a branch from feat/big-node, switch reference fields to `big_cabinet_core::reference::{DatumReference, Location}` and pins to its `head_list`; (2) register the vocabulary with the node: either an embedder `schema_group()` like `big_nodule::schema_group()` / big_blobs, or an intxt nodule's manifest (`registrable_datums`, big_nodule/state.rs), awaiting the operator's choice; (3) `intxt new` / `intxt add` over the `day` socket (drawer, entry datums, `body`); (4) the capture adapter from the prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import/src/capture.rs`) writing ADR 040 datums per ADR 039; (5) an e2e with a scripted shell-only agent; reading and commenting are raw datum reads and writes (D23). UI waits for claytxt.
+- **intxt_core build** on mothership (`~/scratch/townframe-intxt-feat`, a worktree from a git bundle of feat/intxt) was queued behind other lanes' tests and never reported; rebuild there after step (1) instead.
+- **Open with the operator:** tool outputs in the session doc vs a separate outputs doc (offered a measurement via the replay); schema registration path (above); whether ADRs 035–041 move from Proposed to Accepted.
+- **Waiting on the nodules lane:** the alias-scan fix (500-datum wall, F10); value-CID bulk read and splice writes (F19); whether a document can be a roster entry of two drawers (ADR 039 Q2).
+- Pushed: `intxt/write-costs` (4f9c2bb0, fed952c5). `feat/intxt` is not pushed.
