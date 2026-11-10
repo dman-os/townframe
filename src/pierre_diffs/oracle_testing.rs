@@ -11,13 +11,15 @@ pub fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("oracle/golden")
 }
 
-/// Loads and deserialises one golden file. Panics on a missing or malformed
-/// golden: regenerate with `node oracle/generate.mjs`.
+/// Loads and deserialises one golden (`oracle/golden/<file_name>.gz`, gzip, see
+/// `oracle/generate.mjs`), streaming the decompression into the parser. Panics
+/// on a missing or malformed golden: regenerate with `node oracle/generate.mjs`.
 pub fn load_golden<Golden: DeserializeOwned>(file_name: &str) -> Golden {
-    let path = golden_dir().join(file_name);
-    let text = std::fs::read_to_string(&path)
+    let path = golden_dir().join(format!("{file_name}.gz"));
+    let file = std::fs::File::open(&path)
         .unwrap_or_else(|error| panic!("reading golden {}: {error}", path.display()));
-    serde_json::from_str(&text)
+    let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(file));
+    serde_json::from_reader(reader)
         .unwrap_or_else(|error| panic!("parsing golden {}: {error}", path.display()))
 }
 

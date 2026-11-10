@@ -10,6 +10,7 @@
 //
 // Inputs never contain lone surrogates: Rust `String` cannot carry them.
 import { readFileSync, writeFileSync } from "node:fs";
+import { crc32, deflateRawSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ensureOracle, pins } from "./ensure.mjs";
@@ -2096,24 +2097,45 @@ const outputs = {
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 
+/**
+ * A gzip member that depends only on the text: a fixed header (no mtime, no
+ * file name, no extra flags, OS "unknown"), raw deflate at a fixed level, and
+ * the CRC-32 and length trailer. Goldens are stored this way so that a
+ * regeneration with unchanged content is byte-identical in git.
+ */
+function gzipDeterministic(text) {
+  const bytes = Buffer.from(text, "utf8");
+  const header = Buffer.from([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 0xff]);
+  const trailer = Buffer.alloc(8);
+  trailer.writeUInt32LE(crc32(bytes), 0);
+  trailer.writeUInt32LE(bytes.length >>> 0, 4);
+  return Buffer.concat([header, deflateRawSync(bytes, { level: 9 }), trailer]);
+}
+
 let drift = false;
 for (const [name, value] of Object.entries(outputs)) {
   const text = `${JSON.stringify(value)}\n`;
-  const path = join(goldenDir, name);
+  // The goldens next to this file are gzip (`name.json.gz`); the export that
+  // lives elsewhere (`../..`) stays plain text.
+  const compressed = !name.startsWith("..");
+  const file = compressed ? `${name}.gz` : name;
+  const content = compressed ? gzipDeterministic(text) : text;
+  const path = join(goldenDir, file);
   if (check) {
-    let current = "";
+    let current = null;
     try {
-      current = readFileSync(path, "utf8");
+      current = readFileSync(path, compressed ? undefined : "utf8");
     } catch {
       // missing golden counts as drift
     }
-    if (current !== text) {
-      console.error(`golden drift: ${name}`);
+    const same = compressed ? current !== null && Buffer.compare(current, content) === 0 : current === content;
+    if (!same) {
+      console.error(`golden drift: ${file}`);
       drift = true;
     }
   } else {
-    writeFileSync(path, text);
-    console.log(`${name}: ${text.length} bytes`);
+    writeFileSync(path, content);
+    console.log(`${file}: ${text.length} bytes (${content.length} stored)`);
   }
 }
 // Raw (non-JSON) assets exported from the pinned dist: the package stylesheet
