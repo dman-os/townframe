@@ -172,6 +172,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Nodules { command } => cmds::nodules::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
+        StaticCommands::Intxt { command } => cmds::intxt::run(command).await,
         StaticCommands::Status { json } => cmds::status::run(json).await,
         StaticCommands::Exec { nsid, input, get } => cmds::exec::run(nsid, input, get).await,
     }
@@ -237,6 +238,11 @@ enum StaticCommands {
     Drawers {
         #[clap(subcommand)]
         command: cmds::drawers::DrawersCommands,
+    },
+    /// Create and install intxts (a stopgap until intxt's nodule runs these as operations)
+    Intxt {
+        #[clap(subcommand)]
+        command: cmds::intxt::IntxtCommands,
     },
     /// Show the node's id, how it was reached, and what it runs
     Status {

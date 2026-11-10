@@ -475,6 +475,69 @@ mod library {
             "nothing was written"
         );
     }
+
+    /// The stopgap intxt commands (ledger D41): `install` registers intxt's records, and `new`
+    /// creates a drawer whose descriptor document carries the intxt marker, the title and an
+    /// empty body, readable as written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn intxt_new_creates_a_drawer_marked_as_an_intxt() {
+        use crate::cmds::intxt;
+        use big_cabinet_core::doc::At;
+        use big_cabinet_core::doc::DatumRead;
+        use big_cabinet_core::doc::DocScope;
+        use big_cabinet_core::doc::MintDocCapability;
+        use big_cabinet_core::doc::ReadDatums;
+
+        let (_tmp, dir) = new_node();
+        let client = NodeClient::connect(&dir).await.unwrap();
+        intxt::install(&client).await.unwrap();
+        let drawer = intxt::create(&client, "Datum references move to dtxt:".into(), None)
+            .await
+            .unwrap();
+        let capability = intxt::call(
+            &client,
+            MintDocCapability {
+                scope: DocScope {
+                    read: [drawer.clone()].into(),
+                    ..DocScope::default()
+                },
+                rights: big_cabinet_core::authority::Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+        let read = intxt::call(
+            &client,
+            ReadDatums {
+                capability,
+                doc_id: drawer,
+                at: At::Current,
+                datums: None,
+                optimistic: false,
+            },
+        )
+        .await
+        .unwrap();
+        let accepted = |key: &str| match &read.datums[&key.parse().unwrap()] {
+            DatumRead::Accepted { value, .. } => value.clone(),
+            other => panic!("{key} was not accepted: {other:?}"),
+        };
+        assert_eq!(
+            accepted("org.example.intxt/main"),
+            json!({"$type": "org.example.intxt", "empty": true})
+        );
+        assert_eq!(
+            accepted("org.example.intxt.title/main"),
+            json!({"$type": "org.example.intxt.title", "title": "Datum references move to dtxt:"})
+        );
+        assert_eq!(
+            accepted("org.example.intxt.body/main"),
+            json!({"$type": "org.example.intxt.body", "order": []})
+        );
+        client.stop().await.unwrap();
+    }
 }
 
 mod blackbox {
