@@ -11,9 +11,10 @@
 // and `handleExpandHunk`/`expandHunk`. S12a-2b (hydration, loading, `render`
 // and the DOM it builds, partial render and trimming): `render`, `hydrate`,
 // `rerender`, `loadFilesIfNecessary` with `files_loaded`, and the helpers, in
-// the views under `file_diff/` (`render`, `loading`, `nodes`, `columns`,
-// `theme`). `cleanUp`, `isLineRenderable`, `getNearestRenderableLine` and
-// `revealLine` (2c) follow; see parity/closure_notes.md.
+// the views under `file_diff/` (`lifecycle`, `loading`, `nodes`, `columns`,
+// `theme`). S12a-2c: `cleanUp` (on `Lifecycle`) and `isLineRenderable`,
+// `getNearestRenderableLine` and `revealLine` (the `Lines` view, reached by
+// `lines()`); see parity/closure_notes.md.
 // * `FileDiffOptions<Element, Rendered, LAnnotation>`: `extends BaseDiffOptions,
 //   InteractionManagerBaseOptions<'diff'>` is composition (`base`,
 //   `interaction`). The callbacks upstream types as returning
@@ -98,10 +99,16 @@
 //   `discard`s them in `flush_managers` right after the managers' setup for
 //   that render has run: the managers have then dropped every key. A
 //   `flush_managers` that returns early (nothing dirty, or no `pre`) runs no
-//   setup and discards nothing. `cleanUp` (2c) cleans the managers up first and
-//   then discards what is still retired and the nodes it owns (the container
-//   belongs to the caller and is never discarded). Retire subtree roots only:
+//   setup and discards nothing. `cleanUp` cleans the managers up first and
+//   then detaches, retires and discards every node the instance created (the
+//   container belongs to the caller and is never discarded; neither is its
+//   shadow root, which lives as long as its host). Retire subtree roots only:
 //   a child retired after its parent was discarded panics as a stale key.
+//   Nodes the instance adopted by `hydrate` are its own from then on: cleaning
+//   up the instance that rendered them after the hydrating one is a stale key.
+// S12a-2c, `cleanUp` and the line queries: see the headers of `lifecycle.rs`
+// and `lines.rs`. `DiffHunksRenderer::recycle`/`clean_up` are the renderer's
+// share of `cleanUp` (annotations, expanded hunks).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -195,12 +202,14 @@ macro_rules! file_diff_view {
 
 mod columns;
 mod lifecycle;
+mod lines;
 mod loading;
 mod nodes;
 mod theme;
 
 use columns::Columns;
 pub use lifecycle::Lifecycle;
+pub use lines::Lines;
 pub use loading::Loading;
 use nodes::Nodes;
 pub(crate) use theme::Theme;
@@ -1166,6 +1175,12 @@ impl<
     /// The lifecycle entry points: `render`, `hydrate`, `rerender`.
     pub fn lifecycle(&self) -> Lifecycle<'_, Host, Rendered, LAnnotation> {
         Lifecycle(self)
+    }
+
+    /// The editor-facing line queries: `isLineRenderable`,
+    /// `getNearestRenderableLine`, `revealLine`.
+    pub fn lines(&self) -> Lines<'_, Host, Rendered, LAnnotation> {
+        Lines(self)
     }
 
     /// Loading the full files of a partial diff, driven by the host: read

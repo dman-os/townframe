@@ -1,10 +1,12 @@
 //! Upstream's `FileDiff`-level tests that `render` makes satisfiable, ported
 //! with their names (`test/FileDiff.headerSlots.test.ts`,
-//! `FileDiff.rerenderInputs.test.ts`, `FileDiff.partialRender.test.ts`), over
+//! `FileDiff.rerenderInputs.test.ts`, `FileDiff.partialRender.test.ts`,
+//! `FileDiff.partialHydration.test.ts`, `themeTypeUpdates.test.ts`), over
 //! `FakeDom` and the plain-text stub highlighter. The waits for async
-//! highlighting are gone (rendering is synchronous), `instance.cleanUp()` waits
-//! for 2c, and the tests that need the edit session are not ported (see
-//! parity/divergences.psv). Test-only.
+//! highlighting and the `await`s of the file loader are gone (rendering is
+//! synchronous and loading is host-driven: `LoaderHarness` is the host), the
+//! tests that need the edit session, the worker pool or CodeView are not
+//! ported (see parity/divergences.psv). Test-only.
 
 use std::rc::Rc;
 
@@ -28,10 +30,10 @@ use crate::types::view::AnnotationSide;
 use crate::types::view::DiffLineAnnotation;
 use crate::utils::parse_diff_from_file::parse_diff_from_file;
 
-type Instance = FileDiff<FakeDom, hast::Element, String>;
-type Options = FileDiffOptions<NodeKey, hast::Element, String>;
+pub(super) type Instance = FileDiff<FakeDom, hast::Element, String>;
+pub(super) type Options = FileDiffOptions<NodeKey, hast::Element, String>;
 
-fn file(name: &str, contents: &str) -> FileContents {
+pub(super) fn file(name: &str, contents: &str) -> FileContents {
     FileContents {
         name: name.to_owned(),
         contents: contents.to_owned(),
@@ -41,7 +43,7 @@ fn file(name: &str, contents: &str) -> FileContents {
     }
 }
 
-fn parse(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata> {
+pub(super) fn parse(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata> {
     Rc::new(
         parse_diff_from_file(
             &DiffFileInput::Both { old_file, new_file },
@@ -53,7 +55,7 @@ fn parse(old_file: FileContents, new_file: FileContents) -> Rc<FileDiffMetadata>
     )
 }
 
-fn instance(dom: &Rc<FakeDom>, options: Options) -> Rc<Instance> {
+pub(super) fn instance(dom: &Rc<FakeDom>, options: Options) -> Rc<Instance> {
     Instance::new(
         Rc::clone(dom),
         ResizeObserverHub::new(Rc::clone(dom)),
@@ -64,7 +66,7 @@ fn instance(dom: &Rc<FakeDom>, options: Options) -> Rc<Instance> {
     )
 }
 
-fn window(starting_line: f64, total_lines: f64) -> Option<RenderRange> {
+pub(super) fn window(starting_line: f64, total_lines: f64) -> Option<RenderRange> {
     Some(RenderRange {
         starting_line,
         total_lines,
@@ -89,7 +91,7 @@ fn slot_text(dom: &FakeDom, container: NodeKey, slot: &str) -> Option<String> {
         .map(|element| dom.doc.text_content(*element))
 }
 
-fn shadow_root(dom: &FakeDom, container: NodeKey) -> NodeKey {
+pub(super) fn shadow_root(dom: &FakeDom, container: NodeKey) -> NodeKey {
     dom.doc.shadow_root(container).expect("a shadow root")
 }
 

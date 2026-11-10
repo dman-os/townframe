@@ -1,8 +1,8 @@
 // Part of the S12a-2b port of FileDiff.ts (see ../file_diff.rs for the header):
 // the render orchestration and hydration: `render`, `hydrate`,
 // `hydrateElements`, `hydrationSetup`, `updateInputDiff`, `adoptRenderData`,
-// `prepareRenderData`, `emitPostRender`. A view over the instance (see
-// `file_diff_view!`).
+// `prepareRenderData`, `emitPostRender`, and (S12a-2c) `cleanUp`. A view over
+// the instance (see `file_diff_view!`).
 // Changes (besides the ones in the main header):
 // * Errors are programming errors and panic: the `try`/`catch` around the
 //   collapsed and the full render (log the error, or `applyErrorToDOM` when
@@ -21,6 +21,18 @@
 //   `syncRenderViewToEditor`, the `forceEditorRender` of `hydrate`), the worker
 //   pool and `prerenderedHTML` (`prerenderHTMLIfNecessary`) are dropped.
 // * `onPostRender` is called without the instance.
+// * `cleanUp`: `dequeueRender(handleEditSessionRender)`, the editor teardown,
+//   `workerManager` (unsubscribe, reset), `refreshViewTimeout`, `editSession`,
+//   `deferredEditorActiveLine` and `errorWrapper` are dropped with the edit
+//   session, the worker pool and the error wrapper. `recycle` is ported (the
+//   `VirtualizedFileDiff` override passes it through).
+// * `cleanUp` and ownership. Upstream leaves the sprite and the theme and
+//   unsafe CSS `style` elements in the shadow root (a later instance on the
+//   same container adopts them, `adoptReusableShellElements`); the Rust
+//   instance created them in its `Document`, so it removes and discards them
+//   too: after `clean_up` the container's shadow root is empty and every node
+//   the instance created is freed. `fileContainer` is detached (when the
+//   instance is not owner-managed) but never discarded: the caller owns it.
 // * `requestRender` is inlined in `rerender`; `rerender` is on `FileDiff` itself
 //   (it is public API).
 
@@ -566,6 +578,101 @@ where
             render_range,
             ..FileDiffRenderProps::default()
         });
+    }
+
+    /// `cleanUp(recycle)`: the managers clean up first (they hold keys of nodes
+    /// a render replaced), then everything the instance created is detached
+    /// and discarded, then the retired queue. `recycle` keeps the rendered
+    /// data, the pending files and the reusable header.
+    pub fn clean_up(&self, recycle: bool) {
+        self.emit_post_render(true);
+        self.resize_manager.clean_up();
+        self.interaction_manager.clean_up();
+        self.scroll_sync_manager.clean_up();
+        let nodes = Nodes(self.0);
+        let file_container = {
+            let mut state = self.state.borrow_mut();
+            state.managers_dirty = false;
+            state.render_range = None;
+            if !recycle {
+                state.pending_files = None;
+            }
+            state.mounted = false;
+            if !recycle {
+                state.rendered_data = None;
+                state.pending_data = None;
+            }
+            state.file_container.take()
+        };
+
+        // Clean up the elements
+        if let Some(file_container) = file_container.filter(|_| self.request_owner_render.is_none())
+        {
+            self.document().remove(file_container);
+        }
+        nodes.clear_auxiliary_nodes();
+        let (pre, buffer_before, buffer_after) = {
+            let mut state = self.state.borrow_mut();
+            state.annotation_cache.clear();
+            let nodes = (
+                state.pre.take(),
+                state.buffer_before.take(),
+                state.buffer_after.take(),
+            );
+            state.code_unified = None;
+            state.code_deletions = None;
+            state.code_additions = None;
+            state.applied_pre_attributes = None;
+            nodes
+        };
+        nodes.drop_optional(pre);
+        nodes.drop_optional(buffer_before);
+        nodes.drop_optional(buffer_after);
+        let (header_element, place_holder) = {
+            let mut state = self.state.borrow_mut();
+            (state.header_element.take(), state.place_holder.take())
+        };
+        nodes.drop_optional(header_element);
+        nodes.clear_header_slots();
+        nodes.drop_optional(place_holder);
+        self.state.borrow_mut().header_cache.last_rendered_header = None;
+        if !recycle {
+            self.clear_reusable_header();
+        }
+        let (sprite_svg, theme_css_style, unsafe_css_style) = {
+            let mut state = self.state.borrow_mut();
+            state.last_row_count = None;
+            state.applied_theme_css = None;
+            state.has_adopted_theme_css = false;
+            state.applied_unsafe_css = None;
+            (
+                state.sprite_svg.take(),
+                state.theme_css_style.take(),
+                state.unsafe_css_style.take(),
+            )
+        };
+        nodes.drop_optional(sprite_svg);
+        nodes.drop_optional(theme_css_style);
+        nodes.drop_optional(unsafe_css_style);
+
+        if recycle {
+            self.hunks_renderer.borrow_mut().recycle();
+        } else {
+            self.hunks_renderer.borrow_mut().clean_up();
+            // Clean up the data
+            let mut state = self.state.borrow_mut();
+            state.file_diff = None;
+            state.deletion_file = None;
+            state.addition_file = None;
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.line_state_refresh_pending = false;
+            state.deferred_selected_lines = None;
+            state.enabled = false;
+        }
+        // The managers cleaned up above hold no key of what this discards.
+        nodes.discard_retired();
     }
 
     fn hydrate_elements(&self, file_container: NodeKey) {

@@ -308,6 +308,21 @@ impl<LAnnotation> DiffHunksRenderer<LAnnotation> {
         }
     }
 
+    /// `recycle`: forgets the annotations of the previous use. (Upstream also
+    /// drops the diff and the render cache and cleans up the worker's tasks;
+    /// the Rust renderer holds none of them.)
+    pub fn recycle(&mut self) {
+        self.addition_annotations.clear();
+        self.deletion_annotations.clear();
+    }
+
+    /// `cleanUp`: `recycle` and forgets the expanded hunks. (The edit session
+    /// and the worker are not ported.)
+    pub fn clean_up(&mut self) {
+        self.recycle();
+        self.expanded_hunks.clear();
+    }
+
     pub fn set_options(&mut self, options: DiffHunksRendererOptions) {
         self.options = options;
     }

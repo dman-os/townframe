@@ -26,6 +26,16 @@
 // where the labels are the named containers. The Rust port replays the same
 // scenarios (`components/file_diff_render_oracle_tests.rs`).
 //
+// `cleanUp` (S12a-2c), `isLineRenderable`, `getNearestRenderableLine`,
+// `revealLine` and `expandHunk` are steps too. One deliberate difference: the
+// published `cleanUp` leaves the sprite and the theme and unsafe CSS `style`
+// elements in the shadow root (a later instance on the container adopts them);
+// the Rust instance owns the nodes it creates and frees them, so this oracle
+// removes those three elements after the published `cleanUp` (see `cleanUp`
+// in `runScenario`) and the trees compare equal. A cleaned-up instance takes no
+// further renders (they throw), so scenarios end an instance with `cleanUp`
+// and may let another instance render over the same container.
+//
 // What this establishes: the instance's decisions, call order into its managers,
 // and the document it builds, for the same inputs. What it cannot: a browser's
 // layout and event delivery, or the worker pool and async highlight cache.
@@ -74,11 +84,23 @@ async function buildTemplates(oracle, random) {
     F5: { old: file("a.txt", pairs[0][0], "o1"), new: file("a.txt", pairs[0][1], "n1") },
     F5b: { old: file("a.txt", pairs[0][0], "o1"), new: file("a.txt", pairs[1][1], "n1") },
   };
+  // Larger files with collapsed context between hunks (no random draws, so the
+  // scenarios generated before these existed are unchanged).
+  const numbered = (count, edits) =>
+    Array.from({ length: count }, (_, index) => (edits.includes(index + 1) ? `edited ${index + 1}` : `line ${index + 1}`)).join("\n") + "\n";
+  const plain = (count) => numbered(count, []);
+  files.F6 = { old: file("big.txt", plain(60)), new: file("big.txt", numbered(60, [10, 30, 50])) };
+  // Leading and trailing gaps of exactly two lines (the collapsed context threshold).
+  files.F8 = { old: file("gap.txt", plain(30)), new: file("gap.txt", numbered(30, [7, 24])) };
+  files.F7 = { old: file("mid.txt", plain(40)), new: file("mid.txt", numbered(40, [2, 20])) };
   const diffs = {};
   for (const [name, source] of [
     ["D0", files.F0],
     ["D1", files.F1],
     ["D2", files.F2],
+    ["D6", files.F6],
+    ["D7", files.F7],
+    ["D8", files.F8],
   ]) {
     diffs[name] = JSON.parse(JSON.stringify(parseDiffFromFile(source.old, source.new)));
   }
@@ -308,6 +330,8 @@ const PLAIN_FIELDS = [
   "unsafeCSS",
   "lineHoverHighlight",
   "enableGutterUtility",
+  "collapsedContextThreshold",
+  "expansionLineCount",
 ];
 
 export function buildInstanceOptions(spec, run) {
@@ -500,17 +524,36 @@ function runScenario(JSDOM, oracleModules, templates, scenario) {
       lastRowCount: instance.lastRowCount ?? null,
       pendingFiles: instance.pendingFiles ? (names.get(instance.pendingFiles.fileDiff) ?? "?") : null,
       hasFiles: [instance.deletionFile != null, instance.additionFile != null],
+      renderRange: instance.renderRange
+        ? [instance.renderRange.startingLine, Number.isFinite(instance.renderRange.totalLines) ? instance.renderRange.totalLines : null, instance.renderRange.bufferBefore, instance.renderRange.bufferAfter]
+        : null,
+      enabled: instance.enabled,
+      mounted: instance.mounted,
+      managersDirty: instance.managersDirty,
+      expanded: Array.from(instance.hunksRenderer.expandedHunks.entries())
+        .map(([index, region]) => [index, region.fromStart, region.fromEnd])
+        .sort((a, b) => a[0] - b[0]),
     });
 
     const snapshots = [];
+    let previousTrees = "{}";
     const record = (step, ret, instance) => {
       const trees = {};
       for (const [name, element] of Object.entries(containers)) trees[name] = snapshotTree(element);
+      const serialized = JSON.stringify(trees);
+      // A step that leaves the DOM as it was says "same" in the golden (the
+      // trees of a scenario that queries a lot would otherwise dominate its
+      // size); the replay checks the port's DOM did not change either.
+      const same = serialized === previousTrees;
+      if ((step.op === "isLineRenderable" || step.op === "nearestLine") && !same) {
+        throw new Error(`${scenario.name}: ${step.op} changed the DOM`);
+      }
+      previousTrees = serialized;
       snapshots.push({
         ret,
         trace: world.trace.splice(0),
         state: stateOf(instance),
-        trees,
+        trees: same ? "same" : trees,
       });
     };
 
@@ -548,6 +591,26 @@ function runScenario(JSDOM, oracleModules, templates, scenario) {
             const source = pool.partials[step.files];
             resolve({ oldFile: source.old, newFile: source.new });
             await instance.pendingFiles?.promise;
+            break;
+          }
+          case "expandHunk":
+            instance.expandHunk(step.hunkIndex, step.direction, step.count);
+            break;
+          case "isLineRenderable":
+            ret = instance.isLineRenderable(step.line);
+            break;
+          case "nearestLine":
+            ret = instance.getNearestRenderableLine(step.line, step.direction) ?? null;
+            break;
+          case "revealLine":
+            ret = instance.revealLine(step.line);
+            break;
+          case "cleanUp": {
+            // The nodes the Rust instance frees and the published one leaves
+            // behind (see the file header).
+            const left = [instance.spriteSVG, instance.themeCSSStyle, instance.unsafeCSSStyle];
+            instance.cleanUp(step.recycle === true);
+            for (const node of left) node?.remove();
             break;
           }
           default:
@@ -632,6 +695,45 @@ function handwritten() {
   ];
 }
 
+/** Scenarios for `cleanUp` and the line queries (S12a-2c). */
+function handwrittenLines() {
+  const r = (extra) => ({ op: "render", ...extra });
+  const clean = (extra) => ({ op: "cleanUp", ...extra });
+  const q = (line) => ({ op: "isLineRenderable", line });
+  const near = (line, direction) => ({ op: "nearestLine", line, direction });
+  const reveal = (line) => ({ op: "revealLine", line });
+  const sweep = [0, 1, 5, 7, 8, 9, 10, 11, 12, 13, 14, 20, 21, 25, 26, 27, 28, 29, 30, 33, 36, 37, 44, 46, 47, 50, 53, 54, 55, 56, 57, 60, 61, 70];
+  const queries = (lines) => lines.flatMap((line) => [q(line), near(line, "up"), near(line, "down")]);
+  return [
+    { name: "cleanUp frees everything a full render made", options: SPECS.everything, steps: [r({ diff: "D1", container: "A", annotations: "A1", range: WINDOWS[1] }), clean(), { op: "render", instance: 1, options: SPECS.everything, diff: "D1", container: "A", annotations: "A1" }, clean({ instance: 1 })] },
+    { name: "cleanUp of an owner-managed instance leaves its container attached", options: SPECS.everything, managed: true, steps: [r({ diff: "D0", container: "A", wrapper: "W", annotations: "A0" }), clean(), clean()] },
+    { name: "cleanUp detaches an unmanaged container from its wrapper", options: SPECS.everything, steps: [r({ diff: "D0", container: "A", wrapper: "W", annotations: "A0" }), clean(), r({ instance: 1, diff: "D1", container: "A", wrapper: "W" })] },
+    { name: "cleanUp before anything rendered", options: SPECS.everything, steps: [clean(), clean()] },
+    { name: "cleanUp with deferred managers", options: SPECS.base, steps: [r({ diff: "D0", container: "A", defer: true }), clean()] },
+    { name: "cleanUp of a collapsed render and of unified columns", options: SPECS.unified, steps: [r({ diff: "D0", container: "A" }), { op: "setOptions", spec: { ...SPECS.unified, collapsed: true } }, r({ diff: "D0" }), clean()] },
+    { name: "cleanUp removes buffers", options: SPECS.headers, steps: [r({ diff: "D1", container: "A", range: WINDOWS[1] }), clean()] },
+    { name: "cleanUp of a hydrated instance", options: SPECS.everything, steps: [r({ diff: "D0", container: "A", annotations: "A0", defer: true }), { op: "hydrate", instance: 1, options: SPECS.everything, container: "A", diff: "D0", annotations: "A0" }, clean({ instance: 1 })] },
+    { name: "cleanUp with a theme object and unsafe CSS", options: { theme: { dark: "pierre-dark", light: "pierre-light" }, unsafeCSS: "a{b:c}", onPostRender: true }, steps: [r({ diff: "D0", container: "A" }), { op: "setThemeType", themeType: "dark" }, clean(), r({ instance: 1, diff: "D0", container: "A" })] },
+    { name: "recycling keeps the rendered diff and the expanded hunks", options: SPECS.base, steps: [r({ diff: "D6", container: "A" }), { op: "expandHunk", hunkIndex: 1, direction: "up", count: 2 }, clean({ recycle: true }), q(20), near(20, "down"), reveal(33)] },
+    { name: "a full clean up forgets the rendered diff and the expanded hunks", options: SPECS.base, steps: [r({ diff: "D6", container: "A" }), { op: "expandHunk", hunkIndex: 1, direction: "up", count: 2 }, q(20), clean(), q(20), near(20, "down"), reveal(20)] },
+    { name: "recycling then a later instance", options: SPECS.everything, steps: [r({ diff: "D1", container: "A", annotations: "A1" }), clean({ recycle: true }), r({ instance: 1, diff: "D1", container: "A", annotations: "A1" })] },
+    { name: "line queries without a rendered diff", options: SPECS.base, steps: [q(3), near(3, "up"), near(3, "down"), reveal(3)] },
+    { name: "line queries over collapsed context", options: SPECS.base, steps: [r({ diff: "D6", container: "A" }), ...queries(sweep)] },
+    { name: "line queries with a bigger threshold", options: { collapsedContextThreshold: 12 }, steps: [r({ diff: "D6", container: "A" }), ...queries(sweep)] },
+    { name: "line queries with a zero threshold", options: { collapsedContextThreshold: 0 }, steps: [r({ diff: "D6", container: "A" }), ...queries(sweep)] },
+    { name: "line queries of everything expanded", options: { expandUnchanged: true }, steps: [r({ diff: "D6", container: "A" }), ...queries(sweep), reveal(20)] },
+    { name: "line queries of a partial diff", options: SPECS.base, steps: [r({ diff: "P0", container: "A" }), ...queries([1, 4, 8, 20]), reveal(4)] },
+    { name: "line queries of an added and a deleted file", options: SPECS.base, steps: [r({ files: "F3", container: "A" }), ...queries([1, 5, 30]), reveal(2), r({ files: "F4" }), ...queries([1, 5, 30]), reveal(2)] },
+    { name: "revealing lines in each gap", options: SPECS.base, steps: [r({ diff: "D6", container: "A" }), reveal(8), ...queries([8, 9, 10]), reveal(25), reveal(26), reveal(27), reveal(28), ...queries(sweep), reveal(12), reveal(46), reveal(47), reveal(54), reveal(58), reveal(60), reveal(61), ...queries(sweep)] },
+    { name: "revealing with a small step expands one slice at a time", options: { expansionLineCount: 2 }, steps: [r({ diff: "D6", container: "A" }), reveal(20), reveal(20), reveal(20), reveal(20), reveal(20), reveal(20), reveal(20), reveal(58), reveal(58), reveal(58), reveal(58), ...queries(sweep)] },
+    { name: "revealing with a zero step", options: { expansionLineCount: 0 }, steps: [r({ diff: "D6", container: "A" }), reveal(20), reveal(20), reveal(14), reveal(58), ...queries(sweep)] },
+    { name: "revealing in a file with a leading gap and a trailing gap", options: SPECS.unified, steps: [r({ diff: "D7", container: "A" }), ...[1, 2, 5, 9, 12, 15, 24, 30, 38, 40].flatMap((line) => [reveal(line), q(line)])] },
+    { name: "queries after the render window moved", options: SPECS.base, steps: [r({ diff: "D6", container: "A", range: WINDOWS[0] }), reveal(20), r({ diff: "D6", range: WINDOWS[1] }), ...queries([10, 20, 21, 30]), clean()] },
+    { name: "gaps of exactly the threshold", options: SPECS.base, steps: [r({ diff: "D8", container: "A" }), ...queries([1, 2, 3, 4, 5, 6, 12, 18, 28, 29, 30, 31]), reveal(1), reveal(2), reveal(29), reveal(30), ...queries([1, 2, 3, 29, 30])] },
+    { name: "queries after a new diff", options: SPECS.base, steps: [r({ diff: "D6", container: "A" }), reveal(20), r({ diff: "D7" }), ...queries([5, 6, 7, 20]), reveal(30)] },
+  ];
+}
+
 function randomScenario(random, index, diffNames) {
   const fields = {
     themeType: ["system", "light", "dark"],
@@ -683,6 +785,45 @@ function randomScenario(random, index, diffNames) {
   return { name: `random ${index}`, options: randomSpec(), managed: random.next() < 0.12, steps };
 }
 
+/** A random sequence of renders, expansions and line queries; may end in `cleanUp`. */
+function randomLineScenario(random, index) {
+  const spec = { ...random.pick([SPECS.base, SPECS.base, SPECS.unified, SPECS.annotated, SPECS.headers, SPECS.everything]) };
+  const threshold = random.pick([undefined, undefined, 0, 1, 2, 5, 12]);
+  if (threshold !== undefined) spec.collapsedContextThreshold = threshold;
+  const step = random.pick([undefined, undefined, 0, 1, 2, 3, 50]);
+  if (step !== undefined) spec.expansionLineCount = step;
+  const diffs = ["D6", "D6", "D6", "D7", "D8", "D1", "D0"];
+  const steps = [{ op: "render", diff: random.pick(diffs), container: "A", ...(random.next() < 0.3 ? { annotations: random.pick(["A0", "A1", "E"]) } : {}) }];
+  const maxLine = 66;
+  const count = 6 + random.int(14);
+  for (let at = 0; at < count; at++) {
+    const roll = random.next();
+    const line = random.int(maxLine);
+    if (roll < 0.22) steps.push({ op: "isLineRenderable", line });
+    else if (roll < 0.4) steps.push({ op: "nearestLine", line, direction: random.pick(["up", "down"]) });
+    else if (roll < 0.66) steps.push({ op: "revealLine", line });
+    else if (roll < 0.76) steps.push({ op: "expandHunk", hunkIndex: random.int(5), direction: random.pick(["up", "down", "both"]), ...(random.next() < 0.5 ? { count: 1 + random.int(6) } : {}) });
+    else if (roll < 0.86) steps.push({ op: "render", diff: random.pick(diffs), ...(random.next() < 0.4 ? { range: random.pick(WINDOWS) } : {}), ...(random.next() < 0.3 ? { force: true } : {}) });
+    else if (roll < 0.94) {
+      const next = { ...random.pick([SPECS.base, SPECS.unified, SPECS.annotated]) };
+      if (random.next() < 0.5) next.expandUnchanged = true;
+      if (random.next() < 0.5) next.collapsedContextThreshold = random.pick([0, 1, 3, 12]);
+      if (random.next() < 0.5) next.expansionLineCount = random.pick([1, 4, 100]);
+      steps.push({ op: "setOptions", spec: next });
+    } else steps.push({ op: "setOptions", spec: { ...spec, collapsed: random.next() < 0.5 } });
+  }
+  if (random.next() < 0.5) {
+    steps.push({ op: "cleanUp", recycle: random.next() < 0.3 });
+    for (let at = 0; at < 3; at++) {
+      const line = random.int(maxLine);
+      steps.push(random.pick([{ op: "isLineRenderable", line }, { op: "nearestLine", line, direction: random.pick(["up", "down"]) }, { op: "revealLine", line }]));
+    }
+    if (random.next() < 0.4) steps.push({ op: "render", instance: 1, options: spec, diff: random.pick(diffs), container: "A" });
+    if (random.next() < 0.5) steps.push({ op: "cleanUp", instance: steps.some((entry) => entry.instance === 1) ? 1 : 0 });
+  }
+  return { name: `random lines ${index}`, options: spec, managed: random.next() < 0.1, steps };
+}
+
 export async function buildS12bRender(oracle, random) {
   const { JSDOM } = await import(oracle.jsdom);
   const modules = {
@@ -697,6 +838,8 @@ export async function buildS12bRender(oracle, random) {
   const scenarios = handwritten();
   const diffNames = ["D0", "D1", "D2", "D2b", "K1", "K2", "K3"];
   for (let index = 0; index < 220; index++) scenarios.push(randomScenario(random, index, diffNames));
+  scenarios.push(...handwrittenLines());
+  for (let index = 0; index < 90; index++) scenarios.push(randomLineScenario(random, index));
   const cases = [];
   for (const scenario of scenarios) {
     const snapshots = await runScenario(JSDOM, modules, templates, scenario);

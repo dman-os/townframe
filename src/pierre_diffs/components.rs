@@ -8,6 +8,8 @@ pub mod virtualizer;
 #[cfg(test)]
 mod file_diff_churn_test;
 #[cfg(test)]
+mod file_diff_hydration_upstream_tests;
+#[cfg(test)]
 mod file_diff_lifecycle_oracle_tests;
 #[cfg(test)]
 mod file_diff_oracle_tests;

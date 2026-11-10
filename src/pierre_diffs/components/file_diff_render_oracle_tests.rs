@@ -30,6 +30,7 @@ use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::oracle_testing::assert_json_eq;
 use crate::oracle_testing::load_golden;
 use crate::types::layout::RenderRange;
+use crate::types::lines::ExpansionDirections;
 use crate::types::options::DiffIndicators;
 use crate::types::options::DiffStyle;
 use crate::types::options::Overflow;
@@ -42,6 +43,7 @@ use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::view::AnnotationSide;
 use crate::types::view::DiffLineAnnotation;
+use crate::utils::virtual_diff_layout::RenderableDirection;
 
 type Instance = FileDiff<FakeDom, hast::Element, i64>;
 type Options = FileDiffOptions<NodeKey, hast::Element, i64>;
@@ -60,6 +62,8 @@ struct OptionsSpec {
     disable_background: Option<bool>,
     diff_indicators: Option<DiffIndicators>,
     expand_unchanged: Option<bool>,
+    collapsed_context_threshold: Option<usize>,
+    expansion_line_count: Option<usize>,
     #[serde(rename = "unsafeCSS")]
     unsafe_css: Option<String>,
     line_hover_highlight: Option<LineHoverHighlight>,
@@ -103,6 +107,12 @@ struct Step {
     no_emit: bool,
     container: Option<String>,
     wrapper: Option<String>,
+    #[serde(default)]
+    recycle: bool,
+    line: Option<usize>,
+    direction: Option<String>,
+    hunk_index: Option<i64>,
+    count: Option<f64>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -244,6 +254,8 @@ impl World {
         options.base.disable_background = spec.disable_background;
         options.base.diff_indicators = spec.diff_indicators;
         options.base.expand_unchanged = spec.expand_unchanged;
+        options.base.collapsed_context_threshold = spec.collapsed_context_threshold;
+        options.base.expansion_line_count = spec.expansion_line_count;
         options.interaction.line_hover_highlight = spec.line_hover_highlight;
         options.interaction.enable_gutter_utility = spec.enable_gutter_utility;
         options.has_diff_file_loader = spec.load_diff_files;
@@ -495,6 +507,17 @@ fn snapshot_tree(dom: &FakeDom, node: NodeKey) -> Value {
     json!([tag, attributes, children, shadow])
 }
 
+fn expanded_hunks(instance: &Instance) -> Vec<(usize, usize, usize)> {
+    let renderer = instance.hunks_renderer();
+    let mut expanded: Vec<(usize, usize, usize)> = renderer
+        .get_expanded_hunks_map()
+        .iter()
+        .map(|(index, region)| (*index, region.from_start, region.from_end))
+        .collect();
+    expanded.sort_unstable();
+    expanded
+}
+
 fn state_snapshot(instance: &Instance, pool: &Pool) -> Value {
     let state = instance.state();
     let empty = Rc::clone(&state.empty_line_annotations);
@@ -518,6 +541,16 @@ fn state_snapshot(instance: &Instance, pool: &Pool) -> Value {
             .as_ref()
             .map(|diff| pool.diff_name(diff).unwrap_or_else(|| "?".to_owned())),
         "hasFiles": [state.deletion_file.is_some(), state.addition_file.is_some()],
+        "renderRange": state.render_range.map(|range| json!([
+            range.starting_line,
+            range.total_lines.is_finite().then_some(range.total_lines),
+            range.buffer_before,
+            range.buffer_after
+        ])),
+        "enabled": state.enabled,
+        "mounted": state.mounted,
+        "managersDirty": state.managers_dirty,
+        "expanded": expanded_hunks(instance),
     })
 }
 
@@ -534,6 +567,15 @@ fn recorded(entry: &Value) -> bool {
         ) => true,
         Some("listener.add" | "listener.remove") => entry[2] == "scroll",
         _ => false,
+    }
+}
+
+fn direction_of(name: &str) -> ExpansionDirections {
+    match name {
+        "up" => ExpansionDirections::Up,
+        "down" => ExpansionDirections::Down,
+        "both" => ExpansionDirections::Both,
+        other => panic!("unknown direction {other}"),
     }
 }
 
@@ -556,6 +598,80 @@ fn container_trees(
         .into_iter()
         .map(|(name, node)| (name.clone(), snapshot_tree(dom, *node)))
         .collect()
+}
+
+/// Performs one step on the instance and returns the step's value.
+fn run_step(
+    step: &Step,
+    instance: &Rc<Instance>,
+    input: &dyn Fn(&Step) -> FileDiffRenderProps<i64>,
+    world: &World,
+    templates: &Templates,
+) -> Value {
+    let pool = &world.pool;
+    let mut ret = Value::Null;
+    match step.op.as_str() {
+        "render" => ret = json!(instance.lifecycle().render(input(step))),
+        "setOptions" => {
+            instance.set_options(Some(
+                world.build_options(step.spec.as_ref().expect("a spec")),
+            ));
+        }
+        "setThemeType" => instance.set_theme_type(step.theme_type.expect("a theme type")),
+        "setLineAnnotations" => {
+            instance.set_line_annotations(Rc::clone(
+                &pool.annotations[step.annotations.as_ref().expect("annotations")],
+            ));
+        }
+        "rerender" => instance.lifecycle().rerender(),
+        "flushManagers" => instance.flush_managers(),
+        "hydrate" => instance.lifecycle().hydrate(input(step)),
+        "cleanUp" => instance.lifecycle().clean_up(step.recycle),
+        "expandHunk" => instance.expand_hunk(
+            step.hunk_index.expect("a hunk index"),
+            direction_of(step.direction.as_deref().expect("a direction")),
+            step.count,
+        ),
+        "isLineRenderable" => {
+            ret = json!(
+                instance
+                    .lines()
+                    .is_line_renderable(step.line.expect("a line"))
+            );
+        }
+        "nearestLine" => {
+            ret = json!(instance.lines().get_nearest_renderable_line(
+                step.line.expect("a line"),
+                match step.direction.as_deref().expect("a direction") {
+                    "up" => RenderableDirection::Up,
+                    "down" => RenderableDirection::Down,
+                    other => panic!("unknown direction {other}"),
+                },
+            ));
+        }
+        "revealLine" => ret = json!(instance.lines().reveal_line(step.line.expect("a line"))),
+        "filesLoaded" => {
+            let pending = instance
+                .loading()
+                .pending_files()
+                .expect("a load was requested");
+            let name = pool.diff_name(&pending).expect("a named diff");
+            let source = &templates.partials[step.files.as_ref().expect("files")];
+            instance.loading().files_loaded(
+                &pending,
+                &FileDiffLoadedFiles::Changed {
+                    old_file: source.old.clone().expect("old"),
+                    new_file: source.new.clone().expect("new"),
+                },
+            );
+            // The merge hydrates a copy (see `loading.rs`): the host adopts it, so
+            // the name now stands for the hydrated diff.
+            let hydrated = instance.get_input_diff().expect("an input");
+            pool.diffs.borrow_mut().insert(name, hydrated);
+        }
+        other => panic!("unknown step {other}"),
+    }
+    ret
 }
 
 fn run_case(templates: &Templates, case: &Case) {
@@ -646,50 +762,14 @@ fn run_case(templates: &Templates, case: &Case) {
         scenario.name
     );
     let mut trace_start = 0;
+    let mut previous_trees = json!({});
     for (index, (step, expected)) in scenario.steps.iter().zip(&case.snapshots).enumerate() {
         let which = step.instance.unwrap_or(0);
         while instances.len() <= which {
             instances.push(make_instance(&step.options.clone().unwrap_or_default()));
         }
         let instance = Rc::clone(&instances[which]);
-        let mut ret = Value::Null;
-        match step.op.as_str() {
-            "render" => ret = json!(instance.lifecycle().render(input(step))),
-            "setOptions" => {
-                instance.set_options(Some(
-                    world.build_options(step.spec.as_ref().expect("a spec")),
-                ));
-            }
-            "setThemeType" => instance.set_theme_type(step.theme_type.expect("a theme type")),
-            "setLineAnnotations" => {
-                instance.set_line_annotations(Rc::clone(
-                    &pool.annotations[step.annotations.as_ref().expect("annotations")],
-                ));
-            }
-            "rerender" => instance.lifecycle().rerender(),
-            "flushManagers" => instance.flush_managers(),
-            "hydrate" => instance.lifecycle().hydrate(input(step)),
-            "filesLoaded" => {
-                let pending = instance
-                    .loading()
-                    .pending_files()
-                    .expect("a load was requested");
-                let name = pool.diff_name(&pending).expect("a named diff");
-                let source = &templates.partials[step.files.as_ref().expect("files")];
-                instance.loading().files_loaded(
-                    &pending,
-                    &FileDiffLoadedFiles::Changed {
-                        old_file: source.old.clone().expect("old"),
-                        new_file: source.new.clone().expect("new"),
-                    },
-                );
-                // The merge hydrates a copy (see `loading.rs`): the host adopts it, so
-                // the name now stands for the hydrated diff.
-                let hydrated = instance.get_input_diff().expect("an input");
-                pool.diffs.borrow_mut().insert(name, hydrated);
-            }
-            other => panic!("unknown step {other}"),
-        }
+        let ret = run_step(step, &instance, &input, &world, templates);
 
         let trace: Vec<Value> = dom.trace()[trace_start..]
             .iter()
@@ -697,13 +777,26 @@ fn run_case(templates: &Templates, case: &Case) {
             .cloned()
             .collect();
         trace_start = dom.trace().len();
-        let trees = container_trees(&dom, &containers.borrow());
+        let trees = Value::Object(container_trees(&dom, &containers.borrow()));
+        // A step that left the DOM as it was says "same" in the golden.
+        let unchanged = expected["trees"] == "same";
         let actual = json!({
             "ret": ret,
             "trace": trace,
             "state": state_snapshot(&instance, &pool),
-            "trees": trees,
+            "trees": if unchanged { json!("same") } else { trees.clone() },
         });
+        if unchanged {
+            assert_json_eq(
+                &format!(
+                    "scenario `{}` step {index} ({}) left the DOM alone",
+                    scenario.name, step.op
+                ),
+                &previous_trees,
+                &trees,
+            );
+        }
+        previous_trees = trees;
         assert_json_eq(
             &format!("scenario `{}` step {index} ({})", scenario.name, step.op),
             expected,
@@ -715,7 +808,7 @@ fn run_case(templates: &Templates, case: &Case) {
 #[test]
 fn file_diff_render_matches_the_published_class() {
     let golden: Golden = load_golden("s12b_render.json");
-    assert!(golden.cases.len() > 240);
+    assert!(golden.cases.len() > 360);
     for case in &golden.cases {
         run_case(&golden.templates, case);
     }
