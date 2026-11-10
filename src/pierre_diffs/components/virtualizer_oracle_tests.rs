@@ -294,13 +294,15 @@ impl Context {
                 let root = if self.document_root {
                     Root::Document
                 } else {
-                    Root::Element(ROOT.to_owned())
+                    Root::Element(host.element(ROOT))
                 };
-                virtualizer.setup(root, content.clone());
+                virtualizer.setup(root, content.as_ref().map(|name| host.element(name)));
             }
             Op::Connect { instance } => {
-                let disposer =
-                    virtualizer.connect(self.containers[instance].clone(), self.instance(instance));
+                let disposer = virtualizer.connect(
+                    host.element(&self.containers[instance]),
+                    self.instance(instance),
+                );
                 self.disposers
                     .borrow_mut()
                     .insert(instance.clone(), disposer);
@@ -309,7 +311,7 @@ impl Context {
                 let disposers = self.disposers.borrow();
                 disposers[instance]();
             }
-            Op::Disconnect { container } => virtualizer.disconnect(container),
+            Op::Disconnect { container } => virtualizer.disconnect(&host.element(container)),
             Op::World { set } => host.apply_world(set),
             Op::ScrollEvent => {
                 if host.element_scroll_listener().is_some() {
@@ -329,7 +331,7 @@ impl Context {
                     let entries: Vec<_> = entries
                         .iter()
                         .map(|entry| ResizeEntry {
-                            target: entry.target.clone(),
+                            target: host.element(&entry.target),
                             block_size: entry.block_size,
                         })
                         .collect();
@@ -341,7 +343,7 @@ impl Context {
                     let entries: Vec<_> = entries
                         .iter()
                         .map(|entry| IntersectionEntry {
-                            target: entry.target.clone(),
+                            target: host.element(&entry.target),
                             is_intersecting: entry.is_intersecting,
                         })
                         .collect();
@@ -386,7 +388,7 @@ impl Context {
                 host.record(json!([
                     "result",
                     "getOffsetInScrollContainer",
-                    virtualizer.get_offset_in_scroll_container(element)
+                    virtualizer.get_offset_in_scroll_container(&host.element(element))
                 ]));
             }
             Op::ScrollTo { top, behavior } => {

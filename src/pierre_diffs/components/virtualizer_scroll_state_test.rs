@@ -53,7 +53,10 @@ fn reads_and_restores_an_element_root_logical_scroll_position() {
     });
     let virtualizer = virtualizer_over(&host);
 
-    virtualizer.setup(Root::Element(ROOT.to_owned()), Some("content".to_owned()));
+    virtualizer.setup(
+        Root::Element(host.element(ROOT)),
+        Some(host.element("content")),
+    );
     host.frames.flush_frames(10, 0.0);
     assert_eq!(virtualizer.get_scroll_top(), 1_200.0);
 

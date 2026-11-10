@@ -67,8 +67,11 @@ fn request_height_reconcile_reconciles_instances_the_pass_did_not_repaint() {
         UniversalRenderingManager::new(Rc::clone(&host)),
         VirtualizerConfig::default(),
     );
-    virtualizer.setup(Root::Element(ROOT.to_owned()), Some("content".to_owned()));
-    let _disconnect = virtualizer.connect("container".to_owned(), Rc::clone(&instance_ref));
+    virtualizer.setup(
+        Root::Element(host.element(ROOT)),
+        Some(host.element("content")),
+    );
+    let _disconnect = virtualizer.connect(host.element("container"), Rc::clone(&instance_ref));
     host.frames.flush_frames(20, 0.0);
 
     // onRender returned false in the connect pass, so nothing reconciled.

@@ -14,11 +14,12 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
-use crate::components::virtualizer::AnchorLine;
 use crate::components::virtualizer::IntersectionObserverInit;
 use crate::components::virtualizer::Root;
 use crate::components::virtualizer::ScrollBehavior;
 use crate::components::virtualizer::VirtualizerHost;
+use crate::document::Document;
+use crate::document::NodeKey;
 use crate::managers::universal_rendering_manager::AnimationFrames;
 use crate::managers::universal_rendering_manager::FrameId;
 
@@ -110,37 +111,50 @@ pub struct WorldPatch {
     pub elements: BTreeMap<String, ElementPatch>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct FakeElement {
-    doc_top: f64,
-    height: f64,
-    lines: Vec<(String, f64)>,
-    first_child: Option<String>,
-}
-
 #[derive(Default)]
 struct World {
     scroll_top: f64,
     viewport_height: f64,
     scroll_height: f64,
     root_top: f64,
-    elements: HashMap<String, FakeElement>,
+    doc_tops: HashMap<NodeKey, f64>,
+    heights: HashMap<NodeKey, f64>,
 }
 
 /// The name of the scroll container element in the fake world.
 pub const ROOT: &str = "root";
 
-#[derive(Default)]
 pub struct FakeHost {
     pub frames: FakeFrames,
+    doc: Document,
+    by_name: RefCell<HashMap<String, NodeKey>>,
+    labels: RefCell<HashMap<NodeKey, String>>,
     world: RefCell<World>,
     trace: RefCell<Vec<Value>>,
-    element_scroll_listener: RefCell<Option<String>>,
+    element_scroll_listener: Cell<Option<NodeKey>>,
     window_scroll_listener: Cell<bool>,
     window_resize_listener: Cell<bool>,
     /// Whether the active root is the document (the fake window).
     document_root: Cell<bool>,
     observers_active: Cell<bool>,
+}
+
+impl Default for FakeHost {
+    fn default() -> Self {
+        Self {
+            frames: FakeFrames::default(),
+            doc: Document::new(),
+            by_name: RefCell::default(),
+            labels: RefCell::default(),
+            world: RefCell::default(),
+            trace: RefCell::default(),
+            element_scroll_listener: Cell::new(None),
+            window_scroll_listener: Cell::new(false),
+            window_resize_listener: Cell::new(false),
+            document_root: Cell::new(false),
+            observers_active: Cell::new(false),
+        }
+    }
 }
 
 impl FakeHost {
@@ -150,33 +164,64 @@ impl FakeHost {
         host
     }
 
+    /// The element named `name` (created on first use), as a key of the document.
+    pub fn element(&self, name: &str) -> NodeKey {
+        if let Some(key) = self.by_name.borrow().get(name) {
+            return *key;
+        }
+        let key = self.doc.create_element("div");
+        self.by_name.borrow_mut().insert(name.to_owned(), key);
+        self.labels.borrow_mut().insert(key, name.to_owned());
+        key
+    }
+
+    fn name_of(&self, key: NodeKey) -> String {
+        self.labels.borrow()[&key].clone()
+    }
+
     pub fn apply_world(&self, patch: &WorldPatch) {
-        let mut world = self.world.borrow_mut();
-        if let Some(value) = patch.scroll_top {
-            world.scroll_top = value;
-        }
-        if let Some(value) = patch.viewport_height {
-            world.viewport_height = value;
-        }
-        if let Some(value) = patch.scroll_height {
-            world.scroll_height = value;
-        }
-        if let Some(value) = patch.root_top {
-            world.root_top = value;
+        {
+            let mut world = self.world.borrow_mut();
+            if let Some(value) = patch.scroll_top {
+                world.scroll_top = value;
+            }
+            if let Some(value) = patch.viewport_height {
+                world.viewport_height = value;
+            }
+            if let Some(value) = patch.scroll_height {
+                world.scroll_height = value;
+            }
+            if let Some(value) = patch.root_top {
+                world.root_top = value;
+            }
         }
         for (name, element) in &patch.elements {
-            let slot = world.elements.entry(name.clone()).or_default();
+            let key = self.element(name);
             if let Some(value) = element.doc_top {
-                slot.doc_top = value;
+                self.world.borrow_mut().doc_tops.insert(key, value);
             }
             if let Some(value) = element.height {
-                slot.height = value;
+                self.world.borrow_mut().heights.insert(key, value);
             }
-            if let Some(value) = &element.lines {
-                slot.lines = value.clone();
+            if let Some(lines) = &element.lines {
+                let line_keys: Vec<NodeKey> = lines
+                    .iter()
+                    .map(|(line_index, doc_top)| {
+                        let line = self.doc.create_element("div");
+                        self.doc.set_attribute(line, "data-line", "");
+                        self.doc.set_attribute(line, "data-line-index", line_index);
+                        self.labels
+                            .borrow_mut()
+                            .insert(line, format!("{name}#{line_index}"));
+                        self.world.borrow_mut().doc_tops.insert(line, *doc_top);
+                        line
+                    })
+                    .collect();
+                self.doc.replace_children(key, &line_keys);
             }
-            if let Some(value) = &element.first_child {
-                slot.first_child = Some(value.clone());
+            if let Some(child) = &element.first_child {
+                let child = self.element(child);
+                self.doc.replace_children(key, &[child]);
             }
         }
     }
@@ -189,8 +234,8 @@ impl FakeHost {
         std::mem::take(&mut *self.trace.borrow_mut())
     }
 
-    pub fn element_scroll_listener(&self) -> Option<String> {
-        self.element_scroll_listener.borrow().clone()
+    pub fn element_scroll_listener(&self) -> Option<NodeKey> {
+        self.element_scroll_listener.get()
     }
 
     pub fn window_scroll_listener(&self) -> bool {
@@ -236,7 +281,9 @@ impl AnimationFrames for FakeHost {
 }
 
 impl VirtualizerHost for FakeHost {
-    type Element = String;
+    fn document(&self) -> &Document {
+        &self.doc
+    }
 
     fn window_scroll_y(&self) -> f64 {
         self.world.borrow().scroll_top
@@ -250,58 +297,43 @@ impl VirtualizerHost for FakeHost {
         self.world.borrow().scroll_height
     }
 
-    fn element_scroll_top(&self, _element: &String) -> f64 {
+    fn element_scroll_top(&self, _element: &NodeKey) -> f64 {
         self.world.borrow().scroll_top
     }
 
-    fn element_scroll_height(&self, _element: &String) -> f64 {
+    fn element_scroll_height(&self, _element: &NodeKey) -> f64 {
         self.world.borrow().scroll_height
     }
 
-    fn element_bounding_height(&self, element: &String) -> f64 {
+    fn element_bounding_height(&self, element: &NodeKey) -> f64 {
         let world = self.world.borrow();
-        if element == ROOT {
+        if *element == self.element(ROOT) {
             world.viewport_height
         } else {
-            world.elements[element].height
+            world.heights.get(element).copied().unwrap_or(0.0)
         }
     }
 
-    fn element_bounding_top(&self, element: &String) -> f64 {
+    fn element_bounding_top(&self, element: &NodeKey) -> f64 {
         let world = self.world.borrow();
         let root_top = if self.document_root.get() {
             0.0
         } else {
             world.root_top
         };
-        if element == ROOT {
+        if *element == self.element(ROOT) {
             return root_top;
         }
-        // A line is named `file#lineIndex` (see `anchor_lines`).
-        let doc_top = match element.split_once('#') {
-            Some((file, line_index)) => {
-                world.elements[file]
-                    .lines
-                    .iter()
-                    .find(|(index, _)| index == line_index)
-                    .unwrap_or_else(|| panic!("no line {element}"))
-                    .1
-            }
-            None => world.elements[element].doc_top,
-        };
-        doc_top - world.scroll_top + root_top
+        world.doc_tops.get(element).copied().unwrap_or(0.0) - world.scroll_top + root_top
     }
 
-    fn element_offset_height(&self, element: &String) -> f64 {
-        self.world.borrow().elements[element].height
-    }
-
-    fn first_element_child(&self, element: &String) -> Option<String> {
+    fn element_offset_height(&self, element: &NodeKey) -> f64 {
         self.world
             .borrow()
-            .elements
+            .heights
             .get(element)
-            .and_then(|element| element.first_child.clone())
+            .copied()
+            .unwrap_or(0.0)
     }
 
     fn window_scroll_to(&self, top: f64, behavior: ScrollBehavior) {
@@ -313,47 +345,21 @@ impl VirtualizerHost for FakeHost {
         self.scroll_to_world(top);
     }
 
-    fn element_scroll_to(&self, element: &String, top: f64, behavior: ScrollBehavior) {
+    fn element_scroll_to(&self, element: &NodeKey, top: f64, behavior: ScrollBehavior) {
         self.record(json!([
             "element.scrollTo",
-            element,
+            self.name_of(*element),
             top,
             Self::behavior_name(behavior)
         ]));
         self.scroll_to_world(top);
     }
 
-    fn anchor_lines(&self, file_element: &String) -> impl Iterator<Item = AnchorLine<String>> {
-        let lines = self
-            .world
-            .borrow()
-            .elements
-            .get(file_element)
-            .map(|element| element.lines.clone())
-            .unwrap_or_default();
-        let file_element = file_element.clone();
-        lines.into_iter().map(move |(line_index, _)| AnchorLine {
-            element: format!("{file_element}#{line_index}"),
-            line_index,
-        })
-    }
-
-    fn find_anchor_line(&self, file_element: &String, line_index: &str) -> Option<String> {
-        self.world
-            .borrow()
-            .elements
-            .get(file_element)?
-            .lines
-            .iter()
-            .any(|(index, _)| index == line_index)
-            .then(|| format!("{file_element}#{line_index}"))
-    }
-
-    fn create_observers(&self, intersection: IntersectionObserverInit<String>) {
+    fn create_observers(&self, intersection: IntersectionObserverInit<NodeKey>) {
         self.observers_active.set(true);
         let root = match &intersection.root {
             Root::Document => "document".to_owned(),
-            Root::Element(element) => element.clone(),
+            Root::Element(element) => self.name_of(*element),
         };
         self.record(json!([
             "observers.create",
@@ -374,20 +380,20 @@ impl VirtualizerHost for FakeHost {
         self.record(json!(["intersection.disconnect"]));
     }
 
-    fn observe_resize(&self, element: &String) {
-        self.record(json!(["resize.observe", element]));
+    fn observe_resize(&self, element: &NodeKey) {
+        self.record(json!(["resize.observe", self.name_of(*element)]));
     }
 
     fn observe_document_resize(&self) {
         self.record(json!(["resize.observe", "documentElement"]));
     }
 
-    fn observe_intersection(&self, element: &String) {
-        self.record(json!(["intersection.observe", element]));
+    fn observe_intersection(&self, element: &NodeKey) {
+        self.record(json!(["intersection.observe", self.name_of(*element)]));
     }
 
-    fn unobserve_intersection(&self, element: &String) {
-        self.record(json!(["intersection.unobserve", element]));
+    fn unobserve_intersection(&self, element: &NodeKey) {
+        self.record(json!(["intersection.unobserve", self.name_of(*element)]));
     }
 
     fn add_window_listeners(&self) {
@@ -397,16 +403,24 @@ impl VirtualizerHost for FakeHost {
         self.record(json!(["window.addEventListener", "resize"]));
     }
 
-    fn add_element_scroll_listener(&self, root: &String) {
-        *self.element_scroll_listener.borrow_mut() = Some(root.clone());
-        self.record(json!(["element.addEventListener", root, "scroll"]));
+    fn add_element_scroll_listener(&self, root: &NodeKey) {
+        self.element_scroll_listener.set(Some(*root));
+        self.record(json!([
+            "element.addEventListener",
+            self.name_of(*root),
+            "scroll"
+        ]));
     }
 
-    fn remove_listeners(&self, root: Option<&Root<String>>) {
+    fn remove_listeners(&self, root: Option<&Root<NodeKey>>) {
         if let Some(Root::Element(element)) = root {
-            self.record(json!(["element.removeEventListener", element, "scroll"]));
+            self.record(json!([
+                "element.removeEventListener",
+                self.name_of(*element),
+                "scroll"
+            ]));
         }
-        *self.element_scroll_listener.borrow_mut() = None;
+        self.element_scroll_listener.set(None);
         self.window_scroll_listener.set(false);
         self.window_resize_listener.set(false);
         self.record(json!(["window.removeEventListener", "scroll"]));

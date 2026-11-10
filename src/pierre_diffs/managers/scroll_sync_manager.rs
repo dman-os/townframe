@@ -5,9 +5,11 @@
 
 use std::cell::Cell;
 use std::cell::RefCell;
-use std::hash::Hash;
 use std::rc::Rc;
 use std::rc::Weak;
+
+use crate::document::Document;
+use crate::document::NodeKey;
 
 pub type TimeoutId = i64;
 
@@ -18,18 +20,13 @@ pub enum ScrollSide {
 }
 
 pub trait ScrollSyncHost: 'static {
-    type Element: Clone + Eq + Hash + 'static;
-
-    /// `pre.children`, HTML elements only.
-    fn children(&self, pre: &Self::Element) -> Vec<Self::Element>;
-    /// `key in element.dataset`
-    fn dataset_has(&self, element: &Self::Element, key: &str) -> bool;
+    fn document(&self) -> &Document;
     /// `element.addEventListener('scroll', handler, { passive: true })`
-    fn add_scroll_listener(&self, element: &Self::Element, side: ScrollSide);
-    fn remove_scroll_listener(&self, element: &Self::Element, side: ScrollSide);
-    fn scroll_left(&self, element: &Self::Element) -> f64;
+    fn add_scroll_listener(&self, element: NodeKey, side: ScrollSide);
+    fn remove_scroll_listener(&self, element: NodeKey, side: ScrollSide);
+    fn scroll_left(&self, element: NodeKey) -> f64;
     /// `element.scrollTo({ left })`; `left` is `undefined` when absent.
-    fn scroll_to_left(&self, element: &Self::Element, left: Option<f64>);
+    fn scroll_to_left(&self, element: NodeKey, left: Option<f64>);
     fn set_timeout(&self, callback: Box<dyn FnOnce()>, milliseconds: u32) -> TimeoutId;
     fn clear_timeout(&self, timeout_id: TimeoutId);
 }
@@ -40,8 +37,8 @@ pub struct ScrollSyncManager<Host: ScrollSyncHost> {
     is_deletions_scrolling: Cell<bool>,
     is_additions_scrolling: Cell<bool>,
     timeout_id: Cell<TimeoutId>,
-    code_deletions: RefCell<Option<Host::Element>>,
-    code_additions: RefCell<Option<Host::Element>>,
+    code_deletions: RefCell<Option<NodeKey>>,
+    code_additions: RefCell<Option<NodeKey>>,
     enabled: Cell<bool>,
 }
 
@@ -73,11 +70,11 @@ impl<Host: ScrollSyncHost> ScrollSyncManager<Host> {
         }
         if let Some(code_deletions) = &*self.code_deletions.borrow() {
             self.host
-                .remove_scroll_listener(code_deletions, ScrollSide::Deletions);
+                .remove_scroll_listener(*code_deletions, ScrollSide::Deletions);
         }
         if let Some(code_additions) = &*self.code_additions.borrow() {
             self.host
-                .remove_scroll_listener(code_additions, ScrollSide::Additions);
+                .remove_scroll_listener(*code_additions, ScrollSide::Additions);
         }
         self.host.clear_timeout(self.timeout_id.get());
         *self.code_deletions.borrow_mut() = None;
@@ -87,18 +84,28 @@ impl<Host: ScrollSyncHost> ScrollSyncManager<Host> {
 
     pub fn setup(
         &self,
-        pre: &Host::Element,
-        code_deletions: Option<Host::Element>,
-        code_additions: Option<Host::Element>,
+        pre: &NodeKey,
+        code_deletions: Option<NodeKey>,
+        code_additions: Option<NodeKey>,
     ) {
         let (mut code_deletions, mut code_additions) = (code_deletions, code_additions);
         // If no code elements were provided, lets try to find them in
         // the pre element
         if code_deletions.is_none() || code_additions.is_none() {
-            for element in self.host.children(pre) {
-                if self.host.dataset_has(&element, "deletions") {
+            for element in self.host.document().children(pre) {
+                if self
+                    .host
+                    .document()
+                    .get_attribute(element, &format!("data-{}", "deletions"))
+                    .is_some()
+                {
                     code_deletions = Some(element);
-                } else if self.host.dataset_has(&element, "additions") {
+                } else if self
+                    .host
+                    .document()
+                    .get_attribute(element, &format!("data-{}", "additions"))
+                    .is_some()
+                {
                     code_additions = Some(element);
                 }
             }
@@ -111,20 +118,20 @@ impl<Host: ScrollSyncHost> ScrollSyncManager<Host> {
         if self.code_deletions.borrow().as_ref() != Some(&code_deletions) {
             if let Some(previous) = &*self.code_deletions.borrow() {
                 self.host
-                    .remove_scroll_listener(previous, ScrollSide::Deletions);
+                    .remove_scroll_listener(*previous, ScrollSide::Deletions);
             }
-            *self.code_deletions.borrow_mut() = Some(code_deletions.clone());
+            *self.code_deletions.borrow_mut() = Some(code_deletions);
             self.host
-                .add_scroll_listener(&code_deletions, ScrollSide::Deletions);
+                .add_scroll_listener(code_deletions, ScrollSide::Deletions);
         }
         if self.code_additions.borrow().as_ref() != Some(&code_additions) {
             if let Some(previous) = &*self.code_additions.borrow() {
                 self.host
-                    .remove_scroll_listener(previous, ScrollSide::Additions);
+                    .remove_scroll_listener(*previous, ScrollSide::Additions);
             }
-            *self.code_additions.borrow_mut() = Some(code_additions.clone());
+            *self.code_additions.borrow_mut() = Some(code_additions);
             self.host
-                .add_scroll_listener(&code_additions, ScrollSide::Additions);
+                .add_scroll_listener(code_additions, ScrollSide::Additions);
         }
         self.enabled.set(true);
     }
@@ -149,8 +156,8 @@ impl<Host: ScrollSyncHost> ScrollSyncManager<Host> {
                 .code_deletions
                 .borrow()
                 .as_ref()
-                .map(|code_deletions| self.host.scroll_left(code_deletions));
-            self.host.scroll_to_left(code_additions, left);
+                .map(|code_deletions| self.host.scroll_left(*code_deletions));
+            self.host.scroll_to_left(*code_additions, left);
         }
     }
 
@@ -174,8 +181,8 @@ impl<Host: ScrollSyncHost> ScrollSyncManager<Host> {
                 .code_additions
                 .borrow()
                 .as_ref()
-                .map(|code_additions| self.host.scroll_left(code_additions));
-            self.host.scroll_to_left(code_deletions, left);
+                .map(|code_additions| self.host.scroll_left(*code_additions));
+            self.host.scroll_to_left(*code_deletions, left);
         }
     }
 }

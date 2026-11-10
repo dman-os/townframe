@@ -5,12 +5,13 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+use crate::document::Document;
+use crate::document::NodeKey;
 use crate::js_collections::InsertionMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,27 +92,17 @@ pub struct ResizeObserverEntry<Element> {
     pub content_box_inline_size: f64,
 }
 
+/// What the platform supplies: the rendered document, geometry, connectedness
+/// and the resize observer. Structure and style writes are the `Document`'s.
 pub trait ResizeManagerHost: 'static {
-    type Element: Clone + Eq + Hash + 'static;
-
-    /// `pre.children`, HTML elements only.
-    fn children(&self, pre: &Self::Element) -> Vec<Self::Element>;
-    /// `element.tagName`
-    fn tag_name(&self, element: &Self::Element) -> String;
-    /// `element.firstElementChild`, when it is an HTML element.
-    fn first_element_child(&self, element: &Self::Element) -> Option<Self::Element>;
-    /// `pre.querySelectorAll('[data-line-annotation*=","]')`, HTML elements only.
-    fn query_annotation_elements(&self, pre: &Self::Element) -> Vec<Self::Element>;
-    fn get_attribute(&self, element: &Self::Element, name: &str) -> Option<String>;
+    fn document(&self) -> &Document;
     /// `element.getBoundingClientRect().height`
-    fn bounding_height(&self, element: &Self::Element) -> f64;
-    fn set_style_property(&self, element: &Self::Element, name: &str, value: &str);
-    fn remove_style_property(&self, element: &Self::Element, name: &str);
-    fn is_connected(&self, element: &Self::Element) -> bool;
+    fn bounding_height(&self, element: NodeKey) -> f64;
+    fn is_connected(&self, element: NodeKey) -> bool;
     /// `new ResizeObserver(ResizeManager.handleSharedResizeEntries)`
     fn create_resize_observer(&self);
-    fn observe(&self, element: &Self::Element);
-    fn unobserve(&self, element: &Self::Element);
+    fn observe(&self, element: NodeKey);
+    fn unobserve(&self, element: NodeKey);
     /// `resizeObserver.disconnect()`
     fn disconnect_resize_observer(&self);
     /// `console.error(message, ...)`; `detail` is the annotation string or
@@ -125,7 +116,7 @@ static MANAGER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 pub struct ResizeObserverHub<Host: ResizeManagerHost> {
     host: Rc<Host>,
     observer_exists: RefCell<bool>,
-    managers_by_element: RefCell<InsertionMap<Host::Element, usize>>,
+    managers_by_element: RefCell<InsertionMap<NodeKey, usize>>,
     managers: RefCell<HashMap<usize, Weak<ResizeManager<Host>>>>,
 }
 
@@ -149,10 +140,10 @@ impl<Host: ResizeManagerHost> ResizeObserverHub<Host> {
     }
 
     /// `handleSharedResizeEntries`, the observer callback.
-    pub fn handle_shared_resize_entries(&self, entries: &[ResizeObserverEntry<Host::Element>]) {
+    pub fn handle_shared_resize_entries(&self, entries: &[ResizeObserverEntry<NodeKey>]) {
         // First we need to batch all elements by manager, so callbacks are
         // properly aligned with a per-instance ResizeManager
-        let mut entries_by_manager: InsertionMap<usize, Vec<ResizeObserverEntry<Host::Element>>> =
+        let mut entries_by_manager: InsertionMap<usize, Vec<ResizeObserverEntry<NodeKey>>> =
             InsertionMap::default();
         for entry in entries {
             let manager = self
@@ -199,7 +190,7 @@ pub struct ResizeManager<Host: ResizeManagerHost> {
     id: usize,
     host: Rc<Host>,
     hub: Rc<ResizeObserverHub<Host>>,
-    observed_nodes: RefCell<InsertionMap<Host::Element, Observed<Host::Element>>>,
+    observed_nodes: RefCell<InsertionMap<NodeKey, Observed<NodeKey>>>,
 }
 
 impl<Host: ResizeManagerHost> ResizeManager<Host> {
@@ -218,13 +209,13 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         manager
     }
 
-    pub fn setup(&self, pre: &Host::Element, options: ResizeManagerSetupOptions) {
+    pub fn setup(&self, pre: &NodeKey, options: ResizeManagerSetupOptions) {
         let ResizeManagerSetupOptions {
             disable_annotations,
             column_variables,
         } = options;
         let apply_column_variables = column_variables == ResizeManagerColumnVariableMode::Apply;
-        let mut observed_nodes: InsertionMap<Host::Element, Observed<Host::Element>> = {
+        let mut observed_nodes: InsertionMap<NodeKey, Observed<NodeKey>> = {
             let mut copy = InsertionMap::default();
             for (element, item) in self.observed_nodes.borrow().entries() {
                 copy.insert(element, item);
@@ -257,16 +248,16 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
     // two) code columns and their number gutters. Returns `columnCount`.
     fn setup_code_columns(
         &self,
-        pre: &Host::Element,
+        pre: &NodeKey,
         apply_column_variables: bool,
-        observed_nodes: &mut InsertionMap<Host::Element, Observed<Host::Element>>,
+        observed_nodes: &mut InsertionMap<NodeKey, Observed<NodeKey>>,
     ) -> usize {
         let mut column_count = 0;
-        for element in self.host.children(pre) {
+        for element in self.host.document().children(pre) {
             if column_count == 2 {
                 break;
             }
-            if self.host.tag_name(&element) != "CODE" {
+            if self.host.document().tag_name(element) != "CODE" {
                 continue;
             }
             let code_element = element;
@@ -280,13 +271,13 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
                 ),
             };
 
-            let number_element = self.host.first_element_child(&code_element);
+            let number_element = self.host.document().children(code_element).first().copied();
             if let Some(item) = item {
                 self.observed_nodes
                     .borrow_mut()
-                    .insert(code_element.clone(), Observed::Code(Rc::clone(&item)));
+                    .insert(code_element, Observed::Code(Rc::clone(&item)));
                 observed_nodes.remove(&code_element);
-                let previous_number_element = item.borrow().number_element.clone();
+                let previous_number_element = item.borrow().number_element;
                 if previous_number_element != number_element {
                     if let Some(previous) = &previous_number_element {
                         self.unobserve(previous);
@@ -297,7 +288,7 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
                         observed_nodes.remove(number_element);
                         self.observed_nodes
                             .borrow_mut()
-                            .insert(number_element.clone(), Observed::Code(Rc::clone(&item)));
+                            .insert(*number_element, Observed::Code(Rc::clone(&item)));
                     }
                     let mut item_mut = item.borrow_mut();
                     item_mut.number_element = number_element;
@@ -306,7 +297,7 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
                     observed_nodes.remove(previous);
                     self.observed_nodes
                         .borrow_mut()
-                        .insert(previous.clone(), Observed::Code(Rc::clone(&item)));
+                        .insert(*previous, Observed::Code(Rc::clone(&item)));
                     // If there is a resize, let the resize handler handle it...
                 } else {
                     item.borrow_mut().number_width = 0.0;
@@ -314,20 +305,20 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
                 sync_column_variable_mode(self.host.as_ref(), &item, apply_column_variables);
             } else {
                 let item = Rc::new(RefCell::new(ObservedGridNodes {
-                    code_element: code_element.clone(),
-                    number_element: number_element.clone(),
+                    code_element,
+                    number_element,
                     code_width: CodeWidth::Auto,
                     number_width: 0.0,
                     apply_column_variables,
                 }));
                 self.observed_nodes
                     .borrow_mut()
-                    .insert(code_element.clone(), Observed::Code(Rc::clone(&item)));
+                    .insert(code_element, Observed::Code(Rc::clone(&item)));
                 self.observe(&code_element);
                 if let Some(number_element) = number_element {
                     self.observed_nodes
                         .borrow_mut()
-                        .insert(number_element.clone(), Observed::Code(Rc::clone(&item)));
+                        .insert(number_element, Observed::Code(Rc::clone(&item)));
                     self.observe(&number_element);
                 }
             }
@@ -339,19 +330,31 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
     // containers, one per column, whose children share a min-height.
     fn setup_annotation_pairs(
         &self,
-        pre: &Host::Element,
-        observed_nodes: &mut InsertionMap<Host::Element, Observed<Host::Element>>,
+        pre: &NodeKey,
+        observed_nodes: &mut InsertionMap<NodeKey, Observed<NodeKey>>,
     ) {
-        let mut annotation_updates: Vec<AnnotationSetup<Host::Element>> = Vec::new();
-        let annotation_elements = self.host.query_annotation_elements(pre);
+        let mut annotation_updates: Vec<AnnotationSetup<NodeKey>> = Vec::new();
+        let annotation_elements = self
+            .host
+            .document()
+            .query_by_attribute(pre, "data-line-annotation", None)
+            .into_iter()
+            .filter(|element| {
+                self.host
+                    .document()
+                    .get_attribute(*element, "data-line-annotation")
+                    .is_some_and(|value| value.contains(','))
+            })
+            .collect::<Vec<_>>();
 
-        let mut element_map: InsertionMap<String, Vec<Host::Element>> = InsertionMap::default();
+        let mut element_map: InsertionMap<String, Vec<NodeKey>> = InsertionMap::default();
         // Iterate through all the matched elements and organize them into pairs
         // based on the data-line-annotation attribute
         for element in annotation_elements {
             let line_annotation = self
                 .host
-                .get_attribute(&element, "data-line-annotation")
+                .document()
+                .get_attribute(element, "data-line-annotation")
                 .unwrap_or_default();
             if !is_line_annotation(&line_annotation) {
                 self.host.report(
@@ -374,10 +377,10 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
                     .report("DiffFileRenderer.setupResizeObserver: Bad Pair", Some(&key));
                 continue;
             }
-            let (container1, container2) = (pair[0].clone(), pair[1].clone());
+            let (container1, container2) = (pair[0], pair[1]);
             let (Some(child1), Some(child2)) = (
-                self.host.first_element_child(&container1),
-                self.host.first_element_child(&container2),
+                self.host.document().children(container1).first().copied(),
+                self.host.document().children(container2).first().copied(),
             ) else {
                 continue;
             };
@@ -386,26 +389,24 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
             if let Some(item) = existing {
                 self.observed_nodes
                     .borrow_mut()
-                    .insert(child1.clone(), item.clone());
-                self.observed_nodes
-                    .borrow_mut()
-                    .insert(child2.clone(), item);
+                    .insert(child1, item.clone());
+                self.observed_nodes.borrow_mut().insert(child2, item);
                 observed_nodes.remove(&child1);
                 observed_nodes.remove(&child2);
                 continue;
             }
 
-            let child1_height = self.host.bounding_height(&child1);
-            let child2_height = self.host.bounding_height(&child2);
+            let child1_height = self.host.bounding_height(child1);
+            let child2_height = self.host.bounding_height(child2);
             let item = Rc::new(RefCell::new(ObservedAnnotationNodes {
                 column1: ObservedAnnotationColumn {
                     container: container1,
-                    child: child1.clone(),
+                    child: child1,
                     child_height: child1_height,
                 },
                 column2: ObservedAnnotationColumn {
                     container: container2,
-                    child: child2.clone(),
+                    child: child2,
                     child_height: child2_height,
                 },
                 current_height: CurrentHeight::Auto,
@@ -424,11 +425,11 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         for pending_update in annotation_updates.drain(..) {
             self.apply_new_height(&pending_update.item, pending_update.new_height);
             self.observed_nodes.borrow_mut().insert(
-                pending_update.child1.clone(),
+                pending_update.child1,
                 Observed::Annotations(Rc::clone(&pending_update.item)),
             );
             self.observed_nodes.borrow_mut().insert(
-                pending_update.child2.clone(),
+                pending_update.child2,
                 Observed::Annotations(Rc::clone(&pending_update.item)),
             );
             self.observe(&pending_update.child1);
@@ -437,7 +438,7 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
     }
 
     pub fn clean_up(&self) {
-        let elements: Vec<Host::Element> = self
+        let elements: Vec<NodeKey> = self
             .observed_nodes
             .borrow()
             .entries()
@@ -450,7 +451,7 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         self.observed_nodes.borrow_mut().clear();
     }
 
-    fn observe(&self, element: &Host::Element) {
+    fn observe(&self, element: &NodeKey) {
         let owner = self.hub.managers_by_element.borrow().get(element).copied();
         match owner {
             // Already registered
@@ -465,12 +466,12 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         self.hub
             .managers_by_element
             .borrow_mut()
-            .insert(element.clone(), self.id);
+            .insert(*element, self.id);
         self.hub.ensure_resize_observer();
-        self.host.observe(element);
+        self.host.observe(*element);
     }
 
-    fn unobserve(&self, element: &Host::Element) {
+    fn unobserve(&self, element: &NodeKey) {
         let owner = self.hub.managers_by_element.borrow().get(element).copied();
         match owner {
             None => return,
@@ -482,7 +483,7 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
 
         self.hub.managers_by_element.borrow_mut().remove(element);
         if *self.hub.observer_exists.borrow() {
-            self.host.unobserve(element);
+            self.host.unobserve(*element);
         }
         if *self.hub.observer_exists.borrow() && self.hub.managers_by_element.borrow().is_empty() {
             self.host.disconnect_resize_observer();
@@ -490,10 +491,10 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         }
     }
 
-    fn handle_resize_entries(&self, entries: &[ResizeObserverEntry<Host::Element>]) {
-        let mut code_updates: InsertionMap<usize, (GridItem<Host::Element>, CodeColumnUpdate)> =
+    fn handle_resize_entries(&self, entries: &[ResizeObserverEntry<NodeKey>]) {
+        let mut code_updates: InsertionMap<usize, (GridItem<NodeKey>, CodeColumnUpdate)> =
             InsertionMap::default();
-        let mut annotation_updates: InsertionMap<usize, AnnotationItem<Host::Element>> =
+        let mut annotation_updates: InsertionMap<usize, AnnotationItem<NodeKey>> =
             InsertionMap::default();
         for entry in entries {
             let target = &entry.target;
@@ -554,7 +555,7 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         }
     }
 
-    fn apply_column_update(&self, item: &GridItem<Host::Element>, update: &CodeColumnUpdate) {
+    fn apply_column_update(&self, item: &GridItem<NodeKey>, update: &CodeColumnUpdate) {
         let (next_code_width, next_number_width, code_width_changed, number_width_changed) = {
             let item = item.borrow();
             let next_code_width = match update.code_inline_size {
@@ -593,18 +594,18 @@ impl<Host: ResizeManagerHost> ResizeManager<Host> {
         }
     }
 
-    fn apply_new_height(&self, item: &AnnotationItem<Host::Element>, new_height: f64) {
+    fn apply_new_height(&self, item: &AnnotationItem<NodeKey>, new_height: f64) {
         if CurrentHeight::Px(new_height) != item.borrow().current_height {
             let current_height = new_height.max(0.0);
             item.borrow_mut().current_height = CurrentHeight::Px(current_height);
             let item = item.borrow();
-            self.host.set_style_property(
-                &item.column1.container,
+            self.host.document().set_style_property(
+                item.column1.container,
                 "--diffs-annotation-min-height",
                 &format!("{current_height}px"),
             );
-            self.host.set_style_property(
-                &item.column2.container,
+            self.host.document().set_style_property(
+                item.column2.container,
                 "--diffs-annotation-min-height",
                 &format!("{current_height}px"),
             );
@@ -637,7 +638,7 @@ fn resolve_number_width(inline_size: f64) -> f64 {
 
 fn sync_column_variable_mode<Host: ResizeManagerHost>(
     host: &Host,
-    item: &GridItem<Host::Element>,
+    item: &GridItem<NodeKey>,
     apply_column_variables: bool,
 ) {
     if item.borrow().apply_column_variables == apply_column_variables {
@@ -654,7 +655,7 @@ fn sync_column_variable_mode<Host: ResizeManagerHost>(
 
 fn apply_code_column_variables<Host: ResizeManagerHost>(
     host: &Host,
-    item: &ObservedGridNodes<Host::Element>,
+    item: &ObservedGridNodes<NodeKey>,
     code_width_changed: bool,
     number_width_changed: bool,
 ) {
@@ -669,7 +670,8 @@ fn apply_code_column_variables<Host: ResizeManagerHost>(
             CodeWidth::Px(width) => format!("{width}px"),
             CodeWidth::Auto => "auto".to_owned(),
         };
-        host.set_style_property(code_element, "--diffs-column-width", &value);
+        host.document()
+            .set_style_property(code_element, "--diffs-column-width", &value);
     }
 
     if number_width_changed {
@@ -678,7 +680,8 @@ fn apply_code_column_variables<Host: ResizeManagerHost>(
         } else {
             format!("{number_width}px")
         };
-        host.set_style_property(code_element, "--diffs-column-number-width", &value);
+        host.document()
+            .set_style_property(code_element, "--diffs-column-number-width", &value);
     }
 
     if code_width_changed || (number_width_changed && *code_width != CodeWidth::Auto) {
@@ -691,35 +694,41 @@ fn apply_code_column_variables<Host: ResizeManagerHost>(
         } else {
             "auto".to_owned()
         };
-        host.set_style_property(code_element, "--diffs-column-content-width", &value);
+        host.document()
+            .set_style_property(code_element, "--diffs-column-content-width", &value);
     }
 }
 
 fn remove_code_column_variables<Host: ResizeManagerHost>(
     host: &Host,
-    item: &ObservedGridNodes<Host::Element>,
+    item: &ObservedGridNodes<NodeKey>,
 ) {
-    host.remove_style_property(&item.code_element, "--diffs-column-content-width");
-    host.remove_style_property(&item.code_element, "--diffs-column-number-width");
-    host.remove_style_property(&item.code_element, "--diffs-column-width");
+    host.document()
+        .remove_style_property(item.code_element, "--diffs-column-content-width");
+    host.document()
+        .remove_style_property(item.code_element, "--diffs-column-number-width");
+    host.document()
+        .remove_style_property(item.code_element, "--diffs-column-width");
 }
 
-fn cleanup_stale_code_item<Host: ResizeManagerHost>(host: &Host, item: &GridItem<Host::Element>) {
+fn cleanup_stale_code_item<Host: ResizeManagerHost>(host: &Host, item: &GridItem<NodeKey>) {
     let item = item.borrow();
-    if host.is_connected(&item.code_element) {
+    if host.is_connected(item.code_element) {
         remove_code_column_variables(host, &item);
     }
 }
 
 fn cleanup_stale_annotation_item<Host: ResizeManagerHost>(
     host: &Host,
-    item: &AnnotationItem<Host::Element>,
+    item: &AnnotationItem<NodeKey>,
 ) {
     let item = item.borrow();
-    if host.is_connected(&item.column1.container) {
-        host.remove_style_property(&item.column1.container, "--diffs-annotation-min-height");
+    if host.is_connected(item.column1.container) {
+        host.document()
+            .remove_style_property(item.column1.container, "--diffs-annotation-min-height");
     }
-    if host.is_connected(&item.column2.container) {
-        host.remove_style_property(&item.column2.container, "--diffs-annotation-min-height");
+    if host.is_connected(item.column2.container) {
+        host.document()
+            .remove_style_property(item.column2.container, "--diffs-annotation-min-height");
     }
 }

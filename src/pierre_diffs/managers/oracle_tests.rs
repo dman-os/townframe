@@ -19,6 +19,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::document::Document;
+use crate::document::Mutation;
+use crate::document::NodeKey;
 use crate::managers::resize_manager::ResizeManager;
 use crate::managers::resize_manager::ResizeManagerColumnVariableMode;
 use crate::managers::resize_manager::ResizeManagerHost;
@@ -107,120 +110,151 @@ struct Golden {
     managers: Vec<Case>,
 }
 
-#[derive(Default)]
-struct DomElement {
-    tag: String,
-    children: Vec<String>,
-    attrs: HashMap<String, String>,
-    height: f64,
-    connected: bool,
-    scroll_left: f64,
-    dataset: HashMap<String, String>,
-}
-
 type PendingTimer = (TimeoutId, Box<dyn FnOnce()>);
 
-#[derive(Default)]
-struct FakeDom {
-    elements: RefCell<HashMap<String, DomElement>>,
+struct Shared {
     trace: RefCell<Vec<Value>>,
+    names: RefCell<HashMap<NodeKey, String>>,
+}
+
+struct FakeDom {
+    doc: Document,
+    shared: Rc<Shared>,
+    by_name: RefCell<HashMap<String, NodeKey>>,
+    heights: RefCell<HashMap<NodeKey, f64>>,
+    connected: RefCell<HashMap<NodeKey, bool>>,
+    scroll_left: RefCell<HashMap<NodeKey, f64>>,
     observer_active: Cell<bool>,
-    listeners: RefCell<HashMap<String, ScrollSide>>,
+    listeners: RefCell<HashMap<NodeKey, ScrollSide>>,
     timers: RefCell<Vec<PendingTimer>>,
     next_timer: Cell<TimeoutId>,
 }
 
-impl FakeDom {
-    fn apply(&self, patch: &WorldPatch) {
-        let mut elements = self.elements.borrow_mut();
-        for (name, value) in &patch.elements {
-            let slot = elements.entry(name.clone()).or_insert_with(|| DomElement {
-                tag: "div".to_owned(),
-                connected: true,
-                ..DomElement::default()
-            });
-            if let Some(tag) = &value.tag {
-                slot.tag.clone_from(tag);
+impl Default for FakeDom {
+    fn default() -> Self {
+        let doc = Document::new();
+        let shared = Rc::new(Shared {
+            trace: RefCell::default(),
+            names: RefCell::default(),
+        });
+        let observed = Rc::clone(&shared);
+        // Style writes are the only document edits the managers make; the
+        // scenario's own edits are made silently (see `silent`).
+        doc.set_observer(Some(Rc::new(move |_: &Document, mutation: &Mutation| {
+            let name = |node: &NodeKey| observed.names.borrow()[node].clone();
+            match mutation {
+                Mutation::SetStyleProperty {
+                    node,
+                    name: property,
+                    value,
+                } => observed.trace.borrow_mut().push(json!([
+                    "style.set",
+                    name(node),
+                    property,
+                    value
+                ])),
+                Mutation::RemoveStyleProperty {
+                    node,
+                    name: property,
+                } => {
+                    observed
+                        .trace
+                        .borrow_mut()
+                        .push(json!(["style.remove", name(node), property]))
+                }
+                _ => {}
             }
+        })));
+        Self {
+            doc,
+            shared,
+            by_name: RefCell::default(),
+            heights: RefCell::default(),
+            connected: RefCell::default(),
+            scroll_left: RefCell::default(),
+            observer_active: Cell::new(false),
+            listeners: RefCell::default(),
+            timers: RefCell::default(),
+            next_timer: Cell::new(0),
+        }
+    }
+}
+
+impl FakeDom {
+    // The element named `name`, created (as a `div`) on first sight.
+    fn element(&self, name: &str) -> NodeKey {
+        if let Some(key) = self.by_name.borrow().get(name) {
+            return *key;
+        }
+        let key = self.doc.create_element("div");
+        self.by_name.borrow_mut().insert(name.to_owned(), key);
+        self.shared.names.borrow_mut().insert(key, name.to_owned());
+        self.connected.borrow_mut().insert(key, true);
+        key
+    }
+
+    fn apply(&self, patch: &WorldPatch) {
+        // First sight creates the element with its tag.
+        for (name, value) in &patch.elements {
+            if !self.by_name.borrow().contains_key(name) {
+                let key = self
+                    .doc
+                    .create_element(value.tag.as_deref().unwrap_or("div"));
+                self.by_name.borrow_mut().insert(name.clone(), key);
+                self.shared.names.borrow_mut().insert(key, name.clone());
+                self.connected.borrow_mut().insert(key, true);
+            }
+        }
+        for (name, value) in &patch.elements {
+            let key = self.element(name);
             if let Some(children) = &value.children {
-                slot.children.clone_from(children);
+                let keys: Vec<NodeKey> = children.iter().map(|child| self.element(child)).collect();
+                self.doc.replace_children(key, &keys);
             }
             if let Some(attrs) = &value.attrs {
-                slot.attrs.clone_from(attrs);
-            }
-            if let Some(height) = value.height {
-                slot.height = height;
-            }
-            if let Some(connected) = value.connected {
-                slot.connected = connected;
-            }
-            if let Some(scroll_left) = value.scroll_left {
-                slot.scroll_left = scroll_left;
+                self.doc.remove_attribute(key, "data-line-annotation");
+                for (attribute, attribute_value) in attrs {
+                    self.doc.set_attribute(key, attribute, attribute_value);
+                }
             }
             if let Some(dataset) = &value.dataset {
-                slot.dataset.clone_from(dataset);
+                for (data_key, data_value) in dataset {
+                    self.doc
+                        .set_attribute(key, &format!("data-{data_key}"), data_value);
+                }
+            }
+            if let Some(height) = value.height {
+                self.heights.borrow_mut().insert(key, height);
+            }
+            if let Some(connected) = value.connected {
+                self.connected.borrow_mut().insert(key, connected);
+            }
+            if let Some(scroll_left) = value.scroll_left {
+                self.scroll_left.borrow_mut().insert(key, scroll_left);
             }
         }
     }
 
     fn rec(&self, entry: Value) {
-        self.trace.borrow_mut().push(entry);
+        self.shared.trace.borrow_mut().push(entry);
     }
 
-    fn annotation_descendants(&self, name: &str, found: &mut Vec<String>) {
-        let children = self.elements.borrow()[name].children.clone();
-        for child in children {
-            let has_comma = self.elements.borrow()[&child]
-                .attrs
-                .get("data-line-annotation")
-                .is_some_and(|value| value.contains(','));
-            if has_comma {
-                found.push(child.clone());
-            }
-            self.annotation_descendants(&child, found);
-        }
+    fn name(&self, key: NodeKey) -> String {
+        self.shared.names.borrow()[&key].clone()
     }
 }
 
 impl ResizeManagerHost for FakeDom {
-    type Element = String;
-
-    fn children(&self, pre: &String) -> Vec<String> {
-        self.elements.borrow()[pre].children.clone()
+    fn document(&self) -> &Document {
+        &self.doc
     }
 
-    fn tag_name(&self, element: &String) -> String {
-        self.elements.borrow()[element].tag.to_uppercase()
+    fn bounding_height(&self, element: NodeKey) -> f64 {
+        self.heights.borrow().get(&element).copied().unwrap_or(0.0)
     }
 
-    fn first_element_child(&self, element: &String) -> Option<String> {
-        self.elements.borrow()[element].children.first().cloned()
-    }
-
-    fn query_annotation_elements(&self, pre: &String) -> Vec<String> {
-        let mut found = Vec::new();
-        self.annotation_descendants(pre, &mut found);
-        found
-    }
-
-    fn get_attribute(&self, element: &String, name: &str) -> Option<String> {
-        self.elements.borrow()[element].attrs.get(name).cloned()
-    }
-
-    fn bounding_height(&self, element: &String) -> f64 {
-        self.elements.borrow()[element].height
-    }
-
-    fn set_style_property(&self, element: &String, name: &str, value: &str) {
-        self.rec(json!(["style.set", element, name, value]));
-    }
-
-    fn remove_style_property(&self, element: &String, name: &str) {
-        self.rec(json!(["style.remove", element, name]));
-    }
-
-    fn is_connected(&self, element: &String) -> bool {
-        self.elements.borrow()[element].connected
+    fn is_connected(&self, element: NodeKey) -> bool {
+        self.connected.borrow()[&element]
     }
 
     fn create_resize_observer(&self) {
@@ -228,12 +262,12 @@ impl ResizeManagerHost for FakeDom {
         self.rec(json!(["observer.create"]));
     }
 
-    fn observe(&self, element: &String) {
-        self.rec(json!(["observe", element]));
+    fn observe(&self, element: NodeKey) {
+        self.rec(json!(["observe", self.name(element)]));
     }
 
-    fn unobserve(&self, element: &String) {
-        self.rec(json!(["unobserve", element]));
+    fn unobserve(&self, element: NodeKey) {
+        self.rec(json!(["unobserve", self.name(element)]));
     }
 
     fn disconnect_resize_observer(&self) {
@@ -247,32 +281,30 @@ impl ResizeManagerHost for FakeDom {
 }
 
 impl ScrollSyncHost for FakeDom {
-    type Element = String;
-
-    fn children(&self, pre: &String) -> Vec<String> {
-        self.elements.borrow()[pre].children.clone()
+    fn document(&self) -> &Document {
+        &self.doc
     }
 
-    fn dataset_has(&self, element: &String, key: &str) -> bool {
-        self.elements.borrow()[element].dataset.contains_key(key)
+    fn add_scroll_listener(&self, element: NodeKey, side: ScrollSide) {
+        self.rec(json!(["listener.add", self.name(element), "scroll"]));
+        self.listeners.borrow_mut().insert(element, side);
     }
 
-    fn add_scroll_listener(&self, element: &String, side: ScrollSide) {
-        self.rec(json!(["listener.add", element, "scroll"]));
-        self.listeners.borrow_mut().insert(element.clone(), side);
+    fn remove_scroll_listener(&self, element: NodeKey, _side: ScrollSide) {
+        self.rec(json!(["listener.remove", self.name(element), "scroll"]));
+        self.listeners.borrow_mut().remove(&element);
     }
 
-    fn remove_scroll_listener(&self, element: &String, _side: ScrollSide) {
-        self.rec(json!(["listener.remove", element, "scroll"]));
-        self.listeners.borrow_mut().remove(element);
+    fn scroll_left(&self, element: NodeKey) -> f64 {
+        self.scroll_left
+            .borrow()
+            .get(&element)
+            .copied()
+            .unwrap_or(0.0)
     }
 
-    fn scroll_left(&self, element: &String) -> f64 {
-        self.elements.borrow()[element].scroll_left
-    }
-
-    fn scroll_to_left(&self, element: &String, left: Option<f64>) {
-        self.rec(json!(["scrollTo", element, left]));
+    fn scroll_to_left(&self, element: NodeKey, left: Option<f64>) {
+        self.rec(json!(["scrollTo", self.name(element), left]));
     }
 
     fn set_timeout(&self, callback: Box<dyn FnOnce()>, milliseconds: u32) -> TimeoutId {
@@ -334,7 +366,7 @@ fn managers_match_the_published_classes() {
                 } => {
                     if scenario.kind == "resize" {
                         resize_managers[*manager].setup(
-                            pre,
+                            &dom.element(pre),
                             ResizeManagerSetupOptions {
                                 disable_annotations: *disable_annotations,
                                 column_variables: column_variables.unwrap_or_default(),
@@ -342,9 +374,9 @@ fn managers_match_the_published_classes() {
                         );
                     } else {
                         sync_manager.as_ref().expect("scroll sync scenario").setup(
-                            pre,
-                            deletions.clone(),
-                            additions.clone(),
+                            &dom.element(pre),
+                            deletions.as_ref().map(|name| dom.element(name)),
+                            additions.as_ref().map(|name| dom.element(name)),
                         );
                     }
                 }
@@ -364,7 +396,7 @@ fn managers_match_the_published_classes() {
                         let entries: Vec<_> = entries
                             .iter()
                             .map(|entry| ResizeObserverEntry {
-                                target: entry.target.clone(),
+                                target: dom.element(&entry.target),
                                 border_box_block_size: entry.block_size,
                                 content_box_inline_size: entry.inline_size,
                             })
@@ -373,7 +405,7 @@ fn managers_match_the_published_classes() {
                     }
                 }
                 Op::ScrollEvent { target } => {
-                    let side = dom.listeners.borrow().get(target).copied();
+                    let side = dom.listeners.borrow().get(&dom.element(target)).copied();
                     let manager = sync_manager.as_ref().expect("scroll sync scenario");
                     match side {
                         Some(ScrollSide::Deletions) => manager.handle_deletions_scroll(),
@@ -403,7 +435,7 @@ fn managers_match_the_published_classes() {
         assert_json_eq(
             &format!("scenario `{}`", scenario.name),
             &case.trace,
-            &Value::Array(dom.trace.borrow().clone()),
+            &Value::Array(dom.shared.trace.borrow().clone()),
         );
     }
 }

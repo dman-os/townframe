@@ -11997,11 +11997,7 @@ dependencies = [
 name = "pierre_diffs_dioxus"
 version = "0.1.0"
 dependencies = [
- "dioxus",
- "js-sys",
  "pierre_diffs",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]

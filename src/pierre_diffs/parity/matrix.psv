@@ -26,7 +26,7 @@ pierre/src/components/FileStream.ts|398|PENDING|S10-S12||PORT as Dioxus componen
 pierre/src/components/UnresolvedFile.ts|940|DEFER|-||DEFER (not needed for PR review v1)
 pierre/src/components/VirtualizedFile.ts|1390|DEFER|-||single-file view deferred; review loop uses FileDiff
 pierre/src/components/VirtualizedFileDiff.ts|2452|PENDING|S12||PORT as Dioxus components (semantics, not code shape)
-pierre/src/components/Virtualizer.ts|723|PORTED|S10|components/virtualizer.rs;../pierre_diffs_dioxus/host.rs;../pierre_diffs_dioxus/lib.rs|logic mirrors the class statement for statement against a `VirtualizerHost` trait (components/virtualizer.rs, oracle-tested against the published class under a scripted fake DOM); the web-sys host and the Dioxus `VirtualizerRoot`/hooks are the thin layer in pierre_diffs_dioxus (compile-checked only). Dev hooks (`__STOP`, `__INSTANCE`, `__TOGGLE`) not ported
+pierre/src/components/Virtualizer.ts|723|PORTED|S10|components/virtualizer.rs|logic mirrors the class statement for statement against a `VirtualizerHost` trait (components/virtualizer.rs, oracle-tested against the published class under a scripted fake DOM); the platform host (geometry, events, observers) is the Dioxus-events host to come in pierre_diffs_dioxus (the S10 web-sys `WebHost` was removed in S12a-2). Dev hooks (`__STOP`, `__INSTANCE`, `__TOGGLE`) not ported
 pierre/src/components/VirtulizerDevelopment.d.ts|13|OUT|-||OUT
 pierre/src/components/web-components.ts|39|OUT|-||OUT
 pierre/src/constants.ts|108|PORTED|S1|constants.rs;scanners.rs|values in constants.rs; the twelve RegExp constants are hand-written scanners in scanners.rs
