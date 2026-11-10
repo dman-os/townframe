@@ -52,7 +52,7 @@ where
         self.state.borrow().pending_files.clone()
     }
 
-    pub(super) fn load_files_if_necessary(&self) {
+    pub fn load_files_if_necessary(&self) {
         let Some(file_diff) = self.get_input_diff() else {
             return;
         };
@@ -80,7 +80,7 @@ where
             .get_input_diff()
             .is_some_and(|input| Rc::ptr_eq(&input, expected_diff));
         if still_input {
-            self.handle_files_loaded(expected_diff, files);
+            self.hooks.handle_files_loaded(self.0, expected_diff, files);
         }
         self.abandon_file_load(expected_diff);
     }
@@ -98,14 +98,31 @@ where
         }
     }
 
-    fn handle_files_loaded(
+    /// `FileDiff.handleFilesLoaded`: merge, then render again.
+    pub fn handle_files_loaded(
         &self,
         expected_diff: &Rc<FileDiffMetadata>,
         files: &FileDiffLoadedFiles,
     ) {
-        if !expected_diff.is_partial {
+        if self
+            .get_input_diff()
+            .is_none_or(|input| !Rc::ptr_eq(&input, expected_diff))
+            || !expected_diff.is_partial
+        {
             return;
         }
+        self.merge_loaded_files(expected_diff, files);
+        Lifecycle(self.0).rerender();
+    }
+
+    /// `hydratePartialDiff('merge', ...)` and `setHydratedState(files)`: the
+    /// half of `handleFilesLoaded` both classes share. Returns the hydrated
+    /// diff that replaced `expected_diff` in the instance.
+    pub fn merge_loaded_files(
+        &self,
+        expected_diff: &Rc<FileDiffMetadata>,
+        files: &FileDiffLoadedFiles,
+    ) -> Rc<FileDiffMetadata> {
         let parse_diff_options: ParseDiffOptions = self
             .options
             .borrow()
@@ -146,6 +163,6 @@ where
                 }
             }
         }
-        Lifecycle(self.0).rerender();
+        hydrated
     }
 }

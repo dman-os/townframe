@@ -27,7 +27,6 @@ use super::layout_oracle_tests::Spec;
 use super::layout_oracle_tests::options_from_spec;
 use super::layout_oracle_tests::panic_message;
 use crate::components::file_diff::CodeGroups;
-use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::LineAnnotations;
 use crate::components::virtualizer::Virtualizer;
 use crate::components::virtualizer::VirtualizerConfig;
@@ -186,13 +185,6 @@ enum Step {
         line: usize,
         side: SelectionSide,
     },
-    OnRender {
-        dirty: bool,
-        render_result: bool,
-    },
-    Visibility {
-        visible: bool,
-    },
     SyncTop,
 }
 
@@ -204,7 +196,7 @@ struct GroupNodes {
 
 struct Replay {
     dom: Rc<FakeDom>,
-    instance: Instance,
+    instance: Rc<Instance>,
     diffs: HashMap<String, Rc<FileDiffMetadata>>,
     lists: HashMap<String, LineAnnotations<u8>>,
     separator_functions: HashMap<String, SeparatorFn>,
@@ -225,14 +217,6 @@ impl Replay {
         let dom = Rc::new(FakeDom::default());
         let mut separator_functions = HashMap::new();
         let options = options_from_spec(&scenario.options, &mut separator_functions);
-        let file_diff = FileDiff::new(
-            Rc::clone(&dom),
-            ResizeObserverHub::new(Rc::clone(&dom)),
-            UniversalRenderingManager::new(Rc::clone(&dom)),
-            Rc::new(PlainTextHighlighter),
-            options,
-            None,
-        );
         let virtualizer = Virtualizer::new(
             Rc::clone(&dom),
             UniversalRenderingManager::new(Rc::clone(&dom)),
@@ -243,9 +227,13 @@ impl Replay {
         );
         let instance = VirtualizedFileDiff::new(
             Rc::clone(&dom),
-            file_diff,
+            ResizeObserverHub::new(Rc::clone(&dom)),
+            UniversalRenderingManager::new(Rc::clone(&dom)),
+            Rc::new(PlainTextHighlighter),
+            options,
             virtualizer,
             scenario.metrics.map(Into::into).unwrap_or_default(),
+            None,
         );
         Self {
             dom,
@@ -538,8 +526,8 @@ impl Replay {
         }
     }
 
-    /// The steps that read: reconcile, the window, positions, `onRender`,
-    /// `setVisibility`, `syncVirtualizedTop`.
+    /// The steps that read: reconcile, the window, positions,
+    /// `syncVirtualizedTop`.
     fn query_step(&mut self, step: &Step) -> Value {
         match step {
             Step::Reconcile => json!(self.instance.reconcile_heights()),
@@ -569,22 +557,6 @@ impl Replay {
                     Value::Null,
                     |position| json!({ "top": position.top, "height": position.height }),
                 )
-            }
-            Step::OnRender {
-                dirty,
-                render_result,
-            } => {
-                let mut calls = 0;
-                let result = self.instance.on_render(*dirty, || {
-                    calls += 1;
-                    *render_result
-                });
-                json!({ "result": result, "renderCalls": calls })
-            }
-            Step::Visibility { visible } => {
-                let mut calls = 0;
-                self.instance.set_visibility(*visible, || calls += 1);
-                json!({ "rerenderCalls": calls })
             }
             Step::SyncTop => {
                 self.instance.sync_virtualized_top();

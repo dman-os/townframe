@@ -1,7 +1,7 @@
 // Differential scenarios for the window and measurement half of
 // `VirtualizedFileDiff` (S12b-2): `computeRenderRangeFromWindow`,
 // `getLinePosition`, `reconcileHeights` (with `measureFileAnnotationHeight`),
-// `onRender`, `setVisibility`, `syncVirtualizedTop`, `updatePendingRender`,
+// `syncVirtualizedTop`, `updatePendingRender`,
 // `syncLineAnnotations` and `updateCodeViewLayout`.
 //
 // The published `VirtualizedFileDiff` runs over the published `Virtualizer`
@@ -11,9 +11,9 @@
 // `reconcileHeights` reads (`children`, `dataset`, `nextElementSibling`,
 // `getBoundingClientRect().height`), as upstream's own tests fake them
 // (`FakeHTMLElement` with `HTMLElement` replaced), with heights and the
-// container's top declared by the scenario and changed by steps. `render` and
-// `rerender`, which `onRender` and `setVisibility` call and S12b-3 owns, are
-// recorded stubs. After every step the oracle records its result and the whole
+// container's top declared by the scenario and changed by steps. `onRender` and
+// `setVisibility`, which call `render` and `rerender` (S12b-3), are covered by
+// the integration oracle (`s12b_virtualized.mjs`). After every step the oracle records its result and the whole
 // observable state: the layout (height, top, layoutDirty, the cache), whether
 // and what `renderRange` is, `isVisible`, `forceRenderOverride`, the pending
 // render (which pool diffs it holds) and which annotation list the instance
@@ -222,25 +222,6 @@ function applyStep(world, step) {
       const position = instance.getLinePosition(step.line, step.side);
       return position === undefined ? null : { top: position.top, height: position.height };
     }
-    case "onRender": {
-      let calls = 0;
-      instance.render = () => {
-        calls++;
-        return step.renderResult;
-      };
-      const result = instance.onRender(step.dirty);
-      delete instance.render;
-      return { result, renderCalls: calls };
-    }
-    case "visibility": {
-      let calls = 0;
-      instance.rerender = () => {
-        calls++;
-      };
-      instance.setVisibility(step.visible);
-      delete instance.rerender;
-      return { rerenderCalls: calls };
-    }
     case "syncTop":
       instance.syncVirtualizedTop();
       return null;
@@ -411,9 +392,7 @@ function randomStep(random, diffs, state) {
     case 23:
       return { op: "linePosition", line: random.pick([0, 1, 2, 5, 17, 40, 99, 1000, 1 + random.int(Math.max(state.rows, 1))]), side: random.pick(["additions", "additions", "deletions"]) };
     case 24:
-      return { op: "onRender", dirty: random.next() < 0.5, renderResult: random.next() < 0.5 };
     case 25:
-      return { op: "visibility", visible: random.next() < 0.5 };
     case 26:
       return { op: "syncTop" };
     default:
@@ -553,15 +532,7 @@ function measurementScenarios() {
       { op: "install", diff: "oneLine", container: true, containerTop: 12, placeholder: false, groups: groups(group(50)) },
       { op: "syncTop" },
       { op: "reconcile" },
-      { op: "visibility", visible: true },
-      { op: "visibility", visible: true },
-      { op: "onRender", dirty: true, renderResult: true },
-      { op: "visibility", visible: false },
-      { op: "visibility", visible: false },
-      { op: "onRender", dirty: false, renderResult: false },
       { op: "install", diff: "oneLine", container: false, containerTop: 0, placeholder: false, groups: {} },
-      { op: "onRender", dirty: true, renderResult: true },
-      { op: "visibility", visible: true },
       { op: "syncTop" },
     ];
     scenarios.push({ name: `edge:measure:${name}`, metrics: METRICS.upstreamTest, options: spec, lists, steps });

@@ -8,28 +8,23 @@
 //! `codeAdditions`, `renderRange`) and fake `HTMLElement`s with a height
 //! callback; here `install_rendered_for_test` writes them and the elements are
 //! `FakeDom` nodes whose declared height the test changes. `setOptions` and
-//! `expandHunk` (S12b-3's overrides) are composed as the published class
-//! composes them (`set_options`, `expand_hunk` below). Not converted: the cases
-//! that need `cleanUp(true)` (`retains file-level annotation height through
-//! recycling until the top remounts`) or `recomputeDiffHunks`
+//! `expandHunk` are the instance's own (`overrides.rs`). The cases that need
+//! `cleanUp(true)`, `render` or `instanceChanged` are in
+//! `integration_upstream_tests.rs`. Not converted: `recomputeDiffHunks`
 //! (`render range clamp reaches additionLines.length after stale layout cache`),
-//! `render` (`ignores trailing fromEnd expansion...`), `getAdvancedStickySpecs` and
-//! `getNumericScrollAnchor` (dropped); see parity/rules.psv. Test-only.
+//! `getAdvancedStickySpecs` and `getNumericScrollAnchor` (dropped); see
+//! parity/rules.psv. Test-only.
 
 use std::rc::Rc;
 
 use super::instance::VirtualizedFileDiff;
-use super::layout::ResetLayoutCacheOptions;
 use super::layout::VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL;
-use super::layout::has_diff_estimate_option_changed;
-use super::layout::has_diff_layout_option_changed;
 use super::layout_upstream_tests::METRICS;
 use super::layout_upstream_tests::create_huge_single_block_diff;
 use super::layout_upstream_tests::create_two_hunk_diff;
 use super::layout_upstream_tests::parse_files;
 use super::layout_upstream_tests::plain_file;
 use crate::components::file_diff::CodeGroups;
-use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::FileDiffOptions;
 use crate::components::file_diff::LineAnnotations;
 use crate::components::virtualizer::Virtualizer;
@@ -50,7 +45,6 @@ use crate::types::view::AnnotationSide;
 use crate::types::view::DiffLineAnnotation;
 use crate::types::view::SelectionSide;
 use crate::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
-use crate::utils::predicates::are_options_equal::are_options_equal;
 
 type Instance = VirtualizedFileDiff<FakeDom, u8, u8>;
 pub(super) type Options = FileDiffOptions<NodeKey, u8, u8>;
@@ -62,25 +56,26 @@ const HUNK_LINE_COUNT: f64 = 2.0;
 
 pub(super) struct World {
     pub(super) dom: Rc<FakeDom>,
-    pub(super) instance: Instance,
+    pub(super) instance: Rc<Instance>,
 }
 
 pub(super) fn world(options: Options, metrics: PartialVirtualFileMetrics) -> World {
     let dom = Rc::new(FakeDom::default());
-    let file_diff = FileDiff::new(
-        Rc::clone(&dom),
-        ResizeObserverHub::new(Rc::clone(&dom)),
-        UniversalRenderingManager::new(Rc::clone(&dom)),
-        Rc::new(PlainTextHighlighter),
-        options,
-        None,
-    );
     let virtualizer = Virtualizer::new(
         Rc::clone(&dom),
         UniversalRenderingManager::new(Rc::clone(&dom)),
         VirtualizerConfig::default(),
     );
-    let instance = VirtualizedFileDiff::new(Rc::clone(&dom), file_diff, virtualizer, metrics);
+    let instance = VirtualizedFileDiff::new(
+        Rc::clone(&dom),
+        ResizeObserverHub::new(Rc::clone(&dom)),
+        UniversalRenderingManager::new(Rc::clone(&dom)),
+        Rc::new(PlainTextHighlighter),
+        options,
+        virtualizer,
+        metrics,
+        None,
+    );
     World { dom, instance }
 }
 
@@ -115,7 +110,7 @@ impl World {
         self.instance.get_virtualized_height()
     }
 
-    fn cache<Output>(
+    pub(super) fn cache<Output>(
         &self,
         read: impl FnOnce(&super::layout::DiffLayoutCache) -> Output,
     ) -> Output {
@@ -124,34 +119,20 @@ impl World {
 
     /// `VirtualizedFileDiff.setOptions` for a change of one option.
     pub(super) fn set_options(&self, change: impl FnOnce(&mut Options)) {
-        let file_diff = self.instance.file_diff();
-        let previous = file_diff.options().clone();
-        let mut next = previous.clone();
+        let mut next = self.instance.file_diff().options().clone();
         change(&mut next);
-        let options_changed = !are_options_equal(Some(&previous), Some(&next));
-        let layout_changed = options_changed && has_diff_layout_option_changed(&previous, &next);
-        let estimate_changed = has_diff_estimate_option_changed(&previous, &next);
-        file_diff.set_options(Some(next));
-        if layout_changed {
-            self.instance.reset_layout_cache(ResetLayoutCacheOptions {
-                force_simple_recompute: true,
-                include_estimated_heights: estimate_changed,
-                reset_render_range: true,
-            });
-        }
+        self.instance.set_options(Some(next));
     }
 
-    /// The simple-mode `expandHunk`.
-    fn expand_hunk(&self, hunk_index: usize, direction: ExpansionDirections, count: usize) {
+    /// `expandHunk` (the simple mode's).
+    pub(super) fn expand_hunk(
+        &self,
+        hunk_index: usize,
+        direction: ExpansionDirections,
+        count: usize,
+    ) {
         self.instance
-            .file_diff()
-            .virtualized()
-            .expand_renderer_hunk(hunk_index, direction, Some(count));
-        self.instance.reset_layout_cache(ResetLayoutCacheOptions {
-            include_estimated_heights: true,
-            ..ResetLayoutCacheOptions::default()
-        });
-        self.instance.compute_approximate_size(false, None);
+            .expand_hunk(hunk_index as i64, direction, Some(count as f64));
     }
 
     fn set_cache_for_annotation(&self, annotation_height: f64) {
@@ -175,13 +156,13 @@ impl World {
 }
 
 /// `createMeasuredCodeGroup*`: `group[gutter, content[annotations..., line]]`.
-struct Measured {
+pub(super) struct Measured {
     group: NodeKey,
     line: NodeKey,
     file_annotation: Option<NodeKey>,
 }
 
-fn measured_group(
+pub(super) fn measured_group(
     dom: &FakeDom,
     line_index: &str,
     line_height: f64,
@@ -224,7 +205,7 @@ fn measured_group(
 
 impl World {
     /// `setRenderedDiff` + `fileContainer` + `codeAdditions`.
-    fn install(&self, file_diff: &Rc<FileDiffMetadata>, additions: Option<&Measured>) {
+    pub(super) fn install(&self, file_diff: &Rc<FileDiffMetadata>, additions: Option<&Measured>) {
         let container = self.dom.doc.create_element("div");
         self.instance
             .file_diff()
@@ -262,7 +243,7 @@ impl World {
             );
     }
 
-    fn render_range(&self, starting_line: f64) {
+    pub(super) fn render_range(&self, starting_line: f64) {
         self.instance
             .file_diff()
             .virtualized()
@@ -516,7 +497,7 @@ fn estimated_height_cache_uses_a_top_render_range_for_no_hunk_diffs_with_file_le
     assert!(range.total_lines > 0.0);
 }
 
-fn annotated_world() -> (World, Rc<FileDiffMetadata>, Measured) {
+pub(super) fn annotated_world() -> (World, Rc<FileDiffMetadata>, Measured) {
     let world = world(Options::default(), METRICS);
     let file_diff = create_two_hunk_diff("base");
     world.layout(&file_diff, Some(&file_annotation()));

@@ -108,6 +108,20 @@
 //   a child retired after its parent was discarded panics as a stale key.
 //   Nodes the instance adopted by `hydrate` are its own from then on: cleaning
 //   up the instance that rendered them after the hydrating one is a stale key.
+// S12b-3, the overridable points: `VirtualizedFileDiff` extends this class and
+// overrides methods that `FileDiff` itself calls (`finalizeRender` from
+// `render`, `expandHunk` from `handleExpandHunk` and `revealLine`,
+// `handleFilesLoaded` from the load's resolution, `setLineAnnotations` from
+// `render`, `flushManagers` from the render paths). The port has no
+// inheritance, so the instance holds a `FileDiffHooks` (passed to `new`, like
+// the highlighter) and those call sites dispatch through it; the default hooks
+// are the base class's behaviour. The overrides that only reach the base class
+// in the mode that remains are not hooks: `isComponentManaged`,
+// `shouldDisableVirtualizationBuffers`, `loadFilesIfNecessary` and
+// `isLineRenderable` of `VirtualizedFileDiff` return the base class's answer
+// unless CodeView (dropped) or `pendingExpansions`/`pendingHydratedDiff`
+// (written only by CodeView) is involved, and `shouldGuardRebuildScroll` is
+// dropped with the WebKit guard (`columns.rs`).
 // S12a-2c, `cleanUp` and the line queries: see the headers of `lifecycle.rs`
 // and `lines.rs`. `DiffHunksRenderer::recycle`/`clean_up` are the renderer's
 // share of `cleanUp` (annotations, expanded hunks).
@@ -161,6 +175,7 @@ use crate::types::options::PrePropertiesConfig;
 use crate::types::options::ThemeOption;
 use crate::types::options::ThemeTypes;
 use crate::types::patch::FileContents;
+use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::patch::HunkContent;
 use crate::types::view::DiffLineAnnotation;
@@ -703,6 +718,70 @@ pub(crate) struct FileDiffState<LAnnotation> {
 #[cfg(test)]
 pub(crate) type ThemeStateRecorder = Rc<dyn Fn(NodeKey, &str, ThemeTypes, Option<BaseThemeType>)>;
 
+/// The methods `VirtualizedFileDiff` overrides that `FileDiff` calls from inside
+/// its own methods (see the file header). Each default is the base class's
+/// method; `file_diff` is the instance the hook is called for.
+pub trait FileDiffHooks<
+    Host: FileDiffHost,
+    Rendered: RenderedContent + 'static,
+    LAnnotation: Clone + PartialEq + 'static,
+>
+{
+    /// `finalizeRender`, called at the end of every applied render (before the
+    /// post-render emit).
+    fn finalize_render(&self, _file_diff: &FileDiff<Host, Rendered, LAnnotation>) {}
+
+    /// `expandHunk`, the instance field: the interaction manager's click
+    /// handler and `revealLine` resolve it at call time.
+    fn expand_hunk(
+        &self,
+        file_diff: &FileDiff<Host, Rendered, LAnnotation>,
+        hunk_index: i64,
+        direction: ExpansionDirections,
+        expansion_line_count_override: Option<f64>,
+    ) {
+        file_diff.expand_hunk(hunk_index, direction, expansion_line_count_override);
+    }
+
+    /// `handleFilesLoaded`, called when the host's file load resolved for the
+    /// still-current input.
+    fn handle_files_loaded(
+        &self,
+        file_diff: &FileDiff<Host, Rendered, LAnnotation>,
+        expected_diff: &Rc<FileDiffMetadata>,
+        files: &FileDiffLoadedFiles,
+    ) {
+        file_diff
+            .loading()
+            .handle_files_loaded(expected_diff, files);
+    }
+
+    /// `setLineAnnotations`, called by `render` for the annotations it was given.
+    fn set_line_annotations(
+        &self,
+        file_diff: &FileDiff<Host, Rendered, LAnnotation>,
+        line_annotations: LineAnnotations<LAnnotation>,
+    ) {
+        file_diff.set_line_annotations(line_annotations);
+    }
+
+    /// What `flushManagers` does after the base class's body (also when that
+    /// returned early).
+    fn flush_managers_done(&self, _file_diff: &FileDiff<Host, Rendered, LAnnotation>) {}
+}
+
+/// The base class: no override.
+pub struct DefaultFileDiffHooks;
+
+impl<Host, Rendered, LAnnotation> FileDiffHooks<Host, Rendered, LAnnotation>
+    for DefaultFileDiffHooks
+where
+    Host: FileDiffHost,
+    Rendered: RenderedContent + 'static,
+    LAnnotation: Clone + PartialEq + 'static,
+{
+}
+
 pub struct FileDiff<Host: FileDiffHost, Rendered: 'static, LAnnotation: 'static> {
     host: Rc<Host>,
     weak_self: Weak<Self>,
@@ -712,6 +791,7 @@ pub struct FileDiff<Host: FileDiffHost, Rendered: 'static, LAnnotation: 'static>
     scroll_sync_manager: Rc<ScrollSyncManager<Host>>,
     interaction_manager: Rc<InteractionManager<Host>>,
     highlighter: Rc<dyn DiffsHighlighter>,
+    hooks: Rc<dyn FileDiffHooks<Host, Rendered, LAnnotation>>,
     request_owner_render: Option<Rc<dyn Fn()>>,
     state: RefCell<FileDiffState<LAnnotation>>,
 }
@@ -729,6 +809,7 @@ impl<
         resize_observer_hub: Rc<ResizeObserverHub<Host>>,
         render_queue: UniversalRenderingManager<Host>,
         highlighter: Rc<dyn DiffsHighlighter>,
+        hooks: Rc<dyn FileDiffHooks<Host, Rendered, LAnnotation>>,
         options: FileDiffOptions<NodeKey, Rendered, LAnnotation>,
         request_owner_render: Option<Rc<dyn Fn()>>,
     ) -> Rc<Self> {
@@ -773,6 +854,7 @@ impl<
                 scroll_sync_manager,
                 interaction_manager,
                 highlighter,
+                hooks,
                 request_owner_render,
                 state: RefCell::new(FileDiffState {
                     file_container: None,
@@ -1076,49 +1158,8 @@ impl<
     }
 
     pub fn flush_managers(&self) {
-        let (managers_dirty, pre, code_deletions, code_additions) = {
-            let state = self.state.borrow();
-            (
-                state.managers_dirty,
-                state.pre,
-                state.code_deletions,
-                state.code_additions,
-            )
-        };
-        let Some(pre) = pre.filter(|_| managers_dirty) else {
-            self.state.borrow_mut().managers_dirty = false;
-            return;
-        };
-
-        let (diff_style, overflow) = {
-            let options = self.options.borrow();
-            (
-                options.base.diff_style.unwrap_or(DiffStyle::Split),
-                options.base.base.overflow.unwrap_or(Overflow::Scroll),
-            )
-        };
-        self.interaction_manager.setup(&pre);
-        self.resize_manager.setup(
-            &pre,
-            ResizeManagerSetupOptions {
-                disable_annotations: overflow == Overflow::Wrap,
-                column_variables: if self.should_apply_column_variables(overflow) {
-                    ResizeManagerColumnVariableMode::Apply
-                } else {
-                    ResizeManagerColumnVariableMode::Measure
-                },
-            },
-        );
-        if overflow == Overflow::Scroll && diff_style == DiffStyle::Split {
-            self.scroll_sync_manager
-                .setup(&pre, code_deletions, code_additions);
-        } else {
-            self.scroll_sync_manager.clean_up();
-        }
-        // Every manager has set up against the current rows and dropped the
-        // keys of the nodes this render replaced.
-        self.state.borrow_mut().managers_dirty = false;
-        Nodes(self).discard_retired();
+        Lifecycle(self).flush_managers_base();
+        self.hooks.flush_managers_done(self);
     }
 
     /// A node a render replaced (the render detached it with its own `remove` or
@@ -1157,7 +1198,8 @@ impl<
         direction: ExpansionDirections,
         expansion_line_count_override: Option<f64>,
     ) {
-        self.expand_hunk(hunk_index, direction, expansion_line_count_override);
+        self.hooks
+            .expand_hunk(self, hunk_index, direction, expansion_line_count_override);
     }
 
     pub fn expand_hunk(

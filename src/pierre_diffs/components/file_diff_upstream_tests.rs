@@ -10,6 +10,7 @@
 
 use std::rc::Rc;
 
+use crate::components::file_diff::DefaultFileDiffHooks;
 use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::FileDiffOptions;
 use crate::components::file_diff::FileDiffRenderProps;
@@ -61,6 +62,7 @@ pub(super) fn instance(dom: &Rc<FakeDom>, options: Options) -> Rc<Instance> {
         ResizeObserverHub::new(Rc::clone(dom)),
         UniversalRenderingManager::new(Rc::clone(dom)),
         Rc::new(PlainTextHighlighter),
+        Rc::new(DefaultFileDiffHooks),
         options,
         None,
     )

@@ -945,6 +945,12 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
         height
     }
 
+    /// Test-only: whether the geometry flags `mark_dom_dirty` sets are all set.
+    #[cfg(test)]
+    pub fn is_dom_dirty(&self) -> bool {
+        self.scroll_dirty.get() && self.height_dirty.get() && self.scroll_height_dirty.get()
+    }
+
     pub fn mark_dom_dirty(&self) {
         self.scroll_dirty.set(true);
         self.scroll_height_dirty.set(true);

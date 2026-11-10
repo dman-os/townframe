@@ -8,6 +8,7 @@
 
 use std::rc::Rc;
 
+use crate::components::file_diff::DefaultFileDiffHooks;
 use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::FileDiffHunkSeparators;
 use crate::components::file_diff::FileDiffOptions;
@@ -71,6 +72,7 @@ fn instance(
         ResizeObserverHub::new(Rc::clone(dom)),
         UniversalRenderingManager::new(Rc::clone(dom)),
         Rc::new(PlainTextHighlighter),
+        Rc::new(DefaultFileDiffHooks),
         options,
         None,
     )

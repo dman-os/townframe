@@ -10,9 +10,9 @@
 //   as `ExpandedHunks::borrowed(map)`, shared as upstream shares the `Map`
 //   (the renderer stays borrowed while a query runs; `revealLine` releases it
 //   before `expandHunk` writes).
-// * `this.expandHunk(...)` is `FileDiff::expand_hunk`; the `VirtualizedFileDiff`
-//   override that upstream's comment mentions (CodeView's deferred
-//   `pendingExpansions`) is S12b's.
+// * `this.expandHunk(...)` resolves the instance field at call time, as upstream
+//   does: it goes through `FileDiffHooks::expand_hunk`, whose default is
+//   `FileDiff::expand_hunk` and which `VirtualizedFileDiff` overrides.
 // * `revealLine` passes `expansionLineCount` through as an `f64` count, as
 //   `expandHunk`'s `expansionLineCountOverride` is a `number`.
 
@@ -158,7 +158,8 @@ where
                 // `expandHunk` writes the renderer's map: release the shared borrow.
                 drop(expanded_hunks);
                 drop(renderer);
-                self.expand_hunk(
+                self.hooks.expand_hunk(
+                    self.0,
                     hunk_index as i64,
                     direction,
                     Some((distance + expansion_line_count as isize) as f64),
@@ -193,7 +194,8 @@ where
         {
             return false;
         }
-        self.expand_hunk(
+        self.hooks.expand_hunk(
+            self.0,
             file_diff.hunks.len() as i64,
             ExpansionDirections::Up,
             Some(

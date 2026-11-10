@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::components::file_diff::DefaultFileDiffHooks;
 use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::FileDiffHunkSeparators;
 use crate::components::file_diff::FileDiffOptions;
@@ -745,6 +746,7 @@ fn run_case(templates: &Templates, case: &Case) {
             Rc::clone(&hub),
             UniversalRenderingManager::new(Rc::clone(&dom)),
             Rc::new(PlainTextHighlighter),
+            Rc::new(DefaultFileDiffHooks),
             world.build_options(spec),
             scenario
                 .managed

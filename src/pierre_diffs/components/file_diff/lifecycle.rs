@@ -14,9 +14,11 @@
 //   synchronous and has no render cache (see dropped.psv). `renderDiff` never
 //   returns `undefined`, so the worker pool initialisation branch is gone.
 //   `HunksRenderResult.fileDiff` is the diff handed to `render_diff`.
-// * `finalizeRender` is an empty hook upstream that `VirtualizedFileDiff`
-//   overrides; it is not ported here (S12b decides how the subclass hooks are
-//   expressed).
+// * `finalizeRender`, `setLineAnnotations` and `flushManagers` are overridden by
+//   `VirtualizedFileDiff`: `render` calls them through `FileDiffHooks` (see the
+//   main header), `finalizeRender` after the render is applied (every path that
+//   returned `true` upstream except the one that skips it) and before the
+//   post-render emit.
 // * The editor, edit session (`editSessionDirty`, `finishEditSessionForDiff`,
 //   `syncRenderViewToEditor`, the `forceEditorRender` of `hydrate`), the worker
 //   pool and `prerenderedHTML` (`prerenderHTMLIfNecessary`) are dropped.
@@ -53,7 +55,7 @@ use crate::utils::predicates::are_render_ranges_equal::are_render_ranges_equal;
 
 file_diff_view!(pub Lifecycle);
 
-fn parse_input(
+pub(super) fn parse_input(
     input: &DiffFileInput,
     options: &crate::types::patch::ParseDiffOptions,
 ) -> Rc<FileDiffMetadata> {
@@ -88,7 +90,7 @@ where
     Rendered: RenderedContent + 'static,
     LAnnotation: Clone + PartialEq + 'static,
 {
-    fn parse_diff_options(&self) -> crate::types::patch::ParseDiffOptions {
+    pub(super) fn parse_diff_options(&self) -> crate::types::patch::ParseDiffOptions {
         self.options
             .borrow()
             .base
@@ -165,7 +167,7 @@ where
                 // equal
                 || (file_diff.is_none() && !files_did_change))
         {
-            return Theme(self.0).apply_cached_theme_state(theme_type);
+            return self.finalize_if(Theme(self.0).apply_cached_theme_state(theme_type));
         }
 
         let next_parsed_file_diff = (file_diff.is_none()
@@ -207,7 +209,7 @@ where
         }
 
         if let Some(line_annotations) = line_annotations {
-            self.set_line_annotations(line_annotations);
+            self.hooks.set_line_annotations(self.0, line_annotations);
         }
 
         let Some(working_diff) = self.get_working_diff(None) else {
@@ -229,6 +231,7 @@ where
 
         if collapsed {
             self.render_collapsed(&working_diff, file_container, theme_type);
+            self.hooks.finalize_render(self.0);
             if !prevent_emit {
                 self.emit_post_render(false);
             }
@@ -248,10 +251,67 @@ where
                 defer_managers,
             ],
         );
+        self.hooks.finalize_render(self.0);
         if !prevent_emit {
             self.emit_post_render(false);
         }
         true
+    }
+
+    /// `flushManagers`, the base class's body (`FileDiff::flush_managers` adds
+    /// the override's tail).
+    pub(super) fn flush_managers_base(&self) {
+        let (managers_dirty, pre, code_deletions, code_additions) = {
+            let state = self.state.borrow();
+            (
+                state.managers_dirty,
+                state.pre,
+                state.code_deletions,
+                state.code_additions,
+            )
+        };
+        let Some(pre) = pre.filter(|_| managers_dirty) else {
+            self.state.borrow_mut().managers_dirty = false;
+            return;
+        };
+
+        let (diff_style, overflow) = {
+            let options = self.options.borrow();
+            (
+                options.base.diff_style.unwrap_or(DiffStyle::Split),
+                options.base.base.overflow.unwrap_or(Overflow::Scroll),
+            )
+        };
+        self.interaction_manager.setup(&pre);
+        self.resize_manager.setup(
+            &pre,
+            ResizeManagerSetupOptions {
+                disable_annotations: overflow == Overflow::Wrap,
+                column_variables: if self.should_apply_column_variables(overflow) {
+                    ResizeManagerColumnVariableMode::Apply
+                } else {
+                    ResizeManagerColumnVariableMode::Measure
+                },
+            },
+        );
+        if overflow == Overflow::Scroll && diff_style == DiffStyle::Split {
+            self.scroll_sync_manager
+                .setup(&pre, code_deletions, code_additions);
+        } else {
+            self.scroll_sync_manager.clean_up();
+        }
+        // Every manager has set up against the current rows and dropped the
+        // keys of the nodes this render replaced.
+        self.state.borrow_mut().managers_dirty = false;
+        Nodes(self.0).discard_retired();
+    }
+
+    /// `if (rendered) this.finalizeRender()`, then `rendered`.
+    fn finalize_if(&self, rendered: bool) -> bool {
+        if rendered {
+            self.hooks.finalize_render(self.0);
+        }
+        rendered
     }
 
     /// The header removal, the container and the cached theme: what `render`

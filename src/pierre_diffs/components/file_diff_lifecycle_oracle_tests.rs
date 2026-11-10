@@ -23,6 +23,7 @@ use serde_json::Value;
 use serde_json::json;
 
 use super::file_diff_oracle_tests::renderer_options_json;
+use crate::components::file_diff::DefaultFileDiffHooks;
 use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::FileDiffHunkSeparators;
 use crate::components::file_diff::FileDiffOptions;
@@ -524,6 +525,7 @@ fn file_diff_lifecycle_matches_the_published_class() {
                 Rc::clone(&hub),
                 UniversalRenderingManager::new(Rc::clone(&dom)),
                 Rc::new(PlainTextHighlighter),
+                Rc::new(DefaultFileDiffHooks),
                 build_options(&dom, &functions, &initial),
                 None,
             )
@@ -674,6 +676,7 @@ fn instance_over(dom: &Rc<FakeDom>) -> Rc<Instance> {
         ResizeObserverHub::new(Rc::clone(dom)),
         UniversalRenderingManager::new(Rc::clone(dom)),
         Rc::new(PlainTextHighlighter),
+        Rc::new(DefaultFileDiffHooks),
         Options::default(),
         None,
     )

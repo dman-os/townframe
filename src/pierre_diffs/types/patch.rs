@@ -97,6 +97,27 @@ pub enum DiffFileInput {
     Deleted { old_file: FileContents },
 }
 
+impl DiffFileInput {
+    /// `fileInput.oldFile` and `fileInput.newFile` (`None` for a missing side).
+    pub fn files(&self) -> (Option<&FileContents>, Option<&FileContents>) {
+        match self {
+            Self::Both { old_file, new_file } => (Some(old_file), Some(new_file)),
+            Self::Added { new_file } => (None, Some(new_file)),
+            Self::Deleted { old_file } => (Some(old_file), None),
+        }
+    }
+
+    /// The input as the `oldFile`/`newFile` props of a render (`Some(None)` is
+    /// `null`, an intentionally missing side).
+    pub fn into_render_props(self) -> (Option<Option<FileContents>>, Option<Option<FileContents>>) {
+        match self {
+            Self::Both { old_file, new_file } => (Some(Some(old_file)), Some(Some(new_file))),
+            Self::Added { new_file } => (Some(None), Some(Some(new_file))),
+            Self::Deleted { old_file } => (Some(Some(old_file)), Some(None)),
+        }
+    }
+}
+
 /// `MaybeDiffFileInput` is `Option<DiffFileInput>`.
 pub type MaybeDiffFileInput = Option<DiffFileInput>;
 

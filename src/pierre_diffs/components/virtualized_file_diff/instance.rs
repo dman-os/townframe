@@ -9,19 +9,18 @@
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes:
 // * The class extends `FileDiff`; the port holds the `FileDiff` it extends
-//   (`file_diff`, built by the caller) and reads the inherited fields through
-//   `FileDiff::virtualized()` and the public accessors. S12b-3 replaces
-//   `new`'s `file_diff` argument by the constructor over `FileDiff` with its
-//   hooks (`Rc::new_cyclic`, a `Weak` back-reference). The layout state is
-//   `DiffLayout` (see `layout.rs`) behind a `RefCell`; the virtualizer is
-//   `Virtualizer<Host>` (an `Rc`), `getSimpleVirtualizer()` is always that
-//   virtualizer (the advanced mode is dropped, so `isSimpleMode()` is true and
-//   `isAdvancedMode()` false everywhere).
-// * The `render` and `rerender` a method here calls are the integration S12b-3
-//   owns (they are overridden by `VirtualizedFileDiff` and call back into
-//   `FileDiff`), so `on_render` and `set_visibility` take them as closures; the
-//   `SubscribedInstance` impl S12b-3 writes passes `|| self.render(..)` and
-//   `|| self.rerender()`.
+//   (`file_diff`, built by the constructor with the `FileDiffHooks` of
+//   `overrides.rs`, which hold a `Weak` back-reference to this instance) and
+//   reads the inherited fields through `FileDiff::virtualized()` and the public
+//   accessors. The instance is an `Rc` (the virtualizer holds it as an
+//   `InstanceRef`, a `SubscribedInstance`, and the hooks call back into it).
+//   The layout state is `DiffLayout` (see `layout.rs`) behind a `RefCell`; the
+//   virtualizer is `Virtualizer<Host>` (an `Rc`), `getSimpleVirtualizer()` is
+//   always that virtualizer (the advanced mode is dropped, so `isSimpleMode()`
+//   is true and `isAdvancedMode()` false everywhere).
+// * The overrides (`render`, `rerender`, `setOptions`, `setThemeType`,
+//   `setLineAnnotations`, `cleanUp`, `expandHunk`, `finalizeRender`,
+//   `handleFilesLoaded`, `onRender`, `setVisibility`) are in `overrides.rs`.
 // * `measureFileAnnotationHeight(codeGroups)` is a method (`measure_file_annotation_height`)
 //   reading each element's height through the host (`VirtualizerHost::element_bounding_height`,
 //   which `reconcileHeights`' `getBoundingClientRect().height` needs as well, so no
@@ -53,30 +52,31 @@
 // * Layout methods that upstream pairs with `this.renderRange = undefined`
 //   return a flag (`layout.rs`); the instance applies it through
 //   `FileDiff::virtualized().set_render_range(None)`.
-// * What S12b-3 must wire here: `render` (calls `updatePendingRender`,
-//   `resetLayoutCache`, `computeApproximateSize`, `computeRenderRangeFromWindow`
-//   and, when not set up, `virtualizer.connect` and `isInstanceVisible`),
-//   `finalizeRender` (clears `pending_render`, requests the reconcile),
-//   `setOptions`/`setLineAnnotations`/`expandHunk`/`rerender`/`cleanUp`
-//   overrides, the `isSetup` flag (it is read and written only by `render`), `SubscribedInstance`, and the constructor over `FileDiff`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::rc::Weak;
 
 use super::layout::DiffLayout;
 use super::layout::LayoutContext;
 use super::layout::LayoutOptions;
 use super::layout::ResetLayoutCacheOptions;
 use super::layout::parse_line_index;
+use super::overrides::OverrideHooks;
 use super::window::LinePosition;
 use crate::components::file_diff::FileDiff;
+use crate::components::file_diff::FileDiffOptions;
 use crate::components::file_diff::LineAnnotations;
 use crate::components::file_diff::RenderedContent;
 use crate::components::file_diff::VirtualizedFileDiffHost;
+use crate::components::virtualizer::InstanceRef;
 use crate::components::virtualizer::Virtualizer;
 use crate::components::virtualizer::VirtualizerHost;
 use crate::document::Document;
 use crate::document::NodeKey;
+use crate::highlighter_types::DiffsHighlighter;
+use crate::managers::resize_manager::ResizeObserverHub;
+use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::types::layout::RenderRange;
 use crate::types::layout::RenderWindow;
 use crate::types::lines::ExpandedHunks;
@@ -104,6 +104,7 @@ struct InstanceState {
     is_visible: bool,
     current_collapsed: Option<bool>,
     pending_render: Option<PendingRender>,
+    is_setup: bool,
 }
 
 /// What `updatePendingRender` returns.
@@ -119,6 +120,7 @@ pub struct VirtualizedFileDiff<
     Rendered: 'static,
     LAnnotation: 'static,
 > {
+    weak_self: Weak<Self>,
     file_diff: Rc<FileDiff<Host, Rendered, LAnnotation>>,
     virtualizer: Rc<Virtualizer<Host>>,
     host: Rc<Host>,
@@ -131,28 +133,114 @@ where
     Rendered: RenderedContent + 'static,
     LAnnotation: Clone + PartialEq + 'static,
 {
+    /// `new VirtualizedFileDiff(options, virtualizer, metrics, undefined,
+    /// requestOwnerRender)`: the `FileDiff` it extends is built with this
+    /// instance's hooks. The `Rc` is cyclic through the hooks' `Weak` only.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "upstream's constructor and `FileDiff`'s take the same collaborators"
+    )]
     pub fn new(
         host: Rc<Host>,
-        file_diff: Rc<FileDiff<Host, Rendered, LAnnotation>>,
+        resize_observer_hub: Rc<ResizeObserverHub<Host>>,
+        render_queue: UniversalRenderingManager<Host>,
+        highlighter: Rc<dyn DiffsHighlighter>,
+        options: FileDiffOptions<NodeKey, Rendered, LAnnotation>,
         virtualizer: Rc<Virtualizer<Host>>,
         metrics: PartialVirtualFileMetrics,
-    ) -> Self {
-        Self {
-            file_diff,
-            virtualizer,
-            host,
-            state: RefCell::new(InstanceState {
-                layout: DiffLayout::new(metrics),
-                is_visible: false,
-                current_collapsed: None,
-                pending_render: None,
-            }),
-        }
+        request_owner_render: Option<Rc<dyn Fn()>>,
+    ) -> Rc<Self> {
+        Rc::new_cyclic(|weak: &Weak<Self>| {
+            let hooks = Rc::new(OverrideHooks {
+                instance: Weak::clone(weak),
+            });
+            Self {
+                weak_self: Weak::clone(weak),
+                file_diff: FileDiff::new(
+                    Rc::clone(&host),
+                    resize_observer_hub,
+                    render_queue,
+                    highlighter,
+                    hooks,
+                    options,
+                    request_owner_render,
+                ),
+                virtualizer,
+                host,
+                state: RefCell::new(InstanceState {
+                    layout: DiffLayout::new(metrics),
+                    is_visible: false,
+                    current_collapsed: None,
+                    pending_render: None,
+                    is_setup: false,
+                }),
+            }
+        })
+    }
+
+    /// `this` as the virtualizer holds it.
+    pub(super) fn instance_ref(&self) -> InstanceRef {
+        self.weak_self
+            .upgrade()
+            .expect("the instance is alive while it is called")
     }
 
     /// The `FileDiff` this instance extends.
     pub fn file_diff(&self) -> &Rc<FileDiff<Host, Rendered, LAnnotation>> {
         &self.file_diff
+    }
+
+    pub(super) fn virtualizer(&self) -> &Rc<Virtualizer<Host>> {
+        &self.virtualizer
+    }
+
+    pub(super) fn is_setup(&self) -> bool {
+        self.state.borrow().is_setup
+    }
+
+    pub(super) fn set_is_setup(&self, is_setup: bool) {
+        self.state.borrow_mut().is_setup = is_setup;
+    }
+
+    pub(super) fn set_is_visible(&self, is_visible: bool) {
+        self.state.borrow_mut().is_visible = is_visible;
+    }
+
+    /// `this.top ??= this.getVirtualizedTop()`
+    pub(super) fn ensure_top(&self) {
+        if self.state.borrow().layout.top.is_none() {
+            self.sync_virtualized_top();
+        }
+    }
+
+    /// `this.pendingRender?.diff`
+    pub(super) fn pending_render_diff(&self) -> Option<Rc<FileDiffMetadata>> {
+        self.state
+            .borrow()
+            .pending_render
+            .as_ref()
+            .map(|pending| Rc::clone(&pending.diff))
+    }
+
+    /// `this.pendingRender = undefined`
+    pub(super) fn clear_pending_render(&self) {
+        self.state.borrow_mut().pending_render = None;
+    }
+
+    /// The hydrated diff replaces `expected` in the pending render, as it does
+    /// in the instance's other fields (see `overrides.rs`).
+    pub(super) fn swap_pending_render_diff(
+        &self,
+        expected: &Rc<FileDiffMetadata>,
+        hydrated: &Rc<FileDiffMetadata>,
+    ) {
+        if let Some(pending) = self.state.borrow_mut().pending_render.as_mut() {
+            for slot in [&mut pending.working_diff, &mut pending.diff] {
+                if Rc::ptr_eq(slot, expected) {
+                    *slot = Rc::clone(hydrated);
+                }
+            }
+        }
     }
 
     /// The layout state (`top`, `height`, the cache).
@@ -437,33 +525,6 @@ where
                 ctx,
             )
         })
-    }
-
-    /// `onRender`; `render` is `this.render()` (S12b-3).
-    pub fn on_render(&self, dirty: bool, render: impl FnOnce() -> bool) -> bool {
-        if self.file_diff.virtualized().file_container().is_none() {
-            return false;
-        }
-        if dirty {
-            self.sync_virtualized_top();
-        }
-        render()
-    }
-
-    /// `setVisibility`; `rerender` is `this.rerender()` (S12b-3).
-    pub fn set_visibility(&self, visible: bool, rerender: impl FnOnce()) {
-        if self.file_diff.virtualized().file_container().is_none() {
-            return;
-        }
-        self.file_diff.virtualized().set_render_range(None);
-        let is_visible = self.state.borrow().is_visible;
-        if visible && !is_visible {
-            self.sync_virtualized_top();
-            self.state.borrow_mut().is_visible = true;
-        } else if !visible && is_visible {
-            self.state.borrow_mut().is_visible = false;
-            rerender();
-        }
     }
 
     /// `reconcileHeights`: fold the heights the DOM reports for the rendered rows
