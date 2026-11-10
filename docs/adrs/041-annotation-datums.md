@@ -22,6 +22,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
   "targets": [
     { "ref": "dtxt:datum:zFileA/org.example.note/main#content/[12@a3f-40@a3f]",
       "refHeads": ["zbd7…"],                                              // ADR 035 §2.8: the pin, a sibling
+      "lines": { "start": 120, "end": 124 },                              // 1-based, at the pinned heads; or a cursor range in the fragment
       "quote": { "exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)" } }
   ],
   "body": { "mime": "text/markdown", "content": "Why not reuse the fragment here?" },   // the generic note shape
@@ -31,6 +32,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 ```
 
 - **Targets** are any `dtxt:` locations: a text range in a file document at a pinned state, a whole document or datum (no fragment), a commit, a session's tool call, another comment, a structure datum. A span of datums (turns 20–45) is a target with `from` and `to` instead of `ref`.
+- **Text positions** are given either as a line range at the pinned heads (`lines`) or as an Automerge cursor range in the fragment (`#content/[12@a3f-40@a3f]`). Cursors can't be written by hand: an agent would need a tool to turn a line into a cursor. A line range at a pin is exact, because the pin fixes the text, so it is the hand-writable form; a tool may add the cursor, which carries the position to later revisions more cheaply than quote matching. Readers accept either.
 - **`quote` is required on text targets.** A cursor never fails to resolve: one whose text was deleted resolves to a neighbouring position (F6), so a stale anchor looks valid. A reader compares the resolved text with `quote`; on a mismatch it re-attaches by quote matching or shows the comment as outdated. On a real rebase (F6), 785 of 888 anchors resolved onto identical text and quote matching recovered 99 of the other 103. Tools fill `quote`; people's clients fill it for them. A comment about deleted lines targets the earlier state.
 - **Replies** carry `replyTo` and `motivation: replying`, so a thread is one reference-index query (ADR 035 §2.6) rather than a walk over every comment's targets.
 - **Body** uses the generic note shape (ADR 036 §5). A body that is itself a datum to render (a suggested change, an embedded result) is a reference instead, rendered by the renderer registered for its tag (ADR 036 §4), as Patchwork renders typed comment content.
@@ -43,7 +45,7 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 { "resolved": false }
 ```
 
-One slot per thread, written by anyone. Resolving and reopening at the same time is a visible conflict; otherwise one writer acts at a time. Whose turn a thread is waiting on is derived (the side that didn't write last), not stored.
+One slot per thread, written by anyone. Resolving and reopening at the same time leaves one of the two values under Automerge's rules, and the DocService does not expose the overwritten one (`docs/wiki/docs.md`, Conflict model); the loser sees the thread in the other state and acts again. That is acceptable for a flag; if it proves not to be, the flag becomes a competing set (an array cleared and pushed on every write, so concurrent writes leave both values). Whose turn a thread is waiting on is derived (the side that didn't write last), not stored.
 
 ## 4. Structure
 
@@ -67,7 +69,7 @@ A guided review is a set of `section` structures with `order`. Adapters can map 
   "reviewed": { "<ref or layer>": "<position>" } }       // vocabulary-defined: e.g. a ref target last reviewed
 ```
 
-"New" is any slot whose current datum version differs from what is recorded here: one `ListDatums` at current heads (per-slot versions, no values) compared on the client. Datum heads are global, so the comparison is the same on every device. `PollDatums` cursors are node-local and can't be synced seen state. Seen state is split by slot range because one map datum hits the native read budget at about 5,400 entries (F10).
+"New" is any slot whose current datum version differs from what is recorded here: one `ListDatums` at current heads (per-slot versions, no values) compared on the client. Datum heads are global, so the comparison is the same on every device. `PollDatums` cursors are node-local and can't be synced seen state. Seen state is split by slot range because one map datum hits the native read budget at about 5,400 entries (F10). How a reader picks ranges (by the target notes document, by the first characters of the slot) is open.
 
 ## 6. Where annotations live
 
