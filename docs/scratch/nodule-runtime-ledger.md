@@ -861,6 +861,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
     - Crate naming: the `_rs` suffix means the crate is one language's implementation of something we expect to write in other languages too. TypeScript mirrors of our scripts and service crates are coming soon. Any rename of the method/service crates must keep `_rs` on crates that will have mirrors (the service protocol and client crates, probably `method_core` too) and drop it only on Rust-only internals. No rename yet: the manager proposes one with that rule.
     - big_repo outside the cabinet: services other than the cabinet should use the docs service, not big_repo. The gap the operator saw is big_blobs reading documents through big_repo's Automerge frontier worker (`big_blobs/workers.rs:332,435`). Groups A–D above are the work list. The docs-service materialization watch (B) closes the gap named.
     - The `-next` PR stack (8 layers: docs; cabinet leftovers; blobs over the wire; a1 + watch + typed errors; nodule methods + privileged; ADR 045 routes; `day` reshape; holder serves) is approved.
+    - **Crate renames approved (2026-11-12):** `method_core`→`method_core_rs`, `service_utils_rs`→`service_host_rs`. `service_core_rs`, `service_client_core_rs`, `service_client_native_rs` and `method_lexicon` keep their names. Queued after the stack is submitted (mechanical; a Luna lane when the Codex quota resets).
 
 ## Deferred
 
