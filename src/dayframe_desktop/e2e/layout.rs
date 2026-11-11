@@ -358,35 +358,42 @@ async fn hiding_a_native_panel_leaves_the_layout_mounted() {
 #[tokio::test(flavor = "current_thread")]
 async fn the_lab_panel_lists_its_experiments_and_the_mock_review_renders_a_diff() {
     const PANEL: &str = "section[aria-label=\"Lab panel\"]";
-    let Layout { runtime, mut ui, .. } = Layout::start(&["dayframe.lab"]).await;
-    eprintln!("ERRS {:?} {:?}", runtime.installation_errors, runtime.micros());
+    let Layout {
+        runtime, mut ui, ..
+    } = Layout::start(&["dayframe.lab"]).await;
     drop(runtime.set_enabled(&MicroId::local(micro_lab_manifest::ID), true));
     let inside = |selector: &str| format!("{PANEL} {selector}");
     let open_review = inside("button[aria-label=\"Open Mock review\"]");
-    ui.wait_until("the lab lists its experiments", |ui| ui.find(&open_review).is_some())
-        .await;
+    ui.wait_until("the lab lists its experiments", |ui| {
+        ui.find(&open_review).is_some()
+    })
+    .await;
     ui.click(&open_review);
     let open_change = inside("button[aria-label=\"Open change Cap the retry backoff\"]");
-    ui.wait_until("the mock review lists its changes", |ui| ui.find(&open_change).is_some())
-        .await;
+    ui.wait_until("the mock review lists its changes", |ui| {
+        ui.find(&open_change).is_some()
+    })
+    .await;
     ui.click(&open_change);
     let open_file = inside("button[aria-label=\"Open file src/retry.rs\"]");
-    ui.wait_until("the overview lists the change's files", |ui| ui.find(&open_file).is_some())
-        .await;
-    assert!(ui.text(&open_file).contains("+5 -2"), "{}", ui.text(&open_file));
+    ui.wait_until("the overview lists the change's files", |ui| {
+        ui.find(&open_file).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&open_file).contains("+5 -2"),
+        "{}",
+        ui.text(&open_file)
+    );
     ui.click(&open_file);
     let open_thread = inside("button[aria-label=\"Open thread on line 6\"]");
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        ui.wait_until("the diff renders with its annotation thread", |ui| {
-            ui.find(&open_thread).is_some()
-        }),
-    )
-    .await;
-    eprintln!("LAB STATE {:?}", runtime.state(&MicroId::local(micro_lab_manifest::ID)));
-    eprintln!("PANEL TEXT {:?}", ui.text(PANEL));
-    eprintln!("PANEL HTML {}", ui.document.get_node(ui.one(PANEL)).unwrap().outer_html());
+    // A refused batch faults the guest and withdraws its panel, so fail on the fault (which
+    // names the refusal) instead of waiting for a thread that can no longer appear.
+    let lab = MicroId::local(micro_lab_manifest::ID);
     ui.wait_until("the diff renders with its annotation thread", |ui| {
+        if let MicroState::Faulted(fault) = runtime.state(&lab) {
+            panic!("the lab faulted rendering the diff: {fault}");
+        }
         ui.find(&open_thread).is_some()
     })
     .await;
