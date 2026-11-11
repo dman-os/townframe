@@ -142,8 +142,11 @@ impl NodeClient {
             };
             // A holder that has finished its own command closes its socket and exits once the
             // connections it accepted have ended, so this process connects before anything else
-            // and keeps that connection. A refusal means the holder is on its way out.
-            match tokio::net::UnixStream::connect(&socket).await {
+            // and keeps that connection. A connect alone is not proof the holder accepted it (it
+            // may sit in the backlog of a listener about to close), so the connection carries
+            // one request, and its answer is. A refusal or a reset means the holder is on its
+            // way out.
+            match Self::present(&socket).await {
                 Ok(presence) => {
                     let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
                         .map_err(|error| eyre::eyre!("{error:?}"))?;
@@ -163,7 +166,11 @@ impl NodeClient {
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
                     ) => {}
                 Err(error) => {
                     return Err(error)
@@ -177,6 +184,54 @@ impl NodeClient {
                 .await
                 .expect(ERROR_TOKIO)?;
         }
+    }
+
+    /// Opens the connection that keeps a holder up for this client, and proves the holder
+    /// accepted it by having it answer one request (`getNodeInfo`, a query that takes no
+    /// input). The connection stays open and idle afterwards.
+    async fn present(socket: &Path) -> std::io::Result<tokio::net::UnixStream> {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        let mut stream = tokio::net::UnixStream::connect(socket).await?;
+        stream
+            .write_all(
+                format!(
+                    "GET /xrpc/{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                    big_node::GET_NODE_INFO
+                )
+                .as_bytes(),
+            )
+            .await?;
+        // Read the whole response, so the connection is left clean: the head, then the
+        // `content-length` bytes of body.
+        let mut answer = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let (head_len, body_len) = loop {
+            if let Some(end) = answer.windows(4).position(|window| window == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&answer[..end]).to_lowercase();
+                let body_len = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .ok_or_else(|| {
+                        std::io::Error::other("the node's answer carries no content-length")
+                    })?;
+                break (end + 4, body_len);
+            }
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            answer.extend_from_slice(&chunk[..read]);
+        };
+        while answer.len() < head_len + body_len {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            answer.extend_from_slice(&chunk[..read]);
+        }
+        Ok(stream)
     }
 
     pub fn mode(&self) -> Mode {
