@@ -32,5 +32,5 @@ jiff = { workspace = true, optional = true }
 automerge = { workspace = true, optional = true }
 
 [dev-dependencies]
-macros = { path = "../macros" }
+macros.workspace = true
 serde = { workspace = true, features = ["derive"] }

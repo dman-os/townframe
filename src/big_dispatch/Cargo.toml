@@ -11,10 +11,10 @@ path = "lib.rs"
 
 [dependencies]
 method_core.workspace = true
-method_lexicon = { path = "../method_lexicon" }
+method_lexicon.workspace = true
 # internal
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core" }
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest"] }
 big_dispatch_core.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
