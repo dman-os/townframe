@@ -77,7 +77,7 @@ pub struct big_nodule_core::PrivateState  { key: String, kind: StateKind, extra:
 pub struct big_nodule_core::RegistrableDatums< 'a >  { held: Vec < (& 'a str , & 'a IndexMap < String , Value > , Option < & 'a Value >) >, carried: Vec < & 'a IndexMap < String , Value > > }
 pub struct big_nodule_core::RevisionedStore  { key: String, selector: String, entry: String, mode: StoreMode, source: Option < String >, extra: Extra }
 pub struct big_nodule_core::config::AdmissionCache  {  }
-pub struct big_nodule_core::config::MethodGrants  { methods: Vec < String >, authorities: Vec < String >, extra: Extra }
+pub struct big_nodule_core::config::MethodGrants  { methods: Vec < String >, authorities: Vec < String >, privileged: bool, extra: Extra }
 pub struct big_nodule_core::config::NoduleConfig  {  }
 pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < NoduleInstall >, settings: DatumSlot < NoduleSettings >, grants: DatumSlot < NoduleGrants >, substitution: DatumSlot < NoduleSubstitution >, artifacts: BTreeMap < String , DatumSlot < Blob > > }
 pub struct big_nodule_core::config::NoduleGrants  { drawers: BTreeMap < DrawerId , EntryAccess >, methods: Option < MethodGrants >, extra: Extra }
