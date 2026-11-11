@@ -638,7 +638,7 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 Items 2 and 4–10 of the original list are done (see Done). Left before the PR is review-ready:
 1. Done (checked 2026-11-06): `townframe-changes` is on `dman-os/wasmCloud` origin at `e7648c6e`, `Cargo.toml` pins that rev, and no `file://` patch remains.
 2. Done (checked 2026-11-06): capabilities resolve, mint and retract in the in-memory cap ledger (`authority/cap.rs`), and actor rows are memoized in `actor_rows` (`cached_actor_row`); SQLite is only the durable store for actors and grants.
-3. Orphan dispatch authority after a crash: persist it or sweep it at boot (slice 2c follow-up).
+3. Closed (2026-11-11, won't fix): no orphan dispatch authority after a crash is possible. The authority's capability ledger is in memory only (`authority/cap.rs`, empty at every boot; pinned by `reboot_loses_handles_but_preserves_actors_and_keys`), so a dead process takes every handle with it. For the same reason, nodule handles rotate on every restart; keeping them stable would need a persistent capability ledger, which is out of scope for #84.
 4. Compare the heavy `big_cabinet` drawer test timings against an origin/main baseline (our 4th boot drawer).
 5. Done (2026-11-06): the NSID-prefix check is one function (`DispatchScope::authority_owns`), and guest requests and handler responses share one size cap (`MAX_MESSAGE_OCTETS`, `big_nodule_wasm`).
 
