@@ -11,9 +11,9 @@ name = "day"
 path = "main.rs"
 
 [dependencies]
-method_core.workspace = true
 #
 # internal
+method_core.workspace = true
 utils_rs.workspace = true
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
@@ -62,7 +62,12 @@ directories.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+#
+# internal
+secrets_rs = { workspace = true, features = ["test-support"] }
+
+#
+# misc
 trycmd = "1.2.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-secrets_rs = { workspace = true, features = ["test-support"] }

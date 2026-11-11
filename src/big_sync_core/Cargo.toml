@@ -17,16 +17,16 @@ schemars = ["dep:schemars"]
 test-support = []
 
 [dependencies]
-schemars = { version = "1.2", optional = true }
+#
+# internal
 utils_rs = { workspace = true, features = ["hash"] }
 datum_core = { workspace = true }
 
-rand.workspace = true
-
-structstruck.workspace = true
-
 #
-# collections
+# misc
+schemars = { version = "1.2", optional = true }
+rand.workspace = true
+structstruck.workspace = true
 
 #
 # encoding

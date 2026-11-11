@@ -10,6 +10,8 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 big_blobs_core.workspace = true
 big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
@@ -20,6 +22,9 @@ service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 utils_rs = { workspace = true, features = ["hash"] }
+
+#
+# misc
 async-trait.workspace = true
 automerge.workspace = true
 serde.workspace = true
