@@ -101,6 +101,9 @@ pub struct FileDiffViewProps<A: Clone + PartialEq + 'static> {
     /// Unified or split; Pierre's default is split.
     #[props(default = DiffStyle::Split)]
     pub diff_style: DiffStyle,
+    /// Show the unchanged lines between hunks instead of collapsing them behind separators.
+    #[props(default)]
+    pub expand_unchanged: bool,
     /// Line annotations: a comment thread, a lint note, an embedded micro. Each is placed under
     /// its line through `render_annotation`.
     #[props(default)]
@@ -117,10 +120,26 @@ pub struct FileDiffViewProps<A: Clone + PartialEq + 'static> {
 
 type AnnotationCallback<A> = Rc<RefCell<Option<Callback<DiffLineAnnotation<A>, Element>>>>;
 
+/// The props that become `FileDiffOptions`; a change needs `set_options` and a forced render.
+#[derive(Clone, Copy, PartialEq)]
+struct ViewOptions {
+    diff_style: DiffStyle,
+    expand_unchanged: bool,
+}
+
+impl ViewOptions {
+    fn of<A: Clone + PartialEq + 'static>(props: &FileDiffViewProps<A>) -> Self {
+        Self {
+            diff_style: props.diff_style,
+            expand_unchanged: props.expand_unchanged,
+        }
+    }
+}
+
 struct Applied<A> {
     input: DiffInput,
     annotations: Rc<Vec<DiffLineAnnotation<A>>>,
-    diff_style: DiffStyle,
+    options: ViewOptions,
 }
 
 struct View<A: Clone + PartialEq + 'static> {
@@ -135,12 +154,13 @@ struct View<A: Clone + PartialEq + 'static> {
 }
 
 fn file_diff_options<A: Clone + 'static>(
-    diff_style: DiffStyle,
+    view_options: ViewOptions,
     slots: &Rc<SlotTable>,
     render_annotation: &AnnotationCallback<A>,
 ) -> FileDiffOptions<pierre_diffs::document::NodeKey, SlotContent, A> {
     let mut options = FileDiffOptions::default();
-    options.base.diff_style = Some(diff_style);
+    options.base.diff_style = Some(view_options.diff_style);
+    options.base.expand_unchanged = Some(view_options.expand_unchanged);
     let slots = Rc::clone(slots);
     let render_annotation = Rc::clone(render_annotation);
     options.render_annotation = Some(PtrEq::new(Rc::new(move |annotation, _file_diff| {
@@ -168,7 +188,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             UniversalRenderingManager::new(Rc::clone(&host)),
             highlighter,
             Rc::new(DefaultFileDiffHooks),
-            file_diff_options(props.diff_style, &slots, &render_annotation),
+            file_diff_options(ViewOptions::of(props), &slots, &render_annotation),
             None,
         );
         let syncing = Rc::new(Cell::new(false));
@@ -196,7 +216,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         *self.render_annotation.borrow_mut() = props.render_annotation;
         let unchanged = self.applied.borrow().as_ref().is_some_and(|applied| {
             applied.input == props.input
-                && applied.diff_style == props.diff_style
+                && applied.options == ViewOptions::of(props)
                 && *applied.annotations == props.annotations
         });
         if unchanged {
@@ -207,11 +227,11 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             .applied
             .borrow()
             .as_ref()
-            .is_some_and(|applied| applied.diff_style != props.diff_style);
+            .is_some_and(|applied| applied.options != ViewOptions::of(props));
         self.syncing.set(true);
         if style_changed {
             self.file_diff.set_options(Some(file_diff_options(
-                props.diff_style,
+                ViewOptions::of(props),
                 &self.slots,
                 &self.render_annotation,
             )));
@@ -234,7 +254,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         *self.applied.borrow_mut() = Some(Applied {
             input: props.input.clone(),
             annotations,
-            diff_style: props.diff_style,
+            options: ViewOptions::of(props),
         });
     }
 
