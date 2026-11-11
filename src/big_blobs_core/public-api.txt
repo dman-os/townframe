@@ -8,6 +8,7 @@ pub big_blobs_core::datum::fn declarations () -> Universe
 pub const big_blobs_core::protocol::MAX_PUT_BYTES: usize
 pub const big_blobs_core::protocol::MAX_READ_BYTES: u32
 pub enum big_blobs_core::protocol::BlobsError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("blob is not locally available")] NotFound, # [error ("invalid blob request: {reason}")] InvalidInput { reason : String }, # [error ("blob storage failed: {reason}")] Storage { reason : String } }
+pub impl big_blobs_core::protocol::BlobsScope::fn covers (& self , other : & Self) -> bool
 pub mod big_blobs_core::datum
 pub mod big_blobs_core::protocol
 pub static big_blobs_core::datum::UNIVERSE: LazyLock < Universe >
@@ -18,9 +19,11 @@ pub struct big_blobs_core::datum::Jwk  { kty: String, members: Extra }
 pub struct big_blobs_core::datum::Representation  { digest: String, length_octets: u64, extra: Extra }
 pub struct big_blobs_core::datum::Rfc8188EncodingParameters  { record_size: u64, padding: String, extra: Extra }
 pub struct big_blobs_core::protocol::BlobInfo  { blob_id: BlobId, length_octets: u64 }
-pub struct big_blobs_core::protocol::BlobRange  { bytes: Vec < u8 >, length_octets: u64 }
+pub struct big_blobs_core::protocol::BlobRange  { bytes: Bytes, length_octets: u64 }
 pub struct big_blobs_core::protocol::BlobStat  { info: Option < BlobInfo > }
-pub struct big_blobs_core::protocol::PutBlob  { capability: CapId, bytes: Vec < u8 > }
+pub struct big_blobs_core::protocol::BlobsScope  { put: bool, read: BTreeSet < BlobId > }
+pub struct big_blobs_core::protocol::MintBlobsCapability  { scope: BlobsScope, rights: Rights, subject: Option < Uuid7 > }
+pub struct big_blobs_core::protocol::PutBlob  { capability: CapId, bytes: Bytes }
 pub struct big_blobs_core::protocol::ReadBlob  { capability: CapId, blob_id: BlobId, offset: u64, length: u32 }
 pub struct big_blobs_core::protocol::StatBlob  { capability: CapId, blob_id: BlobId }
 pub use big_blobs_core::datum :: Blob
@@ -39,8 +42,10 @@ pub use big_blobs_core::protocol :: BlobStat
 pub use big_blobs_core::protocol :: BlobsError
 pub use big_blobs_core::protocol :: BlobsMessage
 pub use big_blobs_core::protocol :: BlobsProtocol
+pub use big_blobs_core::protocol :: BlobsScope
 pub use big_blobs_core::protocol :: MAX_PUT_BYTES
 pub use big_blobs_core::protocol :: MAX_READ_BYTES
+pub use big_blobs_core::protocol :: MintBlobsCapability
 pub use big_blobs_core::protocol :: PutBlob
 pub use big_blobs_core::protocol :: ReadBlob
 pub use big_blobs_core::protocol :: StatBlob

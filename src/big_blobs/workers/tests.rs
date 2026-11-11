@@ -650,6 +650,7 @@ async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materi
         storage: crate::Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: big_cabinet_core::dmeta::Uuid7::new(),
         namespace: big_cabinet_core::authority::Namespace {
             namespace_id: big_cabinet_core::dmeta::Uuid7::new(),
             capability: CapId::from_bytes([127; 16]),

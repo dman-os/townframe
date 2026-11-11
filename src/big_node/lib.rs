@@ -308,6 +308,7 @@ impl BigNode {
                 sql: config.sql.clone(),
                 authority: authority.client.clone(),
                 namespace: blobs_namespace,
+                operator: authority.service.operator_uuid(),
             })
             .await?;
             stop.stages.push(Stage::Service(blobs_stop));

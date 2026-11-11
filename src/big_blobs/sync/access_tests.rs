@@ -216,6 +216,7 @@ impl Fixture {
             storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            operator: Uuid7::new(),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([113; 16]),

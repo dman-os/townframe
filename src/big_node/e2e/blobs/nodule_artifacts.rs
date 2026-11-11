@@ -3,8 +3,7 @@
 
 use super::super::*;
 use super::all_datums;
-use super::blob_cap;
-use big_blobs::BlobService;
+use super::put_cap;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
 use big_blobs_core::CipherBlob;
@@ -62,8 +61,8 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
         .call(
             RequestContext::root(),
             PutBlob {
-                capability: blob_cap(&node, BlobService::put_object().into(), Vec::new()).await,
-                bytes: bytes.to_vec(),
+                capability: put_cap(&node).await,
+                bytes: bytes.to_vec().into(),
             },
         )
         .await
