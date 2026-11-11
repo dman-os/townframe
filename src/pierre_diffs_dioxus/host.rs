@@ -228,8 +228,8 @@ impl DioxusHost {
     /// Whether this host keeps row heights: a virtualized one always (the port reads them), a
     /// static one only while the pointer can drag over rows, which is the one thing that reads
     /// heights there (`element_from_point`). A static view's cost is then one `onresize` per
-    /// measured row (the rows `is_measured` lists) and one `onmounted` on the `pre` and a content column: it is for short diffs, and
-    /// a long one is what the virtualized view is for.
+    /// measured row (the rows `is_measured` lists) and one `onmounted` on the `pre` and a
+    /// content column: it is for short diffs, and a long one is what the virtualized view is for.
     fn measures_rows(&self) -> bool {
         self.is_interactive() || self.pointer.acts_on_rows()
     }
