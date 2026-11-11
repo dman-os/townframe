@@ -611,7 +611,7 @@ mod library {
 
         with_intxt_node(async |_tmp, client| {
             let created = day_x(
-                &client,
+                client,
                 "org.example.intxt.createIntxt",
                 json!({"title": "Datum references move to dtxt:"}),
             )
@@ -713,17 +713,17 @@ mod library {
                 input.to_string().into_bytes()
             };
 
-            let started = capture::run(&client, &node_root, &hook("SessionStart", false))
+            let started = capture::run(client, &node_root, &hook("SessionStart", false))
                 .await
                 .unwrap();
             assert!(started.recorded.is_some());
-            capture::run(&client, &node_root, &hook("PreToolUse", true))
+            capture::run(client, &node_root, &hook("PreToolUse", true))
                 .await
                 .unwrap();
             std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
             let binary = [0u8, 159, 146, 150, 1, 2];
             std::fs::write(repo.join("pic.png"), binary).unwrap();
-            let edited = capture::run(&client, &node_root, &hook("PostToolUse", true))
+            let edited = capture::run(client, &node_root, &hook("PostToolUse", true))
                 .await
                 .unwrap();
             assert_eq!(edited.blobs_put, 1);
@@ -736,7 +736,7 @@ mod library {
             // The worktree's first op is the edit this call made, caused by the call.
             let worktree: work::Worktree = serde_json::from_value(
                 read_at(
-                    &client,
+                    client,
                     &docs.worktree.as_ref().unwrap().parse::<DocId>().unwrap(),
                     &format!("{}/main", work::Worktree::ID).parse().unwrap(),
                 )
@@ -747,7 +747,7 @@ mod library {
             .unwrap();
             let log: DocId = worktree.op_logs[0].doc.parse().unwrap();
             let op = read_at(
-                &client,
+                client,
                 &log,
                 &format!("{}/0", work::WorktreeOp::ID).parse().unwrap(),
             )
