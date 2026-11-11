@@ -38,8 +38,6 @@ fn fixture() -> Dmeta {
             delegation: Some(Bytes::from(vec![2, 3])),
         },
     );
-    let key = "org.example.note/main".parse().unwrap();
-    dmeta.datum_uuids.insert(Uuid7::new(), key);
     dmeta
         .doc_uuids
         .insert(Uuid7::new(), crate::dmeta::DocId::new(b"doc"));
@@ -47,6 +45,7 @@ fn fixture() -> Dmeta {
     dmeta.datums.insert(
         key,
         DatumMetadata {
+            uuids: BTreeMap::from([(Uuid7::new(), true)]),
             extra: Default::default(),
             updated_at: Vec::new(),
             deleted_at: Vec::new(),
@@ -237,10 +236,12 @@ utils_rs::table_tests! {
         write(&mut doc, &schema, &initial);
         let mut peer = doc.fork();
         peer.set_actor(ActorId::from([2u8; 32]));
+        let aliases = [Uuid7::new(), Uuid7::new()];
         for (branch, byte) in [(&mut doc, 1), (&mut peer, 2)] {
             let mut created = initial.clone();
             created.datums.insert(key.clone(), DatumMetadata {
-            extra: Default::default(),
+                uuids: BTreeMap::from([(aliases[byte as usize - 1], true)]),
+                extra: Default::default(),
                 updated_at: Vec::new(),
                 deleted_at: Vec::new(),
                 signatures: vec![signature(&initial, byte)],
@@ -264,7 +265,14 @@ utils_rs::table_tests! {
             lengths
         };
         assert_eq!(lists(&doc), [1, 1]);
+        // Each creator's alias lives in its own copy of the entry; the visible copy shows one, and
+        // the read unions both, so the chosen alias is the smaller of the two whichever copy wins.
         let mut observed = read(&doc, &schema);
+        assert_eq!(
+            observed.datums[&key].uuids.keys().collect::<Vec<_>>(),
+            aliases.iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>()
+        );
+        assert!(observed.has_concurrent_creation(&key));
         if replaces {
             observed.datums.get_mut(&key).unwrap().signatures = vec![signature(&initial, 3)];
         }
@@ -392,8 +400,12 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
         },
     );
     right
-        .datum_uuids
-        .insert(Uuid7::new(), "org.example.note/main".parse().unwrap());
+        .datums
+        .values_mut()
+        .next()
+        .unwrap()
+        .uuids
+        .insert(Uuid7::new(), true);
     let (datums, _, doc_uuid) = named(&right);
     write_atomic(
         peer.transaction(),
@@ -427,7 +439,10 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
         assert!(metadata.updated_at.contains(&right.updated_at[0]));
         assert_eq!(metadata.deleted_at, right.updated_at);
         assert_eq!(observed.actors, right.actors);
-        assert_eq!(observed.datum_uuids, right.datum_uuids);
+        assert_eq!(
+            observed.datums.values().next().unwrap().uuids,
+            right.datums.values().next().unwrap().uuids
+        );
         for index in 0..2 {
             let entry = merged.get(&before.2[3], index).unwrap().unwrap().1;
             assert_ne!(entry, old_entry);
@@ -494,7 +509,7 @@ fn set_order_duplicates_and_timestamp_precision_do_not_rewrite_equal_entries() {
 #[test]
 fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
     let schema = schema();
-    for index in ["actors", "docUuids", "datumUuids"] {
+    for index in ["actors", "docUuids"] {
         let initial = fixture();
         let mut doc = Automerge::new();
         doc.set_actor(ActorId::from([1u8; 32]));
@@ -503,8 +518,7 @@ fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
         let bindings = doc.get(&root, index).unwrap().unwrap().1;
         let uuid = match index {
             "actors" => initial.actors.keys().next().unwrap().to_string(),
-            "docUuids" => initial.doc_uuids.keys().next().unwrap().to_string(),
-            _ => initial.datum_uuids.keys().next().unwrap().to_string(),
+            _ => initial.doc_uuids.keys().next().unwrap().to_string(),
         };
         let (object, prop) = if index == "actors" {
             (
@@ -521,8 +535,7 @@ fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
                 "actors" => MultibaseKey::try_from([byte; 32].as_slice())
                     .unwrap()
                     .to_string(),
-                "docUuids" => crate::dmeta::DocId::new([byte]).to_string(),
-                _ => format!("org.example.other{byte}/main"),
+                _ => crate::dmeta::DocId::new([byte]).to_string(),
             };
             let mut tx = branch.transaction();
             tx.put(&object, prop.as_str(), replacement).unwrap();
@@ -532,19 +545,13 @@ fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
         let observed = read(&doc, &schema);
         let heads = doc.get_heads();
         assert_eq!(doc.get_all(&object, prop.as_str()).unwrap().len(), 2);
-        let written = write_atomic(doc.transaction(), &schema, &observed, &named(&observed));
-        if index == "datumUuids" {
-            // Both sides moved the alias off `main` onto other datums, which this write does not
-            // name, so it binds neither: it neither trips over the conflict nor settles it.
-            written.unwrap().commit();
-        } else {
-            // The write's own actor and `docUuid` are the conflicted bindings.
-            let error = written.unwrap_err();
-            assert!(
-                matches!(error, StorageError::ReboundBinding { index: actual, .. } if actual == index)
-            );
-            assert_eq!(doc.get_heads(), heads);
-        }
+        // The write's own actor and `docUuid` are the conflicted bindings.
+        let error =
+            write_atomic(doc.transaction(), &schema, &observed, &named(&observed)).unwrap_err();
+        assert!(
+            matches!(error, StorageError::ReboundBinding { index: actual, .. } if actual == index)
+        );
+        assert_eq!(doc.get_heads(), heads);
         assert_eq!(doc.get_all(&object, prop.as_str()).unwrap().len(), 2);
     }
 }
@@ -564,9 +571,9 @@ fn rebound_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
         assert!(doc.get(ROOT, "pending").unwrap().is_none());
         error
     };
-    for index in ["actors", "docUuids", "datumUuids"] {
+    for index in ["actors", "docUuids"] {
         let mut submitted = initial.clone();
-        let mut named = named(&initial);
+        let named = named(&initial);
         match index {
             "actors" => {
                 submitted.actors.values_mut().next().unwrap().pubkey =
@@ -576,15 +583,7 @@ fn rebound_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
                 *submitted.doc_uuids.values_mut().next().unwrap() =
                     crate::dmeta::DocId::new(b"other");
             }
-            _ => {
-                // The stored alias names `main`; the typed value claims it for another datum the
-                // write names.
-                let other: crate::DatumKey = "org.example.other/main".parse().unwrap();
-                *submitted.datum_uuids.values_mut().next().unwrap() = other.clone();
-                let metadata = submitted.datums[&main].clone();
-                submitted.datums.insert(other.clone(), metadata);
-                named.0 = BTreeSet::from([other]);
-            }
+            _ => unreachable!(),
         }
         let error = refused(&mut doc, &submitted, named);
         assert!(
@@ -635,13 +634,12 @@ fn a_partial_read_hydrates_only_what_the_write_names() {
     let schema = schema();
     let mut dmeta = fixture();
     let other: crate::DatumKey = "org.example.other/main".parse().unwrap();
-    dmeta.datum_uuids.insert(Uuid7::new(), other.clone());
     dmeta
         .doc_uuids
         .insert(Uuid7::new(), crate::dmeta::DocId::new(b"elsewhere"));
-    dmeta
-        .datums
-        .insert(other, dmeta.datums.values().next().unwrap().clone());
+    let mut other_metadata = dmeta.datums.values().next().unwrap().clone();
+    other_metadata.uuids = BTreeMap::from([(Uuid7::new(), true)]);
+    dmeta.datums.insert(other, other_metadata);
     let mut doc = Automerge::new();
     // Bind everything the fixture holds, the unrelated datum and document included.
     let all: BTreeSet<_> = dmeta.datums.keys().cloned().collect();
@@ -673,14 +671,6 @@ fn a_partial_read_hydrates_only_what_the_write_names() {
         BTreeMap::from([(key.clone(), full.datums[&key].clone())])
     );
     assert_eq!(
-        partial.datum_uuids,
-        full.datum_uuids
-            .iter()
-            .filter(|(_, alias)| **alias == key)
-            .map(|(uuid, alias)| (*uuid, alias.clone()))
-            .collect::<BTreeMap<_, _>>()
-    );
-    assert_eq!(
         partial.doc_uuids,
         full.doc_uuids
             .iter()
@@ -690,4 +680,56 @@ fn a_partial_read_hydrates_only_what_the_write_names() {
     );
     assert_eq!(partial.actors.keys().collect::<Vec<_>>(), vec![&actor]);
     assert!(partial.updated_at.is_empty());
+}
+
+/// The writer's alias choice reads the same union the verifier reconstructs: every copy of
+/// `datums`, not just the visible one, each with its entry's aliases.
+#[test]
+fn hydrate_for_unions_aliases_across_concurrent_datums_maps() {
+    let schema = schema();
+    let key: crate::DatumKey = "org.example.note/main".parse().unwrap();
+    let mut initial = fixture();
+    initial.datums.clear();
+    let mut doc = Automerge::new();
+    doc.set_actor(ActorId::from([1u8; 32]));
+    write(&mut doc, &schema, &initial);
+    let mut peer = doc.fork();
+    peer.set_actor(ActorId::from([2u8; 32]));
+    let aliases = [Uuid7::new(), Uuid7::new()];
+    for (branch, alias) in [(&mut doc, aliases[0]), (&mut peer, aliases[1])] {
+        let root = branch.get(ROOT, "dmeta").unwrap().unwrap().1;
+        let mut tx = branch.transaction();
+        let datums = tx.put_object(&root, "datums", ObjType::Map).unwrap();
+        let entry = tx
+            .put_object(&datums, key.to_string(), ObjType::Map)
+            .unwrap();
+        for list in ["updatedAt", "deletedAt", "signatures"] {
+            tx.put_object(&entry, list, ObjType::List).unwrap();
+        }
+        let uuids = tx.put_object(&entry, "uuids", ObjType::Map).unwrap();
+        tx.put(&uuids, alias.to_string(), true).unwrap();
+        tx.commit();
+    }
+    doc.merge(&mut peer).unwrap();
+    let root = doc.get(ROOT, "dmeta").unwrap().unwrap().1;
+    assert_eq!(doc.get_all(&root, "datums").unwrap().len(), 2);
+    let (_, actor, _) = named(&initial);
+    let document = crate::dmeta::DocId::new(b"doc");
+    let touched = BTreeSet::from([key.clone()]);
+    let partial = Dmeta::hydrate_for(
+        &doc,
+        &ROOT,
+        "dmeta".into(),
+        &schema,
+        &DmetaRead {
+            datums: &touched,
+            actor,
+            document: &document,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        partial.datums[&key].uuids.keys().collect::<BTreeSet<_>>(),
+        aliases.iter().collect::<BTreeSet<_>>()
+    );
 }

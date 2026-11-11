@@ -92,6 +92,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> Verification
         .unwrap();
     let mut issuers = BTreeMap::new();
     let mut signatures = Vec::new();
+    let mut uuids = BTreeMap::new();
     let node = SigningKey::from_bytes(&[250; 32]);
     let issuer = MultibaseKey::try_from(node.verifying_key().as_bytes().as_slice()).unwrap();
     for signed in claims {
@@ -144,9 +145,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> Verification
                 .insert(signed.claim.actor_uuid, issuer.clone())
                 .is_none()
         );
-        dmeta
-            .record_datum_alias(signed.claim.chosen_uuid, signed.claim.datum_key.clone())
-            .unwrap();
+        uuids.insert(signed.claim.chosen_uuid, true);
         let mut entry = DatumSignature {
             extra: Default::default(),
             actor_uuid: signed.claim.actor_uuid,
@@ -164,6 +163,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> Verification
             .insert(
                 DATUM.parse().unwrap(),
                 DatumMetadata {
+                    uuids,
                     extra: Default::default(),
                     updated_at: Vec::new(),
                     deleted_at: Vec::new(),

@@ -177,19 +177,18 @@ impl DocsService {
             .expect("a freshly minted document UUID is unbound");
         let mut claims = BTreeMap::new();
         for key in touched.iter().cloned() {
-            let visible = dmeta
-                .datum_uuids
-                .iter()
-                .filter(|(_, alias)| **alias == key)
-                .map(|(uuid, _)| *uuid)
-                .min();
-            let chosen = match visible {
-                Some(chosen) => chosen,
+            // `hydrate_for` already unioned `uuids` across every concurrent copy of the entry, so
+            // this is the smallest alias any creator visible to this transaction gave the datum.
+            let mut uuids = dmeta
+                .datums
+                .get(&key)
+                .map(|metadata| metadata.uuids.clone())
+                .unwrap_or_default();
+            let chosen = match uuids.keys().next() {
+                Some(chosen) => *chosen,
                 None => {
                     let alias = *plan.aliases.entry(key.clone()).or_default();
-                    dmeta
-                        .record_datum_alias(alias, key.clone())
-                        .expect("a freshly minted alias is unbound");
+                    uuids.insert(alias, true);
                     alias
                 }
             };
@@ -229,6 +228,7 @@ impl DocsService {
             dmeta.datums.insert(
                 key,
                 DatumMetadata {
+                    uuids,
                     extra,
                     updated_at: vec![plan.now],
                     deleted_at: if removed { vec![plan.now] } else { Vec::new() },
@@ -470,11 +470,13 @@ impl DocsService {
                     let Some(handle) = self.target_handle(&row.command, &target).await? else {
                         continue;
                     };
+                    // Metadata, not `get_change_by_hash`, which re-encodes the change by scanning
+                    // every operation in the document just to say it exists.
                     let merged = handle
                         .with_document_read(|doc| {
                             heads
                                 .iter()
-                                .all(|head| doc.get_change_by_hash(head).is_some())
+                                .all(|head| doc.get_change_meta_by_hash(head).is_some())
                                 .then(|| sorted(doc.get_heads()))
                         })
                         .await;
