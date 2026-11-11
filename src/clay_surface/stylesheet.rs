@@ -6,6 +6,7 @@ use cssparser::AtRuleParser;
 use cssparser::CowRcStr;
 use cssparser::DeclarationParser;
 use cssparser::ParseError;
+use cssparser::ParseErrorKind;
 use cssparser::Parser;
 use cssparser::ParserState;
 use cssparser::QualifiedRuleParser;
@@ -159,45 +160,53 @@ impl<'i> DeclarationParser<'i> for Sanitizer {
     }
 }
 
-/// The declarations of an inline `style` attribute as `(name, value)` pairs. The whole string
-/// must parse as a declaration list with no at-rules or nested rules, and a value is refused if
-/// any token of it can fetch (see [`fetches`]); one bad declaration is an `Err`. Property names
-/// are not judged here.
-pub(crate) fn inline_declarations(text: &str) -> Result<Vec<(String, String)>, &'static str> {
-    struct Inline;
-    impl<'i> DeclarationParser<'i> for Inline {
-        type Declaration = (String, String);
-        type Error = ();
+/// Checks an inline `style` attribute in place. The whole string must parse as a declaration
+/// list with no at-rules or nested rules, a value is refused if any token of it can fetch (see
+/// [`fetches`]), and every `(property, value)` pair that passes is handed to `check`, which judges
+/// the property name. The first refusal is the `Err`. Nothing is collected: inline styles sit on
+/// the render path and the pairs are borrowed from `text`.
+pub(crate) fn check_inline_declarations(
+    text: &str,
+    check: impl FnMut(&str, &str) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    struct Inline<F>(F);
+    impl<'i, F: FnMut(&str, &str) -> Result<(), &'static str>> DeclarationParser<'i> for Inline<F> {
+        type Declaration = ();
+        type Error = &'static str;
 
         fn parse_value(
             &mut self,
             name: CowRcStr<'i>,
             input: &mut Parser<'i>,
             _declaration_start: &ParserState,
-        ) -> Result<Self::Declaration, ParseError<()>> {
+        ) -> Result<(), ParseError<&'static str>> {
             input.skip_whitespace();
             let start = input.position();
             if fetches(input) {
-                return Err(ParseError::custom(()));
+                return Err(ParseError::custom(
+                    "style value can fetch or escape its box",
+                ));
             }
             let value = input.slice_from(start).trim();
             if value.is_empty() {
-                return Err(ParseError::custom(()));
+                return Err(ParseError::custom("style declaration has no value"));
             }
-            Ok((name.to_string(), value.to_owned()))
+            (self.0)(&name, value).map_err(ParseError::custom)
         }
     }
-    impl<'i> AtRuleParser<'i> for Inline {
+    impl<'i, F> AtRuleParser<'i> for Inline<F> {
         type Prelude = ();
-        type AtRule = (String, String);
-        type Error = ();
+        type AtRule = ();
+        type Error = &'static str;
     }
-    impl<'i> QualifiedRuleParser<'i> for Inline {
+    impl<'i, F> QualifiedRuleParser<'i> for Inline<F> {
         type Prelude = ();
-        type QualifiedRule = (String, String);
-        type Error = ();
+        type QualifiedRule = ();
+        type Error = &'static str;
     }
-    impl<'i> RuleBodyItemParser<'i, (String, String), ()> for Inline {
+    impl<'i, F: FnMut(&str, &str) -> Result<(), &'static str>>
+        RuleBodyItemParser<'i, (), &'static str> for Inline<F>
+    {
         fn parse_declarations(&self) -> bool {
             true
         }
@@ -207,9 +216,16 @@ pub(crate) fn inline_declarations(text: &str) -> Result<Vec<(String, String)>, &
         }
     }
     let mut parser = Parser::new(text);
-    RuleBodyParser::new(&mut parser, &mut Inline)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "style attribute is not a list of safe declarations")
+    let mut inline = Inline(check);
+    for item in RuleBodyParser::new(&mut parser, &mut inline) {
+        if let Err((error, _, _)) = item {
+            return Err(match error.kind {
+                ParseErrorKind::Custom(reason) => reason,
+                _ => "style attribute is not a list of declarations",
+            });
+        }
+    }
+    Ok(())
 }
 
 impl<'i> AtRuleParser<'i> for Sanitizer {
