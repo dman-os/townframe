@@ -6,8 +6,6 @@
 //!
 //! [`clay_mdk::export_micro!`] exports the lab as the `micro-client` guest on wasm32-wasip3 and
 //! as the native `ACTIVATE` entry everywhere else.
-mod mock_review;
-
 use clay_dioxus_kit::AppBar;
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -29,7 +27,7 @@ const EXPERIMENTS: &[Experiment] = &[Experiment {
     id: "mock-review",
     title: "Mock review",
     summary: "The review loop's journeys over mock data: changes, an overview, a file diff with annotation threads, a thread.",
-    open: |close| rsx! { mock_review::MockReview { close } },
+    open: |close| rsx! { review_mock::MockReview { close } },
 }];
 
 /// Publish the lab's one presentation. The lab needs no capability from the composition.

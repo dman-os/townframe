@@ -4346,6 +4346,7 @@ dependencies = [
  "dioxus-native",
  "dioxus-ssr",
  "pierre_diffs_dioxus",
+ "review_mock",
  "serde",
  "serde_json",
  "tokio",
@@ -9455,7 +9456,7 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "micro_lab_manifest",
- "pierre_diffs_dioxus",
+ "review_mock",
 ]
 
 [[package]]
@@ -13517,6 +13518,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
+]
+
+[[package]]
+name = "review_mock"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "dioxus",
+ "dioxus-ssr",
+ "pierre_diffs_dioxus",
 ]
 
 [[package]]

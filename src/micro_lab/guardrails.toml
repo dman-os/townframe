@@ -5,7 +5,7 @@ allowed_dependencies = [
     "clay_dioxus_kit",
     "clay_mdk",
     "micro_lab_manifest",
-    "pierre_diffs_dioxus",
+    "review_mock",
 ]
 allow_external_api_types = false
 

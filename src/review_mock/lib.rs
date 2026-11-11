@@ -5,10 +5,15 @@
 //! new threads); the intext lane replaces this experiment with the real micro over datums.
 //!
 //! The diff is `pierre_diffs_dioxus::FileDiffView` used as any Dioxus app would use it: the
-//! threads are its `render_annotation` content, and nothing in this module knows Clay's guest
-//! surface exists.
+//! threads are its `render_annotation` content, and nothing in this crate knows Clay's guest
+//! surface exists. Two embedders render [`MockReview`]: the lab micro (a Clay guest) and the theme
+//! lab's Diffs tab (a plain Dioxus desktop app), so a difference between the two is the runtime's.
+mod data;
+
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::WidthClass;
+use data::Comment;
+use data::CHANGES;
 use std::borrow::Cow;
 
 use dioxus::prelude::*;
@@ -18,26 +23,46 @@ use pierre_diffs_dioxus::DiffLineAnnotation;
 use pierre_diffs_dioxus::DiffStyle;
 use pierre_diffs_dioxus::FileDiffView;
 use pierre_diffs_dioxus::Interaction;
+use pierre_diffs_dioxus::LineHoverHighlight;
 use pierre_diffs_dioxus::SelectedLineRange;
 
-struct Change {
-    title: &'static str,
-    summary: &'static str,
-    files: &'static [File],
+/// The `FileDiffView` options an embedder drives. The default is what the lab micro runs: the
+/// layout follows the width and a line or the gutter's "+" opens a draft. There is no
+/// `expand_unchanged`: the mock files are patches, and the view cannot expand a patch's collapsed
+/// lines without the full file contents.
+#[derive(Clone, Copy, PartialEq)]
+pub struct DiffOptions {
+    /// `None` derives the layout from the width class: split when two panes fit.
+    pub diff_style: Option<DiffStyle>,
+    pub line_hover_highlight: LineHoverHighlight,
+    /// Clicking a line number selects it, and a selection opens a draft annotation.
+    pub enable_line_selection: bool,
+    /// The gutter's "+" opens a draft annotation.
+    pub enable_gutter_utility: bool,
 }
 
-struct File {
-    path: &'static str,
-    /// A unified patch of this one file, as the agent's commit produced it.
-    patch: &'static str,
-    threads: &'static [SeedThread],
+impl DiffOptions {
+    /// The view's `Interaction` for these options, without callbacks: an embedder that listens
+    /// to selections spreads this under its own.
+    pub fn interaction(&self) -> Interaction {
+        Interaction {
+            line_hover_highlight: self.line_hover_highlight,
+            enable_line_selection: self.enable_line_selection,
+            enable_gutter_utility: self.enable_gutter_utility,
+            ..Interaction::default()
+        }
+    }
 }
 
-/// A thread as the mock data seeds it: one new-file line, as the agent left it.
-struct SeedThread {
-    line: usize,
-    resolved: bool,
-    comments: &'static [Comment],
+impl Default for DiffOptions {
+    fn default() -> Self {
+        Self {
+            diff_style: None,
+            line_hover_highlight: LineHoverHighlight::Disabled,
+            enable_line_selection: true,
+            enable_gutter_utility: true,
+        }
+    }
 }
 
 /// A thread while the micro runs: a root comment and its replies anchored at a line range of one
@@ -65,12 +90,6 @@ fn range_label(start: usize, end: usize) -> String {
     } else {
         format!("lines {start}-{end}")
     }
-}
-
-#[derive(Clone, PartialEq)]
-struct Comment {
-    author: &'static str,
-    body: Cow<'static, str>,
 }
 
 /// Every change's threads, by change and file: the micro's mutable state, shared through
@@ -157,7 +176,7 @@ fn counts(patch: &str) -> (usize, usize) {
 }
 
 #[component]
-pub fn MockReview(close: Callback<()>) -> Element {
+pub fn MockReview(close: Callback<()>, #[props(default)] options: DiffOptions) -> Element {
     let mut screen = use_signal(|| Screen::Changes);
     use_context_provider::<Reviews>(|| {
         Signal::new(
@@ -228,7 +247,7 @@ pub fn MockReview(close: Callback<()>) -> Element {
                 Screen::Change(change) => rsx! { Overview { change, screen } },
                 Screen::File { change, file } => rsx! {
                     // Keyed by file so each opened file owns its parsed patch.
-                    FileDiff { key: "{change}-{file}", change, file, width: width(), screen }
+                    FileDiff { key: "{change}-{file}", change, file, width: width(), options, screen }
                 },
                 Screen::Thread { change, file, thread } => rsx! { ThreadView { change, file, thread } },
             }
@@ -299,7 +318,13 @@ fn Overview(change: usize, screen: Signal<Screen>) -> Element {
 /// threads under their lines. Selecting a line or a range (or the gutter's "+") opens a draft
 /// annotation row under the selection's last line.
 #[component]
-fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen>) -> Element {
+fn FileDiff(
+    change: usize,
+    file: usize,
+    width: WidthClass,
+    options: DiffOptions,
+    screen: Signal<Screen>,
+) -> Element {
     let mut reviews = use_context::<Reviews>();
     let mut draft = use_signal(|| None::<Draft>);
     // The diff's selection, held here so a submitted or cancelled draft clears its highlight:
@@ -333,11 +358,11 @@ fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen
         div { class: "overflow-hidden rounded-md border border-border",
             FileDiffView::<Row> {
                 input,
-                diff_style: if width.fits_side_by_side() { DiffStyle::Split } else { DiffStyle::Unified },
+                diff_style: options
+                    .diff_style
+                    .unwrap_or(if width.fits_side_by_side() { DiffStyle::Split } else { DiffStyle::Unified }),
                 annotations,
                 interaction: Interaction {
-                    enable_line_selection: true,
-                    enable_gutter_utility: true,
                     selected_lines: selection(),
                     on_line_selected: Some(Callback::new(move |range: Option<SelectedLineRange>| {
                         selection.set(range.clone());
@@ -345,8 +370,8 @@ fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen
                             open_draft(range);
                         }
                     })),
-                    on_gutter_utility_click: Some(open_draft),
-                    ..Interaction::default()
+                    on_gutter_utility_click: options.enable_gutter_utility.then_some(open_draft),
+                    ..options.interaction()
                 },
                 render_annotation: move |annotation: DiffLineAnnotation<Row>| {
                     match annotation.metadata.expect("every mock annotation carries its row") {
@@ -527,119 +552,23 @@ fn ThreadView(change: usize, file: usize, thread: usize) -> Element {
     }
 }
 
-const CHANGES: &[Change] = &[
-    Change {
-        title: "Cap the retry backoff",
-        summary: "Retries doubled forever and overflowed after 64 attempts. The delay now saturates and is capped at thirty seconds, and a push wakes the queue's waiters.",
-        files: &[
-            File {
-                path: "src/retry.rs",
-                patch: "diff --git a/src/retry.rs b/src/retry.rs
---- a/src/retry.rs
-+++ b/src/retry.rs
-@@ -1,9 +1,12 @@
- use std::time::Duration;
- 
--pub fn backoff(attempt: u32) -> Duration {
--    Duration::from_millis(100 * 2u64.pow(attempt))
-+const CAP: Duration = Duration::from_secs(30);
-+
-+pub fn backoff(attempt: u32) -> Duration {
-+    let delay = Duration::from_millis(100 * 2u64.saturating_pow(attempt));
-+    delay.min(CAP)
- }
- 
- pub fn should_retry(error: &Error) -> bool {
-     error.is_transient()
- }
-",
-                threads: &[SeedThread {
-                    line: 6,
-                    resolved: false,
-                    comments: &[
-                        Comment {
-                            author: "Reviewer",
-                            body: Cow::Borrowed(
-                                "The multiplication can still overflow before the cap applies; saturate that too.",
-                            ),
-                        },
-                        Comment {
-                            author: "Agent",
-                            body: Cow::Borrowed(
-                                "u64 saturating_pow covers the power; 100 * u64::MAX would not, so I will use saturating_mul.",
-                            ),
-                        },
-                    ],
-                }],
-            },
-            File {
-                path: "src/queue.rs",
-                patch: "diff --git a/src/queue.rs b/src/queue.rs
---- a/src/queue.rs
-+++ b/src/queue.rs
-@@ -10,6 +10,7 @@ impl Queue {
-     pub fn push(&mut self, job: Job) {
-         self.jobs.push_back(job);
-+        self.notify.notify_one();
-     }
- 
-     pub fn pop(&mut self) -> Option<Job> {
-         self.jobs.pop_front()
-",
-                threads: &[],
-            },
-        ],
-    },
-    Change {
-        title: "Validate config at startup",
-        summary: "A bad config file panicked with an opaque unwrap. Loading now names what is wrong and rejects a zero worker count or port.",
-        files: &[File {
-            path: "src/config.rs",
-            patch: "diff --git a/src/config.rs b/src/config.rs
---- a/src/config.rs
-+++ b/src/config.rs
-@@ -20,6 +20,9 @@
- impl Config {
-     pub fn load(path: &Path) -> Config {
--        let text = fs::read_to_string(path).unwrap();
--        toml::from_str(&text).unwrap()
-+        let text = fs::read_to_string(path).expect(\"config file is readable\");
-+        let config: Config = toml::from_str(&text).expect(\"config is valid TOML\");
-+        assert!(config.workers > 0, \"workers must be positive\");
-+        assert!(config.port != 0, \"port must be set\");
-+        config
-     }
- }
-",
-            threads: &[SeedThread {
-                line: 24,
-                resolved: true,
-                comments: &[Comment {
-                    author: "Reviewer",
-                    body: Cow::Borrowed(
-                        "A user's config is input, not an invariant; this should be a returned error.",
-                    ),
-                }],
-            }],
-        }],
-    },
-    Change {
-        title: "Document the sync retry",
-        summary: "The module doc now says why retries are expected, so nobody parks them.",
-        files: &[File {
-            path: "src/sync.rs",
-            patch: "diff --git a/src/sync.rs b/src/sync.rs
---- a/src/sync.rs
-+++ b/src/sync.rs
-@@ -1,4 +1,5 @@
--//! Sync.
-+//! Pulls membership before documents.
-+//! Retries are expected while membership lands.
- 
- pub fn pull() {}
- pub fn push() {}
-",
-            threads: &[],
-        }],
-    },
-];
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Dioxus turns a panicking render into an empty subtree, so the list being present at all is
+    // the check that the mock patches parse and the threads seed.
+    #[test]
+    fn the_change_list_renders_each_change_with_its_open_threads() {
+        // `Callback`s need a runtime, so the review is mounted under a root component.
+        fn Root() -> Element {
+            rsx! { MockReview { close: |()| () } }
+        }
+        let mut dom = VirtualDom::new(Root);
+        dom.rebuild_in_place();
+        let page = dioxus_ssr::render(&dom);
+        assert!(page.contains("Cap the retry backoff"));
+        assert!(page.contains("2 files, 1 open threads"));
+        assert!(page.contains("1 files, 0 open threads"));
+    }
+}

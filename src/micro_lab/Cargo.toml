@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 clay_dioxus_kit = { workspace = true }
 micro_lab_manifest = { workspace = true }
-pierre_diffs_dioxus = { workspace = true }
+review_mock = { workspace = true }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
