@@ -302,6 +302,9 @@ fn Overview(change: usize, screen: Signal<Screen>) -> Element {
 fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen>) -> Element {
     let mut reviews = use_context::<Reviews>();
     let mut draft = use_signal(|| None::<Draft>);
+    // The diff's selection, held here so a submitted or cancelled draft clears its highlight:
+    // the view applies `selected_lines` only when it changes (see `Interaction::selected_lines`).
+    let mut selection = use_signal(|| None::<SelectedLineRange>);
     let data = &CHANGES[change].files[file];
     // The input is compared by identity (see `DiffInput::Parsed`), so it is parsed once.
     let input = use_hook(|| DiffInput::from_patch(data.patch).expect("the mock patches parse"));
@@ -335,7 +338,9 @@ fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen
                 interaction: Interaction {
                     enable_line_selection: true,
                     enable_gutter_utility: true,
+                    selected_lines: selection(),
                     on_line_selected: Some(Callback::new(move |range: Option<SelectedLineRange>| {
+                        selection.set(range.clone());
                         if let Some(range) = range {
                             open_draft(range);
                         }
@@ -355,6 +360,7 @@ fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen
                                     label: range_label(current.start, current.end),
                                     on_submit: move |body: String| {
                                         let current = draft.take().expect("the draft being submitted");
+                                        selection.set(None);
                                         reviews.write()[change][file].push(Thread {
                                             side: current.side,
                                             start: current.start,
@@ -365,7 +371,10 @@ fn FileDiff(change: usize, file: usize, width: WidthClass, screen: Signal<Screen
                                             ],
                                         });
                                     },
-                                    on_cancel: move |()| draft.set(None),
+                                    on_cancel: move |()| {
+                                        draft.set(None);
+                                        selection.set(None);
+                                    },
                                 }
                             }
                         }

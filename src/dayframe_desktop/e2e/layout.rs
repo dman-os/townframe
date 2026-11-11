@@ -562,8 +562,10 @@ async fn the_mock_review_annotates_a_line_and_replies_and_resolves_a_thread() {
     // `HeadlessDom` mounts the host tree through a bare `DioxusState`, whose queue of `mounted`
     // events only a `DioxusDocument` flushes, so no `onmounted` ever reaches the micro here.
     ui.click(&format!("{draft} button[aria-label=\"Cancel annotation\"]"));
-    ui.wait_until("cancel removes the draft", |ui| ui.find(&draft).is_none())
-        .await;
+    ui.wait_until("cancel removes the draft and its selection", |ui| {
+        ui.find(&draft).is_none() && !selected(ui, 8)
+    })
+    .await;
 
     // A drag from line 7 to line 9 selects the range; its draft names the range, and submitting
     // the typed text adds a thread there.
@@ -605,6 +607,11 @@ async fn the_mock_review_annotates_a_line_and_replies_and_resolves_a_thread() {
     ui.wait_until("the submitted draft becomes a thread", |ui| {
         faulted(&runtime);
         ui.find(&draft).is_none() && ui.find(&open_new).is_some()
+    })
+    .await;
+    ui.wait_until("submitting clears the range's selection", |ui| {
+        faulted(&runtime);
+        (7..=9).all(|line| !selected(ui, line))
     })
     .await;
     let new_row = inside("aside[aria-label=\"Thread on lines 7-9\"]");
