@@ -9,6 +9,7 @@ pub enum wflow_sdk::JobErrorX { # [doc = " terminal error {0:?}"] Terminal (eyre
 pub impl wflow_sdk::WflowCtx::async fn effect < F , O , Fut > (& mut self , func : F) -> Result < O , JobErrorX > where F : FnOnce () -> Fut , Fut : Future < Output = Result < Json < O > , JobErrorX > > , O : serde :: de :: DeserializeOwned + Serialize ,
 pub impl wflow_sdk::WflowCtx::async fn recv < O > (& mut self) -> Result < O , JobErrorX > where O : RecvCodec ,
 pub impl wflow_sdk::WflowCtx::async fn sleep (& mut self , duration : Duration) -> Result < () , JobErrorX >
+pub macro wflow_sdk::route_wflows! { ($ args : expr , { $ ($ key : literal => |$ cx_ident : ident , $ args_var : ident : $ args_ty : ty | $ handler : expr) ,* $ (,) ? }) }
 pub mod wflow_sdk::wit
 pub struct wflow_sdk::Json< T >  { 0: T }
 pub struct wflow_sdk::WflowCtx  { job: types :: JobCtx }

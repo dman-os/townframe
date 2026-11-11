@@ -3,6 +3,7 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: []
 
+pub macro big_ndk::export_nodule! { ($ nodule : ty => [$ ($ method : ty) ,* $ (,) ?]); ($ nodule : ty) }
 pub mod big_ndk::wit
 pub trait big_ndk::Handler< M : Unary > { fn call (& self , cx : & Cx , input : M) -> impl Future < Output = Result < M :: Output , M :: Error > > }
 pub use big_ndk::cx :: Cx
