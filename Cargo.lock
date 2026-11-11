@@ -8121,6 +8121,7 @@ dependencies = [
  "big_ndk",
  "big_ndk_testing",
  "big_nodule_core",
+ "http",
  "indexmap 2.14.2",
  "intxt_core",
  "method_core",
