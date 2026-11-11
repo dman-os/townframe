@@ -24,6 +24,7 @@ big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
+big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
 intxt_core = { path = "../intxt_core" }

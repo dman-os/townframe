@@ -476,6 +476,25 @@ mod library {
         );
     }
 
+    /// Stands in for the handler component where a test needs only intxt's records registered:
+    /// the node stores it and reports the nodule `ExecutorUnavailable`, since it is not a
+    /// component.
+    const PLACEHOLDER_HANDLER: &[u8] = b"not a component: these tests never call the handler";
+
+    /// An initialized node whose `node.json` lets nodules be granted what intxt's handler calls,
+    /// which is the operator's to configure before the node boots.
+    fn new_intxt_node() -> (tempfile::TempDir, NodeDir) {
+        let (tmp, dir) = new_node();
+        let path = dir.root().join("node.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        settings["nodule_operations"] = json!({
+            "operations": intxt_nodule::REQUIRED_OPERATIONS
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        (tmp, dir)
+    }
+
     /// The stopgap intxt commands (ledger D41): `install` registers intxt's records, and `new`
     /// creates a drawer whose descriptor document carries the intxt marker, the title and an
     /// empty body, readable as written.
@@ -488,9 +507,9 @@ mod library {
         use big_cabinet_core::doc::MintDocCapability;
         use big_cabinet_core::doc::ReadDatums;
 
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_intxt_node();
         let client = NodeClient::connect(&dir).await.unwrap();
-        intxt::install(&client).await.unwrap();
+        intxt::install(&client, PLACEHOLDER_HANDLER).await.unwrap();
         let drawer = intxt::create(&client, "Datum references move to dtxt:".into(), None)
             .await
             .unwrap();
@@ -536,6 +555,95 @@ mod library {
         client.stop().await.unwrap();
     }
 
+    /// Where the handler component is built (see `intxt install --handler`): CI builds it before
+    /// this test, and `INTXT_GUEST_WASM` names it when it is elsewhere.
+    fn guest_path() -> PathBuf {
+        use std::path::Path;
+        std::env::var_os("INTXT_GUEST_WASM")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../wasm_utils_rs/target/wasm32-wasip3/release/intxt_guest.wasm")
+            })
+    }
+
+    /// The real handler component, installed the way `day x intxt install --handler` does, is
+    /// loaded by the node's wasm executor, and `org.example.intxt.createIntxt`, reached through
+    /// the router like `day x`, creates the drawer in a guest that calls back into the node.
+    ///
+    /// Needs the component, built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml
+    /// -p intxt_guest --target wasm32-wasip3 --release`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_real_intxt_handler_serves_create_intxt_through_the_node() {
+        use crate::cmds::intxt;
+        use big_cabinet_core::doc::At;
+        use big_cabinet_core::doc::DatumRead;
+        use big_cabinet_core::doc::DocScope;
+        use big_cabinet_core::doc::MintDocCapability;
+        use big_cabinet_core::doc::ReadDatums;
+        use big_cabinet_core::drawer::protocol::DrawerId;
+        use big_dispatch_core::Readiness;
+        use method_core::HttpMethod;
+
+        let path = guest_path();
+        let wasm = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "{}: {error}; build it with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_guest --target wasm32-wasip3 --release` or set INTXT_GUEST_WASM",
+                path.display()
+            )
+        });
+        let (_tmp, dir) = new_intxt_node();
+        let client = NodeClient::connect(&dir).await.unwrap();
+        let record = intxt::install(&client, &wasm).await.unwrap();
+        assert_eq!(record.readiness, Readiness::Ready);
+        assert!(record.operations.unwrap().granted);
+
+        let reply = client
+            .call(
+                "org.example.intxt.createIntxt",
+                HttpMethod::Post,
+                &json!({"title": "made by the wasm handler"}),
+            )
+            .await
+            .unwrap();
+        assert!(reply.is_success(), "{reply:?}");
+        let drawer: DrawerId = reply.body["drawerId"].as_str().unwrap().parse().unwrap();
+
+        let capability = intxt::call(
+            &client,
+            MintDocCapability {
+                scope: DocScope {
+                    read: [drawer.clone()].into(),
+                    ..DocScope::default()
+                },
+                rights: big_cabinet_core::authority::Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+        let read = intxt::call(
+            &client,
+            ReadDatums {
+                capability,
+                doc_id: drawer,
+                at: At::Current,
+                datums: None,
+                optimistic: false,
+            },
+        )
+        .await
+        .unwrap();
+        match &read.datums[&"org.example.intxt.title/main".parse().unwrap()] {
+            DatumRead::Accepted { value, .. } => {
+                assert_eq!(value, &json!({"title": "made by the wasm handler"}))
+            }
+            other => panic!("the title was not accepted: {other:?}"),
+        }
+        client.stop().await.unwrap();
+    }
+
     /// `intxt add` includes captured parts: each gets an entry keyed by the part's identity, the
     /// body lists the entries in the order they were added, adding a part again changes nothing,
     /// and the parts' documents are entered in the intxt's drawer so its members can read them.
@@ -550,9 +658,9 @@ mod library {
         use big_cabinet_core::drawer::protocol::MintDrawerCapability;
         use big_cabinet_core::reference::DatumReference;
 
-        let (_tmp, dir) = new_node();
+        let (_tmp, dir) = new_intxt_node();
         let client = NodeClient::connect(&dir).await.unwrap();
-        intxt::install(&client).await.unwrap();
+        intxt::install(&client, PLACEHOLDER_HANDLER).await.unwrap();
         let captures = intxt::create(&client, "captures".into(), None)
             .await
             .unwrap();
