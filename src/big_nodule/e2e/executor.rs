@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::sync::watch;
 
 const OWN: &str = "org.example.photos.list";
@@ -69,6 +70,8 @@ struct FakeState {
     ensures: usize,
     log: Vec<String>,
     reensure: BTreeMap<CartridgeId, Reensure>,
+    /// How long `ensure` takes, as a wasm workload compiling and instantiating does.
+    ensure_takes: Duration,
 }
 
 impl FakeExecutor {
@@ -87,6 +90,10 @@ impl FakeExecutor {
             provider,
             ready_answers: watch::channel(0).0,
         })
+    }
+
+    pub(super) fn slow_ensure(&self, takes: Duration) {
+        self.state.lock().unwrap().ensure_takes = takes;
     }
 
     pub(super) fn log(&self) -> Vec<String> {
@@ -119,6 +126,8 @@ impl NoduleExecutor for FakeExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
+        let takes = self.state.lock().unwrap().ensure_takes;
+        tokio::time::sleep(takes).await;
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
         if state.hosted.get(&spec.cartridge_id) != Some(&spec.handler.digest) {
@@ -506,5 +515,36 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
         BTreeSet::from([&foreign, &malformed])
     );
     assert_eq!(blobs[&foreign], neighbours[&foreign]);
+    node.shutdown().await;
+}
+
+/// The state actor reconciles inline for every command it runs, and also on a config watch event.
+/// A watch event used to carry the snapshot taken as the store answered it. When the actor
+/// looked at the watch just before the next command arrived (a command right behind another),
+/// the event's snapshot predated that command and was delivered after it: an enable that had
+/// just started its workload was reconciled back to the disabled config, unbinding its
+/// operation until the follow-up event started the workload again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_config_event_older_than_an_enable_does_not_unbind_the_nodule_it_enabled() {
+    let executor = FakeExecutor::hosting(Arc::<Echo>::default(), true);
+    // Starting a workload takes long enough for the unbound window to outlast the polling.
+    executor.slow_ensure(Duration::from_millis(15));
+    let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
+    let operator = node.operator();
+    node.admit(operator, serving_cartridge(PHOTOS, OWN))
+        .await
+        .unwrap();
+
+    for round in 0..60 {
+        node.set_enabled(PHOTOS, false).await;
+        node.set_enabled(PHOTOS, true).await;
+        for _ in 0..6 {
+            assert!(
+                node.dispatch.router.resolve(OWN).is_ok(),
+                "round {round}: {OWN} is unbound while its nodule is enabled"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
     node.shutdown().await;
 }
