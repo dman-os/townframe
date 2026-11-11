@@ -660,6 +660,37 @@ fn supported_listeners_are_reviewable() {
     insta::assert_yaml_snapshot!(supported);
 }
 
+// A guest tree at the depth cap must project on a 2 MiB thread stack in a debug build. The
+// projection recurses once per level through `render_element_tag`, and that frame was ~145 KB
+// when every tag's `rsx!` expanded into one match (about 168 KB per level, so 13 levels filled
+// 2 MiB); each tag now builds in its own non-inlined function and a level costs ~13 KB (debug).
+#[test]
+fn a_tree_at_the_depth_cap_projects_on_a_two_mebibyte_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 << 20)
+        .spawn(|| {
+            let mut tree = SurfaceTree::<()>::new();
+            let mut batch: Vec<_> = (0..SurfaceTree::<()>::MAX_TREE_DEPTH)
+                .map(|_| Mutation::CreateElement(("div".into(), None)))
+                .collect();
+            batch.extend(
+                (0..SurfaceTree::<()>::MAX_TREE_DEPTH).map(|_| Mutation::AppendChildren(1)),
+            );
+            tree.apply(&batch).unwrap();
+            let mut dom = VirtualDom::new_with_props(
+                listener_app,
+                ListenerProps {
+                    tree,
+                    events: Rc::new(RefCell::new(Vec::new())),
+                },
+            );
+            dom.rebuild(&mut SurfaceTree::<()>::new());
+        })
+        .unwrap()
+        .join()
+        .expect("projecting a maximum-depth tree must not overflow or panic");
+}
+
 // ── listener translation: a host event reaching a surface listener carries the guest's
 //    surface-local element id, the surface revision at render time, and the event group's
 //    serialized data; `prevent_default`/`stop_propagation` honoring is fixed by the macro
