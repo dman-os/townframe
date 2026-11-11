@@ -3,6 +3,7 @@ use automerge::Prop;
 use automerge::transaction::Transactable;
 use automerge::transaction::Transaction;
 use big_cabinet_core::dmeta::CanonicalF64;
+use big_cabinet_core::dmeta::SignatureBytes;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
@@ -46,7 +47,6 @@ impl Fixture {
         let dmeta = tx.put_object(&datums, DMETA, ObjType::Map).unwrap();
         tx.put(&dmeta, "createdAt", ScalarValue::Timestamp(0))
             .unwrap();
-        tx.put_object(&dmeta, "updatedAt", ObjType::List).unwrap();
         let documents = tx.put_object(&dmeta, "docUuids", ObjType::Map).unwrap();
         tx.put(
             &documents,
@@ -156,30 +156,39 @@ impl Fixture {
         for index in (0..tx.length(&paths.signatures)).rev() {
             tx.delete(&paths.signatures, index).unwrap();
         }
-        let marker = tx
-            .insert_object(&paths.signatures, 0, ObjType::Map)
+        // An ordinary entry is one bytes scalar; one that carries a message or a witness is a map
+        // around the same packed value.
+        let marker = if entry.message.is_none() && entry.inherited.is_none() {
+            tx.insert(
+                &paths.signatures,
+                0,
+                ScalarValue::Bytes(entry.packed().to_vec()),
+            )
             .unwrap();
-        tx.put(&marker, "actorUuid", entry.actor_uuid.to_string())
-            .unwrap();
-        tx.put(&marker, "docUuid", entry.doc_uuid.to_string())
-            .unwrap();
-        tx.put(&marker, "signature", entry.signature.as_bytes().to_vec())
-            .unwrap();
-        if let Some(message) = &entry.message {
-            tx.put(&marker, "message", message.as_slice().to_vec())
+            tx.get(&paths.signatures, 0).unwrap().unwrap().1
+        } else {
+            let marker = tx
+                .insert_object(&paths.signatures, 0, ObjType::Map)
                 .unwrap();
-        }
-        if let Some(witness) = &entry.inherited {
-            let inherited = tx.put_object(&marker, "inherited", ObjType::Map).unwrap();
-            tx.put(&inherited, "originDoc", witness.origin_doc.to_string())
+            tx.put(&marker, "signature", entry.packed().to_vec())
                 .unwrap();
-            tx.put(&inherited, "message", witness.message.as_slice().to_vec())
-                .unwrap();
-            if let Some(value) = &witness.value {
-                tx.put(&inherited, "value", value.as_slice().to_vec())
+            if let Some(message) = &entry.message {
+                tx.put(&marker, "message", message.as_slice().to_vec())
                     .unwrap();
             }
-        }
+            if let Some(witness) = &entry.inherited {
+                let inherited = tx.put_object(&marker, "inherited", ObjType::Map).unwrap();
+                tx.put(&inherited, "originDoc", witness.origin_doc.to_string())
+                    .unwrap();
+                tx.put(&inherited, "message", witness.message.as_slice().to_vec())
+                    .unwrap();
+                if let Some(value) = &witness.value {
+                    tx.put(&inherited, "value", value.as_slice().to_vec())
+                        .unwrap();
+                }
+            }
+            marker
+        };
         let hash = tx.commit().0.unwrap();
         (marker, hash)
     }
@@ -335,16 +344,42 @@ fn competing_bad_and_incomplete_entries_do_not_erase_accepted_evidence() {
     let (good, _, signed) = fixture.write(Some(&NativeValue::Str("good".into())));
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
-    let bad = tx
-        .insert_object(&paths.signatures, 1, ObjType::Map)
-        .unwrap();
-    tx.put(&bad, "actorUuid", fixture.actor.to_string())
-        .unwrap();
-    tx.put(&bad, "docUuid", fixture.doc_uuid.to_string())
-        .unwrap();
-    tx.put(&bad, "signature", vec![0_u8; 64]).unwrap();
+    // A well-formed entry whose signature does not verify.
+    let forged = DatumSignature {
+        extra: Default::default(),
+        actor_uuid: fixture.actor,
+        doc_uuid: fixture.doc_uuid,
+        signature: SignatureBytes::try_from([0_u8; 64].as_slice()).unwrap(),
+        message: None,
+        inherited: None,
+    };
+    tx.insert(
+        &paths.signatures,
+        1,
+        ScalarValue::Bytes(forged.packed().to_vec()),
+    )
+    .unwrap();
+    let bad = tx.get(&paths.signatures, 1).unwrap().unwrap().1;
+    // What a peer may write instead of an entry: a packed value of the wrong length, one with an
+    // unknown format byte, and a carried map whose `signature` is not a packed value. Each is
+    // malformed evidence about its own entry, never a panic and never an effect on the others.
+    let mut unknown_format = forged.packed();
+    unknown_format[0] = 0x02;
+    let malformed = [
+        forged.packed()[..96].to_vec(),
+        unknown_format.to_vec(),
+        vec![0x01; 98],
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, bytes)| {
+        tx.insert(&paths.signatures, 2 + index, ScalarValue::Bytes(bytes))
+            .unwrap();
+        tx.get(&paths.signatures, 2 + index).unwrap().unwrap().1
+    })
+    .collect::<Vec<_>>();
     let incomplete = tx
-        .insert_object(&paths.signatures, 2, ObjType::Map)
+        .insert_object(&paths.signatures, 5, ObjType::Map)
         .unwrap();
     tx.put(&incomplete, "signature", vec![0_u8; 64]).unwrap();
     tx.commit();
@@ -355,7 +390,7 @@ fn competing_bad_and_incomplete_entries_do_not_erase_accepted_evidence() {
         HistoryBudget::default(),
     )
     .unwrap();
-    assert_eq!(claims.len(), 3);
+    assert_eq!(claims.len(), 6);
     assert_eq!(
         accepted(
             claims
@@ -376,24 +411,43 @@ fn competing_bad_and_incomplete_entries_do_not_erase_accepted_evidence() {
             .result,
         ClaimHistoryResult::ProvenForgery(ClaimHistoryError::InvalidSignature)
     );
-    assert_eq!(
-        claims
-            .iter()
-            .find(|entry| entry.marker == incomplete)
-            .unwrap()
-            .result,
-        ClaimHistoryResult::ProvenForgery(ClaimHistoryError::MalformedWitness("metadata text"))
-    );
+    for marker in malformed.iter().chain([&incomplete]) {
+        assert_eq!(
+            claims
+                .iter()
+                .find(|entry| &entry.marker == marker)
+                .unwrap()
+                .result,
+            ClaimHistoryResult::ProvenForgery(ClaimHistoryError::MalformedWitness(
+                "signature entry"
+            ))
+        );
+    }
 }
 
+/// A carried entry is a map, which can be changed in place after the change that introduced it;
+/// the introduction's claim stands and the current set shows the entry changed.
 #[test]
-fn mutated_signature_is_not_backdated_by_frontier_cache() {
+fn mutated_carried_signature_is_not_backdated_by_frontier_cache() {
     let mut fixture = Fixture::new();
-    let (marker, _, signed) = fixture.write(Some(&NativeValue::Str("first".into())));
+    let value = NativeValue::Str("first".into());
+    let signed = fixture.signed(Some(&value));
+    let entry = DatumSignature {
+        extra: Default::default(),
+        actor_uuid: fixture.actor,
+        doc_uuid: fixture.doc_uuid,
+        signature: signed.signature.clone(),
+        message: Some(Bytes::from(signed.claim.signing_bytes().unwrap())),
+        inherited: None,
+    };
+    let (marker, _) = fixture.install_entry(Some(&value), &entry);
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
     tx.put(&paths.datums, DATUM, "later").unwrap();
-    tx.put(&marker, "signature", vec![0_u8; 64]).unwrap();
+    let mut mutated = entry.clone();
+    mutated.signature = SignatureBytes::try_from([0_u8; 64].as_slice()).unwrap();
+    tx.put(&marker, "signature", mutated.packed().to_vec())
+        .unwrap();
     tx.commit();
     assert_eq!(accepted(fixture.reconstruct(&marker)).claim, signed.claim);
     let entries = reconstruct_current_claims(
@@ -411,6 +465,46 @@ fn mutated_signature_is_not_backdated_by_frontier_cache() {
                 "signature entry changed after introduction"
             ))
         }]
+    );
+}
+
+/// An ordinary entry is a scalar and cannot be edited in place: replacing it makes a new entry,
+/// judged on its own introduction, while the replaced one still reconstructs as it was.
+#[test]
+fn a_replaced_ordinary_entry_is_a_new_entry_judged_on_its_own_introduction() {
+    let mut fixture = Fixture::new();
+    let (marker, _, signed) = fixture.write(Some(&NativeValue::Str("first".into())));
+    let paths = fixture.paths();
+    let forged = DatumSignature {
+        extra: Default::default(),
+        actor_uuid: fixture.actor,
+        doc_uuid: fixture.doc_uuid,
+        signature: SignatureBytes::try_from([0_u8; 64].as_slice()).unwrap(),
+        message: None,
+        inherited: None,
+    };
+    let mut tx = fixture.doc.transaction();
+    tx.put(&paths.datums, DATUM, "later").unwrap();
+    tx.put(
+        &paths.signatures,
+        0,
+        ScalarValue::Bytes(forged.packed().to_vec()),
+    )
+    .unwrap();
+    tx.commit();
+    assert_eq!(accepted(fixture.reconstruct(&marker)).claim, signed.claim);
+    let entries = reconstruct_current_claims(
+        &fixture.doc,
+        &fixture.datum,
+        &fixture.doc.get_heads(),
+        HistoryBudget::default(),
+    )
+    .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_ne!(entries[0].marker, marker);
+    assert_eq!(
+        entries[0].result,
+        ClaimHistoryResult::ProvenForgery(ClaimHistoryError::InvalidSignature)
     );
 }
 
@@ -439,16 +533,22 @@ fn distinct_markers_in_one_change_have_independent_verdicts() {
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
     tx.put(&paths.datums, DATUM, "same").unwrap();
+    let packed = DatumSignature {
+        extra: Default::default(),
+        actor_uuid: fixture.actor,
+        doc_uuid: fixture.doc_uuid,
+        signature: signed.signature.clone(),
+        message: None,
+        inherited: None,
+    }
+    .packed();
     for index in 0..2 {
-        let marker = tx
-            .insert_object(&paths.signatures, index, ObjType::Map)
-            .unwrap();
-        tx.put(&marker, "actorUuid", fixture.actor.to_string())
-            .unwrap();
-        tx.put(&marker, "docUuid", fixture.doc_uuid.to_string())
-            .unwrap();
-        tx.put(&marker, "signature", signed.signature.as_bytes().to_vec())
-            .unwrap();
+        tx.insert(
+            &paths.signatures,
+            index,
+            ScalarValue::Bytes(packed.to_vec()),
+        )
+        .unwrap();
     }
     let hash = tx.commit().0.unwrap();
     let claims = reconstruct_current_claims(

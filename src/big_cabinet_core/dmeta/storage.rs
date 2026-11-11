@@ -53,7 +53,6 @@ impl From<CodecError> for StorageError {
 pub struct DmetaSchema {
     root: CompiledSchema,
     created_at: CompiledSchema,
-    updated_at: CompiledSchema,
     datum: CompiledSchema,
     actor: CompiledSchema,
 }
@@ -62,7 +61,6 @@ impl DmetaSchema {
     pub fn new(root: CompiledSchema) -> Result<Self, CodecError> {
         Ok(Self {
             created_at: root.member(&["createdAt"])?,
-            updated_at: root.member(&["updatedAt"])?,
             // `datums` and `actors` are keyed maps: every member shares one declaration.
             datum: root.member(&["datums", ""])?,
             actor: root.member(&["actors", ""])?,
@@ -222,7 +220,7 @@ impl Dmeta {
     /// preserving the identity of every signature entry it retains.
     ///
     /// Only the named parts are validated and reconciled, each against its own member schema:
-    /// dmeta's `updatedAt`, each named datum's metadata, and the bindings the write needs (the
+    /// each named datum's metadata, and the bindings the write needs (the
     /// actor, the `docUuid`, and the named datums' aliases). A binding is immutable, so one already
     /// stored is checked against this dmeta's and never rewritten, and one this dmeta adds must not
     /// collide with what any concurrent copy of the index holds. The rest of the stored dmeta is
@@ -283,13 +281,6 @@ impl Dmeta {
             let new_actor = !bound(&tx, &copies, &actors, "actors", write.actor, |held, id| {
                 actor_matches(&tx, held, id, actor)
             })?;
-            let mut updated_at =
-                serde_json::to_value(&self.updated_at).expect("timestamps serialize to JSON");
-            let base = tx
-                .get(&map, "updatedAt")?
-                .map(|_| hydrate_value(&tx, &map, "updatedAt".into(), &schema.updated_at))
-                .transpose()?;
-            reconcile_set(&mut tx, &map, "updatedAt", &mut updated_at, base.as_ref())?;
             let datums = ensure_object(&mut tx, &map, "datums".into(), ObjType::Map)?;
             let mut entries = Vec::with_capacity(write.datums.len());
             for datum_key in write.datums {
@@ -682,7 +673,15 @@ fn reconcile_set(
             continue;
         }
         if field == "signatures" {
-            tx.insert_object(&list, retained.len(), ObjType::Map)?;
+            // An ordinary entry is one bytes scalar (ADR 020, the dmeta cut, item 2): its identity
+            // is its own bytes, so inserting it is one operation. A write never produces the
+            // carried map form, and the declared schema holds only the bytes form.
+            let packed = value
+                .get("$bytes")
+                .and_then(Value::as_str)
+                .and_then(|text| data_encoding::BASE64.decode(text.as_bytes()).ok())
+                .expect("an ordinary signature entry is a bytes object");
+            tx.insert(&list, retained.len(), ScalarValue::Bytes(packed))?;
         } else {
             let instant: jiff::Timestamp = value
                 .as_str()

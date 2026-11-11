@@ -282,9 +282,8 @@ impl DocsService {
                 actor_url: plan.actor.url.clone(),
                 delegation: Some(plan.actor.certificate.clone()),
             });
-        dmeta.updated_at = vec![plan.now];
         // Only what this write changed is validated and written back: its datums' metadata, the
-        // bindings it relies on and `updatedAt`. The rest of the hydrated dmeta only informed the
+        // bindings it relies on. The rest of the hydrated dmeta only informed the
         // alias and `docUuid` choices above.
         let tx = dmeta
             .write_atomic(

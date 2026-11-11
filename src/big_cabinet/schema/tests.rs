@@ -263,7 +263,7 @@ fn core_datums_are_admitted_like_registered_ones_and_keep_their_narrowing() {
     for invalid in [
         json!({"$type": tag, "createdAt": "not an instant"}),
         json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "actors": {"not-a-uuid": {"pubkey": "z", "actorUrl": "https://example.test"}}}),
-        json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "datums": {"org.example.note/main": {"deletedAt": [], "signatures": [{"actorUuid": "not-a-uuid", "signature": {"$bytes": "AQ=="}}]}}}),
+        json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "datums": {"org.example.note/main": {"deletedAt": [], "signatures": [{"signature": {"$bytes": "AQ=="}}]}}}),
         json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "actors": {"01a15688-2519-7ea0-a1ea-421237f5c0cc": {"pubkey": "z", "actorUrl": "https://example.test", "delegation": "not bytes"}}}),
     ] {
         assert!(

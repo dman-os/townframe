@@ -186,8 +186,6 @@ pub struct ActorMetadata {
 pub struct Dmeta {
     pub created_at: Timestamp,
     #[serde(default)]
-    pub updated_at: Vec<Timestamp>,
-    #[serde(default)]
     pub actors: BTreeMap<Uuid7, ActorMetadata>,
     /// Which document each `docUuid` names. A normal branch carries its origin's changes, and with
     /// them the origin's signature entries and this index's bindings for the origin; merging back
@@ -208,7 +206,6 @@ impl Dmeta {
     pub fn new(created_at: Timestamp) -> Self {
         Self {
             created_at,
-            updated_at: Vec::new(),
             actors: BTreeMap::new(),
             doc_uuids: BTreeMap::new(),
             datums: BTreeMap::new(),
@@ -331,27 +328,147 @@ pub struct BranchPath {
 
 /// One entry in a datum's competing set of signatures.
 ///
-/// `inherited` is set only for a signature carried over a compaction, where the history its
-/// message would be reconstructed from is gone. Every other signature, including one that arrived
-/// with a branch's or a merge's changes, has none.
-#[macros::datum]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
+/// An ordinary entry is stored as **one bytes value**: the format byte `0x01`, the `actorUuid` (16
+/// raw bytes), the `docUuid` (16 raw bytes) and the 64 signature bytes, 97 bytes in all, inserted
+/// as a scalar into the datum's `signatures` list (ADR 020, the dmeta cut, item 2). A scalar is
+/// one operation where a `{actorUuid, docUuid, signature}` map was a container and three members,
+/// and a document's load time follows its operation count. `docUuid` stays in every entry because
+/// a branch's writes bind their own and shared history cannot tell which document introduced one.
+///
+/// An entry that has to carry a `message` or an `inherited` witness (export, compaction) is a map
+/// whose `signature` member is that same packed value, with the carried members beside it; an
+/// ordinary write never produces one. `inherited` is set only for a signature carried over a
+/// compaction, where the history its message would be reconstructed from is gone. Every other
+/// signature, including one that arrived with a branch's or a merge's changes, has none.
+///
+/// The declared schema is the ordinary form: Lexicon has no type that is either bytes or a map, so
+/// the carried form is not storable through the codec until compaction defines how the position
+/// widens. The serde form holds both, which is what verification and export work on.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatumSignature {
     pub actor_uuid: Uuid7,
     pub signature: SignatureBytes,
     // The document this entry was introduced on, through the `docUuids` binding visible at its
     // introduction. A branch or a merge moves the entry to another document unchanged, so the
-    // entry cannot assume the document holding it is the one its claim names. (A plain comment: a
-    // doc comment would become a description beside the UUID's `$ref`, which Lexicon cannot state.)
+    // entry cannot assume the document holding it is the one its claim names.
     pub doc_uuid: Uuid7,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<Bytes>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited: Option<InheritedWitness>,
-    #[serde(flatten)]
+    /// Members of a carried-form map this declaration does not name, kept so that a reader that
+    /// has not been taught a new field does not delete it on the way back. An ordinary entry has
+    /// none, which is what makes it the bare bytes value.
     pub extra: crate::datum::Extra,
+}
+
+impl DatumSignature {
+    /// The format byte that opens a packed entry.
+    const PACKED_FORMAT: u8 = 0x01;
+    /// The length of a packed entry: the format byte, two UUIDs and a signature.
+    pub const PACKED_LENGTH: usize = 1 + 16 + 16 + 64;
+
+    /// The packed value an entry stores: format byte, actor UUID, document UUID, signature.
+    pub fn packed(&self) -> [u8; Self::PACKED_LENGTH] {
+        let mut packed = [0; Self::PACKED_LENGTH];
+        packed[0] = Self::PACKED_FORMAT;
+        packed[1..17].copy_from_slice(self.actor_uuid.as_uuid().as_bytes());
+        packed[17..33].copy_from_slice(self.doc_uuid.as_uuid().as_bytes());
+        packed[33..].copy_from_slice(self.signature.as_bytes());
+        packed
+    }
+
+    /// Decode a packed entry, which a peer may have written: a wrong length, an unknown format
+    /// byte or a UUID that is not a v7 one is refused rather than read as some other entry.
+    pub fn from_packed(bytes: &[u8]) -> Result<Self, DmetaError> {
+        let bytes: &[u8; Self::PACKED_LENGTH] = bytes
+            .try_into()
+            .map_err(|_| DmetaError::MalformedSignatureEntry)?;
+        if bytes[0] != Self::PACKED_FORMAT {
+            return Err(DmetaError::MalformedSignatureEntry);
+        }
+        let uuid = |range: std::ops::Range<usize>| {
+            Uuid7::try_from(Uuid::from_slice(&bytes[range]).expect("sixteen bytes are a UUID"))
+        };
+        Ok(Self {
+            actor_uuid: uuid(1..17)?,
+            doc_uuid: uuid(17..33)?,
+            signature: SignatureBytes::try_from(&bytes[33..])?,
+            message: None,
+            inherited: None,
+            extra: crate::datum::Extra::new(),
+        })
+    }
+}
+
+impl Serialize for DatumSignature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let packed = Bytes::from(self.packed().to_vec());
+        if self.message.is_none() && self.inherited.is_none() && self.extra.is_empty() {
+            return packed.serialize(serializer);
+        }
+        let mut object = serializer.serialize_map(None)?;
+        object.serialize_entry("signature", &packed)?;
+        if let Some(message) = &self.message {
+            object.serialize_entry("message", message)?;
+        }
+        if let Some(inherited) = &self.inherited {
+            object.serialize_entry("inherited", inherited)?;
+        }
+        for (name, member) in &self.extra {
+            object.serialize_entry(name, member)?;
+        }
+        object.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for DatumSignature {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let serde_json::Value::Object(mut members) = serde_json::Value::deserialize(deserializer)?
+        else {
+            return Err(D::Error::custom(
+                "a signature entry is a bytes value or a map",
+            ));
+        };
+        if members.contains_key("$bytes") {
+            let packed: Bytes = serde_json::from_value(members.into()).map_err(D::Error::custom)?;
+            return Self::from_packed(packed.as_slice()).map_err(D::Error::custom);
+        }
+        let packed: Bytes = serde_json::from_value(
+            members
+                .remove("signature")
+                .ok_or_else(|| D::Error::custom("a carried signature entry has a signature"))?,
+        )
+        .map_err(D::Error::custom)?;
+        let mut entry = Self::from_packed(packed.as_slice()).map_err(D::Error::custom)?;
+        entry.message = members
+            .remove("message")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?;
+        entry.inherited = members
+            .remove("inherited")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(D::Error::custom)?;
+        entry.extra = members.into_iter().collect();
+        Ok(entry)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DatumSignature {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DatumSignature".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        Bytes::json_schema(generator)
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -703,6 +820,8 @@ pub enum DmetaError {
     InvalidPublicKey,
     #[error("invalid Ed25519 signature")]
     InvalidSignature,
+    #[error("a signature entry is the format byte 0x01, two UUIDv7s and a 64 byte signature")]
+    MalformedSignatureEntry,
 }
 
 impl DatumClaim {
