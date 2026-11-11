@@ -1,4 +1,4 @@
-//! What the listing methods (`ListDocs`, `ListKnownDrawers`, `ListDrawers`) answer: one row type
+//! What the listing methods (`ListDocs`, `ListKnownDrawers`, `ListDrawers`, `ListDocDrawers`) answer: one row type
 //! per listing and the object body that carries the rows.
 
 use super::Drawer;
@@ -59,4 +59,21 @@ pub struct ListedDrawer {
 #[serde(rename_all = "camelCase")]
 pub struct ListedDrawers {
     pub drawers: Vec<ListedDrawer>,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocDrawer {
+    pub drawer_id: DrawerId,
+    /// What the presented authority reaches the document at through this drawer.
+    pub access: Access,
+}
+
+/// The result of [`ListDocDrawers`](super::protocol::ListDocDrawers), ordered by drawer id.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocDrawers {
+    pub drawers: Vec<DocDrawer>,
 }

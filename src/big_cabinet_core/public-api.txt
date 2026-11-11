@@ -304,6 +304,8 @@ pub struct big_cabinet_core::drawer::SingleGroupLayout  { meta_group: GroupKey, 
 pub struct big_cabinet_core::drawer::UnknownDrawerAccess  { 0: String }
 pub struct big_cabinet_core::drawer::UnknownLayoutTag  { 0: String }
 pub struct big_cabinet_core::drawer::UnknownMetaRoot  { 0: String }
+pub struct big_cabinet_core::drawer::listing::DocDrawer  { drawer_id: DrawerId, access: Access }
+pub struct big_cabinet_core::drawer::listing::DocDrawers  { drawers: Vec < DocDrawer > }
 pub struct big_cabinet_core::drawer::listing::KnownDrawer  { drawer_id: DrawerId, mirror: bool }
 pub struct big_cabinet_core::drawer::listing::KnownDrawers  { drawers: Vec < KnownDrawer > }
 pub struct big_cabinet_core::drawer::listing::ListedDoc  { doc_id: DocId, access: Access, via: Option < DrawerId > }
@@ -322,6 +324,7 @@ pub struct big_cabinet_core::drawer::protocol::ForgetDrawer  { capability: CapId
 pub struct big_cabinet_core::drawer::protocol::GetDrawer  { capability: CapId, drawer_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::GrantDrawer  { capability: CapId, drawer_id: DrawerId, subject_id: Uuid7, access: Access }
 pub struct big_cabinet_core::drawer::protocol::InvitePrincipal  { capability: CapId, drawer_id: DrawerId, principal: Principal, access: Access }
+pub struct big_cabinet_core::drawer::protocol::ListDocDrawers  { doc_id: DocId }
 pub struct big_cabinet_core::drawer::protocol::ListDocs  { capability: CapId, drawer_id: DrawerId, offset: u64, limit: Option < u64 > }
 pub struct big_cabinet_core::drawer::protocol::ListDrawers  { capability: CapId }
 pub struct big_cabinet_core::drawer::protocol::ListKnownDrawers  { capability: CapId }
@@ -437,6 +440,8 @@ pub use big_cabinet_core::doc::inspection :: SignatureEvidence
 pub use big_cabinet_core::doc::inspection :: UnsafeDatumInspection
 pub use big_cabinet_core::doc::inspection :: UnsafeInspectDatum
 pub use big_cabinet_core::doc::inspection :: VerifiedSignatureEvidence
+pub use big_cabinet_core::drawer::protocol::super :: listing :: DocDrawer
+pub use big_cabinet_core::drawer::protocol::super :: listing :: DocDrawers
 pub use big_cabinet_core::drawer::protocol::super :: listing :: KnownDrawer
 pub use big_cabinet_core::drawer::protocol::super :: listing :: KnownDrawers
 pub use big_cabinet_core::drawer::protocol::super :: listing :: ListedDoc

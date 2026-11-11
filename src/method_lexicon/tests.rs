@@ -268,6 +268,10 @@ fn valid_requests() -> Vec<(&'static str, Value)> {
             json!({"capability": cap}),
         ),
         (
+            "org.example.daybook.drawers.listDocDrawers",
+            json!({"docId": doc}),
+        ),
+        (
             "org.example.daybook.drawers.setDrawerSuccessor",
             json!({"capability": cap, "drawerId": doc, "successor": doc}),
         ),

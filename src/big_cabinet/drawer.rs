@@ -34,6 +34,7 @@ mod keys;
 mod known;
 mod ledger;
 mod list;
+mod list_doc_drawers;
 mod list_docs;
 mod mirror;
 mod principal;
@@ -111,6 +112,8 @@ use big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::CreateMetaDoc;
+use big_cabinet_core::drawer::protocol::DocDrawer;
+use big_cabinet_core::drawer::protocol::DocDrawers;
 use big_cabinet_core::drawer::protocol::DrawerCreated;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerRecord;
@@ -125,6 +128,7 @@ use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::InvitePrincipal;
 use big_cabinet_core::drawer::protocol::KnownDrawer;
 use big_cabinet_core::drawer::protocol::KnownDrawers;
+use big_cabinet_core::drawer::protocol::ListDocDrawers;
 use big_cabinet_core::drawer::protocol::ListDocs;
 use big_cabinet_core::drawer::protocol::ListDrawers;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
@@ -359,6 +363,7 @@ service_utils_rs::bind_service_protocol! {
             SetDrawerSuccessor(SetDrawerSuccessor),
             ResolveDrawerSuccessor(ResolveDrawerSuccessor),
             ListDrawers(ListDrawers),
+            ListDocDrawers(ListDocDrawers),
             GrantDrawer(GrantDrawer),
             RevokeDrawer(RevokeDrawer),
             InvitePrincipal(InvitePrincipal),
