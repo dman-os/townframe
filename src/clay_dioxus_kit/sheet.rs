@@ -130,7 +130,10 @@ mod tests {
 
             let scrim = page.by_role("button", "Dismiss Details");
             page.click(scrim);
-            assert!(!page.has_role("dialog", "Details"), "{width:?} scrim dismiss");
+            assert!(
+                !page.has_role("dialog", "Details"),
+                "{width:?} scrim dismiss"
+            );
             assert!(!page.has_role("button", "Dismiss Details"));
 
             let open = page.by_role("button", "Open sheet");
@@ -139,11 +142,17 @@ mod tests {
 
             let dialog = page.by_role("dialog", "Details");
             page.key(dialog, Key::Named(NamedKey::Escape));
-            assert!(!page.has_role("dialog", "Details"), "{width:?} escape dismiss");
+            assert!(
+                !page.has_role("dialog", "Details"),
+                "{width:?} escape dismiss"
+            );
 
             let open = page.by_role("button", "Open sheet");
             page.click(open);
-            assert!(page.has_role("dialog", "Details"), "{width:?} reopens again");
+            assert!(
+                page.has_role("dialog", "Details"),
+                "{width:?} reopens again"
+            );
         }
     }
 }

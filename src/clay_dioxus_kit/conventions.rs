@@ -381,7 +381,8 @@ fn tabindex_is_only_the_renderer_focus_gate() {
             continue;
         }
         violations.extend(source.violations("KIT-052", |line| {
-            let modal_panel = ["headless/sheet.rs", "headless/drawer.rs"].contains(&source.path.as_str());
+            let modal_panel =
+                ["headless/sheet.rs", "headless/drawer.rs"].contains(&source.path.as_str());
             if line.contains("tabindex") && source.path != "headless/sections.rs" && !modal_panel {
                 return Some("`tabindex` outside the Sections renderer gate".into());
             }

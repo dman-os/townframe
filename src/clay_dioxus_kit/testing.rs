@@ -17,44 +17,44 @@ use dioxus_core::Event;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
 use dioxus_core::WriteMutations;
-use dioxus_html::Code;
-use dioxus_html::HtmlEventConverter;
-use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::AnimationData;
 use dioxus_html::BeforeInputData;
 use dioxus_html::CancelData;
 use dioxus_html::ClipboardData;
+use dioxus_html::Code;
 use dioxus_html::CompositionData;
 use dioxus_html::DragData;
+use dioxus_html::EventData;
 use dioxus_html::FocusData;
 use dioxus_html::FormData;
+use dioxus_html::HtmlEventConverter;
 use dioxus_html::ImageData;
+use dioxus_html::Key;
 use dioxus_html::KeyboardData;
+use dioxus_html::Location;
 use dioxus_html::MediaData;
+use dioxus_html::Modifiers;
+use dioxus_html::MountedData;
+use dioxus_html::MountedResult;
 use dioxus_html::MouseData;
+use dioxus_html::PlatformEventData;
 use dioxus_html::PointerData;
+use dioxus_html::RenderedElementBacking;
 use dioxus_html::ResizeData;
 use dioxus_html::ScrollData;
 use dioxus_html::SelectionData;
+use dioxus_html::SerializedHtmlEventConverter;
+use dioxus_html::SerializedKeyboardData;
+use dioxus_html::SerializedMouseData;
+use dioxus_html::SerializedPointInteraction;
+use dioxus_html::SerializedPointerData;
 use dioxus_html::ToggleData;
 use dioxus_html::TouchData;
 use dioxus_html::TransitionData;
 use dioxus_html::VisibleData;
 use dioxus_html::WheelData;
-use dioxus_html::MountedData;
-use dioxus_html::MountedResult;
-use dioxus_html::PlatformEventData;
-use dioxus_html::RenderedElementBacking;
-use dioxus_html::EventData;
-use dioxus_html::Key;
-use dioxus_html::Location;
-use dioxus_html::Modifiers;
-use dioxus_html::SerializedKeyboardData;
-use dioxus_html::SerializedMouseData;
-use dioxus_html::SerializedPointInteraction;
-use dioxus_html::SerializedPointerData;
-use std::collections::BTreeMap;
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -903,7 +903,8 @@ impl Page {
             fn set_focus(
                 &self,
                 focus: bool,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MountedResult<()>>>> {
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MountedResult<()>>>>
+            {
                 self.0.set(Some(focus));
                 Box::pin(async { Ok(()) })
             }
@@ -915,7 +916,9 @@ impl Page {
             RenderTargetId::ROOT,
             "mounted",
             Event::new(
-                Rc::new(PlatformEventData::new(Box::new(MountedPayload::new(Cell::new(Some(data)))))),
+                Rc::new(PlatformEventData::new(Box::new(MountedPayload::new(
+                    Cell::new(Some(data)),
+                )))),
                 false,
             ),
             element,
@@ -923,7 +926,7 @@ impl Page {
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         {
             let mut work = std::pin::pin!(self.vdom.wait_for_work());
-            let _ = std::future::Future::poll(work.as_mut(), &mut context);
+            let _poll: std::task::Poll<()> = std::future::Future::poll(work.as_mut(), &mut context);
         }
         self.settle();
         focused
