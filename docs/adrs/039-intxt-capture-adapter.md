@@ -1,6 +1,6 @@
 # ADR 039: The capture adapter
 
-**Status:** Proposed. Rewritten 2026-11-10 for worktrees as the capture unit (ledger D29); the earlier ref-driven design (D26) is superseded.
+**Status:** Proposed. Rewritten 2026-11-10 for worktrees as the capture unit (ledger D29); the earlier ref-driven design (D26) is superseded. §4 revised 2026-11-11 for D41 (observe on the host, record in the nodule).
 
 **Depends on:** ADR 040 (the datums it writes), ADR 036 (intxt entries and `body`), ADR 019 (drawers), ADR 037 (acting as a descendant actor, its open question 2). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F10 and F12 (document limits, write cost); decisions D29–D35.
 
@@ -47,7 +47,7 @@ A prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import`, ledger F7) re
 
 ## 4. How it runs
 
-The adapter is a subcommand of the intxt CLI, `capture <hook event>`, reading the hook's JSON on stdin. For Claude Code it is installed as hooks:
+Capture has two halves (ledger D41). **Observing** happens on the agent's machine: reading the hook's JSON on stdin, snapshotting the worktree, reading git and jj state, and importing the transcript need the filesystem, which a nodule cannot reach. It is a `day` command, `day intxt capture <hook event>`. **Recording** is datum work: sequencing a worktree's ops, writing file docs, the session document and commit datums. It is an operation of intxt's nodule, `recordObservations`, which the `day` command calls with everything one hook invocation observed, so the single-writer order of each worktree's op log is kept in the node rather than by file locks between hook processes. Until that operation exists the `day` command writes the datums itself as the operator, and when nodules can be granted a worktree's files the observing half moves into the nodule too. For Claude Code the command is installed as hooks:
 
 | Hook | What capture does |
 |---|---|
@@ -56,7 +56,7 @@ The adapter is a subcommand of the intxt CLI, `capture <hook event>`, reading th
 | `PostToolUse`, `PostToolUseFailure` (any) | Snapshot again; record differences as ops caused by this tool call; check `HEAD`, refs and jj |
 | `UserPromptSubmit`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | Import the transcript up to now; snapshot; check `HEAD`, refs and jj |
 
-Every invocation first imports the transcript from its stored offset, so any hook brings the session up to date. Hooks of parallel tool calls run concurrently, so each invocation takes a per-worktree file lock. Snapshotting around every tool call, not only shell calls, is what makes the shell-only baseline and edit tools look the same: an edit tool's write is a change in its window like any other, and its patch, when the transcript has one, is only a cross-check. A harness without hooks is recorded by snapshots at session boundaries and by importing its transcript afterwards; changes then have no cause finer than the session.
+Every invocation first imports the transcript from its stored offset, so any hook brings the session up to date. Hooks of parallel tool calls run concurrently: each invocation takes a per-worktree file lock around its snapshot and its local state, and `recordObservations` orders the ops it receives per worktree. Snapshotting around every tool call, not only shell calls, is what makes the shell-only baseline and edit tools look the same: an edit tool's write is a change in its window like any other, and its patch, when the transcript has one, is only a cross-check. A harness without hooks is recorded by snapshots at session boundaries and by importing its transcript afterwards; changes then have no cause finer than the session.
 
 **Errors.** Capture never blocks or feeds the agent. A failure exits non-zero with a message (Claude Code shows it to the operator, not the model), and the next hook retries from the stored state. Exit code 2, which Claude Code feeds back to the model, is never used.
 
