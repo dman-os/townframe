@@ -31,3 +31,12 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/plug_test_manifest/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 5
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"

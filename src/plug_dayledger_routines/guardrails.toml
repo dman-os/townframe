@@ -20,3 +20,12 @@ ceiling = 304
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/plug_dayledger_routines/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 5
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"
