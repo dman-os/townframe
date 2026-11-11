@@ -1,0 +1,20 @@
+[package]
+name = "intxt_capture"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
+intxt_core = { path = "../intxt_core" }
+jiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

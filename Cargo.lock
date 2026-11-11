@@ -8087,6 +8087,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "intxt_capture"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "intxt_core",
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "intxt_core"
 version = "0.1.0"
 dependencies = [
