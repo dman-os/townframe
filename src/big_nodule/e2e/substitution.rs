@@ -206,6 +206,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
                 methods: DispatchScope {
                     operations: [MORE.to_owned()].into(),
                     authorities: ["org.example.remote".to_owned()].into(),
+                    ..Default::default()
                 },
             },
         )

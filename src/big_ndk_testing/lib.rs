@@ -66,13 +66,11 @@ use std::sync::Mutex;
 pub fn node() -> TestNodeBuilder {
     TestNodeBuilder {
         nodules: Vec::new(),
-        ceiling: DispatchScope::default(),
     }
 }
 
 pub struct TestNodeBuilder {
     nodules: Vec<(Cartridge, Box<dyn Registered>)>,
-    ceiling: DispatchScope,
 }
 
 impl TestNodeBuilder {
@@ -89,27 +87,13 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Widens the ceiling of what a nodule can be granted to invoke beyond the authorities of
-    /// the registered cartridges, which it always covers.
-    pub fn with_operation_ceiling(mut self, ceiling: DispatchScope) -> Self {
-        self.ceiling.operations.extend(ceiling.operations);
-        self.ceiling.authorities.extend(ceiling.authorities);
-        self
-    }
-
     /// Boots the node and admits every registered cartridge. The nodules are not enabled: grants are
     /// set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
     pub async fn boot(self) -> TestNode {
-        let Self {
-            nodules,
-            mut ceiling,
-        } = self;
+        let Self { nodules } = self;
         let mut cartridges = Vec::new();
         let mut registered = BTreeMap::new();
         for (cartridge, nodule) in nodules {
-            ceiling
-                .authorities
-                .extend(cartridge.authority.iter().cloned());
             registered.insert(cartridge.id.clone(), nodule);
             cartridges.push(cartridge);
         }
@@ -120,7 +104,6 @@ impl TestNodeBuilder {
             secrets,
             sql,
             big_repo::Storage::memory(&runtime).expect("in-memory repo storage"),
-            ceiling,
         );
         let (node, stop) = BigNode::boot_with(config, move |deps| async move {
             let executor = NativeExecutor::new(registered, deps.dispatch);
@@ -253,7 +236,7 @@ impl TestNode {
 
     /// Sets the methods the nodule of `cartridge_id` may invoke, which it holds as a dispatch
     /// capability minted from them. The grant is bounded by what the nodule's cartridge requested and
-    /// by the node's ceiling, and the record says whether it was applied.
+    /// by the nodule service's own dispatch authority, and the record says whether it was applied.
     pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
         self.nodules(SetNoduleMethodGrants {
             cartridge_id: cartridge_id.clone(),
@@ -298,12 +281,7 @@ async fn secrets() -> Arc<SecretStore> {
     Arc::new(SecretStore::boot_with_store(keyring).await.unwrap())
 }
 
-fn config(
-    secrets: Arc<SecretStore>,
-    sql: Database,
-    storage: big_repo::Storage,
-    nodule_methods: DispatchScope,
-) -> Config {
+fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) -> Config {
     Config {
         repo: big_repo::Config {
             node_identity_seed: [47; 32],
@@ -319,7 +297,6 @@ fn config(
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
         blob_storage: big_blobs::Storage::memory().unwrap(),
-        nodule_methods,
         listeners: Default::default(),
         peers: None,
     }

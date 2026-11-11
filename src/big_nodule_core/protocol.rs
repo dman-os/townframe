@@ -296,19 +296,23 @@ impl From<InventoryError> for NodulesError {
     }
 }
 
+// Every method but `mintNoduleCapability` manages nodules (install, enable, grants, substitution)
+// or reads their configuration, so all of them are privileged: a nodule's dispatch scope never
+// reaches them, which is what keeps a nodule from widening its own grants. Minting a nodule
+// handle only narrows the presented one (`scope.covers`), so it is not privileged.
 method_core::methods! {
     error = NodulesError, nsid_prefix = "org.example.daybook.nodules.";
     MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
-    AdmitNodule => NoduleRecord, procedure, "admitNodule";
-    ConfigureNodule => NoduleRecord, procedure, "configureNodule";
-    SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled";
-    SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants";
-    SetNoduleMethodGrants => NoduleRecord, procedure, "setNoduleMethodGrants";
-    ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution";
-    SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution";
-    UninstallNodule => (), procedure, "uninstallNodule";
-    GetNodule => NoduleRecord, query, "getNodule";
-    ListNodules => NoduleList, query, "listNodules";
+    AdmitNodule => NoduleRecord, procedure, "admitNodule", privileged;
+    ConfigureNodule => NoduleRecord, procedure, "configureNodule", privileged;
+    SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled", privileged;
+    SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants", privileged;
+    SetNoduleMethodGrants => NoduleRecord, procedure, "setNoduleMethodGrants", privileged;
+    ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution", privileged;
+    SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution", privileged;
+    UninstallNodule => (), procedure, "uninstallNodule", privileged;
+    GetNodule => NoduleRecord, query, "getNodule", privileged;
+    ListNodules => NoduleList, query, "listNodules", privileged;
 }
 
 declare_service_protocol! {

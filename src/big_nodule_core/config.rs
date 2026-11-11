@@ -153,6 +153,10 @@ pub struct MethodGrants {
     pub methods: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorities: Vec<String>,
+    /// Whether the nodule may invoke privileged methods (`XrpcMethod::privileged`). The nodule
+    /// service holds no privilege, so a grant that sets this is reported as not applied.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -162,6 +166,7 @@ impl From<MethodGrants> for DispatchScope {
         Self {
             operations: grants.methods.into_iter().collect(),
             authorities: grants.authorities.into_iter().collect(),
+            privileged: grants.privileged,
         }
     }
 }
@@ -171,6 +176,7 @@ impl From<DispatchScope> for MethodGrants {
         Self {
             methods: scope.operations.into_iter().collect(),
             authorities: scope.authorities.into_iter().collect(),
+            privileged: scope.privileged,
             extra: Default::default(),
         }
     }
@@ -1466,6 +1472,7 @@ fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) ->
             .map(|request| request.contract.clone())
             .collect(),
         authorities: BTreeSet::new(),
+        privileged: granted.privileged,
     }
 }
 

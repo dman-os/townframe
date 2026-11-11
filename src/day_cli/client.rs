@@ -127,13 +127,7 @@ impl NodeClient {
     /// so `input` must be an object of primitives (or arrays of them), the shape a query's
     /// Lexicon `parameters` take. The node holds the verb to the method's kind.
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
-        eyre::ensure!(
-            !nsid.is_empty()
-                && nsid
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-'),
-            "`{nsid}` is not an NSID (dot-separated letters, digits and hyphens)"
-        );
+        ensure_nsid(nsid)?;
         match &self.transport {
             Transport::Daemon(client) => {
                 let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
@@ -184,6 +178,19 @@ impl NodeClient {
             }
         }
     }
+}
+
+/// Refuses text that cannot be an NSID or an NSID prefix (an authority): what the router is
+/// keyed by.
+pub fn ensure_nsid(nsid: &str) -> Res<()> {
+    eyre::ensure!(
+        !nsid.is_empty()
+            && nsid
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-'),
+        "`{nsid}` is not an NSID (dot-separated letters, digits and hyphens)"
+    );
+    Ok(())
 }
 
 /// The query string pairs of a query's `input`: each property a pair, an array a pair per item

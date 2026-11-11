@@ -120,6 +120,30 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             assert_eq!(router.claimants(&nsid), [provider_id], "{nsid}");
         }
     }
+    // The methods that introduce authority or manage nodules carry the privileged declaration into
+    // their routes, and those that only narrow what the caller presents do not: a nodule's scope,
+    // which never holds privilege, reaches exactly the second kind.
+    {
+        use big_cabinet_core::authority as authority_methods;
+        use big_nodule_core::protocol as nodule_methods;
+        for (nsid, privileged) in [
+            (authority_methods::OpenActor::XRPC.nsid, true),
+            (authority_methods::MintCapability::XRPC.nsid, true),
+            (authority_methods::AttenuateCapability::XRPC.nsid, false),
+            (authority_methods::RetractCapability::XRPC.nsid, false),
+            (nodule_methods::AdmitNodule::XRPC.nsid, true),
+            (nodule_methods::SetNoduleMethodGrants::XRPC.nsid, true),
+            (nodule_methods::ListNodules::XRPC.nsid, true),
+            (nodule_methods::MintNoduleCapability::XRPC.nsid, false),
+            (big_blobs_core::PutBlob::XRPC.nsid, false),
+        ] {
+            assert_eq!(
+                router.resolve(nsid).unwrap().privileged,
+                privileged,
+                "{nsid}"
+            );
+        }
+    }
     shutdown(node, stop).await;
 }
 

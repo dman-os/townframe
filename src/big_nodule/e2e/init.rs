@@ -744,6 +744,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
                         "org.example.other".to_owned(),
                     ]
                     .into(),
+                    ..Default::default()
                 },
             },
         )
@@ -757,6 +758,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
         DispatchScope {
             operations: [REMOTE.to_owned()].into(),
             authorities: BTreeSet::new(),
+            privileged: false,
         }
     );
     assert_eq!(
@@ -764,6 +766,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
         DispatchScope {
             operations: ["org.example.mail.send".to_owned()].into(),
             authorities: ["org.example.other".to_owned()].into(),
+            privileged: false,
         }
     );
 
@@ -783,6 +786,54 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     assert!(operations.desired.is_empty());
     assert_eq!(operations.unrequested.operations.len(), 1);
     assert_eq!(operations.unrequested.authorities.len(), 2);
+    node.shutdown().await;
+}
+
+/// The nodule service holds every authority but no privilege, so a grant of every authority is
+/// applied while one that asks for privileged methods is refused at the mint and reported on the
+/// record, whatever it names.
+#[tokio::test]
+async fn a_privileged_grant_is_not_applied_though_every_authority_is() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    node.admit(
+        operator,
+        with_requests(
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
+            vec![necessity(REMOTE, Necessity::Optional)],
+        ),
+    )
+    .await
+    .unwrap();
+    node.set_enabled(ALPHA, true).await;
+    let grant = |privileged| {
+        node.call(
+            operator,
+            SetNoduleMethodGrants {
+                cartridge_id: id(ALPHA),
+                methods: DispatchScope {
+                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                    privileged,
+                    ..Default::default()
+                },
+            },
+        )
+    };
+    let status = grant(false).await.unwrap().methods.unwrap();
+    assert!(status.granted, "{status:?}");
+    assert!(!status.desired.privileged);
+
+    let status = grant(true).await.unwrap().methods.unwrap();
+    assert!(!status.granted, "{status:?}");
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("exceeds the dispatch authority"),
+        "{status:?}"
+    );
     node.shutdown().await;
 }
 

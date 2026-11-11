@@ -292,6 +292,10 @@ impl Nodule {
                 .map(|nsid| (*nsid).to_owned())
                 .collect(),
             authorities: BTreeSet::new(),
+            // Privilege is not narrowed by the manifest (a request names a method, not its
+            // declaration), so a grant that asks for it carries it through; the mint then
+            // refuses it unless the nodule service itself holds it.
+            privileged: grants.privileged,
         };
         let unrequested = DispatchScope {
             operations: grants
@@ -310,6 +314,7 @@ impl Nodule {
                 })
                 .cloned()
                 .collect(),
+            privileged: false,
         };
         (applied, unrequested)
     }
