@@ -81,12 +81,14 @@ impl DocsService {
         let merged = target
             .with_document(|doc| -> Result<_, DocsError> {
                 // Every document starts from its creating change, which depends on nothing. Two
-                // documents share history exactly when the target holds the source's.
+                // documents share history exactly when the target holds the source's. Holding is
+                // tested on change metadata: `get_change_by_hash` re-encodes the change by
+                // scanning every operation in the document.
                 let related = fork
                     .get_changes(&[])
                     .iter()
                     .filter(|change| change.deps().is_empty())
-                    .all(|root| doc.get_change_by_hash(&root.hash()).is_some());
+                    .all(|root| doc.get_change_meta_by_hash(&root.hash()).is_some());
                 if !related {
                     return Err(DocsError::UnrelatedHistory);
                 }

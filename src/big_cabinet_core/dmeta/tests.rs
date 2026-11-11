@@ -28,11 +28,9 @@ const PORTABLE_PROOF: &str = r#"{
         "docUuids": {
             "01890f3e-1234-7000-8000-000000000009": "zajdk"
         },
-        "datumUuids": {
-            "01890f3e-1234-7000-8000-000000000001": "org.example.note/main"
-        },
         "datums": {
             "org.example.note/main": {
+                "uuids": {"01890f3e-1234-7000-8000-000000000001": true},
                 "updatedAt": [],
                 "deletedAt": [],
                 "signatures": [{
@@ -104,22 +102,24 @@ fn signature_id_with(byte: u8) -> SignatureId {
 }
 
 #[test]
-fn aliases_retain_concurrency_without_a_reverse_index() {
+fn aliases_retain_concurrency_under_their_datum() {
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
     let key = datum_key("org.example.note/main");
-    dmeta.record_datum_alias(uuid7(2), key.clone()).unwrap();
+    let mut metadata = DatumMetadata {
+        uuids: BTreeMap::from([(uuid7(2), true)]),
+        extra: Default::default(),
+        updated_at: Vec::new(),
+        deleted_at: Vec::new(),
+        signatures: Vec::new(),
+    };
+    dmeta.datums.insert(key.clone(), metadata.clone());
     assert!(!dmeta.has_concurrent_creation(&key));
-    dmeta.record_datum_alias(uuid7(1), key.clone()).unwrap();
+    metadata.uuids.insert(uuid7(1), true);
+    dmeta.datums.insert(key.clone(), metadata);
     assert!(dmeta.has_concurrent_creation(&key));
     assert!(!dmeta.has_concurrent_creation(&datum_key("org.example.note/other")));
-    // The chosen alias is the smallest one visible, and it falls out of the index order.
-    let chosen = dmeta
-        .datum_uuids
-        .iter()
-        .filter(|(_, alias)| **alias == key)
-        .map(|(uuid, _)| *uuid)
-        .min()
-        .unwrap();
+    // The chosen alias is the smallest one, and it falls out of the map order.
+    let chosen = *dmeta.datums[&key].uuids.keys().next().unwrap();
     assert_eq!(chosen, uuid7(1));
     assert_eq!(
         serde_json::from_value::<Dmeta>(serde_json::to_value(&dmeta).unwrap()).unwrap(),
@@ -176,21 +176,6 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
 }
 
 #[test]
-fn a_datum_alias_can_be_repeated_but_never_rebound() {
-    let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
-    let key = datum_key("org.example.note/main");
-    dmeta.record_datum_alias(uuid7(1), key.clone()).unwrap();
-    let original = dmeta.clone();
-    dmeta.record_datum_alias(uuid7(1), key).unwrap();
-    assert_eq!(dmeta, original);
-    assert!(matches!(
-        dmeta.record_datum_alias(uuid7(1), datum_key("org.example.note/other")),
-        Err(DmetaError::ReboundAlias)
-    ));
-    assert_eq!(dmeta, original);
-}
-
-#[test]
 fn uuid7_is_validated_in_values_and_metadata_map_keys() {
     let uuid = uuid7(1);
     assert_eq!(uuid.unix_millis(), 1_688_177_873_460);
@@ -216,9 +201,16 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
             Err(DmetaError::InvalidUuidVersion)
         ));
         assert!(serde_json::from_value::<Uuid7>(serde_json::json!(invalid)).is_err());
-        for member in ["actors", "datumUuids"] {
+        for path in [
+            ["actors"].as_slice(),
+            ["datums", "org.example.note/main", "uuids"].as_slice(),
+        ] {
             let mut malformed = fixture.clone();
-            let map = malformed[member].as_object_mut().unwrap();
+            let map = path
+                .iter()
+                .fold(&mut malformed, |value, member| &mut value[*member])
+                .as_object_mut()
+                .unwrap();
             let valid_key = map.keys().next().unwrap().clone();
             let value = map.remove(&valid_key).unwrap();
             assert!(map.insert(invalid.into(), value).is_none());
@@ -233,12 +225,13 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
 #[test]
 fn deleted_at_is_a_required_list_even_when_empty() {
     let metadata = DatumMetadata {
+        uuids: BTreeMap::new(),
         extra: Default::default(),
         updated_at: Vec::new(),
         deleted_at: Vec::new(),
         signatures: Vec::new(),
     };
-    let json = serde_json::json!({"updatedAt": [], "deletedAt": [], "signatures": []});
+    let json = serde_json::json!({"uuids": {}, "updatedAt": [], "deletedAt": [], "signatures": []});
     assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
     assert_eq!(
         serde_json::from_value::<DatumMetadata>(json).unwrap(),
@@ -623,7 +616,7 @@ fn a_static_openssl_proof_round_trips_and_verifies_without_document_history() {
     assert_eq!(restored, fixture);
     let value = native_value();
     let claim = claim_for(&value);
-    assert_eq!(restored.datum_uuids[&claim.chosen_uuid], claim.datum_key);
+    assert!(restored.datums[&claim.datum_key].uuids[&claim.chosen_uuid]);
     let entry = &restored.datums[&claim.datum_key].signatures[0];
     let actor = &restored.actors[&entry.actor_uuid];
     assert_eq!(actor.delegation, Some(Bytes::from(vec![1, 2, 3, 255])));
@@ -718,7 +711,7 @@ utils_rs::table_tests! {
         match missing {
             "none" => {}
             "actor" => { dmeta.actors.remove(&claim.actor_uuid).unwrap(); }
-            "alias" => { dmeta.datum_uuids.remove(&claim.chosen_uuid).unwrap(); }
+            "alias" => { dmeta.datums.get_mut(&claim.datum_key).unwrap().uuids.remove(&claim.chosen_uuid).unwrap(); }
             "document" => { dmeta.doc_uuids.remove(&uuid7(9)).unwrap(); }
             "rebound document" => { dmeta.doc_uuids.insert(uuid7(9), DocId::new(b"other")).unwrap(); }
             "certificate" => dmeta.actors.get_mut(&claim.actor_uuid).unwrap().delegation = None,
@@ -789,15 +782,13 @@ fn a_corrupted_other_datum_does_not_poison_a_valid_datum() {
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
     assert!(dmeta.actors.insert(claim.actor_uuid, actor).is_none());
     for (datum_claim, entry) in [(&claim, valid), (&other_claim, corrupt)] {
-        dmeta
-            .record_datum_alias(datum_claim.chosen_uuid, datum_claim.datum_key.clone())
-            .unwrap();
         assert!(
             dmeta
                 .datums
                 .insert(
                     datum_claim.datum_key.clone(),
                     DatumMetadata {
+                        uuids: BTreeMap::from([(datum_claim.chosen_uuid, true)]),
                         extra: Default::default(),
                         updated_at: Vec::new(),
                         deleted_at: Vec::new(),

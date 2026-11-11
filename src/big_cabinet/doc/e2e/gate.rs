@@ -555,18 +555,10 @@ async fn signed_outside(
             signer.actor.certificate.as_slice().to_vec(),
         )
         .unwrap();
-        let aliases = object(&tx, &dmeta, "datumUuids");
-        let target = datum.to_string();
+        let metadata = object(&tx, &dmeta, "datums");
+        let aliases = object(&tx, &object(&tx, &metadata, &datum.to_string()), "uuids");
         let chosen = tx
             .keys(&aliases)
-            .filter(|alias| {
-                tx.get(&aliases, alias.as_str())
-                    .unwrap()
-                    .unwrap()
-                    .0
-                    .to_str()
-                    == Some(target.as_str())
-            })
             .map(|alias| alias.parse::<uuid::Uuid>().unwrap())
             .min()
             .unwrap();

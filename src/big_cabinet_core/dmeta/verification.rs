@@ -111,7 +111,7 @@ impl Dmeta {
             // A compaction witness names its origin itself; every other entry names it through the
             // binding of its `docUuid`.
             if signed.claim.datum_key != *key
-                || self.datum_uuids.get(&signed.claim.chosen_uuid) != Some(key)
+                || !metadata.uuids.contains_key(&signed.claim.chosen_uuid)
                 || (entry.inherited.is_none()
                     && self.doc_uuids.get(&entry.doc_uuid) != Some(&signed.claim.origin_document))
             {

@@ -727,43 +727,27 @@ impl Reconstruction<'_> {
         bound.ok_or(ClaimHistoryError::MalformedWitness("unbound document UUID"))
     }
 
+    /// The aliases bound to this datum at `heads`: the union of `uuids` across every copy of its
+    /// metadata map. Concurrent creators of the datum each created `datums[key]`, so Automerge
+    /// keeps several maps there and shows one; reading only the visible one would drop the
+    /// other creators' aliases. This is a read of the datum's own entries, never a scan of the
+    /// document, and each entry read is charged to the frontier budget, which bounds what a
+    /// hostile document can make a verifier read.
     fn aliases(&mut self, heads: &[ChangeHash]) -> Result<Vec<Uuid7>, ClaimHistoryError> {
         let mut aliases = Vec::new();
         let doc = self.doc;
-        let target = self.datum_key.to_string();
-        for dmeta in self.dmeta_maps(heads)? {
-            for index in self.maps(&dmeta, "datumUuids", heads)? {
+        for meta in self.datum_metas(heads)? {
+            for index in self.maps(&meta, "uuids", heads)? {
                 let length = doc.length_at(&index, heads);
                 self.account(heads, length)?;
                 for item in doc.map_range_at(&index, .., heads) {
-                    if !item.conflict {
-                        self.account(heads, 1)?;
-                        if matches!(
-                            item.value,
-                            automerge::ValueRef::Scalar(automerge::ScalarValueRef::Str(ref text))
-                                if text.as_ref() == target.as_str()
-                        ) {
-                            aliases.push(Self::uuid(item.key.as_ref())?);
-                        }
-                        continue;
+                    if !matches!(
+                        item.value,
+                        automerge::ValueRef::Scalar(automerge::ScalarValueRef::Boolean(true))
+                    ) {
+                        return Err(ClaimHistoryError::MalformedWitness("datum UUID alias"));
                     }
-                    let values = doc.get_all_at(&index, item.key.as_ref(), heads)?;
-                    self.account(heads, values.len())?;
-                    let mut matches = false;
-                    let mut other = false;
-                    for (value, _) in values {
-                        if value.to_str() == Some(target.as_str()) {
-                            matches = true;
-                        } else {
-                            other = true;
-                        }
-                    }
-                    if matches && other {
-                        return Err(ClaimHistoryError::MalformedWitness("rebound datum UUID"));
-                    }
-                    if matches {
-                        aliases.push(Self::uuid(item.key.as_ref())?);
-                    }
+                    aliases.push(Self::uuid(item.key.as_ref())?);
                 }
             }
         }

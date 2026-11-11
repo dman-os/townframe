@@ -47,8 +47,6 @@ impl Fixture {
         tx.put(&dmeta, "createdAt", ScalarValue::Timestamp(0))
             .unwrap();
         tx.put_object(&dmeta, "updatedAt", ObjType::List).unwrap();
-        let aliases = tx.put_object(&dmeta, "datumUuids", ObjType::Map).unwrap();
-        tx.put(&aliases, fixture.alias.to_string(), DATUM).unwrap();
         let documents = tx.put_object(&dmeta, "docUuids", ObjType::Map).unwrap();
         tx.put(
             &documents,
@@ -66,6 +64,8 @@ impl Fixture {
         tx.put(&actor, "actorUrl", "dtxt:actor:node/test").unwrap();
         let metadata = tx.put_object(&dmeta, "datums", ObjType::Map).unwrap();
         let metadata = tx.put_object(&metadata, DATUM, ObjType::Map).unwrap();
+        let aliases = tx.put_object(&metadata, "uuids", ObjType::Map).unwrap();
+        tx.put(&aliases, fixture.alias.to_string(), true).unwrap();
         tx.put_object(&metadata, "updatedAt", ObjType::List)
             .unwrap();
         tx.put_object(&metadata, "deletedAt", ObjType::List)
@@ -80,9 +80,9 @@ impl Fixture {
     fn paths(&self) -> Paths {
         let (_, datums) = self.doc.get(automerge::ROOT, "datums").unwrap().unwrap();
         let (_, dmeta) = self.doc.get(&datums, DMETA).unwrap().unwrap();
-        let (_, aliases) = self.doc.get(&dmeta, "datumUuids").unwrap().unwrap();
         let (_, metadata) = self.doc.get(&dmeta, "datums").unwrap().unwrap();
         let (_, metadata) = self.doc.get(&metadata, DATUM).unwrap().unwrap();
+        let (_, aliases) = self.doc.get(&metadata, "uuids").unwrap().unwrap();
         let (_, signatures) = self.doc.get(&metadata, "signatures").unwrap().unwrap();
         Paths {
             datums,
@@ -245,12 +245,8 @@ fn introduction_uses_historical_value_alias_and_actor_binding() {
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
     tx.put(&paths.datums, DATUM, "later").unwrap();
-    tx.put(
-        &paths.aliases,
-        "01930000-0000-7000-8000-000000000001",
-        DATUM,
-    )
-    .unwrap();
+    tx.put(&paths.aliases, "01930000-0000-7000-8000-000000000001", true)
+        .unwrap();
     let (_, actors) = tx.get(&paths.dmeta, "actors").unwrap().unwrap();
     let (_, actor) = tx.get(&actors, fixture.actor.to_string()).unwrap().unwrap();
     tx.put(&actor, "pubkey", "invalid-later-binding").unwrap();

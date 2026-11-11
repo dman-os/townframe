@@ -144,8 +144,6 @@ impl Fixture {
                 .put_object(automerge::ROOT, "datums", ObjType::Map)
                 .unwrap();
             let dmeta = tx.put_object(&datums, DMETA, ObjType::Map).unwrap();
-            let aliases = tx.put_object(&dmeta, "datumUuids", ObjType::Map).unwrap();
-            tx.put(&aliases, alias.to_string(), DATUM).unwrap();
             let bindings = tx.put_object(&dmeta, "docUuids", ObjType::Map).unwrap();
             let actors = tx.put_object(&dmeta, "actors", ObjType::Map).unwrap();
             let actor_meta = tx
@@ -155,6 +153,8 @@ impl Fixture {
                 .unwrap();
             let metadata = tx.put_object(&dmeta, "datums", ObjType::Map).unwrap();
             let datum_meta = tx.put_object(&metadata, DATUM, ObjType::Map).unwrap();
+            let aliases = tx.put_object(&datum_meta, "uuids", ObjType::Map).unwrap();
+            tx.put(&aliases, alias.to_string(), true).unwrap();
             let signatures = tx
                 .put_object(&datum_meta, "signatures", ObjType::List)
                 .unwrap();
