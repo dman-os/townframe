@@ -97,10 +97,10 @@ fn authority_error(error: ClientError<AuthorityServiceError>) -> DispatchError {
 
 impl DispatchService {
     /// Verifies `authorization` through the authority service, the same path the nodule service
-    /// uses. Cost per call: one `ResolveAuthority` for the presented handle, plus one
-    /// `ResolveActor` for the actor it is bound to when it is a scoped handle. Resolving the
-    /// presenter (see `invoke`) adds another `ResolveAuthority`. Each one that names an actor
-    /// currently reads the actor's registry row on the authority's reader pool.
+    /// uses, which also refuses a scoped handle presented by an actor it is not
+    /// bound to. Cost per call: one `ResolveAuthority` for the presented handle, plus one
+    /// `ResolveActor` for the actor it signs as. Each one that names an actor currently reads the
+    /// actor's registry row on the authority's reader pool.
     async fn caller(
         &self,
         context: &RequestContext,
@@ -145,23 +145,11 @@ impl DispatchService {
             return Err(ContextError::DeadlineExceeded.into());
         }
         let verified = self.caller(context, authorization).await?;
-        let presenter = self
-            .capabilities
-            .presenter(context, authorization.signer)
-            .await
-            .map_err(authority_error)?
-            .actor_id;
+        // The holder check ran in `source`: a scoped handle presented under another actor's
+        // signer is already refused, which is what lets the Wasm egress hand a guest nothing but
+        // the handle id (the signer is always the nodule's own actor there).
+        let presenter = verified.signer.actor_id;
         let scope = self.scope_of(&verified)?;
-        // A handle is its holder's: it was minted bound to one actor and only that actor may
-        // invoke through it. Presenting another actor's handle under one's own signer is the
-        // forgery this refuses, and it is what lets the Wasm egress hand a guest nothing but the
-        // handle id: the signer is always the nodule's own actor there.
-        if verified
-            .bound_signer
-            .is_some_and(|holder| holder != presenter)
-        {
-            return Err(DispatchError::Denied);
-        }
         // Denied is settled before the lookup so an unauthorized caller cannot probe which
         // operations exist.
         if let Some(scope) = scope

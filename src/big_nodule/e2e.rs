@@ -858,6 +858,27 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
         Err(NodulesError::Denied)
     );
 
+    // A handle is bound to the actor it was minted for: another actor presenting the id under
+    // its own signer is refused, whatever the handle would let its holder do.
+    let held = node
+        .mint(
+            operator,
+            scope(true, &[example_cartridge!("photos")]),
+            Rights::USE | Rights::NARROW,
+        )
+        .await
+        .unwrap();
+    let stolen = Authorization {
+        authority: held.authority,
+        signer: bystander.signer,
+    };
+    assert_eq!(node.list(stolen).await, Err(NodulesError::Denied));
+    assert_eq!(
+        node.mint(stolen, scope(false, &[]), Rights::USE).await,
+        Err(NodulesError::Denied)
+    );
+    assert!(node.list(held).await.is_ok());
+
     let photos_only = node
         .mint(
             operator,

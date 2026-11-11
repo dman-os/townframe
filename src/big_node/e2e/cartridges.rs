@@ -40,6 +40,25 @@ pub(super) fn operator(node: &BigNode) -> Authorization {
     Authorization::identity(node.authority.root)
 }
 
+/// An actor under the operator presenting its own identity: another actor than the one a handle
+/// minted by the operator is bound to.
+pub(super) async fn bystander(node: &BigNode) -> Authorization {
+    let actor = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            big_cabinet_core::authority::OpenActor {
+                parent: node.authority.root,
+                path: "bystander".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .unwrap();
+    Authorization::identity(actor.capability)
+}
+
 fn operation<E>(error: ClientError<E>) -> E {
     match error {
         ClientError::Method(error) => error,
@@ -942,6 +961,47 @@ async fn a_synced_version_with_a_bad_signature_is_surfaced_and_never_served() {
         get_version(&node, PHOTOS, "1.1.0").await.unwrap().envelope,
         photos("1.1.0", &info)
     );
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
+async fn a_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
+    let secrets = secrets().await;
+    let (node, stop, _sql) = boot_memory(&secrets).await;
+    let info = put(&node, b"held handle").await;
+    let held = mint(
+        &node,
+        CartridgesScope {
+            publish: true,
+            namespaces: None,
+        },
+    )
+    .await;
+    publish(&node, held, photos("1.0.0", &info)).await.unwrap();
+
+    // The handle is bound to the operator: another actor presenting its id under its own signer
+    // is refused for a write and a read alike.
+    let stolen = Authorization {
+        authority: held.authority,
+        signer: bystander(&node).await.signer,
+    };
+    assert_eq!(
+        publish(&node, stolen, photos("1.1.0", &info)).await,
+        Err(CartridgesError::Denied)
+    );
+    let list_as = async |authorization: Authorization| {
+        node.cartridges
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization.metadata(),
+                ListCartridges {},
+            )
+            .await
+            .map_err(operation)
+    };
+    assert_eq!(list_as(stolen).await, Err(CartridgesError::Denied));
+    assert!(list_as(held).await.is_ok());
     shutdown(node, stop).await;
 }
 
