@@ -201,93 +201,104 @@ type Assemble = fn() -> Result<Value, MethodLexiconError>;
 /// it refuses to start (`big_dispatch::ServiceProvider::register`), so a new method cannot go
 /// unlisted unnoticed.
 pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
-    static LIST: std::sync::LazyLock<Vec<(&'static str, Assemble)>> = std::sync::LazyLock::new(
-        || {
-            macro_rules! group {
-                ($($method:path),* $(,)?) => { vec![$((<$method as Method>::XRPC.nsid, lexicon::<$method> as Assemble)),*] };
+    builtin_list()
+        .iter()
+        .map(|(nsid, assemble, _)| (*nsid, *assemble))
+}
+
+type Builtin = (&'static str, Assemble, fn() -> MethodSchemas);
+
+/// [`builtin_methods`] with each method's schemas too, which the tests read the error enums from.
+fn builtin_list() -> &'static [Builtin] {
+    static LIST: std::sync::LazyLock<Vec<Builtin>> = std::sync::LazyLock::new(|| {
+        macro_rules! group {
+                ($($method:path),* $(,)?) => { vec![$((
+                    <$method as Method>::XRPC.nsid,
+                    lexicon::<$method> as Assemble,
+                    <$method as MethodSchema>::schemas as fn() -> MethodSchemas,
+                )),*] };
             }
-            use big_blobs_core::protocol as blobs;
-            use big_cabinet_core::authority;
-            use big_cabinet_core::doc as docs;
-            use big_cabinet_core::drawer::protocol as drawers;
-            use big_cartridges_core::protocol as cartridges;
-            use big_dispatch_core as dispatch;
-            use big_nodule_core::protocol as nodules;
-            group![
-                authority::OpenActor,
-                authority::ResolveActor,
-                authority::ResolveAuthority,
-                authority::MintCapability,
-                authority::AttenuateCapability,
-                authority::InspectCapability,
-                authority::RetractCapability,
-                authority::SignDatumClaim,
-                authority::ObserveCapability,
-                docs::MintDocCapability,
-                docs::CreateDoc,
-                docs::WriteDatums,
-                docs::BranchDoc,
-                docs::MergeDoc,
-                docs::ReadDatums,
-                docs::ListDatums,
-                docs::PollDatums,
-                docs::QueryDatumRefs,
-                docs::UnsafeInspectDatum,
-                docs::InspectDatumClaims,
-                docs::GetDocAvailability,
-                docs::ObserveDocAvailability,
-                drawers::MintDrawerCapability,
-                drawers::CreateDrawer,
-                drawers::AddDoc,
-                drawers::CreateMetaDoc,
-                drawers::RemoveDoc,
-                drawers::AddChild,
-                drawers::RemoveChild,
-                drawers::GetDrawer,
-                drawers::ListDocs,
-                drawers::RememberDrawer,
-                drawers::ForgetDrawer,
-                drawers::ListKnownDrawers,
-                drawers::SetDrawerPolicy,
-                drawers::SetDrawerSuccessor,
-                drawers::ResolveDrawerSuccessor,
-                drawers::ListDrawers,
-                drawers::ListDocDrawers,
-                drawers::GrantDrawer,
-                drawers::RevokeDrawer,
-                drawers::InvitePrincipal,
-                drawers::RevokePrincipal,
-                dispatch::Invoke,
-                dispatch::MintDispatchCapability,
-                nodules::MintNoduleCapability,
-                nodules::AdmitNodule,
-                nodules::ConfigureNodule,
-                nodules::SetNoduleEnabled,
-                nodules::SetNoduleDrawerGrants,
-                nodules::SetNoduleMethodGrants,
-                nodules::ConfirmNoduleResolution,
-                nodules::SetNoduleSubstitution,
-                nodules::UninstallNodule,
-                nodules::GetNodule,
-                nodules::ListNodules,
-                blobs::MintBlobsCapability,
-                blobs::PutBlob,
-                blobs::ReadBlob,
-                blobs::StatBlob,
-                cartridges::MintCartridgesCapability,
-                cartridges::PublishCartridgeVersion,
-                cartridges::RemoveCartridgeVersion,
-                cartridges::RemoveCartridge,
-                cartridges::ImportCartridgeDocument,
-                cartridges::GetPublisher,
-                cartridges::ListCartridges,
-                cartridges::GetCartridge,
-                cartridges::GetCartridgeVersion,
-                cartridges::WatchCartridges,
-            ]
-        },
-    );
-    LIST.iter().copied()
+        use big_blobs_core::protocol as blobs;
+        use big_cabinet_core::authority;
+        use big_cabinet_core::doc as docs;
+        use big_cabinet_core::drawer::protocol as drawers;
+        use big_cartridges_core::protocol as cartridges;
+        use big_dispatch_core as dispatch;
+        use big_nodule_core::protocol as nodules;
+        group![
+            authority::OpenActor,
+            authority::ResolveActor,
+            authority::ResolveAuthority,
+            authority::MintCapability,
+            authority::AttenuateCapability,
+            authority::InspectCapability,
+            authority::RetractCapability,
+            authority::SignDatumClaim,
+            authority::ObserveCapability,
+            docs::MintDocCapability,
+            docs::CreateDoc,
+            docs::WriteDatums,
+            docs::BranchDoc,
+            docs::MergeDoc,
+            docs::ReadDatums,
+            docs::ListDatums,
+            docs::PollDatums,
+            docs::QueryDatumRefs,
+            docs::UnsafeInspectDatum,
+            docs::InspectDatumClaims,
+            docs::GetDocAvailability,
+            docs::ObserveDocAvailability,
+            drawers::MintDrawerCapability,
+            drawers::CreateDrawer,
+            drawers::AddDoc,
+            drawers::CreateMetaDoc,
+            drawers::RemoveDoc,
+            drawers::AddChild,
+            drawers::RemoveChild,
+            drawers::GetDrawer,
+            drawers::ListDocs,
+            drawers::RememberDrawer,
+            drawers::ForgetDrawer,
+            drawers::ListKnownDrawers,
+            drawers::SetDrawerPolicy,
+            drawers::SetDrawerSuccessor,
+            drawers::ResolveDrawerSuccessor,
+            drawers::ListDrawers,
+            drawers::ListDocDrawers,
+            drawers::GrantDrawer,
+            drawers::RevokeDrawer,
+            drawers::InvitePrincipal,
+            drawers::RevokePrincipal,
+            dispatch::Invoke,
+            dispatch::MintDispatchCapability,
+            nodules::MintNoduleCapability,
+            nodules::AdmitNodule,
+            nodules::ConfigureNodule,
+            nodules::SetNoduleEnabled,
+            nodules::SetNoduleDrawerGrants,
+            nodules::SetNoduleMethodGrants,
+            nodules::ConfirmNoduleResolution,
+            nodules::SetNoduleSubstitution,
+            nodules::UninstallNodule,
+            nodules::GetNodule,
+            nodules::ListNodules,
+            blobs::MintBlobsCapability,
+            blobs::PutBlob,
+            blobs::ReadBlob,
+            blobs::StatBlob,
+            cartridges::MintCartridgesCapability,
+            cartridges::PublishCartridgeVersion,
+            cartridges::RemoveCartridgeVersion,
+            cartridges::RemoveCartridge,
+            cartridges::ImportCartridgeDocument,
+            cartridges::GetPublisher,
+            cartridges::ListCartridges,
+            cartridges::GetCartridge,
+            cartridges::GetCartridgeVersion,
+            cartridges::WatchCartridges,
+        ]
+    });
+    &LIST
 }
 
 /// The compiled form of one method's Lexicon: what dispatch checks a call against, built once
