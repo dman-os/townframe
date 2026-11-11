@@ -558,6 +558,7 @@ mod library {
 }
 
 mod blackbox {
+    use crate::interlude::json;
     use std::path::Path;
     use std::path::PathBuf;
     use std::process::Command;
