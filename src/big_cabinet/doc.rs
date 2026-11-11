@@ -123,6 +123,7 @@ use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
+use big_cabinet_core::dmeta::NativeReadError;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::SignatureId;
