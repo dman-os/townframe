@@ -1,7 +1,7 @@
 # A relay node
 
 `day node init --relay` records the relay flag and the network attachment a relay is reached over.
-The daemon runs the relay policy, and `status` says so. The test binds the loopback interface
+The daemon runs the relay policy, and `node status` says so. The test binds the loopback interface
 only, so nothing leaves the machine.
 
 ```console
