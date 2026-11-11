@@ -79,20 +79,20 @@ repos:
       - id: sqlite-gen
         name: check generated SQLite queries and embedded migrations
         language: system
-        entry: ./x/agent-build.ts -- cargo x sql gen --check --all
+        entry: cargo x sql gen --check --all
         pass_filenames: false
       - id: guardrails-lint
         name: check AST, architecture, migration-identity, and doc guardrails
         language: system
-        entry: ./x/agent-build.ts -- cargo x guardrails lint
+        entry: cargo x guardrails lint
         pass_filenames: false
       - id: guardrails-api
         name: check boundary crate public API snapshots
         language: system
-        entry: ./x/agent-build.ts -- cargo x guardrails api --all --check
+        entry: cargo x guardrails api --all --check
         pass_filenames: false
       - id: guardrails-doctor
         name: check build flags and toolchain configuration
         language: system
-        entry: ./x/agent-build.ts -- cargo x guardrails doctor
+        entry: cargo x guardrails doctor
         pass_filenames: false
