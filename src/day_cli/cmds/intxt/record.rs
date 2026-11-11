@@ -32,22 +32,36 @@ use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::Notify;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::error::TrySendError;
 use utils_rs::prelude::Timestamp;
+
+/// The largest chunk a pump reads, so the bytes pending in the tee never exceed its chunk
+/// capacity times this.
+const CHUNK_BYTES: usize = 64 * 1024;
+
+/// The tee holds at most this many chunks: 1024 chunks of at most 64 KiB, a budget of 64 MiB
+/// pending for a recorder that falls behind the session.
+const TEE_CHUNKS: usize = 1024;
 
 /// Forward `from` to `to` until `from` ends, teeing each chunk after it has been forwarded. A
 /// peer that closed its end of the pipe ends the pump quietly: that is the session ending.
 ///
 /// The tee comes after the forward, which keeps the recorder's order causal: the client answers
 /// only what it was forwarded, so the recorder has seen a message before it sees its answer.
+///
+/// The pump never waits on the tee: a full tee means recording fell behind, which `overflow`
+/// announces, and the pump stops teeing and goes on forwarding.
 async fn pump(
     mut from: impl AsyncRead + Unpin,
     mut to: impl AsyncWrite + Unpin,
     direction: Direction,
-    mut tee: Option<UnboundedSender<(Direction, Timestamp, Vec<u8>)>>,
+    mut tee: Option<Sender<(Direction, Timestamp, Vec<u8>)>>,
+    overflow: &Notify,
 ) -> std::io::Result<()> {
-    let mut chunk = vec![0; 64 * 1024];
+    let mut chunk = vec![0; CHUNK_BYTES];
     loop {
         let read = from.read(&mut chunk).await?;
         if read == 0 {
@@ -63,13 +77,17 @@ async fn pump(
             Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
             other => other?,
         }
-        if let Some(sender) = &tee
-            && sender
-                .send((direction, at, chunk[..read].to_vec()))
-                .is_err()
-        {
-            // Recording ended; the session goes on.
-            tee = None;
+        if let Some(sender) = &tee {
+            match sender.try_send((direction, at, chunk[..read].to_vec())) {
+                Ok(()) => {}
+                // Recording ended; the session goes on.
+                Err(TrySendError::Closed(_)) => tee = None,
+                Err(TrySendError::Full(_)) => {
+                    // A permit is stored, so it is seen even when the recorder is not waiting.
+                    overflow.notify_one();
+                    tee = None;
+                }
+            }
         }
     }
     // Closing the agent's stdin is what tells it the client left.
@@ -81,13 +99,16 @@ async fn pump(
 
 /// Run `agent` with `input` as its stdin and its stdout copied to `output`, recording the
 /// exchange: `record` is called for each [`Emit`] and answers the session's document id once the
-/// node holds one. Returns the agent's exit status.
+/// node holds one. `stopped` is told why when recording stops, which never stops the session.
+/// `tee_chunks` bounds the chunks pending for the recorder. Returns the agent's exit status.
 async fn proxy(
     agent: &[String],
     thinking: bool,
     input: impl AsyncRead + Unpin,
     output: impl AsyncWrite + Unpin,
+    tee_chunks: usize,
     mut record: impl AsyncFnMut(Emit) -> Res<Option<String>>,
+    mut stopped: impl FnMut(&str),
 ) -> Res<ExitStatus> {
     let mut child = tokio::process::Command::new(&agent[0])
         .args(&agent[1..])
@@ -100,9 +121,22 @@ async fn proxy(
     let child_in = child.stdin.take().expect("the agent's stdin is piped");
     let child_out = child.stdout.take().expect("the agent's stdout is piped");
 
-    let (tee, mut teed) = unbounded_channel();
-    let to_agent = pump(input, child_in, Direction::ToAgent, Some(tee.clone()));
-    let from_agent = pump(child_out, output, Direction::FromAgent, Some(tee));
+    let (tee, mut teed) = channel(tee_chunks);
+    let overflow = Notify::new();
+    let to_agent = pump(
+        input,
+        child_in,
+        Direction::ToAgent,
+        Some(tee.clone()),
+        &overflow,
+    );
+    let from_agent = pump(
+        child_out,
+        output,
+        Direction::FromAgent,
+        Some(tee),
+        &overflow,
+    );
     let pumping = async {
         let mut to_agent = pin!(to_agent);
         let mut from_agent = pin!(from_agent);
@@ -130,7 +164,7 @@ async fn proxy(
             }
             Ok(())
         };
-        let outcome: Res<()> = async {
+        let drained = async {
             while let Some((direction, at, bytes)) = teed.recv().await {
                 let emits = recorder.feed(direction, at, &bytes)?;
                 record_all(&mut recorder, emits).await?;
@@ -138,11 +172,17 @@ async fn proxy(
             // Both pumps are done: the connection ended.
             let emits = recorder.finish();
             record_all(&mut recorder, emits).await
-        }
-        .await;
+        };
+        // Overflow cancels the drain wherever it is, including a `record` that never returns.
+        let outcome: Res<()> = tokio::select! {
+            biased;
+            () = overflow.notified() => Err(eyre::eyre!(
+                "recording fell behind the session ({tee_chunks} chunks of up to {CHUNK_BYTES} bytes were pending)"
+            )),
+            outcome = drained => outcome,
+        };
         if let Err(error) = outcome {
-            let line = format!("{error:#}").replace('\n', " ");
-            eprintln!("intxt record: recording stopped, the session is not affected: {line}");
+            stopped(&format!("{error:#}").replace('\n', " "));
         }
     };
     let (pumped, ()) = tokio::join!(pumping, recording);
@@ -207,12 +247,16 @@ pub(crate) async fn run(agent: Vec<String>, thinking: bool) -> Res<ExitCode> {
         thinking,
         tokio::io::stdin(),
         tokio::io::stdout(),
+        TEE_CHUNKS,
         async |emit: Emit| {
             let recording = match &mut recording {
                 Some(recording) => recording,
                 None => recording.insert(Recording::connect().await?),
             };
             recording.record(emit).await
+        },
+        |reason| {
+            eprintln!("intxt record: recording stopped, the session is not affected: {reason}")
         },
     )
     .await?;
