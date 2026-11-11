@@ -3,11 +3,12 @@
 use super::*;
 use crate::git::GitMove;
 use crate::identity;
-use crate::snapshot::BlobReason;
-use crate::snapshot::ChangeKind;
-use crate::snapshot::Content;
 use crate::testing::Repo;
 use crate::testing::git_in;
+use intxt_core::capture::BlobReason;
+use intxt_core::capture::ChangeKind;
+use intxt_core::capture::Content;
+use intxt_core::capture::ContentClass;
 use intxt_core::work::FileStatus;
 use intxt_core::work::OpKind;
 
@@ -143,39 +144,29 @@ fn snapshots_diff_into_classified_changes() {
             .find(|change| change.path == path)
             .unwrap_or_else(|| panic!("no change for {path}: {:?}", observed.changes))
     };
-    let blob_reason = |path: &str| match change(path).content.as_ref().unwrap() {
-        Content::Blob {
-            reason,
-            size,
-            path: file,
-            ..
-        } => {
-            assert_eq!(file, &repo.root.join(path));
-            assert_eq!(*size, std::fs::metadata(file).unwrap().len());
-            *reason
-        }
-        Content::Text(_) => panic!("{path} is text"),
+    let blob_reason = |path: &str| {
+        let content = change(path).content.as_ref().unwrap();
+        assert_eq!(content.class, ContentClass::Blob, "{path} is a blob");
+        assert_eq!(content.text, None);
+        assert_eq!(
+            content.size,
+            Some(std::fs::metadata(repo.root.join(path)).unwrap().len())
+        );
+        content.reason.clone().unwrap()
     };
 
     assert_eq!(observed.changes.len(), 10, "{:?}", observed.changes);
     assert_eq!(change("a.txt").kind, ChangeKind::Modified);
     assert_eq!(
         change("a.txt").content,
-        Some(Content::Text("one\nedited\n".into()))
+        Some(Content::text("one\nedited\n"))
     );
     assert_eq!(change("new.txt").kind, ChangeKind::Added);
-    assert_eq!(
-        change("new.txt").content,
-        Some(Content::Text("new\n".into()))
-    );
+    assert_eq!(change("new.txt").content, Some(Content::text("new\n")));
     assert_eq!(change("gone.txt").kind, ChangeKind::Deleted);
     assert_eq!(change("gone.txt").content, None);
-    assert_eq!(
-        change("renamed.txt").kind,
-        ChangeKind::Renamed {
-            from: "old.txt".into()
-        }
-    );
+    assert_eq!(change("renamed.txt").kind, ChangeKind::Renamed);
+    assert_eq!(change("renamed.txt").from.as_deref(), Some("old.txt"));
     assert!(
         observed
             .changes

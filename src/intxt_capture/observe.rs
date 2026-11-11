@@ -10,8 +10,8 @@ use crate::git;
 use crate::git::GitObserved;
 use crate::git::GitState;
 use crate::identity::Identity;
-use crate::snapshot::Change;
 use crate::snapshot::Snapshot;
+use intxt_core::capture::Change;
 use serde::Deserialize;
 use serde::Serialize;
 
