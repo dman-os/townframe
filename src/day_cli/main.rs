@@ -260,9 +260,9 @@ enum StaticCommands {
     /// bindings. An NSID always contains dots, so it cannot be a command's name.
     #[clap(visible_alias = "x", args_conflicts_with_subcommands = true)]
     Exec {
-        /// The operation's NSID, such as org.example.daybook.nodules.listNodules
+        /// The method's NSID, such as org.example.daybook.nodules.listNodules
         nsid: Option<String>,
-        /// The operation's input as JSON (default: {})
+        /// The method's input as JSON (default: {})
         input: Option<String>,
         /// Call a query: send the input, an object of primitives, as the query string of a GET
         /// instead of the JSON body of a POST
@@ -281,7 +281,7 @@ enum StaticCommands {
 /// The commands of `day x`, one per cartridge.
 #[derive(Debug, clap::Subcommand)]
 enum ExecCommands {
-    /// Install intxt, which the nodule's operations (`day x org.example.intxt.createIntxt`, ..) then serve
+    /// intxt: record agent work and its git history, and package it (`day x intxt --help`)
     Intxt {
         #[clap(subcommand)]
         command: cmds::intxt::IntxtCommands,
