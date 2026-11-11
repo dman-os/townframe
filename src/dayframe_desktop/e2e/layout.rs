@@ -403,3 +403,284 @@ async fn the_lab_panel_lists_its_experiments_and_the_mock_review_renders_a_diff(
     })
     .await;
 }
+
+/// The lab's mock review down to the file diff of `src/retry.rs`, the panel's selector prefix
+/// returned for scoping.
+async fn open_lab_file() -> (Layout, String) {
+    const PANEL: &str = "section[aria-label=\"Lab panel\"]";
+    let mut layout = Layout::start(&["dayframe.lab"]).await;
+    drop(
+        layout
+            .runtime
+            .set_enabled(&MicroId::local(micro_lab_manifest::ID), true),
+    );
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    for (checkpoint, button) in [
+        ("the lab lists its experiments", "Open Mock review"),
+        (
+            "the mock review lists its changes",
+            "Open change Cap the retry backoff",
+        ),
+        (
+            "the overview lists the change's files",
+            "Open file src/retry.rs",
+        ),
+    ] {
+        let button = format!("{PANEL} button[aria-label=\"{button}\"]");
+        let Layout { runtime, ui, .. } = &mut layout;
+        ui.wait_until(checkpoint, |ui| {
+            if let MicroState::Faulted(fault) = runtime.state(&lab) {
+                panic!("the lab faulted: {fault}");
+            }
+            ui.find(&button).is_some()
+        })
+        .await;
+        ui.click(&button);
+    }
+    (layout, PANEL.to_owned())
+}
+
+// J4 and J5 through the surface. In the seeded thread: reply, resolve (the diff then shows one
+// summary line) and reopen. In the diff: a selected line opens a draft annotation row, a dragged
+// range one headed with the range; the typed text is submitted into a new thread under the
+// range's last line, which resolves and reopens from its inline row.
+#[tokio::test(flavor = "current_thread")]
+async fn the_mock_review_annotates_a_line_and_replies_and_resolves_a_thread() {
+    let (
+        Layout {
+            runtime, mut ui, ..
+        },
+        panel,
+    ) = open_lab_file().await;
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    let inside = |selector: &str| format!("{panel} {selector}");
+    let new_number =
+        |line: usize| inside(&format!("[data-additions] [data-column-number=\"{line}\"]"));
+    let draft = inside("aside[aria-label=\"Draft annotation\"]");
+    let draft_text = format!("{draft} textarea[aria-label=\"Annotation text\"]");
+    let faulted = |runtime: &CompositionRuntime| {
+        if let MicroState::Faulted(fault) = runtime.state(&lab) {
+            panic!("the lab faulted: {fault}");
+        }
+    };
+    let selected = |ui: &HeadlessDom, line: usize| {
+        ui.attribute(&new_number(line), "data-selected-line")
+            .is_some()
+    };
+
+    // J4: the seeded thread takes a reply and resolves.
+    let open_seeded = inside("button[aria-label=\"Open thread on line 6\"]");
+    ui.wait_until("the diff renders with the seeded thread", |ui| {
+        faulted(&runtime);
+        ui.find(&open_seeded).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&open_seeded).contains("2 comments, open"),
+        "{}",
+        ui.text(&open_seeded)
+    );
+    ui.click(&open_seeded);
+    let reply = inside("textarea[aria-label=\"Reply\"]");
+    ui.wait_until("the thread opens", |ui| ui.find(&reply).is_some())
+        .await;
+    let status = inside("p[role=\"status\"]");
+    assert!(
+        ui.text(&status).contains("line 6, open"),
+        "{}",
+        ui.text(&status)
+    );
+    let submit_reply = inside("button[aria-label=\"Submit reply\"]");
+    assert!(
+        ui.attribute(&submit_reply, "disabled").is_some(),
+        "an empty reply cannot be submitted"
+    );
+    ui.input(&reply, "Done in the next push.");
+    ui.wait_until("typing enables reply", |ui| {
+        ui.attribute(&submit_reply, "disabled").is_none()
+    })
+    .await;
+    ui.click(&submit_reply);
+    let comments = inside("ol[aria-label=\"Comments\"]");
+    ui.wait_until("the reply is appended and the box is empty again", |ui| {
+        faulted(&runtime);
+        ui.text(&comments).contains("Done in the next push.")
+            && ui.attribute(&submit_reply, "disabled").is_some()
+    })
+    .await;
+    ui.click(&inside("button[aria-label=\"Resolve thread\"]"));
+    ui.wait_until("the thread resolves", |ui| {
+        ui.find(&inside("button[aria-label=\"Reopen thread\"]"))
+            .is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&status).contains("resolved"),
+        "{}",
+        ui.text(&status)
+    );
+    // Back in the diff the resolved thread is one summary line, which reopens it.
+    ui.click(&inside("button[aria-label=\"Back\"]"));
+    let reopen = inside("button[aria-label=\"Reopen thread on line 6\"]");
+    ui.wait_until("the diff shows the thread resolved", |ui| {
+        faulted(&runtime);
+        ui.find(&reopen).is_some()
+    })
+    .await;
+    let seeded_row = inside("aside[aria-label=\"Thread on line 6\"]");
+    assert!(
+        ui.text(&seeded_row).contains("resolved") && ui.text(&seeded_row).contains("3 comments"),
+        "{}",
+        ui.text(&seeded_row)
+    );
+    ui.click(&reopen);
+    ui.wait_until("the inline row reopens the thread", |ui| {
+        ui.find(&open_seeded).is_some() && ui.text(&open_seeded).contains("3 comments, open")
+    })
+    .await;
+
+    // J5: a press on a line number selects the line; the release (once the micro's render has
+    // delivered the document-level listeners, as a finger's lift takes a moment) opens the draft.
+    ui.pointer(&new_number(8), "pointerdown", 5.0);
+    ui.wait_until("the press selects the line", |ui| {
+        faulted(&runtime);
+        selected(ui, 8)
+    })
+    .await;
+    ui.pointer(&new_number(8), "pointerup", 5.0);
+    ui.wait_until("selecting a line opens a draft annotation", |ui| {
+        faulted(&runtime);
+        ui.find(&draft_text).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&draft).contains("New annotation on line 8"),
+        "{}",
+        ui.text(&draft)
+    );
+    // Focus on the draft's textarea (`onmounted` then `MountedData::set_focus`) is not asserted:
+    // `HeadlessDom` mounts the host tree through a bare `DioxusState`, whose queue of `mounted`
+    // events only a `DioxusDocument` flushes, so no `onmounted` ever reaches the micro here.
+    ui.click(&format!("{draft} button[aria-label=\"Cancel annotation\"]"));
+    ui.wait_until("cancel removes the draft", |ui| ui.find(&draft).is_none())
+        .await;
+
+    // A drag from line 7 to line 9 selects the range; its draft names the range, and submitting
+    // the typed text adds a thread there.
+    ui.pointer(&new_number(7), "pointerdown", 5.0);
+    ui.wait_until("the press selects line 7", |ui| {
+        faulted(&runtime);
+        selected(ui, 7)
+    })
+    .await;
+    ui.pointer(&new_number(9), "pointermove", 5.0);
+    ui.wait_until("the drag reaches line 9", |ui| {
+        faulted(&runtime);
+        selected(ui, 9)
+    })
+    .await;
+    ui.pointer(&new_number(9), "pointerup", 5.0);
+    ui.wait_until("the drag opens a draft for the range", |ui| {
+        faulted(&runtime);
+        ui.find(&draft_text).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&draft).contains("New annotation on lines 7-9"),
+        "{}",
+        ui.text(&draft)
+    );
+    let submit = format!("{draft} button[aria-label=\"Submit annotation\"]");
+    assert!(
+        ui.attribute(&submit, "disabled").is_some(),
+        "an empty draft cannot be submitted"
+    );
+    ui.input(&draft_text, "Why 30 seconds?");
+    ui.wait_until("typing enables submit", |ui| {
+        ui.attribute(&submit, "disabled").is_none()
+    })
+    .await;
+    ui.click(&submit);
+    let open_new = inside("button[aria-label=\"Open thread on lines 7-9\"]");
+    ui.wait_until("the submitted draft becomes a thread", |ui| {
+        faulted(&runtime);
+        ui.find(&draft).is_none() && ui.find(&open_new).is_some()
+    })
+    .await;
+    let new_row = inside("aside[aria-label=\"Thread on lines 7-9\"]");
+    assert!(
+        ui.text(&new_row).contains("Why 30 seconds?"),
+        "{}",
+        ui.text(&new_row)
+    );
+    assert!(
+        ui.text(&open_new).contains("1 comment, open"),
+        "{}",
+        ui.text(&open_new)
+    );
+    // The new thread resolves and reopens from its inline row.
+    ui.click(&inside(
+        "button[aria-label=\"Resolve thread on lines 7-9\"]",
+    ));
+    ui.wait_until("the new thread resolves", |ui| {
+        faulted(&runtime);
+        ui.find(&inside("button[aria-label=\"Reopen thread on lines 7-9\"]"))
+            .is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&new_row).contains("resolved"),
+        "{}",
+        ui.text(&new_row)
+    );
+}
+
+// A pin of an open bug in the diff view (`pierre_diffs`, not the lab): leaving a file while a
+// multi-line range is selected faults the micro, because `InteractionManager::clean_up` clears
+// `data-selected-line` on row nodes the render since replaced (`stale NodeKey`, a panic in the
+// guest). A single selected line does not. The day it is fixed the micro stays live and this
+// test must be inverted into the flow `the_mock_review_annotates_a_line...` could not end with:
+// open a thread from the diff after annotating a range.
+#[tokio::test(flavor = "current_thread")]
+async fn leaving_a_diff_with_a_selected_range_faults_the_micro_in_the_diff_views_clean_up() {
+    let (
+        Layout {
+            runtime, mut ui, ..
+        },
+        panel,
+    ) = open_lab_file().await;
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    let number = |line: usize| format!("{panel} [data-additions] [data-column-number=\"{line}\"]");
+    ui.wait_until("the diff renders with its lines", |ui| {
+        ui.find(&number(8)).is_some()
+    })
+    .await;
+    ui.pointer(&number(8), "pointerdown", 5.0);
+    ui.wait_until("the press selects line 8", |ui| {
+        ui.attribute(&number(8), "data-selected-line").is_some()
+    })
+    .await;
+    ui.pointer(&number(9), "pointermove", 5.0);
+    ui.wait_until("the drag reaches line 9", |ui| {
+        ui.attribute(&number(9), "data-selected-line").is_some()
+    })
+    .await;
+    ui.pointer(&number(9), "pointerup", 5.0);
+    let draft = format!("{panel} textarea[aria-label=\"Annotation text\"]");
+    ui.wait_until("the range opens a draft", |ui| ui.find(&draft).is_some())
+        .await;
+    ui.click(&format!(
+        "{panel} button[aria-label=\"Open thread on line 6\"]"
+    ));
+    ui.wait_until("the micro faults", |_| {
+        matches!(runtime.state(&lab), MicroState::Faulted(_))
+    })
+    .await;
+    let MicroState::Faulted(fault) = runtime.state(&lab) else {
+        unreachable!("the wait ended on a fault")
+    };
+    assert!(
+        fault.to_string().contains("InteractionManager") && fault.to_string().contains("clean_up"),
+        "{fault}"
+    );
+}
