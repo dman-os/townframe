@@ -557,6 +557,7 @@ impl<Host: InteractionHost> InteractionManager<Host> {
             self.clean_up();
             *self.pre.borrow_mut() = Some(*pre);
         }
+        self.forget_replaced_rows(pre);
 
         if enable_gutter_utility {
             GutterUtility(self).ensure_gutter_utility_node(uses_custom_gutter_utility);
@@ -1230,14 +1231,42 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         let Some(hovered_line) = self.hovered_line.borrow_mut().take() else {
             return;
         };
-        // A render replaces the rows the pointer was over without telling the manager, and the
-        // owner frees the replaced nodes. Upstream then removes the attribute from a detached
-        // element, a no-op; a freed node here is a stale key, so the no-op is spelled out.
+        self.host
+            .document()
+            .remove_attribute(hovered_line.line_element, "data-hovered");
+        self.host
+            .document()
+            .remove_attribute(hovered_line.number_element, "data-hovered");
+    }
+
+    /// Forgets the hovered line and the utility's anchor when a render replaced their rows.
+    ///
+    /// Upstream keeps both as references to elements the render detached: the pointer has not
+    /// moved, so nothing re-resolves them, and `setup` then appends the utility container into
+    /// the detached number element (`showUtilityOnLine`), which takes it out of the view and
+    /// leaves it alive in the detached row. Here the owner frees the replaced rows after this
+    /// manager's `setup`, and the container with them, so those references would go stale (a
+    /// freed key panics). `setup` therefore ends them while the rows still exist: the hover is
+    /// cleared (its attribute goes with the row) and the utility is hidden, which leaves the
+    /// container out of any row exactly as upstream's detached placement does, and owned by the
+    /// manager. The divergence is `getHoveredLine`, which answers no line until the pointer moves
+    /// instead of the replaced row's number.
+    fn forget_replaced_rows(&self, pre: &NodeKey) {
         let document = self.host.document();
-        for element in [hovered_line.line_element, hovered_line.number_element] {
-            if document.exists(element) {
-                document.remove_attribute(element, "data-hovered");
-            }
+        let replaced = |line: &LineEventBaseProps<NodeKey>| {
+            !document.is_attached(line.line_element, *pre)
+                || !document.is_attached(line.number_element, *pre)
+        };
+        if self.hovered_line.borrow().as_ref().is_some_and(replaced) {
+            self.clear_hovered_line();
+        }
+        if self
+            .gutter_utility_line
+            .borrow()
+            .as_ref()
+            .is_some_and(replaced)
+        {
+            GutterUtility(self).hide_utility();
         }
     }
 

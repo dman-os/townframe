@@ -64,6 +64,8 @@ struct Recorder {
     /// The embedder's `Interaction::selected_lines`, read on every render of the page, and the
     /// signal that re-renders it.
     controlled: Rc<RefCell<Option<SelectedLineRange>>>,
+    /// Whether the page enables the built-in gutter utility.
+    gutter_utility: Rc<std::cell::Cell<bool>>,
     rerender: Rc<std::cell::Cell<Option<Signal<u32>>>>,
 }
 
@@ -104,6 +106,7 @@ fn Page(props: PageProps) -> Element {
             Interaction {
                 line_hover_highlight: LineHoverHighlight::Both,
                 enable_line_selection: true,
+                enable_gutter_utility: props.recorder.gutter_utility.get(),
                 selected_lines: props.recorder.controlled.borrow().clone(),
                 on_line_selected: Some(Callback::new(move |range| {
                     selected.borrow_mut().push(range);
@@ -237,9 +240,24 @@ struct Rig {
 
 impl Rig {
     fn new(input: DiffInput, virtualized: bool, expand_unchanged: bool, interaction: bool) -> Self {
+        Self::with_recorder(
+            Recorder::default(),
+            input,
+            virtualized,
+            expand_unchanged,
+            interaction,
+        )
+    }
+
+    fn with_recorder(
+        recorder: Recorder,
+        input: DiffInput,
+        virtualized: bool,
+        expand_unchanged: bool,
+        interaction: bool,
+    ) -> Self {
         // Event payloads are the serialized forms; without a converter `event.data()` panics.
         dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-        let recorder = Recorder::default();
         let mut dom = VirtualDom::new_with_props(
             Page,
             PageProps {
@@ -810,18 +828,6 @@ fn clicking_a_collapsed_hunks_expand_button_shows_the_hidden_lines() {
 }
 
 #[test]
-fn dropping_the_view_after_a_render_replaced_the_hovered_rows_cleans_up() {
-    let mut rig = Rig::new(pair(40, &[2, 39]), false, false, true);
-    let hovered = rig.line(1);
-    rig.pointer(hovered, "pointermove", Pointer::mouse(10.0, 10.0));
-    assert!(rig.document().has_attribute(hovered, "data-hovered"));
-    let button = rig.query("data-expand-button", None)[0];
-    rig.click(button, Pointer::mouse(20.0, 200.0).pressed());
-    // `use_drop` runs `FileDiff::clean_up`, which clears the hover it still holds.
-    drop(rig);
-}
-
-#[test]
 fn the_embedder_sets_and_clears_the_selection_through_the_interaction_prop() {
     let mut rig = Rig::new(pair(8, &[7]), false, true, true);
     let set = |rig: &mut Rig, range: Option<SelectedLineRange>| {
@@ -853,4 +859,63 @@ fn the_embedder_sets_and_clears_the_selection_through_the_interaction_prop() {
     assert_eq!(rig.selected_lines(), ["3"]);
     set(&mut rig, None);
     assert_eq!(rig.selected_lines(), Vec::<String>::new());
+}
+
+/// A render replaces the rows the pointer was over (a hunk expansion), so the manager's hovered
+/// line and the gutter utility's anchor name rows that are gone. Upstream keeps them as detached
+/// elements; none of these steps may fault or leave `data-hovered` or the utility on a dead row.
+fn hovered_then_replaced() -> Rig {
+    let recorder = Recorder::default();
+    recorder.gutter_utility.set(true);
+    let mut rig = Rig::with_recorder(recorder, pair(40, &[2, 39]), false, false, true);
+    let hovered = rig.line(1);
+    rig.pointer(hovered, "pointermove", Pointer::mouse(10.0, 10.0));
+    assert!(rig.document().has_attribute(hovered, "data-hovered"));
+    assert_eq!(rig.query("data-gutter-utility-slot", None).len(), 1);
+    let button = rig.query("data-expand-button", None)[0];
+    rig.click(button, Pointer::mouse(20.0, 200.0).pressed());
+    rig
+}
+
+fn set_selected_lines(rig: &mut Rig, range: Option<SelectedLineRange>) {
+    *rig.recorder.controlled.borrow_mut() = range;
+    let mut rerender = rig.recorder.rerender.get().expect("the page rendered");
+    rig.dom.in_scope(ScopeId::ROOT, || rerender += 1);
+    rig.settle();
+}
+
+#[test]
+fn clearing_the_selection_after_a_render_replaced_the_hovered_rows_does_not_fault() {
+    let mut rig = hovered_then_replaced();
+    // The embedder had set a range, then clears it (a draft annotation was cancelled).
+    set_selected_lines(&mut rig, Some(range(3, 4)));
+    set_selected_lines(&mut rig, None);
+    assert_eq!(rig.selected_lines(), Vec::<String>::new());
+    assert_eq!(rig.query("data-hovered", None), []);
+    // The utility is in the live tree at most once, never in a replaced row.
+    assert!(rig.query("data-gutter-utility-slot", None).len() <= 1);
+}
+
+#[test]
+fn setting_a_range_after_a_render_replaced_the_hovered_rows_puts_the_utility_on_its_end() {
+    let mut rig = hovered_then_replaced();
+    set_selected_lines(&mut rig, Some(range(5, 7)));
+    let mut lines = rig.selected_lines();
+    lines.sort();
+    assert_eq!(lines, ["5", "6", "7"]);
+    // It follows the selection's bottom row's number.
+    let slot = rig.query("data-gutter-utility-slot", None);
+    assert_eq!(slot.len(), 1);
+    let number = rig.document().parent(slot[0]).expect("placed in a row");
+    assert_eq!(
+        rig.document().get_attribute(number, "data-column-number"),
+        Some("7".to_owned())
+    );
+}
+
+#[test]
+fn dropping_the_view_after_a_render_replaced_the_hovered_rows_cleans_up() {
+    let rig = hovered_then_replaced();
+    // `use_drop` runs `FileDiff::clean_up`, which clears the hover and the utility it holds.
+    drop(rig);
 }
