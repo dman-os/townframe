@@ -10,7 +10,7 @@
 //   p50 of the first tenth and of the last tenth (a cost that grows with the data shows as
 //   last > first), and max.
 // - Timing lines, one per phase, as the `// INSTR` tracing lines print them:
-//     ... INSTR grant_doc_access timing instr_heads=149.4µs ... reconciled=220.5ms
+//     ... INSTR causal task timing kind=ensure_coverage ... wall=220.5ms
 //   Every `key=<duration>` is a metric, in ms. Reported per timing name: count and p50.
 // `--skip N` drops samples with ordinal < N, and timing lines before the `INSTR ... begin
 // ordinal=N` marker, to leave warm-up out.

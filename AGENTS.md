@@ -61,7 +61,7 @@
   - The cache directory is per machine, in mbx's global config (`mbx settings get cache_dir`). Keep it on the same filesystem as the checkouts so restores hard link instead of copying.
   - Every worktree on a machine must pin the same mbx version, because the shim and cache agent refuse to talk across versions. Bump the pin on main and rebase.
   - `mbx explain --last` names why a compilation missed or bypassed the cache; `mbx stats`, `mbx gc --dry-run` and `mbx tui` cover savings, pruning and live builds.
-- Never use `nix develop path:.` here: it copies untracked build output into the store and rebuilds the toolchain from source. Use `nix develop .#ci-rust`.
+- Never use `nix develop path:.` here: it copies untracked build output into the store and rebuilds the toolchain from source. Use plain `nix develop` (the default shell, whose Cargo is mbx's shim), on every machine including remote ones like mothership. `.#ci-rust` is CI's shell: its Cargo is the bare toolchain, so a build there bypasses mbx and writes an unmanaged `target` directory that nothing prunes. Don't develop or verify in it. A `target` that is a real directory rather than a symlink into mbx's cache is such a build; delete it once nothing is building there.
 
 ## Comments
 
