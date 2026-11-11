@@ -31,9 +31,11 @@ use futures::FutureExt;
 use pierre_diffs::document::Document;
 use pierre_diffs::document::NodeKey;
 use pierre_diffs::types::patch::FileContents;
+use pierre_diffs::types::view::AnnotationSide;
 use pierre_diffs::types::view::SelectedLineRange;
 
 use super::*;
+use crate::geometry::ScrollSample;
 
 /// The platform's client rects: a scripted element answers `get_client_rect`.
 struct Rect(PixelsRect);
@@ -66,6 +68,9 @@ struct Recorder {
     controlled: Rc<RefCell<Option<SelectedLineRange>>>,
     /// Whether the page enables the built-in gutter utility.
     gutter_utility: Rc<std::cell::Cell<bool>>,
+    /// Whether the page renders a split diff (it is unified otherwise) with an annotation on the
+    /// additions side of line 12.
+    split_annotated: Rc<std::cell::Cell<bool>>,
     rerender: Rc<std::cell::Cell<Option<Signal<u32>>>>,
 }
 
@@ -93,10 +98,26 @@ fn Page(props: PageProps) -> Element {
     let never: Rc<dyn Fn(Duration) -> SleepFuture> = Rc::new(|_| Box::pin(std::future::pending()));
     let view = use_view(&FileDiffViewProps::<()> {
         input: props.input.clone(),
-        diff_style: DiffStyle::Unified,
+        diff_style: if props.recorder.split_annotated.get() {
+            DiffStyle::Split
+        } else {
+            DiffStyle::Unified
+        },
         expand_unchanged: props.expand_unchanged,
-        annotations: Vec::new(),
-        render_annotation: None,
+        annotations: if props.recorder.split_annotated.get() {
+            vec![DiffLineAnnotation {
+                side: AnnotationSide::Additions,
+                line_number: 12,
+                metadata: Some(()),
+            }]
+        } else {
+            Vec::new()
+        },
+        render_annotation: props
+            .recorder
+            .split_annotated
+            .get()
+            .then(|| Callback::new(|_| rsx! { aside { "a note" } })),
         highlighter: None,
         virtualized: props.virtualized.then(|| Virtualization {
             height: "600px".to_owned(),
@@ -681,118 +702,6 @@ fn a_view_whose_pointer_has_no_rows_to_act_on_measures_none() {
     });
 }
 
-/// A collapsed hunk's separator sits between rows of the content column and is as tall as the
-/// stylesheet makes it, which no `style` in the document says. Every node that hears `onresize`
-/// reports its scripted height (a line 20, a separator 32), as the platform would.
-#[test]
-fn a_touch_drag_across_a_collapsed_hunk_separator_lands_on_the_row_below_it() {
-    for virtualized in [false, true] {
-        let mut rig = Rig::new(pair(30, &[3, 20]), virtualized, false, true);
-        let host = Rc::clone(&rig.view.host);
-        let dispatch = Rc::clone(&rig.view.dispatch);
-        // The virtualized view renders its window once the scroller reports its size; the nodes
-        // below are those of the settled render.
-        if let Some(scroller) = host.scroller() {
-            let (root, content, container) = (scroller.root, scroller.content, host.container());
-            let content_height = match &rig.view.engine {
-                Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
-                Engine::Static(_) => unreachable!("a virtualized view"),
-            };
-            rig.dom.in_scope(ScopeId::ROOT, || {
-                dispatch.mounted(root, MountedData::new(rect(100.0, 0.0, 800.0, 600.0)));
-                dispatch.resized(root, 600.0, 800.0);
-                dispatch.resized(content, content_height, 800.0);
-                dispatch.visible(container, true);
-            });
-            rig.settle();
-        }
-        let (pre, column) = (rig.pre(), rig.query("data-content", None)[0]);
-        let height_of = |document: &Document, node: NodeKey| {
-            if document.has_attribute(node, "data-separator") {
-                32.0
-            } else {
-                20.0
-            }
-        };
-        let rows: Vec<NodeKey> = rig
-            .document()
-            .child_nodes(column)
-            .into_iter()
-            .filter(|row| !rig.document().tag_name(*row).is_empty())
-            .collect();
-        let at_separator = rows
-            .iter()
-            .position(|row| rig.document().has_attribute(*row, "data-separator"))
-            .expect("a collapsed hunk renders a separator in the column");
-        let (above, separator, below) = (
-            rows[at_separator - 1],
-            rows[at_separator],
-            rows[at_separator + 1],
-        );
-        rig.dom.in_scope(ScopeId::ROOT, || {
-            let hears = |node| {
-                dispatch
-                    .listeners(node)
-                    .iter()
-                    .any(|attribute| attribute.name == "onresize")
-            };
-            dispatch.mounted(pre, MountedData::new(rect(100.0, 50.0, 800.0, 600.0)));
-            dispatch.mounted(column, MountedData::new(rect(140.0, 50.0, 760.0, 600.0)));
-            for row in &rows {
-                if hears(*row) {
-                    dispatch.resized(*row, height_of(rig.document(), *row), 760.0);
-                }
-            }
-        });
-        rig.settle();
-        let start = rig.number(1);
-        let touch = |x, y| Pointer {
-            kind: "touch",
-            buttons: 1,
-            ..Pointer::mouse(x, y)
-        };
-        rig.pointer(
-            start,
-            "pointerdown",
-            Pointer {
-                button: 0,
-                ..touch(120.0, 60.0)
-            },
-        );
-        // The client top of `below`: the first row at y 50, then each row's scripted height.
-        let top_of = |target: NodeKey| {
-            50.0 + rows
-                .iter()
-                .take_while(|row| **row != target)
-                .map(|row| height_of(rig.document(), *row))
-                .sum::<f64>()
-        };
-        let at = |node: NodeKey, offset: f64| {
-            pierre_diffs::managers::interaction_manager::InteractionHost::element_from_point(
-                &*rig.view.host,
-                500.0,
-                top_of(node) + offset,
-            )
-        };
-        use pierre_diffs::managers::interaction_manager::HitTest::Element;
-        assert_eq!(
-            at(above, 10.0),
-            Element(above),
-            "virtualized: {virtualized}"
-        );
-        assert_eq!(
-            at(separator, 16.0),
-            Element(separator),
-            "virtualized: {virtualized}"
-        );
-        assert_eq!(
-            at(below, 10.0),
-            Element(below),
-            "virtualized: {virtualized}"
-        );
-    }
-}
-
 #[test]
 fn a_drag_whose_button_came_up_outside_the_view_ends_on_the_next_move() {
     let mut rig = Rig::new(pair(5, &[3]), false, true, true);
@@ -918,4 +827,197 @@ fn dropping_the_view_after_a_render_replaced_the_hovered_rows_cleans_up() {
     let rig = hovered_then_replaced();
     // `use_drop` runs `FileDiff::clean_up`, which clears the hover and the utility it holds.
     drop(rig);
+}
+
+/// What the stylesheet makes of each row of a column, which is what the platform would report:
+/// a line 20 tall, a hunk separator 32 tall with the block gap above and below it (8px) except
+/// where the stylesheet zeroes it (`data-separator-first` has no top margin, `-last` no bottom
+/// one), an annotation 56. The margin is outside the border box that `onresize` reports.
+fn scripted_row(document: &Document, row: NodeKey) -> (f64, f64, f64) {
+    if document.has_attribute(row, "data-separator") {
+        (
+            if document.has_attribute(row, "data-separator-first") {
+                0.0
+            } else {
+                8.0
+            },
+            32.0,
+            if document.has_attribute(row, "data-separator-last") {
+                0.0
+            } else {
+                8.0
+            },
+        )
+    } else if document.has_attribute(row, "data-line-annotation") {
+        (0.0, 56.0, 0.0)
+    } else if let Some(height) = document.get_attribute(row, "style").and_then(|style| {
+        style
+            .strip_prefix("height:")?
+            .split("px")
+            .next()?
+            .parse()
+            .ok()
+    }) {
+        (0.0, height, 0.0)
+    } else {
+        (0.0, 20.0, 0.0)
+    }
+}
+
+/// A diff that looks like the theme lab's: a 44px header above the `pre`, collapsed hunks (a
+/// leading, a middle and a trailing separator) and, when split, an annotation row in the
+/// additions column (paired with a buffer in the deletions one). The platform is scripted from
+/// `scripted_row` independently of the host's own arithmetic: every row's `onresize`, the client
+/// rects the host asks for, and the client tops the rows would really have. Then a drag starts,
+/// the view is scrolled `scrolled` pixels, and every row of every column is hit-tested at its
+/// middle.
+fn assert_every_row_is_hit_where_the_layout_puts_it(split: bool, virtualized: bool, scrolled: f64) {
+    use pierre_diffs::managers::interaction_manager::HitTest;
+    use pierre_diffs::managers::interaction_manager::InteractionHost;
+    let recorder = Recorder::default();
+    recorder.split_annotated.set(split);
+    let mut rig = Rig::with_recorder(recorder, pair(40, &[10, 25]), virtualized, false, true);
+    let host = Rc::clone(&rig.view.host);
+    let dispatch = Rc::clone(&rig.view.dispatch);
+    let header_top = 10.0;
+    let header_height = 44.0;
+    if let Some(scroller) = host.scroller() {
+        let (root, content, container) = (scroller.root, scroller.content, host.container());
+        let content_height = match &rig.view.engine {
+            Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
+            Engine::Static(_) => unreachable!("a virtualized view"),
+        };
+        rig.dom.in_scope(ScopeId::ROOT, || {
+            dispatch.mounted(root, MountedData::new(rect(100.0, 0.0, 800.0, 600.0)));
+            dispatch.resized(root, 600.0, 800.0);
+            dispatch.resized(content, content_height, 800.0);
+            dispatch.visible(container, true);
+        });
+        rig.settle();
+    }
+    let pre = rig.pre();
+    let document = super::host_document(&host);
+    let columns = rig.query("data-content", None);
+    // The client top of the `pre`'s first row: the header and any buffer above the `pre` stack
+    // first, then the first row.
+    let shadow = rig.shadow();
+    let mut pre_top = header_top;
+    for child in document.child_nodes(shadow) {
+        if child == pre {
+            break;
+        }
+        if document.has_attribute(child, "data-diffs-header") {
+            pre_top += header_height;
+        } else if !document.tag_name(child).is_empty() {
+            pre_top += scripted_row(document, child).1;
+        }
+    }
+    // Each column's rows with their client tops (before any scrolling), border boxes and margins
+    // applied the way layout stacks them.
+    let layout: Vec<Vec<(NodeKey, f64, f64)>> = columns
+        .iter()
+        .map(|column| {
+            let mut top = pre_top;
+            document
+                .child_nodes(*column)
+                .into_iter()
+                .filter(|row| !document.tag_name(*row).is_empty())
+                .map(|row| {
+                    let (before, height, after) = scripted_row(document, row);
+                    let placed = (row, top + before, height);
+                    top += before + height + after;
+                    placed
+                })
+                .collect()
+        })
+        .collect();
+    let column_width = if split { 380.0 } else { 760.0 };
+    rig.dom.in_scope(ScopeId::ROOT, || {
+        let hears = |node, name: &str| {
+            dispatch
+                .listeners(node)
+                .iter()
+                .any(|attribute| attribute.name == name)
+        };
+        dispatch.mounted(pre, MountedData::new(rect(100.0, pre_top, 800.0, 900.0)));
+        for (index, column) in columns.iter().enumerate() {
+            let left = 140.0 + column_width * index as f64;
+            dispatch.mounted(
+                *column,
+                MountedData::new(rect(left, pre_top, column_width, 900.0)),
+            );
+            for (row, top, height) in &layout[index] {
+                if hears(*row, "onmounted") {
+                    dispatch.mounted(
+                        *row,
+                        MountedData::new(rect(left, *top, column_width, *height)),
+                    );
+                }
+                if hears(*row, "onresize") {
+                    dispatch.resized(*row, *height, column_width);
+                }
+            }
+        }
+        if let Some(header) = rig.query("data-diffs-header", None).first()
+            && hears(*header, "onresize")
+        {
+            dispatch.resized(*header, header_height, 800.0);
+        }
+    });
+    rig.settle();
+    // Lines 1 to 6 are collapsed behind the leading separator: the drag starts at the first
+    // number the diff shows.
+    let start = rig.query("data-column-number", None)[0];
+    rig.pointer(
+        start,
+        "pointerdown",
+        Pointer::mouse(120.0, pre_top + 5.0).pressed(),
+    );
+    assert!(host.pointer.document_listeners_active());
+    if let Some(scroller) = host.scroller() {
+        let root = scroller.root;
+        rig.dom.in_scope(ScopeId::ROOT, || {
+            dispatch.scrolled(
+                root,
+                ScrollSample {
+                    top: scrolled,
+                    left: 0.0,
+                    scroll_height: 5000.0,
+                    client_height: 600.0,
+                },
+            );
+        });
+    }
+    let shift = if host.scroller().is_some() {
+        scrolled
+    } else {
+        0.0
+    };
+    let mut checked = 0;
+    for (index, rows) in layout.iter().enumerate() {
+        let x = 140.0 + column_width * (index as f64 + 0.5);
+        for (row, top, height) in rows {
+            for fraction in [0.1, 0.5, 0.9] {
+                let y = top - shift + height * fraction;
+                assert_eq!(
+                    host.element_from_point(x, y),
+                    HitTest::Element(*row),
+                    "split {split} virtualized {virtualized} scrolled {scrolled}: column {index} \
+                     row at {top} ({:?}), pointer y {y}",
+                    document.get_attribute(*row, "data-line"),
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 30, "only {checked} checks");
+}
+
+#[test]
+fn a_drag_hits_the_row_the_pointer_is_over_below_hunk_separators_and_annotations() {
+    for split in [false, true] {
+        for (virtualized, scrolled) in [(false, 0.0), (true, 0.0), (true, 130.0)] {
+            assert_every_row_is_hit_where_the_layout_puts_it(split, virtualized, scrolled);
+        }
+    }
 }
