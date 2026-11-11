@@ -56,9 +56,12 @@ intxt m4 "Datum refs move to dtxt"
 
 **Agent, at the end of a task** (its skill asks it to): the same command, plus `--description` written by the agent. The agent knows its branch from git; it doesn't need its session id, because the sessions come with the branch.
 
-What `--branch` includes is decided by the command, not by the packager: the branch's revisions (each recorded position), the commits between its base and each revision, the files those commits and the uncommitted work touched, and the sessions whose edits landed on the branch. If the branch was never recorded live (W6), its history is imported first, which is recording, so it needs no confirmation.
+An intxt says two separate things about history (ledger D53):
 
-The intxt **follows its branch**: later moves of `feat/refs` (new commits, amends, rebases) become new revisions in it, and sessions that work on the branch join it. `--snapshot` makes an intxt that stops at the branch's current position.
+- **It names commits:** `--commits <range>` (`main..feat/refs`, a single commit) or `--change <jj change>`. Named commits are fixed. Named jj changes include their rewrites, since jj keeps a change's id when it is amended or rebased.
+- **It tracks refs:** `--branch feat/refs` names the commits from the branch's base to where it points now, and also tracks the branch, so commits it moves onto later (new commits, amends, rebases) come in as new revisions. Only positions a recorder observed count. A ref is tracked by name, and each machine's recorder contributes the positions it saw (D54).
+
+`--branch` is the common path. Whichever way the work is named, the command decides what comes with it: the commits, the files they and the uncommitted work touched, and the sessions whose edits landed on them. If the commits were never recorded live (W6), their history is imported first. That is recording, so it needs no confirmation.
 
 ### W3. Adding something the defaults missed (U3)
 
@@ -70,7 +73,7 @@ added to m4: session q9 (claude-code, 11 turns, ended yesterday 18:40)
   undo: day x intxt rm m4 q9
 ```
 
-`add` takes exactly one kind of thing per flag: `--session`, `--branch`, `--commits <range>`. Each flag's help says what it brings with it (`--session` brings the session; `--commits` brings those commits and the files they touch). Adding something already in the intxt changes nothing and says so.
+`add` takes exactly one kind of thing per flag: `--session`, `--branch`, `--commits <range>`, `--change <jj change>`. Each flag's help says what it brings with it (`--session` brings the session; `--commits` brings those commits and the files they touch). Adding something already in the intxt changes nothing and says so.
 
 `rm m4 <item>` removes an item by the short id `show` printed. It stops further sharing; copies already synced to others stay with them (FDR 007).
 
@@ -96,7 +99,7 @@ A new session, or a teammate's agent, has to pick up m4.
 
 ```
 $ day x intxt show m4
-m4 "Datum refs move to dtxt"   follows feat/refs   stacks on: none
+m4 "Datum refs move to dtxt"   tracks feat/refs   stacks on: none
   description …
 items (by time):
   q9  session    claude-code   yesterday 18:40   11 turns   "explore dtxt refs"
@@ -124,7 +127,7 @@ Work done before intxt was installed, or on another machine. `--branch` and `--c
 
 | Noun | Meaning |
 | --- | --- |
-| **intxt** | A package of work, with a title and description. It follows a branch unless made with `--snapshot`. |
+| **intxt** | A package of work, with a title and description. It names commits or jj changes, and may track refs. |
 | **item** | One thing an intxt includes: a session, a revision, commits, files. Items come from recording and are shared, not copied. |
 | **session** | An agent session as recorded: turns, messages, tool calls, plans. |
 | **revision** | One recorded position of a branch: its commits since the base, and the files as they stood. |
@@ -141,7 +144,6 @@ Items are sorted, not authored into an order. There is no story or guide layer: 
 
 ## Open questions
 
-1. **Following:** should following its branch be the default for an intxt (proposed), with `--snapshot` the exception?
-2. **Which sessions a branch brings:** the sessions whose edits landed on the branch (proposed), or also sessions that only read it?
-3. **Carving by turns:** when `--from … --turns` takes part of a session, does the new intxt reference the whole session document (simple, more shared), or does that need a finer document layout (see the granularity constraint)?
-4. **The noun:** is it "item", or another word?
+1. **Which sessions a branch brings:** the sessions whose edits landed on the branch (proposed), or also sessions that only read it?
+2. **Carving by turns:** when `--from … --turns` takes part of a session, does the new intxt reference the whole session document (simple, more shared), or does that need a finer document layout (see the granularity constraint)?
+3. **The noun:** is it "item", or another word?
