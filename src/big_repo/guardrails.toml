@@ -11,6 +11,11 @@ allowed_dependencies = [
 ]
 allow_external_api_types = false
 
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
 [[exemptions]]
 code = "ERROR_ALLOW_ATTRIBUTE"
 path = "src/big_repo/runtime2/native.rs"
