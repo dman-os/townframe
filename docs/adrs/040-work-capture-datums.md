@@ -1,5 +1,7 @@
 # ADR 040: Work capture datums: repositories, worktrees, git, jj, agent sessions
 
+**Changed 2026-11-12:** §4 states which datums are content-identified and which are location state (ledger D54), and when a file document may span machines (D55). Document granularity is under proposal in `docs/scratch/intxt-granularity.md`; this ADR is not yet changed for it.
+
 **Status:** Proposed. Supersedes the code, history and session sections of the earlier ADR 036 ("intxt datums for the review loop"), including D26's ref-driven file documents (ledger D29).
 
 **Depends on:** ADR 036 (intxt core: layers, generic datums), ADR 035 (references), ADR 041 (annotations, which target these datums). **Capture side:** ADR 039 (the adapter that writes them; to be revised against this ADR). Evidence: ledger F1, F5–F7, F10.
@@ -74,6 +76,10 @@ Two machines with checkouts of one project are two clones, each with its worktre
 ## 4. File documents
 
 One document per worktree per path that some op touched: the generic `path` and `note` datums (ADR 036 §5) plus provenance.
+
+File documents are **location state**: they hold one working copy's edits, which only that worktree's recorder observes, so they have one writer and stay per worktree (ledger D29, D32). Content-identified datums (commits, trees, file contents at a commit) are different: they are the same wherever they are observed, so any recorder writes the same value and they can be shared across machines (D54). The same path edited in worktrees on two machines therefore has two file documents. They share ground only through commit content, and a comment made on one reaches the other by quote matching, not by a CRDT cursor.
+
+A file document spans machines only when both edit the same document through an editor that writes it directly, as the filesystem will once dpaths lands. The other machine's working copy must then come from that document, never from `git checkout`, or the two would diverge as separate writers (D55).
 
 ```jsonc
 // file doc
