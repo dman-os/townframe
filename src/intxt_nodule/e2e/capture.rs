@@ -51,6 +51,31 @@ struct Session {
     root_commit: String,
 }
 
+/// A session in a fresh git repository, recording into a new intxt drawer of `node`.
+async fn start(node: &TestNode) -> Session {
+    let drawer = node
+        .call(intxt_handlers::CreateIntxt {
+            title: "capture".to_owned(),
+            description: None,
+        })
+        .await
+        .unwrap()
+        .drawer_id;
+    Session::new(drawer)
+}
+
+/// A transcript record of Claude Code's shape.
+fn record(kind: &str, uuid: &str, parent: Option<&str>, message: Value, extra: Value) -> Value {
+    let mut record = json!({"type": kind, "uuid": uuid, "parentUuid": parent,
+        "timestamp": "2026-11-10T10:00:00Z", "cwd": "/work/repo", "sessionId": "s1",
+        "message": message});
+    record
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    record
+}
+
 impl Session {
     fn new(drawer: DrawerId) -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -94,11 +119,16 @@ impl Session {
     }
 
     fn append(&self, records: &[Value]) {
+        self.append_to(&self.transcript, records);
+    }
+
+    fn append_to(&self, path: &Path, records: &[Value]) {
         use std::io::Write;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut file = std::fs::File::options()
             .create(true)
             .append(true)
-            .open(&self.transcript)
+            .open(path)
             .unwrap();
         for record in records {
             writeln!(file, "{record}").unwrap();
@@ -522,5 +552,281 @@ async fn a_blob_file_is_a_blob_datum_until_it_becomes_text() {
             .is_none()
     );
     prepared.commit(first).unwrap();
+    node.stop().await;
+}
+
+/// The worktree datum of the worktree `recorded` names.
+async fn worktree_of(node: &TestNode, docs: &intxt_core::capture::WorktreeDocs) -> work::Worktree {
+    serde_json::from_value(
+        value(
+            node,
+            docs.worktree.as_ref().unwrap(),
+            work::Worktree::ID,
+            "main",
+        )
+        .await,
+    )
+    .unwrap()
+}
+
+/// A batch of four ops numbered from 254 crosses the 256-op boundary: a second op-log document
+/// opens, the worktree datum lists both with the sequence number each starts at, and a retry of
+/// the batch changes nothing; the next batch appends to the open document.
+#[tokio::test]
+async fn ops_roll_over_into_a_second_op_log_document() {
+    let node = boot().await;
+    let session = start(&node).await;
+    let root = session.repo.display().to_string();
+    std::fs::write(session.repo.join("a.txt"), "one\nTWO\n").unwrap();
+    let prepared =
+        intxt_capture::host::prepare(&session.hook("Stop", None), &session.state).unwrap();
+    let mut batch = prepared.batch.clone();
+    let worktree = &mut batch.worktrees[0];
+    worktree.next_seq = 254;
+    let op = worktree.ops[0].clone();
+    worktree.ops = vec![op.clone(); 4];
+
+    let first = session.send(&node, &batch, "hook-1").await;
+    let docs = first.worktrees[&root].docs.clone();
+    assert_eq!(first.worktrees[&root].next_seq, 258);
+    let worktree = worktree_of(&node, &docs).await;
+    let froms: Vec<u64> = worktree.op_logs.iter().map(|log| log.from).collect();
+    assert_eq!(froms, [254, 256]);
+    let (log0, log1) = (&worktree.op_logs[0].doc, &worktree.op_logs[1].doc);
+    assert_ne!(log0, log1);
+    for (seq, log) in [(254, log0), (255, log0), (256, log1), (257, log1)] {
+        assert_eq!(
+            value(&node, log, work::WorktreeOp::ID, &seq.to_string()).await["kind"],
+            "edit",
+            "op {seq}"
+        );
+    }
+    assert!(is_absent(&node, log0, work::WorktreeOp::ID, "256").await);
+    assert!(is_absent(&node, log1, work::WorktreeOp::ID, "255").await);
+
+    // A retry answers the same and writes nothing.
+    assert_eq!(session.send(&node, &batch, "hook-1").await, first);
+    let again = worktree_of(&node, &docs).await;
+    assert_eq!(again, worktree);
+    assert!(is_absent(&node, log1, work::WorktreeOp::ID, "258").await);
+
+    // The next batch continues in the open document.
+    let mut next = prepared.batch.clone();
+    next.worktrees[0].docs = docs.clone();
+    next.worktrees[0].next_seq = 258;
+    next.worktrees[0].ops.truncate(1);
+    let second = session.send(&node, &next, "hook-2").await;
+    assert_eq!(second.worktrees[&root].next_seq, 259);
+    assert_eq!(worktree_of(&node, &docs).await.op_logs.len(), 2);
+    value(&node, log1, work::WorktreeOp::ID, "258").await;
+    prepared.commit(second).unwrap();
+    node.stop().await;
+}
+
+/// A subagent is its own session document: its `parent` names the main session's document, and
+/// its turns are its own.
+#[tokio::test]
+async fn a_subagent_is_recorded_as_a_session_of_its_own() {
+    let node = boot().await;
+    let mut session = start(&node).await;
+    session.append(&[
+        record(
+            "user",
+            "u1",
+            None,
+            json!({"role": "user", "content": "explore"}),
+            json!({}),
+        ),
+        record(
+            "assistant",
+            "a1",
+            Some("u1"),
+            json!({"id": "m-t1", "content": [{"type": "tool_use", "id": "t1", "name": "Agent",
+                "input": {"description": "look"}}]}),
+            json!({}),
+        ),
+    ]);
+    let start = session
+        .run(&node, session.hook("SessionStart", None), false)
+        .await
+        .unwrap();
+    let main_doc = start.session.unwrap();
+
+    // The call returns, naming the agent; its transcript sits beside the session's.
+    session.append(&[record(
+        "user",
+        "r1",
+        Some("a1"),
+        json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "found"}]}),
+        json!({"toolUseResult": {"status": "completed", "agentId": "ab12"}}),
+    )]);
+    let sub_path = session
+        .transcript
+        .with_extension("")
+        .join("subagents/agent-ab12.jsonl");
+    let sub = |uuid: &str, parent: Option<&str>, message: Value, kind: &str| {
+        record(
+            kind,
+            uuid,
+            parent,
+            message,
+            json!({"agentId": "ab12", "isSidechain": true}),
+        )
+    };
+    session.append_to(
+        &sub_path,
+        &[
+            sub(
+                "s1",
+                None,
+                json!({"role": "user", "content": "look around"}),
+                "user",
+            ),
+            sub(
+                "s2",
+                Some("s1"),
+                json!({"id": "sm1", "content": [{"type": "text", "text": "done"}]}),
+                "assistant",
+            ),
+        ],
+    );
+    let stopped = session
+        .run(&node, session.hook("Stop", None), true)
+        .await
+        .expect("the subagent's import is recorded");
+    assert_eq!(
+        stopped.session,
+        Some(main_doc.clone()),
+        "the main session's document is answered"
+    );
+    let agent_doc = stopped.subagents["ab12"].clone();
+    assert_ne!(agent_doc, main_doc);
+    let agent = value(&node, &agent_doc, work::AgentSession::ID, "main").await;
+    assert_eq!(agent["sessionId"], "agent-ab12");
+    assert_eq!(
+        agent["parent"],
+        format!("dtxt:datum:{main_doc}/org.example.intxt.work.agentSession/main")
+    );
+    let turn = value(&node, &agent_doc, work::PromptTurn::ID, "s1").await;
+    assert_eq!(turn["messages"][0]["text"], "look around");
+    assert_eq!(turn["messages"][1]["text"], "done");
+
+    // The host remembered the subagent's document: nothing new is nothing to record.
+    assert!(
+        session
+            .run(&node, session.hook("Stop", None), false)
+            .await
+            .is_none()
+    );
+    node.stop().await;
+}
+
+/// Ref moves: a checkout, a branch forced while HEAD was elsewhere, and a reflog that expired
+/// between two looks, each as the op of its kind with the `gitRef` datums moved to match.
+#[tokio::test]
+async fn ref_moves_and_a_reflog_gap_are_recorded() {
+    let node = boot().await;
+    let mut session = start(&node).await;
+    let root = session.repo.display().to_string();
+    let first_sha = session.root_commit.clone();
+    let seen = session
+        .run(&node, session.hook("Stop", None), false)
+        .await
+        .expect("the first look records the clone");
+    let docs = seen.worktrees[&root].docs.clone();
+    let clone_doc = docs.clone.clone().unwrap();
+    let clone_slot = {
+        let worktree = worktree_of(&node, &docs).await;
+        String::from_utf8(worktree.clone.key().slot_bytes().to_vec()).unwrap()
+    };
+    let target_of = async |name: &str| {
+        value(
+            &node,
+            &clone_doc,
+            work::GitRef::ID,
+            &format!("{clone_slot}/{name}"),
+        )
+        .await["target"]
+            .clone()
+    };
+    assert_eq!(target_of("refs/heads/main").await, first_sha);
+    let ops_since = async |from: u64, to: u64| {
+        let worktree = worktree_of(&node, &docs).await;
+        let log = &worktree.op_logs[0].doc;
+        let mut ops = Vec::new();
+        for seq in from..to {
+            ops.push(value(&node, log, work::WorktreeOp::ID, &seq.to_string()).await);
+        }
+        ops
+    };
+
+    // A checkout of a new branch; another branch is made beside it.
+    git(&session.repo, &["checkout", "-q", "-b", "feat"]);
+    git(&session.repo, &["branch", "other"]);
+    let checkout = session
+        .run(&node, session.hook("Stop", None), false)
+        .await
+        .unwrap();
+    let after_checkout = checkout.worktrees[&root].next_seq;
+    let ops = ops_since(0, after_checkout).await;
+    let checkout_op = ops
+        .iter()
+        .find(|op| op["kind"] == "checkout")
+        .unwrap_or_else(|| panic!("no checkout op: {ops:?}"));
+    assert_eq!(checkout_op["git"]["ref"], "refs/heads/feat");
+    assert_eq!(target_of("refs/heads/feat").await, first_sha);
+    assert_eq!(target_of("refs/heads/other").await, first_sha);
+
+    // A commit on feat, and `other` forced onto it while it is not checked out.
+    git(
+        &session.repo,
+        &["commit", "-q", "--allow-empty", "-m", "second"],
+    );
+    let second_sha = git(&session.repo, &["rev-parse", "HEAD"]);
+    git(&session.repo, &["branch", "-q", "-f", "other", "feat"]);
+    let forced = session
+        .run(&node, session.hook("Stop", None), false)
+        .await
+        .unwrap();
+    let after_forced = forced.worktrees[&root].next_seq;
+    let ops = ops_since(after_checkout, after_forced).await;
+    assert!(ops.iter().any(|op| op["kind"] == "commit"), "{ops:?}");
+    let moved = &ops
+        .iter()
+        .find(|op| op["kind"] == "refMove" && op["git"]["ref"] == "refs/heads/other")
+        .unwrap_or_else(|| panic!("no refMove of other: {ops:?}"))["git"];
+    assert_eq!(moved["ref"], "refs/heads/other");
+    assert_eq!(moved["from"], first_sha);
+    assert_eq!(moved["to"], second_sha);
+    assert!(
+        moved["reflog"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "{moved}"
+    );
+    assert_eq!(target_of("refs/heads/other").await, second_sha);
+    assert_eq!(target_of("refs/heads/feat").await, second_sha);
+
+    // The reflog expires between two looks: one synthetic move, with no reflog message.
+    git(
+        &session.repo,
+        &["commit", "-q", "--allow-empty", "-m", "third"],
+    );
+    let third_sha = git(&session.repo, &["rev-parse", "HEAD"]);
+    git(
+        &session.repo,
+        &["reflog", "expire", "--expire=now", "--all"],
+    );
+    let gap = session
+        .run(&node, session.hook("Stop", None), false)
+        .await
+        .unwrap();
+    let ops = ops_since(after_forced, gap.worktrees[&root].next_seq).await;
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0]["kind"], "refMove");
+    assert_eq!(ops[0]["git"]["from"], second_sha);
+    assert_eq!(ops[0]["git"]["to"], third_sha);
+    assert!(ops[0]["git"].get("reflog").is_none(), "{}", ops[0]["git"]);
+    assert_eq!(target_of("refs/heads/feat").await, third_sha);
     node.stop().await;
 }
