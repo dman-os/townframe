@@ -49,22 +49,10 @@ fn wire<T: Serialize + DeserializeOwned>(value: &T, expected: Value) {
 
 #[test]
 fn core_protocol_metadata_wire() {
-    for (operations, namespace, error_schema) in [
-        (
-            AuthorityProtocol::METHODS,
-            "org.example.daybook.authority.",
-            "AuthorityServiceError",
-        ),
-        (
-            DocsProtocol::METHODS,
-            "org.example.daybook.docs.",
-            "DocsError",
-        ),
-        (
-            DrawersProtocol::METHODS,
-            "org.example.daybook.drawers.",
-            "DrawersError",
-        ),
+    for (operations, namespace) in [
+        (AuthorityProtocol::METHODS, "org.example.daybook.authority."),
+        (DocsProtocol::METHODS, "org.example.daybook.docs."),
+        (DrawersProtocol::METHODS, "org.example.daybook.drawers."),
     ] {
         assert!(!operations.unary.is_empty());
         let mut nsids = std::collections::BTreeSet::new();
@@ -72,7 +60,6 @@ fn core_protocol_metadata_wire() {
             assert!(operation.nsid.starts_with(namespace));
             assert!(nsids.insert(operation.nsid));
             assert!(!operation.output_schema.is_empty());
-            assert_eq!(operation.error_schema, error_schema);
             let (method, input) = match operation.kind {
                 MethodKind::Query | MethodKind::Subscription => (HttpMethod::Get, HttpInput::Query),
                 MethodKind::Procedure => (HttpMethod::Post, HttpInput::JsonBody),
@@ -161,7 +148,7 @@ fn doc_availability_wire() {
     assert_eq!(
         GetDocAvailability::XRPC,
         method_core::XrpcMethod::query("org.example.daybook.docs.getDocAvailability")
-            .with_schemas("DocAvailability", "DocsError"),
+            .with_output_schema("DocAvailability"),
     );
     assert!(
         DocsProtocol::METHODS
@@ -171,7 +158,7 @@ fn doc_availability_wire() {
     assert_eq!(
         ObserveDocAvailability::XRPC,
         method_core::XrpcMethod::subscription("org.example.daybook.docs.observeDocAvailability")
-            .with_schemas("DocAvailability", "DocsError"),
+            .with_output_schema("DocAvailability"),
     );
     let capability = CapId::from_bytes([1; 16]);
     let doc_id = DocId::new([2; 32]);

@@ -41,8 +41,8 @@ const QUERY_OPERATION: XrpcMethod = XrpcMethod {
     method: HttpMethod::Get,
     input: HttpInput::Query,
     output_schema: "EchoOutput",
-    error_schema: "TestError",
     long_poll: false,
+    privileged: false,
 };
 const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.write",
@@ -50,8 +50,8 @@ const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     method: HttpMethod::Post,
     input: HttpInput::JsonBody,
     output_schema: "WriteOutput",
-    error_schema: "TestError",
     long_poll: false,
+    privileged: false,
 };
 const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.numeric",
@@ -59,8 +59,8 @@ const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     method: HttpMethod::Get,
     input: HttpInput::Query,
     output_schema: "NumericOutput",
-    error_schema: "TestError",
     long_poll: false,
+    privileged: false,
 };
 const LONG_POLL_OPERATION: XrpcMethod = XrpcMethod::query("org.example.test.poll").long_poll();
 
@@ -1813,8 +1813,8 @@ async fn unsupported_subscription_is_explicit() {
         method: HttpMethod::Get,
         input: HttpInput::Query,
         output_schema: "Event",
-        error_schema: "TestError",
         long_poll: false,
+        privileged: false,
     };
     let mut router = XrpcRouter::new(1024);
     assert_eq!(

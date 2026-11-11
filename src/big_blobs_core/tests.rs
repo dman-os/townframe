@@ -426,7 +426,6 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
         assert!(big_cabinet_core::datum::is_nsid(operation.nsid));
         assert_eq!(operation.nsid, nsid);
         assert_eq!(operation.output_schema, output);
-        assert_eq!(operation.error_schema, "BlobsError");
     }
     assert_eq!(MAX_READ_BYTES, 1024 * 1024);
     assert_eq!(MAX_PUT_BYTES, 8 * 1024 * 1024);
