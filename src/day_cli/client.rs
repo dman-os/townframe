@@ -77,12 +77,13 @@ impl Reply {
 }
 
 enum Transport {
+    /// One HTTP/1 connection to the holder's socket, opened in [`NodeClient::acquire`] and never
+    /// idled out. The holder counts it, and a holder that has finished its own command accepts
+    /// no new connection, so every call goes over this one: `gate` lets one call at a time use
+    /// it, which is what keeps the HTTP client from opening a second.
     Socket {
-        http: service_client_native_rs::XrpcClient,
-        /// A connection to the holder's socket that sends nothing and lives as long as this
-        /// client. The holder counts it, so it stays up for this process's calls whatever the
-        /// HTTP client does with its own connections.
-        _presence: tokio::net::UnixStream,
+        http: reqwest::Client,
+        gate: tokio::sync::Mutex<()>,
     },
     /// The booted node and the router that serves it. They are dropped together on stop: the
     /// router holds the dispatch client, which must not outlive the node it calls.
@@ -141,19 +142,25 @@ impl NodeClient {
                 None => dir.socket_path()?,
             };
             // A holder that has finished its own command closes its socket and exits once the
-            // connections it accepted have ended, so this process connects before anything else
-            // and keeps that connection. A connect alone is not proof the holder accepted it (it
-            // may sit in the backlog of a listener about to close), so the connection carries
-            // one request, and its answer is. A refusal or a reset means the holder is on its
-            // way out.
-            match Self::present(&socket).await {
-                Ok(presence) => {
-                    let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
-                        .map_err(|error| eyre::eyre!("{error:?}"))?;
+            // connections it accepted have ended. So this client opens one connection before
+            // anything else, proves the holder accepted it by having it answer a request (a
+            // connect alone can sit in the backlog of a listener about to close), and makes
+            // every call over it. A refusal or a reset means the holder is on its way out.
+            let http = reqwest::Client::builder()
+                .unix_socket(socket.as_path())
+                .pool_max_idle_per_host(1)
+                .pool_idle_timeout(None)
+                .build()?;
+            match http
+                .get(format!("http://localhost/xrpc/{}", big_node::GET_NODE_INFO))
+                .send()
+                .await
+            {
+                Ok(_) => {
                     return Ok(Self {
                         transport: Transport::Socket {
                             http,
-                            _presence: presence,
+                            gate: tokio::sync::Mutex::new(()),
                         },
                         mode: if held.role == Some(LockRole::Daemon) {
                             Mode::Daemon
@@ -163,15 +170,7 @@ impl NodeClient {
                         socket: SocketState::Live,
                     });
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound
-                            | std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::UnexpectedEof
-                    ) => {}
+                Err(error) if error.is_connect() => {}
                 Err(error) => {
                     return Err(error)
                         .wrap_err_with(|| format!("connecting to {}", socket.display()));
@@ -184,54 +183,6 @@ impl NodeClient {
                 .await
                 .expect(ERROR_TOKIO)?;
         }
-    }
-
-    /// Opens the connection that keeps a holder up for this client, and proves the holder
-    /// accepted it by having it answer one request (`getNodeInfo`, a query that takes no
-    /// input). The connection stays open and idle afterwards.
-    async fn present(socket: &Path) -> std::io::Result<tokio::net::UnixStream> {
-        use tokio::io::AsyncReadExt;
-        use tokio::io::AsyncWriteExt;
-        let mut stream = tokio::net::UnixStream::connect(socket).await?;
-        stream
-            .write_all(
-                format!(
-                    "GET /xrpc/{} HTTP/1.1\r\nHost: localhost\r\n\r\n",
-                    big_node::GET_NODE_INFO
-                )
-                .as_bytes(),
-            )
-            .await?;
-        // Read the whole response, so the connection is left clean: the head, then the
-        // `content-length` bytes of body.
-        let mut answer = Vec::new();
-        let mut chunk = [0_u8; 4096];
-        let (head_len, body_len) = loop {
-            if let Some(end) = answer.windows(4).position(|window| window == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&answer[..end]).to_lowercase();
-                let body_len = head
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length:"))
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .ok_or_else(|| {
-                        std::io::Error::other("the node's answer carries no content-length")
-                    })?;
-                break (end + 4, body_len);
-            }
-            let read = stream.read(&mut chunk).await?;
-            if read == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
-            answer.extend_from_slice(&chunk[..read]);
-        };
-        while answer.len() < head_len + body_len {
-            let read = stream.read(&mut chunk).await?;
-            if read == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
-            answer.extend_from_slice(&chunk[..read]);
-        }
-        Ok(stream)
     }
 
     pub fn mode(&self) -> Mode {
@@ -251,11 +202,12 @@ impl NodeClient {
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         ensure_nsid(nsid)?;
         match &self.transport {
-            Transport::Socket { http: client, .. } => {
-                let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
+            Transport::Socket { http, gate } => {
+                let _one_call_at_a_time = gate.lock().await;
+                let url = format!("http://localhost/xrpc/{nsid}");
                 let request = match verb {
-                    HttpMethod::Post => client.http_client().post(url).json(input),
-                    HttpMethod::Get => client.http_client().get(url).query(&query_pairs(input)?),
+                    HttpMethod::Post => http.post(url).json(input),
+                    HttpMethod::Get => http.get(url).query(&query_pairs(input)?),
                 };
                 let response = request.send().await?;
                 Ok(Reply {
