@@ -372,14 +372,19 @@ fn ref_moves(
     Ok(moved_elsewhere)
 }
 
-/// The commits the moves made, and the one `HEAD` is at. A checkout or reset only arrives at its
+/// The commits the moves made, and the one `HEAD` is at when it changed (or was first seen). A checkout or reset only arrives at its
 /// commit; the others made `to --not from`.
 fn made_commits(
     git: &Git,
     head: &Head,
+    head_moved: bool,
     moves: &[GitMove],
 ) -> Result<BTreeMap<String, GitCommit>, Error> {
-    let mut wanted: Vec<String> = head.target.iter().cloned().collect();
+    let mut wanted: Vec<String> = if head_moved {
+        head.target.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
     let mut commits = BTreeMap::new();
     for mv in moves {
         let (Some(to), from) = (&mv.observation.to, &mv.observation.from) else {
@@ -484,7 +489,11 @@ pub fn observe(
         });
     }
     moves.extend(ref_moves(&git, common_dir, state, &refs, &head, &moves)?);
-    let commits = made_commits(&git, &head, &moves)?;
+    let head_moved = state
+        .head
+        .as_ref()
+        .is_none_or(|seen| seen.target != head.target);
+    let commits = made_commits(&git, &head, head_moved, &moves)?;
 
     let mut ref_datums = BTreeMap::new();
     for (name, target) in &refs {
