@@ -439,6 +439,27 @@ Slices run in order, one subagent reused across them while under 400k tokens. Ea
 - Under discussion with the operator (2026-11-10): replace datum signatures with node-attested per-change attribution. Actor keys never leave the node's authority, so an actor signature attests no more than the node does; subduction already signs every loose commit and fragment with the node key and checks write membership at ingest. The gap is compaction: a fragment is signed by the compactor, so per-change attribution needs either upstream Automerge author signatures (planned, not shipped) or keeping each commit's `Signed` header through compaction in our fork. Also proposed: author = node key (keyhive identity, so Automerge author masking matches keyhive revocation) and actor = authority actor, bounded per long-lived actor because clocks grow with actor count. Needs an ADR 020 amendment before any code. (Retracted: an earlier claim here that the gate's per-write cost grows with history. Measured, the growth was an edit-position artifact of the Myers diff in `update_text`; the gate is flat. See the write-cost entry below.)
 - 2026-11-10: dtxt: migration (ADR 035) landed: `big_cabinet_core::reference` (`DatumReference`, `Location`, `ActorUrl`, `head_list`), `big_blobs_core::url` (`BlobUrl`), repo-wide db+ -> dtxt: (`c69ead9e`, `6e3865d8`). intxt's answers: heads are spelled in hash-byte order everywhere (fixed `9c3b88c9`: the text form had sorted the base58 spellings, which disagree with byte order across the 43/44-char boundary), and grammar-minimal escaping is intended. Legacy forms left to die with daybook_core, intxt depends on none: `db+command`, `db+iroh-clone`, `?via=`, `?branch=&at=`, Kotlin `#<heads>`, `keyRefHeads` hex. Verified on mothership: 891/891 node-side, big_blobs 186/186; the native check-matrix caught big_blobs' recursion-limit lint (`f438927a`). Note: `check-matrix` takes no `--manifest-path` (AGENTS.md is stale there); it already runs wasm-workspace members through their own manifest paths, so the wasm32 targets cover the guests.
 - 2026-11-10 write costs (mothership, release, `~/scratch/gatecost*`, `~/scratch/ovh`): a small datum write is ~7k allocations and 7-10 ms vs plain Automerge ~100 allocations and 0.05 ms. dmeta + gate + signing ~45% (3.2 ms; `write_atomic` 1.9k allocations for 9 ops, staged twice); big_repo `commit_delta` persistence ~39% (2.75 ms) and grows with history even with dmeta off (big-repo-ledger). dmeta adds +259 B per change in 9 ops (two updatedAt pairs, signature delete+make, actorUuid/docUuid as 36-char strings, a 64 B signature); saved doc +90 B/write vs 18 B without dmeta and 9 B plain. Text edits: the gate is flat (~850 allocations, 2.5 ms); per-character `NativeValue::read_at` for the value CID costs 12-17 ms (plain fix: bulk text read). Proposals awaiting the operator: invert the alias index to `datums[key].uuids` (removes the whole-map `aliases()` scan and the ~500-datum ceiling from `max_entries_per_frontier` counting each entry twice); version tag as a per-datum field; raw-byte UUIDs; splice input for Text; two-phase write deferred (mirror recommended pending measurement).
+- **2026-11-11 status:**
+  - **#84 is green and CLEAN at 88bc9ae2** and awaits the operator's review and merge. Notify claytxt on merge.
+  - **Landed on feat/big-node-next (7a2b5f24, which also merges #84 forward):**
+    - reference defs (fe442c64);
+    - object-main datums held, and sidecars pruned to reachable defs (c739070e);
+    - `drawers.listDocDrawers` (8169119c);
+    - ADR 020 cut item 5: aliases under the datum (e44932ce);
+    - unparseable references refused at their path (e89bf15a);
+    - Text read in one call and costing its bytes, plus `ValueTooLarge` (c71bde92);
+    - `dispatch.local` GET queries, and node defs resolving implicitly (5f719563);
+    - blobs over the wire: `mintCapability`, `$bytes`, upload holds released on retention (1bbe198a);
+    - oversized values refused before staging (b759cda3);
+    - ADR 020 cut items 2-4: packed signature entry, no doc `updatedAt`, version = `DatumVersion` (489fe56e). Signed-write overhead fell from 240 to 124 B/edit.
+  - **Follow-ups:**
+    - a decoded inspection view of signature entries;
+    - a storable carried-map signature entry, decided with compaction;
+    - blob upload holds that nothing references never expire, and released receipt rows are never pruned;
+    - an 8 MiB copy in `blobs.put` (`dmeta::Bytes` has no `into_vec`);
+    - an wire op for a reader to select mirrors;
+    - draft (unsigned) branches: parked by the operator, not this week.
+  - **In flight:** profiling a 240 KB Text create and one-line edit (~30 s each in debug, per intxt). It decides intxt capture's 256 KiB Text cutoff.
 - **2026-11-11 #84 freeze (operator):** #84 (feat/big-node, ~30k lines, 100 commits) is frozen in scope. The goal is to get it green and merged, so claytext can run on nodules (micros set up inside cartridges) after it lands on main.
   - **On merge, message the claytxt session.** Its node work (Clay on the node, micros in cartridges, isomorphic service access, a node-backed `clay_docs` source) is blocked on #84.
   - New node-side work lands on **feat/big-node-next** (branched at 56e425bf). feat/big-node gets only CI and merge-prep fixes, merged forward into -next.
