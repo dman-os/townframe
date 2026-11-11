@@ -2,6 +2,7 @@ version = 1
 role = "plugin"
 dependency_reason = "intxt as a cartridge: the manifest that admits intxt's vocabularies to a node, with the storage forms their Lexicons cannot state, and the nodule handler serving its operations (`intxt_handlers`)."
 allowed_dependencies = [
+    "big_blobs_core",
     "big_cabinet_core",
     "big_dispatch_core",
     "big_cartridges_core",

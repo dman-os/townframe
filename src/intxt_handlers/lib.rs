@@ -376,8 +376,9 @@ impl big_ndk::Handler<AddToIntxt> for Intxt {
                     extra: Default::default(),
                 }),
                 work::RepoEntry::ID,
-                std::str::from_utf8(part.key().slot_bytes())
-                    .map_err(|error| IntxtError::Invalid(format!("{part}'s slot: {error}")))?,
+                // A fork and its upstream share a root commit, so the entry is keyed by the
+                // repository's document, not by the `gitRepo` slot (ADR 040 §8).
+                &part_doc.to_string(),
             )
         } else if tag == work::AgentSession::ID {
             let session: work::AgentSession =

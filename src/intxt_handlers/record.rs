@@ -38,6 +38,7 @@ use big_cabinet_core::reference::head_text;
 use intxt_core::capture::Batch;
 use intxt_core::capture::Cause;
 use intxt_core::capture::ChangeKind;
+use intxt_core::capture::Content;
 use intxt_core::capture::ContentClass;
 use intxt_core::capture::Imported;
 use intxt_core::capture::RecordedIds;
@@ -49,7 +50,12 @@ use intxt_core::work;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use serde_json::json;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
+/// The tag of the blob datum a file document holds for a blob-classified file (ledger D45).
+const BLOB_TAG: &str = "org.example.daybook.blob";
 
 /// Ops per op-log document (ADR 040 §3).
 const OPS_PER_LOG: u64 = 256;
@@ -152,7 +158,7 @@ struct PendingFile {
     doc: Option<DocId>,
     /// Whether the path is new to the document: a rename moved it, or the document is new.
     path_changed: bool,
-    text: Option<String>,
+    content: Option<Content>,
 }
 
 struct Recorder<'a> {
@@ -185,6 +191,17 @@ impl Recorder<'_> {
         doc: &DocId,
         set: BTreeMap<DatumKey, Value>,
     ) -> Result<WriteReceipt, IntxtError> {
+        self.write_removing(step, doc, set, BTreeSet::new()).await
+    }
+
+    /// [`Self::write`], removing `remove` in the same write.
+    async fn write_removing(
+        &self,
+        step: &str,
+        doc: &DocId,
+        set: BTreeMap<DatumKey, Value>,
+        remove: BTreeSet<DatumKey>,
+    ) -> Result<WriteReceipt, IntxtError> {
         let capability = self
             .caller
             .doc_capability(DocScope {
@@ -195,11 +212,11 @@ impl Recorder<'_> {
         self.caller
             .call(WriteDatums {
                 capability,
-                command: Some(self.caller.command(step, &set)?),
+                command: Some(self.caller.command(step, &(&set, &remove))?),
                 doc_id: doc.clone(),
                 mode: WriteMode::AtCurrent,
                 set,
-                remove: Default::default(),
+                remove,
             })
             .await
     }
@@ -467,13 +484,12 @@ impl Recorder<'_> {
                         })
                     });
                     state.changed |= old.is_some();
-                    let text = change.content.as_ref().and_then(text_of);
                     pending.insert(
                         path.clone(),
                         PendingFile {
                             path_changed: true,
                             doc: old,
-                            text,
+                            content: change.content.clone(),
                         },
                     );
                     continue;
@@ -494,7 +510,7 @@ impl Recorder<'_> {
                 PendingFile {
                     path_changed: doc.is_none(),
                     doc,
-                    text: change.content.as_ref().and_then(text_of),
+                    content: change.content.clone(),
                 },
             );
         }
@@ -502,48 +518,9 @@ impl Recorder<'_> {
         let worktree_ref = reference(&state.doc, work::Worktree::ID, "main")?;
         let mut heads = BTreeMap::new();
         for (index, (path, file)) in pending.into_iter().enumerate() {
-            let mut set = BTreeMap::new();
-            if file.path_changed {
-                set.extend([entry(
-                    to_value(&generic::PathName {
-                        path: path.clone(),
-                        extra: Default::default(),
-                    }),
-                    generic::PathName::ID,
-                    "main",
-                )?]);
-            }
-            if let Some(text) = file.text {
-                set.extend([entry(
-                    to_value(&generic::Note {
-                        mime: mime_of(&path).to_owned(),
-                        content: text,
-                        extra: Default::default(),
-                    }),
-                    generic::Note::ID,
-                    "main",
-                )?]);
-            }
             let step = format!("{}/file-{index}", worktree.identity.worktree_id);
-            let receipt = match file.doc {
-                Some(doc) => {
-                    if set.is_empty() {
-                        continue;
-                    }
-                    self.write(&step, &doc, set).await?
-                }
-                None => {
-                    set.extend([entry(
-                        to_value(&work::File {
-                            worktree: worktree_ref.clone(),
-                            blob: None,
-                            extra: Default::default(),
-                        }),
-                        work::File::ID,
-                        "main",
-                    )?]);
-                    self.create(&step, set).await?
-                }
+            let Some(receipt) = self.write_file(&step, &path, file, &worktree_ref).await? else {
+                continue;
             };
             state
                 .datum
@@ -553,6 +530,103 @@ impl Recorder<'_> {
             heads.insert(path, receipt.heads.iter().map(head_text).collect());
         }
         Ok(heads)
+    }
+
+    /// Writes one file document: created with its `path`, content and `file` provenance, or, for
+    /// an existing one, only what changed. Content is text (a `note`) or a blob (an
+    /// `org.example.daybook.blob` datum that `file.blob` references); when a path switches from
+    /// one to the other the old one is removed in the same write. A blob the host did not
+    /// upload writes no content. None when there is nothing to write.
+    async fn write_file(
+        &self,
+        step: &str,
+        path: &str,
+        file: PendingFile,
+        worktree_ref: &DatumReference,
+    ) -> Result<Option<WriteReceipt>, IntxtError> {
+        let note_key = key(generic::Note::ID, "main")?;
+        let blob_key = key(BLOB_TAG, "main")?;
+        let (had_note, had_blob) = match &file.doc {
+            Some(doc) => {
+                let present = self
+                    .read(doc, &[note_key.clone(), blob_key.clone()])
+                    .await?;
+                (
+                    present.contains_key(&note_key),
+                    present.contains_key(&blob_key),
+                )
+            }
+            None => (false, false),
+        };
+        let text = file.content.as_ref().and_then(text_of);
+        let blob = file
+            .content
+            .as_ref()
+            .filter(|content| content.class == ContentClass::Blob)
+            .and_then(|content| content.blob.as_ref());
+        let mut set = BTreeMap::new();
+        let mut remove = BTreeSet::new();
+        if file.path_changed {
+            set.extend([entry(
+                to_value(&generic::PathName {
+                    path: path.to_owned(),
+                    extra: Default::default(),
+                }),
+                generic::PathName::ID,
+                "main",
+            )?]);
+        }
+        let has_blob = match (&text, blob) {
+            (Some(text), _) => {
+                set.extend([entry(
+                    to_value(&generic::Note {
+                        mime: mime_of(path).to_owned(),
+                        content: text.clone(),
+                        extra: Default::default(),
+                    }),
+                    generic::Note::ID,
+                    "main",
+                )?]);
+                if had_blob {
+                    remove.insert(blob_key.clone());
+                }
+                false
+            }
+            (None, Some(blob)) => {
+                set.extend([(
+                    blob_key.clone(),
+                    json!({
+                        "mime": blob.mime,
+                        "digest": blob.digest,
+                        "lengthOctets": blob.length_octets,
+                    }),
+                )]);
+                if had_note {
+                    remove.insert(note_key.clone());
+                }
+                true
+            }
+            (None, None) => had_blob,
+        };
+        // `file` states whether the document has a blob: written new, and whenever that changes.
+        if file.doc.is_none() || has_blob != had_blob {
+            let blob_ref =
+                has_blob.then(|| DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone()));
+            set.extend([entry(
+                to_value(&work::File {
+                    worktree: worktree_ref.clone(),
+                    blob: blob_ref,
+                    extra: Default::default(),
+                }),
+                work::File::ID,
+                "main",
+            )?]);
+        }
+        match file.doc {
+            Some(_) if set.is_empty() && remove.is_empty() => Ok(None),
+            Some(doc) => Ok(Some(self.write_removing(step, &doc, set, remove).await?)),
+            None => Ok(Some(self.create(step, set).await?)),
+        }
     }
 
     /// The batch's commits into the repository document (a recorded commit is never rewritten)

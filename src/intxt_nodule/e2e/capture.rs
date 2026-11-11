@@ -3,10 +3,14 @@
 //! nodule's `recordObservations`, whose answer the host commits as its state.
 
 use super::*;
+use big_blobs_core::BlobsScope;
+use big_blobs_core::MintBlobsCapability;
+use big_blobs_core::PutBlob;
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use intxt_capture::hook::Hook;
 use intxt_core::capture::Batch;
+use intxt_core::capture::BlobRef;
 use intxt_core::capture::Content;
 use intxt_core::capture::RecordedIds;
 use intxt_handlers::RecordObservations;
@@ -377,5 +381,146 @@ async fn a_changed_batch_under_the_same_key_records_the_change() {
     let log = &worktree.op_logs[0].doc;
     value(&node, log, work::WorktreeOp::ID, "1").await;
     prepared.commit(second).unwrap();
+    node.stop().await;
+}
+
+/// Whether `tag/slot` is absent from `doc`.
+async fn is_absent(node: &TestNode, doc: &str, tag: &str, slot: &str) -> bool {
+    let datum_key = DatumKey::new(tag, slot.as_bytes()).unwrap();
+    let doc: DocId = doc.parse().unwrap();
+    let capability = capability(
+        node,
+        DocScope {
+            read: BTreeSet::from([doc.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let mut read = node
+        .big_node()
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            ReadDatums {
+                capability,
+                doc_id: doc,
+                at: At::Current,
+                datums: Some(BTreeSet::from([datum_key.clone()])),
+                optimistic: false,
+            },
+        )
+        .await
+        .unwrap();
+    matches!(
+        read.datums.remove(&datum_key),
+        Some(DatumRead::Absent { .. })
+    )
+}
+
+/// A blob-classified file whose bytes the host put in the blob service is recorded as a
+/// `org.example.daybook.blob` datum in its file document, which `file.blob` references; when the
+/// path turns into text, the blob datum goes in the write that stores the note (ledger D45).
+#[tokio::test]
+async fn a_blob_file_is_a_blob_datum_until_it_becomes_text() {
+    let node = boot().await;
+    let drawer = node
+        .call(intxt_handlers::CreateIntxt {
+            title: "capture".to_owned(),
+            description: None,
+        })
+        .await
+        .unwrap()
+        .drawer_id;
+    let session = Session::new(drawer);
+    let root = session.repo.display().to_string();
+    session.append(&[json!({"type": "user", "uuid": "u1", "parentUuid": null,
+        "timestamp": "2026-11-10T10:00:00Z", "cwd": session.repo, "sessionId": "s1",
+        "message": {"role": "user", "content": "edit it"}})]);
+    std::fs::write(session.repo.join("a.txt"), [0u8, 159, 146, 150]).unwrap();
+    let prepared =
+        intxt_capture::host::prepare(&session.hook("Stop", None), &session.state).unwrap();
+
+    // The host puts the bytes first, as the operator.
+    let blobs = &node.big_node().blobs.client;
+    let operator = Authorization::identity(node.big_node().authority.root).metadata();
+    let put = blobs
+        .call_with(
+            RequestContext::root(),
+            operator,
+            MintBlobsCapability {
+                scope: BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let info = blobs
+        .call(
+            RequestContext::root(),
+            PutBlob {
+                capability: put,
+                bytes: vec![0u8, 159, 146, 150].into(),
+            },
+        )
+        .await
+        .unwrap();
+    let digest = info.blob_id.digest_str();
+
+    let mut batch = prepared.batch.clone();
+    let content = &mut batch.worktrees[0].ops[0].changes[0].content;
+    assert_eq!(content.as_ref().unwrap().text, None, "a.txt is a blob");
+    content.as_mut().unwrap().blob = Some(BlobRef {
+        digest: digest.clone(),
+        length_octets: info.length_octets,
+        mime: "application/octet-stream".to_owned(),
+        extra: Default::default(),
+    });
+    let first = session.send(&node, &batch, "hook-1").await;
+    let recorded = &first.worktrees[&root];
+    let worktree: work::Worktree = serde_json::from_value(
+        value(
+            &node,
+            recorded.docs.worktree.as_ref().unwrap(),
+            work::Worktree::ID,
+            "main",
+        )
+        .await,
+    )
+    .unwrap();
+    let file_doc = worktree.files["a.txt"].clone();
+    assert_eq!(
+        value(&node, &file_doc, "org.example.daybook.blob", "main").await,
+        json!({"mime": "application/octet-stream", "digest": digest, "lengthOctets": 4})
+    );
+    assert_eq!(
+        value(&node, &file_doc, work::File::ID, "main").await["blob"],
+        "dtxt:datum:self/org.example.daybook.blob/main"
+    );
+    assert!(is_absent(&node, &file_doc, generic::Note::ID, "main").await);
+
+    // The next observation finds the path as text.
+    let mut batch = prepared.batch.clone();
+    batch.worktrees[0].docs = recorded.docs.clone();
+    batch.worktrees[0].next_seq = recorded.next_seq;
+    batch.worktrees[0].ops[0].changes[0].content = Some(Content::text("now text\n"));
+    session.send(&node, &batch, "hook-2").await;
+    assert_eq!(
+        value(&node, &file_doc, generic::Note::ID, "main").await["content"],
+        "now text\n"
+    );
+    assert!(is_absent(&node, &file_doc, "org.example.daybook.blob", "main").await);
+    assert!(
+        value(&node, &file_doc, work::File::ID, "main")
+            .await
+            .get("blob")
+            .is_none()
+    );
+    prepared.commit(first).unwrap();
     node.stop().await;
 }
