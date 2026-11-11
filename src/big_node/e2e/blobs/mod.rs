@@ -992,6 +992,67 @@ async fn the_operator_stores_and_reads_a_file_over_the_socket_as_a_bytes_object(
 }
 
 #[tokio::test]
+async fn a_blobs_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
+    let secrets = secrets().await;
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        runtime.ephemeral(&[]).unwrap(),
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
+    // A handle that may mint, bound to the operator that minted it.
+    let held = node
+        .blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            MintBlobsCapability {
+                scope: BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let mint_as = async |signer: CapId| {
+        node.blobs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: held,
+                    signer,
+                }
+                .metadata(),
+                MintBlobsCapability {
+                    scope: BlobsScope {
+                        put: true,
+                        ..Default::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+    };
+    mint_as(operator(&node).signer).await.unwrap();
+    // Another actor presenting the same id under its own signer is refused.
+    let stolen = super::cartridges::bystander(&node).await.signer;
+    assert!(matches!(
+        mint_as(stolen).await,
+        Err(ClientError::Method(BlobsError::Denied))
+    ));
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
 async fn blobs_handles_are_minted_by_the_operator_and_a_handle_only_narrows() {
     let secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
