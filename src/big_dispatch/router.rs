@@ -16,6 +16,7 @@ use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
+use big_dispatch_core::Route;
 use method_lexicon::MethodContract;
 use serde_json::Value;
 use service_utils_rs::RequestContext;
@@ -220,7 +221,7 @@ struct Table {
     /// The operator's routes (ADR 045): an exact NSID or an authority prefix, mapped to the id of
     /// the provider that serves it. Provider ids are opaque here, so a built-in and a nodule are
     /// routed alike.
-    routes_to: BTreeMap<String, String>,
+    routes_to: BTreeMap<String, Route>,
 }
 
 #[derive(Default)]
@@ -242,17 +243,27 @@ impl Router {
     /// claimant. Without a matching route the claims decide.
     pub fn resolve(&self, nsid: &str) -> Result<Arc<ProviderEntry>, DispatchError> {
         let table = self.snapshot();
-        if let Some(provider) = DispatchScope::route_target(&table.routes_to, nsid) {
-            return table
-                .routes
-                .get(nsid)
-                .and_then(|claims| claims.iter().find(|entry| entry.provider_id == provider))
-                .map(Arc::clone)
-                .ok_or_else(|| DispatchError::NotReady {
-                    reason: NotReadyReason::RouteTargetMissing {
-                        provider: provider.to_owned(),
+        match DispatchScope::route_target(&table.routes_to, nsid) {
+            Some(Route::Invalid(reason)) => {
+                return Err(DispatchError::NotReady {
+                    reason: NotReadyReason::RouteInvalid {
+                        reason: reason.clone(),
                     },
                 });
+            }
+            Some(Route::Provider(provider)) => {
+                return table
+                    .routes
+                    .get(nsid)
+                    .and_then(|claims| claims.iter().find(|entry| entry.provider_id == *provider))
+                    .map(Arc::clone)
+                    .ok_or_else(|| DispatchError::NotReady {
+                        reason: NotReadyReason::RouteTargetMissing {
+                            provider: provider.clone(),
+                        },
+                    });
+            }
+            None => {}
         }
         match table.routes.get(nsid).map(Vec::as_slice) {
             None | Some([]) => Err(DispatchError::UnknownOperation),
@@ -281,7 +292,7 @@ impl Router {
     /// Replaces every route with `routes` (pattern to provider id) in one swap; setting what is
     /// already set swaps nothing. Routes are independent of claims: one may name a provider
     /// that has not registered yet, which callers see as `RouteTargetMissing` until it does.
-    pub fn set_routes(&self, routes: BTreeMap<String, String>) {
+    pub fn set_routes(&self, routes: BTreeMap<String, Route>) {
         let mut slot = self.table.write().expect("routing table lock");
         if slot.routes_to == routes {
             return;
@@ -294,7 +305,7 @@ impl Router {
     }
 
     /// The routes in force, pattern to provider id.
-    pub fn routes(&self) -> BTreeMap<String, String> {
+    pub fn routes(&self) -> BTreeMap<String, Route> {
         self.snapshot().routes_to.clone()
     }
 
@@ -564,7 +575,7 @@ mod tests {
         let router = Router::default();
         router.register("p", ops(&["x.op"]), ready()).unwrap();
         router.register("q", ops(&["x.op"]), ready()).unwrap();
-        router.set_routes([("x.op".to_owned(), "q".to_owned())].into());
+        router.set_routes([("x.op".to_owned(), Route::Provider("q".into()))].into());
         assert_eq!(provider_of(&router, "x.op"), "q");
         // No fall back to the other claimant while the routed one is not serving.
         router
@@ -591,7 +602,7 @@ mod tests {
     fn a_route_to_a_provider_that_does_not_claim_the_nsid_is_retryable_not_a_fallback() {
         let router = Router::default();
         router.register("p", ops(&["x.op"]), ready()).unwrap();
-        router.set_routes([("x.op".to_owned(), "q".to_owned())].into());
+        router.set_routes([("x.op".to_owned(), Route::Provider("q".into()))].into());
         let missing = DispatchError::NotReady {
             reason: NotReadyReason::RouteTargetMissing {
                 provider: "q".into(),
@@ -618,9 +629,9 @@ mod tests {
         }
         router.set_routes(
             [
-                ("org.x".to_owned(), "a".to_owned()),
-                ("org.x.sub".to_owned(), "b".to_owned()),
-                ("org.x.sub.get".to_owned(), "c".to_owned()),
+                ("org.x".to_owned(), Route::Provider("a".into())),
+                ("org.x.sub".to_owned(), Route::Provider("b".into())),
+                ("org.x.sub.get".to_owned(), Route::Provider("c".into())),
             ]
             .into(),
         );
@@ -633,14 +644,39 @@ mod tests {
                 reason: NotReadyReason::Ambiguous
             }
         );
-        router.set_routes([("org.x.sub".to_owned(), "b".to_owned())].into());
+        router.set_routes([("org.x.sub".to_owned(), Route::Provider("b".into()))].into());
         assert_eq!(provider_of(&router, "org.x.sub.get"), "b");
+    }
+
+    #[test]
+    fn a_damaged_route_refuses_what_it_covers_and_nothing_else() {
+        let router = Router::default();
+        router
+            .register("p", ops(&["a.one", "b.one"]), ready())
+            .unwrap();
+        router.set_routes(
+            [(
+                "a".to_owned(),
+                Route::Invalid("route `a` is damaged".into()),
+            )]
+            .into(),
+        );
+        assert_eq!(
+            router.resolve("a.one").unwrap_err(),
+            DispatchError::NotReady {
+                reason: NotReadyReason::RouteInvalid {
+                    reason: "route `a` is damaged".into()
+                }
+            }
+        );
+        assert_eq!(provider_of(&router, "b.one"), "p");
     }
 
     #[test]
     fn routes_survive_registrations_and_setting_the_same_routes_swaps_nothing() {
         let router = Router::default();
-        let routes: BTreeMap<String, String> = [("x.op".to_owned(), "p".to_owned())].into();
+        let routes: BTreeMap<String, Route> =
+            [("x.op".to_owned(), Route::Provider("p".into()))].into();
         router.set_routes(routes.clone());
         let before = router.snapshot();
         router.set_routes(routes.clone());

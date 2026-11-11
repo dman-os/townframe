@@ -35,6 +35,7 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
+use big_cabinet_core::doc::WriteReceipt;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
@@ -491,6 +492,55 @@ async fn boot_nodules(
 }
 
 impl Node {
+    /// Writes `set` straight into the node's config drawer document, as any client holding a
+    /// capability on it can, bypassing the nodule service's own validation.
+    async fn write_config_datums(&self, set: BTreeMap<DatumKey, Value>) -> WriteReceipt {
+        let config_doc = DocId::from(self.drawers.local().config_id.clone());
+        let doc_cap = self
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(self.drawers_actor.capability).metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        write: BTreeSet::from([config_doc.clone()]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap();
+        self.docs
+            .client
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability: doc_cap.capability_id,
+                    command: None,
+                    doc_id: config_doc,
+                    mode: WriteMode::AtCurrent,
+                    set,
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Waits for the nodule service to reconcile the document at `receipt`'s heads.
+    async fn reconciled_at(&self, receipt: &WriteReceipt, cartridge_id: &str) -> NoduleRecord {
+        loop {
+            let record = self.get(self.operator(), cartridge_id).await.unwrap();
+            if record.observed_heads == receipt.heads {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// [`Self::restart_nodules`] on a node whose `dev.allow_slot_takeover` is now `allow`.
     async fn restart_with_takeover(&mut self, allow: bool) {
         self.allow_slot_takeover = allow;
@@ -1403,50 +1453,19 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     .unwrap();
 
     // Simulate an invalid imported settings datum written directly to the config drawer doc.
-    let config_doc = DocId::from(node.drawers.local().config_id.clone());
-    let doc_cap = node
-        .docs
-        .client
-        .call_with(
-            RequestContext::root(),
-            Authorization::identity(node.drawers_actor.capability).metadata(),
-            MintDocCapability {
-                scope: DocScope {
-                    write: BTreeSet::from([config_doc.clone()]),
-                    ..DocScope::default()
-                },
-                rights: Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap();
     let bad_settings_key: DatumKey =
         format!("{}/{}", NoduleSettings::ID, example_cartridge!("photos"))
             .parse()
             .unwrap();
     let bad_receipt = node
-        .docs
-        .client
-        .call(
-            RequestContext::root(),
-            WriteDatums {
-                capability: doc_cap.capability_id,
-                command: None,
-                doc_id: config_doc,
-                mode: WriteMode::AtCurrent,
-                set: BTreeMap::from([(
-                    bad_settings_key,
-                    json!({
-                        "$type": NoduleSettings::ID,
-                        "values": { "thumbnails": "not-a-bool" }
-                    }),
-                )]),
-                remove: BTreeSet::new(),
-            },
-        )
-        .await
-        .unwrap();
+        .write_config_datums(BTreeMap::from([(
+            bad_settings_key,
+            json!({
+                "$type": NoduleSettings::ID,
+                "values": { "thumbnails": "not-a-bool" }
+            }),
+        )]))
+        .await;
 
     let refused = loop {
         let record = node

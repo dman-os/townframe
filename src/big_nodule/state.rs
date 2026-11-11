@@ -336,6 +336,8 @@ pub(crate) struct State {
     /// The revision whose datum Lexicons are registered in the node's schema repo for each cartridge,
     /// under the cartridge id as owner. A cartridge is here exactly while it is enabled and admitted.
     registered_schemas: BTreeMap<CartridgeId, Revision>,
+    /// The unusable route datums already reported (see `NoduleConfig::routes`).
+    reported_unreadable_routes: BTreeSet<String>,
     /// Cartridges whose executor asked to be ensured again. The state actor constructs it and
     /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
     reensure: Arc<ReensureQueue>,
@@ -412,6 +414,7 @@ impl State {
             locks,
             applied_heads: BTreeMap::new(),
             registered_schemas: BTreeMap::new(),
+            reported_unreadable_routes: BTreeSet::new(),
             records: BTreeMap::new(),
             observed_heads: Vec::new(),
             admission_cache: Arc::default(),
@@ -783,7 +786,7 @@ impl State {
         // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
         // change is still what the offers say, and the one offer is the cartridge to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
-        let index = ProviderIndex::new(&resolved, snapshot.value.routes()?);
+        let index = ProviderIndex::new(&resolved, snapshot.value.routes().0);
         let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(cartridge_id) else {
             unreachable!("a request awaiting confirmation belongs to an admitted nodule")
         };
@@ -987,7 +990,16 @@ impl State {
         // same pass.
         // Routes and claims are pushed in one pass, so dispatch never routes by a table that
         // disagrees with the one dependents were resolved against.
-        let routes = snapshot.value.routes()?;
+        let (routes, unreadable) = snapshot.value.routes();
+        // Reported once per distinct problem, not on every reconcile; a fixed one is forgotten
+        // so it reports again if it comes back.
+        for problem in &unreadable {
+            if self.reported_unreadable_routes.insert(problem.clone()) {
+                tracing::error!(%problem, "a route datum in the config document is unusable and is ignored");
+            }
+        }
+        self.reported_unreadable_routes
+            .retain(|problem| unreadable.contains(problem));
         self.stores.dispatch.set_routes(routes.clone());
         let providers = ProviderIndex::new(&resolved, routes);
         let mut new_records = BTreeMap::new();
@@ -1671,6 +1683,19 @@ impl State {
                 // A route is the operator's consent, so a routed request re-pins to whatever
                 // the route names instead of waiting on a confirmation.
                 .filter(|_| !providers.is_routed(&request.contract));
+            if let Some(reason) = providers.route_problem(&request.contract) {
+                statuses.insert(
+                    request.binding.clone(),
+                    RequestStatus {
+                        contract: request.contract.clone(),
+                        locked: pinned.cloned(),
+                        unresolved: Some(Unresolved::RouteInvalid {
+                            reason: reason.to_owned(),
+                        }),
+                    },
+                );
+                continue;
+            }
             let offers = providers.offers(
                 &request.contract,
                 self.stores

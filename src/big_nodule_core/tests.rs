@@ -1768,6 +1768,7 @@ mod config_tests {
     #[test]
     fn route_datums_round_trip_by_pattern_and_a_damaged_one_is_an_error_until_cleared() {
         use crate::config::route_key;
+        use big_dispatch_core::Route;
 
         let mut config = NoduleConfig::new();
         config
@@ -1799,10 +1800,13 @@ mod config_tests {
         }
         let stored = NoduleConfig::hydrate(&read);
         assert_eq!(
-            stored.routes().unwrap(),
+            stored.routes().0,
             BTreeMap::from([
-                ("org.example.beta".to_owned(), "p".to_owned()),
-                ("org.example.beta.ping".to_owned(), "q".to_owned())
+                ("org.example.beta".to_owned(), Route::Provider("p".into())),
+                (
+                    "org.example.beta.ping".to_owned(),
+                    Route::Provider("q".into())
+                )
             ])
         );
 
@@ -1819,10 +1823,18 @@ mod config_tests {
             accepted(json!({"provider": 7})),
         );
         let damaged = NoduleConfig::hydrate(&read);
-        assert!(damaged.routes().is_err());
+        // The damaged datum is a route that refuses what its pattern covers, not a failure of
+        // the others; one whose pattern is unusable is left out and described.
+        let (table, unreadable) = damaged.routes();
+        assert!(matches!(
+            table.get("org.example.beta"),
+            Some(Route::Invalid(reason)) if reason.contains("damaged")
+        ));
+        assert_eq!(table["org.example.beta.ping"], Route::Provider("q".into()));
+        assert!(unreadable.is_empty());
         let mut repaired = damaged;
         repaired.set_route("org.example.beta", None).unwrap();
-        assert_eq!(repaired.routes().unwrap().len(), 1);
+        assert_eq!(repaired.routes().0.len(), 1);
     }
 
     #[test]
