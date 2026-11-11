@@ -165,6 +165,8 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 
 - **F22 (2026-11-11, mothership debug, load ~6–9)** A 240 KB `note.content` (4,000 lines) through the docs client: boot 35.9 s, **create 27.5 s**, read 0.28 s, **one-line edit 30.6 s**, read 0.75 s (INSTR commit on feat/intxt-impl). Writes cost ~100 µs per character even without a diff base, so something besides Myers is linear in size; the nodules lane is profiling phase by phase in release and debug, and splice input is the likely edit fix. A 17 MiB value was reconciled before `ValueTooLarge` fired (stalled at 4.6 GiB RSS); being fixed to check the incoming JSON before staging. Keep D43's 256 KiB cutoff until the release numbers arrive.
 
+- **F23 (2026-11-11, nodules lane profile, aarch64 release, loaded)** 244 KB note: create 2.6–3.3 s, of which ~2.3 s was rolling back the dry staging pass op by op; with the dry pass on a scratch clone, create is 0.96 s release (7.1 s debug, from 33). One-line edit 0.49 s release / 3.5 s debug; each write runs every phase twice (dry + real): ~130 ms/pass is the claim's value read (a Text read at heads ~20× slower than a plain read), ~100 ms/pass Myers + base read. Next: claim value computed once, faster read at heads → ~0.25–0.3 s per edit; dropping the dry pass would halve it (the operator's two-phase-write call). Release ≈ 7× debug: judge capture by release. D43's 256 KiB cutoff stays. My 30.6 s debug edit (F22) was `AtHeads`, which may hit the slow read-at-heads path; told them.
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
