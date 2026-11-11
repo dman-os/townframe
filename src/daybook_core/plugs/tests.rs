@@ -589,11 +589,7 @@ async fn test_plug_component_url_validation() -> Res<()> {
         "bundle1".into(),
         manifest::WflowBundleManifest {
             keys: vec![],
-            component_urls: vec![
-                crate::blobs::blob_url("nonexistent_hash")
-                    .parse()
-                    .unwrap(),
-            ],
+            component_urls: vec![crate::blobs::blob_url("nonexistent_hash").parse().unwrap()],
         }
         .into(),
     );

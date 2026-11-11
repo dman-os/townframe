@@ -706,6 +706,7 @@ fn grants_never_exceed_requests() {
         authorities: ["org.example.tags", "org.example.search"]
             .map(String::from)
             .into(),
+        privileged: false,
     };
     let (applied, unrequested) = nodule.bind_operations(&grants);
     // The `org.example.tags` prefix is applied as the two requested operations it covers, not as
@@ -729,6 +730,7 @@ fn grants_never_exceed_requests() {
     let only_apply = DispatchScope {
         operations: ["org.example.tags.apply".to_owned()].into(),
         authorities: Default::default(),
+        privileged: false,
     };
     let unmet: Vec<_> = nodule
         .unmet_requests(&only_apply)
@@ -969,7 +971,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn operation_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
+    fn method_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
         use big_dispatch_core::DispatchScope;
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
@@ -985,8 +987,9 @@ mod admission_tests {
         let scope = DispatchScope {
             operations: ["org.example.search.query".to_owned()].into(),
             authorities: ["org.example.callee".to_owned()].into(),
+            privileged: false,
         };
-        config.set_operation_grants(&id, scope.clone()).unwrap();
+        config.set_method_grants(&id, scope.clone()).unwrap();
         let resolved = |config: &NoduleConfig| {
             let Some(NoduleResolution::Admitted {
                 desired_grants,
@@ -1006,7 +1009,7 @@ mod admission_tests {
             )
         );
 
-        // Rewriting the drawer grants keeps the operations, and emptying the operations keeps the
+        // Rewriting the drawer grants keeps the methods, and emptying the methods keeps the
         // drawer grants; with nothing left the datum is absent.
         config.set_drawer_grants(&id, BTreeMap::new()).unwrap();
         assert_eq!(resolved(&config).1.authorities.len(), 1);
@@ -1014,7 +1017,7 @@ mod admission_tests {
             .set_drawer_grants(&id, BTreeMap::from([(drawer.clone(), DrawerAccess::Write)]))
             .unwrap();
         config
-            .set_operation_grants(&id, DispatchScope::default())
+            .set_method_grants(&id, DispatchScope::default())
             .unwrap();
         assert_eq!(
             resolved(&config),

@@ -175,6 +175,14 @@ impl DispatchService {
             scope: scope.cloned(),
         };
         let entry = self.router.resolve(&params.operation)?;
+        // Privilege is a property of the method's declaration, which only the resolved entry
+        // knows, so it is checked here: a scope that names the method still needs
+        // `privileged` to reach one that is.
+        if let Some(scope) = scope
+            && !scope.admits(&params.operation, entry.privileged)
+        {
+            return Err(DispatchError::Denied);
+        }
         let kind = match &entry.state {
             ProviderState::Ready(kind) => kind,
             ProviderState::NotReady(readiness) => {

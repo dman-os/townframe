@@ -457,12 +457,17 @@ pub struct SignDatumClaim {
     pub claim: DatumClaim,
 }
 
+// `mintCapability` mints under the caller-named issuer namespace with a free-form object, and
+// `openActor` brings a new principal into being: neither is narrowed from a presented handle, so
+// both are privileged. `attenuateCapability` only derives a narrower child of the held handle and
+// `retractCapability` only retracts descendants of the `via` handle (`may_retract`), so a nodule
+// may use them on its own handles.
 method_core::methods! {
     error = AuthorityServiceError, nsid_prefix = "org.example.daybook.authority.";
-    OpenActor => OpenedActor, procedure, "openActor";
+    OpenActor => OpenedActor, procedure, "openActor", privileged;
     ResolveActor => Actor, query, "resolveActor";
     ResolveAuthority => ResolvedAuthority, query, "resolveAuthority";
-    MintCapability => Capability, procedure, "mintCapability";
+    MintCapability => Capability, procedure, "mintCapability", privileged;
     AttenuateCapability => Capability, procedure, "attenuateCapability";
     InspectCapability => Capability, query, "inspectCapability";
     RetractCapability => (), procedure, "retractCapability";

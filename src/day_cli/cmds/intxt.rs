@@ -47,7 +47,7 @@ use big_dispatch_core::Readiness;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleMethodGrants;
 use method_core::Method;
 
 #[derive(Debug, clap::Subcommand)]
@@ -55,13 +55,8 @@ pub enum IntxtCommands {
     /// Admit intxt's cartridge to this node, host its handler, and enable it
     ///
     /// Stores the built handler component in the node's blob store, admits the cartridge that
-    /// names it, grants the nodule the operations it calls, and enables it, which registers intxt's records and
+    /// names it, grants the nodule the methods it calls, and enables it, which registers intxt's records and
     /// serves `createIntxt`, `addToIntxt` and `recordObservations`.
-    ///
-    /// The node's `nodule_operations` ceiling must cover the operations the handler calls, or the
-    /// grant is refused: raise it first with `day nodules ceiling add --authority <NSID prefix>`
-    /// (install prints the exact command) and restart the daemon, which reads the
-    /// ceiling at start. Install never edits node.json.
     Install {
         /// The handler component: `src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm`,
         /// built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest
@@ -169,20 +164,6 @@ fn report(summary: &capture::Summary, verbose: bool) {
     }
 }
 
-/// The `day nodules ceiling add` command that covers `REQUIRED_OPERATIONS`, by the minimal
-/// authority prefixes (an operation's NSID without its last segment).
-fn ceiling_command() -> String {
-    let authorities: std::collections::BTreeSet<&str> = intxt_core::methods::REQUIRED_OPERATIONS
-        .iter()
-        .filter_map(|nsid| nsid.rsplit_once('.').map(|(authority, _)| authority))
-        .collect();
-    let flags: String = authorities
-        .into_iter()
-        .map(|authority| format!(" --authority {authority}"))
-        .collect();
-    format!("day nodules ceiling add{flags}")
-}
-
 /// Installs intxt with the handler component `wasm`, the way a node hosts any nodule's handler
 /// (`big_node`'s `nodule_wasm` e2e): the bytes go into the blob store first, so the executor finds
 /// them when the nodule is enabled; the cartridge's artifact names them by their BLAKE3.
@@ -233,9 +214,9 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
     .await?;
     call(
         client,
-        SetNoduleOperationGrants {
+        SetNoduleMethodGrants {
             cartridge_id: cartridge_id.clone(),
-            operations: DispatchScope {
+            methods: DispatchScope {
                 operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
                 ..DispatchScope::default()
             },
@@ -251,17 +232,16 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
     )
     .await?;
     // A nodule holds its dispatch capability only while enabled, so whether the grant took is
-    // known from the enabled record: the node's ceiling (`nodule_operations` in node.json) must
-    // cover what intxt's handler calls.
+    // known from the enabled record. Every method intxt's handler calls is grantable, so a refusal
+    // means the node and this build disagree about them.
     let grants = enabled
-        .operations
+        .methods
         .as_ref()
-        .ok_or_else(|| eyre::eyre!("the node reports no operation grants for intxt"))?;
+        .ok_or_else(|| eyre::eyre!("the node reports no method grants for intxt"))?;
     eyre::ensure!(
         grants.granted,
-        "the node did not grant intxt the operations its handler calls ({}): they exceed the node's `nodule_operations` ceiling. Raise it with `{}` and restart the daemon (`day daemon stop`, `day daemon start`), then run install again. (`install` never edits node.json.)",
-        grants.error.as_deref().unwrap_or("no reason given"),
-        ceiling_command()
+        "the node did not grant intxt the methods its handler calls: {}",
+        grants.error.as_deref().unwrap_or("no reason given")
     );
     Ok(enabled)
 }

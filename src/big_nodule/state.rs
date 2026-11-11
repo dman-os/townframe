@@ -65,7 +65,7 @@ use big_nodule_core::inventory::InventoryError;
 use big_nodule_core::protocol::NoduleActor;
 use big_nodule_core::protocol::NoduleGrantStatus;
 use big_nodule_core::protocol::NoduleInitStatus;
-use big_nodule_core::protocol::NoduleOperationGrantStatus;
+use big_nodule_core::protocol::NoduleMethodGrantStatus;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
@@ -153,10 +153,10 @@ pub(crate) enum Command {
         drawers: BTreeMap<DrawerId, DrawerAccess>,
         reply: Reply<NoduleRecord>,
     },
-    SetOperationGrants {
+    SetMethodGrants {
         context: RequestContext,
         cartridge_id: CartridgeId,
-        operations: DispatchScope,
+        methods: DispatchScope,
         reply: Reply<NoduleRecord>,
     },
     ConfirmResolution {
@@ -312,7 +312,7 @@ pub(crate) struct State {
     persisted_actors: BTreeMap<CartridgeId, Uuid7>,
     actors: BTreeMap<CartridgeId, OpenedActor>,
     applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
-    /// The dispatch handle minted for each nodule from its operation grants, with the scope it
+    /// The dispatch handle minted for each nodule from its method grants, with the scope it
     /// was minted for.
     applied_operations: BTreeMap<CartridgeId, (DispatchScope, CapId)>,
     /// The resolution lockfile: the provider each enabled nodule's operation request is pinned
@@ -551,15 +551,15 @@ impl State {
                 )
                 .await
             }
-            Command::SetOperationGrants {
+            Command::SetMethodGrants {
                 context,
                 cartridge_id,
-                operations,
+                methods,
                 reply,
             } => {
                 answer(
                     reply,
-                    self.set_operation_grants(&context, &cartridge_id, operations),
+                    self.set_method_grants(&context, &cartridge_id, methods),
                 )
                 .await
             }
@@ -721,15 +721,15 @@ impl State {
             .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
-    async fn set_operation_grants(
+    async fn set_method_grants(
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
-        operations: DispatchScope,
+        methods: DispatchScope,
     ) -> Res<NoduleRecord> {
         let target = cartridge_id.clone();
         self.mutate_config(context, move |config| {
-            config.set_operation_grants(&target, operations).map(|_| ())
+            config.set_method_grants(&target, methods).map(|_| ())
         })
         .await?;
         self.records
@@ -1015,7 +1015,7 @@ impl State {
                             config,
                             artifacts: BTreeMap::new(),
                             drawers: BTreeMap::new(),
-                            operations: None,
+                            methods: None,
                             requests: BTreeMap::new(),
                             init: None,
                             observed_heads: snapshot.heads.clone(),
@@ -1102,16 +1102,13 @@ impl State {
             };
             let group = SchemaRegistrationGroup::new(
                 None,
-                split
-                    .held
-                    .iter()
-                    .map(|(nsid, file, sidecar)| {
-                        let registration = SchemaRegistration::new(*nsid, object(file));
-                        match sidecar {
-                            Some(document) => registration.with_supplement((*document).clone()),
-                            None => registration,
-                        }
-                    }),
+                split.held.iter().map(|(nsid, file, sidecar)| {
+                    let registration = SchemaRegistration::new(*nsid, object(file));
+                    match sidecar {
+                        Some(document) => registration.with_supplement((*document).clone()),
+                        None => registration,
+                    }
+                }),
                 split.carried.iter().map(|file| object(file)).collect(),
             );
             let outcome = self
@@ -1873,7 +1870,7 @@ impl State {
             config: installed.config.clone(),
             artifacts: installed.artifact_states(),
             drawers: drawer_statuses,
-            operations: (!desired_operations.is_empty()).then(|| NoduleOperationGrantStatus {
+            methods: (!desired_operations.is_empty()).then(|| NoduleMethodGrantStatus {
                 desired: bound_operations,
                 unrequested: unrequested_operations,
                 granted: capability.is_some(),
@@ -2190,6 +2187,7 @@ fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Op
                 Operation {
                     kind: *kind,
                     lexicon,
+                    privileged: false,
                 },
             )
         })
@@ -2205,8 +2203,7 @@ fn dispatch_error(error: ClientError<DispatchError>) -> NodulesError {
         }
         // Dispatch refuses a scope wider than the authority the service was granted.
         ClientError::Method(DispatchError::Denied) => NodulesError::Rejected(
-            "the operation grant exceeds the dispatch authority granted to the nodule service"
-                .into(),
+            "the method grant exceeds the dispatch authority granted to the nodule service".into(),
         ),
         ClientError::Method(other) => NodulesError::Rejected(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),

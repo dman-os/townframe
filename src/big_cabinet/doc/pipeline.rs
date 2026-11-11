@@ -6,6 +6,13 @@ use super::commands::Row;
 use super::commands::State;
 use super::*;
 
+/// What the real pass of a write stages from the dry pass: the claims it derived and the
+/// signatures over them.
+pub(super) type Signed<'a> = (
+    &'a BTreeMap<DatumKey, DatumClaim>,
+    &'a BTreeMap<DatumKey, SignatureBytes>,
+);
+
 /// What a write intends, fixed before its first transaction so that the transaction it signs and
 /// the transaction it commits are built from identical inputs.
 pub(super) struct Plan<'a> {
@@ -147,13 +154,15 @@ impl DocsService {
     ///
     /// The value a claim covers is read back from the transaction after the content mutation, not
     /// taken from the caller's JSON, and the alias it names is the smallest one visible in the
-    /// transaction. `signatures: None` stages with placeholder signatures so that every refusal —
-    /// including dmeta's — surfaces before anything is signed; the caller then rolls back.
+    /// transaction. `signed: None` is the dry pass: it stages with placeholder signatures so that
+    /// every refusal — including dmeta's — surfaces before anything is signed, and the caller then
+    /// discards the transaction. `signed: Some((claims, signatures))` is the real pass: the claims
+    /// are the dry pass's, whose value is not read and hashed again, and the signatures cover them.
     pub(super) fn stage<'t>(
         &self,
         mut tx: Transaction<'t>,
         plan: &mut Plan<'_>,
-        signatures: Option<&BTreeMap<DatumKey, SignatureBytes>>,
+        signed: Option<Signed<'_>>,
     ) -> Result<(Transaction<'t>, BTreeMap<DatumKey, DatumClaim>), DocsError> {
         let datums = match tx.get(automerge::ROOT, "datums").map_err(repository)? {
             Some((Value::Object(ObjType::Map), datums)) => datums,
@@ -225,27 +234,29 @@ impl DocsService {
                     alias
                 }
             };
-            let native = NativeValue::read_at(&tx, &datums, key.to_string())
-                .map_err(|error| native_read_refusal(&key, error))?;
-            let removed = native.is_none();
-            claims.insert(
-                key.clone(),
-                DatumClaim {
-                    origin_document: plan.document.clone(),
-                    datum_key: key.clone(),
-                    chosen_uuid: chosen,
-                    actor_uuid: plan.actor.actor_id,
-                    operation: if removed {
-                        ClaimOperation::Remove
-                    } else {
-                        ClaimOperation::Set
-                    },
-                    value_cid: native.map(|native| cid_of(&encode_native(&native))),
-                    predecessors: plan.predecessors.get(&key).cloned().unwrap_or_default(),
-                },
-            );
-            let signature = match signatures {
-                Some(signatures) => signatures[&key].clone(),
+            let claim = match signed {
+                // The real pass stages the same plan at the same base as the dry pass, so the value
+                // it writes is the one the dry pass read back and hashed: reading and hashing the
+                // whole value again would only repeat that cost. What can differ is cheap to
+                // re-check: the claim is derived again only in debug builds, where every test
+                // thereby asserts that what is signed is what is stored.
+                Some((claimed, _)) => {
+                    let claim = claimed[&key].clone();
+                    if cfg!(debug_assertions) {
+                        assert_eq!(
+                            Self::derive_claim(&tx, &datums, plan, &key, chosen)?,
+                            claim,
+                            "a plan stages the same claims twice"
+                        );
+                    }
+                    claim
+                }
+                None => Self::derive_claim(&tx, &datums, plan, &key, chosen)?,
+            };
+            let removed = claim.operation == ClaimOperation::Remove;
+            claims.insert(key.clone(), claim);
+            let signature = match signed {
+                Some((_, signatures)) => signatures[&key].clone(),
                 None => SignatureBytes::try_from([0_u8; 64].as_slice())
                     .expect("64 bytes are a signature"),
             };
@@ -347,6 +358,52 @@ impl DocsService {
             (key, heads)
         })
         .collect()
+    }
+
+    /// The claim a datum's signature covers: its value read back from the transaction after the
+    /// content mutation, hashed.
+    fn derive_claim(
+        tx: &Transaction<'_>,
+        datums: &automerge::ObjId,
+        plan: &Plan<'_>,
+        key: &DatumKey,
+        chosen: Uuid7,
+    ) -> Result<DatumClaim, DocsError> {
+        let native = NativeValue::read_at(tx, datums, key.to_string())
+            .map_err(|error| native_read_refusal(key, error))?;
+        Ok(DatumClaim {
+            origin_document: plan.document.clone(),
+            datum_key: key.clone(),
+            chosen_uuid: chosen,
+            actor_uuid: plan.actor.actor_id,
+            operation: if native.is_none() {
+                ClaimOperation::Remove
+            } else {
+                ClaimOperation::Set
+            },
+            value_cid: native.map(|native| cid_of(&encode_native(&native))),
+            predecessors: plan.predecessors.get(key).cloned().unwrap_or_default(),
+        })
+    }
+
+    /// Begin the transaction a write stages in, isolated at `base`.
+    ///
+    /// When `base` is the document's current heads the transaction is a plain one, which is
+    /// observably the same: it reads and writes the same state and its change depends on the same
+    /// heads. The difference is cost. `transaction_at` scopes every read and every index seek to
+    /// a clock, and Automerge answers a clock-scoped seek with a linear walk over the object's
+    /// ops where an unscoped one uses its index. For a Text that makes each deleted character
+    /// cost O(text) (a 36-character cut in a 216 KB text took ~2.7 s per staging pass) and a
+    /// whole-value read ~20x slower; a plain transaction takes the indexed path. A write at a
+    /// historical base (an `AtHeads` behind the current heads) still takes the scoped slow path:
+    /// each character it deletes from a Text is O(text).
+    pub(super) fn begin<'d>(doc: &'d mut Automerge, base: &[ChangeHash]) -> Transaction<'d> {
+        if sorted(doc.get_heads()) == base {
+            doc.transaction()
+        } else {
+            doc.transaction_at(PatchLog::null(), base)
+                .expect("a null patch log matches any document")
+        }
     }
 
     /// Check a write's condition against the document as it is now and return the base to write

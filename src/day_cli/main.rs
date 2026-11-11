@@ -186,7 +186,6 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Init { .. } | StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Daemon { command } => cmds::daemon::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
-        StaticCommands::Nodules { command } => cmds::nodules::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
         StaticCommands::Status { json } => cmds::status::run(json).await,
         StaticCommands::Exec {
@@ -252,11 +251,6 @@ enum StaticCommands {
     Peers {
         #[clap(subcommand)]
         command: cmds::peers::PeersCommands,
-    },
-    /// Manage what the node lets nodules do
-    Nodules {
-        #[clap(subcommand)]
-        command: cmds::nodules::NodulesCommands,
     },
     /// Share drawers with other nodes
     Drawers {

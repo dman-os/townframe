@@ -98,15 +98,15 @@ pub struct SetNoduleDrawerGrants {
     pub drawers: BTreeMap<DrawerId, DrawerAccess>,
 }
 
-/// Replaces the operations the nodule's actor may invoke through dispatch. The service mints one
-/// dispatch capability for the actor from it (see [`NoduleOperationGrantStatus`]); an empty scope
+/// Replaces the methods the nodule's actor may invoke through dispatch. The service mints one
+/// dispatch capability for the actor from it (see [`NoduleMethodGrantStatus`]); an empty scope
 /// revokes it.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SetNoduleOperationGrants {
+pub struct SetNoduleMethodGrants {
     pub cartridge_id: CartridgeId,
-    pub operations: DispatchScope,
+    pub methods: DispatchScope,
 }
 
 /// Confirms that the nodule's request `binding` is to be served by the cartridge that now provides its
@@ -174,13 +174,13 @@ pub struct NoduleGrantStatus {
     pub error: Option<String>,
 }
 
-/// Desired and effective state of the dispatch capability a nodule's operation grants mint.
+/// Desired and effective state of the dispatch capability a nodule's method grants mint.
 /// `desired` is the configured grants bounded by the manifest: only operations the nodule
 /// requests (see [`crate::Nodule::bind_operations`]).
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoduleOperationGrantStatus {
+pub struct NoduleMethodGrantStatus {
     pub desired: DispatchScope,
     /// Configured grant entries that cover no requested operation. They are not applied: the
     /// manifest bounds what configuration can confer.
@@ -242,9 +242,9 @@ pub struct NoduleRecord {
     pub artifacts: BTreeMap<String, ArtifactState>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub drawers: BTreeMap<DrawerId, NoduleGrantStatus>,
-    /// Absent when the nodule has no operation grants.
+    /// Absent when the nodule has no method grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operations: Option<NoduleOperationGrantStatus>,
+    pub methods: Option<NoduleMethodGrantStatus>,
     /// Where each operation request stands, by binding, and the lockfile entry (provider cartridge
     /// id, version and Lexicon revision) it is pinned to. Node-local and durable; empty while
     /// the nodule is disabled or refused. Data and schema requests are not listed.
@@ -296,17 +296,21 @@ impl From<InventoryError> for NodulesError {
     }
 }
 
+// Every method that changes nodules (install, enable, grants, substitution) is privileged: a
+// nodule's dispatch scope never reaches them, which is what keeps a nodule from widening its own
+// grants. The reads (`getNodule`, `listNodules`) confer nothing, so a scope naming them reaches
+// them, and minting a nodule handle only narrows the presented one (`scope.covers`).
 method_core::methods! {
     error = NodulesError, nsid_prefix = "org.example.daybook.nodules.";
     MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
-    AdmitNodule => NoduleRecord, procedure, "admitNodule";
-    ConfigureNodule => NoduleRecord, procedure, "configureNodule";
-    SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled";
-    SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants";
-    SetNoduleOperationGrants => NoduleRecord, procedure, "setNoduleOperationGrants";
-    ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution";
-    SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution";
-    UninstallNodule => (), procedure, "uninstallNodule";
+    AdmitNodule => NoduleRecord, procedure, "admitNodule", privileged;
+    ConfigureNodule => NoduleRecord, procedure, "configureNodule", privileged;
+    SetNoduleEnabled => NoduleRecord, procedure, "setNoduleEnabled", privileged;
+    SetNoduleDrawerGrants => NoduleRecord, procedure, "setNoduleDrawerGrants", privileged;
+    SetNoduleMethodGrants => NoduleRecord, procedure, "setNoduleMethodGrants", privileged;
+    ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution", privileged;
+    SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution", privileged;
+    UninstallNodule => (), procedure, "uninstallNodule", privileged;
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => NoduleList, query, "listNodules";
 }
@@ -319,7 +323,7 @@ declare_service_protocol! {
             ConfigureNodule(ConfigureNodule),
             SetNoduleEnabled(SetNoduleEnabled),
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
-            SetNoduleOperationGrants(SetNoduleOperationGrants),
+            SetNoduleMethodGrants(SetNoduleMethodGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleSubstitution(SetNoduleSubstitution),
             UninstallNodule(UninstallNodule),

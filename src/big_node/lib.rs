@@ -105,10 +105,6 @@ pub struct Config {
     pub index_concurrency: NonZeroUsize,
     /// The blob store, opened by the composition root.
     pub blob_storage: big_blobs::Storage,
-    /// The operator's grant of dispatch to the nodule service: the ceiling of what any nodule
-    /// can be granted to invoke. A nodule's own operation grants are minted from it, so a grant
-    /// outside it is reported on the nodule's record as not applied.
-    pub nodule_operations: DispatchScope,
     /// The attachments that serve the node's router. Empty is a complete node.
     pub listeners: Listeners,
     /// The network attachment: the Iroh endpoint, the peers service and the peer policy. `None`
@@ -380,7 +376,6 @@ impl BigNode {
                 &authority,
                 nodules_actor.actor.actor_id,
                 dispatch_namespace,
-                config.nodule_operations,
                 &mut stop,
             )
             .await?;
@@ -754,7 +749,6 @@ async fn boot_dispatch(
     authority: &Authority,
     nodules_actor: Uuid7,
     namespace: Namespace,
-    scope: DispatchScope,
     stop: &mut StopToken,
 ) -> Res<(Dispatch, CapId)> {
     let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
@@ -769,7 +763,13 @@ async fn boot_dispatch(
             RequestContext::root(),
             Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
-                scope,
+                // Every method that is not privileged: a nodule's method grants are narrowed
+                // from this scope, so no grant reaches a method that manages nodules or mints
+                // authority (`XrpcMethod::privileged`), however it is configured.
+                scope: DispatchScope {
+                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                    ..Default::default()
+                },
                 rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                 subject: Some(nodules_actor),
             },

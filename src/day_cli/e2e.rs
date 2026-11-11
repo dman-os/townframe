@@ -500,13 +500,6 @@ mod library {
         use big_dispatch_core::Readiness;
 
         let (tmp, dir) = new_node();
-        let path = dir.root().join("node.json");
-        let mut settings: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        settings["nodule_operations"] = json!({
-            "operations": intxt_core::methods::REQUIRED_OPERATIONS
-        });
-        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
 
         let wasm_path = guest_path();
         let wasm = std::fs::read(&wasm_path).unwrap_or_else(|error| {
@@ -518,7 +511,7 @@ mod library {
         let client = NodeClient::connect(&dir).await.unwrap();
         let record = intxt::install(&client, &wasm).await.unwrap();
         assert_eq!(record.readiness, Readiness::Ready);
-        assert!(record.operations.unwrap().granted);
+        assert!(record.methods.unwrap().granted);
         (tmp, client)
     }
 
@@ -862,26 +855,6 @@ mod library {
             format!("{error:#}").contains("day daemon start"),
             "{error:#}"
         );
-    }
-
-    /// On a node whose ceiling does not cover the handler's operations, `install` fails and says
-    /// which `day nodules ceiling add` command to run, built from the operations it needs.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn install_names_the_ceiling_command_when_the_grant_exceeds_it() {
-        let (_tmp, dir) = new_node();
-        let client = NodeClient::connect(&dir).await.unwrap();
-        let error = crate::cmds::intxt::install(&client, b"not a component")
-            .await
-            .unwrap_err();
-        let message = format!("{error:#}");
-        assert!(
-            message.contains(
-                "day nodules ceiling add --authority org.example.daybook.docs --authority org.example.daybook.drawers"
-            ),
-            "{message}"
-        );
-        assert!(message.contains("restart the daemon"), "{message}");
-        client.stop().await.unwrap();
     }
 
     /// `org.example.intxt.addToIntxt` includes captured parts: each gets an entry keyed by the

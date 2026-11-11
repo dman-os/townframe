@@ -13,6 +13,7 @@ mod list_costs;
 mod model;
 mod observe;
 mod peer;
+mod text_profile;
 mod wire;
 mod write_costs;
 mod writes;

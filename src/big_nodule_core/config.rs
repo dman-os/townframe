@@ -123,7 +123,7 @@ impl NoduleSettings {
 }
 
 /// `org.example.daybook.nodule.grants/<cartridgeId>`: desired local drawer access bindings for an
-/// installed nodule, keyed by portable [`DrawerId`], and the operations it may invoke through
+/// installed nodule, keyed by portable [`DrawerId`], and the methods it may invoke through
 /// dispatch.
 #[macros::datum(authority = Nodule::ID, name = "grants")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -133,44 +133,50 @@ pub struct NoduleGrants {
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, String>"))]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub drawers: BTreeMap<DrawerId, EntryAccess>,
-    /// The operations the nodule's own actor may invoke through dispatch, as the scope of the
+    /// The methods the nodule's own actor may invoke through dispatch, as the scope of the
     /// capability the nodule service mints for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operations: Option<OperationGrants>,
+    pub methods: Option<MethodGrants>,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
-/// The operations a nodule may invoke through dispatch: the wire form of a [`DispatchScope`], as
+/// The methods a nodule may invoke through dispatch: the wire form of a [`DispatchScope`], as
 /// arrays because datums carry no sets. Authority prefixes match whole NSID segments, exactly as
 /// in any other scope.
 #[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct OperationGrants {
+pub struct MethodGrants {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub operations: Vec<String>,
+    pub methods: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authorities: Vec<String>,
+    /// Whether the nodule may invoke privileged methods (`XrpcMethod::privileged`). The nodule
+    /// service holds no privilege, so a grant that sets this is reported as not applied.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
-impl From<OperationGrants> for DispatchScope {
-    fn from(grants: OperationGrants) -> Self {
+impl From<MethodGrants> for DispatchScope {
+    fn from(grants: MethodGrants) -> Self {
         Self {
-            operations: grants.operations.into_iter().collect(),
+            operations: grants.methods.into_iter().collect(),
             authorities: grants.authorities.into_iter().collect(),
+            privileged: grants.privileged,
         }
     }
 }
 
-impl From<DispatchScope> for OperationGrants {
+impl From<DispatchScope> for MethodGrants {
     fn from(scope: DispatchScope) -> Self {
         Self {
-            operations: scope.operations.into_iter().collect(),
+            methods: scope.operations.into_iter().collect(),
             authorities: scope.authorities.into_iter().collect(),
+            privileged: scope.privileged,
             extra: Default::default(),
         }
     }
@@ -180,7 +186,7 @@ impl NoduleGrants {
     /// Whether the datum grants nothing and carries nothing: it is then deleted rather than
     /// stored.
     fn is_empty(&self) -> bool {
-        self.drawers.is_empty() && self.operations.is_none() && self.extra.is_empty()
+        self.drawers.is_empty() && self.methods.is_none() && self.extra.is_empty()
     }
 }
 
@@ -947,7 +953,7 @@ impl NoduleConfig {
     ///
     /// Grants never widen silently (ADR 028 §3). A different publisher's manifest asks for a
     /// different set of things, and a granted authority prefix would otherwise cover whatever it
-    /// newly asks for. So the slot's operation grants are narrowed here, once, to exactly the
+    /// newly asks for. So the slot's method grants are narrowed here, once, to exactly the
     /// operations the filler requests *identically* (binding, contract and access) to a request
     /// of the slot's own install: those keep their grants, and every other request the filler
     /// makes is ungranted (a required one holds the nodule at `NeedsConfiguration`) until the
@@ -1041,11 +1047,11 @@ impl NoduleConfig {
         ))
     }
 
-    /// Replaces the operations the nodule may invoke through dispatch, keeping its drawer grants.
-    pub fn set_operation_grants(
+    /// Replaces the methods the nodule may invoke through dispatch, keeping its drawer grants.
+    pub fn set_method_grants(
         &mut self,
         cartridge_id: &CartridgeId,
-        operations: DispatchScope,
+        methods: DispatchScope,
     ) -> Result<InstalledNodule, InventoryError> {
         let (cartridge, nodule, admitted, artifacts, enabled, (config, configured)) =
             self.validate_installed(cartridge_id)?;
@@ -1057,13 +1063,13 @@ impl NoduleConfig {
             // An empty scope is stored as no value at all; a rewrite keeps the unknown members of
             // the previous value while there is one.
             let extra = grants
-                .operations
+                .methods
                 .take()
                 .map(|previous| previous.extra)
                 .unwrap_or_default();
-            grants.operations = (operations != DispatchScope::default()).then(|| OperationGrants {
+            grants.methods = (methods != DispatchScope::default()).then(|| MethodGrants {
                 extra,
-                ..OperationGrants::from(operations)
+                ..MethodGrants::from(methods)
             });
         });
         Ok(InstalledNodule::new(
@@ -1441,7 +1447,7 @@ fn filler<'a>(
     Ok((filler_install, admission))
 }
 
-/// The operation grants that reach the code filling a substituted slot. The slot's grants were
+/// The method grants that reach the code filling a substituted slot. The slot's grants were
 /// given for its own code's requests: a request the filler shares with that code (same binding,
 /// contract and access) keeps whatever grant covered it, while one the filler adds or widens is
 /// covered only by a grant naming that exact operation. A prefix grant is broad consent given for
@@ -1466,6 +1472,7 @@ fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) ->
             .map(|request| request.contract.clone())
             .collect(),
         authorities: BTreeSet::new(),
+        privileged: granted.privileged,
     }
 }
 
@@ -1621,7 +1628,7 @@ fn resolve_entry(
                 };
                 desired_grants.insert(drawer_id.clone(), known);
             }
-            desired_operations = value.operations.clone().map(Into::into).unwrap_or_default();
+            desired_operations = value.methods.clone().map(Into::into).unwrap_or_default();
         }
     }
     if filled_from.is_some() {

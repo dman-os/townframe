@@ -46,7 +46,7 @@ mod capture;
 /// Each document creation is a command of its own; the node refuses a reused command id.
 static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 
-/// A node that admitted intxt's cartridge, serving its handler natively, with the operations the
+/// A node that admitted intxt's cartridge, serving its handler natively, with the methods the
 /// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
     let cartridge = intxt_core::cartridge::cartridge(
@@ -55,18 +55,15 @@ async fn boot() -> TestNode {
         ),
     );
     let id = cartridge.id.clone();
-    // The ceiling of what a nodule can be granted covers the registered cartridge's own
-    // authority only, so the foreign operations it calls must be added to it.
-    let operations = DispatchScope {
+    let methods = DispatchScope {
         operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()
-        .with_operation_ceiling(operations.clone())
         .with_nodule(cartridge, crate::Intxt)
         .boot()
         .await;
-    node.grant(&id, operations).await;
+    node.grant(&id, methods).await;
     node.enable(&id).await;
     node
 }

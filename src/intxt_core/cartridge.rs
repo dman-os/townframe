@@ -51,8 +51,7 @@ pub fn handler_artifact(wasm: &[u8]) -> Artifact {
 }
 
 /// intxt's cartridge, whose handler is `handler` (see [`handler_artifact`]). It requests
-/// [`REQUIRED_OPERATIONS`], which an operator must grant the nodule (and the node's ceiling must
-/// cover).
+/// [`REQUIRED_OPERATIONS`], which an operator must grant the nodule.
 pub fn cartridge(handler: Artifact) -> Cartridge {
     assert_eq!(
         handler.key, HANDLER_ARTIFACT,
