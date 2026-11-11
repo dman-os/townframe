@@ -132,9 +132,23 @@ impl DocsService {
         mut doc: Automerge,
     ) -> Result<Automerge, DocsError> {
         doc.set_actor(doc_actor(&self.node_issuer, plan.document));
-        let tx = doc.transaction();
-        let (tx, claims) = self.stage(tx, plan, None)?;
-        tx.rollback();
+        let claims = if doc.get_heads().is_empty() {
+            // A create's dry pass commits on a throwaway empty document instead of rolling back:
+            // `Transaction::rollback` undoes a transaction's ops one by one, which for a large
+            // initial insert costs several times the staging itself (a 240 KB Text: ~2.3 s of a
+            // 2.7 s create in release, ~26 s of 33 s in debug). Committing is O(1) and the scratch
+            // document is dropped. A fork (branch) keeps the rollback: its plan is one small
+            // datum, and a scratch copy would have to clone the whole fork.
+            let mut scratch = Automerge::new();
+            scratch.set_actor(doc.get_actor().clone());
+            let (tx, claims) = self.stage(scratch.transaction(), plan, None)?;
+            tx.commit();
+            claims
+        } else {
+            let (tx, claims) = self.stage(doc.transaction(), plan, None)?;
+            tx.rollback();
+            claims
+        };
         let signatures = self.sign(context, capability, &claims).await?;
         let tx = doc.transaction();
         let (tx, signed) = self.stage(tx, plan, Some(&signatures))?;
