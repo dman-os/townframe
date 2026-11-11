@@ -1356,25 +1356,19 @@ async fn a_pending_successor_is_not_absence_or_a_terminal_answer() {
             let metadata = object(&tx, &dmeta, "datums");
             let metadata = object(&tx, &metadata, &successor_key().to_string());
             let signatures = object(&tx, &metadata, "signatures");
-            let previous = tx.get(&signatures, 0).unwrap().unwrap().1;
-            let fields: Vec<_> = ["actorUuid", "docUuid", "signature"]
-                .into_iter()
-                .map(|field| {
-                    let automerge::Value::Scalar(value) =
-                        tx.get(&previous, field).unwrap().unwrap().0
-                    else {
-                        panic!("signature fields are scalars")
-                    };
-                    (field, value.into_owned())
-                })
-                .collect();
+            // The entry is one packed bytes value; re-inserting the same bytes introduces it anew
+            // in this change, so the datum's heads include the unknown scalar written above.
+            let previous = tx
+                .get(&signatures, 0)
+                .unwrap()
+                .unwrap()
+                .0
+                .to_bytes()
+                .expect("a signature entry is a bytes value")
+                .to_vec();
             tx.delete(&signatures, 0).unwrap();
-            let entry = tx
-                .insert_object(&signatures, 0, automerge::ObjType::Map)
+            tx.insert(&signatures, 0, automerge::ScalarValue::Bytes(previous))
                 .unwrap();
-            for (field, value) in fields {
-                tx.put(&entry, field, value).unwrap();
-            }
             tx.commit();
         })
         .await
