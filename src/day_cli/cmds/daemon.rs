@@ -7,6 +7,7 @@
 //! `start` waits for the daemon's readiness line, `stop` blocks on the lock.
 
 use crate::context::Booted;
+use crate::context::LockRole;
 use crate::context::NodeDir;
 use crate::context::SocketState;
 use crate::interlude::*;
@@ -46,7 +47,7 @@ pub async fn serve(
     ready: impl FnOnce(&Booted) -> Res<()>,
     shutdown: impl Future<Output = ()>,
 ) -> Res<()> {
-    let lock = match dir.try_lock()? {
+    let lock = match dir.try_lock(LockRole::Daemon)? {
         Ok(lock) => lock,
         Err(held) => eyre::bail!(
             "{held} already has the node at {} open",
@@ -54,7 +55,7 @@ pub async fn serve(
         ),
     };
     dir.ensure_run_dir()?;
-    let booted = Booted::boot(dir, lock, true).await?;
+    let booted = Booted::boot(dir, lock, LockRole::Daemon).await?;
     let served = ready(&booted);
     if served.is_ok() {
         shutdown.await;
@@ -98,12 +99,22 @@ async fn run_foreground(dir: &NodeDir) -> Res<ExitCode> {
 }
 
 async fn start(dir: &NodeDir) -> Res<ExitCode> {
-    match dir.probe_socket().await? {
-        SocketState::Live => {
+    // A command that has the node open is not a daemon: wait for it to finish, then start one.
+    // A daemon that is still booting is awaited, so `start` never reports one that is not
+    // serving.
+    if let Err(held) = dir.try_lock(LockRole::Command)? {
+        if held.role == Some(LockRole::Daemon) {
+            let waiting = dir.clone();
+            tokio::task::spawn_blocking(move || waiting.wait_until_serving())
+                .await
+                .expect(ERROR_TOKIO)?;
             println!("daemon already running on {}", dir.socket_path()?.display());
             return Ok(ExitCode::SUCCESS);
         }
-        SocketState::Stale | SocketState::Absent => {}
+        let waiting = dir.clone();
+        tokio::task::spawn_blocking(move || waiting.wait_for_lock_release())
+            .await
+            .expect(ERROR_TOKIO)?;
     }
     dir.ensure_run_dir()?;
     let log_path = dir.log_path();
@@ -145,7 +156,7 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
 }
 
 async fn stop(dir: &NodeDir) -> Res<ExitCode> {
-    let held = match dir.try_lock()? {
+    let held = match dir.try_lock(LockRole::Command)? {
         Ok(_free) => {
             // Nobody has the node. A socket file left behind is a daemon that died uncleanly.
             if dir.probe_socket().await? == SocketState::Stale {
@@ -158,10 +169,10 @@ async fn stop(dir: &NodeDir) -> Res<ExitCode> {
         }
         Err(held) => held,
     };
-    eyre::ensure!(
-        dir.probe_socket().await? == SocketState::Live,
-        "{held} has the node open but is not serving its socket, so it is not a running daemon"
-    );
+    if held.role != Some(LockRole::Daemon) {
+        println!("daemon not running; {held} has the node open for a command");
+        return Ok(ExitCode::SUCCESS);
+    }
     let pid = held
         .pid
         .ok_or_eyre("the daemon holds the node lock but has not recorded its pid")?;

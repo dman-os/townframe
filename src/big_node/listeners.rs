@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::eyre::WrapErr;
 use utils_rs::prelude::eyre::bail;
@@ -105,9 +106,10 @@ impl Listener {
         path: &Path,
         dispatch: Client<DispatchProtocol>,
         operator: Authorization,
-    ) -> Res<Self> {
+    ) -> Res<(Self, watch::Receiver<usize>)> {
         use std::os::unix::fs::MetadataExt;
         let listener = bind_owner_only(path).await?;
+        let (connections, watching) = watch::channel(0);
         // The socket file belongs to the uid the node runs as, which is how that uid is
         // learned without a syscall of its own.
         let owner_uid = std::fs::symlink_metadata(path)?.uid();
@@ -116,16 +118,20 @@ impl Listener {
             OwnerOnly {
                 owner_uid,
                 inner: UnixConnectionAcceptor::new(listener),
+                connections,
             },
             router.into_router(),
             MAX_CONNECTIONS,
         )
         .await?;
-        Ok(Self {
-            shutdown,
-            task,
-            socket: Some(path.to_owned()),
-        })
+        Ok((
+            Self {
+                shutdown,
+                task,
+                socket: Some(path.to_owned()),
+            },
+            watching,
+        ))
     }
 
     #[cfg(not(unix))]
@@ -133,7 +139,7 @@ impl Listener {
         _path: &Path,
         _dispatch: Client<DispatchProtocol>,
         _operator: Authorization,
-    ) -> Res<Self> {
+    ) -> Res<(Self, watch::Receiver<usize>)> {
         bail!("Unix socket listeners are only available on Unix platforms")
     }
 }
@@ -148,10 +154,66 @@ fn admits(owner_uid: u32, peer: &PeerCredentials) -> bool {
 struct OwnerOnly {
     owner_uid: u32,
     inner: UnixConnectionAcceptor,
+    /// The number of admitted connections still open.
+    connections: watch::Sender<usize>,
+}
+
+/// An admitted connection, counted open until it is dropped: the serving loop drops the stream
+/// when the connection ends, so the count falls whichever side closed it.
+struct Counted {
+    inner: tokio::net::UnixStream,
+    connections: watch::Sender<usize>,
+}
+
+impl Counted {
+    fn new(inner: tokio::net::UnixStream, connections: watch::Sender<usize>) -> Self {
+        connections.send_modify(|open| *open += 1);
+        Self { inner, connections }
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.connections.send_modify(|open| *open -= 1);
+    }
+}
+
+impl tokio::io::AsyncRead for Counted {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Counted {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 impl ConnectionAcceptor for OwnerOnly {
-    type Stream = tokio::net::UnixStream;
+    type Stream = Counted;
     type Peer = PeerCredentials;
 
     fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
@@ -159,7 +221,7 @@ impl ConnectionAcceptor for OwnerOnly {
             loop {
                 let (stream, peer) = self.inner.accept().await?;
                 if admits(self.owner_uid, &peer) {
-                    return Ok((stream, peer));
+                    return Ok((Counted::new(stream, self.connections.clone()), peer));
                 }
                 tracing::warn!(
                     uid = peer.uid,
