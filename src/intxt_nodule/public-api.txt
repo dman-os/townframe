@@ -4,4 +4,7 @@
 # exposed_external_crates: []
 
 pub const intxt_nodule::AUTHORITY: & str
-pub intxt_nodule::fn cartridge () -> Cartridge
+pub const intxt_nodule::HANDLER_ARTIFACT: & str
+pub intxt_nodule::fn cartridge (handler : Artifact) -> Cartridge
+pub intxt_nodule::fn handler_artifact (wasm : & [u8]) -> Artifact
+pub use intxt_nodule::intxt_handlers :: REQUIRED_OPERATIONS

@@ -38,9 +38,31 @@ use intxt_handlers::RecordObservations;
 pub const AUTHORITY: &str = "org.example.intxt";
 
 /// The key of the handler artifact in the cartridge.
-const HANDLER_ARTIFACT: &str = "handler";
+pub const HANDLER_ARTIFACT: &str = "handler";
 
-pub fn cartridge() -> Cartridge {
+/// The operations of other authorities the handler calls, which the cartridge requests and an
+/// operator must grant the nodule (and the node's ceiling must cover).
+pub use intxt_handlers::REQUIRED_OPERATIONS;
+
+/// The envelope of the handler component `wasm`: the cartridge's artifact for it. The digest is
+/// the component's BLAKE3, which is also the id of the blob a node stores it under, so putting
+/// the bytes in the node's blob store is what makes the artifact available.
+pub fn handler_artifact(wasm: &[u8]) -> Artifact {
+    Artifact {
+        key: HANDLER_ARTIFACT.into(),
+        digest: Digest::of(wasm),
+        size: Some(wasm.len() as u64),
+        media_type: Some("application/wasm".into()),
+        extra: Default::default(),
+    }
+}
+
+/// intxt's cartridge, whose handler is `handler` (see [`handler_artifact`]).
+pub fn cartridge(handler: Artifact) -> Cartridge {
+    assert_eq!(
+        handler.key, HANDLER_ARTIFACT,
+        "the nodule's handler names the artifact `{HANDLER_ARTIFACT}`"
+    );
     let bundle = Bundle::new(&intxt_core::UNIVERSE, Vec::new());
     let lexicons = bundle
         .lexicons()
@@ -98,16 +120,7 @@ pub fn cartridge() -> Cartridge {
         "0.1.0".parse().expect("intxt's version is valid"),
     );
     cartridge.authority = Some(AUTHORITY.to_owned());
-    // A placeholder: the handler component is not built or packaged yet, and the native test
-    // harness never reads the artifact's bytes. Packaging replaces the digest with the
-    // component's.
-    cartridge.artifacts.push(Artifact {
-        key: HANDLER_ARTIFACT.into(),
-        digest: Digest::of(b"placeholder: intxt's handler component is not packaged yet"),
-        size: Some(1),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
+    cartridge.artifacts.push(handler);
     cartridge
         .contributions
         .push(Contribution::Nodule(NoduleContribution {
@@ -146,7 +159,7 @@ mod tests {
     /// ships the sidecar of each record that declares storage forms.
     #[test]
     fn the_cartridge_holds_every_intxt_record() {
-        let cartridge = cartridge();
+        let cartridge = cartridge(handler_artifact(b"a handler"));
         let Contribution::Nodule(contribution) = &cartridge.contributions[0] else {
             panic!("intxt contributes a nodule");
         };

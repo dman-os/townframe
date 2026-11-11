@@ -49,7 +49,9 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 /// A node that admitted intxt's cartridge, serving its handler natively, with the operations the
 /// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
-    let cartridge = crate::cartridge();
+    let cartridge = crate::cartridge(crate::handler_artifact(
+        b"placeholder: the native test harness never reads the handler bytes",
+    ));
     let id = cartridge.id.clone();
     // The ceiling of what a nodule can be granted covers the registered cartridge's own
     // authority only, so the foreign operations it calls must be added to it.

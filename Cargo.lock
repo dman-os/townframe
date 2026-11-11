@@ -4166,6 +4166,7 @@ name = "day_cli"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
  "big_dispatch",

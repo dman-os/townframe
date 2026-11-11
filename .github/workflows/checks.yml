@@ -147,6 +147,9 @@ jobs:
       - name: build test plug OCI artifact
         run: nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
 
+      - name: build the intxt handler component
+        run: nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_guest --target wasm32-wasip3 --release
+
       - name: build daybook_cli and day_cli
         run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli -p day_cli
 
