@@ -131,17 +131,20 @@ Names follow the Agent Client Protocol (ACP: session, prompt turn, tool call, pl
 
 // org.example.intxt.work.promptTurn/<harness turn id>
 { "seq": 41, "at": "…", "parentTurn": "<id>", "stopReason": "end_turn",
-  "messages": [ { "id": "<harness id>", "seq": 0, "at": "…", "kind": "agentMessage", "text": "…" } ],
+  "messages": [ { "id": "<harness id>", "seq": 0, "at": "…", "kind": "agentMessage", "text": "…" } ],   // open: userMessage | agentMessage | agentThought | meta | crossSession
   "toolCalls": [ { "id": "toolu_01…", "seq": 3, "title": "Edit reference.rs", "kind": "edit", "status": "completed",
                    "cwd": "/run/…/townframe-p3N-3/src",                                // when it differs from the session's
                    "locations": [ { "path": "/run/…/reference.rs", "line": 120 } ],
-                   "diffs": [ { "path": "src/reference.rs", "patch": "@@ -120 +120 @@ …" } ] } ] }   // what the harness reported, when it did
+                   "diffs": [ { "path": "/run/…/reference.rs", "patch": "@@ -120 +120 @@ …" } ],   // what the harness reported, when it did
+                   "output": "…" } ] }                                                  // what the harness showed the model, whole (D37)
 
 // org.example.intxt.work.plan/main             (ACP plan: replaced whole on every update; its history is the plan's history)
 { "entries": [ { "content": "Rewrite reference.rs", "priority": "high", "status": "completed" } ] }
 ```
 
-- A session is a normalized transcript, never the raw log; thinking is excluded by default.
+- A session is a normalized transcript, never the raw log. Thinking is excluded by default (FDR 007) and recorded as `agentThought` messages only when the operator opts in.
+- **Message kinds** are ACP's (`userMessage`, `agentMessage`, `agentThought`) plus two of ours: `meta`, text the harness injected that the model saw (reminders, compaction summaries), and `crossSession`, a message another agent session sent. This settles ADR 039 open question 2's marking half.
+- **Tool output** is stored whole in `output`, as the harness showed it to the model (D37); a tool call's `diffs` and `locations` use absolute paths, as ACP does.
 - Keys reuse the harness's ids, so a re-import converges on the same slots.
 - Messages and tool calls live inside their turn: a long session has thousands of messages (3,483 in one, F5) but around a hundred turns, and a document refuses updates at about 500 datums (F10). Updating a datum replaces its signature rather than accumulating one (F10), so appending to the open turn on every hook is cheap. A session past the limit continues in a new document whose `parent` is the previous one.
 - **Subagents** are imported, each as its own session document with `parent` (D30).
