@@ -29,8 +29,9 @@
 //! This shape (event name, a list of `{ matcher?, hooks: [{ type, command }] }`, the hook's JSON on
 //! the command's stdin) is written from memory of Claude Code's hooks documentation and has not
 //! been checked against it here; verify it before relying on it. Add `--node <dir>` (or set
-//! `DAY_NODE`) to name the node, and `"timeout"` to a hook if a recording can take long. A
-//! `day` daemon makes each hook fast; without one every hook boots the node in its own process.
+//! `DAY_NODE`) to name the node, and `"timeout"` to a hook if a recording can take long. The
+//! command needs the node's daemon (`day daemon start`) and fails fast without one: booting the
+//! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
 
 pub(crate) mod capture;
 
@@ -54,9 +55,13 @@ pub enum IntxtCommands {
     /// Admit intxt's cartridge to this node, host its handler, and enable it
     ///
     /// Stores the built handler component in the node's blob store, admits the cartridge that
-    /// names it, grants the nodule the operations it calls (the node's `nodule_operations`
-    /// ceiling in node.json must cover them), and enables it, which registers intxt's records and
+    /// names it, grants the nodule the operations it calls, and enables it, which registers intxt's records and
     /// serves `createIntxt`, `addToIntxt` and `recordObservations`.
+    ///
+    /// The node's `nodule_operations` ceiling must cover the operations the handler calls, or the
+    /// grant is refused: raise it first with `day nodules ceiling add --authority <NSID prefix>`
+    /// (install prints the exact command) and restart the daemon, which reads the
+    /// ceiling at start. Install never edits node.json.
     Install {
         /// The handler component: `src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_guest.wasm`,
         /// built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_guest
@@ -108,14 +113,28 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     }
 }
 
+/// Capture runs against the node's daemon only. Booting the node in the hook's own process costs
+/// seconds per hook, and parallel tool calls run parallel hooks, of which only one process can
+/// hold the node. The socket is probed, not connected to through [`NodeClient`], which would boot
+/// the node just to be refused.
+pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
+    eyre::ensure!(
+        dir.probe_socket().await? == crate::context::SocketState::Live,
+        "no daemon is serving the node at {}; start it with `day daemon start`",
+        dir.root().display()
+    );
+    Ok(())
+}
+
 /// The hook's JSON from stdin, captured against the node `--node` names.
 async fn capture_hook(verbose: bool) -> Res<()> {
+    let node_dir = lazy::config().await?.node_dir.clone();
+    require_daemon(&node_dir).await?;
     let mut input = Vec::new();
     std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
         .wrap_err("reading the hook's JSON from stdin")?;
     let client = lazy::node().await?;
-    let node_dir = lazy::config().await?.node_dir.root().to_owned();
-    let summary = capture::run(&client, &node_dir, &input).await?;
+    let summary = capture::run(&client, node_dir.root(), &input).await?;
     report(&summary, verbose);
     Ok(())
 }
@@ -148,6 +167,20 @@ fn report(summary: &capture::Summary, verbose: bool) {
             summary.blobs_put
         );
     }
+}
+
+/// The `day nodules ceiling add` command that covers `REQUIRED_OPERATIONS`, by the minimal
+/// authority prefixes (an operation's NSID without its last segment).
+fn ceiling_command() -> String {
+    let authorities: std::collections::BTreeSet<&str> = intxt_nodule::REQUIRED_OPERATIONS
+        .iter()
+        .filter_map(|nsid| nsid.rsplit_once('.').map(|(authority, _)| authority))
+        .collect();
+    let flags: String = authorities
+        .into_iter()
+        .map(|authority| format!(" --authority {authority}"))
+        .collect();
+    format!("day nodules ceiling add{flags}")
 }
 
 /// Installs intxt with the handler component `wasm`, the way a node hosts any nodule's handler
@@ -224,9 +257,9 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
         .ok_or_else(|| eyre::eyre!("the node reports no operation grants for intxt"))?;
     eyre::ensure!(
         grants.granted,
-        "the node did not grant intxt its operations ({}); the `nodule_operations` of node.json is the ceiling of what a nodule can be granted and must cover {:?} (edit it and restart the node; a `day` command for this is planned, and `install` never edits node.json)",
+        "the node did not grant intxt the operations its handler calls ({}): they exceed the node's `nodule_operations` ceiling. Raise it with `{}` and restart the daemon (`day daemon stop`, `day daemon start`), then run install again. (`install` never edits node.json.)",
         grants.error.as_deref().unwrap_or("no reason given"),
-        intxt_nodule::REQUIRED_OPERATIONS
+        ceiling_command()
     );
     Ok(enabled)
 }

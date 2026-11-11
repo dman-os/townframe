@@ -852,6 +852,38 @@ mod library {
         client.stop().await.unwrap();
     }
 
+    /// `capture` is for the daemon: with none serving, its entry point refuses, naming the command
+    /// that starts one, without booting the node.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capture_refuses_without_a_daemon() {
+        let (_tmp, dir) = new_node();
+        let error = crate::cmds::intxt::require_daemon(&dir).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("day daemon start"),
+            "{error:#}"
+        );
+    }
+
+    /// On a node whose ceiling does not cover the handler's operations, `install` fails and says
+    /// which `day nodules ceiling add` command to run, built from the operations it needs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_names_the_ceiling_command_when_the_grant_exceeds_it() {
+        let (_tmp, dir) = new_node();
+        let client = NodeClient::connect(&dir).await.unwrap();
+        let error = crate::cmds::intxt::install(&client, b"not a component")
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(
+                "day nodules ceiling add --authority org.example.daybook.docs --authority org.example.daybook.drawers"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("restart the daemon"), "{message}");
+        client.stop().await.unwrap();
+    }
+
     /// `org.example.intxt.addToIntxt` includes captured parts: each gets an entry keyed by the
     /// part's identity, the body lists the entries in the order they were added, adding a part
     /// again changes nothing, and the parts' documents are entered in the intxt's drawer so its
