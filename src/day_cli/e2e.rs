@@ -621,7 +621,7 @@ mod library {
                 wasm_path.display()
             )
         });
-        let client = NodeClient::connect(&dir).await.unwrap();
+        let client = connect(&dir).await.unwrap();
         let outcome = std::panic::AssertUnwindSafe(async {
             let record = intxt::install(&client, &wasm).await.unwrap();
             assert_eq!(record.readiness, Readiness::Ready);
