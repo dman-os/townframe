@@ -29,7 +29,7 @@ The orientation is a property of the user's set of nodes, so it lives in data th
 
 ### 3. The relay alpha is a native node in relay mode
 
-- **What it is:** a `big_node` composition started by `day` (`day daemon --relay`, or a `day relay` command), running natively on mothership. No wasmCloud and no btress in the alpha.
+- **What it is:** a `big_node` composition started by `day` (`day node init --relay`, then `day node run`), running natively on mothership. No wasmCloud and no btress in the alpha.
 - **Peer policy:** accept any peer that connects; mirror every drawer the relay is a member of (with `relay` or more). This replaces ADR 033's mirroring half (`Drawers::mirrored`) with membership-driven mirroring; the access half (`groups_with_member`) still bounds it.
 - **Authentication:** none at the account level. keyhive membership still decides what the relay syncs, and with `relay` access it stores ciphertext it cannot read. The exposure is storage abuse (anyone can make it hold their drawers), which is acceptable for an alpha we run ourselves.
 - **Public reads:** a throwaway webnode connects as the app fetcher (the webnodes lane) and decrypts as the app reader.
