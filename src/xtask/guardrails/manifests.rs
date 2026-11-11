@@ -11,6 +11,14 @@
 //! separate workspaces (own lockfile and feature unification), each with its own
 //! `[workspace.dependencies]` that points at the shared crates by path. Those tables are the
 //! allowed place for a path, so they are exempt; their members are not.
+//!
+//! `ERROR_DEPENDENCY_GROUP`: manifests split a dependency table into groups, each opened by a
+//! bare `#` line followed by a `# <label>` line (`# encoding`, `# async`, `# log`, ..). Group
+//! names and their order are free-form except one: every dependency on a crate of this
+//! repository sits in the group labelled `# internal`, so the internal edges of a crate are
+//! readable in one block. A dependency before the first group header is ungrouped and fails.
+//! The `[dependencies.name]` subtable spelling has no place for a group and is not accepted for
+//! internal crates.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -31,6 +39,8 @@ struct Entry<'a> {
     spec: &'a toml::Value,
     /// Declared in `[workspace.dependencies]`, the one place a `path` is allowed.
     workspace_level: bool,
+    /// Label of the `#` / `# label` comment group the declaration sits under, if any.
+    group: Option<String>,
 }
 
 pub fn validate(repo: &Repository) -> Res<Vec<Finding>> {
@@ -52,6 +62,22 @@ pub fn validate(repo: &Repository) -> Res<Vec<Finding>> {
         let value: toml::Value =
             toml::from_str(&text).wrap_err_with(|| format!("parse {relative_path}"))?;
         for entry in entries(&text, &value)? {
+            let package = entry
+                .spec
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(&entry.key);
+            if repo.packages.contains_key(package) && entry.group.as_deref() != Some("internal") {
+                findings.push(Finding::new(
+                    "ERROR_DEPENDENCY_GROUP",
+                    &relative_path,
+                    &entry.key,
+                    entry.line,
+                    format!(
+                        "`{package}` is an internal crate; list it under a `#` / `# internal` comment header"
+                    ),
+                ));
+            }
             if !entry.workspace_level && entry.spec.get("path").is_some() {
                 findings.push(Finding::new(
                     "ERROR_PATH_DEPENDENCY",
@@ -82,11 +108,14 @@ fn entries<'a>(text: &str, value: &'a toml::Value) -> Res<Vec<Entry<'a>>> {
     // The dependency table the cursor is inside: its parsed contents and whether it is workspace-level.
     let mut table: Option<(&'a toml::Table, bool)> = None;
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for (index, line) in text.lines().enumerate() {
+    let mut group: Option<String> = None;
+    let lines: Vec<&str> = text.lines().collect();
+    for (index, line) in lines.iter().copied().enumerate() {
         let line_number = index + 1;
         if line.starts_with('[') {
             table = None;
             seen.clear();
+            group = None;
             let header: toml::Table = toml::from_str(&format!("{line}\n"))
                 .wrap_err_with(|| format!("table header at line {line_number}"))?;
             let mut segments = Vec::new();
@@ -119,6 +148,7 @@ fn entries<'a>(text: &str, value: &'a toml::Value) -> Res<Vec<Entry<'a>>> {
                     key: (*name).to_string(),
                     spec: &resolved[*name],
                     workspace_level,
+                    group: None,
                 }),
                 None => table = Some((resolved, workspace_level)),
             }
@@ -127,6 +157,14 @@ fn entries<'a>(text: &str, value: &'a toml::Value) -> Res<Vec<Entry<'a>>> {
         let Some((specs, workspace_level)) = table else {
             continue;
         };
+        if line.trim_end() == "#"
+            && let Some(label) = lines
+                .get(index + 1)
+                .and_then(|next| next.strip_prefix("# "))
+        {
+            group = Some(label.trim().to_string());
+            continue;
+        }
         let key_len = line
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
             .unwrap_or(line.len());
@@ -145,6 +183,7 @@ fn entries<'a>(text: &str, value: &'a toml::Value) -> Res<Vec<Entry<'a>>> {
             key: key.to_string(),
             spec,
             workspace_level,
+            group: group.clone(),
         });
     }
     Ok(result)
@@ -162,6 +201,46 @@ mod tests {
             .filter(|entry| !entry.workspace_level && entry.spec.get("path").is_some())
             .map(|entry| (entry.line, entry.key))
             .collect()
+    }
+
+    fn groups(text: &str) -> Vec<(String, Option<String>)> {
+        let value: toml::Value = toml::from_str(text).unwrap();
+        entries(text, &value)
+            .unwrap()
+            .into_iter()
+            .map(|entry| (entry.key, entry.group))
+            .collect()
+    }
+
+    #[test]
+    fn tracks_comment_groups_per_table() {
+        let text = r#"[dependencies]
+a.workspace = true
+#
+# internal
+b.workspace = true
+c = { workspace = true, features = [
+    "f",
+] }
+# not a header, same group
+#
+# encoding
+d.workspace = true
+
+[dev-dependencies]
+e.workspace = true
+"#;
+        let internal = Some("internal".to_string());
+        assert_eq!(
+            groups(text),
+            [
+                ("a".into(), None),
+                ("b".into(), internal.clone()),
+                ("c".into(), internal),
+                ("d".into(), Some("encoding".into())),
+                ("e".into(), None),
+            ]
+        );
     }
 
     #[test]
