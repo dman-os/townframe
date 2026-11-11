@@ -29,18 +29,19 @@ Git has no repository identity. Two clones of one project share nothing but hist
 
 | Datum | Is | Identity | jj equivalent |
 |---|---|---|---|
-| `gitRepo/<uuid>` | a project, as far as we can tell | a UUID minted by the first recorder; `roots` (its root commit shas) let recorders on other machines match it; `remotes` are fetch hints | — |
+| `gitRepo/<root sha>` | a project, as far as we can tell | keyed by the repository's root commit (the smallest, when there are several), so every recorder's datum for it has the same key and identical content (D13); each clone's recorder still writes it in its own document, created at the first commit; `roots` and `remotes` are hints | — |
 | `gitClone/<uuid>` | one `.git` directory (or jj repo) on one machine; refs and the jj op log live here | a UUID stored in the clone (`.git/intxt-id`) | repo |
 | `worktree/<uuid>` | one checkout directory of a clone; HEAD, index and working files live here | a UUID stored in the worktree's own git dir (`.git/worktrees/<name>/intxt-id`, or `.git/intxt-id` for the main worktree) | workspace |
 
 Paths are recorded (`path`, the current absolute path) but are not identity: worktrees move, are deleted, and a new one may reuse an old path for unrelated work. A stored UUID survives the first two and distinguishes the third.
 
 ```jsonc
-// org.example.intxt.work.gitRepo/<uuid>
+// org.example.intxt.work.gitRepo/<root sha>
 { "roots": ["a1b2…"], "remotes": ["git@github.com:dman-os/townframe.git"] }
 
 // org.example.intxt.work.gitClone/<uuid>
-{ "repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/<uuid>", "machine": "dtxt:actor:zNode", "path": "/run/media/…/townframe-p3N-3/.git",
+{ "repo": "dtxt:datum:zRepo/org.example.intxt.work.gitRepo/<root sha>",   // absent until the repository has a commit
+  "machine": "dtxt:actor:zNode", "path": "/run/media/…/townframe-p3N-3/.git",
   "vcs": ["git", "jj"] }
 
 // org.example.intxt.work.worktree/main         (one per worktree document)
@@ -156,7 +157,7 @@ How the datums above split into documents. Each split has a reason: one writer p
 
 | Document | Holds | Writers | How many |
 |---|---|---|---|
-| Repo | `gitRepo/<uuid>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
+| Repo | `gitRepo/<root sha>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
 | Clone | `gitClone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
 | Worktree | `worktree/main` (lists op-log and file docs) | that worktree's recorder | one per worktree |
 | Op log | `worktreeOp/<seq>` for one seq range | that worktree's recorder | one per ~256 ops; the worktree datum lists them |
@@ -173,7 +174,7 @@ For example, one day of this lane's work (one repo, one clone, one worktree, 30 
 
 - **What ships:** the worktree's documents themselves, at per-document granularity; unwanted documents are removed and replaced, not filtered (§7).
 - **Granularity:** per observed change. The single writer per file doc puts this back in scope (D26's commit-only rule existed because ref-driven docs had several writers). Interactive editing over an intxt would edit a fork (ADR 007) live and fold back into the worktree's docs after a debounce, writing one op. The per-write dmeta and signature overhead for such fine-grained writes is not yet measured; the node lane is asked for a measurement and for whether intermediate changes can skip signing (ledger).
-- **Repository matching:** shared root commits only *suggest* that two clones are one project; they never merge repos automatically. Forks and clones of a starter repo share roots and aren't the same project.
+- **Repository matching:** shared root commits only *suggest* that two clones are one project; they never merge repos automatically: two clones' repo documents stay separate even though their `gitRepo` datums share a key, and an intxt's `repoEntry` is keyed by the repo document, not the root. Forks and clones of a starter repo share roots and aren't the same project.
 - **Directories outside any checkout:** an opt-in layer later (a worktree without a clone); nothing here blocks it.
 - **jj:** record jj operations' and changes' identities and structure (ids, parents, descriptions, which changes and bookmarks moved), not the full content of jj's op store. A jj backend on top of intxt is a future VCS conversation.
 
