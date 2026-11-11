@@ -17,10 +17,15 @@
 //! - Tags: only branches (`refs/heads`) are observed as refs.
 
 pub mod git;
+pub mod hook;
+pub mod host;
 pub mod identity;
 pub mod observe;
 pub mod snapshot;
 pub mod transcript;
+
+#[cfg(test)]
+mod testing;
 
 /// Why an observation failed. git's own failures carry its stderr; the caller reports them and
 /// the next hook retries from the stored state.
@@ -34,4 +39,12 @@ pub enum Error {
     /// newline, or a log line of an unknown shape.
     #[error("{0}")]
     Format(String),
+    /// A hook's JSON input lacks a required field or is not JSON.
+    #[error("hook input: {0}")]
+    Hook(String),
+    #[error(transparent)]
+    Transcript(#[from] crate::transcript::ImportError),
+    /// A state file is not what this version wrote.
+    #[error("state file {path}: {reason}")]
+    State { path: String, reason: String },
 }
