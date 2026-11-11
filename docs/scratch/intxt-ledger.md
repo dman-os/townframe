@@ -198,3 +198,11 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 - **Holding intxt_core reference fields** (D40) until the nodules lane lands the reference defs and index change; they will ping. Then: `Target.source` as a pin, `refHeads` gone, references typed by the defs.
 - Pushed: `intxt/write-costs` (4f9c2bb0, fed952c5). `feat/intxt` is not pushed.
 - **2026-11-11 (later):** the crate rename per nodules D42 is under way (Sonnet agent on feat/intxt-impl): `intxt_core` with a host-only `cartridge` feature, `intxt_nodule` holding the handlers and the e2e, and the `intxt_nodule_guest` shim. The nodule ceiling is going away and operations become methods (nodules lane, on -next); build on neither until they ping. The red `day_cli` test (404 after Ready, cap.rs:468) is with the nodules lane's flake diagnosis. Awaiting the operator: the D41 split (`recordObservations` becomes client code; create and add stay methods).
+- **feat/intxt-impl 877ab24d (2026-11-11 evening).** Everything merged by merge commits, not rebases: the old tip is `backup/intxt-impl-d983463d`. It contains:
+  - the rename (`intxt_core` with `cartridge` and `client` features; `intxt_nodule`; `intxt_nodule_guest` at 1.13 MB);
+  - -next 77352bba: methods instead of operations, the ceiling gone, the node CLI reshape (`day node start`);
+  - D50 from feat/intxt-client: `intxt_core::client::Caller`, the recorder in-process, `RecordObservations` gone as a method;
+  - the ACP recorder from feat/intxt-acp: `intxt_capture::acp`, and `day x intxt record -- <agent>` with a bounded 64 MiB tee and transparent forwarding, tested with hand-written traces and a fake agent, not yet run against a real ACP agent;
+  - the day_cli intxt e2e, which now stops its node on every exit path.
+
+  `REQUIRED_OPERATIONS` lives in `intxt_core::methods` (to be renamed for methods later). The red day_cli test is the node's config-watch race (nodules lane, fix in flight). ACP gaps: a first-seen `session/load` loses its history; hook and ACP sessions of one harness get separate documents; ops are caused by turns, not tool calls.
