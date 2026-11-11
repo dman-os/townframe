@@ -34,14 +34,23 @@ A method with a byte body still has JSON-shaped **parameters**: the Lexicon `par
 
 How each transport carries it:
 - **HTTP `/xrpc`:** the raw request or response body, with `Content-Type`. Reads honour `Range` (`206 Partial Content`).
-- **irpc (in-process and over the node's socket):** a byte-chunk stream (irpc's client-streaming and server-streaming channels), never a `Vec`. A blob larger than memory never exists as one buffer.
+  This includes the node's Unix socket that `day` uses: it serves the same `/xrpc` over HTTP (`service_utils_rs::xrpc::unix`; the client is `day_cli/client.rs`).
+- **irpc (in-process clients):** a byte-chunk stream (irpc's client-streaming and server-streaming channels), never a `Vec`. A blob larger than memory never exists as one buffer.
 - **Wasm guests:** wasi:http body streams. This is what lifts the 4 MiB message cap for bodies; the cap stays for JSON messages. Until the guest side lands, a nodule reads blob ranges under 4 MiB.
 
 Ranged reads keep iroh-blobs' semantics: any byte range of a local blob, verified against its BLAKE3 tree where the reader asks for verification (remote readers). A local reader asking for plain bytes gets plain bytes.
 
 ### 3. Local-only methods
 
-A method's declaration may mark it **local-only**. Dispatch refuses a local-only method unless the call's origin is local. Today that means a Unix socket peer, whose uid the transport already reads with `SO_PEERCRED` (`service_utils_rs::xrpc::unix`), or an in-process caller. The origin is recorded in `InvocationContext` by the transport, never by the caller.
+A method's declaration may mark it **local-only**. Dispatch refuses a local-only method unless the call's origin is local.
+
+A local origin is a client on the node's own machine reaching an edge transport directly:
+- a peer on one of the node's Unix sockets, whose uid the transport reads with `SO_PEERCRED` (`service_utils_rs::xrpc::unix`);
+- a native client embedded in the node's process, such as `day` running the node in-process.
+
+It is **not** a nodule guest, even though guests run in the node's process. Nor is it a call relayed through guest egress, nor one arriving from a remote peer.
+
+Only the edge transport that accepted the call sets the origin in `InvocationContext`; the caller never sets it. A hop never inherits it: a nodule's egress call, made while serving a local caller, has the nodule as its origin, not the local client.
 
 Local-only is an exposure rule, not authority. A local caller still needs a capability for the method, and the uid only lets a process *ask* for a grant (D42); it never confers operator authority.
 
@@ -49,11 +58,19 @@ Precedent: Docker's Unix socket versus TCP split, and D-Bus with polkit checking
 
 ### 4. Import from a file descriptor, not a path
 
-`blobs.importFile` is local-only and takes a file descriptor passed over the Unix socket (`SCM_RIGHTS`), not a path.
+`blobs.importFile` is local-only and takes file descriptors passed over a Unix socket (`SCM_RIGHTS`), not paths.
 
-A path would make the node open a file as its own uid. That might be a file the caller can't read, which is the classic confused deputy. A passed descriptor proves the caller could open it, which is the xdg-desktop-portal and Wayland precedent. Passing one is also only possible over a Unix socket, so the method is local by construction.
+A path would make the node open a file as its own uid. That might be a file the caller can't read, which is the classic confused deputy. A passed descriptor proves the caller could open it, which is the xdg-desktop-portal and Wayland precedent.
 
-The node feeds the descriptor into `import_stream` (**copy**) by default. **Reference in place** (iroh-blobs' external import) is opt-in for sources the caller declares immutable. A worktree file edited in place would change the bytes under the hash, and reads would then fail verification.
+**The mechanism: a separate descriptor socket with its own small framed protocol.** HTTP can't carry descriptors: hyper reads and writes the stream with plain `read`/`write`, so ancillary data is never sent or is lost. Wayland and D-Bus can pass descriptors because they are message protocols where each message may carry some.
+
+So the node serves a second Unix socket next to the XRPC one (`<node id>.fd.sock`). It is served by whoever holds the node, like the XRPC socket (D42). Each frame there is one call: a length-prefixed header (the method NSID, its parameters including the capability, and the descriptor count), with the descriptors attached to that frame's `sendmsg`. The server turns a frame into an ordinary `Invoke`, whose body is a descriptors case of `Body` that only this transport can construct, with a local origin, and runs it through dispatch. Capability checks and routing stay in one place. The response is a frame of n results, in order.
+
+Rejected:
+- Sending descriptors on the XRPC connection right before the HTTP request. That needs a custom accept loop that reads ancillary data before handing the stream to hyper, and it breaks on any request pipelining.
+- Exchanging descriptors on a side socket for short-lived tokens that the HTTP call then names. That needs two round trips plus token state and expiry, for what one frame does.
+
+`importFile` always **copies**: the node feeds each descriptor into `import_stream`, and it `fstat`s the descriptor to learn the length up front. Reference in place (iroh-blobs' external import) is left out of v1. A caller that wrongly declares a file immutable would corrupt what the node later serves to remote peers, whose verification then fails. Capture never needs it: worktree files are mutable, and git objects are zlib-compressed. If reference mode comes back, it is operator-only.
 
 ### 5. The blob methods after this ADR
 
@@ -62,7 +79,7 @@ The node feeds the descriptor into `import_stream` (**copy**) by default. **Refe
 | `blobs.put` | procedure | `capability` | input: bytes (`*/*`), output: `BlobInfo` JSON |
 | `blobs.read` | query | `capability`, `blobId` | output: bytes (`Range` for part of it) |
 | `blobs.stat` | query | `capability`, `blobId` | JSON, as today |
-| `blobs.importFile` | procedure, local-only | `capability`, `mode: copy\|reference` | input: n descriptors (Unix socket only), output: n `BlobInfo` or refusals, in order |
+| `blobs.importFile` | procedure, local-only | `capability` | input: n descriptors (descriptor socket only), output: n `BlobInfo` or refusals, in order |
 | `blobs.mintCapability` | procedure | — | JSON, as today |
 
 ### 6. Put semantics (capture's requirements, from intxt)
@@ -79,14 +96,19 @@ The `{"$bytes"}` datum form stays for small byte values *inside datums*, where i
 
 - `big_dispatch_core::Invoke` and `InvokeOutput` break: `input: Value` becomes `body: Body`. Every provider, the router, the HTTP surface and the guest provider change with it. Per AGENTS.md this is a clean interface break, not a shim.
 - `method_core` gains body encodings and a local-only flag in `XrpcMethod`; `service_method!` grows a form for byte-bodied methods.
-- The node socket's irpc protocol needs streaming request and response bodies, and descriptor passing for `importFile`.
+- The XRPC HTTP surface (TCP and the Unix socket) and the irpc in-process path need streaming request and response bodies.
+- The node serves a second Unix socket for descriptor calls, with the same lifecycle as the XRPC socket.
+- `InvocationContext` gains an origin set only by edge transports.
 - intxt's capture stops base64-encoding files and loses its 8 MiB skip.
 - The guest's 4 MiB cap remains for JSON; blob bodies in guests wait for wasi:http streams.
 
 ## Open questions
 
-1. Should a byte-bodied response carry the method's JSON output too, such as `BlobInfo` for `put`? atproto returns JSON for `uploadBlob`, so the input is bytes and the output JSON. That is the table's answer, but it means a method has two encodings, one per direction.
-2. Is a declared `lengthOctets` required on `put`, so the node can refuse an oversized upload before reading it, or is a running cap enough?
-3. `importFile` by path as well, for callers that can't pass descriptors, with the node checking the peer uid's access first (`faccessat` as that uid)? I'd say no: descriptors cover every local client we have.
-4. The upload hold's grace period: atproto-like hours, or a day so that a client offline mid-capture can still claim its uploads?
-5. Order of work: the dispatch `Body` change first (it has no users besides blobs at first), then the blob methods, then the guest streams.
+Settled in review with intxt (2026-11-11):
+- Encodings are one per direction (bytes in, JSON out for `put`, as atproto's `uploadBlob`).
+- `importFile` needs no declared length (`fstat`). HTTP `put` has `Content-Length`; a running cap matters only for chunked bodies.
+- No path import.
+
+Open for the operator:
+1. The upload hold's grace period. Capture is satisfied with hours, because it puts right before it records.
+2. Order of work: the dispatch `Body` change first (it has no users besides blobs at first), then the blob methods, then the guest streams.
