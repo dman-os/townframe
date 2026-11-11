@@ -506,8 +506,14 @@ pub struct LockHeld {
 
 impl LockHeld {
     fn read(path: &Path) -> Res<Self> {
-        let text = std::fs::read_to_string(path)
-            .wrap_err_with(|| format!("reading {}", path.display()))?;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            // The holder has the boot lock but has not created its lock file yet.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("reading {}", path.display()));
+            }
+        };
         let mut lines = text.lines();
         Ok(Self {
             pid: lines.next().and_then(|line| line.parse().ok()),
