@@ -85,4 +85,38 @@ mod tests {
             );
         }
     }
+
+    /// An owner as an app writes it: `open` is a signal, an "Open" button sets it. Dismissal only
+    /// counts if the owner's state follows, so this drives the whole loop.
+    fn owner(width: WidthClass) -> Element {
+        let mut open = use_signal(|| true);
+        rsx! {
+            button { onclick: move |_| open.set(true), "Open drawer" }
+            Drawer { width, name: "Sidebar", open: open(), on_dismiss: move |()| open.set(false),
+                button { "Home" }
+            }
+        }
+    }
+
+    #[test]
+    fn an_owner_can_dismiss_the_drawer_by_scrim_or_escape_and_reopen_it() {
+        let mut page = Page::with_props(owner, WidthClass::Compact);
+        assert!(page.has_role("dialog", "Sidebar"));
+
+        let scrim = page.by_role("button", "Dismiss Sidebar");
+        page.click(scrim);
+        assert!(!page.has_role("dialog", "Sidebar"), "scrim dismiss");
+
+        let open = page.by_role("button", "Open drawer");
+        page.click(open);
+        assert!(page.has_role("dialog", "Sidebar"), "reopens");
+
+        let dialog = page.by_role("dialog", "Sidebar");
+        page.key(dialog, Key::Named(NamedKey::Escape));
+        assert!(!page.has_role("dialog", "Sidebar"), "escape dismiss");
+
+        let open = page.by_role("button", "Open drawer");
+        page.click(open);
+        assert!(page.has_role("dialog", "Sidebar"), "reopens again");
+    }
 }

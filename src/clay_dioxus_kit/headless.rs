@@ -15,3 +15,20 @@ pub mod list_row;
 pub mod nav_button;
 pub mod sections;
 pub mod sheet;
+
+use dioxus::prelude::*;
+
+/// The `onmounted` handler of a modal panel: moves keyboard focus into it, as the WAI-ARIA dialog
+/// pattern asks, so Escape reaches the panel's `onkeydown` even when it holds no focusable child.
+/// The panel carries `tabindex="-1"` (focusable by script, not a tab stop). A renderer that
+/// cannot focus an element faults here instead of leaving a dialog that ignores the keyboard.
+/// Focus is neither trapped inside the panel nor restored to the opener on dismissal yet.
+pub(crate) fn focus_on_mount(event: MountedEvent) {
+    spawn(async move {
+        event
+            .data()
+            .set_focus(true)
+            .await
+            .expect("the renderer must be able to focus a modal panel");
+    });
+}
