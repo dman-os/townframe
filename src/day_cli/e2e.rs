@@ -765,7 +765,7 @@ mod library {
             // The binary file's document holds the blob datum, and its `File` points at it.
             let picture: DocId = worktree.files["pic.png"].parse().unwrap();
             let blob = read_at(
-                &client,
+                client,
                 &picture,
                 &"org.example.daybook.blob/main".parse().unwrap(),
             )
@@ -776,7 +776,7 @@ mod library {
             assert_eq!(blob["lengthOctets"], binary.len());
             assert!(blob["digest"].as_str().unwrap().starts_with('z'));
             let file = read_at(
-                &client,
+                client,
                 &picture,
                 &format!("{}/main", work::File::ID).parse().unwrap(),
             )
@@ -791,7 +791,7 @@ mod library {
             // The text file is a note.
             let text: DocId = worktree.files["a.txt"].parse().unwrap();
             let note = read_at(
-                &client,
+                client,
                 &text,
                 &format!("{}/main", intxt_core::generic::Note::ID)
                     .parse()
@@ -804,7 +804,7 @@ mod library {
 
             // A hook with nothing new records nothing; the machine and the capture drawer are the
             // node's, remembered for the next hook.
-            let stopped = capture::run(&client, &node_root, &hook("Stop", false))
+            let stopped = capture::run(client, &node_root, &hook("Stop", false))
                 .await
                 .unwrap();
             assert!(stopped.recorded.is_none(), "{stopped:?}");
@@ -819,7 +819,7 @@ mod library {
             );
             let drawer: DrawerId = stored["drawer"].as_str().unwrap().parse().unwrap();
             let listing = crate::cmds::intxt::call(
-                &client,
+                client,
                 MintDrawerCapability {
                     scope: big_cabinet_core::drawer::protocol::DrawerScope {
                         drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
@@ -833,7 +833,7 @@ mod library {
             .unwrap()
             .capability_id;
             let listed = crate::cmds::intxt::call(
-                &client,
+                client,
                 ListDocs {
                     capability: listing,
                     drawer_id: drawer,
@@ -981,7 +981,7 @@ mod library {
                 ]
             );
             let (_, entry) = read_at(
-                &client,
+                client,
                 &review,
                 &"org.example.intxt.work.worktreeEntry/0193a"
                     .parse()
@@ -991,7 +991,7 @@ mod library {
             .unwrap();
             assert_eq!(entry, json!({"worktree": worktree.to_string()}));
             let (_, body) = read_at(
-                &client,
+                client,
                 &review,
                 &"org.example.intxt.body/main".parse().unwrap(),
             )
@@ -1006,7 +1006,7 @@ mod library {
             );
 
             let listing = intxt::call(
-                &client,
+                client,
                 MintDrawerCapability {
                     scope: big_cabinet_core::drawer::protocol::DrawerScope {
                         drawers: [(review.clone(), DrawerAccess::Read)].into(),
@@ -1020,7 +1020,7 @@ mod library {
             .unwrap()
             .capability_id;
             let listed = intxt::call(
-                &client,
+                client,
                 ListDocs {
                     capability: listing,
                     drawer_id: review.clone(),
