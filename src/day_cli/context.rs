@@ -295,6 +295,27 @@ impl NodeDir {
         Ok(settings)
     }
 
+    /// Rewrites `node.json` with `change` applied. The new file is written beside it and renamed
+    /// over it, so a reader (a daemon booting) sees the old settings or the new, never half.
+    /// Whether the node is serving does not matter: settings are read once, at boot.
+    pub fn update_settings<T>(&self, change: impl FnOnce(&mut NodeSettings) -> Res<T>) -> Res<T> {
+        let mut settings = self.settings()?;
+        let out = change(&mut settings)?;
+        let staging = self.root.join("node.json.new");
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&staging)
+            .wrap_err_with(|| format!("creating {}", staging.display()))?;
+        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&settings)?)?;
+        file.sync_all()?;
+        std::fs::rename(&staging, self.settings_path())
+            .wrap_err_with(|| format!("replacing {}", self.settings_path().display()))?;
+        Ok(out)
+    }
+
     /// Creates `run/` (the daemon's log) and the socket directory, each owner-only.
     pub fn ensure_run_dir(&self) -> Res<()> {
         Self::ensure_private_dir(&self.run_dir())?;
