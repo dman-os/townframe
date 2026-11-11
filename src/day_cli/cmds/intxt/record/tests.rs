@@ -24,8 +24,35 @@ fn fake_agent() -> Vec<String> {
     vec!["sh".to_owned(), "-c".to_owned(), script]
 }
 
-fn client_input() -> Vec<u8> {
-    format!("{INIT}\n{NEW}\n{PROMPT}\n").into_bytes()
+/// Run the proxy over the fake agent with a client that answers causally, as an editor does: it
+/// sends each request only after the agent's previous answer arrived. Returns the agent's exit
+/// status and everything the client received.
+async fn drive(record: impl AsyncFnMut(Emit) -> Res<Option<String>>) -> (ExitStatus, Vec<u8>) {
+    use tokio::io::AsyncBufReadExt;
+    let (mut client_writes, agent_reads) = tokio::io::duplex(64 * 1024);
+    let (agent_writes, client_reads) = tokio::io::duplex(64 * 1024);
+    let client = async {
+        let mut received = Vec::new();
+        let mut lines = tokio::io::BufReader::new(client_reads);
+        for (request, answers) in [(INIT, 1), (NEW, 1), (PROMPT, 3)] {
+            client_writes
+                .write_all(format!("{request}\n").as_bytes())
+                .await
+                .unwrap();
+            for _ in 0..answers {
+                lines.read_until(b'\n', &mut received).await.unwrap();
+            }
+        }
+        // The client leaves: the agent sees its stdin end.
+        drop(client_writes);
+        lines.read_to_end(&mut received).await.unwrap();
+        received
+    };
+    let (status, received) = tokio::join!(
+        proxy(&fake_agent(), false, agent_reads, agent_writes, record),
+        client
+    );
+    (status.unwrap(), received)
 }
 
 fn agent_output() -> Vec<u8> {
@@ -34,24 +61,15 @@ fn agent_output() -> Vec<u8> {
 
 #[tokio::test]
 async fn bytes_pass_through_unchanged_and_the_turn_is_recorded() {
-    let input = client_input();
-    let mut output = Vec::new();
     let mut seen: Vec<Emit> = Vec::new();
-    let status = proxy(
-        &fake_agent(),
-        false,
-        &input[..],
-        &mut output,
-        async |emit: Emit| {
-            seen.push(emit);
-            Ok(Some("zdoc".to_owned()))
-        },
-    )
-    .await
-    .unwrap();
+    let (status, received) = drive(async |emit: Emit| {
+        seen.push(emit);
+        Ok(Some("zdoc".to_owned()))
+    })
+    .await;
     assert!(status.success());
     assert_eq!(
-        String::from_utf8(output).unwrap(),
+        String::from_utf8(received).unwrap(),
         String::from_utf8(agent_output()).unwrap()
     );
 
@@ -83,23 +101,14 @@ async fn bytes_pass_through_unchanged_and_the_turn_is_recorded() {
 
 #[tokio::test]
 async fn a_failing_recording_stops_recording_and_not_the_session() {
-    let input = client_input();
-    let mut output = Vec::new();
     let mut calls = 0;
-    let status = proxy(
-        &fake_agent(),
-        false,
-        &input[..],
-        &mut output,
-        async |_: Emit| {
-            calls += 1;
-            Err(eyre::eyre!("the node is gone"))
-        },
-    )
-    .await
-    .unwrap();
+    let (status, received) = drive(async |_: Emit| {
+        calls += 1;
+        Err(eyre::eyre!("the node is gone"))
+    })
+    .await;
     assert!(status.success());
-    assert_eq!(output, agent_output());
+    assert_eq!(received, agent_output());
     assert_eq!(calls, 1, "recording stopped at its first failure");
 }
 

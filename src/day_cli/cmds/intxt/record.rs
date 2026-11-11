@@ -38,6 +38,9 @@ use utils_rs::prelude::Timestamp;
 
 /// Forward `from` to `to` until `from` ends, teeing each chunk after it has been forwarded. A
 /// peer that closed its end of the pipe ends the pump quietly: that is the session ending.
+///
+/// The tee comes after the forward, which keeps the recorder's order causal: the client answers
+/// only what it was forwarded, so the recorder has seen a message before it sees its answer.
 async fn pump(
     mut from: impl AsyncRead + Unpin,
     mut to: impl AsyncWrite + Unpin,
