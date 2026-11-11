@@ -102,6 +102,15 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
   File documents stay per worktree (ADR 040 §4, D29, D32). The same path edited on two machines gives two file documents, which share ground only through commit content; comments cross between them by quote match. `docs/scratch/intxt-granularity.md` adds a bound per line of work within a worktree (proposal).
 - **D55 (2026-11-12, operator)** File documents span machines only with an editor that writes them directly (the filesystem, once dpaths lands). The other machine's working copy then comes from that document, never from `git checkout`. Recorded in ADR 040 §4.
 - **D56 (2026-11-12, operator), process pilot for this lane:** a largish proposal is a short scratch document that makes its case (the constraint, today, the proposal, its costs, what's open). An ADR changes only after the decision, with a dated "Changed" line at the top saying what changed.
+- **D57 (2026-11-12, operator)** Settled in the thread on what an intxt carries:
+  - B is the lean: a deliverable layer at commits, separate from the private record of work. A has not been ruled out, and storage cost is not a reason to drop git commits from an intxt.
+  - Entries that include commits name their VCS: `gitCommitEntry`, `jjChangeEntry`.
+  - The question goes to an experiment that replays real work and walks the use cases (`docs/scratch/intxt-file-docs.md`). That doc also proposes C: filesystem worktrees recorded as a worktree log plus content-addressed snapshots, with no file documents; file documents only in collaborative worktrees (dpaths/Delta).
+  - Operator's points:
+    - Something enters an intxt only when something references it.
+    - A checkout is not a mutation of file content; record it in the worktree's linear log.
+    - A collaborative worktree that checks out another commit is a new worktree.
+    - A secret is removed by replacing a document with a squash replay that starts after it.
 - **D52 (2026-11-11, operator)** This week's use cases, all free of other lanes: session recording (Claude Code hooks, and any agent over ACP through a recording proxy), guided review (marks, a guide of sections, inbox/reply/resolve), and association with git (revisions per branch move, diffs between revisions, importing a branch or range). Surface in FDR 008.
 - **D45 (2026-11-11, mine, with the nodules lane)** Blob content for capture: the host puts the bytes (`blobs.put`, ≤ 8 MiB once `$bytes` base64 lands; `blobs.mintCapability` on the operator's bearer), writes `org.example.daybook.blob/main` `{mime, digest, lengthOctets}` into the file doc itself, and `File.blob` references `self/org.example.daybook.blob/main`; the encryption worker adds `cipherBlob`/`jwk` there. The capture drawer gets a blob inventory (`drawers.createMetaDoc {kind: blobInventory}`) so the pin worker syncs them. Files over 8 MiB carry no content: recorded as changed with size and git hash only. Nodules never see bytes.
 - **A2** Datum shapes for the review loop: file docs, commit datums, ref datums, session docs, annotations, structure, thread state; each checked against D13 (multiplayer).
