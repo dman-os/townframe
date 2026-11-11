@@ -24,15 +24,18 @@ cartridge = ["schemars", "dep:big_cartridges_core", "dep:big_nodule_core", "dep:
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
 macros = { path = "../macros" }
 automerge.workspace = true
-big_cartridges_core = { path = "../big_cartridges_core", default-features = false, optional = true }
-big_nodule_core = { path = "../big_nodule_core", default-features = false, optional = true }
-indexmap = { version = "2", features = ["serde"], optional = true }
 jiff.workspace = true
 method_core.workspace = true
-method_lexicon = { path = "../method_lexicon", optional = true }
 schemars = "1.2"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# The cartridge builder is host-only (`cartridge` feature); a wasm guest never links it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+big_cartridges_core = { path = "../big_cartridges_core", default-features = false, optional = true }
+big_nodule_core = { path = "../big_nodule_core", default-features = false, optional = true }
+indexmap = { version = "2", features = ["serde"], optional = true }
+method_lexicon = { path = "../method_lexicon", optional = true }
 
 [dev-dependencies]
