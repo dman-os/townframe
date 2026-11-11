@@ -330,20 +330,20 @@ This is an illustrative JSON shape, not a signed test vector; angle-bracketed by
         "delegation": { "$bytes": "<base64 certificate>" }
       }
     },
-    // concurrent creations could produce the same datum
-    // so we assign UUIDv7s to identify them
-    "datumUuids": {
-      // if there are multiple uuids for the same datum key
-      // the lowest one lexicographically wins
-      "019e5d38-0000-7000-8000-000000000002": "org.example.daybook.branch/main",
-      "019e5d38-0000-7000-8000-000000000003": "org.example.daybook.branch/main"
-    },
     "docUuids": {
       "019e5d38-0000-7000-8000-000000000004": "zDoc1",
     },
     "datums": {
       // every field in this is a competing set to resolve concurrent writes
       "org.example.daybook.branch/main": {
+        // concurrent creations could produce the same datum
+        // so each creator assigns a UUIDv7 to identify its copy.
+        // readers union these across every concurrent copy of the entry;
+        // if there are multiple uuids the lowest one lexicographically wins
+        "uuids": {
+          "019e5d38-0000-7000-8000-000000000002": true,
+          "019e5d38-0000-7000-8000-000000000003": true
+        },
         "updatedAt": ["2026-10-13T14:30:15Z"],
         // tombstone for removed facets, empty by default
         "deletedAt": [],
