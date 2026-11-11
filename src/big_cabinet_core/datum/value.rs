@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use unicode_segmentation::UnicodeSegmentation;
 
-
 type Result<T> = std::result::Result<T, GrammarError>;
 
 /// Admits an object schema identified by `target` (`nsid` or `nsid#def`) and every schema position
@@ -801,6 +800,7 @@ values!(
     crate::DatumKey,
     crate::DatumReference,
     crate::Location,
+    crate::DatumPin,
     crate::ActorUrl,
     crate::drawer::GroupKey,
 );
@@ -846,7 +846,7 @@ mod tests {
         declared::<Option<Vec<Box<str>>>>();
         declared::<std::collections::BTreeMap<String, Vec<crate::dmeta::ActorMetadata>>>();
         declared::<std::collections::HashMap<String, crate::dmeta::DatumMetadata>>();
-        declared::<IndexMap<String, Vec<crate::dmeta::BranchOrigin>>>();
+        declared::<IndexMap<String, Vec<crate::DatumPin>>>();
         declared::<[crate::dmeta::DatumSignature; 2]>();
         declared::<&[crate::dmeta::InheritedWitness]>();
     }

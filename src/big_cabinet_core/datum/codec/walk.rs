@@ -612,6 +612,14 @@ impl<'a> Position<'a> {
                 },
             ));
         }
+        if let Some(form) = super::references::ReferenceForm::of(schema) {
+            // A reference def's position must parse as that form; its storage is the plain string
+            // or map the def states, so no codec applies.
+            if !(value.is_null() && type_mentions(schema, "null")) {
+                form.read(value).map_err(|err| at(path, err))?;
+            }
+            return Ok(());
+        }
         if let Some(codec) = Codec::of(schema).map_err(|err| at(path, err))? {
             // A `null` a declaration claims — the `None` of an option, whose `type` carries it —
             // belongs to the declaration and not to the codec, whose holds is schema-blind.

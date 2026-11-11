@@ -96,6 +96,20 @@ fn position(
             "a position is a schema object: `true` admits any JSON value, which no Lexicon type does",
         ));
     };
+    if let Some(reference) = object.get(crate::reference::LEXICON_REF) {
+        // The Rust type declares itself a def of another Lexicon (a `DatumReference` is
+        // `org.example.daybook.defs#datumRef`), so the position is a `ref` to it and nothing of the
+        // type's own schema is carried.
+        return match reference.as_str() {
+            Some(reference) if reference.contains('#') || reference.contains('.') => {
+                Ok(json!({ "type": "ref", "ref": reference }))
+            }
+            _ => Err(here(
+                path,
+                format!("`{}` names a Lexicon def", crate::reference::LEXICON_REF),
+            )),
+        };
+    }
     for keyword in [
         "allOf",
         "not",
@@ -237,7 +251,7 @@ fn marked(
             }
             Ok(Some(json!({ "type": "bytes" })))
         }
-        "float" | "text" | "timestamp" | "reference" | "location" => {
+        "float" | "text" | "timestamp" => {
             if !stated("string") {
                 return Err(here(
                     path,

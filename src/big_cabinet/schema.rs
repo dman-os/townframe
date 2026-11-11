@@ -18,8 +18,8 @@ use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::Declaration;
 use big_cabinet_core::datum::LexiconAdmissionError;
 use big_cabinet_core::datum::Universe;
-use big_cabinet_core::datum::admit_lexicon;
 use big_cabinet_core::datum::UniverseError;
+use big_cabinet_core::datum::admit_lexicon;
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::drawer::Drawer;
@@ -31,12 +31,17 @@ use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::SelfDocLayout;
 use big_cabinet_core::drawer::SingleGroupLayout;
+use big_cabinet_core::reference::DEFS_NSID;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use thiserror::Error;
+
+/// The reference defs Lexicon ([`big_cabinet_core::reference::defs_lexicon`]), carried for every
+/// registration.
+static DEFS: LazyLock<Value> = LazyLock::new(big_cabinet_core::reference::defs_lexicon);
 
 static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
@@ -79,6 +84,7 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
             .enumerate()
             .filter(|(other, _)| *other != index)
             .map(|(_, other)| &other.file)
+            .chain(std::iter::once(&*DEFS))
             .collect();
         let compiled = bundle
             .validate_lexicon(&datum.id, &lexicon.file, &carried)
@@ -146,6 +152,8 @@ pub enum SchemaRepoError {
     EmptyDatumTag,
     #[error("known datum schema tag `{0}` is configured more than once")]
     DuplicateDatumTag(String),
+    #[error("the carried copy of `{0}` differs from this node's: its defs are the node's to state")]
+    ConflictingDefs(String),
     #[error("sidecar bundle is invalid: {source}")]
     SidecarInvalid {
         #[source]
@@ -242,6 +250,14 @@ impl KnownSchemas {
     ) -> Result<(), SchemaRepoError> {
         let known = &mut self.known;
         for group in groups {
+            if let Some(copy) = group
+                .carried_lexicons
+                .iter()
+                .find(|file| file.get("id").and_then(Value::as_str) == Some(DEFS_NSID))
+                && copy != &*DEFS
+            {
+                return Err(SchemaRepoError::ConflictingDefs(DEFS_NSID.to_owned()));
+            }
             let mut tags = std::collections::BTreeSet::new();
             for registration in &group.registrations {
                 if !tags.insert(&registration.datum_tag)
@@ -266,9 +282,13 @@ impl KnownSchemas {
                 if known.contains_key(tag) {
                     return Err(SchemaRepoError::DuplicateDatumTag(tag.clone()));
                 }
+                // The reference defs are carried for every registration, so any Lexicon can refer to
+                // them. A group's own copy is a vendored one and must be the node's.
                 let carried: Vec<_> = group
                     .carried_lexicons
                     .iter()
+                    .filter(|file| file.get("id").and_then(Value::as_str) != Some(DEFS_NSID))
+                    .chain(std::iter::once(&*DEFS))
                     .chain(
                         group
                             .registrations
@@ -286,17 +306,14 @@ impl KnownSchemas {
                             .borrowed()
                             .validate_lexicon(tag, &registration.lexicon, &carried)
                     }
-                    (None, supplement) => admit_lexicon(
-                        tag,
-                        &registration.lexicon,
-                        &carried,
-                        supplement.as_ref(),
-                    ),
+                    (None, supplement) => {
+                        admit_lexicon(tag, &registration.lexicon, &carried, supplement.as_ref())
+                    }
                 }
                 .map_err(|source| SchemaRepoError::Admission {
-                        tag: tag.clone(),
-                        source: Box::new(source),
-                    })?;
+                    tag: tag.clone(),
+                    source: Box::new(source),
+                })?;
                 known.insert(
                     tag.clone(),
                     SchemaHandle {

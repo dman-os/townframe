@@ -460,3 +460,45 @@ fn a_pattern_map_that_is_not_keyed_is_refused() {
         assert!(reason.contains(reason_contains), "{reason}");
     }
 }
+
+/// A Rust reference type is a def of `org.example.daybook.defs`, so a datum holding one publishes a
+/// `ref` to that def and nothing of the type's own schema: a peer resolves the def from the
+/// Lexicon rather than from any sidecar.
+#[cfg(feature = "schemars")]
+#[test]
+fn reference_types_project_to_refs_to_the_reference_defs() {
+    #[derive(schemars::JsonSchema)]
+    #[expect(
+        dead_code,
+        reason = "the fields are read by the schema derive, not by code"
+    )]
+    struct Linked {
+        link: crate::DatumReference,
+        at: crate::Location,
+        pinned: crate::DatumPin,
+        maybe: Option<crate::DatumReference>,
+    }
+    let file = project_datum(
+        "org.example.test",
+        &serde_json::to_value(schemars::schema_for!(Linked)).unwrap(),
+    )
+    .expect("projected");
+    let properties = &file["defs"]["main"]["properties"];
+    assert_eq!(
+        properties["link"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumRef"})
+    );
+    assert_eq!(
+        properties["at"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumLocation"})
+    );
+    assert_eq!(
+        properties["pinned"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumPin"})
+    );
+    assert_eq!(
+        properties["maybe"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumRef"})
+    );
+    assert_eq!(file["defs"]["main"]["nullable"], json!(["maybe"]));
+}

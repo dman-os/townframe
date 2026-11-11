@@ -30,6 +30,8 @@ pub struct CompiledSchema {
     document: Arc<Value>,
     validator: Arc<jsonschema::Validator>,
     branch_validators: Arc<BranchValidators>,
+    /// Whether the value can hold a reference; see [`Self::declares_references`].
+    declares_references: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,10 +64,12 @@ impl CompiledSchema {
                 message: error.to_string(),
             })?;
         let branch_validators = compile_branch_validators(&document)?;
+        let declares_references = reaches_reference(&document);
         Ok(Self {
             document: Arc::new(document),
             validator: Arc::new(validator),
             branch_validators: Arc::new(branch_validators),
+            declares_references,
         })
     }
 
@@ -101,17 +105,15 @@ impl CompiledSchema {
         Self::compile(Value::Object(document))
     }
 
-    /// Whether any position declares the `reference` or `location` storage form. A consumer walks a value for
-    /// its references only when this says there are any to find.
+    /// Whether any position this document's value can reach refers to one of the reference defs
+    /// (`#datumRef`, `#datumLocation`, `#datumPin`). A consumer walks a value for its references
+    /// only when this says there are any to find.
+    ///
+    /// Reachability is followed from the root through `$ref`: every carried Lexicon compiles into
+    /// `$defs`, the reference defs among them, so a def merely being present says nothing about
+    /// what this datum holds.
     pub fn declares_references(&self) -> bool {
-        schema_positions(&self.document)
-            .into_iter()
-            .any(|schema| {
-                matches!(
-                    Codec::of(schema),
-                    Ok(Some(Codec::Reference | Codec::Location))
-                )
-            })
+        self.declares_references
     }
 
     pub(super) fn proof(&self) -> ValidationProof {
@@ -149,6 +151,31 @@ impl CompiledSchema {
     }
 }
 
+/// Whether a position reachable from `document`'s root through `$ref` refers to a reference def,
+/// computed once at compile time: an indexer asks for every datum it visits.
+fn reaches_reference(document: &Value) -> bool {
+    let defs = document.get("$defs").and_then(Value::as_object);
+    let mut reached = std::collections::HashSet::new();
+    let mut pending = vec![document];
+    while let Some(entry) = pending.pop() {
+        for schema in schema_positions(entry, false) {
+            if super::references::ReferenceForm::of(schema).is_some() {
+                return true;
+            }
+            if let Some(key) = schema
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                && reached.insert(key)
+                && let Some(definition) = defs.and_then(|defs| defs.get(key))
+            {
+                pending.push(definition);
+            }
+        }
+    }
+    false
+}
+
 fn enforce_value_resource_bound(value: &Value) -> Result<(), CodecError> {
     let mut pending = vec![(value, 0usize)];
     let mut work = 0usize;
@@ -178,7 +205,7 @@ fn enforce_value_resource_bound(value: &Value) -> Result<(), CodecError> {
 fn compile_branch_validators(document: &Value) -> Result<BranchValidators, CodecError> {
     let definitions = document.get("$defs").cloned();
     let mut validators = HashMap::new();
-    for schema in schema_positions(document) {
+    for schema in schema_positions(document, true) {
         let Some(object) = schema.as_object() else {
             continue;
         };
@@ -220,7 +247,7 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
 
 impl CompiledSchema {
     pub(in crate::datum) fn check_storage_declarations(document: &Value) -> Result<(), CodecError> {
-        for schema in schema_positions(document) {
+        for schema in schema_positions(document, true) {
             let Some(object) = schema.as_object() else {
                 continue;
             };
@@ -255,13 +282,9 @@ impl CompiledSchema {
             }
             let expected = match codec {
                 Codec::Bytes => "object",
-                Codec::Timestamp
-                | Codec::Float
-                | Codec::Text
-                | Codec::Uint
-                | Codec::Datetime
-                | Codec::Reference
-                | Codec::Location => "string",
+                Codec::Timestamp | Codec::Float | Codec::Text | Codec::Uint | Codec::Datetime => {
+                    "string"
+                }
                 Codec::Counter => "integer",
             };
             if let Some(stated) = object.get("type") {
@@ -296,7 +319,10 @@ impl CompiledSchema {
 /// key named `allOf` states an author's data and is not a composition this codec refuses to walk.
 /// Reading data as schema rejects a legitimate literal, and reading it the other way round would
 /// miss a composition nested under one of these keys' siblings.
-fn schema_positions(document: &Value) -> Vec<&Value> {
+///
+/// `follow_defs` says whether the schemas in `$defs` are positions of this document, or only
+/// definitions it may refer to.
+fn schema_positions(document: &Value, follow_defs: bool) -> Vec<&Value> {
     /// One schema, whatever it applies to.
     const SINGLE: [&str; 10] = [
         "items",
@@ -338,6 +364,7 @@ fn schema_positions(document: &Value) -> Vec<&Value> {
                     pending.extend(schemas);
                 }
             } else if MAP.contains(&keyword)
+                && (follow_defs || keyword != "$defs")
                 && let Some(schemas) = value.as_object()
             {
                 pending.extend(schemas.values());

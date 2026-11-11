@@ -40,8 +40,7 @@ pub struct DatumRefEdge {
     pub path: String,
     /// The addressed datum; a `self` reference resolves against the origin document.
     pub target: DatumRoute,
-    /// The frontier the sibling `refHeads` pins the target to; empty follows the target's
-    /// current frontier.
+    /// The frontier a `datumPin` pins the target to; empty follows the target's current frontier.
     pub ref_heads: Vec<ChangeHash>,
 }
 

@@ -32,9 +32,9 @@ mod e2e;
 pub use attribution::Attribution;
 pub use attribution::AttributionError;
 #[cfg(feature = "schemars")]
-pub use storage::DmetaSchema;
-#[cfg(feature = "schemars")]
 pub use storage::DmetaRead;
+#[cfg(feature = "schemars")]
+pub use storage::DmetaSchema;
 #[cfg(feature = "schemars")]
 pub use storage::DmetaWrite;
 #[cfg(feature = "schemars")]
@@ -329,20 +329,7 @@ pub struct InheritedWitness {
 pub struct BranchPath {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<BranchOrigin>,
-    #[serde(flatten)]
-    pub extra: crate::datum::Extra,
-}
-
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchOrigin {
-    pub datum_ref: crate::DatumReference,
-    #[serde(with = "crate::reference::head_list")]
-    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
-    pub ref_heads: Vec<automerge::ChangeHash>,
+    pub from: Option<crate::DatumPin>,
     #[serde(flatten)]
     pub extra: crate::datum::Extra,
 }

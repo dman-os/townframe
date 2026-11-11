@@ -1157,26 +1157,29 @@ fn unsupported_primary_forms_and_sidecar_rules_are_explicit_admission_errors() {
     }
 }
 
+/// The storage form the compiled schema gives the `text` member, if it declares one.
+fn text_storage(compiled: &crate::datum::CompiledSchema) -> Option<crate::datum::Codec> {
+    let member = compiled.member(&["text"]).unwrap();
+    crate::datum::Codec::of(member.document()).unwrap()
+}
+
 #[test]
 fn a_supplement_from_data_is_checked_not_assumed() {
     let primary = record(json!({"text": {"type": "string"}}), &[], &[]);
     // A cartridge ships the document `Bundle::document` renders; admitting it from data gives the
     // same storage forms the bundle would.
-    let universe = supplement(json!({"text": {"type": "string", "x-automerge": "reference"}}));
+    let universe = supplement(json!({"text": {"type": "string", "x-automerge": "text"}}));
     let bundle = Bundle::new(&universe, Vec::new());
     let document = serde_json::to_value(bundle.document("Authored").unwrap()).unwrap();
     let from_data = admit_lexicon(TAG, &primary, &[], Some(&document)).unwrap();
-    assert!(from_data.declares_references());
-    assert!(
-        bundle
-            .validate_lexicon(TAG, &primary, &[])
-            .unwrap()
-            .declares_references()
+    assert_eq!(text_storage(&from_data), Some(crate::datum::Codec::Text));
+    assert_eq!(
+        text_storage(&bundle.validate_lexicon(TAG, &primary, &[]).unwrap()),
+        Some(crate::datum::Codec::Text)
     );
-    assert!(
-        !admit_lexicon(TAG, &primary, &[], None)
-            .unwrap()
-            .declares_references()
+    assert_eq!(
+        text_storage(&admit_lexicon(TAG, &primary, &[], None).unwrap()),
+        None
     );
 
     // A peer's document is refused, not trusted, when it has no definitions or widens the Lexicon.

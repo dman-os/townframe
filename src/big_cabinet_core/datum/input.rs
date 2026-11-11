@@ -17,6 +17,7 @@ use super::value::decode_base64;
 use super::value::record_key;
 use super::value::valid_tag;
 use super::value::validate_data_model;
+use crate::reference::LEXICON_REF;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -28,6 +29,11 @@ mod integers;
 
 pub(super) const KEYWORD: &str = "x-cabinet-lexicon";
 pub(super) const DATA: &str = "x-cabinet-lexicon-data";
+/// Stamped on every compiled definition: the Lexicon identity (`<nsid>#<def>`, or the bare NSID for
+/// `main`) it was compiled from. Compiled names are positional (`L0`, `L1`, …), so this is how a
+/// walker that reached a definition through `$ref` knows which Lexicon type the position declares;
+/// the reference index finds `org.example.daybook.defs#datumRef` positions by it.
+pub(super) const DEF: &str = "x-cabinet-lexicon-def";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LexiconAdmissionError {
@@ -294,7 +300,8 @@ impl Compiler<'_> {
                 }
                 continue;
             }
-            let compiled = self.position(&id, definition, &format!("{id}#{name}"), 0)?;
+            let mut compiled = self.position(&id, definition, &format!("{id}#{name}"), 0)?;
+            compiled[DEF] = Value::from(identity(&id, &name));
             self.definitions.insert(key.clone(), compiled.clone());
             if definition["type"] == "object" {
                 let mut tagged = compiled;
@@ -561,6 +568,14 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     let object = schema
         .as_object()
         .ok_or_else(|| invalid(path, "supplement positions must be schema objects"))?;
+    if object.contains_key(LEXICON_REF) {
+        // The position is the named Lexicon def; the overlay checks the Lexicon refers to it and
+        // leaves the rest to the def, so nothing beneath it is the supplement's to state.
+        return match object.get(LEXICON_REF) {
+            Some(Value::String(_)) => Ok(()),
+            _ => Err(invalid(path, format!("`{LEXICON_REF}` must be a string"))),
+        };
+    }
     check_keys(object, SUPPLEMENT_KEYS, path)?;
     for key in ["$schema", "title", "description", "x-lexicon-id"] {
         if object.get(key).is_some_and(|value| !value.is_string()) {
@@ -643,16 +658,7 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
         !matches!(
             marker.as_str(),
             Some(
-                "bytes"
-                    | "float"
-                    | "uint"
-                    | "text"
-                    | "timestamp"
-                    | "datetime"
-                    | "counter"
-                    | "list"
-                    | "reference"
-                    | "location"
+                "bytes" | "float" | "uint" | "text" | "timestamp" | "datetime" | "counter" | "list"
             )
         )
     }) {
@@ -802,6 +808,33 @@ impl Overlay<'_> {
         let object = supplement
             .as_object()
             .ok_or_else(|| invalid(path, "supplement positions must be schema objects"))?;
+        if let Some(declared) = object.get(LEXICON_REF) {
+            // A Rust type that *is* a Lexicon def (a `DatumReference` is `#datumRef`) says so
+            // rather than restating it. The Lexicon must refer to that same def here; then the def
+            // decides everything about the position and the supplement adds nothing.
+            // An optional field is the def beside a null branch (`anyOf: [{$ref}, null]`).
+            let non_null = match primary.get("anyOf").and_then(Value::as_array) {
+                Some(branches) if branches.len() == 2 && branches[1] == json!({"type": "null"}) => {
+                    &branches[0]
+                }
+                _ => &*primary,
+            };
+            let stamped = non_null
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                .and_then(|key| self.definitions.get(key))
+                .and_then(|definition| definition.get(DEF));
+            if stamped != Some(declared) {
+                return Err(invalid(
+                    path,
+                    format!(
+                        "the supplement says this position is {declared}, and the Lexicon does not refer to it"
+                    ),
+                ));
+            }
+            return Ok(());
+        }
         check_keys(object, SUPPLEMENT_KEYS, path)?;
         if let Some(reference) = object.get("$ref") {
             if object.keys().any(|key| {
@@ -1098,7 +1131,7 @@ impl Overlay<'_> {
         if let Some(marker) = marker {
             let expected = match marker {
                 "bytes" => primary.get("x-automerge").and_then(Value::as_str) == Some("bytes"),
-                "float" | "uint" | "text" | "reference" | "location" => kind == "string",
+                "float" | "uint" | "text" => kind == "string",
                 "timestamp" | "datetime" => {
                     kind == "string"
                         && primary

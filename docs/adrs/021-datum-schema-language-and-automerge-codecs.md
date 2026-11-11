@@ -61,7 +61,7 @@ vocabularies are plabels (pseudo-label, pseudo-label-error, pseudo-label-candida
 | maps keyed by an identifier | `HashMap<Uuid, DatumKey>` and `HashMap<DatumKey, DatumMeta>` |
 | arrays, nested objects | `Body.order`, `updatedAt`, `OcrResult.textRegions`; `DatumMeta`, `UserMeta`, `KnownPlug`, `OcrTextRegion` |
 | open strings, closed sets | `MimeType`, `modelTag`, `compression`; `EmbeddingDtype { F32, F16, I8, Binary }` |
-| references | `datumRef: Url` together with `refHeads: ChangeHashSet`; weak branch doc references |
+| references | `#datumRef`, `#datumLocation` and `#datumPin` of `org.example.daybook.defs`; weak branch doc references |
 | text | `Note.content`, `OcrResult.text`, chat transcripts |
 | unions of named types | datum values themselves (`WellKnownDatum` or `DatumRaw`), the profile example's attachment, plabels' three variants |
 | non-integer numbers | `OcrTextRegion.confidenceScore: Option<f32>`, OCR bounding boxes, plabels' `topScore: f64` |
@@ -73,7 +73,7 @@ Schema expresses this directly as `{"type":"object","additionalProperties": <sch
 keys necessarily strings, which is also what Automerge's `Map` allows. `DatumKey` and `Uuid` already
 produce their string form, so nothing is strained.
 
-**A datum URL names a datum; an optional sibling `refHeads` selects a frontier.** The URL uses `db+datum:/<doc-id>/<tag>/<key-slot...>` with no authority component. `self` resolves against the containing doc, and the entire path remainder after the tag is the key slot.
+**A datum URL names a datum; the `heads` of a `#datumPin` select a frontier.** The URL uses `db+datum:/<doc-id>/<tag>/<key-slot...>` with no authority component. `self` resolves against the containing doc, and the entire path remainder after the tag is the key slot.
 
 **Non-integer numbers appear in exactly three places**, all of which already have a better
 representation, and none of which is a reason to remove `F64` from the storage model.
@@ -402,23 +402,16 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 | a number | a counter | `x-automerge: "counter"` |
 | a string | a collaborative text | `x-automerge: "text"` |
 | a decimal string | a float | `x-automerge: "float"`, which `datum::F64` emits |
-| a `dtxt:datum:` address string | the same string | `x-automerge: "reference"`, which `DatumReference` emits |
-| a `dtxt:datum:` address string, optionally with a `#` fragment | the same string | `x-automerge: "location"`, which `Location` emits |
 
-The reference and location rows are the markers that change no storage: the string is a string on
-both sides of the document's edge. What the declaration buys is semantics — a value at a marked
-position must parse as a `dtxt:datum:` address without a query (ADR 035) or the write is refused,
-and a consumer can find every reference a schema declares from the schema alone (the `datum_ref`
-index does exactly this, and reads the optional sibling `refHeads` array of multibase base58btc
-heads as the pin named above). A string that happens to spell an address where nothing declares a
+A reference is not a storage form, so `x-automerge` does not declare one: the string is a string on
+both sides of the document's edge. A position holds a reference by referring to a def of the
+Lexicon `org.example.daybook.defs`, the way an AT Protocol record refers to
+`com.atproto.repo.strongRef` (ADR 035 §2.6): `#datumRef` for a whole datum, `#datumLocation` for a
+position inside one (a fragment allowed), and `#datumPin` for a location with the heads it is read
+at. The declaration travels inside the published Lexicon, so a peer and the `datum_ref` index find
+every reference a schema declares from it alone, and a value at such a position must parse as the
+def or the write is refused. A string that happens to spell an address where nothing declares a
 reference is data, not a reference.
-
-A location is a position inside a datum: an annotation's target, say, whose fragment is an
-Automerge cursor range the target's type interprets. The index records its datum part, so "what
-points at this datum" finds annotations too; the fragment stays in the value. It is a marker of its
-own, not a reference that tolerates fragments, because a position that names a whole datum must
-refuse a fragment (ADR 035 §2.3), and a reader decoding a `reference` position into a whole-datum
-type must never meet a value the schema let through.
 
 The timestamp row uses JSON Schema's standard `format: "date-time"` — the one standard keyword the
 vocabulary uses. Canonical bytes are the `{"$bytes": "…"}` object and nothing else: `contentEncoding`

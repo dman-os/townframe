@@ -395,9 +395,14 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
         .datum_uuids
         .insert(Uuid7::new(), "org.example.note/main".parse().unwrap());
     let (datums, _, doc_uuid) = named(&right);
-    write_atomic(peer.transaction(), &schema, &right, &(datums, bob, doc_uuid))
-        .unwrap()
-        .commit();
+    write_atomic(
+        peer.transaction(),
+        &schema,
+        &right,
+        &(datums, bob, doc_uuid),
+    )
+    .unwrap()
+    .commit();
     doc.merge(&mut peer).unwrap();
     let tx = doc
         .transaction_at(automerge::PatchLog::null(), &base)

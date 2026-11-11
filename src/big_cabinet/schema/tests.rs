@@ -279,14 +279,11 @@ fn reference_tags_select_the_datums_that_declare_references() {
     let plain = "org.example.schema.plain";
     let repo = SchemaRepo::open([
         SchemaRegistrationGroup::new(
-            Some(Bundle::new(
-                &universe(
-                    referencing,
-                    json!({"type": "string", "x-automerge": "reference"}),
-                ),
-                Vec::new(),
-            )),
-            [registration(referencing, json!({"type": "string"}))],
+            None,
+            [registration(
+                referencing,
+                json!({"type": "ref", "ref": "org.example.daybook.defs#datumRef"}),
+            )],
             Vec::new(),
         ),
         SchemaRegistrationGroup::new(
@@ -297,7 +294,7 @@ fn reference_tags_select_the_datums_that_declare_references() {
     ])
     .unwrap();
     let tags = repo.reference_tags();
-    // The core branch datum carries a `DatumReference`, so it is selected alongside the
+    // The core branch datum carries a `DatumPin`, so it is selected alongside the
     // registered referencing datum; the plain one and dmeta are not.
     assert_eq!(
         tags,
@@ -388,4 +385,26 @@ fn a_registration_never_shadows_and_a_refusal_leaves_the_owner_untouched() {
     ));
     assert!(repo.resolve_for_read("org.example.a.one").is_some());
     assert!(repo.resolve_for_read("org.example.a.two").is_none());
+}
+
+#[test]
+fn a_carried_copy_of_the_reference_defs_must_be_the_nodes() {
+    let tag = "org.example.schema.note";
+    let mut vendored = big_cabinet_core::reference::defs_lexicon();
+    let make = |defs: Value| {
+        SchemaRepo::open([SchemaRegistrationGroup::new(
+            None,
+            [registration(
+                tag,
+                json!({"type": "ref", "ref": "org.example.daybook.defs#datumRef"}),
+            )],
+            vec![defs],
+        )])
+    };
+    make(vendored.clone()).expect("the node's own copy is accepted");
+    vendored["defs"]["datumRef"]["format"] = json!("at-uri");
+    assert!(matches!(
+        make(vendored),
+        Err(SchemaRepoError::ConflictingDefs(_))
+    ));
 }

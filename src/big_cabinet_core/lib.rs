@@ -13,12 +13,13 @@ pub mod schema_compat;
 
 pub use reference::ActorUrl;
 pub use reference::DatumKey;
+pub use reference::DatumPin;
 pub use reference::DatumReference;
 pub use reference::DatumTag;
 pub use reference::DocId;
 pub use reference::Location;
-pub use reference::ReferenceDocId;
 pub use reference::REFERENCE_SCHEME;
+pub use reference::ReferenceDocId;
 pub use reference::ReferenceError;
 pub use reference::SELF_DOC;
 

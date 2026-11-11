@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 
 fn doc() -> DocId {
     DocId::from_str("z11111111111111111111111111111111").unwrap()
@@ -247,7 +248,7 @@ fn heads_are_multibase_in_hash_byte_order_and_pipe_joined() {
 fn heads_are_spelled_in_hash_byte_order_even_where_their_text_sorts_otherwise() {
     // 32-byte values spell as 43 or 44 base58 digits, so string order and byte order disagree
     // across that boundary: 58^43 - 1 spells as 43 `z`s and 58^43 as `2` and 43 `1`s. The
-    // canonical order is the bytes', which is also the stored `refHeads` order.
+    // canonical order is the bytes', which is also a stored pin's `heads` order.
     let low = ChangeHash(hex_bytes(
         "0edbafda67ca37188cf28263571f03b9716879e4acc9c514ab6727ffffffffff",
     ));
@@ -502,4 +503,79 @@ fn constructors_and_serde_enforce_invariants() {
     assert!(DatumKey::new("tag", Vec::<u8>::new()).is_err());
     assert!(serde_json::from_str::<DatumTag>("\"\"").is_err());
     assert!(serde_json::from_str::<DatumKey>("\"tag/\"").is_err());
+}
+
+fn pin_text(suffix: &str) -> String {
+    format!("dtxt:datum:self/org.example.note/{suffix}")
+}
+
+#[test]
+fn a_pin_round_trips_with_and_without_heads() {
+    let unpinned = json!({"ref": pin_text("main")});
+    let pin: DatumPin = serde_json::from_value(unpinned.clone()).unwrap();
+    assert!(pin.location().reference().heads().is_empty());
+    assert_eq!(pin.location().fragment(), None);
+    assert_eq!(serde_json::to_value(&pin).unwrap(), unpinned);
+
+    let pinned = json!({"ref": pin_text("main"), "heads": [head_text(&head(1))]});
+    let pin: DatumPin = serde_json::from_value(pinned.clone()).unwrap();
+    assert_eq!(pin.location().reference().heads(), [head(1)]);
+    // The address inside carries no query: the heads are the pin's own member.
+    assert_eq!(pin.location().reference().key(), &key(b"main"));
+    assert_eq!(serde_json::to_value(&pin).unwrap(), pinned);
+
+    // A member a newer writer added survives a round trip through this one.
+    let extended = json!({"ref": pin_text("main"), "heads": [head_text(&head(1))], "label": "v2"});
+    let pin: DatumPin = serde_json::from_value(extended.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&pin).unwrap(), extended);
+}
+
+#[test]
+fn a_pin_writes_its_heads_in_hash_byte_order_as_multibase() {
+    let reference = self_reference(b"main").pinned([head(9), head(2), head(5), head(2)]);
+    let pin = DatumPin::new(Location::new(reference, None).unwrap());
+    // The location written to `ref` is unpinned; the pin is only in `heads`.
+    assert_eq!(
+        serde_json::to_value(&pin).unwrap(),
+        json!({
+            "ref": pin_text("main"),
+            "heads": [head_text(&head(2)), head_text(&head(5)), head_text(&head(9))],
+        })
+    );
+    // Read back out of order and with a repeat, it is the same pin.
+    let read: DatumPin = serde_json::from_value(json!({
+        "ref": pin_text("main"),
+        "heads": [head_text(&head(9)), head_text(&head(2)), head_text(&head(5)), head_text(&head(2))],
+    }))
+    .unwrap();
+    assert_eq!(read, pin);
+}
+
+#[test]
+fn a_pin_refuses_empty_heads_and_a_query_on_its_address() {
+    // Absent heads is the one spelling of "current", so a present empty list is refused.
+    let error = serde_json::from_value::<DatumPin>(json!({"ref": pin_text("main"), "heads": []}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("never empty"), "{error}");
+    // The pin is the object's `heads`, never a query on the address.
+    let queried = format!("{}?heads={}", pin_text("main"), head_text(&head(1)));
+    assert!(serde_json::from_value::<DatumPin>(json!({"ref": queried})).is_err());
+    assert!(serde_json::from_value::<DatumPin>(json!({"heads": [head_text(&head(1))]})).is_err());
+    assert!(
+        serde_json::from_value::<DatumPin>(json!({"ref": pin_text("main"), "heads": ["nope"]}))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_pin_keeps_its_locations_fragment() {
+    let stated = json!({
+        "ref": format!("{}#text/@3", pin_text("main")),
+        "heads": [head_text(&head(1))],
+    });
+    let pin: DatumPin = serde_json::from_value(stated.clone()).unwrap();
+    assert_eq!(pin.location().fragment(), Some("text/@3"));
+    assert_eq!(pin.location().reference().heads(), [head(1)]);
+    assert_eq!(serde_json::to_value(&pin).unwrap(), stated);
 }

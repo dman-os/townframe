@@ -30,8 +30,8 @@ fn branch_value(path: &str, origin: &WriteReceipt) -> Value {
     json!({
         "path": path,
         "from": {
-            "datumRef": origin_reference(&origin.doc_id),
-            "refHeads": origin.heads.iter().map(head_text).collect::<Vec<_>>(),
+            "ref": origin_reference(&origin.doc_id),
+            "heads": origin.heads.iter().map(head_text).collect::<Vec<_>>(),
         },
     })
 }
@@ -318,8 +318,10 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
     );
     let typed: big_cabinet_core::dmeta::BranchPath = serde_json::from_value(expected).unwrap();
     assert_eq!(
-        typed.from.unwrap().datum_ref.to_string(),
-        origin_reference(&origin.doc_id)
+        typed.from.unwrap().location().reference(),
+        &DatumReference::parse(&origin_reference(&origin.doc_id))
+            .unwrap()
+            .pinned(origin.heads.clone())
     );
     node.stop().await;
 }

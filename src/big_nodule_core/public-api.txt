@@ -72,9 +72,9 @@ pub struct big_nodule_core::Admitted  { operations: BTreeMap < String , Option <
 pub struct big_nodule_core::Config  { schema: String, defaults: Option < IndexMap < String , Value > >, extra: Extra }
 pub struct big_nodule_core::Handler  { artifact: String, extra: Extra }
 pub struct big_nodule_core::Initializer  { key: String, target: String, mode: RunMode, extra: Extra }
-pub struct big_nodule_core::Nodule  { lexicons: Vec < IndexMap < String , Value > >, requires: Vec < Request >, handler: Option < Handler >, implements: Vec < String >, revisioned_stores: Vec < RevisionedStore >, initialization: Vec < Initializer >, private_state: Vec < PrivateState >, config: Option < Config >, bindings: IndexMap < String , Value >, extra: Extra }
+pub struct big_nodule_core::Nodule  { lexicons: Vec < IndexMap < String , Value > >, sidecar: IndexMap < String , Value >, requires: Vec < Request >, handler: Option < Handler >, implements: Vec < String >, revisioned_stores: Vec < RevisionedStore >, initialization: Vec < Initializer >, private_state: Vec < PrivateState >, config: Option < Config >, bindings: IndexMap < String , Value >, extra: Extra }
 pub struct big_nodule_core::PrivateState  { key: String, kind: StateKind, extra: Extra }
-pub struct big_nodule_core::RegistrableDatums< 'a >  { held: Vec < (& 'a str , & 'a IndexMap < String , Value >) >, carried: Vec < & 'a IndexMap < String , Value > > }
+pub struct big_nodule_core::RegistrableDatums< 'a >  { held: Vec < (& 'a str , & 'a IndexMap < String , Value > , Option < & 'a Value >) >, carried: Vec < & 'a IndexMap < String , Value > > }
 pub struct big_nodule_core::RevisionedStore  { key: String, selector: String, entry: String, mode: StoreMode, source: Option < String >, extra: Extra }
 pub struct big_nodule_core::config::AdmissionCache  {  }
 pub struct big_nodule_core::config::NoduleConfig  {  }

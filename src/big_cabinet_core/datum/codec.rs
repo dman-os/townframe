@@ -60,8 +60,8 @@ pub use references::declared_references;
 #[cfg(test)]
 pub(crate) use target::reconcile_json;
 pub use target::reconcile_json_atomic;
-pub use validation::CompiledSchema;
 pub(super) use validation::CarriedSchemaRetriever;
+pub use validation::CompiledSchema;
 pub use walk::Stored;
 pub use walk::hydrate_value;
 
@@ -172,24 +172,11 @@ pub enum Codec {
     Text,
     Uint,
     Datetime,
-    /// A datum reference: a string in the document and in JSON, which must parse as a
-    /// [`crate::DatumReference`] in its stored form, without a query. An optional `refHeads` sibling
-    /// of the marked member pins the referenced datum's frontier as multibase base58btc heads
-    /// (ADR 021, ADR 035 §2.8).
-    Reference,
-    /// A position inside a datum: a [`Self::Reference`] that may also carry a `#` fragment, which
-    /// the target's type interprets (an Automerge cursor range in a text, say). It is stored and
-    /// pinned as a reference is, and the reference index records its datum part, so "what points
-    /// at this datum" finds annotations too. It is its own form rather than a reference that
-    /// tolerates fragments because a position that names a whole datum must refuse one (ADR 035
-    /// §2.3): a reader decoding it as a whole-datum reference would otherwise meet a value the
-    /// schema accepted and its type cannot hold.
-    Location,
 }
 
 impl Codec {
     /// Every shape a declaration can state.
-    pub const ALL: [Codec; 9] = [
+    pub const ALL: [Codec; 7] = [
         Codec::Bytes,
         Codec::Timestamp,
         Codec::Counter,
@@ -197,8 +184,6 @@ impl Codec {
         Codec::Float,
         Codec::Uint,
         Codec::Datetime,
-        Codec::Reference,
-        Codec::Location,
     ];
 
     /// How this shape is spelled in our keyword, and how it is named in a message.
@@ -211,8 +196,6 @@ impl Codec {
             Codec::Text => "text",
             Codec::Uint => "uint",
             Codec::Datetime => "datetime",
-            Codec::Reference => "reference",
-            Codec::Location => "location",
         }
     }
 
@@ -275,7 +258,6 @@ impl Codec {
             Codec::Uint => {
                 reconciler.u64(value.as_str().expect("checked").parse().expect("checked"))
             }
-            Codec::Reference | Codec::Location => reconciler.str(value.as_str().expect("checked")),
             Codec::Counter => reconciler.counter()?.set(value.as_i64().expect("checked")),
             Codec::Text => reconciler.text()?.update(value.as_str().expect("checked")),
             Codec::Float => {
@@ -318,12 +300,6 @@ impl Codec {
                 ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
                 other => Err(unexpected(stored_scalar(other))),
             },
-            (Codec::Reference | Codec::Location, automerge::Value::Scalar(stated)) => {
-                match stated.as_ref() {
-                    ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
-                    other => Err(unexpected(stored_scalar(other))),
-                }
-            }
             (Codec::Timestamp, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
                 other => Err(unexpected(stored_scalar(other))),
@@ -399,24 +375,6 @@ impl Codec {
                     path: String::new(),
                     message: "expected a stringified uint64".to_owned(),
                 }),
-            Codec::Reference | Codec::Location => {
-                let Some(stated) = value.as_str() else {
-                    return Err(CodecError::NotADatumReference {
-                        form: self.name(),
-                        stated: kind(value).to_owned(),
-                        reason: "it is a `dtxt:datum:` address string without a query".to_owned(),
-                    });
-                };
-                let parsed = match self {
-                    Codec::Reference => crate::DatumReference::parse_stored(stated).map(|_| ()),
-                    _ => crate::Location::parse_stored(stated).map(|_| ()),
-                };
-                parsed.map_err(|reason| CodecError::NotADatumReference {
-                    form: self.name(),
-                    stated: stated.to_owned(),
-                    reason: reason.to_string(),
-                })
-            }
             Codec::Counter => value
                 .as_i64()
                 .map(|_value| ())
@@ -522,13 +480,7 @@ pub fn codec_schema(codec: Codec, schema: Schema) -> Schema {
         Codec::Timestamp => {
             schema.insert(FORMAT.to_owned(), DATE_TIME.into());
         }
-        Codec::Counter
-        | Codec::Text
-        | Codec::Float
-        | Codec::Uint
-        | Codec::Datetime
-        | Codec::Reference
-        | Codec::Location => {
+        Codec::Counter | Codec::Text | Codec::Float | Codec::Uint | Codec::Datetime => {
             schema.insert(KEYWORD.to_owned(), codec.name().into());
         }
     };
@@ -571,8 +523,8 @@ pub enum CodecError {
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
 
-    /// the position is declared a datum reference or location, and the value is not a
-    /// `dtxt:datum:` address of that form
+    /// the position refers to a reference def (`datumRef`, `datumLocation`, `datumPin`), and the
+    /// value is not of that form
     #[error("this position is declared a {form}, and {stated} is not one: {reason}")]
     NotADatumReference {
         form: &'static str,

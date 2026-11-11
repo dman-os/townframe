@@ -155,7 +155,11 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
         DatumReference::new(ReferenceDocId::SelfDoc, datum_key("org.example.note/main"));
     let branch = json!({
         "path": "work",
-        "from": {"datumRef": reference, "refHeads": [], "future": {"origin": true}},
+        "from": {
+            "ref": reference,
+            "heads": [crate::reference::head_text(&automerge::ChangeHash([1; 32]))],
+            "future": {"origin": true}
+        },
         "future": {"branch": true}
     });
     let decoded: BranchPath = serde_json::from_value(branch.clone()).unwrap();

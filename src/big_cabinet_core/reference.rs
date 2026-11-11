@@ -25,6 +25,15 @@ const ACTOR_KIND: &str = "actor";
 const HEADS_KEY: &str = "heads";
 pub const SELF_DOC: &str = "self";
 
+mod defs;
+
+pub use defs::DATUM_LOCATION;
+pub use defs::DATUM_PIN;
+pub use defs::DATUM_REF;
+pub use defs::DEFS_NSID;
+pub use defs::LEXICON_REF;
+pub use defs::defs_lexicon;
+
 /// Unicode data used when serializing canonical Go-style datum references.
 ///
 /// This is deliberately fixed to Unicode 15.0.0, the data version used by the
@@ -202,10 +211,7 @@ impl schemars::JsonSchema for DatumReference {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        crate::datum::codec_schema(
-            crate::datum::Codec::Reference,
-            schemars::json_schema!({ "type": "string" }),
-        )
+        schemars::json_schema!({ "type": "string", "format": "uri", LEXICON_REF: DATUM_REF })
     }
 }
 
@@ -271,9 +277,9 @@ impl ReferenceDocId {
 /// A schema-independent address for one datum, optionally pinned to a version of its document.
 ///
 /// Text form: `dtxt:datum:<doc>/<tag>/<slot>[?heads=<head>|<head>…]` (ADR 035). A reference
-/// inside a datum value holds the text without its query and keeps the pin in the sibling
-/// `refHeads` member; [`Self::parse_stored`] and the serde impls are that stored form, and
-/// [`fmt::Display`] and [`Self::parse`] are the text form.
+/// inside a datum value holds the text without its query, and a pinned one is a [`DatumPin`];
+/// [`Self::parse_stored`] and the serde impls are that stored form, and [`fmt::Display`] and
+/// [`Self::parse`] are the text form.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DatumReference {
     document: ReferenceDocId,
@@ -344,8 +350,8 @@ impl DatumReference {
         Ok(location.reference)
     }
 
-    /// Parse the stored form: the text without its query, because the pin lives in the sibling
-    /// `refHeads` member.
+    /// Parse the stored form: the text without its query, because a pin is a [`DatumPin`]'s own
+    /// `heads`.
     pub fn parse_stored(value: &str) -> Result<Self, ReferenceError> {
         let reference = Self::parse(value)?;
         if !reference.heads.is_empty() {
@@ -394,7 +400,7 @@ impl DatumReference {
             // `self.heads` is kept in hash-byte order, the canonical order (ADR 035): base58
             // strings of equal-length values differ in length when they lead with zero bytes, so
             // sorting the spelled heads would disagree with the bytes and make equal pins spell
-            // differently from their stored `refHeads`.
+            // differently from a pin's stored `heads`.
             let heads = self.heads.iter().map(head_text).collect::<Vec<_>>();
             write!(formatter, "?{HEADS_KEY}={}", heads.join("|"))?;
         }
@@ -416,8 +422,8 @@ impl FromStr for DatumReference {
     }
 }
 
-/// The stored form. A pinned reference cannot be serialized as one string: its pin belongs in
-/// the sibling `refHeads` member, and dropping it silently would change what the reference means.
+/// The stored form. A pinned reference cannot be serialized as one string: its pin belongs in a
+/// [`DatumPin`]'s `heads`, and dropping it silently would change what the reference means.
 impl Serialize for DatumReference {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -469,9 +475,9 @@ impl Location {
         self.reference
     }
 
-    /// Parse the stored form: the text without its query, because the pin lives in the sibling
-    /// `refHeads` member, as for [`DatumReference::parse_stored`]. The fragment stays: it moves
-    /// when the position moves, not when the pin does (ADR 035 §2.8).
+    /// Parse the stored form: the text without its query, as for
+    /// [`DatumReference::parse_stored`]. The fragment stays: it moves when the position moves, not
+    /// when a [`DatumPin`]'s heads do (ADR 035 §2.8).
     pub fn parse_stored(value: &str) -> Result<Self, ReferenceError> {
         let location = Self::parse(value)?;
         if !location.reference.heads.is_empty() {
@@ -560,10 +566,129 @@ impl schemars::JsonSchema for Location {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        crate::datum::codec_schema(
-            crate::datum::Codec::Location,
-            schemars::json_schema!({ "type": "string" }),
-        )
+        schemars::json_schema!({ "type": "string", "format": "uri", LEXICON_REF: DATUM_LOCATION })
+    }
+}
+
+/// A [`Location`] and the document heads it is read at: `#datumPin`, `{ "ref": <location>,
+/// "heads"?: [<head>…] }` (ADR 035 §2.6). The pin sits beside the address inside one object, so
+/// re-pinning rewrites `heads` alone and the fragment stays with the position. No `heads` means the
+/// document's current frontier; a present one is never empty, so "current" has one spelling.
+/// Like every open datum object, a pin keeps members it does not know, so a member a newer writer
+/// adds survives a round trip through an older one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatumPin {
+    location: Location,
+    extra: crate::datum::Extra,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredPin {
+    #[serde(rename = "ref")]
+    location: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    heads: Option<Vec<String>>,
+    #[serde(flatten)]
+    extra: crate::datum::Extra,
+}
+
+impl DatumPin {
+    /// Pins `location` at the heads it carries; a location with none follows the current frontier.
+    pub fn new(location: Location) -> Self {
+        Self {
+            location,
+            extra: crate::datum::Extra::default(),
+        }
+    }
+
+    pub fn location(&self) -> &Location {
+        &self.location
+    }
+
+    pub fn into_location(self) -> Location {
+        self.location
+    }
+}
+
+impl Serialize for DatumPin {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let heads = self.location.reference.heads();
+        let unpinned = Location {
+            reference: DatumReference {
+                heads: Vec::new(),
+                ..self.location.reference.clone()
+            },
+            fragment: self.location.fragment.clone(),
+        };
+        StoredPin {
+            location: unpinned.to_string(),
+            heads: (!heads.is_empty()).then(|| heads.iter().map(head_text).collect()),
+            extra: self.extra.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for DatumPin {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let stored = StoredPin::deserialize(deserializer)?;
+        let location =
+            Location::parse_stored(&stored.location).map_err(serde::de::Error::custom)?;
+        let heads = match stored.heads {
+            None => Vec::new(),
+            Some(heads) if heads.is_empty() => {
+                return Err(serde::de::Error::custom(ReferenceError::EmptyPin));
+            }
+            Some(heads) => heads
+                .iter()
+                .map(|head| parse_head(head))
+                .collect::<Result<_, _>>()
+                .map_err(serde::de::Error::custom)?,
+        };
+        let Location {
+            reference,
+            fragment,
+        } = location;
+        Ok(Self {
+            location: Location {
+                reference: reference.pinned(heads),
+                fragment,
+            },
+            extra: stored.extra,
+        })
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DatumPin {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DatumPin".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::DatumPin").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "ref": { "type": "string", "format": "uri", LEXICON_REF: DATUM_LOCATION },
+                "heads": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+            },
+            "required": ["ref"],
+            LEXICON_REF: DATUM_PIN,
+        })
     }
 }
 
@@ -679,7 +804,7 @@ impl schemars::JsonSchema for ActorUrl {
     }
 }
 
-/// A document head as it is written in `?heads=` and in the sibling `refHeads` member: the 32
+/// A document head as it is written in `?heads=` and in a [`DatumPin`]'s `heads`: the 32
 /// hash bytes as multibase base58btc, like our other ids.
 pub fn head_text(head: &ChangeHash) -> String {
     utils_rs::hash::encode_base58_multibase(head.0)
@@ -696,7 +821,7 @@ pub fn parse_head(value: &str) -> Result<ChangeHash, ReferenceError> {
         .map_err(|_| ReferenceError::InvalidHead(value.to_owned()))
 }
 
-/// Serde for a sibling `refHeads` member: an array of [`head_text`] strings.
+/// Serde for a list of heads: an array of [`head_text`] strings.
 pub mod head_list {
     use super::ChangeHash;
     use super::head_text;
@@ -800,8 +925,10 @@ pub enum ReferenceError {
     EmptyHeads,
     #[error("{0:?} is not a document head: expected 32 bytes as multibase base58btc")]
     InvalidHead(String),
-    #[error("a stored reference holds no query; its pin is the sibling `refHeads` member")]
+    #[error("a stored reference holds no query; a pinned one is a `datumPin` with its own `heads`")]
     PinInStoredReference,
+    #[error("a pin's `heads` is never empty: a pin that follows the current frontier has none")]
+    EmptyPin,
     #[error("invalid fragment {0:?}")]
     InvalidFragment(String),
     #[error("datum reference is missing a document id")]

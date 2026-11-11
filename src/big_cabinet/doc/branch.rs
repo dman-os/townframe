@@ -8,9 +8,10 @@ use super::pipeline::Failure;
 use super::pipeline::Plan;
 use super::pipeline::digest;
 use super::*;
+use big_cabinet_core::DatumPin;
 use big_cabinet_core::DatumReference;
+use big_cabinet_core::Location;
 use big_cabinet_core::ReferenceDocId;
-use big_cabinet_core::reference::head_text;
 
 impl DocsService {
     async fn branch(
@@ -89,16 +90,21 @@ impl DocsService {
             .await?;
         let branch = self.big_repo.allocate_id().await.map_err(repository)?;
         self.commands.set_document(&params.command, &branch).await?;
-        let branch_value = serde_json::json!({
-            "path": params.path,
-            "from": {
-                "datumRef": DatumReference::new(
+        // The branch's origin: the document's branch datum, pinned at the heads the fork was cut at.
+        let origin = DatumPin::new(
+            Location::new(
+                DatumReference::new(
                     ReferenceDocId::Concrete(params.doc_id.clone()),
                     branch_key(&params.doc_id),
                 )
-                .to_string(),
-                "refHeads": sorted(fork.get_heads()).iter().map(head_text).collect::<Vec<_>>(),
-            },
+                .pinned(fork.get_heads()),
+                None,
+            )
+            .expect("a location without a fragment is valid"),
+        );
+        let branch_value = serde_json::json!({
+            "path": params.path,
+            "from": origin,
         });
         let mut plan = Plan {
             document: &branch,

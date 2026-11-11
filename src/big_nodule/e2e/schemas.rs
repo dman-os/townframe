@@ -8,6 +8,8 @@ use super::init::Probe;
 use super::init::init_cartridge;
 use super::init::node_hosting;
 use super::init::with_requests;
+use big_cabinet_core::datum::Codec;
+use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::Dmeta;
 use big_cartridges_core::Cartridge;
@@ -155,15 +157,21 @@ fn sidecar(field: &str, storage: &str) -> Value {
     })
 }
 
+/// The storage form a compiled record gives its `text` member, if it declares one.
+fn text_storage(compiled: &CompiledSchema) -> Option<Codec> {
+    let member = compiled.member(&["text"]).unwrap();
+    Codec::of(member.document()).unwrap()
+}
+
 #[tokio::test]
 async fn a_held_records_sidecar_gives_it_storage_forms() {
     let node = node_with_alpha(Vec::new()).await;
-    // The Lexicon alone cannot say `link` is a datum reference: registered without a sidecar it
-    // is a plain string, and the reference index never sees it.
+    // The Lexicon alone states no storage form: registered without a sidecar `text` is a plain
+    // string, stored as a scalar.
     node.admit(node.operator(), beta("1.0.0", 1)).await.unwrap();
     node.set_enabled(BETA, true).await;
     let plain = node.schemas.require_for_write(NOTE).unwrap();
-    assert!(!plain.compiled().declares_references());
+    assert_eq!(text_storage(plain.compiled()), None);
 
     let cartridge = with_sidecar(
         with_lexicon(
@@ -171,12 +179,12 @@ async fn a_held_records_sidecar_gives_it_storage_forms() {
             record(NOTE, Some(2), "text"),
         ),
         NOTE,
-        sidecar("text", "reference"),
+        sidecar("text", "text"),
     );
     node.admit(node.operator(), cartridge).await.unwrap();
     let declared = node.schemas.require_for_write(NOTE).unwrap();
     assert_eq!(declared.lexicon()["revision"], 2);
-    assert!(declared.compiled().declares_references());
+    assert_eq!(text_storage(declared.compiled()), Some(Codec::Text));
     node.shutdown().await;
 }
 
@@ -187,14 +195,17 @@ async fn a_sidecar_for_a_record_the_nodule_does_not_hold_is_refused() {
     let cartridge = with_sidecar(
         init_cartridge("alpha", "1.0.0", &[], &[], &[]),
         NOTE,
-        sidecar("text", "reference"),
+        sidecar("text", "text"),
     );
     let error = node
         .admit(node.operator(), cartridge)
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("not a record this cartridge holds"), "{error}");
+    assert!(
+        error.contains("not a record this cartridge holds"),
+        "{error}"
+    );
     node.shutdown().await;
 }
 

@@ -15,9 +15,6 @@ use automerge::ChangeHash;
 use big_cabinet_core::DatumTag;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
-use big_cabinet_core::datum::Bundle;
-use big_cabinet_core::datum::DatumDecl;
-use big_cabinet_core::datum::Universe;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
@@ -82,30 +79,13 @@ fn schemas() -> Arc<SchemaRepo> {
             "required": ["value"],
             "properties": {
                 "value": {"type": "string"},
-                "link": {"type": "string"}
+                "link": {"type": "ref", "ref": "org.example.daybook.defs#datumRef"}
             }
         }}}
     });
-    let supplement = json!({
-        "type": "object",
-        "properties": {
-            "value": {"type": "string"},
-            "link": {"type": "string", "x-automerge": "reference"}
-        }
-    });
-    let universe = Universe {
-        datums: vec![DatumDecl {
-            id: NOTE.to_owned(),
-            name: "Note".to_owned(),
-            schema: schemars::Schema::try_from(supplement).unwrap(),
-            flags: Vec::new(),
-        }],
-        types: Vec::new(),
-    };
-    let bundle = Bundle::new(&universe, Vec::new());
     Arc::new(
         SchemaRepo::open([crate::schema::SchemaRegistrationGroup::new(
-            Some(bundle),
+            None,
             [crate::schema::SchemaRegistration::new(NOTE, lexicon)],
             Vec::new(),
         )])
