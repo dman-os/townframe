@@ -7,6 +7,7 @@ use crate::Capability;
 use crate::Collection;
 use crate::Facet;
 use crate::FacetSnapshot;
+use crate::RefStatus;
 use crate::Row;
 use crate::context::Mount;
 use crate::context::MountInner;
@@ -32,7 +33,8 @@ pub struct PresentationSlotProps {
 /// What a slot shows: the presentation it redeemed, or why there is none right now.
 enum SlotState {
     Loading,
-    Unavailable(crate::Error),
+    /// The failure, and the reference's status when it failed, which says why in words.
+    Unavailable(crate::Error, RefStatus),
     Mounted(Mount),
 }
 
@@ -66,7 +68,7 @@ async fn follow_provider(reference: Capability, mut show: impl FnMut(SlotState))
             Err(failure) => failure,
         };
         // Redeeming again before the status moves would only fail the same way.
-        show(SlotState::Unavailable(failure));
+        show(SlotState::Unavailable(failure, reference.status()));
         reference.status_changed(before).await;
     }
 }
@@ -97,8 +99,12 @@ fn render_state(state: &SlotState, chrome: &Option<Element>) -> Element {
         SlotState::Loading => {
             rsx! { {chrome.clone()} p { role: "status", "Loading section…" } }
         }
-        SlotState::Unavailable(failure) => {
-            rsx! { {chrome.clone()} p { role: "alert", "Section unavailable: {failure:?}" } }
+        SlotState::Unavailable(failure, status) => {
+            let reason = match status.blocked_reason() {
+                Some(reason) => reason.to_owned(),
+                None => failure.to_string(),
+            };
+            rsx! { {chrome.clone()} p { role: "alert", "Section unavailable: {reason}." } }
         }
         SlotState::Mounted(mount) => rsx! { MountedSlot { mount: mount.clone() } },
     }
@@ -263,6 +269,25 @@ where
     facet
         .current()
         .expect("the document watch outlives the view that reads it")
+}
+
+/// Bind a reference's [`RefStatus`] to Dioxus reactivity without activating its provider: the
+/// returned status is current at this render, and the calling component re-renders whenever the
+/// supervisor's status ticks move it (a disabled micro enabled, a faulted one retried). A view
+/// uses it to show an action whose provider cannot start as unavailable before it is pressed.
+/// A reference that changes between renders is followed from then on.
+pub fn use_ref_status(reference: &Capability) -> RefStatus {
+    let mut status = use_signal(|| reference.status());
+    use_resource(use_reactive((reference,), move |(reference,)| async move {
+        loop {
+            let seen = reference.status();
+            if *status.peek() != seen {
+                status.set(seen);
+            }
+            reference.status_changed(seen).await;
+        }
+    }));
+    status()
 }
 
 #[cfg(all(test, feature = "in_process"))]

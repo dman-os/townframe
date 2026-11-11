@@ -28,7 +28,8 @@ allowed_dependencies = [
 allow_external_api_types = false
 
 # Desktop is the native launch shell only (ADR 018 §7). The shell is meaningless without
-# the `desktop` renderer feature, so the matrix never builds it bare.
+# the `desktop` (Wry) renderer feature, so the matrix never builds it bare; `blitz` adds the
+# Blitz launcher next to it.
 [builds.native]
-features = ["desktop"]
+features = ["blitz"]
 required_features = ["desktop"]

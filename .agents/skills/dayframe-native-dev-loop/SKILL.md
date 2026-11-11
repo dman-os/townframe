@@ -28,10 +28,10 @@ least once. Read the **False signals** section before concluding a build failed.
 deno run --allow-all x/dayframe.ts desktop
 ```
 
-This builds the Wasm packages, exports `DAYFRAME_PACKAGE_DIR`, then runs `x/dx.ts serve --desktop -p dayframe_desktop --renderer native --hot-patch false`, printing the package dir and store path. `--fresh` starts from an empty temp store, `--store <path>` picks one, `--webview` switches renderer. `x/dayframe.ts --help` lists the other commands (`web`, `showcase`, `packages`, `test`).
+This builds the Wasm packages, exports `DAYFRAME_PACKAGE_DIR`, then runs `x/dx.ts serve --desktop -p dayframe_desktop --renderer webview --hot-patch false`, printing the package dir and store path. `--fresh` starts from an empty temp store, `--store <path>` picks one, `--native` switches to Blitz. `x/dayframe.ts --help` lists the other commands (`web`, `showcase`, `packages`, `test`).
 
-- **Native renderer always.** `--renderer native` is the default expectation for this work; wry exists only as a production fallback.
-- **Webview fallback for interaction checks.** When native/Blitz cannot dispatch accessibility actions, stop the native serve process and run the same command with `x/dayframe.ts desktop --webview`. The webview build is slower on a cold target, but its AT-SPI tree exposes element titles and `accessibility-cli --click '[title="..."]'` can verify real callbacks. The native `with_window_attributes(...with_title(...))` configuration does not control the webview window title; expect `dioxus | ⛺` there.
+- **Webview (Wry) is the default renderer** (operator, 2026-11-10: ship on Wry first, Blitz later). `dayframe_desktop`'s `desktop` feature is Wry; `--native` adds the Blitz launcher (feature `blitz`, additive) and starts it with `DAYFRAME_RENDERER=blitz`. Before this split, `--webview` only changed the dx flag and the binary still launched Blitz; a window titled "Dayframe" under the old code was Blitz.
+- **Webview for interaction checks.** Its AT-SPI tree exposes element titles, so `accessibility-cli --click '[title="..."]'` can verify real callbacks, which Blitz cannot dispatch.
 - **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `dayframe_desktop` (the script does).
 - **Let the serve process own compilation.** Do not run `cargo build` alongside it. The wrapper forwards the arguments to the repository-local Dioxus CLI, and installs that CLI through `x/install-dx.ts` when needed.
 - Use the same wrapper for other Dioxus commands, for example `deno run --allow-all x/dx.ts check ...`.

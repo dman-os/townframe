@@ -10,8 +10,8 @@ const [command, ...rest] = Deno.args;
 
 const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
 
-  desktop     build the Wasm packages and run the native desktop shell
-                --webview        webview renderer (AT-SPI interaction checks)
+  desktop     build the Wasm packages and run the desktop shell in a webview (Wry)
+                --native         the Blitz renderer instead
                 --fresh          start from an empty store in a new temp file
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
   android     build the Android APK (dayframe_mobile)
@@ -22,7 +22,8 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                                  default dev (15 to 17 MB components, slow to compile on a phone)
                 --install        adb install the APK on the attached device
   web         build and serve dayframe_web (--build: build only)
-  showcase    run the design showcase (dayframe_showcase) natively
+  showcase    run the design showcase (dayframe_showcase) in a webview (Wry)
+                --native         the Blitz renderer instead
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
   test        x/check-dayframe.ts, then the dayframe_web Playwright e2e
                 --no-e2e         skip the browser part
@@ -55,14 +56,17 @@ switch (command) {
       // A path that does not exist yet: the app creates it, so the run starts empty.
       store = `${await Deno.makeTempDir({ prefix: "dayframe-store-" })}/store`;
     }
+    // One binary carries both launchers; the variable picks Blitz (see dayframe_desktop/main.rs).
+    if (flag("--native")) env["DAYFRAME_RENDERER"] = "blitz";
     if (store) env["DAYFRAME_STORE_PATH"] = $.path(store).resolve().toString();
     console.log(`package dir: ${env["DAYFRAME_PACKAGE_DIR"]}`);
     console.log(`store path: ${env["DAYFRAME_STORE_PATH"] ?? "(app default)"}`);
     await dx(
       "-p",
       "dayframe_desktop",
-      "--renderer",
-      flag("--webview") ? "webview" : "native",
+      ...(flag("--native")
+        ? ["--renderer", "native", "--features", "blitz"]
+        : ["--renderer", "webview"]),
       "--hot-patch",
       "false",
     ).env(env);
@@ -163,7 +167,12 @@ switch (command) {
     }`;
     break;
   case "showcase":
-    await dx("-p", "dayframe_showcase", "--renderer", "native");
+    await dx(
+      "-p",
+      "dayframe_showcase",
+      "--renderer",
+      flag("--native") ? "native" : "webview",
+    ).env(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {});
     break;
   case "packages":
     await prepareDayframePackages({ testFixtures: true });

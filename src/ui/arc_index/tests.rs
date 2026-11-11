@@ -5,12 +5,12 @@ const WIDTH: f64 = 1076.0;
 
 /// The distance a label has to retreat into before it runs out of window.
 fn room() -> f64 {
-    WIDTH - REST_INSET - spacing(HEIGHT) / 2.0
+    WIDTH - REST_INSET - spacing(HEIGHT, breakpoints().len()) / 2.0
 }
 
 fn placed(settle: f64) -> Vec<Placed> {
     let items = breakpoints();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let limit = push_limit(300.0, room());
     let floor = push_floor(limit);
     place(&items, 6.0, spacing, floor, limit, settle)
@@ -22,7 +22,7 @@ fn placed(settle: f64) -> Vec<Placed> {
 #[test]
 fn resting_index_fits_every_breakpoint() {
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let span = (count - 1) as f64 * spacing;
     let inset = top_inset(spacing, count, HEIGHT);
 
@@ -159,7 +159,7 @@ fn the_dent_reaches_further_as_the_drag_goes() {
     assert!(reach_for(PUSH_CLEARANCE) >= REACH_BASE);
 
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let lifted = |limit: f64| {
         let (floor, reach) = (push_floor(limit), reach_for(limit));
         (0..count)
@@ -180,7 +180,7 @@ fn the_dent_reaches_further_as_the_drag_goes() {
 #[test]
 fn the_selected_breakpoint_is_the_one_under_the_pointer() {
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let top = top_inset(spacing, count, HEIGHT);
 
     for index in 0..count {
@@ -208,7 +208,7 @@ fn the_selected_breakpoint_is_the_one_under_the_pointer() {
 #[test]
 fn pressing_picks_the_breakpoint_under_the_finger() {
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let top = top_inset(spacing, count, HEIGHT);
 
     // Pressing `L` must focus `L`, not whatever was focused before.
@@ -243,7 +243,7 @@ fn pressing_picks_the_breakpoint_under_the_finger() {
 #[test]
 fn the_list_only_travels_once_the_drag_passes_an_end() {
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let top = top_inset(spacing, count, HEIGHT);
 
     // Anywhere within the index: no movement, so the whole list stays put.
@@ -273,7 +273,7 @@ fn the_list_only_travels_once_the_drag_passes_an_end() {
 #[test]
 fn the_picked_breakpoint_stays_under_the_thumb() {
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let top = top_inset(spacing, count, HEIGHT);
 
     for step in 0..=860 {
@@ -298,7 +298,7 @@ fn the_picked_breakpoint_stays_under_the_thumb() {
 #[test]
 fn the_index_stays_inside_the_window() {
     let count = breakpoints().len();
-    let spacing = spacing(HEIGHT);
+    let spacing = spacing(HEIGHT, breakpoints().len());
     let top = top_inset(spacing, count, HEIGHT);
     let span = (count - 1) as f64 * spacing;
 
@@ -336,4 +336,86 @@ fn neighbours_are_never_skipped() {
     let start = labels.iter().position(|l| *l == "A").expect("A is visible");
     let end = labels.iter().position(|l| *l == "F").expect("F is visible");
     assert_eq!(&labels[start..=end], ["A", "B", "C", "D", "E", "F"]);
+}
+
+/// Any list length lays out inside the window while a finger is down: the pull's slack
+/// (`height - top - span`) used to go negative past ~40 breakpoints, which made
+/// `f64::clamp` panic on the first press.
+#[test]
+fn long_lists_fit_and_pulling_never_panics() {
+    for count in [1, 2, REFERENCE_COUNT, REFERENCE_COUNT + 1, 60, 500] {
+        // While engaged the strip spreads by `ACTIVE_SPACING_MULTIPLIER`.
+        let spacing = spacing(HEIGHT, count) * ACTIVE_SPACING_MULTIPLIER;
+        let top = top_inset(spacing, count, HEIGHT);
+        let span = (count - 1) as f64 * spacing;
+        assert!(
+            top >= 0.0 && span <= HEIGHT,
+            "{count}: top {top} span {span}"
+        );
+        for step in -200..=1060 {
+            let y = f64::from(step);
+            let pull = pull_for(y, top, spacing, count, HEIGHT);
+            let focus = focus_at(y, top, spacing, count);
+            let first = anchor_y(focus, spacing, top, pull) - focus * spacing;
+            assert!(first >= -1e-9, "{count}: top left the window at {y}");
+            assert!(first + span <= HEIGHT + 1e-9, "{count}: bottom left at {y}");
+        }
+    }
+}
+
+/// The resting strip of a list longer than the reference still spans the same share of the window.
+#[test]
+fn spacing_shrinks_so_a_long_list_spans_what_the_reference_one_does() {
+    let reference = (REFERENCE_COUNT - 1) as f64 * spacing(HEIGHT, REFERENCE_COUNT);
+    let long = 59.0 * spacing(HEIGHT, 60);
+    assert!((reference - long).abs() < 1e-9, "{reference} vs {long}");
+    // At or under the reference count the spacing is the window's alone.
+    assert_eq!(spacing(HEIGHT, 3), spacing(HEIGHT, REFERENCE_COUNT));
+}
+
+mod rendered {
+    //! The component under a `VirtualDom`, as the lab drives it: one `ArcIndex` whose items the
+    //! parent swaps when the tab changes.
+    use super::*;
+
+    static TAB: GlobalSignal<usize> = Signal::global(|| 0);
+    const TABS: [&[&str]; 3] = [
+        &["Component kit"],
+        &["Typography", "Spacing", "Shape", "Surfaces"],
+        &["Colors", "Extra"],
+    ];
+
+    fn app() -> Element {
+        rsx! {
+            ArcIndex { viewport: (1076.0, 860.0), items: TABS[TAB()].to_vec(), on_select: |_| {} }
+        }
+    }
+
+    fn switch_to(dom: &mut VirtualDom, tab: usize) -> String {
+        dom.in_runtime(|| *TAB.write() = tab);
+        format!("{:?}", dom.render_immediate_to_vec())
+    }
+
+    #[test]
+    fn the_strip_follows_the_items_the_parent_passes() {
+        let mut dom = VirtualDom::new(app);
+        let first = format!("{:?}", dom.rebuild_to_vec());
+        assert!(
+            first.contains("aria-valuemax") && first.contains("Int(1)"),
+            "{first}"
+        );
+
+        let second = switch_to(&mut dom, 1);
+        assert!(
+            second.contains("Int(4)"),
+            "valuemax did not follow the items: {second}"
+        );
+        assert!(
+            second.contains("Typography"),
+            "labels did not follow the items: {second}"
+        );
+
+        let third = switch_to(&mut dom, 2);
+        assert!(third.contains("Int(2)"), "{third}");
+    }
 }

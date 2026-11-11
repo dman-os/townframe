@@ -16,6 +16,7 @@ fn main() {}
 
 #[cfg(target_os = "android")]
 mod android {
+    use dayframe_native::BlitzApplication;
     use dayframe_native::PackageFiles;
     use dayframe_native::Shell;
     use dioxus::prelude::*;
@@ -217,7 +218,9 @@ mod android {
         rsx! {
             Shell {
                 load: dayframe_native::runtime_loader(load),
-                insets: Some(Callback::new(system_insets)),
+                ready: Callback::new(|runtime| {
+                    rsx! { BlitzApplication { runtime, insets: Some(Callback::new(system_insets)) } }
+                }),
             }
         }
     }

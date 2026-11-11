@@ -11,17 +11,12 @@ use clay_mdk::host::Resources;
 use clay_store::OrderedStore;
 use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
+#[cfg(feature = "blitz")]
 use dayframe_composition::HostInputs;
+#[cfg(feature = "blitz")]
 use dayframe_composition::Insets;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
-use dioxus_native::winit::event::ButtonSource;
-use dioxus_native::winit::event::ElementState;
-use dioxus_native::winit::event::MouseButton;
-use dioxus_native::winit::event::WindowEvent;
-use dioxus_native::winit::keyboard::Key;
-use dioxus_native::winit::keyboard::NamedKey;
-use dioxus_native::winit::window::Window;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -307,13 +302,19 @@ pub static SYSTEM_BACK: SystemBack = SystemBack {
 
 /// Reads the system chrome currently covering the window, in logical px, given the window's
 /// scale factor. Only a shell whose window has such chrome (Android) supplies one.
+#[cfg(feature = "blitz")]
 pub type InsetsSource = Callback<f64, Insets>;
 
+/// What a shell mounts once the runtime exists: it reads the renderer's window events into
+/// `HostInputs` and renders `Application`. Desktop picks per renderer (Wry or Blitz); Android
+/// mounts [`BlitzApplication`].
+pub type ReadyView = Callback<Signal<Option<CompositionRuntime>>, Element>;
+
 /// The launch screen shared by the native shells: loads the runtime once, shows a failure
-/// instead of a shell when the store or packages cannot be loaded, and mounts the
-/// [`Application`] when it is ready.
+/// instead of a shell when the store or packages cannot be loaded, and mounts `ready` when the
+/// runtime exists.
 #[component]
-pub fn Shell(load: RuntimeLoader, insets: Option<InsetsSource>) -> Element {
+pub fn Shell(load: RuntimeLoader, ready: ReadyView) -> Element {
     let mut runtime = use_signal(|| None::<CompositionRuntime>);
     let mut failure = use_signal(|| None::<String>);
     use_future(move || async move {
@@ -331,7 +332,7 @@ pub fn Shell(load: RuntimeLoader, insets: Option<InsetsSource>) -> Element {
                 if let Some(error) = failure() {
                     p { role: "alert", "Dayframe cannot start: {error}" }
                 } else if runtime.read().is_some() {
-                    ReadyApp { runtime, insets }
+                    {ready.call(runtime)}
                 } else {
                     p { role: "status", "Loading Dayframe…" }
                 }
@@ -340,13 +341,18 @@ pub fn Shell(load: RuntimeLoader, insets: Option<InsetsSource>) -> Element {
     }
 }
 
-/// Mounts the shell once the runtime exists; `Application` takes the runtime as a signal.
+/// Mounts the shell under Blitz once the runtime exists; `Application` takes the runtime as a
+/// signal. `insets` is the system chrome source of a window that has some (Android).
+#[cfg(feature = "blitz")]
 #[component]
-fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>, insets: Option<InsetsSource>) -> Element {
+pub fn BlitzApplication(
+    runtime: Signal<Option<CompositionRuntime>>,
+    insets: Option<InsetsSource>,
+) -> Element {
     let initial = runtime
         .read()
         .clone()
-        .expect("ReadyApp mounts only with a built runtime");
+        .expect("BlitzApplication mounts only with a built runtime");
     let runtime = use_signal(|| initial);
     let host = use_host_inputs(insets);
     rsx! { Application { runtime, host } }
@@ -357,7 +363,15 @@ fn ReadyApp(runtime: Signal<Option<CompositionRuntime>>, insets: Option<InsetsSo
 /// `KEYCODE_BACK` arrives from winit as `BrowserBack`; a mouse's back button is the desktop
 /// equivalent. Neither is a key Blitz delivers to a focused element, so they are taken from the
 /// window event stream.
+#[cfg(feature = "blitz")]
 fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
+    use dioxus_native::winit::event::ButtonSource;
+    use dioxus_native::winit::event::ElementState;
+    use dioxus_native::winit::event::MouseButton;
+    use dioxus_native::winit::event::WindowEvent;
+    use dioxus_native::winit::keyboard::Key;
+    use dioxus_native::winit::keyboard::NamedKey;
+    use dioxus_native::winit::window::Window;
     let window: Arc<dyn Window> = use_hook(consume_context);
     let logical_size = |window: &Arc<dyn Window>| {
         let size = window.surface_size();
@@ -421,8 +435,8 @@ fn use_host_inputs(insets_source: Option<InsetsSource>) -> HostInputs {
         insets: insets.into(),
         platform_back,
         can_back,
-        // Blitz cannot take keyboard focus (`tabindex` panics it).
-        keyboard: false,
+        // Blitz has no keyboard focus (`tabindex` panics it) and no pointer capture.
+        renderer: dayframe_composition::Renderer::Blitz,
         // The development seed: see `HostInputs::start`.
         start: std::env::var("DAYFRAME_SHELL_OPEN").ok(),
     }
