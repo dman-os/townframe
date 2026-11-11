@@ -3,6 +3,7 @@ role = "application"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
     "clay_dioxus_kit",
+    "pierre_diffs_dioxus",
     "ui",
 ]
 allow_external_api_types = false

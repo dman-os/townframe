@@ -1,3 +1,5 @@
+mod diff_fixtures;
+mod diffs;
 mod kit;
 
 #[cfg(feature = "desktop")]
@@ -189,6 +191,14 @@ fn App() -> Element {
                                 TileGrammarFoundation { available_width: available_width() }
                             }
                         },
+                        LabTab::Diffs => rsx! {
+                            FoundationSection {
+                                id: "diffs".to_string(),
+                                title: "Diff view".to_string(),
+                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port: a split Rust diff and a unified TypeScript diff with one line annotation whose content is ordinary Dioxus. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                                diffs::DiffsFoundation {}
+                            }
+                        },
                     }
                 }
                 }
@@ -205,14 +215,16 @@ enum LabTab {
     Tokens,
     Colors,
     Tiles,
+    Diffs,
 }
 
 impl LabTab {
-    const ALL: [LabTab; 4] = [
+    const ALL: [LabTab; 5] = [
         LabTab::Components,
         LabTab::Tokens,
         LabTab::Colors,
         LabTab::Tiles,
+        LabTab::Diffs,
     ];
 
     fn label(self) -> &'static str {
@@ -221,6 +233,7 @@ impl LabTab {
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
             LabTab::Tiles => "Tiles",
+            LabTab::Diffs => "Diffs",
         }
     }
 
@@ -230,6 +243,7 @@ impl LabTab {
             LabTab::Tokens => "lab-tab-tokens",
             LabTab::Colors => "lab-tab-colors",
             LabTab::Tiles => "lab-tab-tiles",
+            LabTab::Diffs => "lab-tab-diffs",
         }
     }
 
@@ -245,6 +259,7 @@ impl LabTab {
             ],
             LabTab::Colors => &[("colors", "Existing colors")],
             LabTab::Tiles => &[("tile-grammar", "Tile grammar")],
+            LabTab::Diffs => &[("diffs", "Diff view")],
         }
     }
 }

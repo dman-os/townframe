@@ -4340,6 +4340,8 @@ dependencies = [
  "clay_dioxus_kit",
  "dioxus",
  "dioxus-native",
+ "dioxus-ssr",
+ "pierre_diffs_dioxus",
  "serde",
  "serde_json",
  "ui",

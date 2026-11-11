@@ -3,6 +3,7 @@
 //! The kit never measures, so a specimen is a fixed-size frame whose width is both its CSS width
 //! and the `WidthClass` / split extent it hands the component: the same contract a real host
 //! (the shell) follows with its window.
+use clay_dioxus_kit::use_list_details;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
@@ -16,7 +17,6 @@ use clay_dioxus_kit::SizeRule;
 use clay_dioxus_kit::Snap;
 use clay_dioxus_kit::Split;
 use clay_dioxus_kit::WidthClass;
-use clay_dioxus_kit::use_list_details;
 use dioxus::prelude::*;
 
 const COMPACT_PX: f64 = 390.0;
