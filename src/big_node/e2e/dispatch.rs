@@ -133,7 +133,7 @@ async fn the_built_in_services_claim_their_declared_operations_without_collision
             (authority_methods::RetractCapability::XRPC.nsid, false),
             (nodule_methods::AdmitNodule::XRPC.nsid, true),
             (nodule_methods::SetNoduleMethodGrants::XRPC.nsid, true),
-            (nodule_methods::ListNodules::XRPC.nsid, true),
+            (nodule_methods::ListNodules::XRPC.nsid, false),
             (nodule_methods::MintNoduleCapability::XRPC.nsid, false),
             (big_blobs_core::PutBlob::XRPC.nsid, false),
         ] {

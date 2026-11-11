@@ -296,10 +296,10 @@ impl From<InventoryError> for NodulesError {
     }
 }
 
-// Every method but `mintNoduleCapability` manages nodules (install, enable, grants, substitution)
-// or reads their configuration, so all of them are privileged: a nodule's dispatch scope never
-// reaches them, which is what keeps a nodule from widening its own grants. Minting a nodule
-// handle only narrows the presented one (`scope.covers`), so it is not privileged.
+// Every method that changes nodules (install, enable, grants, substitution) is privileged: a
+// nodule's dispatch scope never reaches them, which is what keeps a nodule from widening its own
+// grants. The reads (`getNodule`, `listNodules`) confer nothing, so a scope naming them reaches
+// them, and minting a nodule handle only narrows the presented one (`scope.covers`).
 method_core::methods! {
     error = NodulesError, nsid_prefix = "org.example.daybook.nodules.";
     MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
@@ -311,8 +311,8 @@ method_core::methods! {
     ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution", privileged;
     SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution", privileged;
     UninstallNodule => (), procedure, "uninstallNodule", privileged;
-    GetNodule => NoduleRecord, query, "getNodule", privileged;
-    ListNodules => NoduleList, query, "listNodules", privileged;
+    GetNodule => NoduleRecord, query, "getNodule";
+    ListNodules => NoduleList, query, "listNodules";
 }
 
 declare_service_protocol! {
