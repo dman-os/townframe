@@ -57,7 +57,7 @@ Two machines with checkouts of one project are two clones, each with its worktre
 // org.example.intxt.work.worktreeOp/<seq>      (seq: 0, 1, 2 … written only by the worktree's recorder)
 { "at": "2026-11-10T21:04:11Z",
   "kind": "edit",                         // open: edit | checkout | reset | commit | amend | rebase | refMove | jjSnapshot
-  "cause": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/<id>#toolCalls/{\"id\":\"toolu_01…\"}",   // when known
+  "cause": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/<id>#toolCalls/%7B%22id%22:%22toolu_01…%22%7D",   // when known
   "files": { "src/big_cabinet_core/reference.rs": ["zbd7…"] },   // path → file doc heads after this op
   "deleted": [ "src/old.rs" ],                                    // paths this op deleted
   "renames": { "src/url.rs": "src/uri.rs" },                      // new path → old path, continued in the old path's doc
