@@ -22,6 +22,9 @@ use serde_json::Value;
 use tower::ServiceExt;
 
 /// The bound on one request or response body, the same as the listener's.
+/// The header a call's idempotency key travels in (`service_core_rs::xrpc`'s name for it).
+const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -127,14 +130,29 @@ impl NodeClient {
     /// so `input` must be an object of primitives (or arrays of them), the shape a query's
     /// Lexicon `parameters` take. The node holds the verb to the method's kind.
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
+        self.call_with(nsid, verb, input, None).await
+    }
+
+    /// [`Self::call`] under an idempotency key, which the operation's handler dedupes retries by:
+    /// the node forwards it as the `idempotency-key` header of the call.
+    pub async fn call_with(
+        &self,
+        nsid: &str,
+        verb: HttpMethod,
+        input: &Value,
+        idempotency_key: Option<&str>,
+    ) -> Res<Reply> {
         ensure_nsid(nsid)?;
         match &self.transport {
             Transport::Daemon(client) => {
                 let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
-                let request = match verb {
+                let mut request = match verb {
                     HttpMethod::Post => client.http_client().post(url).json(input),
                     HttpMethod::Get => client.http_client().get(url).query(&query_pairs(input)?),
                 };
+                if let Some(key) = idempotency_key {
+                    request = request.header(IDEMPOTENCY_KEY_HEADER, key);
+                }
                 let response = request.send().await?;
                 Ok(Reply {
                     status: response.status().as_u16(),
@@ -143,15 +161,22 @@ impl NodeClient {
             }
             Transport::InProcess(running) => {
                 let router = running.1.clone();
-                let request = match verb {
+                let mut builder = match verb {
                     HttpMethod::Post => http::Request::post(format!("/xrpc/{nsid}"))
-                        .header(http::header::CONTENT_TYPE, "application/json")
-                        .body(axum::body::Body::from(serde_json::to_vec(input)?))?,
+                        .header(http::header::CONTENT_TYPE, "application/json"),
                     HttpMethod::Get => http::Request::get(format!(
                         "/xrpc/{nsid}?{}",
                         serde_urlencoded::to_string(query_pairs(input)?)?
-                    ))
-                    .body(axum::body::Body::empty())?,
+                    )),
+                };
+                if let Some(key) = idempotency_key {
+                    builder = builder.header(IDEMPOTENCY_KEY_HEADER, key);
+                }
+                let request = match verb {
+                    HttpMethod::Post => {
+                        builder.body(axum::body::Body::from(serde_json::to_vec(input)?))?
+                    }
+                    HttpMethod::Get => builder.body(axum::body::Body::empty())?,
                 };
                 let response = router
                     .oneshot(request)

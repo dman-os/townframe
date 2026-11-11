@@ -2,7 +2,37 @@
 //! bindings are generated from installed cartridges. `day x <nsid>` reaches a cartridge's
 //! operations directly (`day x org.example.intxt.createIntxt '{"title": ".."}'`), so a command is
 //! only what the operations cannot do yet: `install` stores the handler component's bytes, which
-//! no operation takes from a file.
+//! no operation takes from a file, and `capture` observes the host (transcript, worktrees, blob
+//! files) and records what it saw.
+//!
+//! # Claude Code hooks
+//!
+//! `day x intxt capture` is the command of every hook ADR 039 §4 lists. In `.claude/settings.json`
+//! (or the user's `~/.claude/settings.json`):
+//!
+//! ```json
+//! {
+//!   "hooks": {
+//!     "SessionStart":       [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "UserPromptSubmit":   [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "PreToolUse":         [{ "matcher": "*", "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "PostToolUse":        [{ "matcher": "*", "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "PostToolUseFailure": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "Stop":               [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "SubagentStop":       [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "PreCompact":         [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }],
+//!     "SessionEnd":         [{ "hooks": [{ "type": "command", "command": "day x intxt capture" }] }]
+//!   }
+//! }
+//! ```
+//!
+//! This shape (event name, a list of `{ matcher?, hooks: [{ type, command }] }`, the hook's JSON on
+//! the command's stdin) is written from memory of Claude Code's hooks documentation and has not
+//! been checked against it here; verify it before relying on it. Add `--node <dir>` (or set
+//! `DAY_NODE`) to name the node, and `"timeout"` to a hook if a recording can take long. A
+//! `day` daemon makes each hook fast; without one every hook boots the node in its own process.
+
+pub(crate) mod capture;
 
 use crate::client::NodeClient;
 use crate::interlude::*;
@@ -34,12 +64,24 @@ pub enum IntxtCommands {
         #[arg(long)]
         handler: PathBuf,
     },
+    /// Record one Claude Code hook invocation: the hook's JSON on stdin
+    ///
+    /// Observes the session's transcript and worktrees, puts changed binary files in the node's
+    /// blob store, and records everything in the node's capture drawer. Install it as the command
+    /// of Claude Code's hooks (see this module's documentation). It prints nothing unless it has
+    /// something to report or `--verbose` is given, and then only to stderr; it never exits with
+    /// status 2, which Claude Code feeds back to the model.
+    Capture {
+        /// Say on stderr what was recorded
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
-    let client = lazy::node().await?;
     match command {
         IntxtCommands::Install { handler } => {
+            let client = lazy::node().await?;
             let wasm = std::fs::read(&handler)
                 .wrap_err_with(|| format!("reading the handler {}", handler.display()))?;
             let record = install(&client, &wasm).await?;
@@ -49,9 +91,63 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
                 record.readiness
             );
             println!("intxt is installed");
+            Ok(ExitCode::SUCCESS)
+        }
+        IntxtCommands::Capture { verbose } => {
+            // A failure is one line on stderr and status 1: Claude Code shows it to the operator,
+            // and status 2 would be fed back to the model.
+            match capture_hook(verbose).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(error) => {
+                    let line = format!("{error:#}").replace('\n', " ");
+                    eprintln!("intxt capture: {line}");
+                    Ok(ExitCode::FAILURE)
+                }
+            }
         }
     }
-    Ok(ExitCode::SUCCESS)
+}
+
+/// The hook's JSON from stdin, captured against the node `--node` names.
+async fn capture_hook(verbose: bool) -> Res<()> {
+    let mut input = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut input)
+        .wrap_err("reading the hook's JSON from stdin")?;
+    let client = lazy::node().await?;
+    let node_dir = lazy::config().await?.node_dir.root().to_owned();
+    let summary = capture::run(&client, &node_dir, &input).await?;
+    report(&summary, verbose);
+    Ok(())
+}
+
+/// What a run says on stderr: everything under `--verbose`, otherwise only what the operator
+/// should see (a blob that was not put, a tool call recorded without its cause).
+fn report(summary: &capture::Summary, verbose: bool) {
+    if summary.uncaused_tool_calls > 0 {
+        eprintln!(
+            "intxt capture: {} op(s) of a tool call the transcript did not show yet were recorded without a cause",
+            summary.uncaused_tool_calls
+        );
+    }
+    for path in &summary.stale_blobs {
+        eprintln!("intxt capture: {path} changed after it was observed; its bytes were not stored");
+    }
+    for path in &summary.oversize_blobs {
+        eprintln!(
+            "intxt capture: {path} is over 8 MiB; recorded as changed, its bytes were not stored"
+        );
+    }
+    if verbose {
+        eprintln!(
+            "intxt capture: {} ({} blob(s) stored)",
+            if summary.recorded.is_some() {
+                "recorded"
+            } else {
+                "nothing to record"
+            },
+            summary.blobs_put
+        );
+    }
 }
 
 /// Installs intxt with the handler component `wasm`, the way a node hosts any nodule's handler
@@ -128,7 +224,7 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
         .ok_or_else(|| eyre::eyre!("the node reports no operation grants for intxt"))?;
     eyre::ensure!(
         grants.granted,
-        "the node did not grant intxt its operations ({}); the `nodule_operations` of node.json is the ceiling of what a nodule can be granted and must cover {:?}",
+        "the node did not grant intxt its operations ({}); the `nodule_operations` of node.json is the ceiling of what a nodule can be granted and must cover {:?} (edit it and restart the node; a `day` command for this is planned, and `install` never edits node.json)",
         grants.error.as_deref().unwrap_or("no reason given"),
         intxt_nodule::REQUIRED_OPERATIONS
     );

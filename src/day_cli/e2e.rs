@@ -635,6 +635,223 @@ mod library {
         client.stop().await.unwrap();
     }
 
+    /// Runs `git` in `dir` with nothing taken from the machine.
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Ada")
+            .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+            .env("GIT_COMMITTER_NAME", "Grace")
+            .env("GIT_COMMITTER_EMAIL", "grace@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A scripted Claude Code session through `capture`: the hooks' JSON in, the real handler's
+    /// documents out. A tool call writes a text file and a binary one; the binary file's bytes go
+    /// to the blob store and its file document carries the blob datum, which `file.blob`
+    /// references (ledger D45).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capture_records_a_session_and_stores_a_binary_file_as_a_blob() {
+        use crate::cmds::intxt::capture;
+        use big_cabinet_core::DocId;
+        use big_cabinet_core::datum::DatumMember;
+        use big_cabinet_core::drawer::DrawerAccess;
+        use big_cabinet_core::drawer::protocol::DrawerId;
+        use big_cabinet_core::drawer::protocol::ListDocs;
+        use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+        use intxt_core::work;
+        use std::io::Write;
+
+        let (tmp, client) = intxt_node().await;
+        let node_root = tmp.path().join("node");
+        let base = tmp.path().canonicalize().unwrap();
+        let repo = base.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        let transcript = base.join("claude/s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let mut file = std::fs::File::create(&transcript).unwrap();
+        for record in [
+            json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "2026-11-10T10:00:00Z",
+                   "cwd": repo, "sessionId": "s1", "message": {"role": "user", "content": "make files"}}),
+            json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": "2026-11-10T10:00:01Z",
+                   "cwd": repo, "sessionId": "s1",
+                   "message": {"id": "m-t1", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                               "input": {"command": "make files"}}]}}),
+        ] {
+            writeln!(file, "{record}").unwrap();
+        }
+        let hook = |event: &str, tool: bool| {
+            let mut input = json!({
+                "session_id": "s1",
+                "transcript_path": transcript,
+                "cwd": repo,
+                "hook_event_name": event,
+            });
+            if tool {
+                input["tool_name"] = json!("Bash");
+                input["tool_use_id"] = json!("t1");
+                input["tool_input"] = json!({"command": "make files"});
+            }
+            input.to_string().into_bytes()
+        };
+
+        let started = capture::run(&client, &node_root, &hook("SessionStart", false))
+            .await
+            .unwrap();
+        assert!(started.recorded.is_some());
+        capture::run(&client, &node_root, &hook("PreToolUse", true))
+            .await
+            .unwrap();
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        let binary = [0u8, 159, 146, 150, 1, 2];
+        std::fs::write(repo.join("pic.png"), binary).unwrap();
+        let edited = capture::run(&client, &node_root, &hook("PostToolUse", true))
+            .await
+            .unwrap();
+        assert_eq!(edited.blobs_put, 1);
+        assert_eq!(edited.uncaused_tool_calls, 0);
+        assert!(edited.stale_blobs.is_empty() && edited.oversize_blobs.is_empty());
+        let recorded = edited.recorded.unwrap();
+        let root = repo.display().to_string();
+        let docs = &recorded.worktrees[&root].docs;
+
+        // The worktree's first op is the edit this call made, caused by the call.
+        let worktree: work::Worktree = serde_json::from_value(
+            read_at(
+                &client,
+                &docs.worktree.as_ref().unwrap().parse::<DocId>().unwrap(),
+                &format!("{}/main", work::Worktree::ID).parse().unwrap(),
+            )
+            .await
+            .unwrap()
+            .1,
+        )
+        .unwrap();
+        let log: DocId = worktree.op_logs[0].doc.parse().unwrap();
+        let op = read_at(
+            &client,
+            &log,
+            &format!("{}/0", work::WorktreeOp::ID).parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .1;
+        assert_eq!(op["kind"], "edit");
+        assert!(
+            op["cause"].as_str().unwrap().contains("promptTurn/u1"),
+            "{op}"
+        );
+        assert!(op["files"].as_object().unwrap().contains_key("pic.png"));
+        assert!(op["files"].as_object().unwrap().contains_key("a.txt"));
+
+        // The binary file's document holds the blob datum, and its `File` points at it.
+        let picture: DocId = worktree.files["pic.png"].parse().unwrap();
+        let blob = read_at(
+            &client,
+            &picture,
+            &"org.example.daybook.blob/main".parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .1;
+        assert_eq!(blob["mime"], "image/png");
+        assert_eq!(blob["lengthOctets"], binary.len());
+        assert!(blob["digest"].as_str().unwrap().starts_with('z'));
+        let file = read_at(
+            &client,
+            &picture,
+            &format!("{}/main", work::File::ID).parse().unwrap(),
+        )
+        .await
+        .unwrap()
+        .1;
+        assert_eq!(
+            file["blob"],
+            "dtxt:datum:self/org.example.daybook.blob/main"
+        );
+
+        // The text file is a note.
+        let text: DocId = worktree.files["a.txt"].parse().unwrap();
+        let note = read_at(
+            &client,
+            &text,
+            &format!("{}/main", intxt_core::generic::Note::ID)
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .1;
+        assert_eq!(note["content"], "one\ntwo\n");
+
+        // A hook with nothing new records nothing; the machine and the capture drawer are the
+        // node's, remembered for the next hook.
+        let stopped = capture::run(&client, &node_root, &hook("Stop", false))
+            .await
+            .unwrap();
+        assert!(stopped.recorded.is_none(), "{stopped:?}");
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(node_root.join("intxt/capture.json")).unwrap())
+                .unwrap();
+        assert!(
+            stored["machine"]
+                .as_str()
+                .unwrap()
+                .starts_with("dtxt:actor:")
+        );
+        let drawer: DrawerId = stored["drawer"].as_str().unwrap().parse().unwrap();
+        let listing = crate::cmds::intxt::call(
+            &client,
+            MintDrawerCapability {
+                scope: big_cabinet_core::drawer::protocol::DrawerScope {
+                    drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
+                    create: false,
+                },
+                rights: big_cabinet_core::authority::Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+        let listed = crate::cmds::intxt::call(
+            &client,
+            ListDocs {
+                capability: listing,
+                drawer_id: drawer,
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        for doc in [
+            docs.worktree.as_ref().unwrap(),
+            recorded.session.as_ref().unwrap(),
+        ] {
+            let doc: DocId = doc.parse().unwrap();
+            assert!(
+                listed.docs.iter().any(|listed| listed.doc_id == doc),
+                "{doc} is not in the capture drawer: {listed:?}"
+            );
+        }
+        client.stop().await.unwrap();
+    }
+
     /// `org.example.intxt.addToIntxt` includes captured parts: each gets an entry keyed by the
     /// part's identity, the body lists the entries in the order they were added, adding a part
     /// again changes nothing, and the parts' documents are entered in the intxt's drawer so its

@@ -4179,6 +4179,7 @@ dependencies = [
  "data-encoding",
  "directories",
  "http",
+ "intxt_capture",
  "intxt_core",
  "intxt_nodule",
  "libc",
