@@ -134,6 +134,9 @@ impl DioxusHost {
             "style",
             &format!("overflow-y:auto;overflow-anchor:none;height:{height};"),
         );
+        // A scroll container the keyboard can reach: without a tab stop its arrow and page keys
+        // do nothing, and a mouse is the only way to move through the diff.
+        document.set_attribute(root, "tabindex", "0");
         document.append_child(content, container);
         document.append_child(root, content);
         Self::build(

@@ -75,7 +75,11 @@ fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
         .expect("material-theme.json must match the Material theme schema");
     let mut mode = use_signal(|| ThemeMode::Dark);
-    let mut tab = use_signal(|| LabTab::Components);
+    // `DAYFRAME_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
+    let mut tab = use_signal(|| match std::env::var("DAYFRAME_LAB_TAB").as_deref() {
+        Ok("diffs") => LabTab::Diffs,
+        _ => LabTab::Components,
+    });
     let native_window: Option<Arc<dyn Window>> = use_hook(try_consume_context);
     #[cfg(feature = "desktop")]
     let desktop_window: Option<DesktopContext> = use_hook(try_consume_context);
