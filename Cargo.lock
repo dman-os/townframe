@@ -2893,6 +2893,7 @@ dependencies = [
  "cssparser 0.38.0",
  "dioxus",
  "dioxus-core",
+ "dioxus-core-template",
  "dioxus-html",
  "insta",
  "pastey 0.1.1",

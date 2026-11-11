@@ -11,6 +11,8 @@ use crate::wire::NodeId;
 use crate::wire::SurfaceEventHandler;
 use dioxus::prelude::*;
 use dioxus_core::ListenerCallback;
+use dioxus_core::Template;
+use dioxus_core_template::RuntimeTemplateBuilder;
 use dioxus_html::PlatformEventData;
 
 impl<C: Clone> SurfaceTree<C> {
@@ -107,42 +109,61 @@ impl<C: Clone> SurfaceTree<C> {
 /// Maximum number of distinct `data-*` names the process-wide interner will hold.
 const DATA_ATTRIBUTE_NAME_LIMIT: usize = 4096;
 
+/// Maximum number of distinct custom element names the process-wide interner will hold. Each one
+/// also leaks a one-element template, so the bound is smaller than the attribute one.
+const CUSTOM_ELEMENT_NAME_LIMIT: usize = 512;
+
+/// Longest custom element name admitted, in bytes. With [`CUSTOM_ELEMENT_NAME_LIMIT`] it bounds
+/// the host memory a guest can pin through element names.
+pub(crate) const MAX_CUSTOM_ELEMENT_NAME_BYTES: usize = 64;
+
 /// The process-wide interner behind [`static_attribute`]'s open `data-*` names.
-pub(crate) static DATA_ATTRIBUTES: DataAttributeInterner =
-    DataAttributeInterner::new(DATA_ATTRIBUTE_NAME_LIMIT);
+pub(crate) static DATA_ATTRIBUTES: NameInterner<()> = NameInterner::new(DATA_ATTRIBUTE_NAME_LIMIT);
+
+/// The process-wide interner behind open custom element names; the value kept with each name is
+/// the leaked template that renders it.
+pub(crate) static CUSTOM_ELEMENTS: NameInterner<Template> =
+    NameInterner::new(CUSTOM_ELEMENT_NAME_LIMIT);
 
 /// The interner already holds its limit of distinct names and the requested one is new.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DataAttributeNamesExhausted;
+pub(crate) struct NamesExhausted;
 
-/// Dioxus attribute names are `&'static str`, so each distinct guest-chosen `data-*` name is
-/// leaked once and deduplicated here. The distinct-name bound is what keeps a guest from growing
-/// host memory without limit by minting names; a repeated name costs nothing.
-pub(crate) struct DataAttributeInterner {
+/// Dioxus attribute and tag names are `&'static str`, so each distinct guest-chosen name is
+/// leaked once and deduplicated here, together with whatever `V` the renderer derives from it
+/// once. The distinct-name bound is what keeps a guest from growing host memory without limit by
+/// minting names; a repeated name costs nothing.
+pub(crate) struct NameInterner<V> {
     limit: usize,
-    names: std::sync::Mutex<std::collections::BTreeSet<&'static str>>,
+    names: std::sync::Mutex<std::collections::BTreeMap<&'static str, V>>,
 }
 
-impl DataAttributeInterner {
+impl<V: Copy> NameInterner<V> {
     pub(crate) const fn new(limit: usize) -> Self {
         Self {
             limit,
-            names: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            names: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 
-    /// `name` must already be a well-formed `data-*` name (see [`is_data_attribute_name`]).
-    pub(crate) fn intern(&self, name: &str) -> Result<&'static str, DataAttributeNamesExhausted> {
+    /// `name` must already be well formed for the vocabulary this interner serves. `make` runs
+    /// only the first time a name is interned and receives the leaked name.
+    pub(crate) fn intern(
+        &self,
+        name: &str,
+        make: impl FnOnce(&'static str) -> V,
+    ) -> Result<(&'static str, V), NamesExhausted> {
         let mut names = self.names.lock().expect("interner lock is never poisoned");
-        if let Some(&interned) = names.get(name) {
-            return Ok(interned);
+        if let Some((&interned, &value)) = names.get_key_value(name) {
+            return Ok((interned, value));
         }
         if names.len() >= self.limit {
-            return Err(DataAttributeNamesExhausted);
+            return Err(NamesExhausted);
         }
         let interned: &'static str = Box::leak(name.to_owned().into_boxed_str());
-        names.insert(interned);
-        Ok(interned)
+        let value = make(interned);
+        names.insert(interned, value);
+        Ok((interned, value))
     }
 }
 
@@ -160,10 +181,10 @@ pub(crate) fn is_data_attribute_name(name: &str) -> bool {
 /// Resolves a wire attribute to the names Dioxus needs. `Ok(None)` is an unsupported name;
 /// `Err` means a well-formed new `data-*` name would exceed the interner's bound.
 pub(crate) fn static_attribute(
-    data_names: &DataAttributeInterner,
+    data_names: &NameInterner<()>,
     name: &str,
     namespace: Option<&str>,
-) -> Result<Option<(&'static str, Option<&'static str>)>, DataAttributeNamesExhausted> {
+) -> Result<Option<(&'static str, Option<&'static str>)>, NamesExhausted> {
     macro_rules! vocabulary {
         ($($ns:pat => $canonical:expr => [$($name:literal),* $(,)?]),* $(,)?) => {
             match (name, namespace) {
@@ -173,7 +194,9 @@ pub(crate) fn static_attribute(
         };
     }
     if namespace.is_none() && is_data_attribute_name(name) {
-        return data_names.intern(name).map(|name| Some((name, None)));
+        return data_names
+            .intern(name, |_| ())
+            .map(|(name, ())| Some((name, None)));
     }
     Ok(vocabulary!(
         None => None => [
@@ -186,7 +209,7 @@ pub(crate) fn static_attribute(
             "href", "target", "rel", "download", "src", "alt", "width", "height", "loading",
             "srcset", "sizes", "crossorigin", "referrerpolicy", "open", "datetime", "start",
             "reversed", "colspan", "rowspan", "scope", "headers", "label", "low", "high",
-            "optimum",
+            "optimum", "media",
             "aria-label", "aria-labelledby", "aria-describedby", "aria-hidden", "aria-live",
             "aria-atomic", "aria-busy", "aria-controls", "aria-current", "aria-disabled",
             "aria-expanded", "aria-haspopup", "aria-invalid", "aria-modal", "aria-multiline",
@@ -312,11 +335,86 @@ macro_rules! expand_surface_event_listener {
 
 dioxus_html::with_html_event_groups!(expand_surface_event_listener);
 
+/// The valid autonomous custom element names of the HTML Standard, narrowed to ASCII: a lowercase
+/// ASCII letter, then `[a-z0-9._-]`, containing a hyphen, at most
+/// [`MAX_CUSTOM_ELEMENT_NAME_BYTES`] long, and not one of the names the standard reserves for
+/// SVG and MathML elements (`annotation-xml`, `color-profile`, `font-face`, `font-face-*`,
+/// `missing-glyph`). The standard's non-ASCII "PCEN" characters are refused. The name is only a
+/// tag the host renders; with no script on the host there is no definition for it to upgrade to.
+pub(crate) fn is_custom_element_name(name: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "annotation-xml",
+        "color-profile",
+        "font-face",
+        "missing-glyph",
+    ];
+    name.len() <= MAX_CUSTOM_ELEMENT_NAME_BYTES
+        && name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name.contains('-')
+        && name
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'))
+        && !RESERVED.contains(&name)
+        && !name.starts_with("font-face-")
+}
+
+/// Interns `name` as a custom element tag, leaking its template on first use. `name` must satisfy
+/// [`is_custom_element_name`].
+pub(crate) fn intern_custom_element(
+    interner: &NameInterner<Template>,
+    name: &str,
+) -> Result<&'static str, NamesExhausted> {
+    interner
+        .intern(name, |tag| {
+            // The shape every static tag's template has: the element with one slot for the spread
+            // attributes and one for its children.
+            let mut builder = RuntimeTemplateBuilder::default();
+            builder.open_element(tag, None);
+            builder.dynamic_attr();
+            builder.dynamic_node(false);
+            builder.close_element();
+            builder.finish()
+        })
+        .map(|(tag, _)| tag)
+}
+
+fn render_custom_element(
+    tag: &str,
+    key: u64,
+    attrs: Vec<dioxus_core::Attribute>,
+    children: impl Iterator<Item = Element>,
+) -> Element {
+    let template = CUSTOM_ELEMENTS
+        .names
+        .lock()
+        .expect("interner lock is never poisoned")
+        .get(tag)
+        .copied()
+        .expect("validated custom element name is interned");
+    Ok(VNode::new(
+        template,
+        dioxus_core::DynamicValues::from_parts(
+            Some(key.to_string()),
+            Box::new([dioxus_core::DynamicNode::make_node(children)]),
+            Box::new([attrs.into_boxed_slice()]),
+        ),
+    ))
+}
+
+macro_rules! tag_name {
+    ($tag:ident) => {
+        stringify!($tag)
+    };
+    ($tag:ident, $name:literal) => {
+        $name
+    };
+}
+
 macro_rules! surface_tags {
-    ($($namespace:pat => [$($tag:ident),* $(,)?]),* $(,)?) => {
+    ($($namespace:pat => [$($tag:ident $(=> $name:literal)?),* $(,)?]),* $(,)?) => {
         pub(crate) fn supported_tag(tag: &str, namespace: Option<&str>) -> bool {
             match (tag, namespace) {
-                $($((stringify!($tag), $namespace) => true,)*)*
+                $($((tag_name!($tag $(, $name)?), $namespace) => true,)*)*
                 _ => false,
             }
         }
@@ -329,29 +427,35 @@ macro_rules! surface_tags {
             children: impl Iterator<Item = Element>,
         ) -> Element {
             match (tag, namespace) {
-                $($((stringify!($tag), $namespace) => rsx! {
+                $($((tag_name!($tag $(, $name)?), $namespace) => rsx! {
                     $tag {
                         key: "{key}",
                         ..attrs,
                         {children}
                     }
                 },)*)*
+                (custom, None) if is_custom_element_name(custom) => {
+                    render_custom_element(custom, key, attrs, children)
+                }
                 _ => unreachable!("validated surface element"),
             }
         }
     };
 }
 
+// `style` is admitted with its text sanitized at ingress (see `SurfaceTree::sanitize_style_text`);
+// `use` takes only same-document `href`s (see `validate_use_href`). `slot` and `bdi` carry no
+// behaviour without a shadow-root host and a script. None of these fetches or runs anything.
 surface_tags!(
     None => [
         div, section, article, aside, header, footer, main, nav, h1, h2, h3, h4, h5, h6, p, span,
         pre, code, blockquote, strong, em, small, b, i, u, s, mark, kbd, sub, sup, br, hr, ul, ol,
         li, dl, dt, dd, table, thead, tbody, tfoot, tr, th, td, caption, form, label, input,
         textarea, button, select, option, optgroup, fieldset, legend, details, summary, dialog, a,
-        img, figure, figcaption, progress, meter, output, time, data
+        img, figure, figcaption, progress, meter, output, time, data, style, slot, bdi
     ],
     Some("http://www.w3.org/2000/svg") => [
-        svg, g, path, circle, rect, line, polyline, polygon, defs
+        svg, g, path, circle, rect, line, polyline, polygon, defs, symbol, r#use => "use"
     ]
 );
 

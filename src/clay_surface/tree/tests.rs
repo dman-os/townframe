@@ -285,7 +285,13 @@ fn malformed_operations_clear_and_terminally_revoke_only_the_target_tree() {
 #[test]
 fn unsupported_vocabulary_is_rejected_without_dynamic_interning_or_tag_substitution() {
     let batches = vec![
-        vec![Mutation::CreateElement(("unknown-widget".into(), None))],
+        vec![Mutation::CreateElement(("unknownwidget".into(), None))],
+        vec![Mutation::CreateElement(("script".into(), None))],
+        vec![Mutation::CreateElement(("font-face".into(), None))],
+        vec![Mutation::CreateElement((
+            "x-widget".into(),
+            Some("http://www.w3.org/2000/svg".into()),
+        ))],
         vec![Mutation::CreateElement((
             "div".into(),
             Some("unknown".into()),
@@ -1323,4 +1329,404 @@ fn elements_leaving_the_tree_are_retired_by_id_through_remove_replace_steal_and_
     // Clear retires everything still in the tree.
     tree.clear();
     assert_eq!(tree.take_retired_elements(), [3, 4].into());
+}
+
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+
+fn element(tag: &str, ns: Option<&str>) -> Mutation {
+    Mutation::CreateElement((tag.into(), ns.map(str::to_owned)))
+}
+
+fn text_attr(name: &str, ns: Option<&str>, value: &str) -> Mutation {
+    Mutation::SetAttribute((
+        name.into(),
+        ns.map(str::to_owned),
+        AttributeValue::Text(value.into()),
+    ))
+}
+
+/// What the retained bytes must equal for a lone `<style>` holding `text`.
+fn style_bytes(text: &str) -> usize {
+    "style".len() + text.len()
+}
+
+#[test]
+fn every_admitted_tag_survives_ingress_and_projects_into_the_host_vdom() {
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        tree: SurfaceTree,
+    }
+    fn app(props: Props) -> Element {
+        let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
+    }
+    let html = [
+        "style",
+        "slot",
+        "bdi",
+        "small",
+        "b",
+        "header",
+        "code",
+        "pre",
+        "a",
+        "button",
+        "diffs-container",
+    ];
+    let svg = ["svg", "path", "symbol", "use"];
+    let mut batch = Vec::new();
+    for tag in html {
+        batch.push(element(tag, None));
+        batch.push(Mutation::AppendChildren(1));
+    }
+    for tag in svg {
+        batch.push(element(tag, Some(SVG_NS)));
+        batch.push(Mutation::AppendChildren(1));
+    }
+    let mut tree = SurfaceTree::new();
+    tree.apply(&batch).unwrap();
+    let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree: tree.clone() });
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    assert_eq!(host_tree.outline(), tree.outline());
+    let rendered = |index: usize| match &host_tree
+        .node(host_tree.node(SurfaceNodeId::ROOT).children[index])
+        .kind
+    {
+        SurfaceNodeKind::Element { tag, namespace, .. } => (tag.clone(), namespace.clone()),
+        other => panic!("expected an element, got {other:?}"),
+    };
+    assert_eq!(rendered(10), ("diffs-container".to_owned(), None));
+    assert_eq!(rendered(14), ("use".to_owned(), Some(SVG_NS.to_owned())));
+}
+
+#[test]
+fn custom_elements_carry_attributes_listeners_and_children_through_the_host_vdom() {
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        tree: SurfaceTree,
+    }
+    fn app(props: Props) -> Element {
+        let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
+    }
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        element("x-card", None),
+        Mutation::SetId(1),
+        text_attr("class", None, "c"),
+        text_attr("data-k", None, "v"),
+        Mutation::AddEventListener("click".into()),
+        element("span", None),
+        Mutation::CreateText("hi".into()),
+        Mutation::AppendChildren(1),
+        Mutation::AppendChildren(1),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree });
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    assert_eq!(host_tree.outline(), "(x-card[class,data-k](span(#)))");
+    assert_eq!(host_tree.text_content(), "hi");
+    assert!(host_tree.listener_id("x-card", "click").is_some());
+}
+
+#[test]
+fn custom_element_names_are_validated_and_capped_per_surface() {
+    // A refused batch poisons the tree, so each bad name gets a fresh one.
+    for bad in [
+        "x",
+        "X-card",
+        "font-face",
+        "annotation-xml",
+        "x-é",
+        "x card-a",
+    ] {
+        assert_eq!(
+            SurfaceTree::new().apply(&[element(bad, None)]),
+            Err(PresentationError::Unsupported(
+                "element tag or namespace".into()
+            )),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(
+        SurfaceTree::new().apply(&[element("x-card", Some("urn:other"))]),
+        Err(PresentationError::Unsupported(
+            "element tag or namespace".into()
+        ))
+    );
+    let create = |names: &mut dyn Iterator<Item = String>| {
+        let mut batch = Vec::new();
+        for name in names {
+            batch.push(element(&name, None));
+            batch.push(Mutation::AppendChildren(1));
+        }
+        batch
+    };
+    let cap = SurfaceTree::MAX_CUSTOM_ELEMENT_NAMES;
+    let mut surface = SurfaceTree::new();
+    let mut names = (0..cap).map(|index| format!("cap-a{index}"));
+    surface
+        .apply(&create(&mut names))
+        .expect("within the per-surface cap");
+    let mut repeats = (0..cap).map(|index| format!("cap-a{index}"));
+    surface
+        .apply(&create(&mut repeats))
+        .expect("repeats are free");
+    let mut other = SurfaceTree::new();
+    let mut fresh = ["cap-a0".to_owned(), "cap-b0".to_owned()].into_iter();
+    other
+        .apply(&create(&mut fresh))
+        .expect("independent budget");
+    let mut one_more = std::iter::once("cap-over".to_owned());
+    assert_eq!(
+        surface.apply(&create(&mut one_more)),
+        Err(PresentationError::InvalidBatch(
+            "too many distinct custom element names on this surface".into()
+        ))
+    );
+}
+
+#[test]
+fn custom_element_names_stay_charged_when_a_surface_is_cleared() {
+    let cap = SurfaceTree::MAX_CUSTOM_ELEMENT_NAMES;
+    let mut surface = SurfaceTree::new();
+    let mut batch = Vec::new();
+    for index in 0..cap {
+        batch.push(element(&format!("clear-a{index}"), None));
+        batch.push(Mutation::AppendChildren(1));
+    }
+    surface.apply(&batch).unwrap();
+    surface.clear();
+    assert!(surface.error().is_none());
+    assert_eq!(
+        surface.apply(&[element("clear-over", None)]),
+        Err(PresentationError::InvalidBatch(
+            "too many distinct custom element names on this surface".into()
+        ))
+    );
+}
+
+#[test]
+fn style_text_is_sanitized_when_created_under_a_style_element() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        element("style", None),
+        Mutation::CreateText(
+            "a { color: red; background: url(https://x/y.png) } @import 'z';".into(),
+        ),
+        Mutation::AppendChildren(1),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    let sanitized = "a {\ncolor: red;\n}";
+    assert_eq!(tree.text_content(), sanitized);
+    assert_eq!(tree.retained_bytes, style_bytes(sanitized));
+}
+
+#[test]
+fn style_text_is_sanitized_on_set_text_of_the_text_node_and_of_the_element() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        element("style", None),
+        Mutation::SetId(1),
+        Mutation::CreateText("b { margin: 0 }".into()),
+        Mutation::AppendChildren(1),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    assert_eq!(tree.text_content(), "b {\nmargin: 0;\n}");
+    // SetText on the text node itself.
+    tree.apply(&[
+        Mutation::PushId(1),
+        Mutation::Child(0),
+        Mutation::SetText("c { background: image-set(url(x) 1x); color: blue }".into()),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    let sanitized = "c {\ncolor: blue;\n}";
+    assert_eq!(tree.text_content(), sanitized);
+    assert_eq!(tree.retained_bytes, style_bytes(sanitized));
+    // SetText on the style element replaces its children with a sanitized text node.
+    tree.apply(&[
+        Mutation::PushId(1),
+        Mutation::SetText(
+            "@font-face { src: url(f.woff) } d { cursor: url(c.png), auto; margin: 1px }".into(),
+        ),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    let sanitized = "d {\nmargin: 1px;\n}";
+    assert_eq!(tree.text_content(), sanitized);
+    assert_eq!(tree.retained_bytes, style_bytes(sanitized));
+}
+
+#[test]
+fn text_moved_under_a_style_element_is_sanitized_on_every_attachment_path() {
+    let raw = "a { background: url(x) ; color: red }";
+    let sanitized = "a {\ncolor: red;\n}";
+    // The text starts raw under a div, where it is plain text. Each attachment verb then moves
+    // it under the style element.
+    let setup = || {
+        let mut tree = SurfaceTree::new();
+        tree.apply(&[
+            element("style", None),
+            Mutation::SetId(1),
+            element("div", None),
+            Mutation::SetId(2),
+            Mutation::CreateText(raw.into()),
+            Mutation::AppendChildren(1),
+            Mutation::AppendChildren(2),
+        ])
+        .unwrap();
+        assert_eq!(tree.text_content(), raw, "outside a style it is only text");
+        tree
+    };
+    let to_text = [Mutation::PushId(2), Mutation::Child(0)];
+    // Append.
+    let mut tree = setup();
+    tree.apply(&[
+        Mutation::PushId(1),
+        to_text[0].clone(),
+        to_text[1].clone(),
+        Mutation::AppendChildren(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.text_content(), sanitized);
+    assert_eq!(tree.retained_bytes, style_bytes(sanitized) + "div".len());
+    // Insert after and before an existing child of the style element, and replace one.
+    for verb in [
+        Mutation::InsertAfter(1),
+        Mutation::InsertBefore(1),
+        Mutation::ReplaceWith(1),
+    ] {
+        let mut tree = setup();
+        tree.apply(&[
+            Mutation::PushId(1),
+            Mutation::CreateText("x".into()),
+            Mutation::AppendChildren(1),
+            Mutation::Pop,
+        ])
+        .unwrap();
+        // Replacing consumes the anchor from the stack; inserting leaves it to pop.
+        let mut batch = vec![
+            Mutation::PushId(1),
+            Mutation::Child(0),
+            Mutation::PushId(2),
+            Mutation::Child(0),
+            verb.clone(),
+        ];
+        if !matches!(verb, Mutation::ReplaceWith(_)) {
+            batch.push(Mutation::Pop);
+        }
+        tree.apply(&batch).unwrap();
+        assert!(
+            tree.text_content().contains(sanitized) && !tree.text_content().contains("url"),
+            "{verb:?}: {:?}",
+            tree.text_content()
+        );
+    }
+}
+
+#[test]
+fn style_text_that_would_only_form_a_fetching_rule_across_nodes_stays_sanitized_per_node() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        element("style", None),
+        Mutation::CreateText("a { background: u".into()),
+        Mutation::AppendChildren(1),
+        Mutation::CreateText("rl(https://x/y) }".into()),
+        Mutation::AppendChildren(1),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    assert!(
+        !tree.text_content().contains("url"),
+        "{:?}",
+        tree.text_content()
+    );
+}
+
+#[test]
+fn style_elements_take_media_and_refuse_title_and_nonce() {
+    let attr = |name: &str, value: &str| {
+        SurfaceTree::new().apply(&[element("style", None), text_attr(name, None, value)])
+    };
+    // A lone element stays on the stack, so an accepted attribute still ends in an unbalanced
+    // batch; what the cases below tell apart is whether the attribute itself is refused.
+    let unbalanced = PresentationError::InvalidBatch("unbalanced final stack".into());
+    assert_eq!(attr("media", "(min-width: 600px)"), Err(unbalanced));
+    for refused in ["title", "nonce", "blocking"] {
+        assert_eq!(
+            attr(refused, "x"),
+            Err(PresentationError::Unsupported(
+                "attribute name or namespace".into()
+            )),
+            "{refused}"
+        );
+    }
+    // `media` means nothing on any other element.
+    assert_eq!(
+        SurfaceTree::new().apply(&[element("div", None), text_attr("media", None, "print")]),
+        Err(PresentationError::Unsupported(
+            "attribute name or namespace".into()
+        ))
+    );
+}
+
+#[test]
+fn svg_use_admits_only_same_document_fragments() {
+    let use_href = |ns: Option<&str>, value: AttributeValue| {
+        SurfaceTree::new().apply(&[
+            element("use", Some(SVG_NS)),
+            Mutation::SetAttribute(("href".into(), ns.map(str::to_owned), value)),
+            Mutation::AppendChildren(1),
+        ])
+    };
+    for ns in [None, Some(XLINK_NS)] {
+        assert!(use_href(ns, AttributeValue::Text("#sprite".into())).is_ok());
+        assert!(use_href(ns, AttributeValue::None).is_ok(), "removal");
+        for bad in [
+            "https://example.com/a.svg#x",
+            "//example.com/a.svg#x",
+            "x.svg#y",
+            "/x.svg#y",
+            "data:image/svg+xml,<svg/>",
+            "javascript:void(0)",
+            " #x",
+            "#",
+            "",
+        ] {
+            assert_eq!(
+                use_href(ns, AttributeValue::Text(bad.into())),
+                Err(PresentationError::Unsupported(
+                    "svg use href must be a same-document fragment".into()
+                )),
+                "{ns:?} {bad:?}"
+            );
+        }
+        assert!(use_href(ns, AttributeValue::Int(1)).is_err());
+    }
+    // The rule is about `<use>`; other SVG elements keep their vocabulary.
+    assert!(
+        SurfaceTree::new()
+            .apply(&[
+                element("path", Some(SVG_NS)),
+                text_attr("d", None, "M0 0"),
+                Mutation::AppendChildren(1),
+            ])
+            .is_ok()
+    );
 }

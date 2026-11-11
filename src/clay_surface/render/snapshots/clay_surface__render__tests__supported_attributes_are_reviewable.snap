@@ -72,6 +72,7 @@ expression: supported
 - low
 - high
 - optimum
+- media
 - data-testid
 - data-state
 - data-value

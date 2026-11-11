@@ -293,7 +293,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     fn validate_create_element(
-        &self,
+        &mut self,
         tag: &str,
         ns: Option<&str>,
         bytes: &mut usize,
@@ -303,9 +303,28 @@ impl<C: Clone> SurfaceTree<C> {
             Self::charge_string(bytes, ns)?;
         }
         if !supported_tag(tag, ns) {
-            return Err(PresentationError::Unsupported(
-                "element tag or namespace".into(),
-            ));
+            if ns.is_some() || !is_custom_element_name(tag) {
+                return Err(PresentationError::Unsupported(
+                    "element tag or namespace".into(),
+                ));
+            }
+            // Same two-level bound as `data-*` names: the process-wide interner leaks each
+            // distinct name, and the per-surface cap keeps one micro from spending its budget.
+            // Checked before interning so an over-budget surface interns nothing new.
+            if !self.custom_element_names.contains(tag) {
+                if self.custom_element_names.len() >= Self::MAX_CUSTOM_ELEMENT_NAMES {
+                    return Err(PresentationError::InvalidBatch(
+                        "too many distinct custom element names on this surface".into(),
+                    ));
+                }
+                let interned =
+                    intern_custom_element(&CUSTOM_ELEMENTS, tag).map_err(|NamesExhausted| {
+                        PresentationError::InvalidBatch(
+                            "too many distinct custom element names".into(),
+                        )
+                    })?;
+                self.custom_element_names.insert(interned);
+            }
         }
         self.check_capacity(1, 0, tag.len() + ns.map_or(0, str::len))
     }
@@ -367,7 +386,7 @@ impl<C: Clone> SurfaceTree<C> {
                     "attribute name or namespace".into(),
                 ));
             }
-            Err(DataAttributeNamesExhausted) => {
+            Err(NamesExhausted) => {
                 return Err(PresentationError::InvalidBatch(
                     "too many distinct data-* attribute names".into(),
                 ));
@@ -378,9 +397,16 @@ impl<C: Clone> SurfaceTree<C> {
                 "non-finite attribute".into(),
             ));
         }
-        let SurfaceNodeKind::Element { attributes, .. } = &self.node(top).kind else {
+        let SurfaceNodeKind::Element {
+            tag,
+            namespace,
+            attributes,
+            ..
+        } = &self.node(top).kind
+        else {
             return Err(invalid_target());
         };
+        validate_element_attribute(tag, namespace.as_deref(), name, ns, value)?;
         Self::charge_work(work, attributes.len())?;
         let existing = attributes
             .iter()
@@ -482,6 +508,46 @@ impl<C: Clone> SurfaceTree<C> {
             Self::charge_work(work, self.node(parent).children.len())?;
         }
         Ok(())
+    }
+}
+
+/// Attribute rules that depend on the element carrying the attribute.
+///
+/// An SVG `<use>` instantiates the element its `href` names, and an external reference makes the
+/// renderer fetch a document, so only a same-document fragment (`#id`) is admitted. Setting the
+/// attribute to `None` or `false` removes it and is always fine.
+///
+/// A `<style>` element takes `media`, as `document::Style { media }` does in a guest, and `media`
+/// is refused everywhere else. The guest side drops `title` and `nonce` silently because it can;
+/// the retained tree mirrors the wire one-to-one, so here `nonce` is outside the vocabulary and
+/// `title` (which on a `<style>` would select a named style sheet set, not label it) is refused
+/// like any other unsupported attribute. The remaining vocabulary (`id`, `class`, ...) is inert on
+/// a `<style>`.
+fn validate_element_attribute(
+    tag: &str,
+    element_ns: Option<&str>,
+    name: &str,
+    ns: Option<&str>,
+    value: &AttributeValue,
+) -> Result<(), PresentationError> {
+    const SVG_NS: &str = "http://www.w3.org/2000/svg";
+    const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+    match (tag, element_ns, name, ns) {
+        ("use", Some(SVG_NS), "href", None | Some(XLINK_NS)) => match value {
+            AttributeValue::None | AttributeValue::Boolean(false) => Ok(()),
+            AttributeValue::Text(text) if text.len() > 1 && text.starts_with('#') => Ok(()),
+            _ => Err(PresentationError::Unsupported(
+                "svg use href must be a same-document fragment".into(),
+            )),
+        },
+        ("style", None, "media", None) => Ok(()),
+        ("style", None, "title", None) => Err(PresentationError::Unsupported(
+            "attribute name or namespace".into(),
+        )),
+        (_, _, "media", _) => Err(PresentationError::Unsupported(
+            "attribute name or namespace".into(),
+        )),
+        _ => Ok(()),
     }
 }
 
