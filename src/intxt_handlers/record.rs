@@ -171,7 +171,7 @@ impl Recorder<'_> {
         self.caller
             .call(CreateDoc {
                 capability: self.create_capability,
-                command: self.caller.command(step)?,
+                command: self.caller.command(step, &datums)?,
                 placement: self.placement.clone(),
                 datums,
             })
@@ -195,7 +195,7 @@ impl Recorder<'_> {
         self.caller
             .call(WriteDatums {
                 capability,
-                command: Some(self.caller.command(step)?),
+                command: Some(self.caller.command(step, &set)?),
                 doc_id: doc.clone(),
                 mode: WriteMode::AtCurrent,
                 set,
@@ -303,56 +303,67 @@ struct WorktreeState {
 
 impl Recorder<'_> {
     /// The repository, clone and worktree documents, created when missing. The repository's
-    /// `gitRepo` slot is the clone's UUID: the first recorder of a project mints the repository
-    /// id, and the recorder has no better source for it than the clone it first saw.
+    /// `gitRepo` slot is its smallest root commit, which every clone of the project on every
+    /// machine derives alike (ledger D13); a repository with no commit yet has none, so it has no
+    /// repository document until it has one, and the clone's `repo` is set then.
     async fn identity_docs(
         &self,
         worktree: &WorktreeBatch,
-    ) -> Result<(DocId, DocId, WorktreeState), IntxtError> {
+    ) -> Result<(Option<DocId>, DocId, WorktreeState), IntxtError> {
         let identity = &worktree.identity;
         let step = |what: &str| format!("{}/{what}", identity.worktree_id);
-        let repo = match &worktree.docs.repo {
-            Some(doc) => doc_id(doc)?,
-            None => {
+        let root = identity.roots.iter().min();
+        let repo = match (&worktree.docs.repo, root) {
+            (Some(doc), _) => Some(doc_id(doc)?),
+            (None, Some(root)) => {
                 let repo = work::GitRepo {
                     roots: identity.roots.clone(),
                     remotes: identity.remotes.clone(),
                     extra: Default::default(),
                 };
-                self.create(
-                    &step("repo"),
-                    [entry(
-                        to_value(&repo),
-                        work::GitRepo::ID,
-                        &identity.clone_id,
-                    )?]
-                    .into(),
+                Some(
+                    self.create(
+                        &step("repo"),
+                        [entry(to_value(&repo), work::GitRepo::ID, root)?].into(),
+                    )
+                    .await?
+                    .doc_id,
                 )
-                .await?
-                .doc_id
             }
+            (None, None) => None,
         };
-        let clone = match &worktree.docs.clone {
-            Some(doc) => doc_id(doc)?,
-            None => {
-                let clone = work::GitClone {
-                    repo: reference(&repo, work::GitRepo::ID, &identity.clone_id)?,
+        let repo_ref = match (&repo, root) {
+            (Some(doc), Some(root)) => Some(reference(doc, work::GitRepo::ID, root)?),
+            (None, _) => None,
+            (Some(_), None) => return Err(invalid("a repository document without a root commit")),
+        };
+        let clone_datum = || {
+            entry(
+                to_value(&work::GitClone {
+                    repo: repo_ref.clone(),
                     machine: self.machine.clone(),
                     path: identity.clone_path.clone(),
                     vcs: vec![work::Vcs::Git],
                     extra: Default::default(),
-                };
-                self.create(
-                    &step("clone"),
-                    [entry(
-                        to_value(&clone),
-                        work::GitClone::ID,
-                        &identity.clone_id,
-                    )?]
-                    .into(),
-                )
-                .await?
-                .doc_id
+                }),
+                work::GitClone::ID,
+                &identity.clone_id,
+            )
+        };
+        let clone = match &worktree.docs.clone {
+            Some(doc) => {
+                let doc = doc_id(doc)?;
+                if worktree.docs.repo.is_none() && repo.is_some() {
+                    // The repository document is new: the clone points at it from now on.
+                    self.write(&step("clone-repo"), &doc, [clone_datum()?].into())
+                        .await?;
+                }
+                doc
+            }
+            None => {
+                self.create(&step("clone"), [clone_datum()?].into())
+                    .await?
+                    .doc_id
             }
         };
         let worktree_key = key(work::Worktree::ID, "main")?;
@@ -549,7 +560,7 @@ impl Recorder<'_> {
     async fn write_git(
         &self,
         worktree: &WorktreeBatch,
-        repo: &DocId,
+        repo: Option<&DocId>,
         clone: &DocId,
     ) -> Result<(), IntxtError> {
         let step = |what: &str| format!("{}/{what}", worktree.identity.worktree_id);
@@ -559,6 +570,9 @@ impl Recorder<'_> {
             .map(|(sha, commit)| Ok((key(work::GitCommit::ID, sha)?, to_value(commit))))
             .collect::<Result<BTreeMap<_, _>, IntxtError>>()?;
         if !commits.is_empty() {
+            let repo = repo.ok_or_else(|| {
+                invalid("commits were observed in a repository without a root commit")
+            })?;
             let known = self
                 .read(repo, &commits.keys().cloned().collect::<Vec<_>>())
                 .await?;
@@ -690,7 +704,7 @@ impl Recorder<'_> {
         let docs = WorktreeDocs {
             worktree: Some(state.doc.to_string()),
             clone: Some(clone.to_string()),
-            repo: Some(repo.to_string()),
+            repo: repo.as_ref().map(ToString::to_string),
             extra: Default::default(),
         };
         let recorded = RecordedWorktree {
@@ -702,7 +716,7 @@ impl Recorder<'_> {
             return Ok(recorded);
         }
         let heads = self.write_files(worktree, &mut state).await?;
-        self.write_git(worktree, &repo, &clone).await?;
+        self.write_git(worktree, repo.as_ref(), &clone).await?;
         self.write_ops(worktree, &mut state, sessions, &heads)
             .await?;
         if state.changed {

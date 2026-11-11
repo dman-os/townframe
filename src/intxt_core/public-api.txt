@@ -58,7 +58,7 @@ pub struct intxt_core::generic::Title  { title: String, description: Option < St
 pub struct intxt_core::work::AgentSession  { harness: String, session_id: String, title: Option < String >, cwd: String, additional_directories: Vec < String >, parent: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::work::CommitFile  { path: String, status: FileStatus, old_path: Option < String >, extra: Extra }
 pub struct intxt_core::work::File  { worktree: DatumReference, blob: Option < DatumReference >, extra: Extra }
-pub struct intxt_core::work::GitClone  { repo: DatumReference, machine: ActorUrl, path: String, vcs: Vec < Vcs >, extra: Extra }
+pub struct intxt_core::work::GitClone  { repo: Option < DatumReference >, machine: ActorUrl, path: String, vcs: Vec < Vcs >, extra: Extra }
 pub struct intxt_core::work::GitCommit  { parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, extra: Extra }
 pub struct intxt_core::work::GitIdent  { name: String, email: String, at: Timestamp, extra: Extra }
 pub struct intxt_core::work::GitObservation  { head: Option < String >, reference: Option < String >, from: Option < String >, to: Option < String >, reflog: Option < String >, extra: Extra }

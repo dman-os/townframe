@@ -6,6 +6,8 @@ use super::*;
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use intxt_capture::hook::Hook;
+use intxt_core::capture::Batch;
+use intxt_core::capture::Content;
 use intxt_core::capture::RecordedIds;
 use intxt_handlers::RecordObservations;
 use std::path::Path;
@@ -41,6 +43,8 @@ struct Session {
     drawer: DrawerId,
     machine: ActorUrl,
     calls: usize,
+    /// The repository's root commit, which keys its `gitRepo` datum.
+    root_commit: String,
 }
 
 impl Session {
@@ -54,6 +58,7 @@ impl Session {
         std::fs::write(repo.join("b.txt"), "bee\n").unwrap();
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "first"]);
+        let root_commit = git(&repo, &["rev-parse", "HEAD"]);
         let transcript = base.join("claude/s1.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         Self {
@@ -65,6 +70,7 @@ impl Session {
             machine: serde_json::from_value(json!("dtxt:actor:z11111111111111111111111111111111"))
                 .unwrap(),
             calls: 0,
+            root_commit,
         }
     }
 
@@ -95,6 +101,28 @@ impl Session {
         }
     }
 
+    /// Sends `batch` to `recordObservations` under idempotency key `key`.
+    async fn send(&self, node: &TestNode, batch: &Batch, key: &str) -> RecordedIds {
+        let output = node
+            .invoke(
+                RecordObservations::XRPC.nsid,
+                serde_json::to_value(RecordObservations {
+                    drawer: self.drawer.clone(),
+                    machine: self.machine.clone(),
+                    batch: batch.clone(),
+                })
+                .unwrap(),
+                InvocationContext {
+                    idempotency_key: Some(key.to_owned()),
+                    http: None,
+                },
+                RequestContext::root(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("recordObservations refused: {error:?}"));
+        serde_json::from_value(output).unwrap()
+    }
+
     /// Runs `hook`: observe, record what was observed (twice, under one idempotency key, when
     /// `retry`, which must answer the same), and commit the answer as the host's state. None when
     /// the hook observed nothing.
@@ -105,30 +133,11 @@ impl Session {
             return None;
         }
         self.calls += 1;
-        let record = async |node: &TestNode| -> RecordedIds {
-            let output = node
-                .invoke(
-                    RecordObservations::XRPC.nsid,
-                    serde_json::to_value(RecordObservations {
-                        drawer: self.drawer.clone(),
-                        machine: self.machine.clone(),
-                        batch: prepared.batch.clone(),
-                    })
-                    .unwrap(),
-                    InvocationContext {
-                        idempotency_key: Some(format!("hook-{}", self.calls)),
-                        http: None,
-                    },
-                    RequestContext::root(),
-                )
-                .await
-                .unwrap_or_else(|error| panic!("recordObservations refused: {error:?}"));
-            serde_json::from_value(output).unwrap()
-        };
-        let recorded = record(node).await;
+        let key = format!("hook-{}", self.calls);
+        let recorded = self.send(node, &prepared.batch, &key).await;
         if retry {
             assert_eq!(
-                record(node).await,
+                self.send(node, &prepared.batch, &key).await,
                 recorded,
                 "a retried call answers the same"
             );
@@ -280,19 +289,93 @@ async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
     )
     .await;
     assert_eq!(commit["message"], "second");
-    let clone_id = worktree.clone.key().tag().to_string();
-    assert_eq!(clone_id, work::GitClone::ID);
+    let clone_id_slot = String::from_utf8(worktree.clone.key().slot_bytes().to_vec()).unwrap();
+    // The repository is keyed by its root commit, which any clone of it derives alike.
+    let repo = value(
+        &node,
+        docs.repo.as_ref().unwrap(),
+        work::GitRepo::ID,
+        &session.root_commit,
+    )
+    .await;
+    assert_eq!(repo["roots"], json!([session.root_commit]));
+    assert_eq!(
+        value(
+            &node,
+            docs.clone.as_ref().unwrap(),
+            work::GitClone::ID,
+            &clone_id_slot
+        )
+        .await["repo"],
+        format!(
+            "dtxt:datum:{}/org.example.intxt.work.gitRepo/{}",
+            docs.repo.as_ref().unwrap(),
+            session.root_commit
+        )
+    );
     let main_ref = value(
         &node,
         docs.clone.as_ref().unwrap(),
         work::GitRef::ID,
-        &format!(
-            "{}/refs/heads/main",
-            String::from_utf8(worktree.clone.key().slot_bytes().to_vec()).unwrap()
-        ),
+        &format!("{clone_id_slot}/refs/heads/main"),
     )
     .await;
     assert_eq!(main_ref["target"], sha);
     assert_eq!(committed.worktrees[&root].next_seq, 3);
+    node.stop().await;
+}
+
+/// A first attempt that did not finish leaves the same key behind: re-sending it with a batch
+/// whose content changed in the meantime is a new write, not a refusal, and records the change.
+#[tokio::test]
+async fn a_changed_batch_under_the_same_key_records_the_change() {
+    let node = boot().await;
+    let drawer = node
+        .call(intxt_handlers::CreateIntxt {
+            title: "capture".to_owned(),
+            description: None,
+        })
+        .await
+        .unwrap()
+        .drawer_id;
+    let session = Session::new(drawer);
+    let root = session.repo.display().to_string();
+    session.append(&[json!({"type": "user", "uuid": "u1", "parentUuid": null,
+        "timestamp": "2026-11-10T10:00:00Z", "cwd": session.repo, "sessionId": "s1",
+        "message": {"role": "user", "content": "edit it"}})]);
+    std::fs::write(session.repo.join("a.txt"), "one\nTWO\n").unwrap();
+    let prepared =
+        intxt_capture::host::prepare(&session.hook("Stop", None), &session.state).unwrap();
+    let first = session.send(&node, &prepared.batch, "hook-1").await;
+
+    let mut batch = prepared.batch.clone();
+    let ops = &mut batch.worktrees[0].ops;
+    ops[0].changes[0].content = Some(Content::text("one\nCHANGED\n"));
+    let again = ops[0].clone();
+    ops.push(again);
+    let second = session.send(&node, &batch, "hook-1").await;
+    assert_eq!(
+        second.worktrees[&root].next_seq,
+        first.worktrees[&root].next_seq + 1
+    );
+
+    let docs = &second.worktrees[&root].docs;
+    let worktree: work::Worktree = serde_json::from_value(
+        value(
+            &node,
+            docs.worktree.as_ref().unwrap(),
+            work::Worktree::ID,
+            "main",
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(
+        value(&node, &worktree.files["a.txt"], generic::Note::ID, "main").await["content"],
+        "one\nCHANGED\n"
+    );
+    let log = &worktree.op_logs[0].doc;
+    value(&node, log, work::WorktreeOp::ID, "1").await;
+    prepared.commit(second).unwrap();
     node.stop().await;
 }

@@ -49,6 +49,7 @@ use service_client_core_rs::Client;
 use service_client_core_rs::xrpc::Xrpc;
 use service_core_rs::HttpMetadata;
 use service_core_rs::xrpc::bearer_header_value;
+use std::collections::BTreeMap;
 
 /// Creates an intxt (ADR 036 §2): a drawer, marked as an intxt, with a title and an empty body.
 /// The drawer is owned by the caller, whose authority the handler presents.
@@ -175,9 +176,22 @@ impl<'a> Caller<'a> {
         })
     }
 
-    /// The command id of `step`: the base and the step's fixed suffix.
-    pub(crate) fn command(&self, step: &str) -> Result<CommandId, IntxtError> {
-        CommandId::try_from(format!("{}/{step}", self.command_base)).map_err(|error| {
+    /// The command id of `step` writing `content`: the base, the step's fixed suffix and a short
+    /// digest of the request's content (canonical JSON). An identical retry is the same command
+    /// and dedupes; a write whose content changed since a partial first attempt is a new command
+    /// instead of a `CommandReused` refusal.
+    pub(crate) fn command(
+        &self,
+        step: &str,
+        content: &impl Serialize,
+    ) -> Result<CommandId, IntxtError> {
+        let digest = blake3::hash(&serde_json::to_vec(content).expect("a request serializes"));
+        CommandId::try_from(format!(
+            "{}/{step}/{}",
+            self.command_base,
+            &digest.to_hex().as_str()[..16]
+        ))
+        .map_err(|error| {
             IntxtError::Invalid(format!("the idempotency key makes no command id: {error}"))
         })
     }
@@ -272,7 +286,7 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
         let drawer_id = caller
             .call(CreateDrawer {
                 capability: drawers,
-                command: caller.command("create-drawer")?,
+                command: caller.command("create-drawer", &CreateLayout::SingleGroup)?,
                 layout: CreateLayout::SingleGroup,
             })
             .await?
@@ -283,37 +297,38 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
                 ..DocScope::default()
             })
             .await?;
+        let set: BTreeMap<DatumKey, Value> = [
+            datum(
+                to_value(&generic::Intxt::default()),
+                generic::Intxt::ID,
+                "main",
+            ),
+            datum(
+                to_value(&generic::Title {
+                    title: input.title,
+                    description: input.description,
+                    extra: Default::default(),
+                }),
+                generic::Title::ID,
+                "main",
+            ),
+            datum(
+                to_value(&generic::Body {
+                    order: Vec::new(),
+                    extra: Default::default(),
+                }),
+                generic::Body::ID,
+                "main",
+            ),
+        ]
+        .into();
         caller
             .call(WriteDatums {
                 capability: descriptor,
-                command: Some(caller.command("write-descriptor")?),
+                command: Some(caller.command("write-descriptor", &set)?),
                 doc_id: drawer_id.clone(),
                 mode: WriteMode::AtCurrent,
-                set: [
-                    datum(
-                        to_value(&generic::Intxt::default()),
-                        generic::Intxt::ID,
-                        "main",
-                    ),
-                    datum(
-                        to_value(&generic::Title {
-                            title: input.title,
-                            description: input.description,
-                            extra: Default::default(),
-                        }),
-                        generic::Title::ID,
-                        "main",
-                    ),
-                    datum(
-                        to_value(&generic::Body {
-                            order: Vec::new(),
-                            extra: Default::default(),
-                        }),
-                        generic::Body::ID,
-                        "main",
-                    ),
-                ]
-                .into(),
+                set,
                 remove: Default::default(),
             })
             .await?;
@@ -395,17 +410,18 @@ impl big_ndk::Handler<AddToIntxt> for Intxt {
                 ..DocScope::default()
             })
             .await?;
+        let set: BTreeMap<DatumKey, Value> = [
+            (entry_key, entry),
+            datum(to_value(&body), generic::Body::ID, "main"),
+        ]
+        .into();
         caller
             .call(WriteDatums {
                 capability: descriptor,
-                command: Some(caller.command("write-entry")?),
+                command: Some(caller.command("write-entry", &(&set, &body_heads))?),
                 doc_id: intxt.clone(),
                 mode: WriteMode::AtHeads { heads: body_heads },
-                set: [
-                    (entry_key, entry),
-                    datum(to_value(&body), generic::Body::ID, "main"),
-                ]
-                .into(),
+                set,
                 remove: Default::default(),
             })
             .await?;
@@ -439,7 +455,7 @@ impl big_ndk::Handler<AddToIntxt> for Intxt {
             .call(AddDoc {
                 capability: drawers,
                 reach: drawers,
-                command: caller.command("add-doc")?,
+                command: caller.command("add-doc", &(&intxt, part_doc))?,
                 drawer_id: intxt.clone(),
                 doc_id: part_doc.clone(),
                 access: DrawerAccess::Read,

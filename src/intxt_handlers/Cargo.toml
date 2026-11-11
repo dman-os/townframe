@@ -17,6 +17,7 @@ schemars = ["dep:schemars", "big_cabinet_core/schemars", "method_core/schemars"]
 [dependencies]
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 big_ndk.workspace = true
+blake3.workspace = true
 intxt_core = { path = "../intxt_core" }
 method_core.workspace = true
 service_client_core_rs.workspace = true
