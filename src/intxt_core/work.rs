@@ -33,8 +33,9 @@ pub struct GitRepo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitClone {
-    /// The `gitRepo` datum.
-    pub repo: DatumReference,
+    /// The `gitRepo` datum, once the repository has a root commit to be keyed by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<DatumReference>,
     /// The node holding the clone.
     pub machine: ActorUrl,
     /// Absolute path of the git directory; a hint, not identity.
