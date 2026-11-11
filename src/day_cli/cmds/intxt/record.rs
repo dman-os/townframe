@@ -24,7 +24,6 @@ use crate::interlude::*;
 use intxt_capture::acp::Direction;
 use intxt_capture::acp::Emit;
 use intxt_capture::acp::Recorder;
-use jiff::Timestamp;
 use std::collections::BTreeSet;
 use std::pin::pin;
 use std::process::ExitStatus;
