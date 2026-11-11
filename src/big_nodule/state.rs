@@ -106,8 +106,10 @@ pub(crate) struct Stores {
     pub(crate) dispatch_authority: CapId,
     pub(crate) executor: Option<Arc<dyn NoduleExecutor>>,
     /// The node's schema repo: an enabled nodule's held datums are registered here and retired
-    /// when it is disabled, refused, substituted away or uninstalled.
+    /// when it is disabled, refused, taken over or uninstalled.
     pub(crate) schemas: Arc<SchemaRepo>,
+    /// `NodulesConfig::allow_slot_takeover`.
+    pub(crate) allow_slot_takeover: bool,
 }
 
 impl Stores {
@@ -170,7 +172,7 @@ pub(crate) enum Command {
         provider: Option<String>,
         reply: Reply<()>,
     },
-    SetSubstitution {
+    SetDevTakeover {
         context: RequestContext,
         cartridge_id: CartridgeId,
         by: Option<CartridgeId>,
@@ -577,12 +579,12 @@ impl State {
                 provider,
                 reply,
             } => answer(reply, self.set_method_route(&context, pattern, provider)).await,
-            Command::SetSubstitution {
+            Command::SetDevTakeover {
                 context,
                 cartridge_id,
                 by,
                 reply,
-            } => answer(reply, self.set_substitution(&context, &cartridge_id, by)).await,
+            } => answer(reply, self.set_dev_takeover(&context, &cartridge_id, by)).await,
             Command::Uninstall {
                 context,
                 cartridge_id,
@@ -683,16 +685,22 @@ impl State {
             .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
-    async fn set_substitution(
+    async fn set_dev_takeover(
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
         by: Option<CartridgeId>,
     ) -> Res<NoduleRecord> {
+        // Clearing is always allowed, which is how a slot refused for a stray takeover recovers.
+        if by.is_some() && !self.stores.allow_slot_takeover {
+            return Err(NodulesError::Rejected(
+                "dev slot takeover is off: set `dev.allow_slot_takeover` in node.json".into(),
+            ));
+        }
         let target = cartridge_id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.set_substitution(&cache, &target, by)
+            config.set_dev_takeover(&cache, &target, by)
         })
         .await?;
         self.records
@@ -1994,10 +2002,17 @@ impl State {
 impl Stores {
     /// The nodule config as it is now: what every reconcile starts from.
     async fn config(&self) -> Res<StoreSnapshot<NoduleConfig>> {
-        self.datum_store
+        let mut snapshot = self
+            .datum_store
             .snapshot()
             .await
-            .map_err(crate::store_error)
+            .map_err(crate::store_error)?;
+        if !self.allow_slot_takeover {
+            // A takeover datum that reaches the document by any other path (a sync, a hand
+            // edit) must not run another cartridge as a slot on a node that did not opt in.
+            snapshot.value.refuse_dev_takeover();
+        }
+        Ok(snapshot)
     }
 
     async fn open_actor(
