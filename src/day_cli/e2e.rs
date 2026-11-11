@@ -504,7 +504,7 @@ mod library {
         let mut settings: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         settings["nodule_operations"] = json!({
-            "operations": intxt_nodule::REQUIRED_OPERATIONS
+            "operations": intxt_core::methods::REQUIRED_OPERATIONS
         });
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
 

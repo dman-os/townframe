@@ -27,6 +27,7 @@ use serde_json::Value;
 
 use crate::methods::AddToIntxt;
 use crate::methods::CreateIntxt;
+use crate::methods::REQUIRED_OPERATIONS;
 use crate::methods::RecordObservations;
 
 /// The authority every intxt record is under. A cartridge registers only NSIDs it owns, so the
@@ -49,11 +50,10 @@ pub fn handler_artifact(wasm: &[u8]) -> Artifact {
     }
 }
 
-/// intxt's cartridge, whose handler is `handler` (see [`handler_artifact`]). `requires` are the
-/// operations of other authorities the handler calls (`intxt_nodule::REQUIRED_OPERATIONS`), which
-/// the cartridge requests and an operator must grant the nodule (and the node's ceiling must
+/// intxt's cartridge, whose handler is `handler` (see [`handler_artifact`]). It requests
+/// [`REQUIRED_OPERATIONS`], which an operator must grant the nodule (and the node's ceiling must
 /// cover).
-pub fn cartridge(handler: Artifact, requires: &[&str]) -> Cartridge {
+pub fn cartridge(handler: Artifact) -> Cartridge {
     assert_eq!(
         handler.key, HANDLER_ARTIFACT,
         "the nodule's handler names the artifact `{HANDLER_ARTIFACT}`"
@@ -93,7 +93,7 @@ pub fn cartridge(handler: Artifact, requires: &[&str]) -> Cartridge {
             ])
             .collect(),
         sidecar,
-        requires: requires
+        requires: REQUIRED_OPERATIONS
             .iter()
             .map(|nsid| Request::new(*nsid, *nsid))
             .collect(),

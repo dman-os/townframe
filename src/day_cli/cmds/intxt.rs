@@ -172,7 +172,7 @@ fn report(summary: &capture::Summary, verbose: bool) {
 /// The `day nodules ceiling add` command that covers `REQUIRED_OPERATIONS`, by the minimal
 /// authority prefixes (an operation's NSID without its last segment).
 fn ceiling_command() -> String {
-    let authorities: std::collections::BTreeSet<&str> = intxt_nodule::REQUIRED_OPERATIONS
+    let authorities: std::collections::BTreeSet<&str> = intxt_core::methods::REQUIRED_OPERATIONS
         .iter()
         .filter_map(|nsid| nsid.rsplit_once('.').map(|(authority, _)| authority))
         .collect();
@@ -221,7 +221,6 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
 
     let cartridge = intxt_core::cartridge::cartridge(
         intxt_core::cartridge::handler_artifact(wasm),
-        &intxt_nodule::REQUIRED_OPERATIONS,
     );
     let cartridge_id = cartridge.id.clone();
     call(
@@ -237,7 +236,7 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
         SetNoduleOperationGrants {
             cartridge_id: cartridge_id.clone(),
             operations: DispatchScope {
-                operations: intxt_nodule::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+                operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
                 ..DispatchScope::default()
             },
         },

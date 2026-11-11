@@ -7,10 +7,32 @@ use crate::capture::RecordedIds;
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DocId;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::WriteDatums;
+use big_cabinet_core::drawer::protocol::AddDoc;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::ListDocDrawers;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::reference::DatumReference;
 use method_core::ContextError;
+use method_core::Method;
 use serde::Deserialize;
 use serde::Serialize;
+
+/// The operations of other authorities intxt's handler calls (`intxt_nodule`), which the cartridge
+/// requests and an operator grants the nodule.
+pub const REQUIRED_OPERATIONS: [&str; 8] = [
+    MintDrawerCapability::XRPC.nsid,
+    CreateDrawer::XRPC.nsid,
+    MintDocCapability::XRPC.nsid,
+    WriteDatums::XRPC.nsid,
+    ReadDatums::XRPC.nsid,
+    ListDocDrawers::XRPC.nsid,
+    AddDoc::XRPC.nsid,
+    CreateDoc::XRPC.nsid,
+];
 
 /// Creates an intxt (ADR 036 §2): a drawer, marked as an intxt, with a title and an empty body.
 /// The drawer is owned by the caller, whose authority the handler presents.

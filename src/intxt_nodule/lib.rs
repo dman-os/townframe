@@ -24,7 +24,6 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
-use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
@@ -58,18 +57,6 @@ use service_client_core_rs::xrpc::Xrpc;
 use service_core_rs::HttpMetadata;
 use service_core_rs::xrpc::bearer_header_value;
 use std::collections::BTreeMap;
-
-/// The operations of other authorities the handler calls, which the cartridge requests.
-pub const REQUIRED_OPERATIONS: [&str; 8] = [
-    MintDrawerCapability::XRPC.nsid,
-    CreateDrawer::XRPC.nsid,
-    MintDocCapability::XRPC.nsid,
-    WriteDatums::XRPC.nsid,
-    ReadDatums::XRPC.nsid,
-    ListDocDrawers::XRPC.nsid,
-    AddDoc::XRPC.nsid,
-    CreateDoc::XRPC.nsid,
-];
 
 /// The intxt nodule's handler. A fresh value serves each request (`big_ndk::export_nodule!`
 /// cannot be used here because the guest wrapper, not this crate, owns the export), so it holds

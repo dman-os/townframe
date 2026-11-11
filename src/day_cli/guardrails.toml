@@ -12,7 +12,6 @@ allowed_dependencies = [
     "big_repo",
     "intxt_capture",
     "intxt_core",
-    "intxt_nodule",
     "method_core",
     "secrets_rs",
     "service_client_native_rs",

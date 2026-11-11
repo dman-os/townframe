@@ -53,13 +53,12 @@ async fn boot() -> TestNode {
         intxt_core::cartridge::handler_artifact(
             b"placeholder: the native test harness never reads the handler bytes",
         ),
-        &crate::REQUIRED_OPERATIONS,
     );
     let id = cartridge.id.clone();
     // The ceiling of what a nodule can be granted covers the registered cartridge's own
     // authority only, so the foreign operations it calls must be added to it.
     let operations = DispatchScope {
-        operations: crate::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+        operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()
