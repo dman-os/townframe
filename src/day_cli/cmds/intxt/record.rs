@@ -242,6 +242,12 @@ pub(crate) async fn run(agent: Vec<String>, thinking: bool) -> Res<ExitCode> {
     // The node is reached when the first batch is ready, not before: the session must start even
     // when there is no daemon.
     let mut recording: Option<Recording> = None;
+    // `tokio::io::stdin()` reads on a blocking-pool thread that stays parked when the agent exits
+    // while the client keeps our stdin open, and dropping a runtime waits for such threads. This
+    // does not hang `day`: its runtime lives in a static (`lazy::rt`) that is never dropped, so
+    // returning from `main` exits the process regardless (checked with a held-open stdin and an
+    // agent that exits: `day x intxt record -- sh -c 'exit 3'` returns 3 at once). Keep it that
+    // way: a runtime owned and dropped here would need `std::process::exit` instead.
     let status = proxy(
         &agent,
         thinking,

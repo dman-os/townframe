@@ -34,7 +34,8 @@
 //!
 //! Replays are not recorded: `session/load` makes the agent stream the whole history as
 //! `session/update` notifications before it answers, and they are dropped (they are what an
-//! earlier recording already holds). `user_message_chunk` is dropped too: the prompt request is
+//! earlier recording already holds; the gap is that a loaded session this recorder sees for the
+//! first time loses its history). `user_message_chunk` is dropped too: the prompt request is
 //! the turn's user message. `fs/*`, `terminal/*` and `session/request_permission` are not
 //! recorded; terminal content is a `terminalId`, whose output only the client sees.
 
