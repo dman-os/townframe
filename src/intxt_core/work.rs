@@ -132,6 +132,13 @@ pub enum OpKind {
     Amend,
     #[serde(rename = "rebase")]
     Rebase,
+    #[serde(rename = "merge")]
+    Merge,
+    #[serde(rename = "cherryPick")]
+    CherryPick,
+    #[serde(rename = "revert")]
+    Revert,
+    /// A ref moved some other way: a fast-forward, `branch -f`, a fetch.
     #[serde(rename = "refMove")]
     RefMove,
     #[serde(rename = "jjSnapshot")]
