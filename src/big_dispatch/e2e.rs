@@ -461,6 +461,84 @@ async fn a_request_without_a_credential_is_unauthenticated() {
     h.shutdown().await;
 }
 
+/// A scope that names every authority still reaches no privileged method, a scope reaches one only
+/// when it says `privileged`, and the bit attenuates like the names do: a handle without it cannot
+/// mint one with it, while minting a narrower handle still works.
+#[tokio::test]
+async fn privilege_is_a_scope_bit_that_names_cannot_confer() {
+    const SENSITIVE: &str = "org.example.admin.setGrants";
+    let h = harness().await;
+    let echo = h.register_echo();
+    h.dispatch
+        .router
+        .register(
+            "admin",
+            [(
+                SENSITIVE.to_owned(),
+                Operation {
+                    privileged: true,
+                    ..Operation::unchecked(Some(OperationKind::Query))
+                },
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(echo as Arc<dyn Provider>)),
+        )
+        .unwrap();
+    let operator = h.operator();
+
+    let everything = h
+        .mint_dispatch(operator, authorities(&[DispatchScope::ALL_AUTHORITIES]))
+        .await
+        .unwrap();
+    assert!(h.invoke(everything, ECHO, json!({})).await.is_ok());
+    assert_eq!(
+        h.invoke(everything, SENSITIVE, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+    // Naming the method exactly is no more than naming its authority.
+    let named = h
+        .mint_dispatch(
+            operator,
+            DispatchScope {
+                operations: [SENSITIVE.to_owned()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        h.invoke(named, SENSITIVE, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+
+    // Only a handle that holds the bit can mint one with it.
+    let privileged = DispatchScope {
+        privileged: true,
+        ..authorities(&[DispatchScope::ALL_AUTHORITIES])
+    };
+    assert_eq!(
+        h.mint_dispatch(everything, privileged.clone()).await,
+        Err(DispatchError::Denied)
+    );
+    let holder = h.mint_dispatch(operator, privileged).await.unwrap();
+    assert!(h.invoke(holder, SENSITIVE, json!({})).await.is_ok());
+    // Narrowing still works from either, and a narrowed handle of the holder keeps the bit only
+    // if it asks for it.
+    let narrowed = h
+        .mint_dispatch(everything, authorities(&["org.example.echo"]))
+        .await
+        .unwrap();
+    assert!(h.invoke(narrowed, ECHO, json!({})).await.is_ok());
+    let dropped = h
+        .mint_dispatch(holder, authorities(&["org.example.admin"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        h.invoke(dropped, SENSITIVE, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+    h.shutdown().await;
+}
+
 /// The adapter, exercised on dispatch's own protocol: serving `Client<DispatchProtocol>` as a
 /// provider makes `mintCapability` reachable by NSID through an `Invoke`. The caller holds one
 /// credential: dispatch admits it for the NSID, then hands it on as the request's `Authorization`
@@ -572,6 +650,7 @@ impl Harness {
         }}});
         let operation = |kind, file| Operation {
             kind: Some(kind),
+            privileged: false,
             lexicon: Some(LexiconSource {
                 file,
                 carried: Vec::new(),
@@ -762,6 +841,7 @@ async fn an_operation_referring_to_the_nodes_reference_defs_is_validated_with_th
                     nsid.to_owned(),
                     Operation {
                         kind: Some(OperationKind::Procedure),
+                        privileged: false,
                         lexicon: Some(LexiconSource { file: tag, carried }),
                     },
                 )],
