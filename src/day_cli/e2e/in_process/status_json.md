@@ -1,10 +1,11 @@
 # `status --json`
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
-$ day status --json
+$ day node status --json
+? 3
 {
   "mode": "inProcess",
   "nodeId": "[..]",

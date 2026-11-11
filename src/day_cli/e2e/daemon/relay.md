@@ -1,19 +1,19 @@
 # A relay node
 
-`day init --relay` records the relay flag and the network attachment a relay is reached over.
+`day node init --relay` records the relay flag and the network attachment a relay is reached over.
 The daemon runs the relay policy, and `status` says so. The test binds the loopback interface
 only, so nothing leaves the machine.
 
 ```console
-$ day init --relay
+$ day node init --relay
 initialized node [..] at [..]/node
 
 $ sh -c 'sed -i "s/\"loopbackOnly\": false/\"loopbackOnly\": true/" "$DAY_NODE/node.json"'
 
-$ day daemon start
+$ day node start
 daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
-$ day status
+$ day node status
 node      [..]
 path      [..]/node
 mode      daemon
@@ -24,7 +24,7 @@ services  not exposed by the node
 peers     0 connected
   address [..]
 
-$ day daemon stop
+$ day node stop
 daemon stopped (pid [..])
 
 ```

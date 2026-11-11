@@ -5,10 +5,10 @@ that holds the list through `getNodeInfo`, mints a handle on just that drawer, a
 drawer per line, so a user can find drawer ids without being handed a capability first.
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
-$ day daemon start
+$ day node start
 daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
 $ day drawers ls
@@ -19,7 +19,7 @@ listed
 $ sh -c '"$DAY" drawers ls --json | grep -c "\"mirror\": true"'
 1
 
-$ day daemon stop
+$ day node stop
 daemon stopped (pid [..])
 
 ```

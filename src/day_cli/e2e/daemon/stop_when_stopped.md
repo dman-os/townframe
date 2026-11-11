@@ -1,10 +1,10 @@
 # `daemon stop` with no daemon is not an error
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
-$ day daemon stop
+$ day node stop
 daemon not running
 
 ```

@@ -5,7 +5,7 @@ use crate::interlude::*;
 pub enum PeersCommands {
     /// Add a peer to the daemon's bootstrap list: it is dialed as soon as the daemon starts
     Add {
-        /// The peer's endpoint ticket, as `day status` prints it under `address`
+        /// The peer's endpoint ticket, as `day node status` prints it under `address`
         ticket: String,
     },
     /// List the bootstrap peers and, when a daemon is serving, who it is connected to
@@ -41,7 +41,7 @@ async fn add(ticket: &str) -> Res<ExitCode> {
         }
     );
     if changed && dir.probe_socket().await? == SocketState::Live {
-        println!("the running daemon dials it after `day daemon stop` and `day daemon start`");
+        println!("the running daemon dials it after `day node stop` and `day node start`");
     }
     Ok(ExitCode::SUCCESS)
 }
