@@ -10,4 +10,7 @@ default_features = true
 features = []
 
 [builds.native]
-features = ["schemars"]
+required_features = ["schemars"]
+
+[builds.wasm32-wasip3]
+required_features = ["schemars"]

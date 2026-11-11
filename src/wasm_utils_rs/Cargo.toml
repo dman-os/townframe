@@ -23,9 +23,10 @@ members = [
     "../plug_dayledger_routines",
     "../test_wflows",
     "../test_nodule_guest",
+    "../intxt_guest",
     "../clay_rt_wcmp_web",
 ]
-default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows", "../test_nodule_guest"]
+default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows", "../test_nodule_guest", "../intxt_guest"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,6 +37,7 @@ rust-version = "1.91"
 wasm_utils_rs = { path = "." }
 big_ndk = { path = "../big_ndk" }
 test_nodule_handlers = { path = "../test_nodule_handlers" }
+intxt_handlers = { path = "../intxt_handlers" }
 method_core = { path = "../method_core", default-features = false }
 service_core_rs = { path = "../service_core_rs", default-features = false }
 service_client_core_rs = { path = "../service_client_core_rs", default-features = false }

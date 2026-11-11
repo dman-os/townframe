@@ -8112,27 +8112,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "intxt_handlers"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "big_ndk",
+ "http",
+ "intxt_core",
+ "method_core",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "intxt_nodule"
 version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
  "big_cartridges_core",
  "big_dispatch_core",
- "big_ndk",
  "big_ndk_testing",
  "big_nodule_core",
- "http",
  "indexmap 2.14.2",
  "intxt_core",
+ "intxt_handlers",
  "method_core",
  "method_lexicon",
- "schemars 1.2.3",
- "serde",
  "serde_json",
- "service_client_core_rs",
- "service_core_rs",
  "service_utils_rs",
- "thiserror 2.0.21",
  "tokio",
 ]
 

@@ -8,7 +8,7 @@
 //! writer replacing the value. Without the sidecar every position would keep the plain JSON kind
 //! its Lexicon states.
 //!
-//! It also serves operations through a handler ([`Intxt`]): `createIntxt` and `addToIntxt` today, recording capture
+//! It also serves operations through a handler (`intxt_handlers::Intxt`): `createIntxt` and `addToIntxt` today, recording capture
 //! observations later. The handler's Lexicons are projected from the Rust types of its methods.
 
 // Booting a node in the tests (`big_ndk_testing`) makes rustc evaluate deep auto-trait chains
@@ -29,14 +29,8 @@ use indexmap::IndexMap;
 use method_core::Method;
 use serde_json::Value;
 
-mod ops;
-
-pub use ops::AddToIntxt;
-pub use ops::AddedToIntxt;
-pub use ops::CreateIntxt;
-pub use ops::Intxt;
-pub use ops::IntxtCreated;
-pub use ops::IntxtError;
+use intxt_handlers::AddToIntxt;
+use intxt_handlers::CreateIntxt;
 
 /// The authority every intxt record is under. A cartridge registers only NSIDs it owns, so the
 /// generic datums intxt holds until they migrate out before the beta (ledger D39) are under it too.
@@ -81,7 +75,7 @@ pub fn cartridge() -> Cartridge {
             ])
             .collect(),
         sidecar,
-        requires: ops::REQUIRED_OPERATIONS
+        requires: intxt_handlers::REQUIRED_OPERATIONS
             .into_iter()
             .map(|nsid| Request::new(nsid, nsid))
             // The operations' Lexicons refer to the reference defs (`addToIntxt`'s `part` is a

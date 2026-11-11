@@ -9,28 +9,16 @@ workspace = true
 [lib]
 path = "lib.rs"
 
-# The `schemars` feature is the switch `method_core::methods!` and the derives below test, so the
-# operation's Lexicon is projected from its Rust types.
-[features]
-default = ["schemars"]
-schemars = []
-
 [dependencies]
-big_ndk.workspace = true
 intxt_core = { path = "../intxt_core" }
+intxt_handlers = { path = "../intxt_handlers", features = ["schemars"] }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
 big_cartridges_core.workspace = true
 big_nodule_core.workspace = true
-http.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 method_core = { workspace = true, features = ["schemars"] }
 method_lexicon = { path = "../method_lexicon" }
-schemars = "1.2"
-serde.workspace = true
 serde_json.workspace = true
-service_client_core_rs.workspace = true
-service_core_rs.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 big_dispatch_core.workspace = true

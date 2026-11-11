@@ -1,8 +1,6 @@
 //! intxt's vocabularies written and read through a real node that admitted intxt's cartridge,
 //! so they are stored as its sidecar says.
 
-use crate::AddToIntxt;
-use crate::AddedToIntxt;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
@@ -31,6 +29,8 @@ use big_dispatch_core::InvocationContext;
 use big_ndk_testing::TestNode;
 use intxt_core::generic;
 use intxt_core::work;
+use intxt_handlers::AddToIntxt;
+use intxt_handlers::AddedToIntxt;
 use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
@@ -52,12 +52,14 @@ async fn boot() -> TestNode {
     // The ceiling of what a nodule can be granted covers the registered cartridge's own
     // authority only, so the foreign operations it calls must be added to it.
     let operations = DispatchScope {
-        operations: crate::ops::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+        operations: intxt_handlers::REQUIRED_OPERATIONS
+            .map(str::to_owned)
+            .into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()
         .with_operation_ceiling(operations.clone())
-        .with_nodule(cartridge, crate::Intxt)
+        .with_nodule(cartridge, intxt_handlers::Intxt)
         .boot()
         .await;
     node.grant(&id, operations).await;
@@ -258,7 +260,7 @@ async fn concurrent_line_edits_to_a_note_both_land() {
 async fn create_intxt_writes_the_descriptor_datums() {
     let node = boot().await;
     let created = node
-        .call(crate::CreateIntxt {
+        .call(intxt_handlers::CreateIntxt {
             title: "Port the sync".to_owned(),
             description: Some("Notes *in markdown*".to_owned()),
         })
@@ -289,7 +291,7 @@ async fn create_intxt_writes_the_descriptor_datums() {
 async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     let node = boot().await;
     let intxt = async |title: &str| {
-        node.call(crate::CreateIntxt {
+        node.call(intxt_handlers::CreateIntxt {
             title: title.to_owned(),
             description: None,
         })
@@ -413,7 +415,7 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
     let create = async |key: &str| {
         let output = node
             .invoke(
-                crate::CreateIntxt::XRPC.nsid,
+                intxt_handlers::CreateIntxt::XRPC.nsid,
                 json!({"title": "Retried"}),
                 InvocationContext {
                     idempotency_key: Some(key.to_owned()),
@@ -423,7 +425,7 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
             )
             .await
             .unwrap();
-        serde_json::from_value::<crate::IntxtCreated>(output)
+        serde_json::from_value::<intxt_handlers::IntxtCreated>(output)
             .unwrap()
             .drawer_id
     };
@@ -436,7 +438,7 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
 /// A file document far past the old per-value node cap reads back as written, and an edit of one
 /// line from the heads it was created at lands, as it does for a small file.
 #[tokio::test]
-async fn a_large_note_reads_back_and_takes_a_line_edit() {
+async fn long_test_a_large_note_reads_back_and_takes_a_line_edit() {
     let node = boot().await;
     let lines = |edited: Option<usize>| -> String {
         (0..4_000)
@@ -477,7 +479,7 @@ async fn a_large_note_reads_back_and_takes_a_line_edit() {
 /// A value past the per-value budget is refused by name, through the docs service client the
 /// helpers here use (an in-process call, so no request-body limit is in the way).
 #[tokio::test]
-async fn a_note_past_the_value_budget_is_refused_by_name() {
+async fn long_af_test_a_note_past_the_value_budget_is_refused_by_name() {
     let node = boot().await;
     let (key, small) =
         datum::<generic::Note>("main", json!({"mime": "text/plain", "content": "x"}));

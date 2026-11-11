@@ -5,9 +5,3 @@
 
 pub const intxt_nodule::AUTHORITY: & str
 pub intxt_nodule::fn cartridge () -> Cartridge
-pub use intxt_nodule::ops :: AddToIntxt
-pub use intxt_nodule::ops :: AddedToIntxt
-pub use intxt_nodule::ops :: CreateIntxt
-pub use intxt_nodule::ops :: Intxt
-pub use intxt_nodule::ops :: IntxtCreated
-pub use intxt_nodule::ops :: IntxtError
