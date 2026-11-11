@@ -565,6 +565,19 @@ impl<'a> Admission<'a> {
                 .get("id")
                 .and_then(Value::as_str)
                 .expect("lexicons() verified every file states its NSID");
+            if let Some(library) = provided_library(id) {
+                let copy =
+                    Value::Object(file.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+                if copy != *library {
+                    return Err(NoduleError::invalid(
+                        format!("lexicons[{index}]"),
+                        format!(
+                            "`{id}` is a type library the node provides; a vendored copy must equal the node's"
+                        ),
+                    ));
+                }
+                continue;
+            }
             if !self.owns(id) && !self.is_requested(id) && !self.implemented.contains(id) {
                 return Err(NoduleError::invalid(
                     format!("lexicons[{index}].id"),
@@ -809,6 +822,18 @@ impl<'a> Admission<'a> {
                 ));
             }
         };
+        // A type library the node provides is always resolved, requested or not.
+        if let Some(library) = provided_library(file) {
+            let def = def.unwrap_or("main");
+            return if library["defs"].get(def).is_some() {
+                Ok(())
+            } else {
+                Err(NoduleError::invalid(
+                    path,
+                    format!("`{file}` declares no definition `{def}`"),
+                ))
+            };
+        }
         if !self.owns(file) {
             return if self.is_requested(file) || self.implemented.contains(file) {
                 Ok(())
@@ -891,6 +916,14 @@ impl<'a> Admission<'a> {
             },
         }
     }
+}
+
+/// The type library the node provides under `nsid`, if it is one (see
+/// [`node_type_libraries`](big_cabinet_core::reference::node_type_libraries)).
+fn provided_library(nsid: &str) -> Option<&'static Value> {
+    big_cabinet_core::reference::node_type_libraries()
+        .iter()
+        .find(|library| library["id"] == nsid)
 }
 
 struct LexiconFile<'a> {

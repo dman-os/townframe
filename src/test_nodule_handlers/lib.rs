@@ -23,7 +23,9 @@
 //!   dynamic, so the call goes through `Cx::transport` and `Cx::next_hop` rather than a typed
 //!   `Cx::call`; it forwards the incoming `idempotency-key` and answers 200 with
 //!   `{ status, body }` (`body` is the upstream JSON, or a string when the upstream body is
-//!   not JSON), or the `UpstreamFailed` domain error when the outgoing request fails.
+//!   not JSON), or the `UpstreamFailed` domain error when the outgoing request fails. With a
+//!   `query` it sends `GET /xrpc/<operation>?<query>` with no body instead, which is how a
+//!   query is called.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }` and any other
 //!   path answers 404 `{ "error": "NotFound" }`.
 
@@ -81,6 +83,9 @@ struct Relay {
     operation: String,
     authority: Option<String>,
     input: Option<Value>,
+    /// The percent-encoded query string of a `GET` to `operation`, which is how a query is
+    /// called. Absent, `input` is POSTed as a procedure's body.
+    query: Option<String>,
 }
 
 // The NSIDs are bare route names: `Fixture::route` matches the last segment of whatever
@@ -140,15 +145,24 @@ impl Handler<Relay> for Fixture {
         )
         .expect("context headers are valid HTTP");
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = cx
-            .transport()
-            .send(XrpcRequest {
+        let request = match &input.query {
+            Some(query) => XrpcRequest {
+                method: Method::GET,
+                path: format!("xrpc/{}?{query}", input.operation),
+                headers,
+                body: Vec::new(),
+            },
+            None => XrpcRequest {
                 method: Method::POST,
                 path: format!("xrpc/{}", input.operation),
                 headers,
                 body: serde_json::to_vec(input.input.as_ref().unwrap_or(&Value::Null))
                     .expect("serializing a Value cannot fail"),
-            })
+            },
+        };
+        let response = cx
+            .transport()
+            .send(request)
             .await
             .map_err(|error| FixtureError::UpstreamFailed(error.message))?;
         let body = serde_json::from_slice::<Value>(&response.body).unwrap_or_else(|_| {

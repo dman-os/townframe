@@ -16,6 +16,18 @@ pub const DATUM_PIN: &str = "org.example.daybook.defs#datumPin";
 /// Lexicon def: projection emits a `ref` to it, and the sidecar overlay leaves it to the def.
 pub const LEXICON_REF: &str = "x-lexicon-ref";
 
+/// The type libraries the node itself provides: Lexicon files with no `main` that any
+/// cartridge's Lexicon may refer to without requesting a contract or vendoring a copy. Every
+/// consumer that resolves a cartridge's references reads this one list: admission treats a
+/// reference into one as resolved and refuses a vendored copy that differs, and dispatch
+/// compiles an operation's input and output with them carried. Only [`DEFS_NSID`] is here, not
+/// every Lexicon the node boots with.
+pub fn node_type_libraries() -> &'static [serde_json::Value] {
+    static LIBRARIES: std::sync::LazyLock<[serde_json::Value; 1]> =
+        std::sync::LazyLock::new(|| [defs_lexicon()]);
+    &*LIBRARIES
+}
+
 /// The published [`DEFS_NSID`] Lexicon file. Every registration carries it, so any datum Lexicon,
 /// a cartridge's included, can refer to its defs.
 pub fn defs_lexicon() -> serde_json::Value {

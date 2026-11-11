@@ -33,6 +33,7 @@ pub use defs::DATUM_REF;
 pub use defs::DEFS_NSID;
 pub use defs::LEXICON_REF;
 pub use defs::defs_lexicon;
+pub use defs::node_type_libraries;
 
 /// Unicode data used when serializing canonical Go-style datum references.
 ///
