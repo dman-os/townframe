@@ -183,7 +183,7 @@ For an ordinary Automerge write, a signature entry carries `actorUuid`, `docUuid
 
 `deletedAt` is always present and initialized, empty for an authored non-tombstone. A removal records a deletion candidate; a later Set clears the candidates it observed. A concurrent Remove/Set merge can retain deletion candidates even when a value is visible. Timestamps are unsigned display metadata: neither a nonempty `deletedAt` nor the latest timestamp decides current tombstone status. The signed operation and its match to the current slot state do. Older entries may remain in Automerge history without being duplicated in current dmeta. Granting broader local access creates no entries in untouched documents.
 
-### Revision 2026-11-11: the dmeta cut (proposed, awaiting the operator)
+### Revision 2026-11-11: the dmeta cut (accepted, operator 2026-11-11)
 
 Measured on replayed editing traces (the 260k-edit Automerge paper trace, seph-blog1, rustcode,
 sveltecomponent), every signed write leaves 70–100 bytes in history after `save()`, against 3–5 for
