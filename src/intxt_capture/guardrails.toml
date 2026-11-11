@@ -1,0 +1,12 @@
+version = 1
+role = "domain"
+dependency_reason = "intxt's capture adapter turns a harness's records into intxt's work datums; it holds that translation and its resumable state, and no node, storage or hook I/O."
+allowed_dependencies = ["big_cabinet_core", "intxt_core"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
