@@ -73,7 +73,6 @@ use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::ProviderIndex;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
-use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::Value;
 use service_client_native_rs::Client;
@@ -476,29 +475,32 @@ impl State {
                         Some(command) => state.run(command).await,
                         None => break,
                     },
-                    event = watch.next() => match event {
+                    changed = watch.changed() => {
+                        // The watch only says the config moved. Read the current snapshot here: one
+                        // taken when the event was produced can predate the change a command of this
+                        // actor made while the actor was blocked (an enable waiting on its workload),
+                        // and reconciling to it would withdraw what that command just served.
+                        // Shutdown stops this task before the datum store it watches, so a closed
+                        // watch while we are still running is a lifecycle break.
+                        changed.expect("nodule config watch closed while the state actor was running");
                         // Revoke failures come back as a map of per-cartridge outcomes that
                         // `reconcile` already folded into the refused records, so only
                         // an `Err` (storage, actor or capability failure) is fatal.
                         // A change this actor made itself (`mutate_config` reconciles it before
                         // its own watch event arrives) is already applied at these heads; only
                         // a change from elsewhere, such as a synced config edit, has others.
-                        Some(Ok(snapshot)) => {
-                            if snapshot.heads != state.observed_heads {
-                                drop(
-                                    state
-                                        .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
-                                        .await?,
-                                );
-                            }
-                        }
-                        Some(Err(err)) => return Err(crate::store_error(err)),
-                        // Shutdown stops this task before the datum store it watches, so a
-                        // closed watch while we are still running is a lifecycle break.
-                        None => {
-                            return Err(NodulesError::Storage(
-                                "nodule config watch closed while the state actor was running".into(),
-                            ));
+                        let snapshot = state
+                            .stores
+                            .datum_store
+                            .snapshot()
+                            .await
+                            .map_err(crate::store_error)?;
+                        if snapshot.heads != state.observed_heads {
+                            drop(
+                                state
+                                    .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
+                                    .await?,
+                            );
                         }
                     },
                 }
