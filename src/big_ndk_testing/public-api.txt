@@ -14,6 +14,5 @@ pub impl big_ndk_testing::TestNode::async fn stop (self)
 pub impl big_ndk_testing::TestNode::fn big_node (& self) -> & BigNode
 pub impl big_ndk_testing::TestNodeBuilder::async fn boot (self) -> TestNode
 pub impl big_ndk_testing::TestNodeBuilder::fn with_nodule < N > (mut self , cartridge : Cartridge , nodule : N) -> Self where N : big_ndk :: Nodule + Clone + Send + 'static ,
-pub impl big_ndk_testing::TestNodeBuilder::fn with_operation_ceiling (mut self , ceiling : DispatchScope) -> Self
 pub struct big_ndk_testing::TestNode  {  }
 pub struct big_ndk_testing::TestNodeBuilder  {  }
