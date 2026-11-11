@@ -4188,6 +4188,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "service_client_core_rs",
  "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
@@ -8109,6 +8110,7 @@ dependencies = [
  "big_cabinet_core",
  "big_cartridges_core",
  "big_nodule_core",
+ "blake3",
  "indexmap 2.14.2",
  "jiff",
  "macros",
@@ -8117,6 +8119,8 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
  "thiserror 2.0.21",
 ]
 
@@ -8124,22 +8128,24 @@ dependencies = [
 name = "intxt_nodule"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "big_blobs_core",
  "big_cabinet_core",
+ "big_dispatch",
  "big_dispatch_core",
  "big_ndk",
  "big_ndk_testing",
- "blake3",
+ "http",
  "intxt_capture",
  "intxt_core",
  "method_core",
  "serde",
  "serde_json",
  "service_client_core_rs",
- "service_core_rs",
  "service_utils_rs",
  "tempfile",
  "tokio",
+ "tower",
 ]
 
 [[package]]

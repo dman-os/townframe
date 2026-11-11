@@ -2505,12 +2505,15 @@ version = "0.1.0"
 dependencies = [
  "automerge",
  "big_cabinet_core",
+ "blake3",
  "jiff",
  "macros",
  "method_core",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
  "thiserror 2.0.20",
 ]
 
@@ -2520,13 +2523,10 @@ version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
  "big_ndk",
- "blake3",
  "intxt_core",
  "method_core",
  "serde",
  "serde_json",
- "service_client_core_rs",
- "service_core_rs",
 ]
 
 [[package]]
