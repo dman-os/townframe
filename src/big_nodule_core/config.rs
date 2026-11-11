@@ -206,6 +206,20 @@ pub struct NoduleSubstitution {
     pub extra: Extra,
 }
 
+/// `org.example.daybook.dispatch.route/<pattern>`: the node-local route of an exact NSID or an
+/// authority prefix to the provider `provider` (ADR 045). Dispatch's router applies it; the
+/// nodule service holds the datum only until the node has a per-node store of its own, so this
+/// datum is not keyed by a cartridge and has no slot in a [`NoduleEntry`].
+#[macros::datum(authority = "org.example.daybook.dispatch", name = "route")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MethodRoute {
+    pub provider: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// The portable nodule configuration datum declarations.
 #[cfg(feature = "schemars")]
 pub fn config_universe() -> big_cabinet_core::datum::Universe {
@@ -216,6 +230,7 @@ pub fn config_universe() -> big_cabinet_core::datum::Universe {
         Declaration::of::<NoduleSettings>().expect("NoduleSettings declaration is valid"),
         Declaration::of::<NoduleGrants>().expect("NoduleGrants declaration is valid"),
         Declaration::of::<NoduleSubstitution>().expect("NoduleSubstitution declaration is valid"),
+        Declaration::of::<MethodRoute>().expect("MethodRoute declaration is valid"),
     ])
 }
 
@@ -237,6 +252,11 @@ pub fn grants_key(cartridge_id: &CartridgeId) -> DatumKey {
 pub fn substitution_key(cartridge_id: &CartridgeId) -> DatumKey {
     DatumKey::from_text(NoduleSubstitution::ID, cartridge_id.to_string())
         .expect("a CartridgeId is a valid datum key slot")
+}
+
+pub fn route_key(pattern: &str) -> DatumKey {
+    DatumKey::from_text(MethodRoute::ID, pattern)
+        .expect("a validated route pattern is a valid datum key slot")
 }
 
 /// The slot prefix that namespaces the [`Blob`] datums this projection owns inside the node config
@@ -495,6 +515,8 @@ impl AdmissionCache {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NoduleConfig {
     entries: BTreeMap<CartridgeId, NoduleEntry>,
+    /// The route datums by pattern: node-wide, so they belong to no cartridge's entry.
+    routes: BTreeMap<String, DatumSlot<MethodRoute>>,
     carried_keys: BTreeMap<DatumKey, DatumRead>,
 }
 
@@ -507,9 +529,11 @@ impl From<InventoryError> for StoreError {
 impl DatumStore for NoduleConfig {
     fn owns(key: &DatumKey) -> bool {
         match key.tag().as_str() {
-            NoduleInstall::ID | NoduleSettings::ID | NoduleGrants::ID | NoduleSubstitution::ID => {
-                true
-            }
+            NoduleInstall::ID
+            | NoduleSettings::ID
+            | NoduleGrants::ID
+            | NoduleSubstitution::ID
+            | MethodRoute::ID => true,
             Blob::ID => key
                 .slot_bytes()
                 .starts_with(ARTIFACT_SLOT_PREFIX.as_bytes()),
@@ -534,6 +558,19 @@ impl DatumStore for NoduleConfig {
                     .or_default()
                     .artifacts
                     .insert(artifact, DatumSlot::from_read(datum_read));
+                continue;
+            }
+            if key.tag().as_str() == MethodRoute::ID {
+                match std::str::from_utf8(key.slot_bytes()) {
+                    Ok(pattern) => {
+                        config
+                            .routes
+                            .insert(pattern.to_owned(), DatumSlot::from_read(datum_read));
+                    }
+                    Err(_) => {
+                        config.carried_keys.insert(key.clone(), datum_read.clone());
+                    }
+                }
                 continue;
             }
             let Some(cartridge_id) = std::str::from_utf8(key.slot_bytes())
@@ -599,6 +636,16 @@ impl DatumStore for NoduleConfig {
                     &mut patch,
                 )?;
             }
+        }
+        let absent = DatumSlot::Absent;
+        let patterns: BTreeSet<&String> = before.routes.keys().chain(after.routes.keys()).collect();
+        for pattern in patterns {
+            diff_slot(
+                route_key(pattern),
+                before.routes.get(pattern).unwrap_or(&absent),
+                after.routes.get(pattern).unwrap_or(&absent),
+                &mut patch,
+            )?;
         }
         for key in before.carried_keys.keys() {
             if !after.carried_keys.contains_key(key) {
@@ -933,6 +980,69 @@ impl NoduleConfig {
             config,
             configured,
         ))
+    }
+
+    /// The routes in force, pattern to provider id. A route datum that does not decode is an
+    /// error rather than a skipped route: dropping it would silently send its calls to whichever
+    /// provider claims them. `set_route` with no provider clears it.
+    pub fn routes(&self) -> std::result::Result<BTreeMap<String, String>, InventoryError> {
+        self.routes
+            .iter()
+            .filter_map(|(pattern, slot)| match slot {
+                DatumSlot::Absent => None,
+                DatumSlot::Accepted { value, .. } => {
+                    Some(Ok((pattern.clone(), value.provider.clone())))
+                }
+                DatumSlot::Invalid { reason, .. } => Some(Err(InventoryError::InvalidRoute {
+                    pattern: pattern.clone(),
+                    reason: reason.clone(),
+                })),
+            })
+            .collect()
+    }
+
+    /// Sets or, with `provider` absent, clears the route of `pattern`: an exact NSID or an
+    /// authority prefix, dotted segments of letters, digits and hyphens. Whether the provider
+    /// exists is not checked: a route may be set before its target registers, and callers are
+    /// told `RouteTargetMissing` until it does.
+    pub fn set_route(
+        &mut self,
+        pattern: &str,
+        provider: Option<String>,
+    ) -> std::result::Result<(), InventoryError> {
+        let invalid = |reason: &str| InventoryError::InvalidRoute {
+            pattern: pattern.to_owned(),
+            reason: reason.to_owned(),
+        };
+        let Some(provider) = provider else {
+            self.routes.remove(pattern);
+            return Ok(());
+        };
+        if !pattern.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }) {
+            return Err(invalid(
+                "a pattern is dotted segments of letters, digits and hyphens",
+            ));
+        }
+        if provider.is_empty() {
+            return Err(invalid("the provider id is empty"));
+        }
+        let extra = match self.routes.get(pattern) {
+            Some(DatumSlot::Accepted { value, .. }) => value.extra.clone(),
+            _ => Extra::default(),
+        };
+        self.routes.insert(
+            pattern.to_owned(),
+            DatumSlot::Accepted {
+                value: MethodRoute { provider, extra },
+                raw: None,
+            },
+        );
+        Ok(())
     }
 
     /// The slot `cartridge_id`'s code fills by substitution, if any.

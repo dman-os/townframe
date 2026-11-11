@@ -17,6 +17,7 @@ use crate::config::NoduleResolution;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Version;
 use big_cartridges_core::request::Request;
+use big_dispatch_core::DispatchScope;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -142,17 +143,22 @@ pub struct ProviderIndex {
     /// dispatch's routing table is the nodule service's own, so the snapshot decides it (the
     /// table lags it until that nodule's turn in the pass).
     nodules: BTreeSet<CartridgeId>,
+    /// The operator's routes (ADR 045), pattern to provider id, as dispatch's router holds them.
+    routes: BTreeMap<String, String>,
 }
 
 impl ProviderIndex {
     /// Indexes what each enabled, admitted nodule implements and the datum records it holds.
     ///
-    /// A slot filled by a substitution (see [`crate::inventory::InstalledNodule::filled_by`]) is
-    /// offered under the slot's cartridge id with the filler's version and Lexicons. Dependents name
-    /// the slot, so a substitution is not a provider change for them: their pin stays on the slot
-    /// and only its version moves, as for any upgrade. The operator's substitution is itself the
-    /// consent, and enablement survives it (ADR 028 §3).
-    pub fn new(resolved: &BTreeMap<CartridgeId, NoduleResolution>) -> Self {
+    /// A slot under a dev takeover (see [`crate::inventory::InstalledNodule::filled_by`]) is
+    /// offered under the slot's cartridge id with the filler's version and Lexicons, so for
+    /// dependents, which name the slot, only its version moves, as for any upgrade.
+    ///
+    /// `routes` are the operator's routes (ADR 045): see [`Self::offers`].
+    pub fn new(
+        resolved: &BTreeMap<CartridgeId, NoduleResolution>,
+        routes: BTreeMap<String, String>,
+    ) -> Self {
         let mut offers: BTreeMap<String, Vec<LockedProvider>> = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
             let NoduleResolution::Admitted { installed, .. } = resolution else {
@@ -188,13 +194,21 @@ impl ProviderIndex {
         Self {
             offers,
             nodules: resolved.keys().cloned().collect(),
+            routes,
         }
+    }
+
+    /// Whether the operator's routes cover `nsid`. A routed request is not pinned: the route is
+    /// the operator's consent for every dependent, as Cargo's `[patch]` redirects them all.
+    pub fn is_routed(&self, nsid: &str) -> bool {
+        DispatchScope::route_target(&self.routes, nsid).is_some()
     }
 
     /// Everything on offer for `nsid`: the enabled nodules that implement or hold it plus
     /// `native`, the provider ids the node itself serves it under (dispatch's routing table for
     /// an operation, the boot schemas for a datum), from which the nodule service's
-    /// own registrations are dropped.
+    /// own registrations are dropped. A route covering `nsid` leaves only the routed provider's
+    /// offer, which is how a route settles what would otherwise be ambiguous.
     pub fn offers(
         &self,
         nsid: &str,
@@ -216,6 +230,9 @@ impl ProviderIndex {
                     lexicon_revision: None,
                 }),
         );
+        if let Some(target) = DispatchScope::route_target(&self.routes, nsid) {
+            offers.retain(|offer| offer.provider == target);
+        }
         offers
     }
 }

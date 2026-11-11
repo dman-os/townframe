@@ -95,6 +95,7 @@ mod dispatch;
 mod executor;
 mod init;
 mod resolution;
+mod routing;
 mod schemas;
 mod substitution;
 

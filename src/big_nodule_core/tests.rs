@@ -1431,6 +1431,7 @@ mod declaration {
 
     #[test]
     fn the_config_datums_declare_publish_and_admit() {
+        use crate::config::MethodRoute;
         use crate::config::NoduleGrants;
         use crate::config::NoduleInstall;
         use crate::config::NoduleSettings;
@@ -1449,12 +1450,13 @@ mod declaration {
                 NoduleInstall::ID,
                 NoduleSettings::ID,
                 NoduleGrants::ID,
-                NoduleSubstitution::ID
+                NoduleSubstitution::ID,
+                MethodRoute::ID
             ]
         );
         let bundle = Bundle::new(&universe, Vec::new());
         let lexicons = bundle.lexicons().unwrap();
-        assert_eq!(lexicons.len(), 4);
+        assert_eq!(lexicons.len(), 5);
 
         let grants_lex = lexicons
             .iter()
@@ -1761,6 +1763,66 @@ mod config_tests {
             version: DatumVersion::default(),
             authors: Vec::new(),
         }
+    }
+
+    #[test]
+    fn route_datums_round_trip_by_pattern_and_a_damaged_one_is_an_error_until_cleared() {
+        use crate::config::route_key;
+
+        let mut config = NoduleConfig::new();
+        config
+            .set_route("org.example.beta", Some("p".into()))
+            .unwrap();
+        config
+            .set_route("org.example.beta.ping", Some("q".into()))
+            .unwrap();
+        let patch = NoduleConfig::diff(&NoduleConfig::new(), &config).unwrap();
+        assert_eq!(
+            patch.set.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                route_key("org.example.beta"),
+                route_key("org.example.beta.ping")
+            ])
+        );
+        assert_eq!(
+            patch.set[&route_key("org.example.beta")],
+            json!({"provider": "p"})
+        );
+        assert!(NoduleConfig::owns(&route_key("org.example.beta")));
+
+        let mut read = DatumsRead {
+            heads: Vec::new(),
+            datums: BTreeMap::new(),
+        };
+        for (key, value) in &patch.set {
+            read.datums.insert(key.clone(), accepted(value.clone()));
+        }
+        let stored = NoduleConfig::hydrate(&read);
+        assert_eq!(
+            stored.routes().unwrap(),
+            BTreeMap::from([
+                ("org.example.beta".to_owned(), "p".to_owned()),
+                ("org.example.beta.ping".to_owned(), "q".to_owned())
+            ])
+        );
+
+        // Clearing deletes the datum, and a stored datum that does not decode is reported rather
+        // than dropped, which would send its calls to whichever provider claims them.
+        let mut cleared = stored.clone();
+        cleared.set_route("org.example.beta", None).unwrap();
+        assert_eq!(
+            NoduleConfig::diff(&stored, &cleared).unwrap().remove,
+            BTreeSet::from([route_key("org.example.beta")])
+        );
+        read.datums.insert(
+            route_key("org.example.beta"),
+            accepted(json!({"provider": 7})),
+        );
+        let damaged = NoduleConfig::hydrate(&read);
+        assert!(damaged.routes().is_err());
+        let mut repaired = damaged;
+        repaired.set_route("org.example.beta", None).unwrap();
+        assert_eq!(repaired.routes().unwrap().len(), 1);
     }
 
     #[test]

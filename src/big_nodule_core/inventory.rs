@@ -169,6 +169,8 @@ pub enum InventoryError {
     },
     #[error("cannot substitute for `{id}`: {reason}")]
     InvalidSubstitution { id: CartridgeId, reason: String },
+    #[error("invalid method route `{pattern}`: {reason}")]
+    InvalidRoute { pattern: String, reason: String },
     #[error("nodule for cartridge `{0}` is not installed")]
     UnknownCartridge(CartridgeId),
     #[error("nodule for cartridge `{0}` declares no config schema")]
