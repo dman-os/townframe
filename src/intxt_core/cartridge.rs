@@ -108,6 +108,8 @@ pub fn cartridge(handler: Artifact) -> Cartridge {
         ],
         ..Default::default()
     };
+    // intxt has no namespace of its own yet, so its id sits under the fixture namespace
+    // (`test-support`, enabled by the `cartridge` feature for this alone).
     let mut cartridge = Cartridge::new(
         big_cartridges_core::example_cartridge!("intxt")
             .parse()
@@ -151,7 +153,7 @@ mod tests {
     /// ships the sidecar of each record that declares storage forms.
     #[test]
     fn the_cartridge_holds_every_intxt_record() {
-        let cartridge = cartridge(handler_artifact(b"a handler"), &[]);
+        let cartridge = cartridge(handler_artifact(b"a handler"));
         let Contribution::Nodule(contribution) = &cartridge.contributions[0] else {
             panic!("intxt contributes a nodule");
         };

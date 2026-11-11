@@ -18,7 +18,7 @@ default = ["schemars"]
 schemars = ["method_core/schemars"]
 # Host-only: the cartridge builder (`intxt_core::cartridge`), which admits these vocabularies and
 # the nodule's methods to a node. A wasm guest never enables it.
-cartridge = ["schemars", "dep:big_cartridges_core", "dep:big_nodule_core", "dep:indexmap", "dep:method_lexicon"]
+cartridge = ["schemars", "dep:big_cartridges_core", "big_cartridges_core/test-support", "dep:big_nodule_core", "dep:indexmap", "dep:method_lexicon"]
 
 [dependencies]
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
