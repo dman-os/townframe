@@ -4,7 +4,7 @@
 peers service, which `peers ls` says.
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
 $ day peers add nonsense

@@ -5,10 +5,11 @@ A fresh node has no nodules and, reached in process, no peers service; the servi
 exposed by any operation.
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
-$ day status
+$ day node status
+? 3
 node      [..]
 path      [..]/node
 mode      in-process

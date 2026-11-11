@@ -23,8 +23,6 @@ pub enum DaemonCommands {
     Start,
     /// Stop the background daemon and return once it has exited
     Stop,
-    /// Report whether a daemon is running (exit status 3 when it is not)
-    Status,
 }
 
 /// What the foreground daemon prints, once, when it is serving. `start` waits for this line.
@@ -37,7 +35,6 @@ pub async fn run(command: DaemonCommands) -> Res<ExitCode> {
         DaemonCommands::Run => run_foreground(dir).await,
         DaemonCommands::Start => start(dir).await,
         DaemonCommands::Stop => stop(dir).await,
-        DaemonCommands::Status => status(dir).await,
     }
 }
 
@@ -180,31 +177,4 @@ async fn stop(dir: &NodeDir) -> Res<ExitCode> {
         .expect(ERROR_TOKIO)?;
     println!("daemon stopped (pid {pid})");
     Ok(ExitCode::SUCCESS)
-}
-
-async fn status(dir: &NodeDir) -> Res<ExitCode> {
-    let socket = dir.socket_path()?;
-    if dir.probe_socket().await? == SocketState::Live {
-        match dir.try_lock()? {
-            Err(held) => println!("running ({held}) on {}", socket.display()),
-            Ok(_free) => eyre::bail!(
-                "{} is live but nothing holds the node lock; another program owns that socket",
-                socket.display()
-            ),
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
-    // Any exit but 0 means "no daemon serving", the convention `systemctl status` follows.
-    let not_running = ExitCode::from(3);
-    match dir.try_lock()? {
-        Err(held) => println!("not serving: {held} has the node open"),
-        Ok(_free) => {
-            if dir.probe_socket().await? == SocketState::Stale {
-                println!("stopped (stale socket at {})", socket.display());
-            } else {
-                println!("stopped");
-            }
-        }
-    }
-    Ok(not_running)
 }
