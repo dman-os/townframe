@@ -33,7 +33,18 @@
 //! command needs the node's daemon (`day daemon start`) and fails fast without one: booting the
 //! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
 
+//! # ACP agents
+//!
+//! `day x intxt record -- <agent command>` records an ACP agent for the client that launches it:
+//! point the editor's agent command at it (`day x intxt record -- claude-code-acp`). It forwards
+//! the connection unchanged and records session starts and prompt turns (see `record.rs`).
+//!
+//! `claude-code-acp`, `gemini --experimental-acp` and `codex-acp` are the agents it is meant for;
+//! none was run against it here (the tests use a scripted agent), so check the first recording
+//! of each.
+
 pub(crate) mod capture;
+mod record;
 
 use crate::client::NodeClient;
 use crate::interlude::*;
@@ -76,10 +87,27 @@ pub enum IntxtCommands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Record an ACP session: run the agent command, passing everything through
+    ///
+    /// An ACP client (an editor) launches this in place of the agent, e.g. `day x intxt record --
+    /// claude-code-acp`. It spawns the agent, forwards the client's stdin to it and its stdout to
+    /// the client unchanged, and records the session's messages, tool calls and plan, and the edits
+    /// each prompt turn made in the session's working directory, in the node's capture drawer.
+    /// Needs the node's daemon; without one the session runs unrecorded. A recording that fails
+    /// says why on stderr and stops, and the session goes on. Exits with the agent's status.
+    Record {
+        /// Record the agent's thinking (`agent_thought_chunk`) as well
+        #[arg(long)]
+        thinking: bool,
+        /// The agent's command and arguments
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        agent: Vec<String>,
+    },
 }
 
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
+        IntxtCommands::Record { thinking, agent } => record::run(agent, thinking).await,
         IntxtCommands::Install { handler } => {
             let client = lazy::node().await?;
             let wasm = std::fs::read(&handler)

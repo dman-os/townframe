@@ -151,12 +151,17 @@ struct PendingWorktree {
 #[must_use = "dropping a Prepared persists nothing"]
 pub struct Prepared {
     pub batch: Batch,
-    session_path: PathBuf,
-    session: SessionHost,
+    /// A hook's session state; none for an ACP session, whose recorder keeps its own in memory.
+    session: Option<StoredSession>,
     worktrees: Vec<PendingWorktree>,
     /// The post hook's call, whose `tool_turns` entry goes with the commit.
     finished_tool: Option<String>,
-    _session_lock: File,
+}
+
+struct StoredSession {
+    path: PathBuf,
+    host: SessionHost,
+    _lock: File,
 }
 
 /// The subagent transcripts live beside the session's, in
@@ -244,17 +249,18 @@ fn import_transcripts(
 /// `Stop` and `SessionEnd` drop every pending pre-snapshot: no tool is in flight then, so those
 /// belong to calls that never reported.
 fn observe_worktree(
-    hook: &Hook,
+    event: &Event,
+    tool_use_id: Option<&str>,
     found: Identity,
     tool_cause: Option<&Cause>,
     host: &mut WorktreeHost,
 ) -> Result<(Option<WorktreeBatch>, u64), Error> {
-    if let (Event::PreToolUse, Some(tool_use_id)) = (&hook.event, &hook.tool_use_id) {
+    if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
         host.pre
-            .insert(tool_use_id.clone(), Snapshot::take(&found.root)?);
+            .insert(tool_use_id.to_owned(), Snapshot::take(&found.root)?);
         return Ok((None, 0));
     }
-    if matches!(hook.event, Event::Stop | Event::SessionEnd) {
+    if matches!(event, Event::Stop | Event::SessionEnd) {
         host.pre.clear();
     }
     let pre = tool_cause.and_then(|cause| host.pre.remove(&cause.tool_use_id));
@@ -325,6 +331,47 @@ fn observe_worktree(
     ))
 }
 
+/// Resolve the worktrees of `candidates` and observe each for one window, holding their locks.
+/// `stored` are the roots an earlier window found: one that is gone resolves to whatever encloses
+/// it, which is not the same worktree and is dropped.
+fn observe_worktrees(
+    event: &Event,
+    tool_use_id: Option<&str>,
+    cause: Option<&Cause>,
+    candidates: &BTreeSet<PathBuf>,
+    stored: &BTreeSet<PathBuf>,
+) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
+    let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
+    for candidate in candidates {
+        if let Some(found) = identity::resolve(candidate)?
+            && (!stored.contains(candidate) || found.root == *candidate)
+        {
+            identities.insert(found.root.clone(), found);
+        }
+    }
+    let mut worktrees = Vec::new();
+    let mut batches = Vec::new();
+    let mut uncaused_tool_calls = 0;
+    for (root, found) in identities {
+        // Sorted by root: every window takes worktree locks in the same order.
+        let worktree_lock = lock(&found.git_dir.join("intxt/lock"))?;
+        let state_path = found.git_dir.join("intxt/state.json");
+        let mut host: WorktreeHost = load(&state_path)?;
+        let (batch, uncaused) = observe_worktree(event, tool_use_id, found, cause, &mut host)?;
+        uncaused_tool_calls += uncaused;
+        let batched = batch.is_some();
+        batches.extend(batch);
+        worktrees.push(PendingWorktree {
+            root,
+            state_path,
+            host,
+            batched,
+            _lock: worktree_lock,
+        });
+    }
+    Ok((worktrees, batches, uncaused_tool_calls))
+}
+
 /// Observe for `hook`. `session_path` is the session's state file; its lock is `<path>.lock`.
 pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
     let mut lock_path: OsString = session_path.as_os_str().to_owned();
@@ -346,20 +393,7 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
                 .map(PathBuf::from),
         );
     }
-    let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
-    for candidate in &candidates {
-        if let Some(found) = identity::resolve(candidate)? {
-            // A stored root that is gone resolves to whatever encloses it: not the same worktree.
-            let is_stored = session.worktrees.contains(candidate);
-            if !is_stored || found.root == *candidate {
-                identities.insert(found.root.clone(), found);
-            }
-        }
-    }
-    session.worktrees = identities.keys().cloned().collect();
-
-    let tool = hook.tool_use_id.clone();
-    let cause = match (&hook.event, &tool) {
+    let cause = match (&hook.event, &hook.tool_use_id) {
         (Event::PostToolUse | Event::PostToolUseFailure, Some(tool_use_id)) => {
             let located = session.tool_turns.get(tool_use_id);
             Some(Cause {
@@ -371,27 +405,17 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
         }
         _ => None,
     };
-
-    let mut worktrees = Vec::new();
-    let mut batches = Vec::new();
-    let mut uncaused_tool_calls = 0;
-    for (root, found) in identities {
-        // Sorted by root: every hook takes worktree locks in the same order.
-        let worktree_lock = lock(&found.git_dir.join("intxt/lock"))?;
-        let state_path = found.git_dir.join("intxt/state.json");
-        let mut host: WorktreeHost = load(&state_path)?;
-        let (batch, uncaused) = observe_worktree(hook, found, cause.as_ref(), &mut host)?;
-        uncaused_tool_calls += uncaused;
-        let batched = batch.is_some();
-        batches.extend(batch);
-        worktrees.push(PendingWorktree {
-            root,
-            state_path,
-            host,
-            batched,
-            _lock: worktree_lock,
-        });
-    }
+    let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
+        &hook.event,
+        hook.tool_use_id.as_deref(),
+        cause.as_ref(),
+        &candidates,
+        &session.worktrees,
+    )?;
+    session.worktrees = worktrees
+        .iter()
+        .map(|pending| pending.root.clone())
+        .collect();
 
     Ok(Prepared {
         batch: Batch {
@@ -406,30 +430,82 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
             uncaused_tool_calls,
             extra: Default::default(),
         },
-        session_path: session_path.to_owned(),
-        session,
+        session: Some(StoredSession {
+            path: session_path.to_owned(),
+            host: session,
+            _lock: session_lock,
+        }),
         worktrees,
         finished_tool: cause.map(|cause| cause.tool_use_id),
-        _session_lock: session_lock,
+    })
+}
+
+/// Observe the worktrees of an ACP session after one of its windows: a session start or the end
+/// of a prompt turn. `session` is what the ACP recorder made of the window; the worktrees are
+/// those holding `cwd`, those a tool call's locations name and `known`, the roots earlier windows
+/// of the connection found ([`Prepared::worktree_roots`]).
+///
+/// There is no hook and no tool call to cause the ops, and no state file for the session: an ACP
+/// recording lives as long as its connection. The worktrees' own state and locks are the same as
+/// a hook's, so a session recorded through both agrees on sequence numbers.
+pub fn prepare_acp(
+    session: SessionBatch,
+    cwd: &Path,
+    known: &BTreeSet<PathBuf>,
+) -> Result<Prepared, Error> {
+    let mut candidates = known.clone();
+    candidates.insert(cwd.to_owned());
+    candidates.extend(
+        session
+            .imported
+            .turns
+            .values()
+            .flat_map(|turn| &turn.tool_calls)
+            .flat_map(|call| &call.locations)
+            .map(|location| PathBuf::from(&location.path)),
+    );
+    // A window's end is `Stop`'s: no tool is in flight, so no pre-snapshot is pending.
+    let (worktrees, batches, uncaused_tool_calls) =
+        observe_worktrees(&Event::Stop, None, None, &candidates, known)?;
+    Ok(Prepared {
+        batch: Batch {
+            session,
+            worktrees: batches,
+            uncaused_tool_calls,
+            extra: Default::default(),
+        },
+        session: None,
+        worktrees,
+        finished_tool: None,
     })
 }
 
 impl Prepared {
+    /// The roots of the worktrees this window observed.
+    pub fn worktree_roots(&self) -> impl Iterator<Item = &Path> {
+        self.worktrees.iter().map(|pending| pending.root.as_path())
+    }
+
     /// Store what the recorder answered, persist every state file and release the locks.
     ///
     /// Worktree states go first and the session's last: a crash in between leaves the session
     /// behind, so the next hook imports its records again, which the recorder's idempotency keys
     /// absorb.
     pub fn commit(mut self, recorded: RecordedIds) -> Result<(), Error> {
-        if let Some(doc) = recorded.session {
-            self.session.doc = Some(doc);
-        }
-        for (agent_id, doc) in recorded.subagents {
-            self.session
-                .subagents
-                .get_mut(&agent_id)
-                .ok_or_else(|| Error::Format(format!("recorded an unknown subagent {agent_id}")))?
-                .doc = Some(doc);
+        if let Some(stored) = &mut self.session {
+            if let Some(doc) = recorded.session {
+                stored.host.doc = Some(doc);
+            }
+            for (agent_id, doc) in recorded.subagents {
+                stored
+                    .host
+                    .subagents
+                    .get_mut(&agent_id)
+                    .ok_or_else(|| {
+                        Error::Format(format!("recorded an unknown subagent {agent_id}"))
+                    })?
+                    .doc = Some(doc);
+            }
         }
         for pending in &mut self.worktrees {
             match recorded.worktrees.get(&pending.root.display().to_string()) {
@@ -446,13 +522,16 @@ impl Prepared {
                 None => {}
             }
         }
-        if let Some(tool_use_id) = &self.finished_tool {
-            self.session.tool_turns.remove(tool_use_id);
-        }
         for pending in &self.worktrees {
             save(&pending.state_path, &pending.host)?;
         }
-        save(&self.session_path, &self.session)
+        if let Some(stored) = &mut self.session {
+            if let Some(tool_use_id) = &self.finished_tool {
+                stored.host.tool_turns.remove(tool_use_id);
+            }
+            save(&stored.path, &stored.host)?;
+        }
+        Ok(())
     }
 }
 

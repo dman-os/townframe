@@ -29,6 +29,7 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use intxt_capture::hook::Hook;
+use intxt_capture::host::Prepared;
 use intxt_core::capture::BlobRef;
 use intxt_core::capture::ContentClass;
 use intxt_core::capture::RecordedIds;
@@ -332,7 +333,7 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
         .join(format!("{}.json", hook.session_id));
     // Locks and git: blocking work, so off the runtime's threads. The locks are held until the
     // `Prepared` is committed or dropped, whichever thread that is on.
-    let mut prepared =
+    let prepared =
         tokio::task::spawn_blocking(move || intxt_capture::host::prepare(&hook, &session_path))
             .await??;
 
@@ -340,12 +341,26 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
         uncaused_tool_calls: prepared.batch.uncaused_tool_calls,
         ..Summary::default()
     };
+    let recorded = record_prepared(client, node_dir, prepared, &mut summary).await?;
+    summary.recorded = recorded;
+    Ok(summary)
+}
+
+/// Records `prepared`'s batch through intxt's `recordObservations` and commits the recorder's
+/// answer as the host's state: the one place a batch reaches the node, for hooks and for ACP
+/// recordings alike. Returns the answer, or none when the batch was empty and nothing was sent.
+pub(crate) async fn record_prepared(
+    client: &NodeClient,
+    node_dir: &Path,
+    mut prepared: Prepared,
+    summary: &mut Summary,
+) -> Res<Option<RecordedIds>> {
     if prepared.batch.is_empty() {
         prepared.commit(RecordedIds::default())?;
-        return Ok(summary);
+        return Ok(None);
     }
     let capture = capture_node(client, node_dir).await?;
-    put_blobs(client, &mut prepared.batch, &mut summary).await?;
+    put_blobs(client, &mut prepared.batch, summary).await?;
     let key = idempotency_key(&prepared.batch);
     // The node's operator calls as itself, so the recorder presents no capability. The command ids
     // start from the batch's key: a retried hook (same state, same observations) reuses them.
@@ -353,6 +368,5 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
         .record_observations(&capture.drawer, &capture.machine, &prepared.batch)
         .await?;
     prepared.commit(recorded.clone())?;
-    summary.recorded = Some(recorded);
-    Ok(summary)
+    Ok(Some(recorded))
 }

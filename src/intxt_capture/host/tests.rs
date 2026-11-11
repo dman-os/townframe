@@ -518,3 +518,43 @@ fn stop_and_session_end_drop_pre_snapshots_of_calls_that_never_reported() {
         assert_eq!(pending(&env), 0, "{event}");
     }
 }
+
+fn acp_session(session_id: &str) -> SessionBatch {
+    SessionBatch {
+        session_id: session_id.to_owned(),
+        doc: None,
+        imported: Default::default(),
+        subagents: Vec::new(),
+        extra: Default::default(),
+    }
+}
+
+#[test]
+fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
+    let env = Env::new();
+    let none = BTreeSet::new();
+    // The start of a session: first sight of the worktree, with what already differs.
+    let start = prepare_acp(acp_session("acp1"), &env.repo.root, &none).unwrap();
+    assert!(start.batch.worktrees.is_empty() || start.batch.worktrees[0].ops.is_empty());
+    let roots: BTreeSet<PathBuf> = start.worktree_roots().map(Path::to_owned).collect();
+    assert_eq!(roots, BTreeSet::from([env.repo.root.clone()]));
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+
+    // A turn's edits: one op without a cause, with its sequence continuing the stored one.
+    env.repo.write("a.txt", "two\n");
+    let turn = prepare_acp(acp_session("acp1"), &env.repo.root, &roots).unwrap();
+    let [worktree] = &turn.batch.worktrees[..] else {
+        panic!("the edited worktree is batched");
+    };
+    assert_eq!(worktree.ops.len(), 1);
+    assert_eq!(worktree.ops[0].cause, None);
+    assert_eq!(worktree.ops[0].changes[0].path, "a.txt");
+    assert_eq!(turn.batch.uncaused_tool_calls, 0);
+    let recorded = recorded_for(&turn, 1);
+    turn.commit(recorded).unwrap();
+
+    // Nothing more happened: nothing to record.
+    let idle = prepare_acp(acp_session("acp1"), &env.repo.root, &roots).unwrap();
+    assert!(idle.batch.worktrees.is_empty());
+}

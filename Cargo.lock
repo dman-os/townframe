@@ -8097,6 +8097,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "similar 2.7.0",
  "tempfile",
  "thiserror 2.0.21",
  "uuid",

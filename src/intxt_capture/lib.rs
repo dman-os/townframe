@@ -16,6 +16,7 @@
 //! - jj: no `JjObservation`, `JjOperation` or `JjChange` is observed.
 //! - Tags: only branches (`refs/heads`) are observed as refs.
 
+pub mod acp;
 pub mod git;
 pub mod hook;
 pub mod host;
@@ -42,6 +43,10 @@ pub enum Error {
     /// A hook's JSON input lacks a required field or is not JSON.
     #[error("hook input: {0}")]
     Hook(String),
+    /// An ACP message a recording cannot follow: not JSON-RPC, a response to a request never
+    /// seen, an update outside a prompt turn.
+    #[error("acp: {0}")]
+    Acp(String),
     #[error(transparent)]
     Transcript(#[from] crate::transcript::ImportError),
     /// A state file is not what this version wrote.
