@@ -67,10 +67,10 @@ use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::NodulesMessage;
 use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetMethodRoute;
+use big_nodule_core::protocol::SetNoduleDevTakeover;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleMethodGrants;
-use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::protocol::UninstallNodule;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
@@ -128,6 +128,10 @@ pub struct NodulesConfig {
     pub dispatch_authority: CapId,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
     pub schemas: Arc<SchemaRepo>,
+    /// Whether the dev takeover hook is on (`dev.allow_slot_takeover` in `node.json`, ADR 045 §5).
+    /// Fixed at boot: with it off, `setNoduleDevTakeover` refuses to set one and a takeover datum
+    /// found in the config document is not honored, so the slot is refused.
+    pub allow_slot_takeover: bool,
     pub sql: Database,
 }
 
@@ -334,11 +338,11 @@ impl NoduleService {
             .await
     }
 
-    async fn set_substitution(
+    async fn set_dev_takeover(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: SetNoduleSubstitution,
+        params: SetNoduleDevTakeover,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
@@ -347,7 +351,7 @@ impl NoduleService {
         }
         let context = context.clone();
         self.state
-            .ask(|reply| Command::SetSubstitution {
+            .ask(|reply| Command::SetDevTakeover {
                 context,
                 cartridge_id: params.cartridge_id,
                 by: params.by,
@@ -498,7 +502,7 @@ handlers! {
     SetNoduleDrawerGrants => set_drawer_grants: NoduleRecord;
     SetNoduleMethodGrants => set_method_grants: NoduleRecord;
     ConfirmNoduleResolution => confirm_resolution: NoduleRecord;
-    SetNoduleSubstitution => set_substitution: NoduleRecord;
+    SetNoduleDevTakeover => set_dev_takeover: NoduleRecord;
     SetMethodRoute => set_method_route: ();
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
@@ -515,7 +519,7 @@ service_utils_rs::bind_service_protocol! {
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
             SetNoduleMethodGrants(SetNoduleMethodGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
-            SetNoduleSubstitution(SetNoduleSubstitution),
+            SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
@@ -578,6 +582,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         dispatch_authority: config.dispatch_authority,
         executor: config.executor,
         schemas: config.schemas,
+        allow_slot_takeover: config.allow_slot_takeover,
     })
     .await
     {
