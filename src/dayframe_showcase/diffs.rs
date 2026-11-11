@@ -1,5 +1,8 @@
 //! The Diffs tab: `pierre_diffs_dioxus::FileDiffView` over two sample file pairs, and a generated
-//! three-thousand-line one that only renders the rows near its scroller's viewport.
+//! three-thousand-line one that only renders the rows near its scroller's viewport. All three take
+//! the pointer: hover highlights a line, a click on a line number selects it, shift-click or a drag
+//! extends the range, the gutter utility button follows the hovered line or the selection, and a
+//! collapsed hunk's separator expands on click.
 
 use crate::diff_fixtures;
 use dioxus::prelude::*;
@@ -8,7 +11,10 @@ use pierre_diffs_dioxus::DiffInput;
 use pierre_diffs_dioxus::DiffLineAnnotation;
 use pierre_diffs_dioxus::DiffStyle;
 use pierre_diffs_dioxus::FileDiffView;
+use pierre_diffs_dioxus::Interaction;
+use pierre_diffs_dioxus::LineHoverHighlight;
 use pierre_diffs_dioxus::PtrEq;
+use pierre_diffs_dioxus::SelectedLineRange;
 use pierre_diffs_dioxus::Virtualization;
 use std::rc::Rc;
 
@@ -35,9 +41,33 @@ pub fn DiffsFoundation() -> Element {
         height: "32rem".to_owned(),
         sleep: PtrEq::new(Rc::new(|duration| Box::pin(tokio::time::sleep(duration)))),
     });
+    // The latest selection, shown above the diffs so a click is visibly a result and not only a
+    // highlight.
+    let mut status = use_signal(|| "Click a line number to select a line.".to_owned());
+    let interaction = Interaction {
+        line_hover_highlight: LineHoverHighlight::Both,
+        enable_line_selection: true,
+        enable_gutter_utility: true,
+        on_line_selected: Some(Callback::new(move |range: Option<SelectedLineRange>| {
+            status.set(match range {
+                Some(range) if range.start == range.end => {
+                    format!("Selected line {}.", range.start)
+                }
+                Some(range) => format!("Selected lines {} to {}.", range.start, range.end),
+                None => "Selection cleared.".to_owned(),
+            });
+        })),
+        on_gutter_utility_click: Some(Callback::new(move |range: SelectedLineRange| {
+            status.set(format!(
+                "Gutter utility: lines {} to {}.",
+                range.start, range.end
+            ));
+        })),
+    };
     rsx! {
         div {
             class: "flex flex-col gap-8",
+            p { class: "text-sm text-text-muted", "{status}" }
             div {
                 class: "overflow-hidden rounded-md border border-border",
                 FileDiffView::<Note> {
@@ -47,6 +77,7 @@ pub fn DiffsFoundation() -> Element {
                     },
                     diff_style: DiffStyle::Split,
                     expand_unchanged: true,
+                    interaction: interaction.clone(),
                 }
             }
             div {
@@ -58,6 +89,7 @@ pub fn DiffsFoundation() -> Element {
                     },
                     diff_style: DiffStyle::Unified,
                     expand_unchanged: true,
+                    interaction: interaction.clone(),
                     annotations: vec![DiffLineAnnotation {
                         side: AnnotationSide::Additions,
                         line_number: 41,
@@ -86,6 +118,7 @@ pub fn DiffsFoundation() -> Element {
                     diff_style: DiffStyle::Unified,
                     expand_unchanged: true,
                     virtualized: Some(virtualized),
+                    interaction,
                 }
             }
         }
