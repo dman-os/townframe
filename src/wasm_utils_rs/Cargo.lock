@@ -2669,7 +2669,6 @@ version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
  "big_ndk",
- "http",
  "intxt_core",
  "method_core",
  "serde",
