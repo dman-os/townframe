@@ -635,14 +635,11 @@ async fn the_mock_review_annotates_a_line_and_replies_and_resolves_a_thread() {
     );
 }
 
-// A pin of an open bug in the diff view (`pierre_diffs`, not the lab): leaving a file while a
-// multi-line range is selected faults the micro, because `InteractionManager::clean_up` clears
-// `data-selected-line` on row nodes the render since replaced (`stale NodeKey`, a panic in the
-// guest). A single selected line does not. The day it is fixed the micro stays live and this
-// test must be inverted into the flow `the_mock_review_annotates_a_line...` could not end with:
-// open a thread from the diff after annotating a range.
+// Leaving a file after annotating a range: the diff view's `InteractionManager::clean_up` used to
+// clear attributes on row nodes a render had since replaced (`stale NodeKey`, a panic that faulted
+// the micro). Opening a thread from the diff right after a range draft must reach the thread.
 #[tokio::test(flavor = "current_thread")]
-async fn leaving_a_diff_with_a_selected_range_faults_the_micro_in_the_diff_views_clean_up() {
+async fn opening_a_thread_from_the_diff_after_a_range_draft_leaves_the_micro_live() {
     let (
         Layout {
             runtime, mut ui, ..
@@ -672,15 +669,12 @@ async fn leaving_a_diff_with_a_selected_range_faults_the_micro_in_the_diff_views
     ui.click(&format!(
         "{panel} button[aria-label=\"Open thread on line 6\"]"
     ));
-    ui.wait_until("the micro faults", |_| {
-        matches!(runtime.state(&lab), MicroState::Faulted(_))
+    let reply = format!("{panel} textarea[aria-label=\"Reply\"]");
+    ui.wait_until("the thread opens", |ui| {
+        if let MicroState::Faulted(fault) = runtime.state(&lab) {
+            panic!("the lab faulted leaving the diff: {fault}");
+        }
+        ui.find(&reply).is_some()
     })
     .await;
-    let MicroState::Faulted(fault) = runtime.state(&lab) else {
-        unreachable!("the wait ended on a fault")
-    };
-    assert!(
-        fault.to_string().contains("InteractionManager") && fault.to_string().contains("clean_up"),
-        "{fault}"
-    );
 }
