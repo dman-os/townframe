@@ -2,7 +2,7 @@
 
 Status: Draft for the operator.
 Owner: Townframe maintainers
-Updated: 2026-11-11
+Updated: 2026-11-12
 Scope: What every P2P subsystem asks of a node relationship (D42 "Sisters and mothers"), before the relationship vocabulary is named.
 
 
@@ -75,6 +75,11 @@ Each entry says what moves, who must hold it, what trust that takes, and what th
 - **What moves:** public content to throwaway clients (webnodes).
 - **Who holds it:** an app fetcher with `relay` and an app reader with `read` (ADR 038 §1).
 - **Requirement:** this is not a relationship between the user's nodes, so it stays out of the orientation vocabulary.
+
+### F11. Inbound admission
+- **What moves:** nothing yet. This is whether a node answers at all: a connection, a dial, an iroh ping.
+- **Who may reach a node:** today, only peers the node expects. A node that isn't a relay accepts inbound connections only from its sisters. A relay accepts the members it holds drawers for. Later, peers holding a ticket the node issued.
+- **Requirement (operator, #84 review, 2026-11-12):** a node never replies to a peer it doesn't expect, iroh pings included. Today's peer policy (`big_node/peers/policy.rs`) doesn't enforce this. The relationship vocabulary has to say who may reach whom, and tickets are the extension point for reach-outs beyond it.
 
 ## What the list says
 
