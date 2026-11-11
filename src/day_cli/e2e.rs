@@ -824,6 +824,11 @@ mod blackbox {
             text(&node_status)
         );
 
+        // The command that found the stale socket held the node and replaced it with its own,
+        // which it removed on exit.
+        assert!(!socket.exists());
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+
         let stopped = day(&["node", "stop"]);
         assert!(stopped.status.success(), "{}", text(&stopped));
         assert!(
