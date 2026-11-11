@@ -66,6 +66,7 @@ use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::NodulesMessage;
 use big_nodule_core::protocol::NodulesProtocol;
+use big_nodule_core::protocol::SetMethodRoute;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleMethodGrants;
@@ -355,6 +356,29 @@ impl NoduleService {
             .await
     }
 
+    /// Routes are node-wide, so only the operator's own identity may set them: a scoped handle
+    /// manages named cartridges and never decides where every caller's data goes.
+    async fn set_method_route(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: SetMethodRoute,
+    ) -> Res<()> {
+        let caller = self.caller(context, authorization).await?;
+        if self.scope_of(&caller)?.is_some() {
+            return Err(NodulesError::Denied);
+        }
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::SetMethodRoute {
+                context,
+                pattern: params.pattern,
+                provider: params.provider,
+                reply,
+            })
+            .await
+    }
+
     async fn set_drawer_grants(
         &self,
         context: &RequestContext,
@@ -475,6 +499,7 @@ handlers! {
     SetNoduleMethodGrants => set_method_grants: NoduleRecord;
     ConfirmNoduleResolution => confirm_resolution: NoduleRecord;
     SetNoduleSubstitution => set_substitution: NoduleRecord;
+    SetMethodRoute => set_method_route: ();
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
     ListNodules => list: NoduleList;
@@ -491,6 +516,7 @@ service_utils_rs::bind_service_protocol! {
             SetNoduleMethodGrants(SetNoduleMethodGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleSubstitution(SetNoduleSubstitution),
+            SetMethodRoute(SetMethodRoute),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)
