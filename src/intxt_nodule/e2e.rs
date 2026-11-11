@@ -41,11 +41,13 @@ use std::collections::BTreeSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
-/// A node that admitted intxt's cartridge, serving its handler natively, with the four
-/// operations the handler calls granted to it, and the nodule enabled.
+mod capture;
+
 /// Each document creation is a command of its own; the node refuses a reused command id.
 static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 
+/// A node that admitted intxt's cartridge, serving its handler natively, with the operations the
+/// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
     let cartridge = crate::cartridge();
     let id = cartridge.id.clone();

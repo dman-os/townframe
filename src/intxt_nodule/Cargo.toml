@@ -21,6 +21,8 @@ method_lexicon = { path = "../method_lexicon" }
 serde_json.workspace = true
 
 [dev-dependencies]
+intxt_capture = { path = "../intxt_capture" }
+tempfile.workspace = true
 big_dispatch_core.workspace = true
 big_cabinet_core = { path = "../big_cabinet_core" }
 big_ndk_testing = { path = "../big_ndk_testing" }

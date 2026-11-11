@@ -8,8 +8,9 @@
 //! writer replacing the value. Without the sidecar every position would keep the plain JSON kind
 //! its Lexicon states.
 //!
-//! It also serves operations through a handler (`intxt_handlers::Intxt`): `createIntxt` and `addToIntxt` today, recording capture
-//! observations later. The handler's Lexicons are projected from the Rust types of its methods.
+//! It also serves operations through a handler (`intxt_handlers::Intxt`): `createIntxt`,
+//! `addToIntxt` and `recordObservations`. The handler's Lexicons are projected from the Rust types
+//! of its methods.
 
 // Booting a node in the tests (`big_ndk_testing`) makes rustc evaluate deep auto-trait chains
 // through its services' futures, which the default limit of 128 cuts off with a warning.
@@ -30,6 +31,7 @@ use serde_json::Value;
 
 use intxt_handlers::AddToIntxt;
 use intxt_handlers::CreateIntxt;
+use intxt_handlers::RecordObservations;
 
 /// The authority every intxt record is under. A cartridge registers only NSIDs it owns, so the
 /// generic datums intxt holds until they migrate out before the beta (ledger D39) are under it too.
@@ -67,6 +69,10 @@ pub fn cartridge() -> Cartridge {
                     method_lexicon::lexicon::<AddToIntxt>()
                         .expect("addToIntxt's types project a Lexicon"),
                 ),
+                as_map(
+                    method_lexicon::lexicon::<RecordObservations>()
+                        .expect("recordObservations's types project a Lexicon"),
+                ),
             ])
             .collect(),
         sidecar,
@@ -81,6 +87,7 @@ pub fn cartridge() -> Cartridge {
         implements: vec![
             CreateIntxt::XRPC.nsid.to_owned(),
             AddToIntxt::XRPC.nsid.to_owned(),
+            RecordObservations::XRPC.nsid.to_owned(),
         ],
         ..Default::default()
     };

@@ -7,6 +7,7 @@ allowed_dependencies = [
     "big_cartridges_core",
     "big_ndk_testing",
     "big_nodule_core",
+    "intxt_capture",
     "intxt_core",
     "intxt_handlers",
     "method_core",

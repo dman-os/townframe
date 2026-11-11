@@ -1,4 +1,4 @@
-//! intxt's operations, served by the nodule's handler: `createIntxt` and `addToIntxt`. `intxt_guest`
+//! intxt's operations, served by the nodule's handler: `createIntxt`, `addToIntxt` and `recordObservations`. `intxt_guest`
 //! exports [`Intxt`] as the wasm component, and `intxt_nodule`'s native tests serve the same value,
 //! so both backends run one implementation. The crate has no host-only code and builds for both
 //! targets; the `schemars` feature, which only the host that projects the operations' Lexicons
@@ -19,6 +19,7 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
@@ -35,6 +36,7 @@ use big_cabinet_core::drawer::protocol::ListDocDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
+use intxt_core::capture::RecordedIds;
 use intxt_core::generic;
 use intxt_core::work;
 use method_core::ContextError;
@@ -110,10 +112,11 @@ method_core::methods! {
     error = IntxtError, nsid_prefix = "org.example.intxt.";
     CreateIntxt => IntxtCreated, procedure, "createIntxt";
     AddToIntxt => AddedToIntxt, procedure, "addToIntxt";
+    RecordObservations => RecordedIds, procedure, "recordObservations";
 }
 
 /// The operations of other authorities the handler calls, which the cartridge requests.
-pub const REQUIRED_OPERATIONS: [&str; 7] = [
+pub const REQUIRED_OPERATIONS: [&str; 8] = [
     MintDrawerCapability::XRPC.nsid,
     CreateDrawer::XRPC.nsid,
     MintDocCapability::XRPC.nsid,
@@ -121,6 +124,7 @@ pub const REQUIRED_OPERATIONS: [&str; 7] = [
     ReadDatums::XRPC.nsid,
     ListDocDrawers::XRPC.nsid,
     AddDoc::XRPC.nsid,
+    CreateDoc::XRPC.nsid,
 ];
 
 /// The intxt nodule's handler. A fresh value serves each request (`big_ndk::export_nodule!`
@@ -137,13 +141,20 @@ impl big_ndk::Nodule for Intxt {
         if nsid == AddToIntxt::XRPC.nsid {
             return Some(big_ndk::invoke::<Self, AddToIntxt>(self, cx, body).await);
         }
+        if nsid == RecordObservations::XRPC.nsid {
+            return Some(big_ndk::invoke::<Self, RecordObservations>(self, cx, body).await);
+        }
         None
     }
 }
 
+mod record;
+
+pub use record::RecordObservations;
+
 /// What a handler needs to call as its caller: the caller's capability and the base of the
 /// command ids.
-struct Caller<'a> {
+pub(crate) struct Caller<'a> {
     cx: &'a big_ndk::Cx,
     capability: &'a str,
     /// The idempotency key, or the request id when the caller sent none (nothing to dedupe
@@ -152,7 +163,7 @@ struct Caller<'a> {
 }
 
 impl<'a> Caller<'a> {
-    fn new(cx: &'a big_ndk::Cx) -> Result<Self, IntxtError> {
+    pub(crate) fn new(cx: &'a big_ndk::Cx) -> Result<Self, IntxtError> {
         Ok(Self {
             cx,
             capability: cx
@@ -165,14 +176,14 @@ impl<'a> Caller<'a> {
     }
 
     /// The command id of `step`: the base and the step's fixed suffix.
-    fn command(&self, step: &str) -> Result<CommandId, IntxtError> {
+    pub(crate) fn command(&self, step: &str) -> Result<CommandId, IntxtError> {
         CommandId::try_from(format!("{}/{step}", self.command_base)).map_err(|error| {
             IntxtError::Invalid(format!("the idempotency key makes no command id: {error}"))
         })
     }
 
     /// Calls `input` presenting the caller's capability as the authority of the call.
-    async fn call<M: Unary>(&self, input: M) -> Result<M::Output, IntxtError> {
+    pub(crate) async fn call<M: Unary>(&self, input: M) -> Result<M::Output, IntxtError> {
         let metadata = HttpMetadata {
             authorization: Some(bearer_header_value(self.capability)),
             idempotency_key: None,
@@ -186,7 +197,7 @@ impl<'a> Caller<'a> {
             })
     }
 
-    async fn doc_capability(&self, scope: DocScope) -> Result<CapId, IntxtError> {
+    pub(crate) async fn doc_capability(&self, scope: DocScope) -> Result<CapId, IntxtError> {
         Ok(self
             .call(MintDocCapability {
                 scope,
@@ -236,7 +247,7 @@ fn datum(value: Value, tag: &str, slot: &str) -> (DatumKey, Value) {
     )
 }
 
-fn to_value(value: &impl Serialize) -> Value {
+pub(crate) fn to_value(value: &impl Serialize) -> Value {
     serde_json::to_value(value).expect("a record serializes")
 }
 
