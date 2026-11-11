@@ -21,6 +21,8 @@ use serde::Serialize;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 
+pub use super::listing::DocDrawer;
+pub use super::listing::DocDrawers;
 pub use super::listing::KnownDrawer;
 pub use super::listing::KnownDrawers;
 pub use super::listing::ListedDoc;
@@ -330,6 +332,17 @@ pub struct ForgetDrawer {
 pub struct ListKnownDrawers {
     pub capability: CapId,
 }
+/// The drawers through which the presented authority reaches `doc_id`, each with the access it
+/// gets there. Authorized from the request's `Authorization` metadata rather than a body
+/// `capability`, because the caller asking has no scoped handle on the doc yet: it holds an
+/// identity or some scoped drawers handle, and a doc it reaches through no drawer answers an
+/// empty list, so "not in a drawer" and "not visible" look the same.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDocDrawers {
+    pub doc_id: DocId,
+}
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -400,6 +413,7 @@ method_core::methods! {
     SetDrawerSuccessor => (), procedure, "setDrawerSuccessor";
     ResolveDrawerSuccessor => SuccessorResolution, query, "resolveDrawerSuccessor";
     ListDrawers => ListedDrawers, query, "listDrawers";
+    ListDocDrawers => DocDrawers, query, "listDocDrawers";
     GrantDrawer => (), procedure, "grantDrawer";
     RevokeDrawer => (), procedure, "revokeDrawer";
     InvitePrincipal => (), procedure, "invitePrincipal";
@@ -425,6 +439,7 @@ declare_service_protocol! {
             SetDrawerSuccessor(SetDrawerSuccessor),
             ResolveDrawerSuccessor(ResolveDrawerSuccessor),
             ListDrawers(ListDrawers),
+            ListDocDrawers(ListDocDrawers),
             GrantDrawer(GrantDrawer),
             RevokeDrawer(RevokeDrawer),
             InvitePrincipal(InvitePrincipal),

@@ -760,6 +760,94 @@ async fn serving_requests_leaves_no_service_handles_in_the_authority() {
 }
 
 #[tokio::test]
+async fn list_doc_drawers_names_the_drawers_the_presented_authority_reaches_the_doc_through() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let home = node.collection(&alice, "home").await;
+    let shared = node.collection(&alice, "shared").await;
+    let other = node.collection(&alice, "other").await;
+    let doc = node.create_doc(&alice, &home, "recipe").await.unwrap();
+    node.add_doc(&alice, "share recipe", &shared, &doc, Access::Read)
+        .await
+        .unwrap();
+    let home_access = node.view(&alice, &home).await.unwrap().docs[&doc];
+
+    // The operator reaches every drawer: the doc's two collections and the local drawers every
+    // doc is entered into, in drawer id order, each at the access its entry confers.
+    let operator = Authorization::identity(node.authority.root);
+    let listed = node.list_doc_drawers(operator, &doc).await.unwrap();
+    assert!(
+        listed.is_sorted_by_key(|entry| entry.drawer_id.clone()),
+        "listing is ordered by drawer id: {listed:?}"
+    );
+    let by_drawer: BTreeMap<DrawerId, Access> = listed
+        .into_iter()
+        .map(|entry| (entry.drawer_id, entry.access))
+        .collect();
+    assert_eq!(by_drawer[&home], home_access);
+    assert_eq!(by_drawer[&shared], Access::Read);
+    assert!(!by_drawer.contains_key(&other));
+    for local in node.local().both() {
+        assert!(by_drawer.contains_key(local), "the local drawer {local}");
+    }
+
+    // An ordinary actor reaches the doc through the drawers it holds grants on, bounded by the
+    // entry: bob holds Write on `shared`, so he gets the entry's Read and nothing through `home`.
+    let bob = node.actor("bob").await;
+    node.grant(&alice, &shared, &bob, Access::Write).await;
+    assert_eq!(
+        node.list_doc_drawers(Authorization::identity(bob.capability), &doc)
+            .await
+            .unwrap(),
+        vec![DocDrawer {
+            drawer_id: shared.clone(),
+            access: Access::Read
+        }]
+    );
+
+    // A scoped handle lists only the drawers it names, at the scope's access bounded by the entry.
+    let via_shared = node.drawer_capability(&alice, &[&shared]).await.unwrap();
+    assert_eq!(
+        node.list_doc_drawers(
+            Authorization {
+                authority: via_shared,
+                signer: alice.capability
+            },
+            &doc
+        )
+        .await
+        .unwrap(),
+        vec![DocDrawer {
+            drawer_id: shared.clone(),
+            access: Access::Read
+        }]
+    );
+    let via_other = node.drawer_capability(&alice, &[&other]).await.unwrap();
+    assert!(
+        node.list_doc_drawers(
+            Authorization {
+                authority: via_other,
+                signer: alice.capability
+            },
+            &doc
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "a handle naming only a drawer the doc is not in reaches it through nothing"
+    );
+
+    // A doc in no drawer answers an empty list, not an error.
+    assert!(
+        node.list_doc_drawers(operator, &DocId::new([9; 32]))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn list_docs_is_one_check_then_the_scoped_roster() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
