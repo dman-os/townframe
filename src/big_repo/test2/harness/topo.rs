@@ -29,9 +29,10 @@ use crate::BigRepoConnection;
 use crate::BigRepoStopToken;
 use crate::Config;
 use crate::DocumentId;
+use crate::KeyhiveStorage;
 use crate::PeerKey;
 use crate::SqliteBigRepoStore;
-use crate::StorageConfig;
+use crate::Storage;
 use crate::WorkerGroupScope;
 use big_sync::HostPartStore;
 use big_sync::stress_support;
@@ -95,6 +96,38 @@ impl iroh::protocol::ProtocolHandler for AcceptHandler {
         *self.accepted.lock().await = Some(connection);
         self.accepts.notify_waiters();
         Ok(())
+    }
+}
+
+/// Where a harness node keeps its repo: the test-support stand-in for the composition root,
+/// which is the only place a path is opened.
+#[derive(Debug, Clone)]
+pub(crate) enum StorageConfig {
+    Disk { path: PathBuf },
+    Memory,
+}
+
+impl StorageConfig {
+    /// Opens the repo's database.
+    fn sql(&self, runtime: &SqliteRuntime) -> crate::Res<sqlite_rs::Database> {
+        match self {
+            Self::Memory => Ok(runtime.ephemeral(&[])?),
+            Self::Disk { path } => {
+                std::fs::create_dir_all(path)?;
+                Ok(runtime.database(path.join("big_repo.sqlite"), &[], "_sqlite_rs_migrations"))
+            }
+        }
+    }
+
+    /// Opens the keyhive archive binding.
+    async fn keyhive(&self) -> crate::Res<KeyhiveStorage> {
+        Ok(match self {
+            Self::Memory => KeyhiveStorage::Memory,
+            Self::Disk { path } => KeyhiveStorage::Files(crate::KeyhiveFiles::open(
+                path.join("keyhive"),
+                Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+            )?),
+        })
     }
 }
 
@@ -170,15 +203,10 @@ impl Node {
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
         let sqlite_runtime = SqliteRuntime::new(Default::default());
-        let sql = match &storage {
-            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
-            StorageConfig::Disk { path } => {
-                std::fs::create_dir_all(path)?;
-                let db_path = path.join("big_repo.sqlite");
-                ::tracing::info!(seed, label, path = %path.display(), "booted node with disk storage");
-                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
-            }
-        };
+        if let StorageConfig::Disk { path } = &storage {
+            ::tracing::info!(seed, label, path = %path.display(), "booted node with disk storage");
+        }
+        let sql = storage.sql(&sqlite_runtime)?;
         let store = Arc::new(
             SqliteBigRepoStore::new_with_config(
                 sql,
@@ -221,7 +249,10 @@ impl Node {
         let (repo, repo_stop) = BigRepo::boot_with_store(
             Config {
                 node_identity_seed: [seed; 32],
-                storage,
+                storage: Storage {
+                    sql: store.sql.clone(),
+                    keyhive: storage.keyhive().await?,
+                },
                 scope_key: Arc::from("big-repo-test"),
                 hidden_parts: Default::default(),
                 // Workers are opt-in per test: the default scope disables the
@@ -1116,6 +1147,19 @@ impl Topo {
         edges[1].1.sync_keyhive_with_peer().await?;
         edges[2].1.sync_keyhive_with_peer().await?;
         Ok(Self::Triangle(TopoData3 { guard, edges }))
+    }
+
+    /// Drive every link of this topology (both directions) to a fixed point
+    /// for `docs`; see [`super::converge::converge`].
+    pub(crate) async fn converge(&self, docs: &[DocumentId]) -> crate::Res<()> {
+        let (Topo::Relay(data) | Topo::Line(data) | Topo::Star(data) | Topo::Triangle(data)) = self;
+        let nodes: Vec<&Node> = data.guard.nodes.iter().collect();
+        let links: Vec<&BigRepoConnection> = data
+            .edges
+            .iter()
+            .flat_map(|(_, init, _, accept)| [init, accept])
+            .collect();
+        super::converge::converge(&nodes, &links, docs).await
     }
 
     /// Return a reference to a node by index.

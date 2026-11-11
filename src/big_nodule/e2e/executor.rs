@@ -5,12 +5,9 @@
 use super::Node;
 use super::dispatch::Echo;
 use super::dispatch::not_ready;
-use super::dispatch::serving_plug;
-use super::dispatch::serving_plug_of;
+use super::dispatch::serving_cartridge;
+use super::dispatch::serving_cartridge_of;
 use super::id;
-use crate::dispatch::Provider;
-use crate::dispatch::ProviderKind;
-use crate::dispatch::ProviderState;
 use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
@@ -30,15 +27,18 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Digest;
+use big_cartridges_core::example_cartridge;
+use big_dispatch::Provider;
+use big_dispatch::ProviderKind;
+use big_dispatch::ProviderState;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::NotReadyReason;
+use big_dispatch_core::Readiness;
 use big_nodule_core::config::artifact_key;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::NotReadyReason;
 use big_nodule_core::inventory::ArtifactState;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::UninstallNodule;
-use big_plugs_core::Digest;
-use big_plugs_core::PlugId;
-use big_plugs_core::example_plug;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
@@ -48,7 +48,7 @@ use std::sync::Mutex;
 use tokio::sync::watch;
 
 const OWN: &str = "org.example.photos.list";
-const PHOTOS: &str = example_plug!("photos");
+const PHOTOS: &str = example_cartridge!("photos");
 
 /// Hosts nothing: it answers `ensure` with the readiness a test sets, serves a shared [`Echo`]
 /// once ready, and logs each workload it starts or stops. Like any executor it treats `ensure`
@@ -64,11 +64,11 @@ pub(super) struct FakeExecutor {
 #[derive(Default)]
 struct FakeState {
     ready: bool,
-    hosted: BTreeMap<PlugId, Digest>,
+    hosted: BTreeMap<CartridgeId, Digest>,
     /// Every `ensure` call, which the reconciler makes once per reconcile of a hosted nodule.
     ensures: usize,
     log: Vec<String>,
-    reensure: BTreeMap<PlugId, Reensure>,
+    reensure: BTreeMap<CartridgeId, Reensure>,
 }
 
 impl FakeExecutor {
@@ -97,13 +97,13 @@ impl FakeExecutor {
         Arc::clone(&self.provider)
     }
 
-    /// The bytes arrived: flip to ready and ask the state actor to ensure `plug_id` again, then
+    /// The bytes arrived: flip to ready and ask the state actor to ensure `cartridge_id` again, then
     /// wait until it has and the answer was ready.
-    async fn arrive(&self, plug_id: &PlugId) {
+    async fn arrive(&self, cartridge_id: &CartridgeId) {
         let reensure = {
             let mut state = self.state.lock().unwrap();
             state.ready = true;
-            state.reensure[plug_id].clone()
+            state.reensure[cartridge_id].clone()
         };
         let mut answers = self.ready_answers.subscribe();
         let seen = *answers.borrow_and_update();
@@ -121,17 +121,18 @@ impl NoduleExecutor for FakeExecutor {
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
-        if state.hosted.get(&spec.plug_id) != Some(&spec.handler.digest) {
+        if state.hosted.get(&spec.cartridge_id) != Some(&spec.handler.digest) {
             state
                 .hosted
-                .insert(spec.plug_id.clone(), spec.handler.digest);
-            state
-                .log
-                .push(format!("host {} {}", spec.plug_id, spec.handler.digest));
+                .insert(spec.cartridge_id.clone(), spec.handler.digest);
+            state.log.push(format!(
+                "host {} {}",
+                spec.cartridge_id, spec.handler.digest
+            ));
         }
         state
             .reensure
-            .insert(spec.plug_id.clone(), spec.reensure.clone());
+            .insert(spec.cartridge_id.clone(), spec.reensure.clone());
         if state.ready {
             drop(state);
             self.ready_answers.send_modify(|answers| *answers += 1);
@@ -141,18 +142,22 @@ impl NoduleExecutor for FakeExecutor {
         }
     }
 
-    async fn retire(&self, plug_id: &PlugId) {
+    fn hosts(&self, cartridge_id: &CartridgeId) -> bool {
+        self.state.lock().unwrap().hosted.contains_key(cartridge_id)
+    }
+
+    async fn retire(&self, cartridge_id: &CartridgeId) {
         let mut state = self.state.lock().unwrap();
         assert!(
-            state.hosted.remove(plug_id).is_some(),
-            "retired a plug that is not hosted"
+            state.hosted.remove(cartridge_id).is_some(),
+            "retired a cartridge that is not hosted"
         );
-        state.log.push(format!("retire {plug_id}"));
+        state.log.push(format!("retire {cartridge_id}"));
     }
 }
 
-fn host_of(plug_id: &str, bytes: &str) -> String {
-    format!("host {plug_id} {}", Digest::of(bytes.as_bytes()))
+fn host_of(cartridge_id: &str, bytes: &str) -> String {
+    format!("host {cartridge_id} {}", Digest::of(bytes.as_bytes()))
 }
 
 #[tokio::test]
@@ -162,7 +167,7 @@ async fn a_hosted_handler_is_registered_not_ready_until_the_executor_signals_and
     let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
     let operator = node.operator();
     let photos = id(PHOTOS);
-    node.admit(operator, serving_plug(PHOTOS, OWN))
+    node.admit(operator, serving_cartridge(PHOTOS, OWN))
         .await
         .unwrap();
     // A disabled nodule is not hosted.
@@ -228,10 +233,12 @@ async fn a_hosted_handler_is_registered_not_ready_until_the_executor_signals_and
     assert_eq!(executor.log().last().unwrap(), &host_of(PHOTOS, "photos"));
     assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
 
-    node.call(UninstallNodule {
-        authorization: operator,
-        plug_id: photos,
-    })
+    node.call(
+        operator,
+        UninstallNodule {
+            cartridge_id: photos,
+        },
+    )
     .await
     .unwrap();
     assert_eq!(executor.log().last().unwrap(), &format!("retire {PHOTOS}"));
@@ -247,14 +254,14 @@ async fn an_upgrade_retires_the_old_revision_before_ensuring_the_new_one() {
     let executor = FakeExecutor::new();
     let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
     let operator = node.operator();
-    node.admit(operator, serving_plug_of(PHOTOS, "1.0.0", OWN, "one"))
+    node.admit(operator, serving_cartridge_of(PHOTOS, "1.0.0", OWN, "one"))
         .await
         .unwrap();
     node.set_enabled(PHOTOS, true).await;
     executor.arrive(&id(PHOTOS)).await;
 
     let upgraded = node
-        .admit(operator, serving_plug_of(PHOTOS, "1.1.0", OWN, "two"))
+        .admit(operator, serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two"))
         .await
         .unwrap();
     assert_eq!(upgraded.readiness, Readiness::Ready);
@@ -275,7 +282,7 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
     let executor = FakeExecutor::new();
     let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
     let operator = node.operator();
-    node.admit(operator, serving_plug(PHOTOS, OWN))
+    node.admit(operator, serving_cartridge(PHOTOS, OWN))
         .await
         .unwrap();
     let ensures = || executor.state.lock().unwrap().ensures;
@@ -300,15 +307,16 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
     let write = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     write: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -356,15 +364,16 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
     let capability = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     read: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -408,15 +417,16 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     let write = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     write: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -451,7 +461,7 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     assert_eq!(neighbours.len(), 2);
 
     // Admitting writes the reference with the install, to the digest and size the envelope pins.
-    node.admit(operator, serving_plug_of(PHOTOS, "1.0.0", OWN, "one"))
+    node.admit(operator, serving_cartridge_of(PHOTOS, "1.0.0", OWN, "one"))
         .await
         .unwrap();
     let blobs = config_blobs(&node).await;
@@ -467,9 +477,12 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     assert_eq!(blobs[&malformed], neighbours[&malformed]);
 
     // Upgrading to another handler swaps the reference; disabling and enabling leave it.
-    node.admit(operator, serving_plug_of(PHOTOS, "1.1.0", OWN, "three"))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        serving_cartridge_of(PHOTOS, "1.1.0", OWN, "three"),
+    )
+    .await
+    .unwrap();
     node.set_enabled(PHOTOS, true).await;
     node.set_enabled(PHOTOS, false).await;
     let blobs = config_blobs(&node).await;
@@ -479,10 +492,12 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
     assert_eq!(blobs.len(), 3);
 
     // Uninstalling removes the reference and nothing else.
-    node.call(UninstallNodule {
-        authorization: operator,
-        plug_id: id(PHOTOS),
-    })
+    node.call(
+        operator,
+        UninstallNodule {
+            cartridge_id: id(PHOTOS),
+        },
+    )
     .await
     .unwrap();
     let blobs = config_blobs(&node).await;

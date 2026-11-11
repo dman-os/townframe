@@ -13,6 +13,7 @@ use crate::BigKeyhiveGroup;
 use crate::DocumentId;
 use crate::PeerKey;
 use crate::Res;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use subduction_keyhive::KeyhivePeerId;
@@ -403,12 +404,15 @@ pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
         let mut stall: Option<(std::time::Instant, std::time::Instant)> = None;
         loop {
             let event_tail = node.store.admission_head().await?;
-            let (group_namespace, group_consumer) =
-                crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
             let group_cursor = node
                 .store
-                .admission_consumer_progress(group_namespace, group_consumer)
-                .await?;
+                .admission_consumer_state(
+                    crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART,
+                )
+                .await?
+                .progress()
+                .await?
+                .upstream_revision;
             if group_cursor >= event_tail {
                 break;
             }
@@ -451,18 +455,24 @@ pub async fn wait_for_network_rest(nodes: &[&super::topo::Node]) -> Res<()> {
             let mut stall: Option<(std::time::Instant, std::time::Instant)> = None;
             while {
                 let event_tail = node.store.admission_head().await?;
-                let (group_namespace, group_consumer) =
-                    crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
                 let group_cursor = node
                     .store
-                    .admission_consumer_progress(group_namespace, group_consumer)
-                    .await?;
-                let (causal_namespace, causal_consumer) =
-                    crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT;
+                    .admission_consumer_state(
+                        crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART,
+                    )
+                    .await?
+                    .progress()
+                    .await?
+                    .upstream_revision;
                 let causal_cursor = node
                     .store
-                    .admission_consumer_progress(causal_namespace, causal_consumer)
-                    .await?;
+                    .admission_consumer_state(
+                        crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT,
+                    )
+                    .await?
+                    .progress()
+                    .await?
+                    .upstream_revision;
                 let behind = group_cursor < event_tail || causal_cursor < event_tail;
                 if behind {
                     let now = std::time::Instant::now();

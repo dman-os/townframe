@@ -11,7 +11,8 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use iroh_blobs::HashAndFormat;
 use iroh_blobs::store::virtual_blob::Provider as _;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 
 struct UnusedAuthority;
 
@@ -27,9 +28,9 @@ async fn reopen(
 ) -> Res<(Blobs, StopToken, Database)> {
     let sql = runtime.database(directory.join("local.sqlite"), &[], "test_migrations");
     let (blobs, stop) = boot(Config {
-        storage: Storage::Filesystem(directory.join("store")),
+        storage: Storage::filesystem(directory.join("store")).await?,
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -62,14 +63,14 @@ async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<(
     let directory = tempfile::tempdir()?;
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     for storage in [
-        Storage::Memory,
-        Storage::Filesystem(directory.path().join("store")),
+        Storage::memory().unwrap(),
+        Storage::filesystem(directory.path().join("store")).await?,
     ] {
         let sql = runtime.ephemeral(&[])?;
         let (blobs, stop) = boot(Config {
             storage,
             sql: sql.clone(),
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([7; 16]),
@@ -129,9 +130,9 @@ async fn shutdown_drains_cancelled_publication_before_closing_store() -> Res<()>
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
-        storage: Storage::Memory,
+        storage: Storage::memory().unwrap(),
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -190,9 +191,9 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
     let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
     let sql = runtime.ephemeral(&[])?;
     let (blobs, stop) = boot(Config {
-        storage: Storage::Memory,
+        storage: Storage::memory().unwrap(),
         sql: sql.clone(),
-        authority: Client::direct(Arc::new(UnusedAuthority)),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),

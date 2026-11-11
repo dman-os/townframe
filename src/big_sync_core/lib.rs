@@ -1999,6 +1999,7 @@ impl BigSyncMachine {
             return refused;
         };
         let state = &mut peer_state.replay_subscription;
+        tracing::debug!(%peer_id, generation, state_generation = state.generation, pending = state.pending_additions.len(), rejected = rejected.len(), "INSTR replay update acknowledged");
         if state.generation != generation.saturating_add(1) {
             return refused;
         }
@@ -2062,8 +2063,15 @@ impl BigSyncMachine {
     /// swept it, or it restarted), so the next update re-states the whole target set under
     /// generation 0 — which is the one generation that opens a subscription it does not know.
     /// Target ids keep counting up so a re-open cannot collide with an entry of the handle
-    /// that was lost; the subscription id is reused because the responder holds nothing under
-    /// it, and a fresh one would spend the peer's subscription budget on the abandoned one.
+    /// that was lost, and the subscription id is fresh. The responder may hold nothing under
+    /// the old id, but it may also be about to: an earlier opening update that was cancelled
+    /// client-side can still be in flight or being adjudicated, and if it lands after the
+    /// re-open, the responder answers the re-open's generation 0 as a repeat of that one
+    /// (applying none of its entries, returning the other request's verdicts), which the
+    /// client reads as acknowledgement of ids the responder never took. Pages then name ids
+    /// the responder does not hold and fail for good. A fresh id makes the re-open a clean
+    /// slate; a late arrival of the old opening only leaves an orphan the responder's TTL
+    /// sweeps.
     ///
     /// Forgetting is only half of a reset. A reset that left nothing queued would leave every
     /// wanted route unpageable for good: a page may only name an entry the responder has
@@ -2071,9 +2079,17 @@ impl BigSyncMachine {
     /// wanted set to the same reconciler every other change uses, which queues it and sends the
     /// opening update itself.
     fn reset_replay_subscription(&mut self, peer_id: &PeerKey) {
+        tracing::debug!(%peer_id, "INSTR replay subscription reset");
         if let Some(peer_state) = self.peers.get_mut(peer_id) {
             let state = &mut peer_state.replay_subscription;
             state.generation = 0;
+            state.subscription_id = crate::rpc::ReplaySubscriptionId(
+                state
+                    .subscription_id
+                    .0
+                    .checked_add(1)
+                    .expect(ERROR_IMPOSSIBLE),
+            );
             state.targets.clear();
             state.pending_additions.clear();
             state.pending_removals.clear();
@@ -4126,19 +4142,18 @@ mod tests {
             .subscription
             .as_ref()
             .expect("an update round belongs to a subscription");
-        assert_eq!(
-            subscription.generation, 0,
-            "the re-open must open a handle the responder does not have"
-        );
         let Some(crate::rpc::ReplaySubscriptionRequest::Update {
             generation,
             additions,
             removals,
+            subscription_id,
             ..
         }) = subscription.request.clone()
         else {
             panic!("the re-open must carry an update");
         };
+        let first = crate::rpc::ReplaySubscriptionId(1);
+        assert_ne!(subscription_id, first, "a re-open names a fresh handle");
         assert_eq!(generation, 0, "an opening update carries generation 0");
         assert!(removals.is_empty(), "a re-open removes nothing");
         let reopened: Set<ReplayRoute> = additions

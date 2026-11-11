@@ -158,7 +158,7 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
 1. Sync accessors drop `Result`: undeclared binding panics, unresolved optional is `None`. Runtime-granted (powerbox) bindings arrive later through a separate async request API.
 2. A call's contract comes from the manifest declaration only.
 3. Isomorphic MDK is in scope (ledger F6): `export_micro!(activate)` emits the guest exports under the guest backend and a native `ACTIVATE` entry under `in_process`. `arguments` leaves the author API.
-4. Call handlers are serde CBOR generic; Lexicon typing waits for big_plugs. `publish_call_raw` only if a real caller needs it.
+4. Call handlers are serde CBOR generic; Lexicon typing waits for big_cartridges. `publish_call_raw` only if a real caller needs it.
 5. One `Context` struct with a cfg'd inner.
 6. `async changed()` replaces the tokio `watch` in the public API.
 7. Decoded rows are cached per revision, not decoded on every `rows()`/render.
@@ -251,24 +251,24 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
   dayframe micros: authority and prefix `org.example.dayframe.<micro>` (`settings.sections`, `counter.count`,
   facet tags `*.config`); tests and fixtures: `org.example.clay.test.*` / `org.example.test.*`.
 - **Request.** One `Request` (camelCase wire, `access` absent for `requires`, present for `collection_requests`,
-  `minRevision`), mirroring `big_plugs_core::request::Request`; swap to theirs after the merge.
+  `minRevision`), mirroring `big_cartridges_core::request::Request`; swap to theirs after the merge.
 - **Sidecar.** `Sidecar { id, package_version, authority?, manifest }` is the flat on-disk form; factories take the
   `MicroId` separately, `InstalledMicro::new(sidecar, ..)`, manifest crates expose `manifest()` (guests) and `sidecar()`.
   `Sidecar::validate` = `MicroManifest::validate` + the authority rule; the composition drops a refused package whole.
 - **Contributions** name a write collection request by `binding`; `declared_rows(&Sidecar)` groups rows by binding and the
   composition installs them into the collection the micro's resolution bound (an unbound binding skips its rows).
-- **Not done (C6d-2):** micro id = installed-as PlugId, writer = (replica, micro id), BLAKE3, grant re-check.
+- **Not done (C6d-2):** micro id = installed-as CartridgeId, writer = (replica, micro id), BLAKE3, grant re-check.
 - **Persisted-data breaks (pre-release, not migrated):** durable collections are keyed by the NSID text now, endpoint
   rows have a new CBOR shape, and a stored binding datum must hold NSIDs.
 
 ## C6d-2 notes (2026-11-04): runtime identity aligned to ADR 028
 
 - **Request defaults.** `necessity` defaults to `required`, `resolution` to `configured`, both skipped on serialize at the
-  default (`skip_serializing_if = is_default`), matching `big_plugs_core::request::Request`. Fixture JSON and snapshots omit them.
+  default (`skip_serializing_if = is_default`), matching `big_cartridges_core::request::Request`. Fixture JSON and snapshots omit them.
 - **Micro id = installed-as plug id.** `clay_mdk::MicroId` is `<did>/<name>`, validated at construction and
-  deserialization (DID syntax and plug-name grammar copied from `big_plugs_core::PlugId`: dots allowed, never leading, trailing
+  deserialization (DID syntax and plug-name grammar copied from `big_cartridges_core::CartridgeId`: dots allowed, never leading, trailing
   or doubled; the unit tests pin it). `MicroId::parse/installed/local`, `.namespace()/.name()`. `Sidecar.id` is now the bare plug
-  *name* (a `String`, checked in `Sidecar::validate`), so the sidecar JSON still reads as `big_plugs`' importer expects.
+  *name* (a `String`, checked in `Sidecar::validate`), so the sidecar JSON still reads as `big_cartridges`' importer expects.
   `Package::new(namespace, sidecar, bytes)` / `from_json(namespace, ..)` build the id (`Package::id()`).
   Stand-in namespace `clay_mdk::LOCAL_NAMESPACE = "did:example:clay-local"`: `did:example` is the W3C documentation method, valid
   DID syntax that can never be a real publisher, so a stand-in id cannot be mistaken for a real one. Replaced by the node DID once
@@ -469,7 +469,7 @@ manifest vocabulary (unchanged), `ComponentRef`. Everything else is `pub(crate)`
 - **Deferred (not built), needs a decision.** ADR 030 #8 dynamic half: `Lease` has no holder, so two incarnations retaining each other
   never idle, and a lazy initialization cycle (A's initialize demands B whose initialize demands A) deadlocks on A's staged outcome rather
   than failing with `Cycle`. ADR 031 #5: no Lexicon validation of keys/values (only limits, attachment indices, selector ceilings);
-  depends on the schema registry (big_plugs P7). ADR 030 #10 / 031 #11: no native `Incarnations`; the lifecycle fixture is wasm32-only.
+  depends on the schema registry (big_cartridges P7). ADR 030 #10 / 031 #11: no native `Incarnations`; the lifecycle fixture is wasm32-only.
   ADR 031 #9 guest-side `status()` of a bound reference after closure through the WIT: no fixture call exposes it (adding one needs a
   guest rebuild and a fixture change; the mapping is a one-line enum match per engine).
 - **Hygiene.** Spin-waits replaced by event waits: composition `settle` (supervisor `changes().wait_for`), clay_host supervisor tests

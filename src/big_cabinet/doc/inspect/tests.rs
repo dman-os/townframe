@@ -8,12 +8,12 @@ use automerge::ObjType;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
 use big_cabinet_core::DatumKey;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Bytes;
@@ -33,19 +33,20 @@ use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
 use big_repo::SharedBigRepo;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
+use method_core::ContextError;
 use secrets_rs::SecretStore;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use service_utils_rs::Admission;
-use service_utils_rs::Client;
 use service_utils_rs::ClientError;
-use service_utils_rs::ContextError;
 use service_utils_rs::IrpcAdapter;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ServerBinding;
 use service_utils_rs::StopToken;
-use service_utils_rs::XrpcClient;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc;
 use std::sync::Arc;
@@ -56,7 +57,7 @@ const DMETA: &str = "org.example.daybook.dmeta/main";
 struct Fixture {
     authority: Authority,
     authority_stop: StopToken,
-    issuer: Actor,
+    issuer: OpenedActor,
     namespace: Namespace,
     access: Arc<LedgerAccess>,
     repo: SharedBigRepo,
@@ -73,10 +74,13 @@ impl Fixture {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
-        let (authority, authority_stop) =
-            crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
-                .await
-                .unwrap();
+        let (authority, authority_stop) = crate::authority::boot(
+            &secrets,
+            "test-node",
+            sqlite_rs::test_support::db(&[]).unwrap().clone(),
+        )
+        .await
+        .unwrap();
         let issuer = authority
             .client
             .call(
@@ -94,18 +98,15 @@ impl Fixture {
             .open_namespace(Uuid7::new())
             .await
             .unwrap();
-        let (repo, repo_stop) = BigRepo::boot(
-            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-            Config {
-                node_identity_seed: [31; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "document-service-tests".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [31; 32],
+            storage: Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default())).unwrap(),
+            scope_key: "document-service-tests".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let schemas = Arc::new(SchemaRepo::open([]).unwrap());
@@ -207,7 +208,7 @@ impl Fixture {
             .await
             .unwrap();
         let capability = docs
-            .mint_inspection_handle(doc_id.clone(), issuer.capability)
+            .mint_inspection_handle(doc_id.clone(), issuer.actor.actor_id)
             .await
             .unwrap();
         let expected = UnsafeDatumInspection {
@@ -278,6 +279,7 @@ impl Fixture {
                     dependencies: Vec::new(),
                     object,
                     rights,
+                    subject: None,
                 },
             )
             .await
@@ -383,7 +385,7 @@ async fn inspect(
         .call(RequestContext::root(), request)
         .await
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("inspection transport: {message}"),
         })
 }
@@ -404,7 +406,7 @@ async fn claims(
         )
         .await
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("claims transport: {message}"),
         })
 }
@@ -590,13 +592,13 @@ async fn capability_checks_precede_any_repository_lookup() {
     let mut fixture = Fixture::new().await;
     let wrong_object = fixture
         .docs
-        .mint_inspection_handle(DocId::new([82; 32]), fixture.issuer.capability)
+        .mint_inspection_handle(DocId::new([82; 32]), fixture.issuer.actor.actor_id)
         .await
         .unwrap();
     let other_namespace = fixture
         .authority
         .service
-        .open_namespace(fixture.issuer.actor_id)
+        .open_namespace(fixture.issuer.actor.actor_id)
         .await
         .unwrap();
     let wrong_issuer = fixture
@@ -615,7 +617,10 @@ async fn capability_checks_precede_any_repository_lookup() {
         .await;
     let retracted = fixture
         .docs
-        .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
+        .mint_inspection_handle(
+            fixture.document.document_id(),
+            fixture.issuer.actor.actor_id,
+        )
         .await
         .unwrap();
     fixture.retract(retracted.capability_id).await;
@@ -667,7 +672,7 @@ async fn capability_checks_precede_any_repository_lookup() {
 }
 
 #[tokio::test]
-async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
+async fn inspection_scope_is_distinct_and_retracting_the_introduced_actor_revokes_it() {
     let fixture = Fixture::new().await;
     let signer = fixture
         .authority
@@ -675,8 +680,8 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
         .call(
             RequestContext::root(),
             OpenActor {
-                parent: fixture.authority.root,
-                path: "inspector".into(),
+                parent: fixture.issuer.capability,
+                path: "documents/inspector".into(),
                 rights: Rights::USE,
             },
         )
@@ -688,7 +693,7 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
         .grants
         .grant(
             &RequestContext::root(),
-            fixture.issuer.actor_id,
+            fixture.issuer.actor.actor_id,
             LedgerAccess::object(AccessRequest::Read(&document)),
             Rights::USE,
             None,
@@ -698,25 +703,27 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
     let resource = fixture
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization {
+                authority: fixture.issuer.capability,
+                signer: signer.capability,
+            }
+            .metadata(),
             MintDocCapability {
-                authorization: Authorization {
-                    authority: fixture.issuer.capability,
-                    signer: signer.capability,
-                },
                 scope: DocScope {
                     read: BTreeSet::from([document.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: Some(signer.actor.actor_id),
             },
         )
         .await
         .unwrap();
     let inspection = fixture
         .docs
-        .mint_inspection_handle(document.clone(), signer.capability)
+        .mint_inspection_handle(document.clone(), signer.actor.actor_id)
         .await
         .unwrap();
     let mut request = fixture.request();
@@ -756,7 +763,7 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
                 }
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     );
     let mut wrong_scope = request.clone();
     wrong_scope.capability = resource.capability_id;
@@ -771,9 +778,11 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
     assert_eq!(
         fixture
             .docs
-            .mint_inspection_handle(document, resource.capability_id)
+            .mint_inspection_handle(document, Uuid7::new())
             .await,
-        Err(DocsError::Denied)
+        Err(DocsError::Authority(
+            big_cabinet_core::authority::AuthorityServiceError::ActorNotFound
+        ))
     );
     fixture
         .authority
@@ -851,7 +860,10 @@ async fn boot_requires_exact_actor_association_and_shutdown_closes_inspection_an
     assert_eq!(
         fixture
             .docs
-            .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
+            .mint_inspection_handle(
+                fixture.document.document_id(),
+                fixture.issuer.actor.actor_id
+            )
             .await
             .unwrap_err(),
         expected
@@ -883,8 +895,8 @@ async fn direct_irpc_and_xrpc_share_exact_heads_evidence_and_denials() {
     let base = url::Url::parse(&format!("http://{address}/")).unwrap();
     let transports = [
         fixture.docs.client.clone(),
-        Client::irpc(irpc),
-        Client::xrpc(XrpcClient::new(base, BODY_LIMIT).unwrap()),
+        Client::new(Transport::irpc(irpc)),
+        Client::new(Transport::xrpc(XrpcClient::new(base, BODY_LIMIT).unwrap())),
     ];
     for client in &transports {
         assert_eq!(

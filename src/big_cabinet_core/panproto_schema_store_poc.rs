@@ -115,22 +115,26 @@ mod tests {
     }
 
     #[test]
-    fn plugs_commit_referenced_schema_versions_and_documents_query_exact_revisions() {
+    fn cartridges_commit_referenced_schema_versions_and_documents_query_exact_revisions() {
         let directory = tempfile::tempdir().unwrap();
-        let mut plugs_repo = Repository::init(directory.path()).unwrap();
+        let mut cartridges_repo = Repository::init(directory.path()).unwrap();
 
         let v1 = bundle(false);
         let v1_revision = {
-            plugs_repo.add(&v1).unwrap();
-            plugs_repo.commit("profile v1", "plug-author").unwrap()
+            cartridges_repo.add(&v1).unwrap();
+            cartridges_repo
+                .commit("profile v1", "cartridge-author")
+                .unwrap()
         };
 
         let v2 = bundle(true);
         let v2_revision = {
-            plugs_repo.add(&v2).unwrap();
-            plugs_repo.commit("profile v2", "plug-author").unwrap()
+            cartridges_repo.add(&v2).unwrap();
+            cartridges_repo
+                .commit("profile v2", "cartridge-author")
+                .unwrap()
         };
-        drop(plugs_repo);
+        drop(cartridges_repo);
 
         // DocsRepo gets only this query facade, not Panproto's writer API.
         let schema_store = SchemaStore::open(directory.path()).unwrap();

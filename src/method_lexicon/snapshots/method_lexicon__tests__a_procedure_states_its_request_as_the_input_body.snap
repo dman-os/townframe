@@ -1,0 +1,141 @@
+---
+source: src/method_lexicon/tests.rs
+expression: "lexicon_of::<big_cabinet_core::drawer::protocol::AddChild>()"
+---
+{
+  "defs": {
+    "AddChild": {
+      "properties": {
+        "access": {
+          "enum": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "childId": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "parentId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capability",
+        "command",
+        "parentId",
+        "childId",
+        "access"
+      ],
+      "type": "object"
+    },
+    "WriteReceipt": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "heads": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "docId",
+        "heads"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "SelfChild"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Docs"
+        },
+        {
+          "name": "DocsUnavailable"
+        },
+        {
+          "name": "Keyhive"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "UnknownDrawer"
+        },
+        {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
+          "name": "SelfDoc"
+        },
+        {
+          "name": "AlreadyDrawer"
+        },
+        {
+          "name": "NotAnEntry"
+        },
+        {
+          "name": "ForeignLayout"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "RosterUnreadable"
+        },
+        {
+          "name": "InvalidMetaDocSlot"
+        },
+        {
+          "name": "SuccessorCycle"
+        },
+        {
+          "name": "SuccessorSelf"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#AddChild",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#WriteReceipt",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.drawers.addChild",
+  "lexicon": 1
+}

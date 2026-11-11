@@ -131,7 +131,7 @@ fun buildSelfFacetRefUrl(key: FacetKey): String {
             is FacetTag.WellKnown -> wellKnownFacetTagCanonicalString(tag.v1)
             is FacetTag.Any -> tag.v1
         }
-    return "db+facet:///self/$tagString/${key.id}"
+    return "dtxt:datum:self/$tagString/${key.id}"
 }
 
 fun stripFacetRefFragment(url: String): String = url.substringBefore('#')
@@ -151,7 +151,7 @@ fun buildBlobFacetFromDigest(digest: String, lengthOctets: ULong, mime: String):
             lengthOctets = lengthOctets,
             digest = digest,
             inline = null,
-            urls = listOf("db+blob:///$digest"),
+            urls = listOf("dtxt:blob:$digest"),
         ),
     )
 
@@ -159,7 +159,7 @@ fun buildImageMetadataFacet(
     mime: String,
     widthPx: ULong,
     heightPx: ULong,
-    facetRef: String = "db+facet:///self/org.example.daybook.blob/main",
+    facetRef: String = "dtxt:datum:self/org.example.daybook.blob/main",
 ): WellKnownFacet.ImageMetadata = WellKnownFacet.ImageMetadata(
     ImageMetadata(
         facetRef = facetRef,

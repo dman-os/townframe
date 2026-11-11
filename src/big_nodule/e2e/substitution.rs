@@ -7,16 +7,21 @@ use super::executor::FakeExecutor;
 use super::id;
 use super::init::PING;
 use super::init::Probe;
-use super::init::init_plug;
+use super::init::init_cartridge;
 use super::init::necessity;
 use super::init::with_requests;
-use crate::dispatch::Provider;
-use crate::dispatch::ProviderKind;
-use crate::dispatch::ProviderState;
 use big_cabinet_core::datum::operation::OperationKind;
-use big_nodule_core::dispatch::DispatchScope;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Digest;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Necessity;
+use big_dispatch::Operation;
+use big_dispatch::Provider;
+use big_dispatch::ProviderKind;
+use big_dispatch::ProviderState;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Readiness;
 use big_nodule_core::inventory::FilledBy;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::SetNoduleEnabled;
@@ -24,54 +29,52 @@ use big_nodule_core::protocol::SetNoduleOperationGrants;
 use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
-use big_plugs_core::Digest;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Necessity;
 use std::sync::Arc;
 
-const ALPHA: &str = example_plug!("alpha");
-const BETA: &str = example_plug!("beta");
-const FORK: &str = example_plug!("fork");
-const GAMMA: &str = example_plug!("gamma");
+const ALPHA: &str = example_cartridge!("alpha");
+const BETA: &str = example_cartridge!("beta");
+const FORK: &str = example_cartridge!("fork");
+const GAMMA: &str = example_cartridge!("gamma");
 const BETA_PING: &str = "org.example.beta.ping";
 /// Operations beta requests (and a native provider serves): the one it and the fork both ask for,
 /// and one only the fork asks for.
 const SYNC: &str = "org.example.remote.sync";
 const MORE: &str = "org.example.remote.more";
 
-fn beta(version: &str) -> Plug {
+fn beta(version: &str) -> Cartridge {
     with_requests(
-        init_plug("beta", version, &[BETA_PING], &[], &[]),
+        init_cartridge("beta", version, &[BETA_PING], &[], &[]),
         vec![necessity(SYNC, Necessity::Required)],
     )
 }
 
-/// A fork of beta: its own plug id but beta's authority, serving beta's operation, requesting
+/// A fork of beta: its own cartridge id but beta's authority, serving beta's operation, requesting
 /// `requests` (as required).
-fn fork(version: &str, requests: &[&str]) -> Plug {
-    let mut plug = with_requests(
-        init_plug("fork", version, &[BETA_PING], &[], &[]),
+fn fork(version: &str, requests: &[&str]) -> Cartridge {
+    let mut cartridge = with_requests(
+        init_cartridge("fork", version, &[BETA_PING], &[], &[]),
         requests
             .iter()
             .map(|nsid| necessity(nsid, Necessity::Required))
             .collect(),
     );
-    plug.authority = Some("org.example.beta".into());
-    plug
+    cartridge.authority = Some("org.example.beta".into());
+    cartridge
 }
 
-fn host(plug_id: &str, bytes: &str) -> String {
-    format!("host {plug_id} {}", Digest::of(bytes.as_bytes()))
+fn host(cartridge_id: &str, bytes: &str) -> String {
+    format!("host {cartridge_id} {}", Digest::of(bytes.as_bytes()))
 }
 
 impl Node {
     async fn substitute(&self, slot: &str, by: Option<&str>) -> Result<NoduleRecord, NodulesError> {
-        self.call(SetNoduleSubstitution {
-            authorization: self.operator(),
-            plug_id: id(slot),
-            by: by.map(id),
-        })
+        self.call(
+            self.operator(),
+            SetNoduleSubstitution {
+                cartridge_id: id(slot),
+                by: by.map(id),
+            },
+        )
         .await
     }
 }
@@ -79,14 +82,22 @@ impl Node {
 /// A node hosting every handler, with native providers of the operations beta and the fork
 /// request, beta enabled and granted everything under `org.example.remote`, and the fork
 /// installed beside it, disabled.
-async fn node_with_beta_and(fork: Plug) -> (Node, Arc<FakeExecutor>) {
+async fn node_with_beta_and(fork: Cartridge) -> (Node, Arc<FakeExecutor>) {
     let executor = FakeExecutor::hosting(Probe::new(), true);
     let node = super::node_with(Some(Arc::clone(&executor) as _)).await;
-    node.dispatch.router.register(
-        "native-remote",
-        [SYNC, MORE].map(|nsid| (nsid.to_owned(), Some(OperationKind::Query))),
-        ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
-    );
+    node.dispatch
+        .router
+        .register(
+            "native-remote",
+            [SYNC, MORE].map(|nsid| {
+                (
+                    nsid.to_owned(),
+                    Operation::unchecked(Some(OperationKind::Query)),
+                )
+            }),
+            ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
+        )
+        .unwrap();
     node.admit(node.operator(), beta("1.0.0")).await.unwrap();
     node.grant_operations(BETA, &["org.example.remote"]).await;
     node.admit(node.operator(), fork).await.unwrap();
@@ -101,11 +112,11 @@ async fn the_slot_runs_the_substitutes_code_and_reports_who_fills_it() {
     let before = node.record(BETA).await;
 
     let record = node.substitute(BETA, Some(FORK)).await.unwrap();
-    assert_eq!(record.plug_id, id(BETA));
+    assert_eq!(record.cartridge_id, id(BETA));
     assert_eq!(
         record.filled_by,
         Some(FilledBy {
-            plug_id: id(FORK),
+            cartridge_id: id(FORK),
             version: "1.5.0".parse().unwrap()
         })
     );
@@ -128,7 +139,7 @@ async fn the_slot_runs_the_substitutes_code_and_reports_who_fills_it() {
             host(BETA, "fork-1.5.0")
         ]
     );
-    // The fork's own slot is just an installed plug.
+    // The fork's own slot is just an installed cartridge.
     let own = node.record(FORK).await;
     assert_eq!((own.filled_by, own.readiness), (None, Readiness::Disabled));
     node.shutdown().await;
@@ -140,7 +151,7 @@ async fn dependents_pinned_to_the_slot_stay_satisfied_with_the_substitutes_versi
     node.admit(
         node.operator(),
         with_requests(
-            init_plug("alpha", "1.0.0", &[PING], &[], &[]),
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
             vec![necessity(BETA_PING, Necessity::Required)],
         ),
     )
@@ -188,14 +199,16 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     assert_eq!(record.readiness, Readiness::NeedsConfiguration);
     // Naming the added operation is the consent, and makes the slot ready.
     let record = node
-        .call(SetNoduleOperationGrants {
-            authorization: node.operator(),
-            plug_id: id(BETA),
-            operations: DispatchScope {
-                operations: [MORE.to_owned()].into(),
-                authorities: ["org.example.remote".to_owned()].into(),
+        .call(
+            node.operator(),
+            SetNoduleOperationGrants {
+                cartridge_id: id(BETA),
+                operations: DispatchScope {
+                    operations: [MORE.to_owned()].into(),
+                    authorities: ["org.example.remote".to_owned()].into(),
+                },
             },
-        })
+        )
         .await
         .unwrap();
     assert_eq!(record.readiness, Readiness::Ready);
@@ -217,7 +230,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
 }
 
 #[tokio::test]
-async fn clearing_the_substitution_reinstalls_the_slots_own_plug() {
+async fn clearing_the_substitution_reinstalls_the_slots_own_cartridge() {
     let (node, executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     let before = node.record(BETA).await;
     node.substitute(BETA, Some(FORK)).await.unwrap();
@@ -244,12 +257,14 @@ async fn clearing_the_substitution_reinstalls_the_slots_own_plug() {
 async fn a_substitute_enabled_on_its_own_cannot_fill_a_slot_and_the_reverse() {
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
     let operator = node.operator();
-    let enable = |plug_id: &str| {
-        node.call(SetNoduleEnabled {
-            authorization: operator,
-            plug_id: id(plug_id),
-            enabled: true,
-        })
+    let enable = |cartridge_id: &str| {
+        node.call(
+            operator,
+            SetNoduleEnabled {
+                cartridge_id: id(cartridge_id),
+                enabled: true,
+            },
+        )
     };
 
     // Beta holds the prefix, so the fork cannot be enabled beside it at all.
@@ -280,7 +295,7 @@ async fn a_substitute_holding_another_authority_is_refused() {
     // Gamma holds `org.example.gamma`: a different prefix is a different slot, not a drop-in.
     node.admit(
         node.operator(),
-        init_plug("gamma", "1.0.0", &[BETA_PING], &[], &[]),
+        init_cartridge("gamma", "1.0.0", &[BETA_PING], &[], &[]),
     )
     .await
     .unwrap();
@@ -291,7 +306,7 @@ async fn a_substitute_holding_another_authority_is_refused() {
         .to_string();
     assert!(refused.contains("holds authority"), "{refused}");
     let refused = node
-        .substitute(BETA, Some(example_plug!("absent")))
+        .substitute(BETA, Some(example_cartridge!("absent")))
         .await
         .unwrap_err()
         .to_string();

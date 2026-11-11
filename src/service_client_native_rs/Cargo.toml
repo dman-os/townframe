@@ -1,0 +1,38 @@
+[package]
+name = "service_client_native_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = []
+iroh-http = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
+
+[dependencies]
+method_core.workspace = true
+service_core_rs.workspace = true
+service_client_core_rs.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
+irpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+http.workspace = true
+uuid = { version = "1", features = ["v7"] }
+reqwest.workspace = true
+serde_urlencoded = "0.7"
+base64 = "0.22"
+sha1 = "0.10"
+iroh = { workspace = true, optional = true }
+hyper = { version = "1", features = ["http1", "client"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tracing.workspace = true
+tokio = { workspace = true, features = ["full", "test-util"] }

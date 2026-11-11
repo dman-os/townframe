@@ -1,27 +1,15 @@
 //! Server side: route `/xrpc/{nsid}` to a mounted operation.
 
-use super::AUTHORIZATION_HEADER;
-use super::DOMAIN_ERROR_FIELD;
 use super::DOMAIN_ERROR_STATUS;
-use super::IDEMPOTENCY_KEY_HEADER;
 use super::REQUEST_ID_HEADER;
-use super::TIMEOUT_HEADER;
-use super::TRACEPARENT_HEADER;
 use super::XrpcErrorEnvelope;
 use super::XrpcHandlerError;
 use super::XrpcRequest;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
-use crate::context::TraceContext;
 use crate::host::Host;
 use crate::middleware::Handler;
 use crate::operation::Envelope;
-use crate::operation::HttpInput;
-use crate::operation::HttpMethod;
-use crate::operation::Subscription;
-use crate::operation::Unary;
-use crate::operation::XrpcKind;
-use crate::operation::XrpcOperation;
 use axum::Json;
 use axum::Router;
 use axum::extract::Path;
@@ -36,44 +24,51 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::any;
 use futures::StreamExt as _;
+use method_core::HttpInput;
+use method_core::HttpMethod;
+use method_core::MethodKind;
+use method_core::Subscription;
+use method_core::Unary;
+use method_core::XrpcMethod;
 use mime::Mime;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
-use service_client_rs::xrpc::ws::WsIo;
-use service_client_rs::xrpc::ws::accept_key;
+use service_client_native_rs::xrpc::ws::WsIo;
+use service_client_native_rs::xrpc::ws::accept_key;
+use service_core_rs::xrpc::domain_error_envelope;
+use service_core_rs::xrpc::request_context;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
 /// A registered operation handler. [`XrpcRouter::mount`] builds one from a
-/// hosted [`Handler`]; [`XrpcOperationHandler::typed`] is the escape hatch for
+/// hosted [`Handler`]; [`XrpcMethodHandler::typed`] is the escape hatch for
 /// an operation that is not hosted through this crate.
 #[derive(Clone)]
-pub struct XrpcOperationHandler {
-    operation: XrpcOperation,
+pub struct XrpcMethodHandler {
+    operation: XrpcMethod,
     handler: Arc<dyn Fn(XrpcRequest) -> HandlerFuture + Send + Sync>,
 }
 
 type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<crate::ResponseEnvelope<Value>, XrpcHandlerError>> + Send>>;
 
-impl std::fmt::Debug for XrpcOperationHandler {
+impl std::fmt::Debug for XrpcMethodHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("XrpcOperationHandler")
+            .debug_struct("XrpcMethodHandler")
             .field("operation", &self.operation)
             .finish_non_exhaustive()
     }
 }
 
-impl XrpcOperationHandler {
-    pub fn new<F, Fut, O>(operation: XrpcOperation, handler: F) -> Self
+impl XrpcMethodHandler {
+    pub fn new<F, Fut, O>(operation: XrpcMethod, handler: F) -> Self
     where
         F: Fn(XrpcRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<O, XrpcHandlerError>> + Send + 'static,
@@ -88,7 +83,7 @@ impl XrpcOperationHandler {
         }
     }
 
-    pub fn typed<P, O, F, Fut>(operation: XrpcOperation, handler: F) -> Self
+    pub fn typed<P, O, F, Fut>(operation: XrpcMethod, handler: F) -> Self
     where
         P: DeserializeOwned + Send + 'static,
         O: Serialize + Send + 'static,
@@ -117,7 +112,7 @@ impl XrpcOperationHandler {
         })
     }
 
-    pub fn operation(&self) -> XrpcOperation {
+    pub fn operation(&self) -> XrpcMethod {
         self.operation
     }
 
@@ -133,7 +128,7 @@ impl XrpcOperationHandler {
 /// the same `/xrpc/{nsid}` route rather than the unary HTTP exchange.
 #[derive(Clone)]
 pub struct XrpcSubscriptionHandler {
-    operation: XrpcOperation,
+    operation: XrpcMethod,
     handler: Arc<dyn Fn(XrpcRequest) -> SubscriptionFuture + Send + Sync>,
 }
 
@@ -161,7 +156,7 @@ impl std::fmt::Debug for XrpcSubscriptionHandler {
 }
 
 impl XrpcSubscriptionHandler {
-    pub fn typed<P, E, F, Fut>(operation: XrpcOperation, handler: F) -> Self
+    pub fn typed<P, E, F, Fut>(operation: XrpcMethod, handler: F) -> Self
     where
         P: DeserializeOwned + Send + 'static,
         E: Serialize + Send + 'static,
@@ -207,7 +202,7 @@ impl XrpcSubscriptionHandler {
         }
     }
 
-    pub fn operation(&self) -> XrpcOperation {
+    pub fn operation(&self) -> XrpcMethod {
         self.operation
     }
 }
@@ -215,7 +210,8 @@ impl XrpcSubscriptionHandler {
 /// A bounded HTTP router for registered unary XRPC operations.
 #[derive(Clone, Debug)]
 pub struct XrpcRouter {
-    operations: Arc<BTreeMap<String, XrpcOperationHandler>>,
+    operations: Arc<BTreeMap<String, XrpcMethodHandler>>,
+    fallback: Option<XrpcMethodHandler>,
     subscriptions: Arc<BTreeMap<String, XrpcSubscriptionHandler>>,
     max_body_bytes: usize,
     admission: Arc<Semaphore>,
@@ -235,6 +231,10 @@ pub enum XrpcRegistrationError {
     DuplicateOperation(String),
     #[error("XRPC subscriptions are not supported by the unary HTTP adapter")]
     SubscriptionUnsupported,
+    #[error("the XRPC fallback handler must be a procedure")]
+    FallbackNotProcedure,
+    #[error("an XRPC fallback handler is already registered")]
+    DuplicateFallback,
 }
 
 impl XrpcRouter {
@@ -266,6 +266,7 @@ impl XrpcRouter {
         );
         Self {
             operations: Arc::new(BTreeMap::new()),
+            fallback: None,
             subscriptions: Arc::new(BTreeMap::new()),
             max_body_bytes,
             admission: Arc::new(Semaphore::new(max_concurrent_handlers)),
@@ -307,7 +308,7 @@ impl XrpcRouter {
         P: Unary,
         H: Handler<P>,
     {
-        self.register(XrpcOperationHandler::new(P::XRPC, move |request| {
+        self.register(XrpcMethodHandler::new(P::XRPC, move |request| {
             let host = Arc::clone(&host);
             async move {
                 let params: P = match P::XRPC.input {
@@ -324,7 +325,7 @@ impl XrpcRouter {
                 let response = host
                     .invoke(envelope)
                     .await
-                    .map_err(|error| domain_error(P::XRPC, &error))?;
+                    .map_err(|error| domain_error(&error))?;
                 Ok(crate::ResponseEnvelope {
                     output: serde_json::to_value(response.output)
                         .expect("operation output must serialize"),
@@ -365,7 +366,7 @@ impl XrpcRouter {
                     let response = host
                         .invoke(envelope)
                         .await
-                        .map_err(|error| domain_error(P::XRPC, &error))?;
+                        .map_err(|error| domain_error(&error))?;
                     let stream = futures::StreamExt::map(response.output, |item| match item {
                         Ok(event) => Ok(serde_json::to_value(event)
                             .expect("subscription events must serialize")),
@@ -386,7 +387,7 @@ impl XrpcRouter {
         &mut self,
         handler: XrpcSubscriptionHandler,
     ) -> Result<(), XrpcRegistrationError> {
-        if handler.operation().kind != XrpcKind::Subscription {
+        if handler.operation().kind != MethodKind::Subscription {
             return Err(XrpcRegistrationError::SubscriptionUnsupported);
         }
         let subscriptions = Arc::make_mut(&mut self.subscriptions);
@@ -398,8 +399,8 @@ impl XrpcRouter {
         Ok(())
     }
 
-    pub fn register(&mut self, handler: XrpcOperationHandler) -> Result<(), XrpcRegistrationError> {
-        if handler.operation().kind == XrpcKind::Subscription {
+    pub fn register(&mut self, handler: XrpcMethodHandler) -> Result<(), XrpcRegistrationError> {
+        if handler.operation().kind == MethodKind::Subscription {
             return Err(XrpcRegistrationError::SubscriptionUnsupported);
         }
         let operations = Arc::make_mut(&mut self.operations);
@@ -408,6 +409,29 @@ impl XrpcRouter {
             return Err(XrpcRegistrationError::DuplicateOperation(nsid));
         }
         operations.insert(nsid, handler);
+        Ok(())
+    }
+
+    /// Installs the handler that serves every NSID no operation is registered for, for a router
+    /// whose operations are not known when it is built (a reverse proxy in front of a routing
+    /// table that changes at runtime). The request's `nsid` names the operation and the handler
+    /// learns the verb ([`XrpcRequest::verb`]): a POST's JSON body is the input, a GET carries
+    /// only a query string (`raw_query`, which the handler reads itself, as it alone knows which
+    /// names repeat). The method's kind is the handler's to hold the verb to, since only it knows
+    /// the NSID's contract. It is registered as a procedure; registered operations take
+    /// precedence.
+    pub fn register_fallback(
+        &mut self,
+        handler: XrpcMethodHandler,
+    ) -> Result<(), XrpcRegistrationError> {
+        let operation = handler.operation();
+        if operation.kind != MethodKind::Procedure {
+            return Err(XrpcRegistrationError::FallbackNotProcedure);
+        }
+        if self.fallback.is_some() {
+            return Err(XrpcRegistrationError::DuplicateFallback);
+        }
+        self.fallback = Some(handler);
         Ok(())
     }
 
@@ -421,21 +445,14 @@ impl XrpcRouter {
     }
 }
 
-/// Encodes a typed operation error as the standard XRPC error envelope. A
-/// non-serializable error is a programming error in the error type.
-fn domain_error<E>(operation: XrpcOperation, error: &E) -> XrpcHandlerError
+/// Wraps a typed operation error in the shared XRPC error envelope.
+fn domain_error<E>(error: &E) -> XrpcHandlerError
 where
-    E: Serialize + std::fmt::Debug,
+    E: Serialize + std::fmt::Display,
 {
-    let value = serde_json::to_value(error).expect("operation errors must serialize");
     XrpcHandlerError::Domain {
         status: DOMAIN_ERROR_STATUS,
-        body: XrpcErrorEnvelope::new(
-            operation.error_schema.to_owned(),
-            Some(format!("{error:?}")),
-            BTreeMap::from([(DOMAIN_ERROR_FIELD.to_owned(), value)]),
-        )
-        .expect("operation error detail is not reserved"),
+        body: domain_error_envelope(error),
     }
 }
 
@@ -483,7 +500,8 @@ async fn dispatch(
         )
         .await;
     }
-    let Some(handler) = router.operations.get(&nsid) else {
+    let registered = router.operations.get(&nsid);
+    let Some(handler) = registered.or(router.fallback.as_ref()) else {
         return error_response(
             StatusCode::NOT_FOUND,
             request_id,
@@ -491,7 +509,12 @@ async fn dispatch(
             "unknown XRPC operation",
         );
     };
-    let operation = handler.operation();
+    let mut operation = handler.operation();
+    // The fallback serves a GET as a query: the verb is the handler's to judge, not the
+    // procedure it was registered as.
+    if registered.is_none() && parts.method == Method::GET {
+        operation = XrpcMethod::query(operation.nsid);
+    }
     let (context, metadata) = match request_context(&parts.headers) {
         Ok(value) => value,
         Err(message) => {
@@ -554,7 +577,16 @@ async fn dispatch(
             );
         }
     };
-    let params = match decode_input(operation.input, raw_query.as_deref(), &body) {
+    // A fallback's GET hands over the raw query string alone.
+    let params = match if registered.is_none() && operation.input == HttpInput::Query {
+        if body.is_empty() {
+            Ok(Value::Null)
+        } else {
+            Err("query operations must not carry a request body".to_owned())
+        }
+    } else {
+        decode_input(operation.input, raw_query.as_deref(), &body)
+    } {
         Ok(params) => params,
         Err(error) => {
             return error_response(
@@ -566,6 +598,8 @@ async fn dispatch(
         }
     };
     let call = handler.call(XrpcRequest {
+        nsid,
+        verb: operation.method,
         context: context.clone(),
         metadata: metadata.clone(),
         params,
@@ -603,7 +637,7 @@ async fn dispatch(
 async fn dispatch_subscription(
     subscription: XrpcSubscriptionHandler,
     admission: Arc<Semaphore>,
-    _nsid: String,
+    nsid: String,
     raw_query: Option<String>,
     parts: axum::http::request::Parts,
     request_id: Option<uuid::Uuid>,
@@ -680,6 +714,8 @@ async fn dispatch_subscription(
         .cloned()
         .unwrap_or(crate::TransportContext::Http);
     let (metadata_out, mut stream) = match (subscription.handler)(XrpcRequest {
+        nsid,
+        verb: HttpMethod::Get,
         context,
         metadata,
         params,
@@ -736,7 +772,7 @@ async fn dispatch_subscription(
     response
 }
 
-fn validate_method(method: &Method, operation: XrpcOperation) -> Result<(), StatusCode> {
+fn validate_method(method: &Method, operation: XrpcMethod) -> Result<(), StatusCode> {
     let expected_method = match operation.method {
         HttpMethod::Get => Method::GET,
         HttpMethod::Post => Method::POST,
@@ -744,7 +780,7 @@ fn validate_method(method: &Method, operation: XrpcOperation) -> Result<(), Stat
     if method != expected_method {
         return Err(StatusCode::METHOD_NOT_ALLOWED);
     }
-    if operation.kind == XrpcKind::Subscription {
+    if operation.kind == MethodKind::Subscription {
         return Err(StatusCode::NOT_IMPLEMENTED);
     }
     Ok(())
@@ -812,48 +848,10 @@ fn decode_input(input: HttpInput, raw_query: Option<&str>, body: &[u8]) -> Resul
 }
 
 fn request_id_from_headers(headers: &HeaderMap) -> Option<uuid::Uuid> {
-    header_string(headers, REQUEST_ID_HEADER)
-        .ok()
-        .flatten()
-        .and_then(|value| value.parse().ok())
-}
-
-fn request_context(headers: &HeaderMap) -> Result<(RequestContext, HttpMetadata), String> {
-    let mut context = RequestContext::root();
-    if let Some(value) = header_string(headers, REQUEST_ID_HEADER)? {
-        context.request_id = value
-            .parse()
-            .map_err(|_| "x-request-id must be a UUID".to_owned())?;
-    }
-    context.trace = TraceContext::from_headers(
-        header_string(headers, TRACEPARENT_HEADER)?.as_deref(),
-        header_string(headers, "tracestate")?.as_deref(),
-    );
-    if let Some(value) = header_string(headers, TIMEOUT_HEADER)? {
-        let millis = value
-            .parse::<u64>()
-            .map_err(|_| "x-timeout-ms must be an unsigned integer".to_owned())?;
-        context = context.with_time_budget(Duration::from_millis(millis));
-    }
-    Ok((
-        context,
-        HttpMetadata {
-            authorization: header_string(headers, AUTHORIZATION_HEADER)?,
-            idempotency_key: header_string(headers, IDEMPOTENCY_KEY_HEADER)?,
-        },
-    ))
-}
-
-fn header_string(headers: &HeaderMap, name: &str) -> Result<Option<String>, String> {
     headers
-        .get(name)
-        .map(|value| {
-            value
-                .to_str()
-                .map(str::to_owned)
-                .map_err(|_| format!("{name} must be valid UTF-8 HTTP text"))
-        })
-        .transpose()
+        .get(REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
 }
 
 fn handler_error_response(error: XrpcHandlerError, request_id: Option<uuid::Uuid>) -> Response {

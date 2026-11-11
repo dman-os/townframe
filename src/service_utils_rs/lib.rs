@@ -5,13 +5,13 @@
 //! same hosted handler:
 //!
 //! ```text
-//! Client<Proto>::call(ctx, params)
+//! Client<Proto>::call(ctx, params)   (service_client_native_rs)
 //!     ├─ Direct ─ routed inline on the caller's task ──┐
 //!     ├─ Irpc ─── bounded adapter spawns one task ──────┼─► Host<H> ─► layers ─► Handler<P>
 //!     └─ Xrpc ─── HTTP router decodes the request ──────┘
 //! ```
 //!
-//! * [`Operation`] is implemented on each request type and names its output,
+//! * [`Method`](method_core::Method) is implemented on each request type and names its output,
 //!   error, and XRPC identity. The request value *is* the method: there is no
 //!   per-service client type and no generated method list.
 //! * [`service_protocol!`] declares the IRPC enum and routing table, wrapping
@@ -30,7 +30,6 @@
 //! should copy.
 
 pub mod admission;
-pub mod client;
 pub mod context;
 pub mod host;
 pub mod irpc_adapter;
@@ -48,10 +47,6 @@ pub use admission::CancellationSignal;
 pub use admission::CancellationTransport;
 pub use admission::TaskActivity;
 pub use admission::cancellation_channel;
-pub use client::Client;
-pub use client::ClientStream;
-pub use client::InlineRoute;
-pub use context::ContextError;
 pub use context::HttpMetadata;
 pub use context::RequestContext;
 pub use context::TraceContext;
@@ -72,25 +67,16 @@ pub use operation::ClientError;
 pub use operation::Envelope;
 pub use operation::EventFrame;
 pub use operation::EventReply;
-pub use operation::EventStream;
-pub use operation::HttpInput;
-pub use operation::HttpMethod;
-pub use operation::Operation;
 pub use operation::Reply;
 pub use operation::ResponseEnvelope;
 pub use operation::ResponseMetadata;
-pub use operation::ServiceError;
-pub use operation::Subscription;
 pub use operation::TransportContext;
-pub use operation::Unary;
-pub use operation::Wire;
-pub use operation::XrpcKind;
-pub use operation::XrpcOperation;
+pub use service_client_native_rs as __client_native;
 pub use service_core_rs::Protocol;
-pub use service_core_rs::ProtocolOperations;
+pub use service_core_rs::ProtocolMethods;
+pub use service_core_rs::UnaryVisitor;
 pub use service_core_rs::declare_service_protocol;
-pub use service_core_rs::service_operation;
-pub use xrpc::XrpcClient;
+pub use service_core_rs::service_method;
 pub use xrpc::XrpcRouter;
 
 #[cfg(test)]

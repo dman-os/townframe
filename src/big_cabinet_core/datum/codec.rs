@@ -13,7 +13,7 @@
 //! sidecar marks that object with `x-automerge`. The other three forms are `x-automerge` as well,
 //! because JSON Schema cannot describe a CRDT object, cannot say that a number is a *float*, and
 //! cannot state the non-finite values at all — so a float's declaration is its value's own type
-//! (`datum::Float64`/`Float32`, spelled as the decimal string it is), and a bare `f64` derives a
+//! (`datum::F64`, spelled as the decimal string it is), and a bare `f64` derives a
 //! plain number, which is the opt-out the Rust type itself states. Nothing opts in: a type declares
 //! its storage by what its `JsonSchema` says, so a foreign type whose schema states a storage form
 //! — `jiff::Timestamp` today, `chrono`'s tomorrow — is stored correctly as soon as it does.
@@ -60,6 +60,7 @@ pub use references::declared_references;
 #[cfg(test)]
 pub(crate) use target::reconcile_json;
 pub use target::reconcile_json_atomic;
+pub(super) use validation::CarriedSchemaRetriever;
 pub use validation::CompiledSchema;
 pub use walk::Stored;
 pub use walk::hydrate_value;
@@ -153,7 +154,7 @@ pub(super) fn keyed_map(object: &Map<String, Value>) -> Result<Option<&Value>, &
 }
 
 /// A shape whose storage in a document is not its JSON form — with one exception: a reference is
-/// a string on both sides, and its marker declares what the string *is* (a `db+datum:` address)
+/// a string on both sides, and its marker declares what the string *is* (a `dtxt:datum:` address)
 /// so that a malformed one is refused on write and the reference index can find every declared
 /// position from the schema alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,15 +172,11 @@ pub enum Codec {
     Text,
     Uint,
     Datetime,
-    /// A datum reference: a string in the document and in JSON, which must parse as a
-    /// [`crate::DatumReference`]. An optional `refHeads` sibling of the marked member pins the
-    /// referenced datum's frontier (ADR 021).
-    Reference,
 }
 
 impl Codec {
     /// Every shape a declaration can state.
-    pub const ALL: [Codec; 8] = [
+    pub const ALL: [Codec; 7] = [
         Codec::Bytes,
         Codec::Timestamp,
         Codec::Counter,
@@ -187,7 +184,6 @@ impl Codec {
         Codec::Float,
         Codec::Uint,
         Codec::Datetime,
-        Codec::Reference,
     ];
 
     /// How this shape is spelled in our keyword, and how it is named in a message.
@@ -200,7 +196,6 @@ impl Codec {
             Codec::Text => "text",
             Codec::Uint => "uint",
             Codec::Datetime => "datetime",
-            Codec::Reference => "reference",
         }
     }
 
@@ -263,7 +258,6 @@ impl Codec {
             Codec::Uint => {
                 reconciler.u64(value.as_str().expect("checked").parse().expect("checked"))
             }
-            Codec::Reference => reconciler.str(value.as_str().expect("checked")),
             Codec::Counter => reconciler.counter()?.set(value.as_i64().expect("checked")),
             Codec::Text => reconciler.text()?.update(value.as_str().expect("checked")),
             Codec::Float => {
@@ -289,7 +283,6 @@ impl Codec {
         schema: &Value,
     ) -> Result<Value, HydrateError> {
         let unexpected = |found: &str| HydrateError::unexpected(self.name(), found.to_owned());
-        let at_f32 = schema.get(FORMAT).and_then(Value::as_str) == Some("float");
         match (self, stored) {
             (Codec::Bytes, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Bytes(bytes) => {
@@ -307,18 +300,14 @@ impl Codec {
                 ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
                 other => Err(unexpected(stored_scalar(other))),
             },
-            (Codec::Reference, automerge::Value::Scalar(stated)) => match stated.as_ref() {
-                ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
-                other => Err(unexpected(stored_scalar(other))),
-            },
             (Codec::Timestamp, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
                 other => Err(unexpected(stored_scalar(other))),
             },
             (Codec::Float, automerge::Value::Scalar(stated)) => match stated.as_ref() {
-                ScalarValue::Int(value) => Ok(Value::String(float_string(*value as f64, at_f32))),
-                ScalarValue::Uint(value) => Ok(Value::String(float_string(*value as f64, at_f32))),
-                ScalarValue::F64(value) => Ok(Value::String(float_string(*value, at_f32))),
+                ScalarValue::Int(value) => Ok(Value::String(float_string(*value as f64))),
+                ScalarValue::Uint(value) => Ok(Value::String(float_string(*value as f64))),
+                ScalarValue::F64(value) => Ok(Value::String(float_string(*value))),
                 // A peer that spelled the convention itself is kept as it spelled it, but only if
                 // what it spelled is a number.
                 ScalarValue::Str(spelled) => match spelled.parse::<f64>() {
@@ -386,20 +375,6 @@ impl Codec {
                     path: String::new(),
                     message: "expected a stringified uint64".to_owned(),
                 }),
-            Codec::Reference => match value.as_str() {
-                Some(stated) => {
-                    crate::DatumReference::parse(stated)
-                        .map(|_| ())
-                        .map_err(|reason| CodecError::NotADatumReference {
-                            stated: stated.to_owned(),
-                            reason: reason.to_string(),
-                        })
-                }
-                None => Err(CodecError::NotADatumReference {
-                    stated: kind(value).to_owned(),
-                    reason: "a datum reference is a `db+datum:` address string".to_owned(),
-                }),
-            },
             Codec::Counter => value
                 .as_i64()
                 .map(|_value| ())
@@ -463,30 +438,20 @@ fn instant_string(millis: i64) -> String {
         .to_string()
 }
 
-/// The spelling of a float in cabinet JSON: the shortest round-tripping decimal at the width the
-/// declaration's type states — an `f32` position says `"0.1"`, not the `f64` that widened it on the
-/// way through a JSON value — with the decimal point kept (`"1.0"`, which is how a reader knows
-/// this was never a whole number) and the three values JSON cannot state at all by the names every
-/// parser reads.
-pub(super) fn float_string(stated: f64, at_f32: bool) -> String {
-    let stated = if at_f32 {
-        (stated as f32) as f64
-    } else {
-        stated
-    };
+/// The spelling of a float in cabinet JSON: the shortest round-tripping decimal of the `f64` a
+/// document holds, with the decimal point kept (`"1.0"`, which is how a reader knows this was never
+/// a whole number) and the three values JSON cannot state at all by the names every parser reads.
+/// Automerge has one float width, so there is no narrower spelling.
+pub(super) fn float_string(stated: f64) -> String {
     match stated.classify() {
         FpCategory::Nan => return "NaN".to_owned(),
         FpCategory::Infinite if stated.is_sign_negative() => return "-Infinity".to_owned(),
         FpCategory::Infinite => return "Infinity".to_owned(),
         _ => {}
     }
-    let mut spelled = if at_f32 {
-        (stated as f32).to_string()
-    } else {
-        serde_json::Number::from_f64(stated)
-            .expect("a float is finite here")
-            .to_string()
-    };
+    let mut spelled = serde_json::Number::from_f64(stated)
+        .expect("a float is finite here")
+        .to_string();
     if !spelled.contains('.') && !spelled.contains(['e', 'E']) {
         spelled.push_str(".0")
     }
@@ -515,12 +480,7 @@ pub fn codec_schema(codec: Codec, schema: Schema) -> Schema {
         Codec::Timestamp => {
             schema.insert(FORMAT.to_owned(), DATE_TIME.into());
         }
-        Codec::Counter
-        | Codec::Text
-        | Codec::Float
-        | Codec::Uint
-        | Codec::Datetime
-        | Codec::Reference => {
+        Codec::Counter | Codec::Text | Codec::Float | Codec::Uint | Codec::Datetime => {
             schema.insert(KEYWORD.to_owned(), codec.name().into());
         }
     };
@@ -563,9 +523,14 @@ pub enum CodecError {
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
 
-    /// the position is declared a datum reference, and the value is not a `db+datum:` address
-    #[error("this position is declared a datum reference, and {stated} is not one: {reason}")]
-    NotADatumReference { stated: String, reason: String },
+    /// the position refers to a reference def (`datumRef`, `datumLocation`, `datumPin`), and the
+    /// value is not of that form
+    #[error("this position is declared a {form}, and {stated} is not one: {reason}")]
+    NotADatumReference {
+        form: &'static str,
+        stated: String,
+        reason: String,
+    },
 
     /// the position is declared as a float, and the value does not spell a number
     #[error(
@@ -869,57 +834,55 @@ impl autosurgeon::Hydrate for Counter {
 }
 /// A float in the document, a decimal string in JSON.
 ///
-/// The widths are types of their own, like `Bytes` is: a JSON value cannot say that a number is a
+/// The float is a type of its own, like `Bytes` is: a JSON value cannot say that a number is a
 /// float, cannot state the non-finite values at all, and a carrier that knows nothing can lower a
-/// number's precision on the way through — so the declared width is spelled in the JSON, and a
-/// whole number keeps the point that says it is not an integer. A bare `f64` field derives a plain
+/// number's precision on the way through — so it is spelled as a decimal string, and a whole number
+/// keeps the point that says it is not an integer. There is one float type, because Automerge has one
+/// float: an `f32` is widened into it by the caller. A bare `f64` field derives a plain
 /// number instead, which is the opt-out stated by the type itself.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Float64(pub f64);
-impl From<f64> for Float64 {
+pub struct F64(pub f64);
+impl From<f64> for F64 {
     fn from(stated: f64) -> Self {
         Self(stated)
     }
 }
 
-impl Serialize for Float64 {
+impl Serialize for F64 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&float_string(self.0, false))
+        serializer.serialize_str(&float_string(self.0))
     }
 }
 
-impl<'de> Deserialize<'de> for Float64 {
+impl<'de> Deserialize<'de> for F64 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let stated = Value::deserialize(deserializer)?;
         parse_float(&stated)
-            .map(Float64)
+            .map(F64)
             .ok_or_else(|| serde::de::Error::custom(format!("{stated} does not spell a number")))
     }
 }
 
-impl JsonSchema for Float64 {
+impl JsonSchema for F64 {
     /// A storage form is a position, never a name a peer points at, so it is inlined.
     fn inline_schema() -> bool {
         true
     }
 
     fn schema_name() -> Cow<'static, str> {
-        "Float64".into()
+        "F64".into()
     }
 
     fn schema_id() -> Cow<'static, str> {
-        concat!(module_path!(), "::Float64").into()
+        concat!(module_path!(), "::F64").into()
     }
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-        codec_schema(
-            Codec::Float,
-            json_schema!({"type": "string", "format": "double"}),
-        )
+        codec_schema(Codec::Float, json_schema!({"type": "string"}))
     }
 }
 
-impl autosurgeon::Reconcile for Float64 {
+impl autosurgeon::Reconcile for F64 {
     type Key<'a> = autosurgeon::reconcile::NoKey;
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
@@ -927,79 +890,18 @@ impl autosurgeon::Reconcile for Float64 {
     }
 }
 
-impl autosurgeon::Hydrate for Float64 {
+impl autosurgeon::Hydrate for F64 {
     fn hydrate_f64(stated: f64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float64(stated))
+        Ok(F64(stated))
     }
 
-    // A document written before the widths were declared stores the token's kind; recover a float.
+    // A document written before floats were declared stores the token's kind; recover a float.
     fn hydrate_int(stated: i64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float64(stated as f64))
+        Ok(F64(stated as f64))
     }
 
     fn hydrate_uint(stated: u64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float64(stated as f64))
-    }
-}
-
-/// The same float at `f32`, whose shortest spelling is the width an `f32` field recovers exactly.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Float32(pub f32);
-
-impl From<f32> for Float32 {
-    fn from(stated: f32) -> Self {
-        Self(stated)
-    }
-}
-
-impl Serialize for Float32 {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&float_string(self.0 as f64, true))
-    }
-}
-
-impl<'de> Deserialize<'de> for Float32 {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let stated = Value::deserialize(deserializer)?;
-        parse_float(&stated)
-            .map(|stated| Float32(stated as f32))
-            .ok_or_else(|| serde::de::Error::custom(format!("{stated} does not spell a number")))
-    }
-}
-
-impl JsonSchema for Float32 {
-    /// A storage form is a position, never a name a peer points at, so it is inlined.
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> Cow<'static, str> {
-        "Float32".into()
-    }
-
-    fn schema_id() -> Cow<'static, str> {
-        concat!(module_path!(), "::Float32").into()
-    }
-
-    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-        codec_schema(
-            Codec::Float,
-            json_schema!({"type": "string", "format": "float"}),
-        )
-    }
-}
-
-impl autosurgeon::Reconcile for Float32 {
-    type Key<'a> = autosurgeon::reconcile::NoKey;
-
-    fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
-        reconciler.f64(self.0 as f64)
-    }
-}
-
-impl autosurgeon::Hydrate for Float32 {
-    fn hydrate_f64(stated: f64) -> Result<Self, autosurgeon::HydrateError> {
-        Ok(Float32(stated as f32))
+        Ok(F64(stated as f64))
     }
 }
 

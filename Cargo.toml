@@ -5,17 +5,23 @@ members = [
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
   "./src/datum_core/",
-  "./src/big_plugs_core/",
-  "./src/big_plugs/",
+  "./src/big_cartridges_core/",
+  "./src/big_cartridges/",
+  "./src/big_dispatch_core/",
+  "./src/big_dispatch/",
   "./src/big_nodule_core/",
   "./src/big_nodule/",
   "./src/big_nodule_wasm/",
+  "./src/big_ndk/",
+  "./src/test_nodule_handlers/",
+  "./src/big_ndk_testing/",
   "./src/big_blobs/",
   "./src/big_blobs_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
   "./src/big_node/",
+  "./src/day_cli",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -29,8 +35,11 @@ members = [
   "./src/plug_plabels_manifest",
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
+  "./src/method_core/",
+  "./src/method_lexicon/",
   "./src/service_core_rs/",
-  "./src/service_client_rs/",
+  "./src/service_client_core_rs/",
+  "./src/service_client_native_rs/",
   "./src/service_utils_rs/",
   "./src/sqlite_rs/",
   "./src/utils_rs",
@@ -100,8 +109,10 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
+method_core = { path = "./src/method_core", default-features = false }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
-service_client_rs = { path = "./src/service_client_rs", default-features = false }
+service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
+service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
@@ -115,11 +126,15 @@ wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = fal
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 datum_core = { path = "./src/datum_core", default-features = false }
-big_plugs_core = { path = "./src/big_plugs_core/", default-features = false }
-big_plugs = { path = "./src/big_plugs/" }
+big_cartridges_core = { path = "./src/big_cartridges_core/", default-features = false }
+big_cartridges = { path = "./src/big_cartridges/" }
+big_dispatch_core = { path = "./src/big_dispatch_core/" }
+big_dispatch = { path = "./src/big_dispatch/" }
 big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
 big_nodule = { path = "./src/big_nodule/" }
 big_nodule_wasm = { path = "./src/big_nodule_wasm/" }
+big_ndk = { path = "./src/big_ndk/" }
+test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
@@ -256,18 +271,18 @@ automerge = "0.11.0"
 autosurgeon = "0.13.0"
 # automerge-test = "0.9"
 
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
-keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
-beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
+keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
+beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -546,6 +561,9 @@ clippy.clone_on_ref_ptr = "warn"
 clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
+# `methods!` / `service_method!` test the caller's `schemars` feature; a crate that declares
+# methods without publishing Lexicons has no such feature, and its absence is the answer.
+rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("schemars"))'] }
 # clippy.used_underscore_binding = "warn"
 
 # [patch."https://github.com/dman-os/iroh-blobs"]

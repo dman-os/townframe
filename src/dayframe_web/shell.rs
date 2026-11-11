@@ -15,7 +15,7 @@ use wasm_bindgen_futures::JsFuture;
 
 /// One entry of `packages/index.json`: where the component lives, the BLAKE3 digest the shell
 /// must verify after fetching, and the package's sidecar JSON (identity, authority, manifest).
-/// STAND-IN until `big_plugs` delivers manifests.
+/// STAND-IN until `big_cartridges` delivers manifests.
 #[derive(Clone, Deserialize)]
 struct PackageIndexEntry {
     location: String,

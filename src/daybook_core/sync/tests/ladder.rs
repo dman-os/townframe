@@ -374,7 +374,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                         length_octets: payload.len() as u64,
                         digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                         inline: None,
-                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                        urls: Some(vec![format!("dtxt:blob:{hash}")]),
                     })
                     .into(),
                 )]
@@ -417,7 +417,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         // The seed's blob workers run, so its encryption worker publishes the
         // Blob facet's resolution url through the cipherBlob at the commit point
         // (ADR 003 §19): the replicated facet carries one extra `?via=` url
-        // beyond the plain `db+blob:///` url the document authored. Assert the
+        // beyond the plain `dtxt:blob:` url the document authored. Assert the
         // authored fields, then the authored url as the first entry.
         let blob_on_b = doc_on_b
             .0
@@ -441,7 +441,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .ok_or_eyre("the Blob facet must carry its urls")?;
         assert_eq!(
             urls.first(),
-            Some(&format!("db+blob:///{hash}")),
+            Some(&format!("dtxt:blob:{hash}")),
             "the url the document authored must come first"
         );
 
@@ -604,7 +604,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
                         length_octets: payload.len() as u64,
                         digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                         inline: None,
-                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                        urls: Some(vec![format!("dtxt:blob:{hash}")]),
                     })
                     .into(),
                 )]
@@ -678,7 +678,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
             .ok_or_eyre("the Blob facet must carry its urls")?;
         assert_eq!(
             urls.first(),
-            Some(&format!("db+blob:///{hash}")),
+            Some(&format!("dtxt:blob:{hash}")),
             "the url the document authored must come first"
         );
     }

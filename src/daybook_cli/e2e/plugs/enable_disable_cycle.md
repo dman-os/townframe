@@ -8,7 +8,7 @@ version is rejected as a republish without a version bump).
 $ daybook_cli init
 $ sh -c 'cp -r "$PLUG_OCI" ./plug-oci'
 $ sh -c 'DOC=$("$DAYBOOK_CLI" plugs import ./plug-oci --no-enable | sed -n "s/.*(doc: \([A-Za-z0-9]*\)).*/\1/p"); echo "$DOC" > .docid; "$DAYBOOK_CLI" plugs enable "$DOC"'
-enabled [..] at db+facet:///[..]/org.example.daybook.plugManifest/main?branch=main&at=[..]
+enabled [..] at dtxt:datum:[..]/org.example.daybook.plugManifest/main?branch=main&at=[..]
 
 $ daybook_cli plugs list
  ID             Version  Status   Config Doc[..]
@@ -24,7 +24,7 @@ $ daybook_cli plugs list
  @daybook/test  0.0.1    disabled  [..]
 
 $ sh -c 'DOC=$(cat .docid); "$DAYBOOK_CLI" plugs enable "$DOC"'
-enabled [..] at db+facet:///[..]/org.example.daybook.plugManifest/main?branch=main&at=[..]
+enabled [..] at dtxt:datum:[..]/org.example.daybook.plugManifest/main?branch=main&at=[..]
 
 $ daybook_cli plugs list
  ID             Version  Status   Config Doc[..]

@@ -14,10 +14,10 @@ use automerge::Automerge;
 use automerge::ROOT;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::CreateDoc;
@@ -28,7 +28,7 @@ use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
 use big_repo::SharedBigRepo;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
@@ -154,10 +154,13 @@ impl TestHarness {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
-        let (authority, authority_stop) =
-            crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
-                .await
-                .unwrap();
+        let (authority, authority_stop) = crate::authority::boot(
+            &secrets,
+            "test-node",
+            sqlite_rs::test_support::db(&[]).unwrap().clone(),
+        )
+        .await
+        .unwrap();
         let docs_actor = authority
             .client
             .call(
@@ -181,18 +184,15 @@ impl TestHarness {
                 .await
                 .unwrap(),
         );
-        let (repo, repo_stop) = BigRepo::boot(
-            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-            Config {
-                node_identity_seed: [53; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "datum-store-tests".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [53; 32],
+            storage: Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default())).unwrap(),
+            scope_key: "datum-store-tests".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let datum_set = Arc::new(
@@ -252,7 +252,7 @@ impl TestHarness {
         self.docs.as_ref().unwrap().client.clone()
     }
 
-    async fn actor(&self, path: &str) -> Actor {
+    async fn actor(&self, path: &str) -> OpenedActor {
         let actor = self
             .authority
             .client
@@ -276,12 +276,12 @@ impl TestHarness {
         actor
     }
 
-    async fn grant(&self, actor: &Actor, object: String) {
+    async fn grant(&self, actor: &OpenedActor, object: String) {
         self.access
             .grants
             .grant(
                 &RequestContext::root(),
-                actor.actor_id,
+                actor.actor.actor_id,
                 object,
                 Rights::USE,
                 None,
@@ -290,22 +290,23 @@ impl TestHarness {
             .unwrap();
     }
 
-    async fn revoke(&self, actor: &Actor, objects: &[String]) {
+    async fn revoke(&self, actor: &OpenedActor, objects: &[String]) {
         self.access
             .grants
-            .revoke(&RequestContext::root(), actor.actor_id, objects)
+            .revoke(&RequestContext::root(), actor.actor.actor_id, objects)
             .await
             .unwrap();
     }
 
-    async fn capability(&self, actor: &Actor, scope: DocScope) -> CapId {
+    async fn capability(&self, actor: &OpenedActor, scope: DocScope) -> CapId {
         self.client()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await
@@ -315,7 +316,7 @@ impl TestHarness {
 
     async fn create_doc(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         command: &str,
         datums: impl IntoIterator<Item = (DatumKey, Value)>,
     ) -> WriteReceipt {

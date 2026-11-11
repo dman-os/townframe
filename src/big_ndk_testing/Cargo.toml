@@ -1,0 +1,41 @@
+[package]
+name = "big_ndk_testing"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+big_cabinet = { path = "../big_cabinet" }
+big_cabinet_core = { path = "../big_cabinet_core" }
+big_blobs = { path = "../big_blobs" }
+big_dispatch.workspace = true
+big_dispatch_core.workspace = true
+big_ndk.workspace = true
+big_node.workspace = true
+big_nodule.workspace = true
+big_nodule_core.workspace = true
+big_cartridges_core.workspace = true
+big_repo.workspace = true
+method_core.workspace = true
+secrets_rs.workspace = true
+service_client_core_rs.workspace = true
+service_client_native_rs.workspace = true
+service_core_rs.workspace = true
+service_utils_rs.workspace = true
+sqlite_rs.workspace = true
+utils_rs.workspace = true
+async-trait.workspace = true
+http.workspace = true
+keyring-core = { version = "1.0", default-features = false }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+serde.workspace = true
+test_nodule_handlers.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

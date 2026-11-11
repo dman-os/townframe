@@ -520,3 +520,73 @@ async fn group_creation_succeeds_once_the_coparent_material_is_present() -> Res<
     );
     Ok(())
 }
+
+/// Reader reconciliation runs once per admitted delegation or prekey expansion, so the
+/// documents it visits must be the ones the change can reach, not every document in the
+/// hive: with thirty unrelated documents present, a change entering at a group reaches
+/// only the documents that list that group.
+#[tokio::test]
+async fn reverse_membership_names_only_the_documents_that_reach_the_entry_point() -> Res<()> {
+    let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
+    let (tx, _rx) = async_channel::unbounded();
+    let owner =
+        BigKeyhiveHandle::new([71; 32], BigRepoKeyhiveListener::new(tx, storage.clone())).await?;
+    let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+        owner.clone_keyhive(),
+        storage.clone(),
+        owner.keyhive_peer_id(),
+        owner.contact_card().clone(),
+    ));
+
+    let mut unrelated = Vec::new();
+    for seed in 0..30u8 {
+        let (doc, _) = owner
+            .create_doc(Vec::new(), nonempty![[seed; 32]], &protocol)
+            .await?;
+        unrelated.push(doc);
+    }
+    let (inner, _) = owner
+        .create_group_with_parents(Vec::new(), &protocol)
+        .await?;
+    let (outer, _) = owner
+        .create_group_with_parents(vec![inner.clone().into()], &protocol)
+        .await?;
+    let (through_outer, _) = owner
+        .create_doc(
+            vec![outer.clone().into()],
+            nonempty![[100u8; 32]],
+            &protocol,
+        )
+        .await?;
+    let (through_inner, _) = owner
+        .create_doc(
+            vec![inner.clone().into()],
+            nonempty![[101u8; 32]],
+            &protocol,
+        )
+        .await?;
+
+    let reach = MembershipReach::from_hive(&owner).await;
+    let docs = |entry: Identifier| {
+        let reaching = reach.reaching(entry);
+        let owner = owner.clone();
+        async move { MembershipReach::documents_among(&owner, reaching).await }
+    };
+    // `inner` is a member of `outer`, so a change at `inner` reaches both documents only
+    // if the walk climbs through groups; a change at `outer` reaches only its own.
+    assert_eq!(
+        docs(inner.id().into()).await,
+        BTreeSet::from([through_outer.clone(), through_inner.clone()])
+    );
+    assert_eq!(
+        docs(outer.id().into()).await,
+        BTreeSet::from([through_outer.clone()])
+    );
+    // A document is its own entry point and is reached by nothing else here.
+    let lone = unrelated[3].clone();
+    assert_eq!(
+        docs(keyhive_doc_id(lone.clone())?.into()).await,
+        BTreeSet::from([lone])
+    );
+    Ok(())
+}

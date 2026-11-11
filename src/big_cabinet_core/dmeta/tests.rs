@@ -152,10 +152,14 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
     }
 
     let reference =
-        DatumReference::new(ReferenceDocId::SelfDoc, datum_key("org.example.note/main")).unwrap();
+        DatumReference::new(ReferenceDocId::SelfDoc, datum_key("org.example.note/main"));
     let branch = json!({
         "path": "work",
-        "from": {"datumRef": reference, "refHeads": [], "future": {"origin": true}},
+        "from": {
+            "ref": reference,
+            "heads": [crate::reference::head_text(&automerge::ChangeHash([1; 32]))],
+            "future": {"origin": true}
+        },
         "future": {"branch": true}
     });
     let decoded: BranchPath = serde_json::from_value(branch.clone()).unwrap();
@@ -1078,8 +1082,8 @@ fn a_datum_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
     assert_eq!(DatumKey::from_str(&key.to_string()).unwrap(), key);
     assert!(key.to_string().contains("\\x80"));
 
-    let reference = DatumReference::new(ReferenceDocId::SelfDoc, key.clone()).unwrap();
-    let uri = reference.to_uri_string().unwrap();
+    let reference = DatumReference::new(ReferenceDocId::SelfDoc, key.clone());
+    let uri = reference.to_string();
     assert!(uri.contains("%5Cx80"));
     assert_eq!(DatumReference::parse(&uri).unwrap().key(), &key);
     assert_eq!(reference.key(), &key);

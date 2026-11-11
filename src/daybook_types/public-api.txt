@@ -31,8 +31,8 @@ impl std :: ops :: Deref for daybook_types::manifest::ManifestFacetTag
 pub const daybook_types::doc::DEFAULT_FACET_ID: & str
 pub const daybook_types::doc::user_path::DEVICE_ID_PREFIX: & str
 pub const daybook_types::doc::user_path::USER_ID_PREFIX: & str
-pub const daybook_types::url::FACET_SCHEME: & str
 pub const daybook_types::url::FACET_SELF_DOC_ID: & str
+pub const daybook_types::url::FACET_URL_PREFIX: & str
 pub const daybook_types::view::MAX_VIEW_DEPTH: usize
 pub const daybook_types::view::MAX_VIEW_EVENTS_PER_NODE: usize
 pub const daybook_types::view::MAX_VIEW_EVENT_NAME_LEN: usize

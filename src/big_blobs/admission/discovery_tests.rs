@@ -93,9 +93,9 @@ async fn candidate(admission: &Admission, inventory: u8) -> Res<()> {
 }
 
 async fn publish_pairs(admission: &Admission) -> Res<()> {
-    for (inventory, digest, _) in admission.dirty().await? {
+    for (inventory, digest, generation) in admission.dirty().await? {
         admission
-            .publish(&inventory, digest, |pair, _| {
+            .publish(&inventory, digest, generation, |pair, _| {
                 Box::pin(async move { Ok(pair.bytes) })
             })
             .await?;
@@ -721,9 +721,10 @@ async fn coverage_waits_for_publication_effects_and_wakes_after_atomic_settlemen
         let publisher = admission.clone();
         let effects = Arc::clone(&parts);
         let target = part.clone();
+        let generation = admission.state(&doc(20), digest).await?.unwrap().generation;
         let publication = tokio::spawn(async move {
             publisher
-                .publish(&doc(20), digest, move |pair, length| {
+                .publish(&doc(20), digest, generation, move |pair, length| {
                     Box::pin(async move {
                         assert!(pair.advertisable());
                         assert_eq!(length, Some(42));
@@ -921,7 +922,12 @@ async fn pair_fact_rollbacks_do_not_broadcast_or_acknowledge_publication() -> Re
     )
     .await?;
     let error = admission
-        .publish(&doc(20), digest, |_, _| Box::pin(async { Ok(true) }))
+        .publish(
+            &doc(20),
+            digest,
+            admission.state(&doc(20), digest).await?.unwrap().generation,
+            |_, _| Box::pin(async { Ok(true) }),
+        )
         .await
         .unwrap_err();
     assert!(format!("{error:?}").contains("pair settlement rejected"));
@@ -942,7 +948,12 @@ async fn pair_fact_rollbacks_do_not_broadcast_or_acknowledge_publication() -> Re
     sql.execute_batch("DROP TRIGGER reject_pair_settlement;")
         .await?;
     admission
-        .publish(&doc(20), digest, |_, _| Box::pin(async { Ok(true) }))
+        .publish(
+            &doc(20),
+            digest,
+            admission.state(&doc(20), digest).await?.unwrap().generation,
+            |_, _| Box::pin(async { Ok(true) }),
+        )
         .await?;
     changes.changed().await?;
     assert_eq!(*changes.borrow_and_update(), revision + 1);
@@ -968,16 +979,26 @@ async fn failed_publication_stays_pending_and_final_availability_settles_cleanly
     let mut changes = admission.subscribe_changes();
     let before = *changes.borrow();
     let failed = admission
-        .publish(&doc(20), digest, |_, _| {
-            Box::pin(async { Err(utils_rs::prelude::eyre::eyre!("publication effect failed")) })
-        })
+        .publish(
+            &doc(20),
+            digest,
+            admission.state(&doc(20), digest).await?.unwrap().generation,
+            |_, _| {
+                Box::pin(async { Err(utils_rs::prelude::eyre::eyre!("publication effect failed")) })
+            },
+        )
         .await;
     assert_eq!(failed.unwrap_err().to_string(), "publication effect failed");
     assert_eq!(admission.coverage(&doc(1)).await?.gaps, pending);
     assert_eq!(admission.dirty().await?.len(), 1);
     assert!(!changes.has_changed()?);
     admission
-        .publish(&doc(20), digest, |_, _| Box::pin(async { Ok(false) }))
+        .publish(
+            &doc(20),
+            digest,
+            admission.state(&doc(20), digest).await?.unwrap().generation,
+            |_, _| Box::pin(async { Ok(false) }),
+        )
         .await?;
     changes.changed().await?;
     assert_eq!(*changes.borrow_and_update(), before + 1);

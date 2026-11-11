@@ -5,15 +5,6 @@ allowed_dependencies = []
 allow_external_api_types = false
 
 [[exemptions]]
-code = "ERROR_ADR_ID"
-path = "docs/adrs"
-symbol = "007"
-ceiling = 2
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: duplicate ADR identity: docs/adrs/007-doc-branch-identity.md, docs/adrs/007-plug-manifests-as-drawer-docs.md; do not rename accepted identities silently"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
 code = "ERROR_DOC_LINK"
 path = "docs/scratch/bigsync-reconciliation-open-items.md"
 symbol = "./adrs/012-bigsync-reconciliation-strategy.md"

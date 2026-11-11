@@ -1,6 +1,6 @@
 # ADR 025: Cabinet datum predicates and `PollDatums`
 
-**Status:** Accepted. Not yet implemented. It replaces `QueryDatums`, `ObserveDatums`,
+**Status:** Accepted and implemented; §7 (amended 2026-11-06) changes the event shape and is not yet implemented. It replaces `QueryDatums`, `ObserveDatums`,
 `DatumSelector` and `ObserveScope` in `big_cabinet_core::doc`, and amends
 [ADR 009](009-datum-set-routing-frontier.md) §6. It depends on
 [ADR 023](023-cursor-consumption-is-long-poll.md) (long polling) and
@@ -111,12 +111,11 @@ PollDatums { capability, predicate, datums, after, limit, holdMs }
   -> DatumPage { events, through, caughtUp }
 ```
 
-- Each event carries its revision and is one of:
-  - `enter { docId, datums }`: the doc now matches; `datums` are its current selected
-    datums;
-  - `datum { docId, datumKey, datum }`: a selected datum changed on a matching doc
-    (`ObservedDatum::Present` or `Removed`, as today);
-  - `leave { docId }`: the doc no longer matches.
+- Each event carries its revision and is one of (amended 2026-11-06, see §7):
+  - `datum { docId, datumKey, datum }`: one selected datum row of a matching doc
+    (`ObservedDatum::Present` or `Removed`). It is delivered when the row changed, and for
+    every selected row of a doc that moved into the result (a move-in);
+  - `leave { docId }`: the doc moved out of the result (a move-out).
 - `through` is the cursor to send next. `caughtUp` replaces `ReplayComplete`.
 - **A current-state query is a poll from `after = 0` with `holdMs = 0`, paged until
   `caughtUp`.** A frontier replay from zero yields the latest entry per key, which is
@@ -152,7 +151,7 @@ tags the predicate names, and the roster tags. For each page at revision r:
    `docEntry` change, or `scoped_docs(child)` for a `childEntry` change. Re-evaluate
    those docs in one statement, so a doc reachable through two children survives
    losing one path.
-4. Stamp every resulting `enter`, `datum` or `leave` with **r**, never with the store's
+4. Stamp every resulting `datum` or `leave` with **r**, never with the store's
    latest revision.
 
 Why resume is now correct:
@@ -191,6 +190,21 @@ today's `Doc` scope holds one for the stream's life. BigRepo keeps an interest a
 `SYNC_INTEREST_GRACE` (30 s, `src/big_repo/interest.rs:12`) after its last holder drops
 it. That is longer than the 15 s hold cap, so a consumer that keeps polling keeps the
 doc in sync without a server-side session.
+
+### 7. Amendment (2026-11-06): rows, move-ins and move-outs
+
+The first implementation sent `enter { docId, datums }`, carrying a doc's whole selected state, for every doc a page touched. A poll keeps no state between requests and only knew within one request whether the caller held a doc, so it re-sent full state on every change. For a drawer doc polled with `DatumSelection::All`, each roster write re-delivered every roster entry: O(roster) per write per poller. Consumers then had to diff pages to find what changed; the big_blobs worker did exactly that.
+
+The stream is now plain rows, the shape partial-replication engines use for a WHERE clause over a joined table (differential dataflow's ±1 diffs, ElectricSQL shapes with move-in/move-out). The client tracks which docs it holds; the server never tells it.
+
+- **A changed row** of a doc that matches is one `datum` event at the row's revision.
+- **A move-in** is a doc that now matches because a *predicate* fact changed after `after`: a roster entry for an `InDrawer` anchor, or a row whose tag the predicate names. Every selected row of that doc is delivered as `datum` events stamped with the predicate fact's revision, even when the rows themselves are older. This is the stateless resume rule of §5. A predicate row change is treated as a move-in even if the doc already matched, because the server does not know the earlier state. That costs a doc's selected rows only when a predicate fact changes.
+- **A move-out** is a doc that no longer matches after a predicate fact changed: one `leave` at that revision. It is idempotent for a consumer that never held the doc.
+- `enter` and the per-request `depth` map are removed.
+
+Membership dimensions generalize. `InDrawer` is the first filter whose matching depends on facts outside the doc (its roster entries). Any future filter with the same property names the tags of the facts it depends on, and their changes are move-ins and move-outs exactly as roster entries are. Datum-only filters (`HasTag`, `IsDoc`) need nothing beyond the row rule.
+
+For comparison, big_sync's part store reaches the same result at write time. Joining a part re-stamps the object's latest-event row (`ObjChanged`), and leaving emits `ObjRemovedFromPart`. The cabinet does the join at read time instead, so a membership write does not wake every unrelated poller.
 
 ## Consequences
 

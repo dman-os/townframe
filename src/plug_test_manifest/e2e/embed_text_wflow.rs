@@ -96,13 +96,10 @@ async fn test_embed_text_workflow() -> Res<()> {
     assert_eq!(embedding.compression, None);
     assert_eq!(embedding.dim, 768);
     assert_eq!(embedding.vector.len(), 768 * 4);
-    assert_eq!(
-        embedding.facet_ref.scheme(),
-        daybook_types::url::FACET_SCHEME
-    );
+    assert_eq!(embedding.facet_ref.scheme(), "dtxt");
     assert_eq!(
         embedding.facet_ref.path(),
-        "/self/org.example.daybook.note/main"
+        "datum:self/org.example.daybook.note/main"
     );
 
     test_cx.stop().await?;

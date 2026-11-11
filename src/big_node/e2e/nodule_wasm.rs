@@ -9,40 +9,41 @@ use super::*;
 use big_blobs::BlobService;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::datum::DatumMember;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Necessity;
+use big_cartridges_core::request::Request;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::NotReadyReason;
+use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::Invoke;
-use big_nodule_core::dispatch::NotReadyReason;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Necessity;
-use big_plugs_core::request::Request;
 use service_utils_rs::ClientError;
+use service_utils_rs::TraceContext;
 use std::time::Duration;
 
 /// One nodule running the test guest: the guest serves `echo` and `relay` under whatever
 /// authority the nodule owns, so the same component stands in for several nodules.
-struct Spec {
-    plug: PlugId,
-    authority: &'static str,
+pub(super) struct Spec {
+    cartridge: CartridgeId,
+    pub(super) authority: &'static str,
 }
 
 impl Spec {
-    fn echo(&self) -> String {
+    pub(super) fn echo(&self) -> String {
         format!("{}.echo", self.authority)
     }
 
@@ -56,21 +57,21 @@ impl Spec {
     }
 }
 
-fn caller() -> Spec {
+pub(super) fn caller() -> Spec {
     Spec {
-        plug: example_plug!("wasm-test").parse().unwrap(),
+        cartridge: example_cartridge!("wasm-test").parse().unwrap(),
         authority: "org.example.test",
     }
 }
 
 fn callee() -> Spec {
     Spec {
-        plug: example_plug!("wasm-callee").parse().unwrap(),
+        cartridge: example_cartridge!("wasm-callee").parse().unwrap(),
         authority: "org.example.callee",
     }
 }
 
-fn guest_bytes() -> Vec<u8> {
+pub(super) fn guest_bytes() -> Vec<u8> {
     let target_dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -103,11 +104,11 @@ fn procedure(nsid: &str) -> Value {
     })
 }
 
-/// The plug whose nodule declares `spec.authority`'s three operations, implements them through
+/// The cartridge whose nodule declares `spec.authority`'s three operations, implements them through
 /// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
 /// relays to). The requests are optional: the nodule runs before its grant, and the tests
 /// exercise what the grant then permits.
-fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
+pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> Cartridge {
     let mut nodule = Nodule {
         requires: calls
             .iter()
@@ -130,25 +131,26 @@ fn plug(spec: &Spec, bytes: &[u8], calls: &[String]) -> Plug {
         extra: Default::default(),
     });
     nodule.implements = operations.into();
-    let mut plug = Plug::new(spec.plug.clone(), "1.0.0".parse().unwrap());
-    plug.authority = Some(spec.authority.to_owned());
-    plug.artifacts.push(Artifact {
+    let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
+    cartridge.authority = Some(spec.authority.to_owned());
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(bytes),
         size: Some(bytes.len() as u64),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
-async fn put(node: &BigNode, bytes: &[u8]) {
+pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
     node.blobs
         .client
         .call(
@@ -163,14 +165,14 @@ async fn put(node: &BigNode, bytes: &[u8]) {
         .unwrap();
 }
 
-async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
+pub(super) async fn admit(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             AdmitNodule {
-                authorization: Authorization::identity(node.authority.root),
-                plug,
+                cartridge,
                 drawers: None,
             },
         )
@@ -178,14 +180,14 @@ async fn admit(node: &BigNode, plug: Plug) -> NoduleRecord {
         .unwrap()
 }
 
-async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
+pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             SetNoduleEnabled {
-                authorization: Authorization::identity(node.authority.root),
-                plug_id: spec.plug.clone(),
+                cartridge_id: spec.cartridge.clone(),
                 enabled,
             },
         )
@@ -196,11 +198,11 @@ async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord
 async fn set_operations(node: &BigNode, spec: &Spec, operations: DispatchScope) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             SetNoduleOperationGrants {
-                authorization: Authorization::identity(node.authority.root),
-                plug_id: spec.plug.clone(),
+                cartridge_id: spec.cartridge.clone(),
                 operations,
             },
         )
@@ -211,29 +213,40 @@ async fn set_operations(node: &BigNode, spec: &Spec, operations: DispatchScope) 
 async fn record(node: &BigNode, spec: &Spec) -> NoduleRecord {
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.authority.root).metadata(),
             GetNodule {
-                authorization: Authorization::identity(node.authority.root),
-                plug_id: spec.plug.clone(),
+                cartridge_id: spec.cartridge.clone(),
             },
         )
         .await
         .unwrap()
 }
 
-async fn invoke(
+pub(super) async fn invoke(
     node: &BigNode,
     operation: &str,
     input: Value,
     context: InvocationContext,
 ) -> Result<Value, DispatchError> {
+    invoke_within(node, operation, input, context, RequestContext::root()).await
+}
+
+/// [`invoke`] under the caller's own request context: its budget, request id and trace.
+pub(super) async fn invoke_within(
+    node: &BigNode,
+    operation: &str,
+    input: Value,
+    context: InvocationContext,
+    request: RequestContext,
+) -> Result<Value, DispatchError> {
     node.dispatch
         .client
-        .call(
-            RequestContext::root(),
+        .call_with(
+            request,
+            Authorization::identity(node.authority.root).metadata(),
             Invoke {
-                authorization: Authorization::identity(node.authority.root),
                 operation: operation.to_owned(),
                 input,
                 context,
@@ -242,17 +255,33 @@ async fn invoke(
         .await
         .map(|output| output.output)
         .map_err(|error| match error {
-            ClientError::Operation(error) => error,
+            ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
         })
 }
 
-async fn boot_node(secrets: &SecretStore) -> (BigNode, StopToken) {
+pub(super) async fn boot_node(secrets: &Arc<SecretStore>) -> (BigNode, StopToken) {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    BigNode::boot(config(secrets, &runtime, sql, StorageConfig::Memory))
-        .await
-        .unwrap()
+    BigNode::boot(config(
+        Arc::clone(secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap()
+}
+
+const OUTER_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+/// A traceparent in the outer call's trace (same trace id) under a span of its own.
+fn assert_continues_trace(traceparent: &str) {
+    let (outer, seen) = (
+        OUTER_TRACEPARENT.split('-').collect::<Vec<_>>(),
+        traceparent.split('-').collect::<Vec<_>>(),
+    );
+    assert_eq!(seen[1], outer[1], "the trace id continues");
+    assert_ne!(seen[2], outer[2], "each hop is a new span");
 }
 
 #[tokio::test]
@@ -263,51 +292,57 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let spec = caller();
     let (echo, absent) = (spec.echo(), spec.absent());
     put(&node, &bytes).await;
-    admit(&node, plug(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
     let enabled = set_enabled(&node, &spec, true).await;
     assert_eq!(enabled.readiness, Readiness::Ready);
-    assert!(node.wasm.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.cartridge));
 
     // The echo returns the input, and the headers the host built for the guest: the operator's
-    // capability as the authority, and the idempotency key. No operations are granted, so the
-    // nodule is told no capability of its own.
+    // capability as a bare `Bearer` token (no signer), the idempotency key, the request id and
+    // no budget. No operations are granted, so the nodule is told no capability of its own.
     let operator_cap = serde_json::to_value(node.authority.root).unwrap();
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
         ..Default::default()
     };
+    let mut outer = RequestContext::root();
+    outer.trace = TraceContext::from_headers(Some(OUTER_TRACEPARENT), None);
+    let echoed = invoke_within(&node, &echo, json!({ "n": 1 }), context, outer.clone())
+        .await
+        .unwrap();
+    assert_eq!(echoed["input"], json!({ "n": 1 }));
     assert_eq!(
-        invoke(&node, &echo, json!({ "n": 1 }), context).await,
-        Ok(json!({
-            "input": { "n": 1 },
-            "authorization": format!("Capability {}", operator_cap.as_str().unwrap()),
-            "idempotencyKey": "key-1",
-            "deadline": null,
-            "noduleCapability": null,
-        }))
+        echoed["authorization"],
+        format!("Bearer {}", operator_cap.as_str().unwrap())
     );
-    // A deadline in the future travels as a header.
-    let deadline = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-        + 60_000;
-    let context = InvocationContext {
-        deadline_unix_ms: Some(deadline),
-        ..Default::default()
-    };
-    let echoed = invoke(&node, &echo, json!({}), context).await.unwrap();
-    assert_eq!(echoed["deadline"], json!(deadline.to_string()));
+    assert_eq!(echoed["idempotencyKey"], "key-1");
+    assert_eq!(echoed["timeoutMs"], Value::Null);
+    // The guest's request id is the delivery hop's, not the caller's; the trace continues
+    // under a new span.
+    assert_ne!(echoed["requestId"], outer.request_id.to_string());
+    assert_eq!(echoed["requestId"].as_str().unwrap().len(), 36, "a uuid");
+    assert_continues_trace(echoed["traceparent"].as_str().unwrap());
+    assert_eq!(echoed["noduleCapability"], Value::Null);
+
+    // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
+    let budgeted = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
+    let echoed = invoke_within(&node, &echo, json!({}), Default::default(), budgeted)
+        .await
+        .unwrap();
+    let timeout_ms: u64 = echoed["timeoutMs"].as_str().unwrap().parse().unwrap();
+    assert!(
+        (1..=60_000).contains(&timeout_ms),
+        "the guest sees what is left of 60s, got {timeout_ms}ms"
+    );
     assert_eq!(echoed["idempotencyKey"], Value::Null);
 
-    // A deadline already behind us fails in dispatch before the handler is entered.
-    let elapsed = InvocationContext {
-        deadline_unix_ms: Some(1),
-        ..Default::default()
-    };
+    // A budget already spent fails before the handler is entered.
+    let elapsed = RequestContext::root().with_time_budget(std::time::Duration::ZERO);
     assert_eq!(
-        invoke(&node, &echo, json!({}), elapsed).await,
-        Err(DispatchError::DeadlineExceeded)
+        invoke_within(&node, &echo, json!({}), Default::default(), elapsed).await,
+        Err(DispatchError::Context(
+            method_core::ContextError::DeadlineExceeded
+        ))
     );
 
     // The guest's own refusal of an operation it does not serve is the provider's error.
@@ -325,9 +360,9 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::UnknownOperation)
     );
-    assert!(!node.wasm.hosts(&spec.plug));
+    assert!(!node.executor.hosts(&spec.cartridge));
     set_enabled(&node, &spec, true).await;
-    assert!(node.wasm.hosts(&spec.plug));
+    assert!(node.executor.hosts(&spec.cartridge));
     assert_eq!(
         invoke(&node, &echo, json!({ "n": 2 }), Default::default())
             .await
@@ -358,7 +393,7 @@ async fn relay(
 ) -> Value {
     let mut input = json!({ "operation": operation, "input": { "n": 1 } });
     if let Some(authority) = authority {
-        input["authority"] = json!(authority.strip_prefix("Capability ").unwrap_or(authority));
+        input["authority"] = json!(authority);
     }
     invoke(node, &from.relay(), input, context).await.unwrap()
 }
@@ -374,7 +409,7 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     // its grants can ever confer.
     let requested = [(&a, vec![b.echo(), b.absent()]), (&b, vec![a.echo()])];
     for (spec, calls) in &requested {
-        admit(&node, plug(spec, &bytes, calls)).await;
+        admit(&node, cartridge(spec, &bytes, calls)).await;
         assert_eq!(
             set_enabled(&node, spec, true).await.readiness,
             Readiness::Ready
@@ -421,10 +456,41 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let relayed = relay(&node, &a, &target, None, context.clone()).await;
     assert_eq!(relayed["status"], 200, "{relayed}");
     assert_eq!(relayed["body"]["input"], json!({ "n": 1 }));
-    assert_eq!(relayed["body"]["authorization"], json!(granted));
+    assert_eq!(
+        relayed["body"]["authorization"],
+        json!(format!("Bearer {granted}"))
+    );
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
     // B has no grants of its own, so it was handed no capability to confuse with A's.
     assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
+
+    // The nested call is a hop of its own: a new request id (the id is the admission key and
+    // the outer call is still in flight), the outer trace under a new span, and a budget
+    // within the outer one. The guest forwards the trace and budget it was delivered and the
+    // egress parses them rather than starting a fresh context.
+    let mut outer = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
+    outer.trace = TraceContext::from_headers(Some(OUTER_TRACEPARENT), None);
+    let nested = invoke_within(
+        &node,
+        &a.relay(),
+        json!({ "operation": target, "input": {} }),
+        context.clone(),
+        outer.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(nested["status"], 200, "{nested}");
+    assert_ne!(nested["body"]["requestId"], outer.request_id.to_string());
+    assert_continues_trace(nested["body"]["traceparent"].as_str().unwrap());
+    let nested_ms: u64 = nested["body"]["timeoutMs"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (1..=60_000).contains(&nested_ms),
+        "the nested call carries a budget within the outer 60s, got {nested_ms}ms"
+    );
 
     // A guest forging another nodule's capability id is denied: B's capability is bound to B.
     // It permits A's echo (which B requested), so only its holder binding can refuse A's use of
@@ -487,10 +553,10 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
     let (node, stop) = boot_node(&secrets).await;
     let spec = caller();
     let echo = spec.echo();
-    admit(&node, plug(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
     let waiting = set_enabled(&node, &spec, true).await;
     assert_eq!(waiting.readiness, Readiness::ArtifactsUnavailable);
-    assert!(!node.wasm.hosts(&spec.plug));
+    assert!(!node.executor.hosts(&spec.cartridge));
     assert_eq!(
         invoke(&node, &echo, json!({}), Default::default()).await,
         Err(DispatchError::NotReady {
@@ -512,4 +578,115 @@ async fn a_handler_whose_bytes_arrive_late_becomes_ready_when_they_do() {
         json!({ "n": 3 })
     );
     shutdown(node, stop).await;
+}
+
+/// A cartridge published on one node is installed and invoked on another (ADR 033 section 9). Alice
+/// publishes the nodule's cartridge in her registry and invites Bob's node to her registry drawer at
+/// `access`; the cartridge document and, through Bob's mirror of the drawer's blob inventory, the
+/// handler bytes sync to Bob. Bob's operator installs the document into Bob's registry, lending the
+/// registry a handle on Alice's drawer it holds without any grant (the operator reaches every
+/// drawer), then admits the nodule from what Bob's registry serves and invokes it through his
+/// dispatch once the synced bytes make it ready.
+///
+/// Installing enters Alice's document in Bob's registry drawer at Read, which Bob's node signs as
+/// a Keyhive delegation on a document it holds only through Alice's drawer: both invite levels
+/// are exercised, since Read is the lowest that can carry it.
+async fn install_a_cartridge_published_on_another_node(
+    access: big_cabinet_core::drawer::DrawerAccess,
+) {
+    use super::cartridges::import_document;
+    use super::cartridges::operator;
+    use super::cartridges::publish;
+    use super::harness::Cluster;
+    use super::harness::Topology;
+    use big_cartridges_core::protocol::GetCartridge;
+    use big_cartridges_core::protocol::GetCartridgeVersion;
+    use big_cartridges_core::test_support::sign_as_example;
+
+    let bytes = guest_bytes();
+    let spec = caller();
+    let mut cluster = Cluster::boot(&["alice", "bob"]).await;
+    cluster.connect(Topology::Pair).await;
+    let (alice, bob) = (0, 1);
+
+    let publisher = cluster.node(alice);
+    put(publisher, &bytes).await;
+    let envelope = sign_as_example(cartridge(&spec, &bytes, &[]));
+    publish(publisher, operator(publisher), envelope.clone())
+        .await
+        .unwrap();
+    let document = publisher
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(publisher).metadata(),
+            GetCartridge {
+                id: spec.cartridge.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    let registry = publisher.registry_drawer.clone();
+    cluster.admit(alice, bob, &registry, access).await;
+    cluster.mirror_blobs(bob, &registry).await;
+    cluster
+        .until(async |cluster| cluster.read_note(bob, &document).await.is_some())
+        .await;
+
+    let node = cluster.node(bob);
+    let installed = import_document(node, operator(node), &registry, &document)
+        .await
+        .unwrap();
+    assert_eq!(installed.id, spec.cartridge);
+    assert_eq!(installed.doc_id, document);
+    let served = node
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(node).metadata(),
+            GetCartridgeVersion {
+                id: spec.cartridge.clone(),
+                version: envelope.version.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .envelope;
+    assert_eq!(served, envelope);
+
+    admit(node, served).await;
+    set_enabled(node, &spec, true).await;
+    // There is no signal for "reconciled" to subscribe to (see the late-bytes test above): the
+    // record is looked at until the synced handler bytes have made the nodule ready.
+    while record(node, &spec).await.readiness != Readiness::Ready {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(node.executor.hosts(&spec.cartridge));
+    assert_eq!(
+        invoke(
+            node,
+            &spec.echo(),
+            json!({ "from": "bob" }),
+            Default::default()
+        )
+        .await
+        .unwrap()["input"],
+        json!({ "from": "bob" })
+    );
+    cluster.stop_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cartridge_published_on_one_node_is_installed_and_invoked_on_another() {
+    install_a_cartridge_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Read)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cartridge_published_on_one_node_is_installed_by_an_admin_member_of_its_drawer() {
+    install_a_cartridge_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Admin)
+        .await;
 }

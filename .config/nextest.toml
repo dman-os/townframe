@@ -9,6 +9,17 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = 'test(/long_af_test/)'
 slow-timeout = { period = "60s", terminate-after = 8 }
 
+# The big_node blob_discovery e2e tests each boot two nodes with several drawers and take
+# 95-105 s alone; run beside a full parallel suite they are 4-10x slower and hit the default
+# kill. Cap how many run at once and give them the same budget as `long_af_test`.
+[test-groups.big-node-blob-discovery]
+max-threads = 2
+
+[[profile.default.overrides]]
+filter = 'package(big_node) and test(/blob_discovery::/)'
+test-group = 'big-node-blob-discovery'
+slow-timeout = { period = "60s", terminate-after = 8 }
+
 [profile.ci]
 fail-fast = false
 retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s", jitter = true }

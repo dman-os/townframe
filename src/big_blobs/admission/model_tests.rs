@@ -130,15 +130,21 @@ impl AdmissionModel {
     ) {
         // Big Sync delivers observations in cursor order and this backend treats
         // the durable (inventory, digest, peer) row as the idempotency key. The
-        // compatibility revision argument is therefore intentionally ignored.
+        // compatibility revision argument is therefore intentionally ignored, and
+        // an observation that repeats the row is a no-op.
         let source = &mut self.sources[inventory][digest][peer];
+        if source.seen && source.present == present {
+            return;
+        }
         source.seen = true;
         source.present = present;
         let observed = self.observed(inventory, digest);
         let pair = &mut self.pairs[inventory][digest];
         pair.created = true;
         pair.observed = observed;
-        self.invalidate_fetches(inventory);
+        // A changed observation re-arms its own pair only: what a source says
+        // about one digest leaves a transfer of another digest running.
+        pair.fetching = false;
     }
 
     fn available(&mut self, inventory: usize, digest: usize, available: bool) {

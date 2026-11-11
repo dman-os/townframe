@@ -6,8 +6,10 @@ use crate::encrypt::has_pair_tags;
 use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DocsMessage;
 use big_cabinet_core::doc::WriteReceipt;
+use big_cabinet_core::reference::head_text;
 use futures::future::BoxFuture;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use sqlite_rs::SqliteRuntime;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -138,6 +140,7 @@ impl DocsStub {
                         heads: heads.clone(),
                         clock,
                     },
+                    authors: Vec::new(),
                 },
             );
         }
@@ -208,7 +211,7 @@ impl Harness {
 
     fn reconciler(&self) -> DocumentBlobs {
         DocumentBlobs::new(
-            Client::direct(Arc::clone(&self.docs)),
+            Client::new(Transport::direct(Arc::clone(&self.docs))),
             self.docs.capability,
             self.store.clone(),
             Arc::clone(&self.provider),
@@ -277,6 +280,7 @@ fn accepted(value: Value) -> DatumRead {
     DatumRead::Accepted {
         value,
         version: DatumVersion::default(),
+        authors: Vec::new(),
     }
 }
 
@@ -296,7 +300,7 @@ async fn existing(
     let key = MasterKey::random();
     let ciphertext = encrypt_with_rs(&key, plain, encoding.record_size, encoding.padding);
     let jwk_key = DatumKey::from_text(Jwk::ID, "legacy-domain")?;
-    let cipher_key = DatumKey::from_text(CipherBlob::ID, "legacy-domain/main")?;
+    let cipher_key = DatumKey::from_text(CipherBlob::ID, "main")?;
     harness.replace(
         jwk_key.clone(),
         accepted(serde_json::to_value(JwkOct::from_master_key(&key))?),
@@ -305,24 +309,16 @@ async fn existing(
         "representation": {"digest": BlobId::new(*Hash::new(&ciphertext).as_bytes()).digest_str(), "lengthOctets": ciphertext.len()},
         "contentEncoding": CONTENT_ENCODING_AES128GCM,
         "encodingParameters": encoding.to_encoding_parameters(),
-        "keyRef": format!("db+facet:///self/{jwk_key}"),
+        "keyRef": format!("dtxt:datum:self/{jwk_key}"),
         "keyRefHeads": [ChangeHash([1; 32]).to_string()],
     });
     harness.replace(cipher_key.clone(), accepted(cipher));
-    let mut blob = blob_value(plain);
-    blob["urls"]
-        .as_array_mut()
-        .unwrap()
-        .push(Value::String(format!(
-            "db+blob:///{}?via={cipher_key}",
-            BlobId::new(*Hash::new(plain).as_bytes())
-        )));
-    harness.replace(blob_key(), accepted(blob));
+    harness.replace(blob_key(), accepted(blob_value(plain)));
     Ok((harness, ciphertext, cipher_key, key))
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn legacy_hashed_representation_without_via_hint_still_resolves() -> Res<()> {
+async fn legacy_hashed_representation_still_resolves() -> Res<()> {
     let plain = b"legacy hashed representation";
     let harness = Harness::new(plain).await?;
     let _tag = harness.put(plain).await?;
@@ -340,7 +336,7 @@ async fn legacy_hashed_representation_without_via_hint_still_resolves() -> Res<(
         "representation": {"digest": BlobId::new(*Hash::new(&ciphertext).as_bytes()).digest_str(), "lengthOctets": ciphertext.len()},
         "contentEncoding": CONTENT_ENCODING_AES128GCM,
         "encodingParameters": encoding.to_encoding_parameters(),
-        "keyRef": format!("db+facet:///self/{jwk_key}"),
+        "keyRef": format!("dtxt:datum:self/{jwk_key}"),
         "keyRefHeads": [ChangeHash([1; 32]).to_string()],
     });
     harness.replace(cipher_key.clone(), accepted(cipher));
@@ -400,7 +396,7 @@ async fn writes_key_and_cipher_in_one_transaction_and_reuses_the_signed_pinned_s
         assert!(state.writes[0].set.contains_key(&retained.cipher_key));
         assert_eq!(
             cipher.key_ref,
-            format!("db+facet:///{}/{jwk_key}", harness.docs.doc_id)
+            format!("dtxt:datum:{}/{jwk_key}", harness.docs.doc_id)
         );
         // Minted in the same transaction as the cipherBlob, so it cannot
         // name that write's own heads; empty means "the cipherBlob's heads".
@@ -937,10 +933,6 @@ async fn ciphertext_first_decrypts_in_bounded_windows_and_checks_plaintext_ident
     let current = harness.current();
     let mut wrong = blob_value(&plain);
     wrong["digest"] = BlobId::new([11; 32]).digest_str().into();
-    wrong["urls"] = serde_json::json!([format!(
-        "db+blob:///{}?via={cipher_key}",
-        BlobId::new([11; 32])
-    )]);
     harness.replace(blob_key(), accepted(wrong));
     let error = harness.reconcile().await.unwrap_err();
     assert!(error.to_string().contains("decrypted plaintext differs"));
@@ -1002,7 +994,7 @@ async fn key_reads_honor_pins_and_missing_pins_or_capabilities_defer() -> Res<()
         b"pinned key"
     );
     let mut cipher = serde_json::to_value(harness.cipher(&cipher_key))?;
-    cipher["keyRef"] = format!("db+facet:///{}/{jwk_key}", DocId::new([55; 32])).into();
+    cipher["keyRef"] = format!("dtxt:datum:{}/{jwk_key}", DocId::new([55; 32])).into();
     harness.replace(cipher_key.clone(), accepted(cipher.clone()));
     let report = harness.reconcile().await?;
     assert!(matches!(
@@ -1030,7 +1022,7 @@ async fn unavailable_external_key_does_not_block_other_blobs_in_the_owner_docume
     let tag = harness.put(plain).await?;
     let mut cipher = serde_json::to_value(harness.cipher(&cipher_key))?;
     let external = DocId::new([55; 32]);
-    cipher["keyRef"] = format!("db+facet:///{external}/{}/legacy-domain", Jwk::ID).into();
+    cipher["keyRef"] = format!("dtxt:datum:{external}/{}/legacy-domain", Jwk::ID).into();
     harness.replace(cipher_key.clone(), accepted(cipher.clone()));
     let independent = DatumKey::from_text(Blob::ID, "second")?;
     harness.replace(independent.clone(), accepted(blob_value(plain)));
@@ -1481,24 +1473,28 @@ fn every_owner_document_failure_stops_stale_work_and_defers_release() -> Res<()>
 }
 
 #[test]
-fn legacy_references_keep_identity_and_reject_unrepresentable_branches_and_conflicting_pins()
--> Res<()> {
+fn key_references_keep_identity_and_reject_pins_fragments_and_foreign_spellings() -> Res<()> {
     let doc = DocId::new([4; 32]);
-    let head = ChangeHash([8; 32]);
-    for prefix in ["db+facet:/", "db+facet:///"] {
-        let reference = format!("{prefix}self/{}/domain/main?branch=main&at={head}", Jwk::ID);
-        let (owner, key, heads) = legacy_reference(&doc, &reference).unwrap();
-        assert_eq!(owner, doc);
-        assert_eq!(key, DatumKey::from_text(Jwk::ID, "domain/main")?);
-        assert_eq!(heads, Some(vec![head]));
-    }
+    let reference = format!("dtxt:datum:self/{}/domain/main", Jwk::ID);
+    let (owner, key) = key_reference(&doc, &reference).unwrap();
+    assert_eq!(owner, doc);
+    assert_eq!(key, DatumKey::from_text(Jwk::ID, "domain/main")?);
+    let (owner, _) = key_reference(&doc, &format!("dtxt:datum:{doc}/{}/key", Jwk::ID)).unwrap();
+    assert_eq!(owner, doc);
     for reference in [
-        format!("db+facet://attacker/{doc}/{}/key", Jwk::ID),
-        format!("db+facet:///self/{}/key?branch=other", Jwk::ID),
-        format!("db+facet:///self/{}/../key", Jwk::ID),
-        format!("db+facet:///self/{}/key?at=bad", Jwk::ID),
+        // The pin is the sibling `keyRefHeads`, never a query on the stored string.
+        format!(
+            "dtxt:datum:self/{}/key?heads={}",
+            Jwk::ID,
+            head_text(&ChangeHash([8; 32]))
+        ),
+        format!("dtxt:datum:self/{}/key#fragment", Jwk::ID),
+        format!("dtxt:datum://attacker/{doc}/{}/key", Jwk::ID),
+        format!("db+facet:///self/{}/key", Jwk::ID),
+        format!("db+datum:/self/{}/key", Jwk::ID),
+        format!("dtxt:blob:{}", BlobId::new([8; 32])),
     ] {
-        assert!(legacy_reference(&doc, &reference).is_none());
+        assert!(key_reference(&doc, &reference).is_none(), "{reference}");
     }
     Ok(())
 }

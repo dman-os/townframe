@@ -47,7 +47,7 @@
 > Don't be lazy with solutions, you really are better than that.
 
 <!--FIXME: rewrite this in CONTRIBUTING.md -->
-- To type check the ./src/daybook_compose multiplatform app, use `./x/check-dayb.ts`.
+- The Kotlin app (`./src/daybook_compose`) is off the validation path: don't type check or lint it as part of a change. It stays in the tree until its remaining claytext concerns are settled; `./x/check-dayb.ts` still type checks it when asked.
 - Source-only checks (nixfmt/statix/deadnix, rustfmt on every `.rs` file, deno fmt/lint/check of `x/`, biome, JSON/TOML/YAML validity) are hermetic Nix checks: run `nix flake check`, fix formatting with `nix fmt`. New files are invisible to the flake until tracked.
 - xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x plug build-oci`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
@@ -61,7 +61,7 @@
   - The cache directory is per machine, in mbx's global config (`mbx settings get cache_dir`). Keep it on the same filesystem as the checkouts so restores hard link instead of copying.
   - Every worktree on a machine must pin the same mbx version, because the shim and cache agent refuse to talk across versions. Bump the pin on main and rebase.
   - `mbx explain --last` names why a compilation missed or bypassed the cache; `mbx stats`, `mbx gc --dry-run` and `mbx tui` cover savings, pruning and live builds.
-- Never use `nix develop path:.` here: it copies untracked build output into the store and rebuilds the toolchain from source. Use `nix develop .#ci-rust`.
+- Never use `nix develop path:.` here: it copies untracked build output into the store and rebuilds the toolchain from source. Use plain `nix develop` (the default shell, whose Cargo is mbx's shim), on every machine including remote ones like mothership. `.#ci-rust` is CI's shell: its Cargo is the bare toolchain, so a build there bypasses mbx and writes an unmanaged `target` directory that nothing prunes. Don't develop or verify in it. A `target` that is a real directory rather than a symlink into mbx's cache is such a build; delete it once nothing is building there.
 
 ## Comments
 
@@ -99,6 +99,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - `../keyhive` and `../subduction` are ours to instrument. Ask before *concluding* a bug is upstream, not before adding a log line.
 - Keep instrumentation in its own commit, separate from fixes and pin bumps: the forks move and the logs must be droppable independently.
 - Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only), `message-ordering-audit` (causal ordering across hub command/event/mailbox surfaces).
+- Performance and memory investigations have `.agents/skills/perf-investigation` (costs.rs harness, release wall vs CPU, census by operation, SQLite lease counters, `strace -c`, critical-path waits vs background load; `x/instr-summary.ts` summarizes INSTR samples).
 - Dayframe UI work has its own playbooks in `.agents/skills/`: `dayframe-design-language` (tokens, components, layout contract), `dayframe-native-dev-loop` (native build, screenshots, AT-SPI inspection), `blitz-dioxus-native-limits` (pinned Blitz capability bounds).
 - Cabinet datum/Lexicon work has its own playbook in `.agents/skills/`: `lexicon-authoring` (open unions, string vocabularies, empty-member convention, unknown-member carrying, admission/codec test chain).
 - Browser automation has `.agents/skills/playwright` (flake-pinned browser farm, per-package `@playwright/test` pins, the `dayframe_web` e2e).
@@ -225,3 +226,6 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
 - Prompt contract: name the single item, the files to touch, what to verify (`cargo clippy -p <crate>` plus the narrowest affected test), and explicitly **forbid** full-suite runs — they time out and buy nothing.
 - Require the fork to report product and design questions instead of answering them, and to state exactly which commands it ran.
 - Never take a fork's report on trust: read its diff, then rerun the targeted test and clippy yourself. A fork that reports a timeout may still have finished the implementation.
+- Background work is fine; ending a turn on it is only fine when the harness will report its completion (e.g. a backgrounded shell command whose exit re-invokes the agent). Never end a turn waiting on background work that nothing will report: a run that dies then leaves an agent that looks busy and does nothing, which stalled work for hours more than once. If no completion notice is guaranteed, keep the turn alive (poll it, or run it in the foreground) until there are results. Never detach locally (`setsid`, `nohup`, a trailing `&` inside a command): the harness then tracks only the launcher, which exits at once, and the real run finishes unseen. Use the harness's own background mode so the run itself is tracked; detach only for remote runs the turn explicitly polls.
+- The manager verifies liveness instead of relaying "still running". When a subagent reports that it is waiting on background work, check right away for live cargo/nextest processes and recently touched files. If nothing is moving, stop it and continue from the working tree.
+- The manager doesn't idle either: when starting a long run, say how long it should take, and do other work in the meantime instead of ending the turn waiting on it.

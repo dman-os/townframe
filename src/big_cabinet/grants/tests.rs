@@ -22,7 +22,9 @@ impl Fixture {
         let sql = sqlite_rs::test_support::db(&[]).unwrap().clone();
         let store = keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(store).await.unwrap();
-        let (authority, stop) = authority::boot(&secrets, sql.clone()).await.unwrap();
+        let (authority, stop) = authority::boot(&secrets, "test-node", sql.clone())
+            .await
+            .unwrap();
         let namespace = authority
             .service
             .open_namespace(Uuid7::new())
@@ -64,6 +66,7 @@ impl Fixture {
                     dependencies,
                     object: "scoped resource".into(),
                     rights: Rights::USE | Rights::NARROW,
+                    subject: None,
                 },
             )
             .await
@@ -75,7 +78,7 @@ impl Fixture {
                 .client
                 .call(RequestContext::root(), InspectCapability { capability })
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         ));
@@ -183,6 +186,7 @@ async fn withdrawal_invalidates_old_proofs_and_transitive_derivations() {
                 dependencies: Vec::new(),
                 object: "another domain".into(),
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -201,7 +205,7 @@ async fn withdrawal_invalidates_old_proofs_and_transitive_derivations() {
     }
     assert!(matches!(
         fixture.mint(proof.dependencies).await,
-        Err(ClientError::Operation(
+        Err(ClientError::Method(
             AuthorityServiceError::InvalidCapability
         ))
     ));
@@ -240,7 +244,7 @@ async fn completed_withdrawal_cannot_be_raced_by_publication() {
         revoked.unwrap();
         match minted {
             Ok(capability) => fixture.assert_dead(capability.capability_id).await,
-            Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {}
+            Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => {}
             Err(error) => panic!("unexpected mint failure: {error}"),
         }
     }
@@ -249,6 +253,7 @@ async fn completed_withdrawal_cannot_be_raced_by_publication() {
 
 #[tokio::test]
 async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
+    use big_cabinet_core::authority::CapabilityChange;
     use big_cabinet_core::authority::CapabilityStatus;
     use big_cabinet_core::authority::ObserveCapability;
     use futures::StreamExt;
@@ -277,7 +282,12 @@ async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
         let writer = fixture.sql.begin_write().await.unwrap();
         let change = async {
             match replacement {
@@ -298,7 +308,7 @@ async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
         tokio::pin!(change);
         tokio::select! {
             result = &mut change => panic!("grant change completed while writer was leased: {result:?}"),
-            event = events.next() => assert_eq!(event, Some(Ok(CapabilityStatus::Retracted))),
+            event = events.next() => assert_eq!(event, Some(Ok(CapabilityChange { status: CapabilityStatus::Retracted }))),
         }
         assert_eq!(
             sqlite::get_grant(
@@ -338,6 +348,7 @@ async fn temporary_delegation_tracks_its_source_without_promoting_to_durable() {
                 dependencies: Vec::new(),
                 object: "delegation source".into(),
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await
@@ -425,7 +436,7 @@ async fn temporary_delegation_tracks_its_source_without_promoting_to_durable() {
                 Some(weak.capability_id)
             )
             .await,
-        Err(GrantError::Authority(ClientError::Operation(
+        Err(GrantError::Authority(ClientError::Method(
             AuthorityServiceError::Escalation
         )))
     ));
@@ -453,6 +464,7 @@ async fn restart_preserves_standing_grants_without_adopting_live_handles() {
                 dependencies: Vec::new(),
                 object: "delegation source".into(),
                 rights: Rights::all(),
+                subject: None,
             },
         )
         .await
@@ -472,7 +484,7 @@ async fn restart_preserves_standing_grants_without_adopting_live_handles() {
         .mint(fixture.proof(subject, "durable").await.dependencies)
         .await
         .unwrap();
-    let (other, stop) = authority::boot(&fixture.secrets, fixture.sql.clone())
+    let (other, stop) = authority::boot(&fixture.secrets, "test-node", fixture.sql.clone())
         .await
         .unwrap();
     let namespace = other
@@ -501,7 +513,7 @@ async fn restart_preserves_standing_grants_without_adopting_live_handles() {
                 }
             )
             .await,
-        Err(ClientError::Operation(
+        Err(ClientError::Method(
             AuthorityServiceError::InvalidCapability
         ))
     ));
@@ -582,6 +594,7 @@ async fn domain_shutdown_retires_grant_support_even_if_authority_stays_alive() {
                 dependencies: proof.dependencies,
                 object: "reacquired".into(),
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await

@@ -1,6 +1,8 @@
 //! HTTP/1 over Iroh: the same wire, driven through Iroh endpoints.
 
 use super::*;
+use service_client_native_rs::xrpc::IROH_XRPC_HTTP_ALPN;
+use service_client_native_rs::xrpc::IrohXrpcClient;
 
 const COEXISTING_ALPN: &[u8] = b"townframe/test-coexisting/1";
 
@@ -73,7 +75,7 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
     let server_endpoint = iroh_test_endpoint().await.expect("server endpoint");
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             |_context, metadata, params: EchoParams| async move {
                 Ok(Output {
@@ -88,7 +90,7 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
     let deadline_started = Arc::new(tokio::sync::Notify::new());
     let handler_deadline_started = Arc::clone(&deadline_started);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             move |_context, _metadata, params: EchoParams| {
                 let handler_deadline_started = Arc::clone(&handler_deadline_started);
@@ -261,7 +263,7 @@ async fn iroh_http1_chunked_request_limit_is_cumulative_across_wire_frames() {
     let server_endpoint = iroh_test_endpoint().await.expect("server endpoint");
     let mut xrpc_router = XrpcRouter::new(8);
     xrpc_router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             |_context, _metadata, params: EchoParams| async move {
                 Ok(Output {
@@ -313,7 +315,7 @@ async fn iroh_http1_client_disconnect_drops_entered_handler() {
     let handler_dropped_sender = Arc::clone(&dropped_sender);
     let mut xrpc_router = XrpcRouter::new(1024);
     xrpc_router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             move |_context, _metadata, params: EchoParams| {
                 let handler_started = Arc::clone(&handler_started);
@@ -402,7 +404,7 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
     let handler_dropped_sender = Arc::clone(&dropped_sender);
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             move |_context, _metadata, params: EchoParams| {
                 let handler_started = Arc::clone(&handler_started);
@@ -518,7 +520,7 @@ async fn iroh_http1_shutdown_reaps_pending_exchange() {
     let handler_started = Arc::clone(&started);
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             move |_context, _metadata, params: EchoParams| {
                 let handler_started = Arc::clone(&handler_started);

@@ -31,7 +31,6 @@ use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
 use crate::keyhive::EventSubject;
 use crate::runtime2::keyhive_admission;
-use crate::runtime2::tasks::TokioTimer;
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
@@ -49,7 +48,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 /// A Keyhive *membered* identity that carries a membership graph, with its kind.
 ///
@@ -168,10 +166,7 @@ where
     /// Build over an explicit admission store and hive.
     fn over(store: SqliteBigRepoStore, keyhive: BigKeyhiveHandle) -> Self {
         Self {
-            source: keyhive_admission::Store {
-                store,
-                timer: Arc::new(TokioTimer),
-            },
+            source: keyhive_admission::Store { store },
             keyhive,
             _memory: PhantomData,
         }
@@ -246,6 +241,7 @@ where
         }
         Ok(KeyhiveAccessReader {
             store: self.source.clone(),
+            link_landings: self.source.store.admission_appends(),
             reader: self.source.open((), after).await?,
             keyhive: self.keyhive.clone(),
             staged: VecDeque::new(),
@@ -272,6 +268,15 @@ pub struct KeyhiveAccessReader<M> {
     /// The source, held only to observe the admission head for
     /// [`KeyhiveAccessDelta::computed_at_seq`].
     store: keyhive_admission::Store,
+    /// The admission watermark, awaited while the staged head row is parked
+    /// on a proof-chain link this hive has not applied. Every path by which the
+    /// hive gains a delegation — a remote exchange, a local mutation
+    /// (`persist_local_events`) and boot's WAL recovery — applies it in memory
+    /// first and then admits it through the durable incorporation sink, whose
+    /// append raises this watermark, so the link landing is always followed by
+    /// a raise. Separate from the inner reader's own receiver so neither side's
+    /// seen-mark can swallow the other's wake.
+    link_landings: tokio::sync::watch::Receiver<u64>,
     reader: keyhive_admission::Reader,
     keyhive: BigKeyhiveHandle,
     /// Rows of the page being resolved, oldest first. A row leaves this queue
@@ -341,19 +346,26 @@ where
         let limit = limits.max_entries.get();
         loop {
             if !self.staged.is_empty() {
+                // Marked before the pass probes the hive, never after: a link
+                // applied before this mark is visible to the probe, and one
+                // applied after it is admitted (and so announced) after it too,
+                // leaving `changed()` ready for the park below.
+                self.link_landings.borrow_and_update();
                 match self.resolve_staged(limit).await? {
                     StagedPass::Progressed => {}
                     // The head row names a proof chain this hive has not applied
                     // yet. That dependency is local state — this hive ingesting
-                    // the missing link — and nothing notifies this reader when it
-                    // lands, so the pass re-probes on the same idle bound the
-                    // admission source waits on. Nothing is returned while parked,
-                    // not even the entries already resolved ahead of the row: they
+                    // the missing link — and the link's own admission is what
+                    // announces it, so the pass parks on the admission watermark
+                    // and re-probes on the next append. Nothing is returned while
+                    // parked, not even the entries already resolved ahead of the row: they
                     // carry this page's revision, and that revision is what the
                     // walker settles, so reporting it would advance the consumer's
                     // cursor past the row that produced no entry.
                     StagedPass::Parked => {
-                        self.store.timer.sleep(keyhive_admission::IDLE_POLL).await;
+                        self.link_landings.changed().await.expect(
+                            "the admission watermark sender lives in the store this reader holds",
+                        );
                         continue;
                     }
                 }
@@ -943,20 +955,14 @@ mod tests {
     /// entry — and that row is never re-admitted, so the subject it names is never
     /// emitted even once the chain's link lands.
     ///
-    /// Both rows of the fixture name the chain's root, so the discriminator is how
-    /// many entries the page carries: the link's row alone is the dropped row's
-    /// signature.
+    /// The link lands the way every ingest path lands one: applied, then admitted.
+    /// That admission is the parked read's only wake (no time advances here), so a
+    /// park that polls or misses the append hangs until the hard test timeout.
     #[tokio::test]
     async fn an_unresolvable_proof_chain_holds_its_revision_until_the_link_lands() {
         let harness = Harness::new().await;
         let (subject, link, chained_bytes) = harness.chained_delegation_events();
-        harness.admit(chained_bytes).await;
-        let link_seq = harness
-            .admit(
-                bincode::serialize(&StaticEvent::Delegated(link.clone()))
-                    .expect("serialize the link's own row"),
-            )
-            .await;
+        let chained_seq = harness.admit(chained_bytes).await;
 
         let hive = harness.keyhive.clone_keyhive();
         let mut reader = harness
@@ -985,11 +991,17 @@ mod tests {
              produced no entry; got {reported:?}"
         );
 
-        // Applying the link is what this hive's ingest does when the missing
-        // delegation arrives; the held row resolves on the next pass.
-        hive.receive_static_event(StaticEvent::Delegated(link))
+        // What this hive's ingest does when the missing delegation arrives: apply
+        // it, then admit it. The held row resolves on the pass that admission wakes.
+        hive.receive_static_event(StaticEvent::Delegated(link.clone()))
             .await
             .expect("apply the chain link");
+        harness
+            .admit(
+                bincode::serialize(&StaticEvent::Delegated(link))
+                    .expect("serialize the link's own row"),
+            )
+            .await;
 
         let RevisionRead::Entries { revision, entries } = read
             .await
@@ -997,18 +1009,11 @@ mod tests {
         else {
             panic!("the held page must report the entries it was read for");
         };
-        assert_eq!(revision, link_seq, "the page reports its own revision");
         assert_eq!(
-            entries.len(),
-            2,
-            "every row of the page produces an entry, so the chained row is not \
-             dropped: {entries:?}"
-        );
-        assert!(
-            entries
-                .iter()
-                .all(|entry| entry.subject == AccessSubject::Group(subject)),
-            "both rows name the chain's root graph: {entries:?}"
+            (revision, entries.len(), entries[0].subject),
+            (chained_seq, 1, AccessSubject::Group(subject)),
+            "the held page reports the chained row, naming the chain's root, at its \
+             own revision rather than dropping it for the link's: {entries:?}"
         );
     }
 
@@ -1113,6 +1118,7 @@ mod tests {
         // this is exactly what a read dropped mid-resolution leaves behind.
         let mut reader = KeyhiveAccessReader {
             store: stream.source.clone(),
+            link_landings: stream.source.store.admission_appends(),
             reader: log,
             keyhive: harness.keyhive.clone(),
             staged: VecDeque::from(entries),

@@ -4,7 +4,7 @@ use big_cabinet_core::authority::RetractCapability;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use secrets_rs::SecretStore;
 
 struct ScopeAccess {
@@ -93,27 +93,27 @@ impl Node {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
-        let (authority, authority_stop) =
-            crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
-                .await
-                .unwrap();
+        let (authority, authority_stop) = crate::authority::boot(
+            &secrets,
+            "test-node",
+            sqlite_rs::test_support::db(&[]).unwrap().clone(),
+        )
+        .await
+        .unwrap();
         let namespace = authority
             .service
             .open_namespace(Uuid7::new())
             .await
             .unwrap();
-        let (big_repo, repo_stop) = BigRepo::boot(
-            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-            Config {
-                node_identity_seed: [73; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "availability-tests".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (big_repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [73; 32],
+            storage: Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default())).unwrap(),
+            scope_key: "availability-tests".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let access = Arc::new(ScopeAccess {
@@ -147,12 +147,13 @@ impl Node {
     async fn capability(&self, scope: DocScope) -> CapId {
         self.docs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(self.authority.root).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(self.authority.root),
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await
@@ -166,7 +167,7 @@ impl Node {
             .call(RequestContext::root(), params)
             .await
             .map_err(|error| match error {
-                ClientError::Operation(error) => error,
+                ClientError::Method(error) => error,
                 error => panic!("availability transport failed: {error:?}"),
             })
     }

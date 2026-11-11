@@ -3,7 +3,12 @@ use crate::interlude::*;
 use crate::doc::DocId;
 use crate::doc::FacetKey;
 
-pub const FACET_SCHEME: &str = "db+facet";
+/// The prefix of a datum reference URL: `dtxt:datum:<doc>/<tag>/<id>` (ADR 035).
+///
+/// This crate keeps its own parser rather than `big_cabinet_core::DatumReference`: a facet
+/// reference here also carries the `branch` and `at` pins of ADR 007 §3, which ADR 035 replaces
+/// with `?heads=` for the Cabinet. They go away with this crate's migration.
+pub const FACET_URL_PREFIX: &str = "dtxt:datum:";
 pub const FACET_SELF_DOC_ID: &str = "self";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +29,7 @@ pub fn build_facet_ref(doc_id: &str, facet_key: &FacetKey) -> Res<Url> {
         eyre::bail!("facet-ref facet id cannot contain '/'");
     }
     let url = format!(
-        "{FACET_SCHEME}:///{doc_id}/{tag}/{id}",
+        "{FACET_URL_PREFIX}{doc_id}/{tag}/{id}",
         tag = facet_key.tag,
         id = facet_key.id
     );
@@ -32,21 +37,25 @@ pub fn build_facet_ref(doc_id: &str, facet_key: &FacetKey) -> Res<Url> {
 }
 
 pub fn parse_facet_ref(url: &Url) -> Res<FacetRef> {
-    if url.scheme() != FACET_SCHEME {
-        eyre::bail!("unsupported facet url scheme '{}'", url.scheme());
-    }
-    if url.host_str().is_some() {
-        eyre::bail!("facet url authority must be empty");
-    }
+    // The path after `dtxt:datum:` is opaque, so the `url` crate hands it back verbatim.
+    let path = (url.scheme() == "dtxt")
+        .then(|| url.path().strip_prefix("datum:"))
+        .flatten()
+        .ok_or_else(|| eyre::eyre!("unsupported facet url '{url}', expected `dtxt:datum:`"))?;
 
-    let mut parts = url
-        .path_segments()
-        .ok_or_eyre("facet url path is malformed")?
-        .filter(|segment| !segment.is_empty());
-
-    let doc_id = parts.next().ok_or_eyre("facet url missing doc id")?;
-    let tag = parts.next().ok_or_eyre("facet url missing facet tag")?;
-    let id = parts.next().ok_or_eyre("facet url missing facet id")?;
+    let mut parts = path.split('/');
+    let doc_id = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_eyre("facet url missing doc id")?;
+    let tag = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_eyre("facet url missing facet tag")?;
+    let id = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .ok_or_eyre("facet url missing facet id")?;
     if parts.next().is_some() {
         eyre::bail!("facet url has unexpected extra path segments");
     }
@@ -97,7 +106,7 @@ mod tests {
 
     #[test]
     fn parses_facet_ref_str() {
-        let parsed = parse_facet_ref_str("db+facet:///self/org.example.daybook.blob/main").unwrap();
+        let parsed = parse_facet_ref_str("dtxt:datum:self/org.example.daybook.blob/main").unwrap();
         assert_eq!(parsed.doc_id, FACET_SELF_DOC_ID);
         assert_eq!(
             parsed.facet_key.tag,
@@ -109,7 +118,7 @@ mod tests {
     #[test]
     fn facet_ref_targets_tag_matches() {
         let is_blob = facet_ref_str_targets_tag(
-            "db+facet:///self/org.example.daybook.blob/main",
+            "dtxt:datum:self/org.example.daybook.blob/main",
             &FacetTag::WellKnown(WellKnownFacetTag::Blob),
         )
         .unwrap();
@@ -119,7 +128,7 @@ mod tests {
     #[test]
     fn facet_ref_targets_tag_mismatch() {
         let is_note = facet_ref_str_targets_tag(
-            "db+facet:///self/org.example.daybook.blob/main",
+            "dtxt:datum:self/org.example.daybook.blob/main",
             &FacetTag::WellKnown(WellKnownFacetTag::Note),
         )
         .unwrap();
@@ -128,7 +137,7 @@ mod tests {
 
     #[test]
     fn parses_facet_ref_branch_and_at_query_params() {
-        let url = "db+facet:///abc123/org.example.daybook.plugManifest/main?branch=main&at=h1|h2";
+        let url = "dtxt:datum:abc123/org.example.daybook.plugManifest/main?branch=main&at=h1|h2";
         let parsed = parse_facet_ref_str(url).unwrap();
         assert_eq!(parsed.doc_id, "abc123");
         assert_eq!(parsed.facet_key.id, "main");
@@ -142,7 +151,7 @@ mod tests {
 
     #[test]
     fn parses_facet_ref_without_query_params_has_no_pin() {
-        let parsed = parse_facet_ref_str("db+facet:///self/org.example.daybook.note/main").unwrap();
+        let parsed = parse_facet_ref_str("dtxt:datum:self/org.example.daybook.note/main").unwrap();
         assert_eq!(parsed.branch, None);
         assert_eq!(parsed.at, None);
     }
@@ -150,9 +159,23 @@ mod tests {
     #[test]
     fn parses_facet_ref_with_unknown_query_params_ignores_them() {
         let parsed =
-            parse_facet_ref_str("db+facet:///self/org.example.daybook.note/main?foo=bar").unwrap();
+            parse_facet_ref_str("dtxt:datum:self/org.example.daybook.note/main?foo=bar").unwrap();
         assert_eq!(parsed.branch, None);
         assert_eq!(parsed.at, None);
+    }
+
+    #[test]
+    fn refuses_other_schemes_kinds_and_shapes() {
+        for url in [
+            "db+facet:///self/org.example.daybook.note/main",
+            "dtxt:blob:zContent",
+            "dtxt:datum:self/org.example.daybook.note",
+            "dtxt:datum:self//main",
+            "dtxt:datum://self/org.example.daybook.note/main",
+            "dtxt:datum:self/org.example.daybook.note/main/extra",
+        ] {
+            assert!(parse_facet_ref_str(url).is_err(), "{url}");
+        }
     }
 
     #[test]

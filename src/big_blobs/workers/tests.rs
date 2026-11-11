@@ -6,10 +6,13 @@ use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsMessage;
 use big_cabinet_core::doc::ObservedDatum;
 use big_cabinet_core::doc::PollDatums;
+use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::query::Anchor;
 use futures::future::BoxFuture;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::Spawner;
 use sqlite_rs::SqliteRuntime;
 use tokio::sync::mpsc;
@@ -91,7 +94,7 @@ impl Polls {
         let (stop, tasks) = StopToken::new();
         Ok(Self {
             queue: WorkQueue::new(sql).await?,
-            docs: Client::direct(Arc::new(DocsStub(send))),
+            docs: Client::new(Transport::direct(Arc::new(DocsStub(send)))),
             requests,
             mints,
             minted: Vec::new(),
@@ -248,12 +251,12 @@ async fn metadata_capabilities_cache_exact_scopes_and_refresh_after_denial_or_po
     let denied: Result<(), _> = metadata
         .call(&document, false, |capability| async move {
             assert_eq!(capability, read);
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         })
         .await;
     assert!(matches!(
         denied,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     assert_ne!(
         metadata
@@ -310,10 +313,14 @@ async fn content_roots_and_inventory_polls_have_independent_durable_cursors() ->
         assert_request(&call.request, document, *content, after);
         let events = if *content {
             vec![
-                DatumEvent::Enter {
+                DatumEvent::Datum {
                     revision: after + 1,
                     doc_id: documents[3].clone(),
-                    datums: BTreeMap::new(),
+                    datum_key: DatumKey::from_text(Jwk::ID, "main")?,
+                    datum: ObservedDatum::Present {
+                        doc_heads: Vec::new(),
+                        version: DatumVersion::default(),
+                    },
                 },
                 DatumEvent::Datum {
                     revision: after + 2,
@@ -330,10 +337,14 @@ async fn content_roots_and_inventory_polls_have_independent_durable_cursors() ->
                 },
             ]
         } else {
-            vec![DatumEvent::Enter {
+            vec![DatumEvent::Datum {
                 revision: through,
                 doc_id: document.clone(),
-                datums: BTreeMap::new(),
+                datum_key: DatumKey::from_text(Drawer::ID, "main")?,
+                datum: ObservedDatum::Present {
+                    doc_heads: Vec::new(),
+                    version: DatumVersion::default(),
+                },
             }]
         };
         call.reply
@@ -459,7 +470,7 @@ async fn refused_metadata_mint_preserves_cursor_and_retries_on_policy_change() -
     assert_eq!(mint.document, document);
     assert!(!mint.write);
     mint.reply
-        .send(Err(ClientError::Operation(DocsError::Access(
+        .send(Err(ClientError::Method(DocsError::Access(
             "read grant unavailable".into(),
         ))))
         .unwrap();
@@ -472,4 +483,290 @@ async fn refused_metadata_mint_preserves_cursor_and_retries_on_policy_change() -
     polls.stop.stop().await;
     drop(held);
     Ok(())
+}
+
+/// A roster write on a drawer doc names the one member whose membership moved, so its poll
+/// enqueues that member alone. Enqueueing the drawer instead fanned out to every member
+/// (`enqueue_root_members`), and each note created re-reconciled every note already in the
+/// drawer. A page carries only the rows that changed, so each `drawerDocEntry` row enqueues the
+/// member it names and any row no entry localizes (here the descriptor) enqueues the drawer
+/// itself. A parked drawer stays parked through member-only pages, so its next rearm reaches
+/// everyone.
+#[tokio::test]
+async fn roster_entries_on_a_polled_drawer_enqueue_only_the_member_they_name() -> Res<()> {
+    let sql = SqliteRuntime::new(Default::default()).ephemeral(&[])?;
+    let mut polls = Polls::new(sql).await?;
+    let drawer = DocId::new([1; 32]);
+    let settled = DocId::new([2; 32]);
+    let entered = DocId::new([3; 32]);
+    let descriptor = DatumKey::from_text(Drawer::ID, "main")?;
+    let entry = |doc: &DocId| DatumKey::from_text(DrawerDocEntry::ID, doc.to_string());
+    let present = ObservedDatum::Present {
+        doc_heads: Vec::new(),
+        version: DatumVersion::default(),
+    };
+    let removed = ObservedDatum::Removed {
+        doc_heads: None,
+        version: DatumVersion::default(),
+    };
+    let cases = [
+        // The first rows of a fresh task: the descriptor stales the drawer, the entry its member.
+        (
+            vec![
+                (descriptor.clone(), present.clone()),
+                (entry(&settled)?, present.clone()),
+            ],
+            BTreeSet::from([drawer.clone(), settled.clone()]),
+        ),
+        // A doc enters: only it, not the settled member nor the parked drawer.
+        (
+            vec![(entry(&entered)?, present.clone())],
+            BTreeSet::from([entered.clone()]),
+        ),
+        // A doc leaves: only it.
+        (
+            vec![(entry(&settled)?, removed)],
+            BTreeSet::from([settled.clone()]),
+        ),
+        // The descriptor moves every member's target: the drawer, to fan out.
+        (
+            vec![(descriptor.clone(), present)],
+            BTreeSet::from([drawer.clone()]),
+        ),
+    ];
+    polls.start(drawer.clone(), false);
+    let mut call = polls.next().await;
+    for (through, (rows, stale)) in (1..).zip(cases) {
+        assert_request(&call.request, &drawer, false, through - 1);
+        call.reply
+            .send(Ok(DatumPage {
+                events: rows
+                    .into_iter()
+                    .map(|(datum_key, datum)| DatumEvent::Datum {
+                        revision: through,
+                        doc_id: drawer.clone(),
+                        datum_key,
+                        datum,
+                    })
+                    .collect(),
+                through,
+                caught_up: true,
+            }))
+            .unwrap();
+        call = polls.next().await;
+        let mut queued_docs = BTreeSet::new();
+        while let Some((queued, generation)) = polls.queue.next().await? {
+            polls
+                .queue
+                .finish(&queued, generation, queued == drawer)
+                .await?;
+            queued_docs.insert(queued);
+        }
+        assert_eq!(queued_docs, stale);
+    }
+    polls
+        .queue
+        .ingest("availability", 1, BTreeSet::new(), true)
+        .await?;
+    assert_eq!(polls.queue.next().await?.unwrap().0, drawer);
+    polls.stop.stop().await;
+    drop(call);
+    Ok(())
+}
+
+/// Serves `ReadDatums` for the member doc: `Denied` until `arrived` is set (the roster names the
+/// member before its content syncs in), then an empty datum set. `denied` and `served` are
+/// notified for each read of the matching outcome.
+struct MemberDocs {
+    arrived: std::sync::atomic::AtomicBool,
+    denied: tokio::sync::Notify,
+    served: tokio::sync::Notify,
+}
+
+impl InlineRoute<DocsProtocol> for MemberDocs {
+    fn route_inline(self: Arc<Self>, message: DocsMessage) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            let DocsMessage::ReadDatums(message) = message else {
+                panic!("a member doc without blobs is only read");
+            };
+            let reply = if self.arrived.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(big_cabinet_core::doc::DatumsRead {
+                    heads: Vec::new(),
+                    datums: BTreeMap::new(),
+                })
+            } else {
+                Err(DocsError::Denied)
+            };
+            let served = reply.is_ok();
+            message.tx.send(reply.map(Into::into)).await.unwrap();
+            if served {
+                self.served.notify_one();
+            } else {
+                self.denied.notify_one();
+            }
+        })
+    }
+}
+
+/// A drawer roster names a member doc whose content has not synced in: the worker reads it
+/// `Denied` and parks it. Nothing the roster poll or the policy stream publishes changes when
+/// the content lands, only the repo's Automerge frontier does, so the worker must wake the
+/// parked member from that stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_parked_before_its_content_arrives_is_read_again_when_it_materializes() -> Res<()>
+{
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+        node_identity_seed: [126; 32],
+        storage: big_repo::Storage::memory(&runtime).unwrap(),
+        scope_key: "workers-materialization-wake".into(),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
+    .await?;
+    let sql = runtime.ephemeral(&[])?;
+    // The worker consults the drawer tables to tell a root drawer from a member doc.
+    sql.apply_migrations(
+        "test_drawers",
+        &[
+            sqlite_rs::Migration {
+                version: 1,
+                name: "drawers",
+                sql: include_str!("../../big_cabinet/drawer/sqlite/migrations/001_drawers.sql"),
+            },
+            sqlite_rs::Migration {
+                version: 2,
+                name: "metadata",
+                sql: include_str!(
+                    "../../big_cabinet/drawer/sqlite/migrations/003_meta_doc_roots.sql"
+                ),
+            },
+        ],
+    )
+    .await?;
+    let (blobs, blobs_stop) = crate::boot(crate::Config {
+        storage: crate::Storage::memory().unwrap(),
+        sql: sql.clone(),
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        namespace: big_cabinet_core::authority::Namespace {
+            namespace_id: big_cabinet_core::dmeta::Uuid7::new(),
+            capability: CapId::from_bytes([127; 16]),
+        },
+    })
+    .await?;
+    let docs_stub = Arc::new(MemberDocs {
+        arrived: false.into(),
+        denied: tokio::sync::Notify::new(),
+        served: tokio::sync::Notify::new(),
+    });
+    let docs = Client::new(Transport::<DocsProtocol>::direct(Arc::clone(&docs_stub)));
+    let parts: SharedPartStore = Arc::new(big_sync::MemoryPartStore::new());
+    let queue = WorkQueue::new(sql.clone()).await?;
+    sql.apply_migrations(
+        sqlite::queries::MIGRATION_TABLE,
+        sqlite::queries::MIGRATIONS,
+    )
+    .await?;
+    let (policy, policy_rx) = watch::channel(0);
+    let metadata = MetadataCapabilities::new(
+        Arc::new(|_| panic!("a member doc is read with the worker's own capability")),
+        policy_rx.clone(),
+    );
+    let retention = Retention::new(
+        sql.clone(),
+        Arc::clone(&blobs.service),
+        docs.clone(),
+        metadata.clone(),
+        Arc::new(|_| Box::pin(async { Ok(false) })),
+        Arc::clone(&parts),
+    )
+    .await?;
+    let capability = CapId::from_bytes([7; 16]);
+    let adapter = DocumentBlobs::new(
+        docs.clone(),
+        capability,
+        blobs.service.store().clone(),
+        Arc::clone(&blobs.service.provider),
+        blobs.service.roots.clone(),
+    );
+    let (mirrors, mirrors_stop) = crate::admission::InventoryMirrors::boot(
+        sql.clone(),
+        Arc::clone(&blobs.service),
+        Arc::clone(&parts),
+        Arc::clone(&repo),
+        queue.clone(),
+    )
+    .await?;
+    let projection = Arc::new(BlobProjection::new(sql.clone()).await?);
+    let (stop, tasks) = StopToken::new();
+    spawn_worker(
+        &tasks,
+        WorkerParts {
+            repo: Arc::clone(&repo),
+            sql: sql.clone(),
+            service: Arc::clone(&blobs.service),
+            docs,
+            capability,
+            metadata,
+            mirrors,
+            observe_metadata: Arc::new(|_| panic!("the member is not a root drawer")),
+            policy: policy_rx,
+        },
+        queue.clone(),
+        retention,
+        adapter,
+        projection,
+    );
+
+    // The member doc exists in the repo (the roster names it) but its datums are not readable.
+    let mut member = automerge::Automerge::new();
+    let mut transaction = member.transaction();
+    automerge::transaction::Transactable::put(&mut transaction, automerge::ROOT, "seed", true)?;
+    transaction.commit();
+    let handle = repo.create_doc(member).await?;
+    let member = big_repo::automerge_doc_obj_id(handle.document_id());
+    queue.enqueue(&member).await?;
+
+    // Only once the worker has been refused the read does the content land, so the member is
+    // parked (or about to be) and cannot read the content on its first pass.
+    docs_stub.denied.notified().await;
+    // The content lands: the stub starts serving, and the doc changes in the repo, which is
+    // what publishes a frontier revision for it.
+    docs_stub
+        .arrived
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    handle
+        .with_document(|doc| {
+            let mut transaction = doc.transaction();
+            automerge::transaction::Transactable::put(
+                &mut transaction,
+                automerge::ROOT,
+                "content",
+                true,
+            )
+            .unwrap();
+            transaction.commit();
+        })
+        .await?;
+    docs_stub.served.notified().await;
+
+    stop.stop().await;
+    mirrors_stop.stop().await;
+    blobs_stop.stop().await;
+    repo_stop.stop().await?;
+    drop(policy);
+    Ok(())
+}
+
+struct UnusedAuthority;
+
+impl InlineRoute<big_cabinet_core::authority::AuthorityProtocol> for UnusedAuthority {
+    fn route_inline(
+        self: Arc<Self>,
+        _: big_cabinet_core::authority::AuthorityMessage,
+    ) -> BoxFuture<'static, ()> {
+        Box::pin(async { panic!("the worker test does not mint client capabilities") })
+    }
 }

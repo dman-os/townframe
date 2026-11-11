@@ -49,7 +49,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     })?;
     let note_facet_key = daybook_types::doc::FacetKey::from(WellKnownFacetTag::Note);
     let note_url_str = format!(
-        "db+facet:///{}/{}/{}",
+        "dtxt:datum:{}/{}/{}",
         args.doc_id, note_facet_key.tag, note_facet_key.id
     );
     let note_url: url::Url = note_url_str
@@ -126,7 +126,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         let txn = &transactions[*txn_index];
 
         let claim_ref_url: url::Url = format!(
-            "db+facet:///{}/{}/{}",
+            "dtxt:datum:{}/{}/{}",
             args.doc_id, claim_facet_tag, claim_id
         )
         .parse()
@@ -180,7 +180,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             account_name
                 .rsplit_once(':')
                 .map(|(parent, _)| {
-                    format!("db+facet:///{}/{}/{}", args.doc_id, account_tag_str, parent).parse()
+                    format!("dtxt:datum:{}/{}/{}", args.doc_id, account_tag_str, parent).parse()
                 })
                 .transpose()
                 .map_err(|err| {
@@ -253,7 +253,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     let transaction_refs: Vec<url::Url> = claim_txn_pairs
         .iter()
         .map(|(claim_id, _)| {
-            format!("db+facet:///{}/{}/{}", args.doc_id, txn_facet_tag, claim_id)
+            format!("dtxt:datum:{}/{}/{}", args.doc_id, txn_facet_tag, claim_id)
                 .parse()
                 .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("invalid txn ref url: {err}")))
         })
@@ -264,7 +264,7 @@ pub async fn run(_cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
         .keys()
         .map(|account_name| {
             format!(
-                "db+facet:///{}/{}/{}",
+                "dtxt:datum:{}/{}/{}",
                 args.doc_id, account_facet_tag, account_name
             )
             .parse()

@@ -4,16 +4,17 @@
 //! consumer would, so a regression in any adapter shows up as a parity break.
 
 use crate::Admission;
-use crate::Client;
 use crate::IrpcAdapter;
 use crate::ServerBinding;
 use crate::StopToken;
-use crate::XrpcClient;
 use crate::XrpcRouter;
 use crate::sample::Sample;
 use crate::sample::SampleProtocol;
 use crate::sample::boot;
 use crate::xrpc;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
+use service_client_native_rs::XrpcClient;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
@@ -57,13 +58,13 @@ impl Stack {
         let (sample, stop) = boot("initial");
         let admission = Admission::new(max_handlers, max_stream_pumps);
         let binding = SampleBinding::new(Arc::clone(&sample.host));
-        let direct = Client::direct(Arc::clone(&binding));
+        let direct = Client::new(Transport::direct(Arc::clone(&binding)));
         let (irpc_client, irpc_stop) = IrpcAdapter::local::<_, SampleProtocol>(
             Arc::clone(&binding),
             Arc::clone(&admission),
             IRPC_QUEUE,
         );
-        let irpc = Client::irpc(irpc_client);
+        let irpc = Client::new(Transport::irpc(irpc_client));
 
         let mut router = XrpcRouter::new(HTTP_BODY_LIMIT);
         SampleBinding::mount(&mut router, binding).expect("mount sample");
@@ -75,8 +76,9 @@ impl Stack {
             .await
             .expect("start HTTP server");
         let http_base = Url::parse(&format!("http://{address}/")).expect("base URL");
-        let xrpc =
-            Client::xrpc(XrpcClient::new(http_base.clone(), HTTP_BODY_LIMIT).expect("HTTP client"));
+        let xrpc = Client::new(Transport::xrpc(
+            XrpcClient::new(http_base.clone(), HTTP_BODY_LIMIT).expect("HTTP client"),
+        ));
 
         Self {
             sample,

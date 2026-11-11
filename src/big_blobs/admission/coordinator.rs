@@ -321,11 +321,12 @@ impl Admission {
         &self,
         inventory: &DocId,
         digest: BlobId,
+        generation: u64,
         effect: impl FnOnce(PairState, Option<u64>) -> BoxFuture<'static, Res<bool>> + Send + 'static,
     ) -> Res<()> {
         let inventory = inventory.clone();
         self.run(move |state| {
-            Box::pin(async move { state.publish(&inventory, digest, effect).await })
+            Box::pin(async move { state.publish(&inventory, digest, generation, effect).await })
         })
         .await
     }

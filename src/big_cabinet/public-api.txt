@@ -13,7 +13,8 @@ impl SqliteFrontierCodec for big_cabinet::index::datum_set::DatumSetCodec
 impl service_utils_rs :: Handler < MintDocCapability > for big_cabinet::doc::access::DocsService
 impl std :: fmt :: Debug for big_cabinet::datum_store::DatumStoreHandle < S >
 impl std :: ops :: Deref for big_cabinet::drawer::Core
-pub big_cabinet::authority::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Authority , StopToken) , AuthorityError >
+pub big_cabinet::authority::async fn boot (secrets : & SecretStore , node_id : & str , sql : Database ,) -> Result < (Authority , StopToken) , AuthorityError >
+pub big_cabinet::authority::async fn delete_wrapping_key (secrets : & SecretStore , node_id : & str ,) -> Result < bool , AuthorityError >
 pub big_cabinet::doc::async fn boot (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::doc::async fn prepare (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::drawer::async fn boot (config : DrawerConfig < '_ >) -> Result < (Drawers , StopToken) , DrawersError >
@@ -25,16 +26,18 @@ pub enum big_cabinet::grants::GrantError { # [error ("grant storage failed: {0}"
 pub enum big_cabinet::index::datum_ref::DatumRefQuery { # [doc = " Every edge out of one datum route."] Origin (DatumRoute), # [doc = " Every edge out of any datum in one document."] OriginDoc (DocId), # [doc = " Every edge pointing at one datum route."] Target (DatumRoute), # [doc = " Every edge pointing at any datum in one document."] TargetDoc (DocId) }
 pub enum big_cabinet::index::datum_set::DatumMembership { Present { doc_heads : Vec < ChangeHash > , datum_heads : Vec < ChangeHash > , # [doc = " Lamport clock of `datum_heads`: the greatest `max_op` among the"] # [doc = " introducing changes. See `DatumVersion` in the DocsRepo protocol."] clock : u64 , }, Removed { doc_heads : Option < Vec < ChangeHash > > , datum_heads : Vec < ChangeHash > , clock : u64 , } }
 pub enum big_cabinet::index::datum_set::DatumSetQuery { Doc (DocId), Tag (DatumTag), Route (DatumRoute), # [doc = " Every live route with exactly this datum key, across documents."] Key (DatumKey) }
-pub enum big_cabinet::schema::SchemaRepoError { # [error ("known datum schema tag is empty")] EmptyDatumTag, # [error ("known datum schema tag `{0}` is configured more than once")] DuplicateDatumTag (String), # [error ("sidecar bundle is invalid: {source}")] SidecarInvalid { # [source] source : UniverseError , }, # [error ("schema pair for datum `{tag}` is invalid: {source}")] Admission { tag : String , # [source] source : Box < LexiconAdmissionError > , }, # [error ("datum `{tag}` is not known to this SchemaRepo")] UnknownDatum { tag : String } }
-pub impl big_cabinet::authority::AuthorityService::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Arc < Self > , StopToken) , AuthorityError >
+pub enum big_cabinet::schema::SchemaRepoError { # [error ("known datum schema tag is empty")] EmptyDatumTag, # [error ("known datum schema tag `{0}` is configured more than once")] DuplicateDatumTag (String), # [error ("the carried copy of `{0}` differs from this node's: its defs are the node's to state")] ConflictingDefs (String), # [error ("sidecar bundle is invalid: {source}")] SidecarInvalid { # [source] source : UniverseError , }, # [error ("schema pair for datum `{tag}` is invalid: {source}")] Admission { tag : String , # [source] source : Box < LexiconAdmissionError > , }, # [error ("datum `{tag}` is not known to this SchemaRepo")] UnknownDatum { tag : String } }
+pub impl big_cabinet::authority::AuthorityService::async fn boot (secrets : & SecretStore , node_id : & str , sql : Database ,) -> Result < (Arc < Self > , StopToken) , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::async fn open_namespace (& self , namespace_id : Uuid7) -> Result < Namespace , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::fn node_issuer (& self) -> MultibaseKey
 pub impl big_cabinet::authority::AuthorityService::fn node_public_key (& self) -> ActorPublicKey
 pub impl big_cabinet::authority::AuthorityService::fn operator_uuid (& self) -> Uuid7
 pub impl big_cabinet::authority::AuthorityService::fn root_cap (& self) -> CapId
 pub impl big_cabinet::authority::AuthorityService::fn sign_as_node (& self , domain : & [u8] , payload : & [u8]) -> [u8 ; 64]
-pub impl big_cabinet::capability::DomainCapabilities::async fn mint < S : Serialize > (& self , context : & RequestContext , source : CapId , caller : & Invocation < S > , scope : S , rights : Rights , mut dependencies : Vec < CapId > ,) -> Result < Capability , Error >
+pub impl big_cabinet::capability::DomainCapabilities::async fn mint < S : Serialize > (& self , context : & RequestContext , caller : & Invocation < S > , subject : Option < Uuid7 > , scope : S , rights : Rights , dependencies : Vec < CapId > ,) -> Result < Capability , Error >
+pub impl big_cabinet::capability::DomainCapabilities::async fn presenter (& self , context : & RequestContext , signer : CapId) -> Result < Actor , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn resolve < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId ,) -> Result < Invocation < S > , Error >
+pub impl big_cabinet::capability::DomainCapabilities::async fn resolve_signed < S : DeserializeOwned > (& self , context : & RequestContext , capability : CapId , signer : CapId ,) -> Result < Invocation < S > , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn retract (& self , context : & RequestContext , capability : CapId) -> Result < () , Error >
 pub impl big_cabinet::capability::DomainCapabilities::async fn source < S : DeserializeOwned > (& self , context : & RequestContext , authorization : Authorization ,) -> Result < Invocation < S > , Error >
 pub impl big_cabinet::capability::DomainCapabilities::fn new (authority : Client < AuthorityProtocol > , namespace : Namespace , prefix : & 'static str ,) -> Self
@@ -44,13 +47,13 @@ pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn load (contex
 pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn mutate < O > (& self , context : & RequestContext , command : Option < CommandId > , edit : impl FnOnce (& mut S) -> Result < O , StoreError > + Send + 'static ,) -> Result < (O , Option < WriteReceipt >) , StoreError > where O : Send + 'static ,
 pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn snapshot (& self) -> Result < StoreSnapshot < S > , StoreError >
 pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn watch (& self) -> Result < EventStream < StoreSnapshot < S > , StoreError > , StoreError >
-pub impl big_cabinet::doc::DocsRepo::async fn mint_inspection_handle (& self , doc_id : DocId , signer : CapId ,) -> Result < Capability , DocsError >
+pub impl big_cabinet::doc::DocsRepo::async fn mint_inspection_handle (& self , doc_id : DocId , subject : Uuid7 ,) -> Result < Capability , DocsError >
 pub impl big_cabinet::doc::DocsRepo::async fn recover (& self) -> Result < () , DocsError >
 pub impl big_cabinet::doc::access::LedgerAccess::async fn open (sql : Database , authority : Client < AuthorityProtocol > , namespace : Namespace ,) -> Result < Self , AccessError >
 pub impl big_cabinet::doc::access::LedgerAccess::fn object (request : AccessRequest < '_ >) -> String
 pub impl big_cabinet::drawer::Drawers::async fn mint_drawer_capability (& self , context : & RequestContext , authorization : Authorization , drawer_id : & DrawerId , access : Access , rights : Rights ,) -> Result < Capability , DrawersError >
 pub impl big_cabinet::drawer::Drawers::fn local (& self) -> LocalDrawers
-pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
+pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , operator : Uuid7 , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn grants (& self) -> & Arc < crate :: grants :: Grants >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn object (access : Access , drawer : & DrawerId) -> String
 pub impl big_cabinet::drawer::access::DrawerProvider::fn start (self , docs : Client < DocsProtocol >) -> (DrawerWorker , StopToken)
@@ -80,6 +83,7 @@ pub impl big_cabinet::schema::SchemaHandle::fn datum_tag (& self) -> & str
 pub impl big_cabinet::schema::SchemaHandle::fn lexicon (& self) -> & Value
 pub impl big_cabinet::schema::SchemaHandle::fn sidecar (& self) -> Option < Bundle < '_ > >
 pub impl big_cabinet::schema::SchemaRegistration::fn new (datum_tag : impl Into < String > , lexicon : Value) -> Self
+pub impl big_cabinet::schema::SchemaRegistration::fn with_supplement (mut self , supplement : Value) -> Self
 pub impl big_cabinet::schema::SchemaRegistrationGroup < 'a >::fn new (sidecar : Option < Bundle < 'a > > , registrations : impl IntoIterator < Item = SchemaRegistration > , carried_lexicons : Vec < Value > ,) -> Self
 pub impl big_cabinet::schema::SchemaRepo::fn is_boot_schema (& self , datum_tag : & str) -> bool
 pub impl big_cabinet::schema::SchemaRepo::fn open < 'a > (groups : impl IntoIterator < Item = SchemaRegistrationGroup < 'a > > ,) -> Result < Self , SchemaRepoError >
@@ -104,7 +108,7 @@ pub mod big_cabinet::schema
 pub struct big_cabinet::authority::Authority  { service: Arc < AuthorityService >, host: Arc < Host < AuthorityHandler > >, client: Client < AuthorityProtocol >, root: CapId, node_issuer: MultibaseKey }
 pub struct big_cabinet::authority::AuthorityService  {  }
 pub struct big_cabinet::capability::DomainCapabilities  {  }
-pub struct big_cabinet::capability::Invocation< S >  { authority: DomainAuthority < S >, signer: Actor, bound_signer: Option < Uuid7 >, rights: Rights, originating_actor: Option < Uuid7 > }
+pub struct big_cabinet::capability::Invocation< S >  { authority: DomainAuthority < S >, handle: CapId, via: CapId, signer: Actor, bound_signer: Option < Uuid7 >, rights: Rights, originating_actor: Option < Uuid7 > }
 pub struct big_cabinet::datum_store::DatumStoreHandle< S >  {  }
 pub struct big_cabinet::doc::DocsConfig  { big_repo: SharedBigRepo, schema_repo: Arc < SchemaRepo >, authority: Client < AuthorityProtocol >, issuer: CapId, namespace: Namespace, node_issuer: MultibaseKey, access: Arc < dyn DocAccess >, sql: Database, datum_set: Option < Arc < DatumSetStore > >, datum_ref: Option < Arc < DatumRefStore > > }
 pub struct big_cabinet::doc::DocsRepo  { host: Arc < Host < DocsHandler > >, client: Client < DocsProtocol > }
@@ -126,7 +130,7 @@ pub struct big_cabinet::index::datum_set::DatumRecord  { route: DatumRoute, doc_
 pub struct big_cabinet::index::datum_set::DatumRoute  { doc_id: DocId, datum_key: DatumKey }
 pub struct big_cabinet::index::datum_set::DatumSetStore  {  }
 pub struct big_cabinet::schema::SchemaHandle  {  }
-pub struct big_cabinet::schema::SchemaRegistration  { datum_tag: String, lexicon: Value }
+pub struct big_cabinet::schema::SchemaRegistration  { datum_tag: String, lexicon: Value, supplement: Option < Value > }
 pub struct big_cabinet::schema::SchemaRegistrationGroup< 'a >  { sidecar: Option < Bundle < 'a > >, registrations: Vec < SchemaRegistration >, carried_lexicons: Vec < Value > }
 pub struct big_cabinet::schema::SchemaRepo  {  }
 pub trait big_cabinet::doc::access::DocAccess { fn prove < 'a > (& 'a self , context : & 'a RequestContext , actor : Uuid7 , scope : & 'a DocScope ,) -> AccessFuture < 'a , Vec < CapId > >; fn check < 'a > (& 'a self , context : & 'a RequestContext , actor : Uuid7 , request : AccessRequest < 'a > ,) -> AccessFuture < 'a , bool >; fn place < 'a > (& 'a self , context : & 'a RequestContext , actor : Option < Uuid7 > , document : & 'a DocId , placement : & 'a str ,) -> AccessFuture < 'a , () >; fn readable_in_drawer < 'a > (& 'a self , _context : & 'a RequestContext , _actor : Uuid7 , _drawer_id : & 'a DocId ,) -> AccessFuture < 'a , Option < BTreeSet < DocId > > >; fn scoped_docs < 'a > (& 'a self , _context : & 'a RequestContext , _drawers : & 'a BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > , _documents : Option < & 'a BTreeSet < DocId > > ,) -> AccessFuture < 'a , BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > >; fn subscribe_changes (& self) -> Option < tokio :: sync :: watch :: Receiver < u64 > > }
@@ -181,6 +185,7 @@ pub use big_cabinet::drawer::self :: access :: DrawerProvider
 pub use big_cabinet::drawer::self :: access :: DrawerWorker
 pub use big_cabinet::drawer::self :: discovery :: DrawerMetadataObservation
 pub use big_cabinet::drawer::self :: discovery :: MetadataRootStatus
+pub use big_cabinet::drawer::self :: mirror :: Mirrored
 pub use big_cabinet::index :: datum_ref :: DatumRefStore
 pub use big_cabinet::index :: datum_set :: DatumSetStore
 pub use big_cabinet::index::datum_ref :: DatumRefEdge

@@ -80,7 +80,7 @@ pub mod doc {
     pub struct CipherBlob {
         pub representation: Representation,
         pub content_encoding: String,
-        /// Facet reference URL: `db+facet:///<doc-id|self>/<tag>/<key-id>`.
+        /// Facet reference URL: `dtxt:datum:<doc-id|self>/<tag>/<key-id>`.
         pub key_ref: String,
         pub key_ref_heads: Vec<String>,
         /// Scheme-selected inputs, kept as JSON because `contentEncoding` is

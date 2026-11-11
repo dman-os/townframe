@@ -7,7 +7,7 @@ use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
@@ -278,7 +278,7 @@ impl State {
                 .call(context.child(), InspectCapability { capability: source })
                 .await?;
             if !cap.rights.contains(Rights::DELEGATE) || !rights.is_subset_of(cap.rights) {
-                return Err(ClientError::Operation(AuthorityServiceError::Escalation).into());
+                return Err(ClientError::Method(AuthorityServiceError::Escalation).into());
             }
             if self
                 .temporary
@@ -384,7 +384,7 @@ impl State {
                             rights = rights | held;
                             dependencies.push(source);
                         }
-                        Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {
+                        Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => {
                             grants.remove(&source);
                         }
                         Err(error) => return Err(error.into()),
@@ -405,6 +405,7 @@ impl State {
                                     dependencies: Vec::new(),
                                     object: format!("grant gate {}", Uuid7::new()),
                                     rights: Rights::all(),
+                                    subject: None,
                                 },
                             )
                             .await?;

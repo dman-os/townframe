@@ -169,7 +169,7 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
         }
         assert!(matches!(
             creation.await.unwrap(),
-            Err(ClientError::Operation(DocsError::Access(_)))
+            Err(ClientError::Method(DocsError::Access(_)))
         ));
         node.stop_services().await;
         drop(resume);
@@ -240,7 +240,7 @@ async fn boot_creates_the_local_drawers_once() {
         BTreeSet::from([
             &local.present_id,
             &local.originated_id,
-            &local.registry_id,
+            &local.known_drawers_id,
             &local.config_id,
         ])
         .len(),
@@ -342,7 +342,11 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
         json!({"access": "Read"})
     );
     // ListDocs answers from the projection alone (GetDrawer rescans the roster first).
-    async fn listed(node: &Node, alice: &Actor, drawer: &DrawerId) -> BTreeMap<DocId, Access> {
+    async fn listed(
+        node: &Node,
+        alice: &OpenedActor,
+        drawer: &DrawerId,
+    ) -> BTreeMap<DocId, Access> {
         node.list_docs(alice, drawer, 0, None)
             .await
             .unwrap()
@@ -424,26 +428,73 @@ async fn a_removal_interrupted_after_its_roster_write_is_finished_at_boot() {
     node.stop().await;
 }
 
+/// ADR 019 Boundaries: the mirror query is the node's own policy, keyed on the `mirror` intent
+/// alone. A mirrored grouped drawer yields its three groups and its descriptor doc; a remembered
+/// drawer that is not mirrored, and a drawer nobody remembered, yield nothing; a mirrored drawer
+/// whose descriptor this node does not carry yields only the doc to fetch it by.
 #[tokio::test]
-async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
+async fn the_mirror_query_names_what_the_mirror_intent_wants() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let mirrored = node.collection(&alice, "mirrored").await;
+    let remembered = node.collection(&alice, "remembered").await;
+    let _unknown = node.collection(&alice, "unknown").await;
+    let absent = DrawerId::new([7; 32]);
+    let context = RequestContext::root();
+    let drawers = node.drawers.as_ref().unwrap();
+    assert_eq!(
+        drawers.mirrored(&context).await.unwrap(),
+        Mirrored::default()
+    );
+
+    node.remember(&node.drawers_actor, &mirrored, true).await;
+    node.remember(&node.drawers_actor, &remembered, false).await;
+    node.remember(&node.drawers_actor, &absent, true).await;
+    let (meta, docs, sensitive) = groups_of(&node.view(&alice, &mirrored).await.unwrap());
+    assert_eq!(
+        drawers.mirrored(&context).await.unwrap(),
+        Mirrored {
+            groups: [meta, docs, sensitive].into(),
+            docs: [mirrored.clone(), absent].into(),
+        }
+    );
+
+    node.forget(&node.drawers_actor, &mirrored).await;
+    assert_eq!(
+        drawers.mirrored(&context).await.unwrap(),
+        Mirrored {
+            groups: Default::default(),
+            docs: [DrawerId::new([7; 32])].into(),
+        }
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn the_known_drawers_list_is_explicit_and_survives_restart() {
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
     let bob = node.actor("bob").await;
     let home = node.collection(&alice, "home").await;
     let shared = node.collection(&alice, "shared").await;
-    let registry = node.local().registry_id;
+    let known_drawers = node.local().known_drawers_id;
 
-    // The registry is a self-doc drawer, readable only through a grant — here the service
+    // The known-drawers list is a self-doc drawer, readable only through a grant — here the service
     // actor's, as the embedder's own handle — and remembering grants nobody anything.
-    let registry_descriptor = node.roster_datums(&registry).await[&drawer_key()].clone();
-    let registry_layout = serde_json::from_value::<Drawer>(registry_descriptor).unwrap();
-    assert_eq!(registry_layout.layout.known(), Some(LayoutKind::SelfDoc));
+    let known_drawers_descriptor = node.roster_datums(&known_drawers).await[&drawer_key()].clone();
+    let known_drawers_layout = serde_json::from_value::<Drawer>(known_drawers_descriptor).unwrap();
     assert_eq!(
-        node.view(&alice, &registry).await.unwrap_err(),
+        known_drawers_layout.layout.known(),
+        Some(LayoutKind::SelfDoc)
+    );
+    assert_eq!(
+        node.view(&alice, &known_drawers).await.unwrap_err(),
         DrawersError::Denied
     );
     assert_eq!(
-        node.list_docs(&bob, &registry, 0, None).await.unwrap_err(),
+        node.list_docs(&bob, &known_drawers, 0, None)
+            .await
+            .unwrap_err(),
         DrawersError::Denied
     );
     let config = node.local().config_id;
@@ -459,8 +510,8 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         .grants
         .grant(
             &RequestContext::root(),
-            alice.actor_id,
-            drawer_object(Access::Admin, &registry),
+            alice.actor.actor_id,
+            drawer_object(Access::Admin, &known_drawers),
             Rights::USE,
             None,
         )
@@ -475,7 +526,7 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         std::collections::BTreeMap::from([(home.clone(), true), (shared.clone(), false)])
     );
     assert_eq!(
-        node.roster_datums(&registry).await[&known_entry_key(&home)],
+        node.roster_datums(&known_drawers).await[&known_entry_key(&home)],
         json!({"mirror": true})
     );
 
@@ -485,7 +536,10 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         .call(
             RequestContext::root(),
             SetDrawerPolicy {
-                capability: node.drawer_capability(&alice, &[&registry]).await.unwrap(),
+                capability: node
+                    .drawer_capability(&alice, &[&known_drawers])
+                    .await
+                    .unwrap(),
                 drawer_id: shared.clone(),
                 mirror: true,
             },
@@ -503,7 +557,7 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         "the drawer itself is unaffected"
     );
 
-    // The list lives on the registry doc: a restart reads it back from the doc, not from
+    // The list lives on the known-drawers doc: a restart reads it back from the doc, not from
     // a separate database row.
     node.restart().await.unwrap();
     assert_eq!(
@@ -511,7 +565,7 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         std::collections::BTreeMap::from([(shared.clone(), true)])
     );
 
-    // Observing a drawer never writes the registry: creating and listing drawers does
+    // Observing a drawer never writes the known-drawers list: creating and listing drawers does
     // not grow the known list.
     let _other = node.collection(&alice, "other").await;
     assert_eq!(node.known(&alice).await.len(), 1);
@@ -910,7 +964,7 @@ async fn a_successor_chain_resolves_to_its_terminal_drawer_without_copying_anyth
     node.remember(&node.drawers_actor, &first, true).await;
     node.remember(&node.drawers_actor, &second, false).await;
     let known = node.known_map(&node.drawers_actor).await;
-    let registry = node.roster_datums(&node.local().registry_id).await;
+    let known_drawers = node.roster_datums(&node.local().known_drawers_id).await;
     let capability = node.drawer_capability(&bob, &[&first]).await.unwrap();
     let all = node
         .drawer_capability(&carol, &[&first, &second, &third])
@@ -1032,8 +1086,8 @@ async fn a_successor_chain_resolves_to_its_terminal_drawer_without_copying_anyth
     );
     assert_eq!(node.known_map(&node.drawers_actor).await, known);
     assert_eq!(
-        node.roster_datums(&node.local().registry_id).await,
-        registry
+        node.roster_datums(&node.local().known_drawers_id).await,
+        known_drawers
     );
     for (index, (owner, drawer)) in drawers.into_iter().enumerate() {
         let (view, mut roster, sensitive_root, sensitive_roster) = before[index].clone();
@@ -1226,7 +1280,7 @@ async fn successor_absence_after_removal_is_not_an_unavailable_target() {
         .grants
         .grant(
             &RequestContext::root(),
-            alice.actor_id,
+            alice.actor.actor_id,
             drawer_object(Access::Read, &missing),
             Rights::USE,
             None,

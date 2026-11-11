@@ -12,7 +12,5 @@ crate-type = ["cdylib"]
 path = "lib.rs"
 
 [dependencies]
-serde_json.workspace = true
-# The workspace pins wit-bindgen with default features off (the `std` feature breaks per-task
-# export state, see the root Cargo.toml), so the generator and async runtime are named here.
-wit-bindgen = { workspace = true, features = ["macros", "realloc", "async", "async-spawn", "futures-stream", "inter-task-wakeup"] }
+big_ndk.workspace = true
+test_nodule_handlers.workspace = true

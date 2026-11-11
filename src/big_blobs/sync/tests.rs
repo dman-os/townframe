@@ -7,8 +7,9 @@ use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::dmeta::Uuid7;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use futures::future::BoxFuture;
-use service_utils_rs::Client;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::Client;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::StopToken;
 use sqlite_rs::SqliteRuntime;
 
@@ -42,23 +43,22 @@ impl Harness {
     }
 
     async fn boot(path: Option<&std::path::Path>, seed: u8) -> Res<Self> {
+        // A panic in any task (an iroh protocol handler, a worker) must fail the test, not leave it
+        // waiting on a notification the dead task would have sent.
+        utils_rs::testing::setup_tracing_once();
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-        let (repo, repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&runtime),
-            big_repo::Config {
-                node_identity_seed: [seed; 32],
-                storage: path.map_or(big_repo::StorageConfig::Memory, |path| {
-                    big_repo::StorageConfig::Disk {
-                        path: path.join("repo"),
-                    }
-                }),
-                scope_key: "inventory-transfers".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
+        let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: [seed; 32],
+            storage: match path {
+                Some(path) => big_repo::Storage::in_directory(&runtime, &path.join("repo"), None)?,
+                None => big_repo::Storage::memory(&runtime)?,
             },
-        )
+            scope_key: "inventory-transfers".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await?;
         let sql = match path {
             Some(path) => {
@@ -73,11 +73,12 @@ impl Harness {
             None => Arc::new(big_sync::MemoryPartStore::new()),
         };
         let (blobs, blob_stop) = crate::boot(crate::Config {
-            storage: path.map_or(crate::Storage::Memory, |path| {
-                crate::Storage::Filesystem(path.join("blobs"))
-            }),
+            storage: match path {
+                Some(path) => crate::Storage::filesystem(path.join("blobs")).await?,
+                None => crate::Storage::memory()?,
+            },
             sql: sql.clone(),
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([102; 16]),

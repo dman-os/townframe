@@ -6,6 +6,7 @@
 //! id of the thing they list (`docEntry/<docId>`, `childEntry/<drawerId>`), the same pattern the
 //! branch datum uses: the key slot is the target, so an entry needs no reference field.
 
+pub mod listing;
 pub mod protocol;
 
 use serde::Deserialize;
@@ -511,6 +512,22 @@ impl FromStr for DrawerAccess {
 /// `keyhive_core`, so the conversion to a `GroupId` lives with the service that holds a Keyhive.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GroupKey(pub [u8; 32]);
+
+/// The text form `Display` writes.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for GroupKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "GroupKey".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::GroupKey").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
 
 impl fmt::Display for GroupKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

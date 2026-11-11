@@ -271,7 +271,7 @@ fn micro_id_is_a_bare_json_string() {
 }
 
 /// The text form is `<did>/<name>` and is checked wherever an id is made, deserialization
-/// included; the name is the plug-name grammar `big_plugs` enforces (dots allowed, never
+/// included; the name is the plug-name grammar `big_cartridges` enforces (dots allowed, never
 /// leading, trailing or doubled).
 #[test]
 fn micro_id_text_form_is_a_did_slash_a_plug_name() {
@@ -313,7 +313,7 @@ fn micro_id_text_form_is_a_did_slash_a_plug_name() {
 }
 
 /// A request omits `necessity` when it is `required` and `resolution` when it is `configured`,
-/// exactly as `big_plugs_core::request::Request` does, so a canonical manifest stays minimal;
+/// exactly as `big_cartridges_core::request::Request` does, so a canonical manifest stays minimal;
 /// an omitted member reads back as its default and a non-default one is kept.
 #[test]
 fn request_defaults_are_off_the_wire() {

@@ -13,7 +13,7 @@ decided, what is running, what is open. Update it whenever a checkpoint lands or
 
 - Settle every open Clay design problem so the next PR can build real micros.
 - Clay runs independently on mock data. **No node / big_sync / big_cabinet integration in this PR.**
-- `../townframe-p3N-2` (`feat/nodules`) holds `big_plugs_core` and `big_nodule`. Read them only to
+- `../townframe-p3N-2` (`feat/nodules`) holds `big_cartridges_core` and `big_nodule`. Read them only to
   keep the enablement/config *shape* aligned. Nothing here depends on them landing.
 - Existing clay code is disposable. Rewrite rather than shim (AGENTS.md "Breaking changes").
 
@@ -468,8 +468,8 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 
 ## C6 decisions (2026-11-04, user)
 
-- OCI is not Clay's job: big_plugs delivers and manages manifests. Clay owns `MicroManifest` types
-  only. Until big_plugs lands, a package is `<name>.component.wasm` + `<name>.manifest.json` on disk
+- OCI is not Clay's job: big_cartridges delivers and manages manifests. Clay owns `MicroManifest` types
+  only. Until big_cartridges lands, a package is `<name>.component.wasm` + `<name>.manifest.json` on disk
   (stand-in loader); the `dayframe.manifest` custom section and `micro_counter/build.rs` go.
 - `activate` is async on both native and guest.
 - Collection access: declared → configured → (later) granted at runtime.
@@ -494,7 +494,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   guest collection read + registration write proven on Wasmtime and wcmp/Wasmi. Notes: docs/scratch/clay-c6-context.md
   ("C6c notes").
 
-## big_plugs coordination (2026-11-04, peer session on ../townframe-p3N-2)
+## big_cartridges coordination (2026-11-04, peer session on ../townframe-p3N-2)
 
 - Operator direction relayed by the peer: a plug is the one package format for every kind
   (nodules, micros, Lexicon schemas); plug-level dependencies; one auditable request → grant →
@@ -509,9 +509,9 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   `id`/`package_version`. Schema gaps for later: lookup by schema id (not datum tag) and a repo
   that grows on plug import.
 
-## big_plugs rulings relayed by the peer (2026-11-04; operator rulings via ../townframe-p3N-2 session)
+## big_cartridges rulings relayed by the peer (2026-11-04; operator rulings via ../townframe-p3N-2 session)
 
-- big_plugs = registry/catalog only (npm-like: versioned imports, semver, no enablement). Clay and
+- big_cartridges = registry/catalog only (npm-like: versioned imports, semver, no enablement). Clay and
   nodules each own enablement, bindings, grants, downgrades, readiness in their own datums.
 - The registry is a drawer; a plug is a document with Blob datums. Retention by reference: Clay's
   desired-state drawer will name the plug doc and blobs it enabled (once on the real node).
@@ -569,19 +569,19 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
   - Immediate feedback: a lazy action renders a pending state at once and queues the call until
     the incarnation is ready, so nothing feels dead while initializing.
   - Measure first: activation latency per engine (Wasmtime, browser) before choosing budgets.
-- big_plugs registry landed on feat/nodules (peer, 2026-11-04): `big_plugs_core::PlugId
+- big_cartridges registry landed on feat/nodules (peer, 2026-11-04): `big_cartridges_core::CartridgeId
   {namespace, name}` (text `<did>/<name>`, d12adcd2); registry datums `org.example.daybook.plug.
   identity/main`, `org.example.daybook.plug/<semver>` (envelope, immutable per label),
   `org.example.daybook.blob/plug.artifact/<label>/<artifactKey>` (BLAKE3 Blob) (e1bd3853);
   `PlugsProtocol` (`org.example.daybook.plugs.*`): listPlugs, getPlug, getPlugVersion,
   watchPlugs (long-poll cursor), publish/remove, mintPlugsCapability. Pending there: typed
   `micro` section key, publisher signatures (P3a), importers incl. our sidecar pair (P3b).
-  C6d uses `PlugId` for micro ids once the micro section key is confirmed.
+  C6d uses `CartridgeId` for micro ids once the micro section key is confirmed.
 - Micro section confirmed: envelope contribution `org.example.daybook.plug.micro`
-  (`big_plugs_core::MicroContribution {schema, description}`); `schema` = our manifest format id,
+  (`big_cartridges_core::MicroContribution {schema, description}`); `schema` = our manifest format id,
   `description` = `MicroManifest` JSON minus `id`/`package_version`. One micro per plug; micro id =
-  installed-as `PlugId` (lands with P3b, peer will ping).
-- P3b landed on feat/nodules: `big_plugs::import::micro_pair(component_bytes, manifest_json)`
+  installed-as `CartridgeId` (lands with P3b, peer will ping).
+- P3b landed on feat/nodules: `big_cartridges::import::micro_pair(component_bytes, manifest_json)`
   imports our sidecar pair (id → `<node did>/<id>`, package_version n → `n.0.0`, component →
   artifact `component` in big_blobs, node-signed). Plug names may contain dots. Micro
   contribution schema NSID = `org.example.clay.micro.manifest`; C6d drops `MicroManifest.schema`
@@ -592,7 +592,7 @@ Reverts of `e1044a06`/`9e87066b` wait for these results and operator go-ahead.
 - Accepted: `RootRow.pinned` keeps a root (the toolbar) mounted when Settings is closed. Generic shell flag, no toolbar vocabulary in the shell.
 - Fixed in C7b-2: call contracts may be implemented outside the package's authority (ADR 028 §5); the toolbar owns `org.example.dayframe.toolbar.action`. Durable mock operations settle on local persistence. `Capability::retain_call` in the MDK; the completion test proves one incarnation across retained calls. The pushed `components` list on `presentation.mount` and `ComponentSlot` are removed (micros only pull presentations through capabilities).
 - Deferred: volatile per-incarnation button state (badge/enabled) needs manifest-declared volatile collections and a scope-owned writer path; icon vocabulary (string carried as `data-icon`, no glyphs); the press path does not consult `status()`, so a disabled provider's button reports its failure on press.
-- big_plugs P7 (feat/nodules `d5b24d44`): schema registry by NSID. The authority holder's datum Lexicons register live in the cabinet SchemaRepo. Vendored copies are compared per NSID: identical copies, or copies differing only in declared `revision`, agree; the authority holder's copy wins; any other mismatch is refused. Clay follow-up when it moves onto PlugsProtocol: micros vendor the Lexicons they use, with a `revision` when they evolve one.
+- big_cartridges P7 (feat/nodules `d5b24d44`): schema registry by NSID. The authority holder's datum Lexicons register live in the cabinet SchemaRepo. Vendored copies are compared per NSID: identical copies, or copies differing only in declared `revision`, agree; the authority holder's copy wins; any other mismatch is refused. Clay follow-up when it moves onto PlugsProtocol: micros vendor the Lexicons they use, with a `revision` when they evolve one.
 
 ## C7c review (2026-11-04)
 

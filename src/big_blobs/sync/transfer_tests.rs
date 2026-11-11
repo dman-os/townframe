@@ -1,6 +1,5 @@
 use super::tests::Harness;
 use super::*;
-use bao_tree::ChunkRanges;
 use bao_tree::io::outboard::PreOrderMemOutboard;
 use bytes::Bytes;
 use iroh::protocol::AcceptError;
@@ -11,10 +10,16 @@ use iroh_blobs::protocol::GetRequest;
 use iroh_blobs::protocol::Request;
 use tokio::sync::Notify;
 
+/// A source serving one blob over the iroh-blobs protocol. It answers the ranges it is asked for,
+/// as a real provider does: a node resuming an interrupted transfer asks only for the chunks it
+/// is missing. It holds back the response's last byte until `finish`, so a test can interrupt a
+/// transfer in flight.
 #[derive(Debug)]
 struct Response {
     hash: Hash,
     bytes: Bytes,
+    outboard: PreOrderMemOutboard,
+    corrupt: bool,
     started: Arc<Notify>,
     finish: Arc<Notify>,
 }
@@ -23,12 +28,32 @@ impl ProtocolHandler for Response {
     async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), AcceptError> {
         let (mut send, mut recv) = connection.accept_bi().await?;
         let (request, _) = Request::read_async(&mut recv).await?;
-        assert_eq!(request, Request::Get(GetRequest::blob(self.hash)));
-        let last = self.bytes.len() - 1;
-        tokio::io::AsyncWriteExt::write_all(&mut send, &self.bytes[..last]).await?;
+        let Request::Get(GetRequest { hash, ranges }) = request else {
+            panic!("a blob transfer is a get, not {request:?}");
+        };
+        assert_eq!(hash, self.hash);
+        let (0, ranges) = ranges
+            .as_single()
+            .expect("a blob transfer asks for ranges of one blob")
+        else {
+            panic!("a blob transfer asks for the blob itself, not a child of it");
+        };
+        let mut encoded = (self.bytes.len() as u64).to_le_bytes().to_vec();
+        bao_tree::io::sync::encode_ranges_validated(
+            &self.bytes[..],
+            &self.outboard,
+            ranges,
+            &mut encoded,
+        )
+        .expect("the source encodes its own blob");
+        if self.corrupt {
+            *encoded.last_mut().unwrap() ^= 1;
+        }
+        let last = encoded.len() - 1;
+        tokio::io::AsyncWriteExt::write_all(&mut send, &encoded[..last]).await?;
         self.started.notify_one();
         self.finish.notified().await;
-        tokio::io::AsyncWriteExt::write_all(&mut send, &self.bytes[last..]).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut send, &encoded[last..]).await?;
         send.finish()?;
         connection.closed().await;
         Ok(())
@@ -37,16 +62,6 @@ impl ProtocolHandler for Response {
 
 async fn source(bytes: &[u8], corrupt: bool) -> Res<(Router, Arc<Notify>, Arc<Notify>)> {
     let outboard = PreOrderMemOutboard::create(bytes, iroh_blobs::store::IROH_BLOCK_SIZE);
-    let mut encoded = (bytes.len() as u64).to_le_bytes().to_vec();
-    bao_tree::io::sync::encode_ranges_validated(
-        bytes,
-        &outboard,
-        &ChunkRanges::all(),
-        &mut encoded,
-    )?;
-    if corrupt {
-        *encoded.last_mut().unwrap() ^= 1;
-    }
     let started = Arc::new(Notify::new());
     let finish = Arc::new(Notify::new());
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
@@ -60,7 +75,9 @@ async fn source(bytes: &[u8], corrupt: bool) -> Res<(Router, Arc<Notify>, Arc<No
             iroh_blobs::ALPN,
             Response {
                 hash: Hash::from(outboard.root),
-                bytes: Bytes::from(encoded),
+                bytes: Bytes::copy_from_slice(bytes),
+                outboard,
+                corrupt,
                 started: Arc::clone(&started),
                 finish: Arc::clone(&finish),
             },

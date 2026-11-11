@@ -1,14 +1,13 @@
-//! ResolveActor: identify the actor a capability presents.
+//! ResolveActor: the public identity of an actor, by id.
 
 use super::*;
 
 impl AuthorityService {
     async fn resolve_actor(&self, request: ResolveActor) -> Result<Actor, AuthorityError> {
-        let uuid = self.resolve(request.capability).await?.actor(Rights::USE)?;
-        // Registry rows are never deleted and a binding is only published after its row
-        // commits, so the row is there for any actor the ledger recognized.
-        let row = self.cached_actor_row(uuid).await?;
-        actor::public_actor(&self.node_public_key(), &row, request.capability)
+        // An actor's id, URL, public key, certificate and parent are public information, so
+        // this is not gated by a capability: knowing an id does not confer authority.
+        let row = self.cached_actor_row(request.actor_id).await?;
+        actor::public_actor(&self.node_public_key(), &row)
     }
 }
 

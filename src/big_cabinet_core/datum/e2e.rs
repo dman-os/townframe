@@ -358,9 +358,9 @@ fn a_declaration_carries_the_flags_of_its_shape() {
     );
 }
 
-/// The bundle is the context, so what the plug carries resolves and nothing else does.
+/// The bundle is the context, so what the cartridge carries resolves and nothing else does.
 #[test]
-fn the_bundle_resolves_the_definitions_the_plug_carries() {
+fn the_bundle_resolves_the_definitions_the_cartridge_carries() {
     let universe = Universe::collect(vec![Declaration::of::<Nested>().unwrap()]);
     let bundle = Bundle::new(&universe, Vec::new());
     assert!(bundle.resolve("Nested").is_some());
@@ -382,7 +382,7 @@ fn two_datums_claiming_one_tag_are_refused() {
     );
 }
 
-/// Two declarations of one name with different schemas: only the plug can see both, which is why
+/// Two declarations of one name with different schemas: only the cartridge can see both, which is why
 /// this is checked here and not per declaration.
 #[test]
 fn two_declarations_disagreeing_about_a_name_are_refused() {
@@ -397,11 +397,11 @@ fn two_declarations_disagreeing_about_a_name_are_refused() {
 
 /// A declaration whose schema points at a name it does not carry — which a derived schema never
 /// does, since `schemars` puts every definition it reaches into `$defs`, but a hand-written or
-/// hoisted one does. Resolving it needs the rest of the plug, and a name that leaves the plug needs
-/// a dependency: the violation that has no meaning below the plug, because one declaration cannot
+/// hoisted one does. Resolving it needs the rest of the cartridge, and a name that leaves the cartridge needs
+/// a dependency: the violation that has no meaning below the cartridge, because one declaration cannot
 /// see the others.
 #[test]
-fn a_reference_is_resolved_against_the_plug_and_its_dependencies() {
+fn a_reference_is_resolved_against_the_cartridge_and_its_dependencies() {
     let ours = Universe::collect(vec![Declaration {
         datum: DatumDecl {
             id: "org.example.daybook.referencing".into(),
@@ -502,7 +502,7 @@ enum WrappedAttachment {
 }
 
 /// The Lexicon is projected from what the whole bundle carries, not stored on the declaration: a
-/// reference a datum makes resolves against the plug and its dependencies, the same way
+/// reference a datum makes resolves against the cartridge and its dependencies, the same way
 /// [`Bundle::document`] resolves it.
 #[test]
 fn an_aligned_declaration_publishes_a_lexicon_file() {

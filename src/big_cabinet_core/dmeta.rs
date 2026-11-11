@@ -8,7 +8,7 @@
 //! Dmeta is an ordinary datum — `org.example.daybook.dmeta/main` — and the document repository is
 //! the only writer of it. Its shape is the one in `docs/wiki/docs.md`: aliases live in one forward
 //! index, identities are multibase text, and branch relationships are not duplicated here. A branch
-//! is a weak link recorded by the branch datums (ADR 007); dmeta signs those datums, it does not
+//! is a weak link recorded by the branch datums (ADR 034); dmeta signs those datums, it does not
 //! restate them.
 //!
 //! A claim authenticates the value in its **native storage form**, not its canonical JSON. The
@@ -31,6 +31,12 @@ mod e2e;
 
 pub use attribution::Attribution;
 pub use attribution::AttributionError;
+#[cfg(feature = "schemars")]
+pub use storage::DmetaRead;
+#[cfg(feature = "schemars")]
+pub use storage::DmetaSchema;
+#[cfg(feature = "schemars")]
+pub use storage::DmetaWrite;
 #[cfg(feature = "schemars")]
 pub use storage::StorageError;
 
@@ -69,6 +75,7 @@ pub use big_sync_core::ObjKey as DocId;
 /// The document's own id is not a field of [`Dmeta`]: the enclosing document already knows it, and
 /// a field inside the datum would be copied verbatim onto a branch, where it would name the origin
 /// rather than the branch.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocIdentity {
     pub id: DocId,
@@ -322,19 +329,7 @@ pub struct InheritedWitness {
 pub struct BranchPath {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<BranchOrigin>,
-    #[serde(flatten)]
-    pub extra: crate::datum::Extra,
-}
-
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchOrigin {
-    pub datum_ref: crate::DatumReference,
-    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
-    pub ref_heads: Vec<automerge::ChangeHash>,
+    pub from: Option<crate::DatumPin>,
     #[serde(flatten)]
     pub extra: crate::datum::Extra,
 }
@@ -364,6 +359,7 @@ pub struct DatumSignature {
     pub extra: crate::datum::Extra,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClaimOperation {
     Set,
@@ -376,6 +372,7 @@ pub enum ClaimOperation {
 /// **native storage form**, read back from the transaction after the content mutation. It is absent
 /// only for a removal. The encoding itself belongs to the repository; this type only ever holds the
 /// resulting CID, so it cannot drift from the bytes that were stored.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumClaim {
@@ -413,6 +410,25 @@ impl Cid {
 impl Serialize for Cid {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_bytes(&self.0)
+    }
+}
+
+/// `serialize_bytes` through serde_json is a list of byte values.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Cid {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Cid".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Cid").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0, "maximum": 255 },
+        })
     }
 }
 
@@ -465,6 +481,7 @@ impl TryFrom<&[u8]> for Cid {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SignatureId(Cid);

@@ -11,20 +11,20 @@ use big_blobs_core::CipherBlob;
 use big_blobs_core::Jwk;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::datum::DatumMember;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::example_cartridge;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
 use big_nodule_core::config::artifact_key;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::UninstallNodule;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
 use std::time::Duration;
 
-const PLUG: &str = example_plug!("artifacts");
+const CARTRIDGE: &str = example_cartridge!("artifacts");
 
 async fn retained(sql: &Database, document: &DocId) -> BTreeSet<String> {
     sql.query(
@@ -46,10 +46,9 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
     let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     ))
     .await
     .unwrap();
@@ -77,15 +76,16 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
         implements: vec!["org.example.other.ping".into()],
         ..Default::default()
     };
-    let mut plug = Plug::new(PLUG.parse().unwrap(), "1.0.0".parse().unwrap());
-    plug.artifacts.push(Artifact {
+    let mut cartridge = Cartridge::new(CARTRIDGE.parse().unwrap(), "1.0.0".parse().unwrap());
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest(info.blob_id.to_bytes32()),
         size: Some(bytes.len() as u64),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
@@ -94,11 +94,11 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
     let operator = Authorization::identity(node.authority.root);
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             AdmitNodule {
-                authorization: operator,
-                plug,
+                cartridge,
                 drawers: None,
             },
         )
@@ -114,7 +114,7 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    let slot = artifact_key(&PLUG.parse().unwrap(), "handler");
+    let slot = artifact_key(&CARTRIDGE.parse().unwrap(), "handler");
     let datums = all_datums(&node, &config_doc).await.datums;
     let DatumRead::Accepted { value, .. } = &datums[&slot] else {
         panic!("the artifact reference is accepted: {:?}", datums[&slot]);
@@ -149,11 +149,11 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
     // Uninstalling removes the reference, and with it the document's retention.
     node.nodules
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            operator.metadata(),
             UninstallNodule {
-                authorization: operator,
-                plug_id: PLUG.parse().unwrap(),
+                cartridge_id: CARTRIDGE.parse().unwrap(),
             },
         )
         .await

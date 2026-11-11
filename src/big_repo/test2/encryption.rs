@@ -648,7 +648,7 @@ async fn tier8_decrypt_after_archive_roundtrip() -> crate::Res<()> {
         .take()
         .expect("right connection should exist");
     old_left.stop().await?;
-    pair.restart_right(crate::StorageConfig::Disk { path: right_path })
+    pair.restart_right(super::harness::StorageConfig::Disk { path: right_path })
         .await?;
 
     // Reconnect and sync keyhive (restores membership from archive).

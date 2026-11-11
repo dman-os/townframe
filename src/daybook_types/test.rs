@@ -58,7 +58,7 @@ fn test_cipherblob_facet_schema() -> Res<()> {
         // A key document rather than `/self/`: the JWK is readable only by
         // decryptors, while whoever may *serve* the ciphertext reads this facet
         // (ADR 003 §19).
-        key_ref: "db+facet:///abc123/org.example.daybook.jwk/relay".parse()?,
+        key_ref: "dtxt:datum:abc123/org.example.daybook.jwk/relay".parse()?,
         key_ref_heads: ChangeHashSet(Arc::from([automerge::ChangeHash([1u8; 32])])),
         encoding_parameters: serde_json::json!({
             "recordSize": 65_536,
@@ -76,7 +76,7 @@ fn test_cipherblob_facet_schema() -> Res<()> {
                 "lengthOctets": 125_337,
             },
             "contentEncoding": "aes128gcm",
-            "keyRef": "db+facet:///abc123/org.example.daybook.jwk/relay",
+            "keyRef": "dtxt:datum:abc123/org.example.daybook.jwk/relay",
             "keyRefHeads": [head],
             "encodingParameters": {"recordSize": 65_536, "padding": "padme"},
         }),

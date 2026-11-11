@@ -1,17 +1,17 @@
 use crate::operation::Envelope;
-use crate::operation::Operation;
+use method_core::Method;
 use std::future::Future;
 use std::sync::Arc;
 
 /// Serves one operation, including its native envelope and response metadata.
-pub trait Handler<P: Operation>: Send + Sync + 'static {
+pub trait Handler<P: Method>: Send + Sync + 'static {
     fn call(
         &self,
         request: Envelope<P>,
     ) -> impl Future<Output = Result<crate::ResponseEnvelope<P::Output>, P::Error>> + Send;
 }
 
-impl<P: Operation, H: Handler<P> + ?Sized> Handler<P> for Arc<H> {
+impl<P: Method, H: Handler<P> + ?Sized> Handler<P> for Arc<H> {
     fn call(
         &self,
         request: Envelope<P>,
@@ -91,10 +91,10 @@ impl<L> ServiceBuilder<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ContextError;
     use crate::RequestContext;
     use crate::ResponseEnvelope;
-    use crate::XrpcOperation;
+    use method_core::ContextError;
+    use method_core::XrpcMethod;
     use serde::Deserialize;
     use serde::Serialize;
     use std::sync::Mutex;
@@ -102,10 +102,10 @@ mod tests {
     #[derive(Serialize, Deserialize)]
     struct Query;
 
-    impl Operation for Query {
+    impl Method for Query {
         type Output = ();
         type Error = ContextError;
-        const XRPC: XrpcOperation = XrpcOperation::query("org.example.middleware.test");
+        const XRPC: XrpcMethod = XrpcMethod::query("org.example.middleware.test");
     }
 
     struct Record(&'static str, Arc<Mutex<Vec<&'static str>>>);
@@ -119,7 +119,7 @@ mod tests {
         }
     }
 
-    impl<P: Operation, H: Handler<P>> Handler<P> for Wrapped<H> {
+    impl<P: Method, H: Handler<P>> Handler<P> for Wrapped<H> {
         async fn call(
             &self,
             request: Envelope<P>,

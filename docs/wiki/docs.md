@@ -129,7 +129,7 @@ As the canonical storage format, the primary data model of documents is the Auto
   - Null
   - Int64
   - Uint64
-  - Float64 (IEEE 754)
+  - F64 (IEEE 754)
   - Boolean
   - Int64 counters
   - Int64 timestamps in milliseconds since Unix epoch
@@ -219,7 +219,7 @@ The following datums are used to track branch relationships in docs:
     // this pins which parent we branched from
     from: {
       // self because ofc, we'll be carrying which parent we branched from
-      datumRef: "db+datum://self/org.example.daybook.branch/zMainDocId",
+      datumRef: "dtxt:datum:self/org.example.daybook.branch/zMainDocId",
       refHeads: ["zHead1"],
     }
   }
@@ -322,11 +322,11 @@ This is an illustrative JSON shape, not a signed test vector; angle-bracketed by
         // pubkey of the actor used to sign datum signatures
         "pubkey": "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk",
         // url identifying the actor
-        "actorUrl": "db+actor://<nodeid>/<path>/<to>/<subsystem>",
+        "actorUrl": "dtxt:actor:<nodeid>/<path>/<to>/<subsystem>",
         // COSE CWT claims bytes that contain the delegations from
         // the authority authorizing the actor
         // the signature
-        // { issuer: "zPubkey", pubkey: "zActorPubkey", actorUrl: "db+actor//xxxx" }
+        // { issuer: "zPubkey", pubkey: "zActorPubkey", actorUrl: "dtxt:actor:xxxx" }
         "delegation": { "$bytes": "<base64 certificate>" }
       }
     },
@@ -416,11 +416,11 @@ We use the blob datum to manage references to this.
     digest: "<hash>",
     inlineBase64: "small blobs are stored inline as base64 strings but not all blobs",
     urls: [
-      "db+blob://<digest>"
+      "dtxt:blob:<digest>"
     ],
   },
   "org.example.daybook.imagemetadata/main": {
-    datumRef: "db+datum://self/org.example.daybook.blob/main",
+    datumRef: "dtxt:datum:self/org.example.daybook.blob/main",
     refHeads: [],
   }
 }

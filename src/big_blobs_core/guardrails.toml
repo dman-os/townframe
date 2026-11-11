@@ -1,7 +1,7 @@
 version = 1
 role = "domain"
 dependency_reason = "Blob identities, Cabinet datum declarations, and typed service contracts use shared object keys and transport-neutral protocols."
-allowed_dependencies = ["big_cabinet_core", "big_sync_core", "macros", "service_core_rs"]
+allowed_dependencies = ["big_cabinet_core", "big_sync_core", "macros", "method_core", "service_core_rs"]
 allow_external_api_types = false
 
 [api]
@@ -10,3 +10,4 @@ default_features = true
 features = []
 
 [builds.native]
+features = ["schemars"]

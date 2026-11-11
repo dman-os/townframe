@@ -121,14 +121,14 @@ async fn migrations_reopen_existing_projection_and_local_drawers() {
     let [
         present_id,
         originated_id,
-        registry_id,
+        known_drawers_id,
         config_id,
         announced_id,
     ] = [10_u8, 11, 12, 13, 14].map(|value| DocId::new([value; 32]));
     let local = LocalDrawers {
         present_id,
         originated_id,
-        registry_id,
+        known_drawers_id,
         config_id,
     };
     let descriptor: Drawer = serde_json::from_value(serde_json::json!({

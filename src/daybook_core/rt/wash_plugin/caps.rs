@@ -1309,17 +1309,9 @@ pub(super) fn blob_hash_from_blob_facet(blob: &daybook_types::doc::Blob) -> Resu
     };
 
     let parsed_url = url::Url::parse(first_url).map_err(|err| err.to_string())?;
-    if parsed_url.scheme() != crate::blobs::BLOB_SCHEME {
-        return Err(format!(
-            "unsupported blob url scheme '{}'",
-            parsed_url.scheme()
-        ));
-    }
-    if parsed_url.host_str().is_some() {
-        return Err("blob url authority must be empty".to_string());
-    }
-
-    let hash = parsed_url.path().trim_start_matches('/');
+    let Some(hash) = crate::blobs::blob_url_digest(&parsed_url) else {
+        return Err(format!("unsupported blob url '{parsed_url}'"));
+    };
     if hash.is_empty() {
         return Err("blob url path is missing hash".to_string());
     }

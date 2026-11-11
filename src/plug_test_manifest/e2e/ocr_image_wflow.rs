@@ -27,7 +27,7 @@ async fn test_ocr_image_workflow() -> Res<()> {
         length_octets: image_bytes.len() as u64,
         digest,
         inline: None,
-        urls: Some(vec![format!("db+blob:///{blob_id}")]),
+        urls: Some(vec![format!("dtxt:blob:{blob_id}")]),
     };
 
     let new_doc = AddDocArgs {

@@ -5,6 +5,8 @@ use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::MintCapability;
 use crate::authority::Namespace;
+use crate::authority::OpenedActor;
+use crate::authority::ResolveActor;
 use crate::authority::ResolveAuthority;
 use crate::authority::ResolvedAuthority;
 use crate::authority::Rights;
@@ -23,20 +25,20 @@ use crate::drawer::protocol::DrawersProtocol;
 use crate::drawer::protocol::GetDrawer;
 use crate::query::DatumSelection;
 use crate::query::Predicate;
+use method_core::HttpInput;
+use method_core::HttpMethod;
+use method_core::Method;
+use method_core::MethodKind;
+use method_core::Subscription;
+use method_core::Unary;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
 use service_core_rs::Envelope;
 use service_core_rs::EventReply;
-use service_core_rs::HttpInput;
-use service_core_rs::HttpMethod;
-use service_core_rs::Operation;
 use service_core_rs::Reply;
 use service_core_rs::RequestContext;
-use service_core_rs::Subscription;
-use service_core_rs::Unary;
-use service_core_rs::XrpcKind;
 
 fn wire<T: Serialize + DeserializeOwned>(value: &T, expected: Value) {
     let encoded = serde_json::to_value(value).unwrap();
@@ -49,17 +51,17 @@ fn wire<T: Serialize + DeserializeOwned>(value: &T, expected: Value) {
 fn core_protocol_metadata_wire() {
     for (operations, namespace, error_schema) in [
         (
-            AuthorityProtocol::OPERATIONS,
+            AuthorityProtocol::METHODS,
             "org.example.daybook.authority.",
             "AuthorityServiceError",
         ),
         (
-            DocsProtocol::OPERATIONS,
+            DocsProtocol::METHODS,
             "org.example.daybook.docs.",
             "DocsError",
         ),
         (
-            DrawersProtocol::OPERATIONS,
+            DrawersProtocol::METHODS,
             "org.example.daybook.drawers.",
             "DrawersError",
         ),
@@ -72,8 +74,8 @@ fn core_protocol_metadata_wire() {
             assert!(!operation.output_schema.is_empty());
             assert_eq!(operation.error_schema, error_schema);
             let (method, input) = match operation.kind {
-                XrpcKind::Query | XrpcKind::Subscription => (HttpMethod::Get, HttpInput::Query),
-                XrpcKind::Procedure => (HttpMethod::Post, HttpInput::JsonBody),
+                MethodKind::Query | MethodKind::Subscription => (HttpMethod::Get, HttpInput::Query),
+                MethodKind::Procedure => (HttpMethod::Post, HttpInput::JsonBody),
             };
             assert_eq!((operation.method, operation.input), (method, input));
         }
@@ -81,31 +83,31 @@ fn core_protocol_metadata_wire() {
             operations
                 .unary
                 .iter()
-                .all(|operation| operation.kind != XrpcKind::Subscription)
+                .all(|operation| operation.kind != MethodKind::Subscription)
         );
         assert!(
             operations
                 .stream
                 .iter()
-                .all(|operation| operation.kind == XrpcKind::Subscription)
+                .all(|operation| operation.kind == MethodKind::Subscription)
         );
     }
     assert!(
-        AuthorityProtocol::OPERATIONS
+        AuthorityProtocol::METHODS
             .unary
             .contains(&MintCapability::XRPC)
     );
-    assert!(DocsProtocol::OPERATIONS.unary.contains(&ReadDatums::XRPC));
-    assert!(DocsProtocol::OPERATIONS.unary.contains(&PollDatums::XRPC));
-    assert!(DrawersProtocol::OPERATIONS.unary.contains(&GetDrawer::XRPC));
+    assert!(DocsProtocol::METHODS.unary.contains(&ReadDatums::XRPC));
+    assert!(DocsProtocol::METHODS.unary.contains(&PollDatums::XRPC));
+    assert!(DrawersProtocol::METHODS.unary.contains(&GetDrawer::XRPC));
     assert_eq!(PollDatums::XRPC.output_schema, "DatumPage");
     assert_eq!(PollDatums::XRPC.nsid, "org.example.daybook.docs.pollDatums");
     assert!(
-        AuthorityProtocol::OPERATIONS
+        AuthorityProtocol::METHODS
             .unary
             .contains(&ResolveAuthority::XRPC)
     );
-    assert!(AuthorityProtocol::OPERATIONS.unary.iter().all(|operation| {
+    assert!(AuthorityProtocol::METHODS.unary.iter().all(|operation| {
         !["grantAccess", "revokeAccess", "checkGrant", "checkGrants"]
             .iter()
             .any(|name| operation.nsid.ends_with(name))
@@ -114,13 +116,13 @@ fn core_protocol_metadata_wire() {
         ResolveAuthority::XRPC.nsid,
         "org.example.daybook.authority.resolveAuthority"
     );
-    assert_eq!(ResolveAuthority::XRPC.kind, XrpcKind::Query);
+    assert_eq!(ResolveAuthority::XRPC.kind, MethodKind::Query);
     assert_eq!(ResolveAuthority::XRPC.output_schema, "ResolvedAuthority");
     assert_eq!(
         MintCapability::XRPC.nsid,
         "org.example.daybook.authority.mintCapability"
     );
-    assert_eq!(MintCapability::XRPC.kind, XrpcKind::Procedure);
+    assert_eq!(MintCapability::XRPC.kind, MethodKind::Procedure);
     assert_eq!(MintCapability::XRPC.output_schema, "Capability");
 }
 
@@ -152,26 +154,24 @@ fn core_protocol_channels_wire() {
 #[test]
 fn doc_availability_wire() {
     assert!(
-        DocsProtocol::OPERATIONS
+        DocsProtocol::METHODS
             .unary
             .contains(&GetDocAvailability::XRPC)
     );
     assert_eq!(
         GetDocAvailability::XRPC,
-        service_core_rs::XrpcOperation::query("org.example.daybook.docs.getDocAvailability")
+        method_core::XrpcMethod::query("org.example.daybook.docs.getDocAvailability")
             .with_schemas("DocAvailability", "DocsError"),
     );
     assert!(
-        DocsProtocol::OPERATIONS
+        DocsProtocol::METHODS
             .stream
             .contains(&ObserveDocAvailability::XRPC)
     );
     assert_eq!(
         ObserveDocAvailability::XRPC,
-        service_core_rs::XrpcOperation::subscription(
-            "org.example.daybook.docs.observeDocAvailability"
-        )
-        .with_schemas("DocAvailability", "DocsError"),
+        method_core::XrpcMethod::subscription("org.example.daybook.docs.observeDocAvailability")
+            .with_schemas("DocAvailability", "DocsError"),
     );
     let capability = CapId::from_bytes([1; 16]);
     let doc_id = DocId::new([2; 32]);
@@ -214,7 +214,7 @@ fn doc_availability_wire() {
         (LocalDocUsability::Usable, "usable"),
     ] {
         for sync_demand in [false, true] {
-            let response: <GetDocAvailability as Operation>::Output = DocAvailability {
+            let response: <GetDocAvailability as Method>::Output = DocAvailability {
                 doc_id: doc_id.clone(),
                 local_usability,
                 sync_demand,
@@ -243,28 +243,44 @@ fn authority_identifiers_wire() {
             object: "read document".into(),
             rights: Rights::USE | Rights::NARROW,
             issuer_id: actor_id,
+            subject: Some(actor_id),
         },
         json!({
             "capabilityId": "01010101-0101-0101-0101-010101010101",
             "object": "read document",
             "rights": ["use", "narrow"],
             "issuerId": actor_id,
+            "subject": actor_id,
         }),
     );
     let public_key = MultibaseKey::try_from(&[2u8; 32][..]).unwrap();
     let certificate = Bytes::from(vec![3, 4]);
+    let actor = Actor {
+        actor_id,
+        url: "dtxt:actor:node/child".into(),
+        public_key: public_key.clone(),
+        certificate: certificate.clone(),
+        parent_actor_id: Some(actor_id),
+    };
     wire(
-        &Actor {
-            actor_id,
-            url: "db+actor://node/child".into(),
-            public_key: public_key.clone(),
-            certificate: certificate.clone(),
-            parent_actor_id: Some(actor_id),
+        &actor,
+        json!({
+            "actorId": actor_id,
+            "url": "dtxt:actor:node/child",
+            "publicKey": public_key,
+            "certificate": certificate,
+            "parentActorId": actor_id,
+        }),
+    );
+    // What `OpenActor` returns is the public actor with the opener's identity capability beside it.
+    wire(
+        &OpenedActor {
+            actor,
             capability: capability_id,
         },
         json!({
             "actorId": actor_id,
-            "url": "db+actor://node/child",
+            "url": "dtxt:actor:node/child",
             "publicKey": public_key,
             "certificate": certificate,
             "parentActorId": actor_id,
@@ -299,17 +315,17 @@ fn authority_resolution_and_mint_wire() {
         object: "opaque application object".into(),
         rights: Rights::USE,
         issuer_id: actor_id,
+        subject: None,
     };
     let actor = Actor {
         actor_id,
-        url: "db+actor://node/child".into(),
+        url: "dtxt:actor:node/child".into(),
         public_key: MultibaseKey::try_from(&[2u8; 32][..]).unwrap(),
         certificate: Bytes::from(vec![3, 4]),
         parent_actor_id: None,
-        capability: capability_id,
     };
     for actor in [None, Some(actor)] {
-        let response: <ResolveAuthority as Operation>::Output = ResolvedAuthority {
+        let response: <ResolveAuthority as Method>::Output = ResolvedAuthority {
             capability: capability.clone(),
             actor: actor.clone(),
         };
@@ -324,6 +340,7 @@ fn authority_resolution_and_mint_wire() {
             dependencies: vec![signer],
             object: "opaque domain data".into(),
             rights: Rights::USE,
+            subject: Some(actor_id),
         },
         json!({
             "issuer": capability_id,
@@ -331,8 +348,10 @@ fn authority_resolution_and_mint_wire() {
             "dependencies": [signer],
             "object": "opaque domain data",
             "rights": ["use"],
+            "subject": actor_id,
         }),
     );
+    wire(&ResolveActor { actor_id }, json!({"actorId": actor_id}));
 }
 
 #[test]
@@ -372,6 +391,7 @@ fn core_protocol_envelopes_wire() {
             dependencies: Vec::new(),
             object: "read document".into(),
             rights: Rights::USE,
+            subject: None,
         },
     ));
     wire(
@@ -380,7 +400,7 @@ fn core_protocol_envelopes_wire() {
             "MintCapability",
             json!({
                 "issuer": capability, "parent": null, "dependencies": [],
-                "object": "read document", "rights": ["use"],
+                "object": "read document", "rights": ["use"], "subject": null,
             }),
         ),
     );

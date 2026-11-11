@@ -147,11 +147,11 @@ jobs:
       - name: build test plug OCI artifact
         run: nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
 
-      - name: build daybook_cli
-        run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
+      - name: build daybook_cli and day_cli
+        run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli -p day_cli
 
       - name: CLI E2E tests
-        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p daybook_cli
+        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p daybook_cli -p day_cli
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
 
@@ -221,8 +221,8 @@ jobs:
 
       - name: rust tests
         run: |
-          # Plug crates are excluded while automatic triage is broken. `daybook_cli` is excluded
-          # because its e2e tests need the built binary and run in the dedicated CLI job.
+          # Plug crates are excluded while automatic triage is broken. `daybook_cli` and `day_cli` are excluded
+          # because their e2e tests need the built binary (found at target/debug) and run in the dedicated CLI job.
           # This lane runs in `ci-desktop` because the Dayframe Dioxus crates link the Linux GUI
           # stack (glib/wayland/wgpu) through the workspace, and `ci-rust` does not carry it.
           #
@@ -241,11 +241,11 @@ jobs:
           nix develop .#ci-desktop --command cargo llvm-cov --no-report nextest \
             --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
             --user-config-file .config/nextest-user-ci.toml \
-            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --exclude daybook_cli --exclude day_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
           nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc --workspace \
-            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --exclude daybook_cli --exclude day_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
           nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info

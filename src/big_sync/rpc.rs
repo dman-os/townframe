@@ -717,6 +717,7 @@ impl BigSyncRpcWorker {
             removals,
         } = update;
         self.sweep_replay_subscriptions();
+        tracing::debug!(%subscriber, ?session_id, ?subscription_id, generation, additions = ?additions.iter().map(|entry| entry.id.0).collect::<Vec<_>>(), removals = removals.len(), "INSTR replay update in");
         if additions.len() + removals.len() > MAX_REPLAY_SUBSCRIPTION_TARGETS {
             return Err(RpcError::SubscriptionLimit);
         }

@@ -16,6 +16,7 @@ use crate::doc::DocsService;
 use crate::grants::GrantError;
 use crate::grants::Grants;
 use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
@@ -24,7 +25,7 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::MintDocCapability;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
@@ -144,7 +145,7 @@ impl LedgerAccess {
 fn ledger_error(error: GrantError) -> AccessError {
     match error {
         GrantError::Storage(error) => AccessError::Unavailable(error.to_string()),
-        GrantError::Authority(ClientError::Operation(error)) => {
+        GrantError::Authority(ClientError::Method(error)) => {
             AccessError::Refused(error.to_string())
         }
         GrantError::Authority(ClientError::Transport { message, .. }) => {
@@ -248,11 +249,12 @@ impl DocsService {
     async fn mint_capability(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         request: MintDocCapability,
     ) -> Result<big_cabinet_core::authority::Capability, DocsError> {
         let caller = self
             .capabilities
-            .source::<big_cabinet_core::doc::DocScope>(context, request.authorization)
+            .source::<big_cabinet_core::doc::DocScope>(context, authorization)
             .await
             .map_err(super::authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !request.rights.is_subset_of(caller.rights) {
@@ -292,8 +294,8 @@ impl DocsService {
         self.capabilities
             .mint(
                 context,
-                request.authorization.authority,
                 &caller,
+                request.subject,
                 request.scope,
                 request.rights,
                 dependencies,
@@ -311,8 +313,9 @@ impl service_utils_rs::Handler<MintDocCapability> for DocsService {
         service_utils_rs::ResponseEnvelope<big_cabinet_core::authority::Capability>,
         DocsError,
     > {
+        let authorization = Authorization::from_metadata(&request.metadata)?;
         Ok(self
-            .mint_capability(&request.context, request.params)
+            .mint_capability(&request.context, authorization, request.params)
             .await?
             .into())
     }

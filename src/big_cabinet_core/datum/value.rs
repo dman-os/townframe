@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use unicode_segmentation::UnicodeSegmentation;
 
-
 type Result<T> = std::result::Result<T, GrammarError>;
 
 /// Admits an object schema identified by `target` (`nsid` or `nsid#def`) and every schema position
@@ -800,17 +799,14 @@ values!(
     crate::dmeta::Bytes,
     crate::DatumKey,
     crate::DatumReference,
+    crate::Location,
+    crate::DatumPin,
+    crate::ActorUrl,
     crate::drawer::GroupKey,
 );
 
 #[cfg(feature = "schemars")]
-values!(
-    super::Bytes,
-    super::Counter,
-    super::Text,
-    super::Float32,
-    super::Float64
-);
+values!(super::Bytes, super::Counter, super::Text, super::F64);
 
 #[cfg(test)]
 mod tests {
@@ -837,13 +833,20 @@ mod tests {
         let _ = <std::collections::BTreeMap<String, Undeclared> as AmbiguousIfShape<_>>::marker;
         let _ = <std::collections::HashMap<Undeclared, String> as AmbiguousIfShape<_>>::marker;
         let _ = <IndexMap<String, Undeclared> as AmbiguousIfShape<_>>::marker;
-        let _ = <(String, Undeclared) as AmbiguousIfShape<_>>::marker;
+        // Rust data model features with no Automerge or Lexicon counterpart are not datum shapes.
+        let _ = <(String, u8) as AmbiguousIfShape<_>>::marker;
+        let _ = <() as AmbiguousIfShape<_>>::marker;
+        let _ = <char as AmbiguousIfShape<_>>::marker;
+        let _ = <usize as AmbiguousIfShape<_>>::marker;
+        let _ = <isize as AmbiguousIfShape<_>>::marker;
+        let _ = <u128 as AmbiguousIfShape<_>>::marker;
+        let _ = <i128 as AmbiguousIfShape<_>>::marker;
 
         fn declared<T: DatumShape + ?Sized>() {}
         declared::<Option<Vec<Box<str>>>>();
         declared::<std::collections::BTreeMap<String, Vec<crate::dmeta::ActorMetadata>>>();
         declared::<std::collections::HashMap<String, crate::dmeta::DatumMetadata>>();
-        declared::<IndexMap<String, (String, bool, crate::dmeta::BranchOrigin)>>();
+        declared::<IndexMap<String, Vec<crate::DatumPin>>>();
         declared::<[crate::dmeta::DatumSignature; 2]>();
         declared::<&[crate::dmeta::InheritedWitness]>();
     }

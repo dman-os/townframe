@@ -6,7 +6,7 @@ use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use std::collections::BTreeMap;
 
 #[expect(
@@ -18,23 +18,30 @@ pub(super) async fn boot(
     blobs: &big_blobs::Blobs,
     docs: &DocsRepo,
     drawers: &Drawers,
-    drawers_actor: &Actor,
-    plugs_actor: &Actor,
+    drawers_actor: &OpenedActor,
+    cartridges_actor: &OpenedActor,
     access: &Arc<DrawerAccess>,
     repo: &SharedBigRepo,
+    scope_key: Arc<str>,
     datum_set: Arc<big_cabinet::index::DatumSetStore>,
     stop: &mut StopToken,
 ) -> Res<(big_blobs::workers::BlobWorkers, DrawerId)> {
     let signer = drawers_actor.capability;
-    let registry_drawer =
-        ensure_registry_drawer(drawers, drawers_actor, plugs_actor, access, sql.clone()).await?;
+    let registry_drawer = ensure_registry_drawer(
+        drawers,
+        drawers_actor,
+        cartridges_actor,
+        access,
+        sql.clone(),
+    )
+    .await?;
     let local = drawers.local();
     let capability = docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(signer).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(signer),
                 scope: DocScope {
                     drawers: BTreeMap::from([
                         (local.present_id.clone(), Access::Read),
@@ -44,13 +51,14 @@ pub(super) async fn boot(
                         // the workers retain them and write their cipherBlob/jwk representation
                         // there like in any other document they maintain.
                         (local.config_id.clone(), Access::Write),
-                        // The plug registry's grouped drawer: its documents carry the `Blob`
-                        // datums for plug artifacts.
+                        // The cartridge registry's grouped drawer: its documents carry the `Blob`
+                        // datums for cartridge artifacts.
                         (registry_drawer.clone(), Access::Write),
                     ]),
                     ..Default::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await?;
@@ -78,6 +86,7 @@ pub(super) async fn boot(
         datum_set,
         parts,
         repo: Arc::clone(repo),
+        scope_key,
         policy: access
             .subscribe_changes()
             .expect("drawer access publishes changes"),
@@ -87,23 +96,23 @@ pub(super) async fn boot(
     Ok((workers, registry_drawer))
 }
 
-/// Creates the plug registry drawer on the first boot (owned by the drawers actor, which is also
-/// the identity the blob workers sign as) and grants the plugs actor admin over it.
+/// Creates the cartridge registry drawer on the first boot (owned by the drawers actor, which is also
+/// the identity the blob workers sign as) and grants the cartridges actor admin over it.
 async fn ensure_registry_drawer(
     drawers: &Drawers,
-    drawers_actor: &Actor,
-    plugs_actor: &Actor,
+    drawers_actor: &OpenedActor,
+    cartridges_actor: &OpenedActor,
     access: &DrawerAccess,
     sql: Database,
 ) -> Res<DrawerId> {
-    let drawer = big_plugs::ensure_registry_drawer(RegistryDrawerConfig {
+    let drawer = big_cartridges::ensure_registry_drawer(RegistryDrawerConfig {
         drawers,
         actor: drawers_actor,
         access,
         sql,
     })
     .await?;
-    grant_drawer_admin(drawers, drawers_actor, plugs_actor, &drawer).await?;
+    grant_drawer_admin(drawers, drawers_actor, cartridges_actor, &drawer).await?;
     Ok(drawer)
 }
 
@@ -120,7 +129,7 @@ pub(super) fn metadata_capability(
                 || !scope.drawers.is_empty()
                 || (scope.read.is_empty() && scope.write.is_empty())
             {
-                return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
+                return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
             }
             for document in scope.read.union(&scope.write) {
                 let known = sql.query(
@@ -133,19 +142,20 @@ pub(super) fn metadata_capability(
                      )",
                     (document.to_string(),),
                 ).await
-                    .map_err(|error| service_utils_rs::ClientError::Operation(DocsError::Repository(error.to_string())))?
+                    .map_err(|error| service_utils_rs::ClientError::Method(DocsError::Repository(error.to_string())))?
                     .one::<bool>()
-                    .map_err(|error| service_utils_rs::ClientError::Operation(DocsError::Repository(error.to_string())))?;
+                    .map_err(|error| service_utils_rs::ClientError::Method(DocsError::Repository(error.to_string())))?;
                 if !known {
-                    return Err(service_utils_rs::ClientError::Operation(DocsError::Denied));
+                    return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
                 }
             }
-            docs.call(
+            docs.call_with(
                 RequestContext::root(),
+                Authorization::identity(signer).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(signer),
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await

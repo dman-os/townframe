@@ -22,8 +22,9 @@ use crate::runtime2::types::BrokenReason;
 use crate::runtime2::types::DocLookup;
 use crate::runtime2::types::LiveDocBundle;
 use crate::runtime2::types::LiveDocHandle;
+use crate::runtime2::types::NoWriteAccess;
 use crate::runtime2::types::handle_validity;
-use crate::runtime2::types::invalid_handle_message;
+use crate::runtime2::types::invalid_handle_error;
 use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
@@ -604,6 +605,14 @@ impl<F: FutureForm> DocWorker2<F> {
         resp: futures::channel::oneshot::Sender<eyre::Result<DocLookup<LiveDocHandle>>>,
         lease_kind: crate::runtime2::DocLeaseKind,
     ) -> eyre::Result<()> {
+        // The requester may have given up while this message sat in the mailbox (a
+        // keyed task replaced or cancelled upstream drops its reply receiver). The
+        // load below is a full hydrate and decrypt walk that nobody would receive,
+        // and skipping it loses nothing: the state stays as it was and the next
+        // requester performs the load.
+        if resp.is_canceled() {
+            return Ok(());
+        }
         let result = match &self.state {
             // - `Live(bundle)` → return `Ready` with a fresh caller lease. A
             //   broken bundle — teardown, eviction, or a rejected commit; the bundle
@@ -731,6 +740,8 @@ impl<F: FutureForm> DocWorker2<F> {
     /// walk is the remaining materialization hot path.
     #[tracing::instrument(skip_all)]
     async fn load_doc_snapshot(&self) -> eyre::Result<LoadedDocSnapshot> {
+        let instr_start = std::time::Instant::now(); // INSTR
+        let (mut instr_cached, mut instr_causal, mut instr_causal_complete, mut instr_bytes, mut instr_covered) = (0usize, 0usize, 0usize, 0usize, 0usize); // INSTR
         let Some(mut tree) = self.io.hydrate_tree(self.sed_id).await? else {
             return Ok(LoadedDocSnapshot::Missing);
         };
@@ -753,11 +764,20 @@ impl<F: FutureForm> DocWorker2<F> {
             checkpoint_count,
             "load_doc_snapshot: tree composition"
         );
-        let doc_id_snapshot = self.doc_id.clone();
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
-        for item in &order {
+        // Walk descendants first (reverse of the ancestors-first topological
+        // order). `try_causal_decrypt` returns the plaintext and key of the
+        // item *and its whole ancestor closure*, so the first walk from a
+        // descendant covers every item below it. Visiting ancestors first
+        // made each item's walk re-decrypt its entire closure (N(N+1)/2
+        // decrypts for a linear history of N); descendants first, a linear
+        // history needs one walk and the rest are served from `plaintexts`.
+        // Blockers lose nothing: a descendant's closure is a superset of any
+        // ancestor's, so its walk already reported every blocker the ancestor's
+        // own walk would.
+        for item in order.iter().rev() {
             let (kind, head) = match item {
                 SedimentreeItem::Fragment(index) => {
                     (BigRepoCiphertextKind::Fragment, fragments[*index].head())
@@ -785,40 +805,21 @@ impl<F: FutureForm> DocWorker2<F> {
             // (one per grant), so always take the full walk for them.
             let is_checkpoint =
                 kind == BigRepoCiphertextKind::LooseCommit && is_causal_checkpoint_id(head);
-            let cached_key = if is_checkpoint {
-                None
-            } else {
-                self.recovered_keys
-                    .lock()
-                    .expect("recovered-key cache lock poisoned")
-                    .get(&head)
-                    .copied()
-            };
-            if let Some(key) = cached_key {
-                match self
-                    .io
-                    .decrypt_with_cached_key(self.sed_id, locator, key)
-                    .await?
-                {
-                    Some(plaintext) => {
-                        plaintexts.insert(head.as_bytes().to_vec(), plaintext);
-                        continue;
-                    }
-                    None => {
-                        tracing::debug!(
-                            %doc_id_snapshot,
-                            ?head,
-                            "cached decryption key failed AEAD; invalidating entry"
-                        );
-                        self.recovered_keys
-                            .lock()
-                            .expect("recovered-key cache lock poisoned")
-                            .remove(&head);
-                    }
-                }
+            // Already decrypted as part of a descendant's closure walk.
+            if !is_checkpoint && plaintexts.contains_key(head.as_bytes().as_slice()) {
+                instr_covered += 1; // INSTR
+                continue;
+            }
+            if !is_checkpoint
+                && let Some(plaintext) = self.decrypt_with_recovered_key(head, locator).await?
+            {
+                instr_cached += 1; instr_bytes += plaintext.len(); // INSTR
+                plaintexts.insert(head.as_bytes().to_vec(), plaintext);
+                continue;
             }
 
             let result = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            instr_causal += 1; instr_causal_complete += result.complete.len(); instr_bytes += result.complete.iter().map(|(_, plain)| plain.len()).sum::<usize>(); // INSTR
             {
                 let mut cache = self
                     .recovered_keys
@@ -886,13 +887,51 @@ impl<F: FutureForm> DocWorker2<F> {
             partially_decrypted,
             "load_doc_snapshot: walk outcome"
         );
-        LoadedDocSnapshot::from_decrypted_plaintexts(
+        let instr_walk = instr_start.elapsed(); // INSTR
+        let instr_result = LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,
             partially_decrypted,
             self.doc_id.clone(),
             blockers,
             blocked_refs,
-        )
+        );
+        tracing::info!(doc_id = %self.doc_id, order_len = order.len(), instr_cached, instr_covered, instr_causal, instr_causal_complete, instr_bytes, ?instr_walk, wall = ?instr_start.elapsed(), "INSTR load_doc_snapshot"); // INSTR
+        instr_result
+    }
+
+    /// Open one blob with its cached application secret, if the recovered-key cache holds one.
+    /// A cached key that fails AEAD is discarded on sight and reported as a miss, so the caller
+    /// falls back to the authoritative Keyhive derivation; stale keys are never trusted.
+    async fn decrypt_with_recovered_key(
+        &self,
+        head: CommitId,
+        locator: BigRepoCiphertextLocator,
+    ) -> eyre::Result<Option<Vec<u8>>> {
+        let Some(key) = self
+            .recovered_keys
+            .lock()
+            .expect("recovered-key cache lock poisoned")
+            .get(&head)
+            .copied()
+        else {
+            return Ok(None);
+        };
+        let plaintext = self
+            .io
+            .decrypt_with_cached_key(self.sed_id, locator, key)
+            .await?;
+        if plaintext.is_none() {
+            tracing::debug!(
+                doc_id = %self.doc_id,
+                ?head,
+                "cached decryption key failed AEAD; invalidating entry"
+            );
+            self.recovered_keys
+                .lock()
+                .expect("recovered-key cache lock poisoned")
+                .remove(&head);
+        }
+        Ok(plaintext)
     }
 
     async fn take_or_load_transient_doc(
@@ -918,6 +957,7 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Unloaded | DocState::PendingMaterialization => {
                 let materialization_ops_count = self.io.current_cgka_ops_count(self.sed_id).await?;
                 self.cgka_ops_count = materialization_ops_count;
+                tracing::info!(doc_id = %self.doc_id, was_pending, "INSTR load_doc_snapshot caller=take_or_load_transient_doc"); // INSTR
                 match self.load_doc_snapshot().await? {
                     LoadedDocSnapshot::Ready {
                         doc,
@@ -1027,8 +1067,8 @@ impl<F: FutureForm> DocWorker2<F> {
             bundle_id,
             current.as_ref().and_then(|bundle| bundle.broken_reason()),
         );
-        if let Some(message) = invalid_handle_message(validity) {
-            resp.send(Err(ferr!("{message}")))
+        if let Some(refusal) = invalid_handle_error(validity) {
+            resp.send(Err(refusal))
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             return Ok(());
@@ -1041,11 +1081,9 @@ impl<F: FutureForm> DocWorker2<F> {
                     .as_ref()
                     .expect("live bundle present for a valid commit")
                     .mark_broken(BrokenReason::CommitRejectedNoWriteAccess);
-                resp.send(Err(ferr!(
-                    "document write rejected: local access is not writable (revoked or read-only)"
-                )))
-                .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                .ok();
+                resp.send(Err(NoWriteAccess.into()))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
                 return Ok(());
             }
             Err(error) => {
@@ -1554,6 +1592,7 @@ impl<F: FutureForm> DocWorker2<F> {
         }
 
         debug!(%self.doc_id, ?current_epoch, ?covered_frontier, "persisting causal coverage checkpoint");
+        tracing::info!(doc_id = %self.doc_id, cur = ?current_epoch.map(|e| format!("{:02x?}", &e[..4])), heads = covered_frontier.len(), known = self.causal_checkpoints.len(), known_epochs = ?self.causal_checkpoints.values().map(|c| format!("{:02x?}", &c.epoch[..4])).collect::<Vec<_>>(), "INSTR causal checkpoint persisting"); // INSTR
         let Some((head, checkpoint, _heads_observed)) = self
             .io
             .persist_causal_checkpoint(self.sed_id, covered_frontier)
@@ -2170,6 +2209,7 @@ impl<F: FutureForm> DocWorker2<F> {
             pre_load_ops_count = self.cgka_ops_count,
             "retry_materialization: loading snapshot"
         );
+        tracing::info!(doc_id = %self.doc_id, was_pending, origin = ?origin, "INSTR load_doc_snapshot caller=retry_materialization"); // INSTR
         match self.load_doc_snapshot().await? {
             LoadedDocSnapshot::Ready {
                 doc,

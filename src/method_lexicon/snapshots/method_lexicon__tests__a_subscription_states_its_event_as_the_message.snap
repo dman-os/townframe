@@ -1,0 +1,124 @@
+---
+source: src/method_lexicon/tests.rs
+expression: "lexicon_of::<big_cabinet_core::doc::ObserveDocAvailability>()"
+---
+{
+  "defs": {
+    "DocAvailability": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "localUsability": {
+          "enum": [
+            "notObserved",
+            "noLocalContent",
+            "pendingMaterialization",
+            "usable"
+          ],
+          "type": "string"
+        },
+        "syncDemand": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "docId",
+        "localUsability",
+        "syncDemand"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "DocNotFound"
+        },
+        {
+          "name": "InvalidCommand"
+        },
+        {
+          "name": "UnrelatedHistory"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Access"
+        },
+        {
+          "name": "Repository"
+        },
+        {
+          "name": "UnknownHeads"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "UnknownSchema"
+        },
+        {
+          "name": "SystemDatum"
+        },
+        {
+          "name": "SetAndRemoved"
+        },
+        {
+          "name": "InvalidValue"
+        },
+        {
+          "name": "Conflict"
+        },
+        {
+          "name": "BaseNotAccepted"
+        },
+        {
+          "name": "Pending"
+        },
+        {
+          "name": "ResourceRefused"
+        },
+        {
+          "name": "Unsupported"
+        },
+        {
+          "name": "MalformedEvidence"
+        }
+      ],
+      "message": {
+        "schema": {
+          "ref": "#DocAvailability",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "capability": {
+            "type": "string"
+          },
+          "docId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability",
+          "docId"
+        ],
+        "type": "params"
+      },
+      "type": "subscription"
+    }
+  },
+  "id": "org.example.daybook.docs.observeDocAvailability",
+  "lexicon": 1
+}

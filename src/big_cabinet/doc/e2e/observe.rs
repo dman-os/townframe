@@ -3,6 +3,10 @@
 
 use super::*;
 use crate::test_poll::Poller;
+use big_cabinet_core::doc::DatumEvent;
+use big_cabinet_core::doc::PollDatums;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 
 #[tokio::test]
 async fn doc_poll_replays_then_reports_versions_and_removal() {
@@ -93,7 +97,7 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
         .page(0)
         .await;
     assert!(
-        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        matches!(refused, Err(ClientError::Method(DocsError::Denied))),
         "{refused:?}"
     );
 
@@ -107,7 +111,7 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
     .page(0)
     .await;
     assert!(
-        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        matches!(refused, Err(ClientError::Method(DocsError::Denied))),
         "{refused:?}"
     );
 
@@ -116,5 +120,175 @@ async fn a_scoped_caller_needs_an_anchor_that_reaches_the_document() {
     let (doc_id, _, datum) = own_poll.next_datum().await;
     assert_eq!(doc_id, own.doc_id);
     assert!(matches!(datum, ObservedDatum::Present { .. }), "{datum:?}");
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn a_sole_doc_poll_is_not_woken_by_writes_to_other_documents() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let watched = node
+        .create(&alice, "watched", [(key("main"), note("one"))])
+        .await
+        .unwrap()
+        .doc_id;
+    let other = node
+        .create(&alice, "other", [(key("main"), note("elsewhere"))])
+        .await
+        .unwrap()
+        .doc_id;
+    // The capability reads both documents, so any leak is the predicate's filtering and not
+    // the capability's reach.
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: BTreeSet::from([watched.clone(), other.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    // `IsDoc` alone would hide a leak, because `matching_docs` rejects the other document
+    // anyway. Adding a tag clause makes every note write a predicate fact, which without the
+    // `sole_doc` filter marks the other document as moved and answers it with a `leave`.
+    let mut poll = Poller::new(
+        node.client(),
+        PollDatums {
+            capability,
+            predicate: Predicate::And {
+                clauses: vec![
+                    Predicate::IsDoc {
+                        doc_id: watched.clone(),
+                    },
+                    Predicate::HasTag {
+                        tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
+                    },
+                ],
+            },
+            datums: DatumSelection::All,
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
+    let replay = poll.page(0).await.unwrap();
+    assert!(replay.caught_up);
+    assert!(
+        replay
+            .events
+            .iter()
+            .all(|event| event_doc(event) == &watched),
+        "{:?}",
+        replay.events
+    );
+
+    node.write(
+        &alice,
+        &other,
+        WriteMode::AtCurrent,
+        [(key("main"), note("changed elsewhere"))],
+        [],
+    )
+    .await
+    .unwrap();
+    // A held poll over the other document's write returns empty once the hold expires, with
+    // the cursor moved past the unrelated entry.
+    let quiet = poll.page(500).await.unwrap();
+    assert!(quiet.events.is_empty(), "{:?}", quiet.events);
+
+    node.write(
+        &alice,
+        &watched,
+        WriteMode::AtCurrent,
+        [(key("main"), note("two"))],
+        [],
+    )
+    .await
+    .unwrap();
+    let (doc_id, _, datum) = poll.next_datum().await;
+    assert_eq!(doc_id, watched);
+    assert!(matches!(datum, ObservedDatum::Present { .. }), "{datum:?}");
+    node.stop().await;
+}
+
+fn event_doc(event: &DatumEvent) -> &DocId {
+    match event {
+        DatumEvent::Datum { doc_id, .. } | DatumEvent::Leave { doc_id, .. } => doc_id,
+    }
+}
+
+/// The intxt waiting loop polls, handles the page and polls again with the `through` it was
+/// given, so between two calls nothing is held open. A write that lands in that gap must be
+/// delivered by the next call, exactly once.
+#[tokio::test]
+async fn a_poll_resumes_across_a_gap_between_calls() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let document = node
+        .create(&alice, "create", [(key("main"), note("hello"))])
+        .await
+        .unwrap()
+        .doc_id;
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                read: BTreeSet::from([document.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut poll = Poller::doc(node.client(), capability, document.clone());
+    assert_eq!(poll.cursor(), 0);
+    // The poll feed is a projection that catches up with writes asynchronously, so a zero-hold
+    // poll right after `create` may answer caught up at cursor 0 before the first row is
+    // projected. Hold until the created row has arrived, then until the feed is caught up.
+    let mut seen_main = false;
+    loop {
+        let page = poll.page(5_000).await.unwrap();
+        seen_main |= page.events.iter().any(|event| {
+            matches!(event, DatumEvent::Datum { datum_key, .. } if datum_key == &key("main"))
+        });
+        if seen_main && page.caught_up {
+            break;
+        }
+    }
+    let through = poll.cursor();
+    assert!(through > 0);
+
+    // No poll is in flight: the write lands in the gap between two calls.
+    node.write(
+        &alice,
+        &document,
+        WriteMode::AtCurrent,
+        [(key("second"), note("written in the gap"))],
+        [],
+    )
+    .await
+    .unwrap();
+
+    // Resuming from `through` delivers the new row. The hold only bounds the wait if the
+    // projection were slow; the page returns as soon as the row exists.
+    let resumed = poll.page(5_000).await.unwrap();
+    assert!(resumed.through > through, "{resumed:?}");
+    let [
+        DatumEvent::Datum {
+            doc_id,
+            datum_key,
+            datum: ObservedDatum::Present { .. },
+            ..
+        },
+    ] = resumed.events.as_slice()
+    else {
+        panic!("expected exactly the gap write, got {:?}", resumed.events);
+    };
+    assert_eq!(doc_id, &document);
+    assert_eq!(datum_key, &key("second"));
+
+    // Resuming from the new `through` redelivers nothing.
+    let quiet = poll.page(300).await.unwrap();
+    assert!(quiet.events.is_empty(), "{:?}", quiet.events);
     node.stop().await;
 }

@@ -137,6 +137,7 @@ impl LedgerFailure for DrawersError {
             Self::Denied
             | Self::Authority(_)
             | Self::UnknownDrawer(_)
+            | Self::UnknownPeer(_)
             | Self::ForeignLayout(_)
             | Self::SelfDoc(_)
             | Self::AlreadyDrawer(_)

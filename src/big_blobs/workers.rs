@@ -22,13 +22,18 @@ use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
+use big_repo::AutomergeFrontierEvent;
+use big_repo::AutomergeFrontierRevisionStore;
+use big_repo::AutomergeFrontierSelector;
+use big_repo::AutomergeFrontierTarget;
 use big_repo::SharedPartStore;
 use big_sync_core::PartKey;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 use futures::future::BoxFuture;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
@@ -106,7 +111,7 @@ impl MetadataCapabilities {
         let result = operation(capability).await;
         if matches!(
             result,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Denied | DocsError::Access(_) | DocsError::AuthorityUnavailable(_)
             ))
         ) {
@@ -128,6 +133,9 @@ pub struct WorkerConfig {
     pub datum_set: Arc<DatumSetStore>,
     pub parts: SharedPartStore,
     pub repo: big_repo::SharedBigRepo,
+    /// The repo's `scope_key`: the permissions ingress keeps its cursor in the repo's database,
+    /// which repos with distinct scope keys may share.
+    pub scope_key: Arc<str>,
     pub policy: watch::Receiver<u64>,
     pub metadata_observer: big_cabinet::drawer::DrawerService,
 }
@@ -137,6 +145,9 @@ pub struct BlobWorkers {
     pub parts: SharedPartStore,
     pub mirrors: crate::admission::InventoryMirrors,
 }
+
+/// The work queue progress key of the node-wide frontier reader that wakes parked documents.
+const MATERIALIZATION_SOURCE: &str = "materialization";
 
 pub fn inventory_part(document: &DocId) -> PartKey {
     let digest = blake3::derive_key(
@@ -166,11 +177,24 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         Arc::clone(&config.metadata_capability),
         config.policy.clone(),
     );
+    let repo = Arc::clone(&config.repo);
     let retention = Retention::new(
         config.sql.clone(),
         Arc::clone(&config.service),
         config.docs.clone(),
         metadata.clone(),
+        Arc::new(move |inventory: DocId| {
+            let repo = Arc::clone(&repo);
+            Box::pin(async move {
+                let local =
+                    ed25519_dalek::VerifyingKey::from_bytes(&repo.local_peer_id().to_bytes32()?)?;
+                let inventory = ed25519_dalek::VerifyingKey::from_bytes(&inventory.to_bytes32()?)?;
+                Ok(repo
+                    .keyhive()
+                    .can_write(&local.into(), inventory.into())
+                    .await)
+            })
+        }),
         Arc::clone(&config.parts),
     )
     .await?;
@@ -208,10 +232,12 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
     let permissions_parts = Arc::clone(&config.parts);
     let permissions_sql = config.sql.clone();
     let permissions_mirrors = mirrors.clone();
+    let permissions_scope = Arc::clone(&config.scope_key);
     tasks
         .spawn(async move {
             crate::permissions::run(
                 permissions_repo,
+                &permissions_scope,
                 permissions_parts,
                 permissions_sql,
                 permissions_queue,
@@ -255,13 +281,24 @@ pub async fn boot(config: WorkerConfig) -> Res<(BlobWorkers, StopToken)> {
         })
         .expect("projection starts before shutdown");
     let worker = WorkerParts {
+        repo: Arc::clone(&config.repo),
         sql: config.sql.clone(),
         service: Arc::clone(&config.service),
         docs: config.docs.clone(),
         capability: config.capability,
         metadata,
         mirrors,
-        metadata_observer: config.metadata_observer,
+        observe_metadata: {
+            let observer = config.metadata_observer;
+            Arc::new(move |drawer| {
+                let observer = observer.clone();
+                Box::pin(async move {
+                    observer
+                        .observe_metadata(&RequestContext::root(), &drawer)
+                        .await
+                })
+            })
+        },
         policy: config.policy.clone(),
     };
     spawn_worker(&tasks, worker, queue, retention, adapter, projection);
@@ -286,11 +323,25 @@ fn spawn_worker(
             let mut polled = BTreeSet::new();
             let mut availability = config.service.open_availability(queue.progress("availability").await?).await?;
             let mut policy = config.policy.clone();
+            // A parked document is waiting for its content to materialize locally (a peer's
+            // member doc is named by the roster before its bytes sync in). None of the other
+            // wake sources fires when that content lands, so one node-wide reader over the
+            // Automerge frontier (the same AFW-backed stream the facet-set index parks on)
+            // re-dirties the parked rows whose documents changed. The durable cursor keeps
+            // content that arrived while the node was down from being missed.
+            let frontier = AutomergeFrontierRevisionStore::new(config.repo.frontier_part_store());
+            let mut materialized = frontier
+                .open(
+                    AutomergeFrontierSelector { targets: vec![AutomergeFrontierTarget::All] },
+                    queue.progress(MATERIALIZATION_SOURCE).await?,
+                )
+                .await?;
             poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, None).await?;
             loop {
                 if cancel.is_cancelled() { return Ok::<_, utils_rs::prelude::eyre::Report>(()); }
                 for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
                 if let Some((document, generation)) = queue.next().await? {
+                    tracing::info!(%document, generation, "INSTR blob worker next"); // INSTR
                     if let Some(waiting) = enqueue_root_members(config, &queue, &document).await? {
                         poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                         queue.finish(&document, generation, waiting).await?;
@@ -330,6 +381,7 @@ fn spawn_worker(
                             } else {
                                 let report = adapter.reconcile(&context, &document).await?;
 
+                                if !report.deferred.is_empty() { tracing::info!(%document, deferred = ?report.deferred.iter().map(|deferred| format!("{:?}", deferred.reason)).collect::<Vec<_>>(), retained = report.retained.len(), "INSTR blob worker deferred"); } // INSTR
                                 let denied = report.deferred.iter().any(|deferred| matches!(deferred.reason, DeferralReason::Document { error: DocsError::Denied, .. }));
                                 // A doc we cannot currently read must not shrink
                                 // retention (ADR 026 §5): park it and keep every row
@@ -338,13 +390,15 @@ fn spawn_worker(
                                 else { (report.retained, pins, pending || !report.deferred.is_empty()) }
                             }
                         }
-                        Err(ClientError::Operation(DocsError::Denied | DocsError::Access(_))) => (Vec::new(), BTreeMap::new(), true),
-                        Err(ClientError::Operation(DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_))) => {
+                        Err(ClientError::Method(error @ (DocsError::Denied | DocsError::Access(_)))) => { tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read denied; parking"); /* INSTR */ (Vec::new(), BTreeMap::new(), true) }
+                        Err(ClientError::Method(error @ (DocsError::DocNotFound | DocsError::Pending { .. } | DocsError::UnknownHeads { .. } | DocsError::AuthorityUnavailable(_)))) => {
+                            tracing::info!(%document, ?error, inventory_doc, "INSTR blob worker read not ready; parking"); // INSTR
                             queue.finish(&document, generation, true).await?;
                             continue;
                         }
                         Err(error) => return Err(error.into()),
                     };
+                    tracing::info!(%document, inventory_doc, waiting, cap = ?config.capability, pins = pins.len(), retained = pairs.len(), "INSTR blob worker processed"); // INSTR
                     retention.replace(&document, &pairs, pins.clone(), waiting).await?;
                     poll_writer_documents(&inventory_tasks, config, &queue, &mut polled, Some(&document)).await?;
                     for inventory in retention.flush().await? { queue.enqueue(&inventory).await?; }
@@ -373,8 +427,22 @@ fn spawn_worker(
 
                         }
                     }
+                    read = materialized.next(RevisionReadLimits::default()) => {
+                        if let RevisionRead::Entries { revision, entries } = read? {
+                            let documents = entries
+                                .into_iter()
+                                .filter_map(|event| match event {
+                                    AutomergeFrontierEvent::Changed { doc_id, .. } => Some(big_repo::automerge_doc_obj_id(doc_id)),
+                                    // A removal is not content arriving.
+                                    AutomergeFrontierEvent::Removed { .. } => None,
+                                })
+                                .collect::<BTreeSet<_>>();
+                            queue.wake_materialized(MATERIALIZATION_SOURCE, revision, documents).await?;
+                        }
+                    }
                     changed = policy.changed() => {
                         changed.expect("drawer policy outlives blob workers");
+                        tracing::info!("INSTR blob worker policy changed: rearm all"); // INSTR
                          queue.rearm().await?;
                          projection.rearm();
                          config.mirrors.refresh_policy().await?;
@@ -389,15 +457,31 @@ fn spawn_worker(
 }
 
 struct WorkerParts {
+    repo: big_repo::SharedBigRepo,
     sql: Database,
     service: Arc<BlobService>,
     docs: Client<DocsProtocol>,
     capability: CapId,
     metadata: MetadataCapabilities,
     mirrors: crate::admission::InventoryMirrors,
-    metadata_observer: big_cabinet::drawer::DrawerService,
+    /// Observes a drawer's metadata roots. A closure over the drawer service so the worker
+    /// loop can be driven without booting one when no root drawer is involved.
+    observe_metadata: ObserveMetadata,
     policy: watch::Receiver<u64>,
 }
+
+type ObserveMetadata = Arc<
+    dyn Fn(
+            big_cabinet_core::drawer::protocol::DrawerId,
+        ) -> BoxFuture<
+            'static,
+            Result<
+                big_cabinet::drawer::DrawerMetadataObservation,
+                big_cabinet_core::drawer::protocol::DrawersError,
+            >,
+        > + Send
+        + Sync,
+>;
 
 fn blob_tags() -> BTreeSet<DatumTag> {
     [Blob::ID, CipherBlob::ID, BlobPin::ID, Jwk::ID]
@@ -454,20 +538,19 @@ async fn poll_drawer(
             .events
             .iter()
             .map(|event| match event {
-                big_cabinet_core::doc::DatumEvent::Enter { doc_id, .. }
-                | big_cabinet_core::doc::DatumEvent::Datum { doc_id, .. }
+                big_cabinet_core::doc::DatumEvent::Datum { doc_id, .. }
                 | big_cabinet_core::doc::DatumEvent::Leave { doc_id, .. } => doc_id.clone(),
             })
             .collect();
         // A JWK change can flip which cipherBlob a slot resolves to, so parked docs
         // re-reconcile with it, as the old frontier reader rearmed on JWK entries.
         let rearm = page.events.iter().any(|event| match event {
-            big_cabinet_core::doc::DatumEvent::Enter { .. } => true,
             big_cabinet_core::doc::DatumEvent::Datum { datum_key, .. } => {
                 datum_key.tag().as_str() == Jwk::ID
             }
             big_cabinet_core::doc::DatumEvent::Leave { .. } => false,
         });
+        tracing::info!(%drawer, events = page.events.len(), documents = documents.len(), rearm, after, through = page.through, "INSTR blob poll_drawer page"); // INSTR
         queue
             .ingest(&source, page.through, documents, rearm)
             .await?;
@@ -505,7 +588,7 @@ async fn poll_document(
         };
         let page = match page {
             Ok(page) => page,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Denied
                 | DocsError::DocNotFound
                 | DocsError::Pending { .. }
@@ -521,16 +604,51 @@ async fn poll_document(
             }
             Err(error) => return Err(error.into()),
         };
-        let documents = if page.events.is_empty() {
-            BTreeSet::new()
-        } else {
-            BTreeSet::from([document.clone()])
-        };
+        let documents = affected_documents(&document, &page.events);
+        tracing::info!(%document, events = page.events.len(), tags = ?page.events.iter().filter_map(|event| match event { big_cabinet_core::doc::DatumEvent::Datum { datum_key, .. } => Some(datum_key.tag().as_str().to_owned()), _ => None }).collect::<BTreeSet<_>>(), enqueued = documents.len(), polled_itself = documents.contains(&document), "INSTR blob poll_document page"); // INSTR
         queue
             .ingest(&source, page.through, documents, false)
             .await?;
         after = page.through;
     }
+}
+
+/// The docs a page of `polled`'s datum rows makes stale.
+///
+/// Processing a drawer doc (or a sensitive root) in the worker re-observes the drawer's
+/// metadata and re-enqueues every member (`enqueue_root_members`), since a descriptor or
+/// meta-doc change moves every member's writer target. A roster entry is different: a
+/// `drawerDocEntry/<doc>` row names the one member whose membership moved, and a member's
+/// writer target reads only its own entry, the descriptor and the meta docs
+/// (`refresh_targets`). Enqueueing the drawer for each roster write made every note created
+/// re-reconcile every note already in the drawer, so a `drawerDocEntry` row enqueues just the
+/// doc it names and any other row (descriptor, meta docs, child entries) leaves the polled doc
+/// stale. The poll is `IsDoc(polled)`, so a page carries exactly the rows that changed after
+/// the cursor and each row stands for itself; nothing is diffed. A parked drawer keeps its
+/// `waiting` row untouched by a member-only page, so the next rearm still fans it out to
+/// everyone.
+fn affected_documents(
+    polled: &DocId,
+    events: &[big_cabinet_core::doc::DatumEvent],
+) -> BTreeSet<DocId> {
+    use big_cabinet_core::doc::DatumEvent;
+    events
+        .iter()
+        .map(|event| match event {
+            DatumEvent::Datum { datum_key, .. }
+                if datum_key.tag().as_str() == big_cabinet_core::drawer::DrawerDocEntry::ID =>
+            {
+                // A doc entry's slot is the member's doc id: the roster only stores admitted
+                // entries, so a slot that does not parse is a broken invariant, not a reason
+                // to widen the work.
+                std::str::from_utf8(datum_key.slot_bytes())
+                    .expect("a drawerDocEntry slot is a utf-8 doc id")
+                    .parse::<DocId>()
+                    .expect("a drawerDocEntry slot is a doc id")
+            }
+            DatumEvent::Datum { .. } | DatumEvent::Leave { .. } => polled.clone(),
+        })
+        .collect()
 }
 
 async fn poll_writer_documents(
@@ -594,11 +712,7 @@ async fn enqueue_root_members(
             continue;
         }
         let waiting = metadata.get_or_insert(false);
-        match config
-            .metadata_observer
-            .observe_metadata(&RequestContext::root(), &drawer.parse()?)
-            .await
-        {
+        match (config.observe_metadata)(drawer.parse()?).await {
             Ok(observation) => {
                 *waiting |= observation
                     .roots
@@ -625,6 +739,7 @@ async fn enqueue_root_members(
             Err(error) => return Err(error.into()),
         }
         let members = sqlite::queries::drawer_members(sql, drawer.clone()).await?;
+        tracing::info!(%document, %drawer, members = members.len(), "INSTR blob worker enqueue_root_members"); // INSTR
 
         for member in members {
             queue.enqueue(&member.parse()?).await?;

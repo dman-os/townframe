@@ -1,13 +1,14 @@
 use super::*;
 use crate::test_poll::Poller;
 use big_cabinet_core::authority::AttenuateCapability;
+use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 
-async fn actor(node: &Node, path: &str, rights: Rights) -> Actor {
+async fn actor(node: &Node, path: &str, rights: Rights) -> OpenedActor {
     node.authority
         .client
         .call(
@@ -29,12 +30,13 @@ async fn mint(
     rights: Rights,
 ) -> Capability {
     node.client()
-        .call(
+        .call_with(
             RequestContext::root(),
+            authorization.metadata(),
             MintDocCapability {
-                authorization,
                 scope,
                 rights,
+                subject: None,
             },
         )
         .await
@@ -42,7 +44,7 @@ async fn mint(
 }
 
 #[tokio::test]
-async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
+async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_caller_presents() {
     let node = Node::boot().await;
     let owner = node.writer("owner").await;
     let signer = actor(&node, "plugin", Rights::USE).await;
@@ -58,6 +60,8 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         write: BTreeSet::from([created.doc_id.clone()]),
         ..DocScope::default()
     };
+    // The authorization's `authority` decides the new handle's scope and rights and its subject
+    // is inherited from it (the owner); its `signer` only decides who signs the call.
     let bound = mint(
         &node,
         Authorization {
@@ -68,18 +72,18 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         Rights::USE | Rights::NARROW,
     )
     .await;
+    assert_eq!(bound.subject, Some(owner.actor.actor_id));
     assert_eq!(bound.issuer_id, node.docs_namespace.namespace_id);
-    assert_ne!(bound.issuer_id, signer.actor_id);
-    assert_ne!(bound.issuer_id, owner.actor_id);
-    assert_ne!(bound.issuer_id, node.docs_actor.actor_id);
+    assert_ne!(bound.issuer_id, signer.actor.actor_id);
+    assert_ne!(bound.issuer_id, owner.actor.actor_id);
+    assert_ne!(bound.issuer_id, node.docs_actor.actor.actor_id);
     let object: Value =
         serde_json::from_str(bound.object.strip_prefix("DocsRepo/scope/v2/").unwrap()).unwrap();
     assert_eq!(
         object,
         json!({
             "scope": scope,
-            "signer": signer.capability,
-            "originatingActor": owner.actor_id,
+            "originatingActor": owner.actor.actor_id,
         })
     );
     let attenuated = node
@@ -95,6 +99,7 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         .await
         .unwrap();
     assert_eq!(attenuated.object, bound.object);
+    assert_eq!(attenuated.subject, Some(owner.actor.actor_id));
     let rebound = mint(
         &node,
         Authorization {
@@ -105,26 +110,47 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         Rights::USE,
     )
     .await;
-    for (index, capability, expected_signer) in [
-        (0, bound.capability_id, &signer),
-        (1, attenuated.capability_id, &signer),
-        (2, rebound.capability_id, &owner),
-        (3, bound.capability_id, &signer),
+    assert_eq!(rebound.subject, Some(owner.actor.actor_id));
+    for (index, capability, signing, expected_signer) in [
+        (0, bound.capability_id, Some(signer.capability), &signer),
+        (
+            1,
+            attenuated.capability_id,
+            Some(signer.capability),
+            &signer,
+        ),
+        (2, rebound.capability_id, Some(owner.capability), &owner),
+        // Presented bare, a handle signs as its own subject.
+        (3, bound.capability_id, None, &owner),
     ] {
-        node.client()
-            .call(
-                RequestContext::root(),
-                WriteDatums {
-                    capability,
-                    command: None,
-                    doc_id: created.doc_id.clone(),
-                    mode: WriteMode::AtCurrent,
-                    set: BTreeMap::from([(key("main"), note(&format!("write {index}")))]),
-                    remove: BTreeSet::new(),
-                },
-            )
-            .await
-            .unwrap();
+        let write = WriteDatums {
+            capability,
+            command: None,
+            doc_id: created.doc_id.clone(),
+            mode: WriteMode::AtCurrent,
+            set: BTreeMap::from([(key("main"), note(&format!("write {index}")))]),
+            remove: BTreeSet::new(),
+        };
+        match signing {
+            Some(signer) => node
+                .client()
+                .call_with(
+                    RequestContext::root(),
+                    Authorization {
+                        authority: capability,
+                        signer,
+                    }
+                    .metadata(),
+                    write,
+                )
+                .await
+                .unwrap(),
+            None => node
+                .client()
+                .call(RequestContext::root(), write)
+                .await
+                .unwrap(),
+        };
         let read = node
             .client()
             .call(
@@ -147,8 +173,8 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         assert_eq!(evidence.len(), 1);
         match &evidence[0].result {
             SignatureEvidence::VerifiedSignature { evidence } => {
-                assert_eq!(evidence.claim.actor_uuid, expected_signer.actor_id);
-                assert_eq!(evidence.actor_public_key, expected_signer.public_key);
+                assert_eq!(evidence.claim.actor_uuid, expected_signer.actor.actor_id);
+                assert_eq!(evidence.actor_public_key, expected_signer.actor.public_key);
             }
             result => panic!("expected verified bound attribution, got {result:?}"),
         }
@@ -158,7 +184,7 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
             .access
             .check(
                 &RequestContext::root(),
-                signer.actor_id,
+                signer.actor.actor_id,
                 AccessRequest::Write(&created.doc_id),
             )
             .await
@@ -184,18 +210,20 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         assert_eq!(
             op(node
                 .client()
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    Authorization {
+                        authority: source,
+                        signer: owner.capability
+                    }
+                    .metadata(),
                     MintDocCapability {
-                        authorization: Authorization {
-                            authority: source,
-                            signer: owner.capability
-                        },
                         scope: DocScope {
                             read: BTreeSet::from([other.doc_id.clone()]),
                             ..DocScope::default()
                         },
                         rights: Rights::USE,
+                        subject: None,
                     }
                 )
                 .await),
@@ -231,6 +259,175 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
             )
             .await),
         Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
+/// The regression ADR 037 question 2 rules out: a holder of a DELEGATE handle naming any actor it
+/// likes as the subject of a new handle, then writing through it so the datum is signed as that
+/// actor. A handle is trusted for its own subject and that subject's descendants, nothing else.
+#[tokio::test]
+async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() {
+    let node = Node::boot().await;
+    let owner = actor(
+        &node,
+        "owner",
+        Rights::USE | Rights::NARROW | Rights::DELEGATE | Rights::MINT_CHILD,
+    )
+    .await;
+    node.grant(
+        &owner,
+        LedgerAccess::object(AccessRequest::Create {
+            placement: PLACEMENT,
+        }),
+    )
+    .await;
+    let victim = actor(&node, "victim", Rights::USE).await;
+    let agent = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: owner.capability,
+                path: "owner/agent".into(),
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    let created = node
+        .create(&owner, "create", [(key("main"), note("before"))])
+        .await
+        .unwrap();
+    let scope = DocScope {
+        write: BTreeSet::from([created.doc_id.clone()]),
+        ..DocScope::default()
+    };
+    let delegate = mint(
+        &node,
+        Authorization::identity(owner.capability),
+        scope.clone(),
+        Rights::USE | Rights::NARROW | Rights::DELEGATE,
+    )
+    .await;
+    assert_eq!(delegate.subject, Some(owner.actor.actor_id));
+
+    // Neither the owner's identity nor its DELEGATE handle can name a sibling, the docs
+    // service's own actor or the operator.
+    for named in [
+        victim.actor.actor_id,
+        node.docs_actor.actor.actor_id,
+        node.authority.service.operator_uuid(),
+    ] {
+        for authority in [owner.capability, delegate.capability_id] {
+            assert_eq!(
+                op(node
+                    .client()
+                    .call_with(
+                        RequestContext::root(),
+                        Authorization::identity(authority).metadata(),
+                        MintDocCapability {
+                            scope: scope.clone(),
+                            rights: Rights::USE,
+                            subject: Some(named),
+                        },
+                    )
+                    .await),
+                Err(DocsError::Authority(AuthorityServiceError::Escalation)),
+                "naming {named}"
+            );
+        }
+    }
+
+    // The attribution stays the owner's however the handle is presented: a signer that is not
+    // a live handle with USE is refused outright, and a handle without USE is not a signer.
+    let no_use = mint(
+        &node,
+        Authorization::identity(delegate.capability_id),
+        scope.clone(),
+        Rights::NARROW,
+    )
+    .await;
+    for signer in [CapId::new_random(), no_use.capability_id] {
+        assert_eq!(
+            op(node
+                .client()
+                .call_with(
+                    RequestContext::root(),
+                    Authorization {
+                        authority: delegate.capability_id,
+                        signer,
+                    }
+                    .metadata(),
+                    WriteDatums {
+                        capability: delegate.capability_id,
+                        command: None,
+                        doc_id: created.doc_id.clone(),
+                        mode: WriteMode::AtCurrent,
+                        set: BTreeMap::from([(key("main"), note("forged"))]),
+                        remove: BTreeSet::new(),
+                    },
+                )
+                .await),
+            Err(DocsError::Denied)
+        );
+    }
+    node.client()
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: delegate.capability_id,
+                command: None,
+                doc_id: created.doc_id.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(key("main"), note("by the owner"))]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let signed_by = |evidence: &[DatumClaimEvidence]| match &evidence[0].result {
+        SignatureEvidence::VerifiedSignature { evidence } => evidence.claim.actor_uuid,
+        result => panic!("expected a verified signature, got {result:?}"),
+    };
+    assert_eq!(
+        signed_by(&node.claims(&created.doc_id, &key("main")).await),
+        owner.actor.actor_id
+    );
+
+    // A descendant is the owner's to name, and the handle then signs as that descendant.
+    let introduced = op(node
+        .client()
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(delegate.capability_id).metadata(),
+            MintDocCapability {
+                scope,
+                rights: Rights::USE,
+                subject: Some(agent.actor.actor_id),
+            },
+        )
+        .await)
+    .unwrap();
+    assert_eq!(introduced.subject, Some(agent.actor.actor_id));
+    node.client()
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: introduced.capability_id,
+                command: None,
+                doc_id: created.doc_id.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(key("main"), note("by the agent"))]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        signed_by(&node.claims(&created.doc_id, &key("main")).await),
+        agent.actor.actor_id
     );
     node.stop().await;
 }
@@ -297,6 +494,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                     .unwrap()
                 ),
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -304,7 +502,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
     let namespace = node
         .authority
         .service
-        .open_namespace(owner.actor_id)
+        .open_namespace(owner.actor.actor_id)
         .await
         .unwrap();
     let wrong = node
@@ -318,6 +516,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 dependencies: Vec::new(),
                 object: bound.object,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -355,6 +554,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                         capability,
                         doc_id: created.doc_id.clone(),
                         at: At::Current,
+                        with_authors: false,
                     }
                 )
                 .await),
@@ -480,7 +680,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                     }
                 )
                 .await,
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         ));
     }
     node.stop().await;
@@ -532,7 +732,7 @@ impl DocAccess for InterruptedPlacement {
 async fn assert_doc_access(
     access: &LedgerAccess,
     receipts: &[WriteReceipt],
-    subjects: &[(&Actor, bool)],
+    subjects: &[(&OpenedActor, bool)],
 ) {
     for receipt in receipts {
         for request in [
@@ -542,7 +742,7 @@ async fn assert_doc_access(
             for &(subject, expected) in subjects {
                 assert_eq!(
                     access
-                        .check(&RequestContext::root(), subject.actor_id, request)
+                        .check(&RequestContext::root(), subject.actor.actor_id, request)
                         .await
                         .unwrap(),
                     expected
@@ -550,6 +750,80 @@ async fn assert_doc_access(
             }
         }
     }
+}
+
+/// The create and branch requests the recovery test interrupts, each with a handle minted for
+/// the owner (the plugin signs only by being presented as the call's signer), and the scopes the
+/// handles were minted for.
+async fn bound_creation_requests(
+    node: &Node,
+    owner: &OpenedActor,
+    signer: &OpenedActor,
+    origin: &WriteReceipt,
+) -> (DocScope, DocScope, CreateDoc, BranchDoc) {
+    let create_scope = DocScope {
+        create: BTreeSet::from([PLACEMENT.into()]),
+        ..DocScope::default()
+    };
+    let source = mint(
+        node,
+        Authorization::identity(owner.capability),
+        create_scope.clone(),
+        Rights::USE | Rights::NARROW,
+    )
+    .await;
+    let bound = mint(
+        node,
+        Authorization {
+            authority: source.capability_id,
+            signer: signer.capability,
+        },
+        create_scope.clone(),
+        Rights::USE | Rights::NARROW,
+    )
+    .await;
+    let attenuated = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            AttenuateCapability {
+                capability: bound.capability_id,
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    let create = CreateDoc {
+        capability: attenuated.capability_id,
+        command: "bound-create".to_owned().try_into().unwrap(),
+        placement: PLACEMENT.into(),
+        datums: BTreeMap::from([(key("main"), note("content"))]),
+    };
+    let branch_scope = DocScope {
+        write: BTreeSet::from([origin.doc_id.clone()]),
+        ..create_scope.clone()
+    };
+    let branch_cap = mint(
+        node,
+        Authorization {
+            authority: owner.capability,
+            signer: signer.capability,
+        },
+        branch_scope.clone(),
+        Rights::USE,
+    )
+    .await;
+    let branch = BranchDoc {
+        capability: branch_cap.capability_id,
+        command: "bound-branch".to_owned().try_into().unwrap(),
+        doc_id: origin.doc_id.clone(),
+        at: At::Current,
+        path: "/plugin".into(),
+        stealth: false,
+        placement: PLACEMENT.into(),
+    };
+    (create_scope, branch_scope, create, branch)
 }
 
 #[tokio::test]
@@ -574,77 +848,36 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
         entered,
     });
     node.start_with(access, None).await.unwrap();
-    let create_scope = DocScope {
-        create: BTreeSet::from([PLACEMENT.into()]),
-        ..DocScope::default()
-    };
-    let source = mint(
-        &node,
-        Authorization::identity(owner.capability),
-        create_scope.clone(),
-        Rights::USE | Rights::NARROW,
-    )
-    .await;
-    let bound = mint(
-        &node,
+    let (create_scope, branch_scope, mut create, mut branch) =
+        bound_creation_requests(&node, &owner, &signer, &origin).await;
+    // Each handle is bound to the owner; the plugin signs because the call presents the plugin's
+    // handle as its signer.
+    let through = |handle: CapId, signer: CapId| {
         Authorization {
-            authority: source.capability_id,
-            signer: signer.capability,
-        },
-        create_scope.clone(),
-        Rights::USE | Rights::NARROW,
-    )
-    .await;
-    let attenuated = node
-        .authority
-        .client
-        .call(
-            RequestContext::root(),
-            AttenuateCapability {
-                capability: bound.capability_id,
-                rights: Rights::USE,
-            },
-        )
-        .await
-        .unwrap();
-    let mut create = CreateDoc {
-        capability: attenuated.capability_id,
-        command: "bound-create".to_owned().try_into().unwrap(),
-        placement: PLACEMENT.into(),
-        datums: BTreeMap::from([(key("main"), note("content"))]),
-    };
-    let branch_scope = DocScope {
-        write: BTreeSet::from([origin.doc_id.clone()]),
-        ..create_scope.clone()
-    };
-    let branch_cap = mint(
-        &node,
-        Authorization {
-            authority: owner.capability,
-            signer: signer.capability,
-        },
-        branch_scope.clone(),
-        Rights::USE,
-    )
-    .await;
-    let mut branch = BranchDoc {
-        capability: branch_cap.capability_id,
-        command: "bound-branch".to_owned().try_into().unwrap(),
-        doc_id: origin.doc_id.clone(),
-        at: At::Current,
-        path: "/plugin".into(),
-        stealth: false,
-        placement: PLACEMENT.into(),
+            authority: handle,
+            signer,
+        }
+        .metadata()
     };
     let creating = {
         let client = node.client().clone();
         let request = create.clone();
-        tokio::spawn(async move { client.call(RequestContext::root(), request).await })
+        let metadata = through(request.capability, signer.capability);
+        tokio::spawn(async move {
+            client
+                .call_with(RequestContext::root(), metadata, request)
+                .await
+        })
     };
     let branching = {
         let client = node.client().clone();
         let request = branch.clone();
-        tokio::spawn(async move { client.call(RequestContext::root(), request).await })
+        let metadata = through(request.capability, signer.capability);
+        tokio::spawn(async move {
+            client
+                .call_with(RequestContext::root(), metadata, request)
+                .await
+        })
     };
     let entered = [
         placements.recv().await.unwrap(),
@@ -660,7 +893,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
             &rows[0],
             Kind::Create,
             Detail::Create {
-                owner_id: Some(owner.actor_id),
+                owner_id: Some(owner.actor.actor_id),
             },
         ),
         (
@@ -670,13 +903,13 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
                 origin: origin.doc_id.clone(),
                 path: branch.path.clone(),
                 stealth: branch.stealth,
-                owner_id: Some(owner.actor_id),
+                owner_id: Some(owner.actor.actor_id),
             },
         ),
     ] {
         assert_eq!(
             (row.kind, row.actor, row.state, row.detail.as_ref()),
-            (kind, signer.actor_id, State::Committed, Some(&detail))
+            (kind, signer.actor.actor_id, State::Committed, Some(&detail))
         );
         assert_eq!(row.placement.as_deref(), Some(PLACEMENT));
         assert!(!row.heads.is_empty());
@@ -692,7 +925,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
             .iter()
             .map(|receipt| {
                 (
-                    Some(owner.actor_id),
+                    Some(owner.actor.actor_id),
                     receipt.doc_id.clone(),
                     PLACEMENT.to_owned(),
                 )
@@ -708,7 +941,11 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     assert_eq!(
         op(node
             .client()
-            .call(RequestContext::root(), create.clone())
+            .call_with(
+                RequestContext::root(),
+                through(create.capability, signer.capability),
+                create.clone()
+            )
             .await),
         Err(DocsError::CommandInFlight {
             command: create.command.clone(),
@@ -717,26 +954,34 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     assert_eq!(
         op(node
             .client()
-            .call(RequestContext::root(), branch.clone())
+            .call_with(
+                RequestContext::root(),
+                through(branch.capability, signer.capability),
+                branch.clone()
+            )
             .await),
         Err(DocsError::CommandInFlight {
             command: branch.command.clone(),
         })
     );
     let other_owner = node.writer("other-owner").await;
-    for authorization in [
-        Authorization::identity(owner.capability),
-        Authorization {
-            authority: other_owner.capability,
-            signer: signer.capability,
-        },
+    for (authorization, presenting) in [
+        (Authorization::identity(owner.capability), owner.capability),
+        (
+            Authorization {
+                authority: other_owner.capability,
+                signer: signer.capability,
+            },
+            signer.capability,
+        ),
     ] {
         let different = mint(&node, authorization, create_scope.clone(), Rights::USE).await;
         assert_eq!(
             op(node
                 .client()
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    through(different.capability_id, presenting),
                     CreateDoc {
                         capability: different.capability_id,
                         ..create.clone()
@@ -779,14 +1024,22 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     branch.capability = refreshed.capability_id;
     assert_eq!(
         node.client()
-            .call(RequestContext::root(), create)
+            .call_with(
+                RequestContext::root(),
+                through(create.capability, signer.capability),
+                create
+            )
             .await
             .unwrap(),
         receipts[0]
     );
     assert_eq!(
         node.client()
-            .call(RequestContext::root(), branch)
+            .call_with(
+                RequestContext::root(),
+                through(branch.capability, signer.capability),
+                branch
+            )
             .await
             .unwrap(),
         receipts[1]
@@ -956,14 +1209,16 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                     },
                 )
                 .await),
-            Ok(vec![QueriedDatumRef {
-                origin_doc_id: first_origin.clone(),
-                origin_datum_key: key("main"),
-                path: "/link".to_owned(),
-                target_doc_id: selector.clone(),
-                target_datum_key: key("main"),
-                ref_heads: Vec::new(),
-            }]),
+            Ok(QueriedDatumRefs {
+                refs: vec![QueriedDatumRef {
+                    origin_doc_id: first_origin.clone(),
+                    origin_datum_key: key("main"),
+                    path: "/link".to_owned(),
+                    target_doc_id: selector.clone(),
+                    target_datum_key: key("main"),
+                    ref_heads: Vec::new(),
+                }]
+            }),
         );
         expected_calls.extend([BTreeSet::from([selector.clone()]), policy.origins.clone()]);
     }
@@ -992,7 +1247,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
             },
         ] {
             let expected = if drawer_id.is_some() {
-                Ok(Vec::new())
+                Ok(QueriedDatumRefs { refs: Vec::new() })
             } else {
                 Err(DocsError::Denied)
             };
@@ -1082,7 +1337,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     let mut dependencies: Vec<_> = node
         .access
         .grants
-        .matching(&context, owner.actor_id, &objects)
+        .matching(&context, owner.actor.actor_id, &objects)
         .await
         .unwrap()
         .into_iter()
@@ -1093,7 +1348,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     assert_eq!(dependencies.len(), objects.len());
     assert_eq!(
         node.access
-            .prove(&context, owner.actor_id, &scope)
+            .prove(&context, owner.actor.actor_id, &scope)
             .await
             .unwrap(),
         dependencies
@@ -1102,7 +1357,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     overlapping.read.insert(write_doc.clone());
     assert_eq!(
         node.access
-            .prove(&context, owner.actor_id, &overlapping)
+            .prove(&context, owner.actor.actor_id, &overlapping)
             .await
             .unwrap(),
         dependencies
@@ -1141,7 +1396,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
         .await;
         node.access
             .grants
-            .revoke(&context, owner.actor_id, std::slice::from_ref(object))
+            .revoke(&context, owner.actor.actor_id, std::slice::from_ref(object))
             .await
             .unwrap();
         for capability in [issued.capability_id, narrowed.capability_id] {
@@ -1165,18 +1420,19 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
         for rights in [Rights::empty(), Rights::NARROW] {
             node.access
                 .grants
-                .grant(&context, owner.actor_id, object.clone(), rights, None)
+                .grant(&context, owner.actor.actor_id, object.clone(), rights, None)
                 .await
                 .unwrap();
             assert_eq!(
                 op(node
                     .client()
-                    .call(
+                    .call_with(
                         context.child(),
+                        authorization.metadata(),
                         MintDocCapability {
-                            authorization,
                             scope: scope.clone(),
                             rights: Rights::USE,
+                            subject: None,
                         },
                     )
                     .await),
@@ -1194,8 +1450,8 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
         node.capability(&owner, unsupported.clone()).await,
         Err(DocsError::Denied)
     );
-    let mut expected = vec![(owner.actor_id, scope); objects.len() * 3];
-    expected.push((owner.actor_id, unsupported));
+    let mut expected = vec![(owner.actor.actor_id, scope); objects.len() * 3];
+    expected.push((owner.actor.actor_id, unsupported));
     assert_eq!(*policy.proofs.lock().unwrap(), expected);
     node.stop().await;
 }
@@ -1222,12 +1478,13 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
         assert_eq!(
             op(node
                 .client()
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    Authorization::identity(source.capability).metadata(),
                     MintDocCapability {
-                        authorization: Authorization::identity(source.capability),
                         scope: scope.clone(),
                         rights,
+                        subject: None,
                     }
                 )
                 .await),
@@ -1240,7 +1497,7 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
         .grants
         .revoke(
             &RequestContext::root(),
-            owner.actor_id,
+            owner.actor.actor_id,
             std::slice::from_ref(&object),
         )
         .await
@@ -1321,13 +1578,13 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
         .docs
         .as_ref()
         .unwrap()
-        .mint_inspection_handle(created.doc_id.clone(), owner.capability)
+        .mint_inspection_handle(created.doc_id.clone(), node.docs_actor.actor.actor_id)
         .await
         .unwrap();
     let namespace = node.docs_namespace;
     let access = Arc::clone(&node.access);
     let gates = access
-        .prove(&context, owner.actor_id, &scope)
+        .prove(&context, owner.actor.actor_id, &scope)
         .await
         .unwrap();
     assert_eq!(gates.len(), 3);
@@ -1401,7 +1658,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
             Err(DocsError::Context(ContextError::Cancelled))
         );
         assert_eq!(
-            docs.mint_inspection_handle(created.doc_id.clone(), owner.capability)
+            docs.mint_inspection_handle(created.doc_id.clone(), node.docs_actor.actor.actor_id)
                 .await,
             Err(DocsError::Context(ContextError::Cancelled))
         );
@@ -1437,7 +1694,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
                     },
                 )
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         );
@@ -1448,13 +1705,13 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
                 .client
                 .call(
                     context.child(),
-                    ResolveActor {
-                        capability: actor.capability,
+                    big_cabinet_core::authority::ResolveActor {
+                        actor_id: actor.actor.actor_id,
                     },
                 )
                 .await
                 .unwrap(),
-            *actor
+            actor.actor
         );
     }
     node.docs.take();
@@ -1472,13 +1729,13 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
     node.start().await.unwrap();
     let fresh_gates = node
         .access
-        .prove(&context, owner.actor_id, &scope)
+        .prove(&context, owner.actor.actor_id, &scope)
         .await
         .unwrap();
     assert_eq!(fresh_gates.len(), gates.len());
     assert!(fresh_gates.iter().all(|gate| !gates.contains(gate)));
     assert!(matches!(
-        access.prove(&context, owner.actor_id, &scope).await,
+        access.prove(&context, owner.actor.actor_id, &scope).await,
         Err(AccessError::Refused(_))
     ));
     let fresh = node.capability(&owner, scope).await.unwrap();
@@ -1494,7 +1751,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
         .docs
         .as_ref()
         .unwrap()
-        .mint_inspection_handle(created.doc_id.clone(), owner.capability)
+        .mint_inspection_handle(created.doc_id.clone(), node.docs_actor.actor.actor_id)
         .await
         .unwrap();
     assert_ne!(fresh_inspection.capability_id, inspection.capability_id);
@@ -1516,7 +1773,7 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
                     },
                 )
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         );
@@ -1556,8 +1813,34 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
         Target::TemporaryGrant,
     ] {
         let node = Node::boot().await;
-        let owner = node.writer("owner").await;
-        let signer = actor(&node, "plugin", Rights::USE).await;
+        let owner = actor(
+            &node,
+            "owner",
+            Rights::USE | Rights::NARROW | Rights::DELEGATE | Rights::MINT_CHILD,
+        )
+        .await;
+        node.grant(
+            &owner,
+            LedgerAccess::object(AccessRequest::Create {
+                placement: PLACEMENT,
+            }),
+        )
+        .await;
+        // The plugin is the owner's own descendant, the only kind of actor the owner can
+        // introduce a handle to.
+        let signer = node
+            .authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: owner.capability,
+                    path: "owner/plugin".into(),
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .unwrap();
         let created = node
             .create(&owner, "create", [(key("main"), note("unchanged"))])
             .await
@@ -1569,7 +1852,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
                 .grants
                 .revoke(
                     &RequestContext::root(),
-                    owner.actor_id,
+                    owner.actor.actor_id,
                     std::slice::from_ref(&object),
                 )
                 .await
@@ -1578,7 +1861,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
                 .grants
                 .grant(
                     &RequestContext::root(),
-                    owner.actor_id,
+                    owner.actor.actor_id,
                     object.clone(),
                     Rights::USE,
                     Some(source.capability),
@@ -1597,19 +1880,24 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             &node,
             Authorization::identity(owner.capability),
             scope.clone(),
-            Rights::USE | Rights::NARROW,
+            Rights::USE | Rights::NARROW | Rights::DELEGATE,
         )
         .await;
-        let narrowed = mint(
-            &node,
-            Authorization {
-                authority: capability.capability_id,
-                signer: signer.capability,
-            },
-            scope,
-            Rights::USE | Rights::NARROW,
-        )
-        .await;
+        // Introduced to the plugin, so it lives only as long as the plugin does.
+        let narrowed = node
+            .client()
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(capability.capability_id).metadata(),
+                MintDocCapability {
+                    scope,
+                    rights: Rights::USE | Rights::NARROW,
+                    subject: Some(signer.actor.actor_id),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(narrowed.subject, Some(signer.actor.actor_id));
         let attenuated = node
             .authority
             .client
@@ -1642,7 +1930,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             Target::Grant => {
                 node.access
                     .grants
-                    .revoke(&RequestContext::root(), owner.actor_id, &[object])
+                    .revoke(&RequestContext::root(), owner.actor.actor_id, &[object])
                     .await
                     .unwrap();
                 None
@@ -1663,7 +1951,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
         }
         assert_eq!(
             poll.page(0).await,
-            Err(ClientError::Operation(DocsError::Denied))
+            Err(ClientError::Method(DocsError::Denied))
         );
         node.stop().await;
     }

@@ -84,9 +84,9 @@ nodule identity, the view assembles:
 
 The Lexicon names and key spellings are:
 
-- `org.example.daybook.nodule.install/<plug_id>` (`NoduleInstall`)
-- `org.example.daybook.nodule.settings/<plug_id>` (`NoduleSettings`)
-- `org.example.daybook.nodule.grants/<plug_id>` (`NoduleGrants`)
+- `org.example.daybook.nodule.install/<cartridge_id>` (`NoduleInstall`)
+- `org.example.daybook.nodule.settings/<cartridge_id>` (`NoduleSettings`)
+- `org.example.daybook.nodule.grants/<cartridge_id>` (`NoduleGrants`)
 
 All three categories coexist with the drawer descriptor, registry/bookkeeping
 values, and other services' configuration. The store owns only its declared key
@@ -287,6 +287,6 @@ relay sponsorship, the durable cursored management feed, and multi-provider pins
 Catalog hosting and GUI are deferred for scope, not technically blocked by
 big_blobs/big_tasks. Existing install envelopes are enough for this PR.
 
-See [ADR 027](../adrs/027-plugs-nodules-and-operation-contracts.md) for the larger
+See [ADR 027](../adrs/027-cartridges-nodules-and-operation-contracts.md) for the larger
 runtime contract. This scratch note records the agreed design and implementation
 for datum-backed nodule configuration and host reconciliation.

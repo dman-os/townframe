@@ -4,7 +4,7 @@
 //! uses for blobs, so the same bytes carry the same digest once they live in a plug), so a launcher can pin what
 //! it installed and a shell can verify what it fetched before an engine ever sees it.
 //!
-//! STAND-IN: until `big_plugs` delivers and manages manifests, a package on disk is two
+//! STAND-IN: until `big_cartridges` delivers and manages manifests, a package on disk is two
 //! sibling files, `<name>.component.wasm` and `<name>.manifest.json` (the serialized
 //! manifest, emitted from the micro's manifest crate), and launchers pair them by hand.
 //! Nothing here is the final distribution format; OCI packaging is not Clay's job.
@@ -129,7 +129,7 @@ mod tests {
     }
 
     /// The sidecar is flat JSON (the manifest's members beside `id` and `package_version`), the
-    /// shape `big_plugs`' micro importer reads; the manifest itself carries neither.
+    /// shape `big_cartridges`' micro importer reads; the manifest itself carries neither.
     #[test]
     fn sidecar_json_is_flat_and_the_manifest_carries_no_identity() {
         let json = serde_json::to_value(sidecar()).unwrap();

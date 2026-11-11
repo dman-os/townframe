@@ -17,7 +17,7 @@ never at decode, storage, or projection.
   macro refuses that combination because it would reject what it claims to preserve.
 - **Field shapes are recursive.** Every field in a `#[macros::datum]` object or union must
   implement `DatumShape`, including nested metadata records, container elements, map keys
-  and values, and tuple members. Apply the macro to owned nested records too: an outer
+  and values. Apply the macro to owned nested records too: an outer
   `Extra` cannot preserve unknown members inside an undeclared inner record. Primitives,
   lossless JSON values, Cabinet wire leaves (including `jiff::Timestamp`, `ObjKey` and
   `automerge::ChangeHash`) and standard containers have built-in impls; containers require

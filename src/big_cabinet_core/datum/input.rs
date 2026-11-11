@@ -17,6 +17,7 @@ use super::value::decode_base64;
 use super::value::record_key;
 use super::value::valid_tag;
 use super::value::validate_data_model;
+use crate::reference::LEXICON_REF;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -28,6 +29,11 @@ mod integers;
 
 pub(super) const KEYWORD: &str = "x-cabinet-lexicon";
 pub(super) const DATA: &str = "x-cabinet-lexicon-data";
+/// Stamped on every compiled definition: the Lexicon identity (`<nsid>#<def>`, or the bare NSID for
+/// `main`) it was compiled from. Compiled names are positional (`L0`, `L1`, …), so this is how a
+/// walker that reached a definition through `$ref` knows which Lexicon type the position declares;
+/// the reference index finds `org.example.daybook.defs#datumRef` positions by it.
+pub(super) const DEF: &str = "x-cabinet-lexicon-def";
 
 #[derive(Debug, thiserror::Error)]
 pub enum LexiconAdmissionError {
@@ -58,6 +64,8 @@ fn invalid(path: &str, reason: impl Into<String>) -> LexiconAdmissionError {
 }
 
 impl Bundle<'_> {
+    /// [`admit_lexicon`] with this bundle's declaration of `tag` as the supplement. A bundle that
+    /// declares anything must declare `tag`.
     pub fn validate_lexicon(
         &self,
         tag: &str,
@@ -65,18 +73,140 @@ impl Bundle<'_> {
         carried: &[&Value],
     ) -> Result<CompiledSchema> {
         self.validate()?;
-        if !self.definitions().is_empty() && !self.plug.datums.iter().any(|datum| datum.id == tag) {
+        if !self.definitions().is_empty()
+            && !self.cartridge.datums.iter().any(|datum| datum.id == tag)
+        {
             return Err(invalid(
                 "supplement",
                 format!("bundle does not declare datum `{tag}`"),
             ));
         }
-        let mut compiler = Compiler {
+        let supplement = self
+            .cartridge
+            .datums
+            .iter()
+            .find(|datum| datum.id == tag)
+            .map(|datum| {
+                serde_json::to_value(
+                    self.document(&datum.name)
+                        .expect("validated datum definition"),
+                )
+                .expect("schema serializes")
+            });
+        admit_lexicon(tag, primary, carried, supplement.as_ref())
+    }
+}
+
+/// Compiles the datum `tag`'s published Lexicon `primary`, with `carried` resolving the references
+/// it makes, into the schema its stored values are read against.
+///
+/// `supplement` is the datum's sidecar JSON Schema document (ADR 021 §3), in the form
+/// [`Bundle::document`] renders: `$ref` to the datum's definition and every definition it reaches
+/// under `$defs`. It carries what a Lexicon cannot say, the `x-automerge` storage forms above all, and
+/// is overlaid on the Lexicon's definitions: it may narrow them, never admit a value the Lexicon
+/// refuses. It may come from a peer's cartridge, so its shape and size are checked, not assumed.
+/// Without one, every position keeps the plain JSON kind its Lexicon states.
+pub fn admit_lexicon(
+    tag: &str,
+    primary: &Value,
+    carried: &[&Value],
+    supplement: Option<&Value>,
+) -> Result<CompiledSchema> {
+    let mut compiler = Compiler::index(
+        std::iter::once(primary).chain(carried.iter().copied()),
+        false,
+    )?;
+    if primary.get("id").and_then(Value::as_str) != Some(tag) {
+        return Err(invalid(
+            "id",
+            format!("primary Lexicon must identify `{tag}`"),
+        ));
+    }
+    compiler.compile_definitions()?;
+    let root = compiler
+        .names
+        .get(&(tag.to_owned(), "main".to_owned()))
+        .ok_or_else(|| invalid("defs.main", "the datum requires a main definition"))?
+        .clone();
+    let main = &primary["defs"]["main"];
+    if !matches!(main["type"].as_str(), Some("record" | "object")) {
+        return Err(invalid(
+            "defs.main.type",
+            "a datum must have record or object main",
+        ));
+    }
+    let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
+    if let Some(supplement) = supplement {
+        bound(supplement)?;
+        let source = supplement
+            .get("$defs")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                invalid(
+                    "supplement.$defs",
+                    "a supplement states its definitions under `$defs`",
+                )
+            })?;
+        check_supplement(supplement, source, "supplement")?;
+        CompiledSchema::check_storage_declarations(supplement)
+            .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))?;
+        let mut overlay = Overlay {
+            source,
+            base: compiler.definitions.clone(),
+            definitions: &mut compiler.definitions,
+            paired: HashMap::new(),
+        };
+        overlay.apply(&mut document, supplement, "supplement", 0)?;
+    }
+    document
+        .as_object_mut()
+        .expect("compiled root")
+        .insert("$defs".to_owned(), Value::Object(compiler.definitions));
+    CompiledSchema::compile(document)
+        .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))
+}
+
+fn bound(value: &Value) -> Result<()> {
+    let mut pending = vec![(value, 0)];
+    let mut visits = 0;
+    while let Some((value, depth)) = pending.pop() {
+        visits += 1;
+        if depth > 128 || visits > 100_000 {
+            return Err(invalid("$", "schema resource limit exceeded"));
+        }
+        match value {
+            Value::Object(object) => {
+                pending.extend(object.values().map(|value| (value, depth + 1)))
+            }
+            Value::Array(array) => pending.extend(array.iter().map(|value| (value, depth + 1))),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+struct Compiler<'a> {
+    /// Whether a reference to a file that is not carried is an open object rather than an
+    /// error: a method's Lexicon names datum definitions that live in other files, which the
+    /// bundle binding the providers resolves, as admission leaves them to it.
+    open_external: bool,
+    files: BTreeMap<String, &'a Value>,
+    names: BTreeMap<(String, String), String>,
+    definitions: Map<String, Value>,
+}
+
+impl<'a> Compiler<'a> {
+    /// Frame-checks and indexes the files, the first being the one whose definitions the caller
+    /// is about to use. With `operations`, a file's `main` may be a method signature
+    /// (`query`, `procedure`, `subscription`), which is skipped rather than indexed.
+    fn index(files: impl Iterator<Item = &'a Value>, operations: bool) -> Result<Self> {
+        let mut compiler = Self {
+            open_external: operations,
             files: BTreeMap::new(),
             names: BTreeMap::new(),
             definitions: Map::new(),
         };
-        for file in std::iter::once(primary).chain(carried.iter().copied()) {
+        for file in files {
             bound(file)?;
             let object = file
                 .as_object()
@@ -130,6 +260,14 @@ impl Bundle<'_> {
                         format!("`{kind}` cannot be a named definition"),
                     ));
                 }
+                if operations
+                    && name == "main"
+                    && matches!(kind, "query" | "procedure" | "subscription")
+                {
+                    // A method's main is its signature, not a data definition: it has no
+                    // representation to compile and no reference may name it.
+                    continue;
+                }
                 if kind == "record" && name != "main" {
                     return Err(invalid(name, "a record must be the main definition"));
                 }
@@ -139,15 +277,16 @@ impl Bundle<'_> {
                     .insert((id.to_owned(), name.clone()), format!("L{index}"));
             }
         }
-        if primary.get("id").and_then(Value::as_str) != Some(tag) {
-            return Err(invalid(
-                "id",
-                format!("primary Lexicon must identify `{tag}`"),
-            ));
-        }
-        let names = compiler.names.clone();
+        Ok(compiler)
+    }
+}
+
+impl Compiler<'_> {
+    /// Compiles every indexed data definition into [`Compiler::definitions`].
+    fn compile_definitions(&mut self) -> Result<()> {
+        let names = self.names.clone();
         for ((id, name), key) in names {
-            let definition = &compiler.files[&id]["defs"][&name];
+            let definition = &self.files[&id]["defs"][&name];
             if definition["type"] == "token" {
                 let object = definition
                     .as_object()
@@ -161,78 +300,17 @@ impl Bundle<'_> {
                 }
                 continue;
             }
-            let compiled = compiler.position(&id, definition, &format!("{id}#{name}"), 0)?;
-            compiler.definitions.insert(key.clone(), compiled.clone());
+            let mut compiled = self.position(&id, definition, &format!("{id}#{name}"), 0)?;
+            compiled[DEF] = Value::from(identity(&id, &name));
+            self.definitions.insert(key.clone(), compiled.clone());
             if definition["type"] == "object" {
                 let mut tagged = compiled;
                 add_tag(&mut tagged, &identity(&id, &name));
-                compiler.definitions.insert(format!("T{key}"), tagged);
+                self.definitions.insert(format!("T{key}"), tagged);
             }
         }
-        let root = compiler
-            .names
-            .get(&(tag.to_owned(), "main".to_owned()))
-            .ok_or_else(|| invalid("defs.main", "the datum requires a main definition"))?
-            .clone();
-        let main = &primary["defs"]["main"];
-        if !matches!(main["type"].as_str(), Some("record" | "object")) {
-            return Err(invalid(
-                "defs.main.type",
-                "a datum must have record or object main",
-            ));
-        }
-        let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
-        if let Some(datum) = self.plug.datums.iter().find(|datum| datum.id == tag) {
-            let supplement = serde_json::to_value(
-                self.document(&datum.name)
-                    .expect("validated datum definition"),
-            )
-            .expect("schema serializes");
-            bound(&supplement)?;
-            let source = supplement["$defs"].as_object().expect("bundle definitions");
-            check_supplement(&supplement, source, "supplement")?;
-            CompiledSchema::check_storage_declarations(&supplement)
-                .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))?;
-            let mut overlay = Overlay {
-                source,
-                base: compiler.definitions.clone(),
-                definitions: &mut compiler.definitions,
-                paired: HashMap::new(),
-            };
-            overlay.apply(&mut document, &supplement, "supplement", 0)?;
-        }
-        document
-            .as_object_mut()
-            .expect("compiled root")
-            .insert("$defs".to_owned(), Value::Object(compiler.definitions));
-        CompiledSchema::compile(document)
-            .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))
+        Ok(())
     }
-}
-
-fn bound(value: &Value) -> Result<()> {
-    let mut pending = vec![(value, 0)];
-    let mut visits = 0;
-    while let Some((value, depth)) = pending.pop() {
-        visits += 1;
-        if depth > 128 || visits > 100_000 {
-            return Err(invalid("$", "schema resource limit exceeded"));
-        }
-        match value {
-            Value::Object(object) => {
-                pending.extend(object.values().map(|value| (value, depth + 1)))
-            }
-            Value::Array(array) => pending.extend(array.iter().map(|value| (value, depth + 1))),
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-struct Compiler<'a> {
-    files: BTreeMap<String, &'a Value>,
-    names: BTreeMap<(String, String), String>,
-    definitions: Map<String, Value>,
 }
 
 impl Compiler<'_> {
@@ -258,6 +336,16 @@ impl Compiler<'_> {
             return Err(invalid(path, "a token has no data representation"));
         }
         Ok((key.clone(), identity(file, name), kind.to_owned()))
+    }
+
+    /// The identity of the definition `reference` names when it is in a file that is not carried
+    /// and such references are open; `None` when it resolves (or is an error to resolve).
+    fn open_target(&self, id: &str, reference: &str) -> Option<String> {
+        if !self.open_external || reference.starts_with('#') {
+            return None;
+        }
+        let (file, name) = reference.split_once('#').unwrap_or((reference, "main"));
+        (file != id && !self.files.contains_key(file)).then(|| identity(file, name))
     }
 
     fn position(&self, id: &str, value: &Value, path: &str, depth: usize) -> Result<Value> {
@@ -295,6 +383,9 @@ impl Compiler<'_> {
             }
             "ref" => {
                 let target = object["ref"].as_str().expect("checked ref");
+                if self.open_target(id, target).is_some() {
+                    return Ok(json!({"type": "object"}));
+                }
                 let (key, _, _) = self.target(id, target, path)?;
                 Ok(json!({"$ref": format!("#/$defs/{key}")}))
             }
@@ -354,6 +445,13 @@ impl Compiler<'_> {
         let mut tags = BTreeSet::new();
         for reference in refs {
             let reference = reference.as_str().expect("checked union ref");
+            if let Some(tag) = self.open_target(id, reference) {
+                if !tags.insert(tag.clone()) {
+                    return Err(invalid(path, "duplicate union variant"));
+                }
+                branches.push(json!({"type": "object", "properties": {"$type": {"const": tag}}, "required": ["$type"]}));
+                continue;
+            }
             let (key, tag, kind) = self.target(id, reference, path)?;
             if !matches!(kind.as_str(), "object" | "record") {
                 return Err(invalid(path, "union variants must be objects or records"));
@@ -470,6 +568,14 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     let object = schema
         .as_object()
         .ok_or_else(|| invalid(path, "supplement positions must be schema objects"))?;
+    if object.contains_key(LEXICON_REF) {
+        // The position is the named Lexicon def; the overlay checks the Lexicon refers to it and
+        // leaves the rest to the def, so nothing beneath it is the supplement's to state.
+        return match object.get(LEXICON_REF) {
+            Some(Value::String(_)) => Ok(()),
+            _ => Err(invalid(path, format!("`{LEXICON_REF}` must be a string"))),
+        };
+    }
     check_keys(object, SUPPLEMENT_KEYS, path)?;
     for key in ["$schema", "title", "description", "x-lexicon-id"] {
         if object.get(key).is_some_and(|value| !value.is_string()) {
@@ -552,15 +658,7 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
         !matches!(
             marker.as_str(),
             Some(
-                "bytes"
-                    | "float"
-                    | "uint"
-                    | "text"
-                    | "timestamp"
-                    | "datetime"
-                    | "counter"
-                    | "list"
-                    | "reference"
+                "bytes" | "float" | "uint" | "text" | "timestamp" | "datetime" | "counter" | "list"
             )
         )
     }) {
@@ -569,12 +667,20 @@ fn check_supplement_keywords(object: &Map<String, Value>, path: &str) -> Result<
     if object.get("format").is_some_and(|format| {
         !matches!(
             format.as_str(),
-            Some("float" | "double" | "date-time" | "datetime" | "uuid")
-        ) && !format
-            .as_str()
-            .is_some_and(|format| integers::FORMATS.contains(&format))
+            Some("uint64" | "date-time" | "datetime" | "uuid")
+        )
     }) {
         return Err(invalid(path, "unsupported supplement format"));
+    }
+    // `uint64` is no integer width: the one place it survives is the decimal-string spelling of
+    // the `uint` storage marker, which states an Automerge `Uint` carried as a string.
+    if object.get("format").and_then(Value::as_str) == Some("uint64")
+        && object.get("x-automerge").and_then(Value::as_str) != Some("uint")
+    {
+        return Err(invalid(
+            path,
+            "integer widths are not formats: state `minimum`/`maximum`",
+        ));
     }
     integers::check_supplement(object, path)?;
     // `pattern` is not a generally admissible constraint: the one spelling the declarations carry
@@ -702,6 +808,33 @@ impl Overlay<'_> {
         let object = supplement
             .as_object()
             .ok_or_else(|| invalid(path, "supplement positions must be schema objects"))?;
+        if let Some(declared) = object.get(LEXICON_REF) {
+            // A Rust type that *is* a Lexicon def (a `DatumReference` is `#datumRef`) says so
+            // rather than restating it. The Lexicon must refer to that same def here; then the def
+            // decides everything about the position and the supplement adds nothing.
+            // An optional field is the def beside a null branch (`anyOf: [{$ref}, null]`).
+            let non_null = match primary.get("anyOf").and_then(Value::as_array) {
+                Some(branches) if branches.len() == 2 && branches[1] == json!({"type": "null"}) => {
+                    &branches[0]
+                }
+                _ => &*primary,
+            };
+            let stamped = non_null
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                .and_then(|key| self.definitions.get(key))
+                .and_then(|definition| definition.get(DEF));
+            if stamped != Some(declared) {
+                return Err(invalid(
+                    path,
+                    format!(
+                        "the supplement says this position is {declared}, and the Lexicon does not refer to it"
+                    ),
+                ));
+            }
+            return Ok(());
+        }
         check_keys(object, SUPPLEMENT_KEYS, path)?;
         if let Some(reference) = object.get("$ref") {
             if object.keys().any(|key| {
@@ -998,7 +1131,7 @@ impl Overlay<'_> {
         if let Some(marker) = marker {
             let expected = match marker {
                 "bytes" => primary.get("x-automerge").and_then(Value::as_str) == Some("bytes"),
-                "float" | "uint" | "text" | "reference" => kind == "string",
+                "float" | "uint" | "text" => kind == "string",
                 "timestamp" | "datetime" => {
                     kind == "string"
                         && primary
@@ -1035,29 +1168,19 @@ impl Overlay<'_> {
         }
         if let Some(format) = object.get("format") {
             let allowed = match marker {
-                Some("float") => matches!(format.as_str(), Some("float" | "double")),
                 Some("uint") => format.as_str() == Some("uint64"),
                 Some("timestamp" | "datetime") | None if primary["x-automerge"] == "datetime" => {
                     matches!(format.as_str(), Some("date-time" | "datetime"))
                 }
                 None if kind == "string" && format.as_str() == Some("uuid") => true,
-                None | Some("counter") if kind == "integer" => format
-                    .as_str()
-                    .is_some_and(|format| integers::FORMATS.contains(&format)),
                 _ => false,
             };
             if !allowed {
                 return Err(invalid(path, "format is not an operable native supplement"));
             }
-            if marker == Some("float") {
-                primary["format"] = format.clone();
-            }
-            if marker == Some("float") {
-                primary[KEYWORD]["width"] = format.clone();
-            }
             // `uuid` is not a storage form and not a `Constraint` format; it is the declaration's
             // own annotation on the one string spelling that carries a `pattern`.
-            if format.as_str() == Some("uuid") || kind == "integer" {
+            if format.as_str() == Some("uuid") {
                 primary["format"] = format.clone();
             }
         }
@@ -1421,9 +1544,9 @@ impl jsonschema::Keyword for Constraint {
                     return false;
                 }
                 if self.0["native"] == "float"
-                    && !value.parse::<f64>().is_ok_and(|number| {
-                        super::codec::float_string(number, self.0["width"] == "float") == value
-                    })
+                    && !value
+                        .parse::<f64>()
+                        .is_ok_and(|number| super::codec::float_string(number) == value)
                 {
                     return false;
                 }
@@ -1467,6 +1590,62 @@ impl jsonschema::Keyword for Data {
     fn is_valid(&self, instance: &Value) -> bool {
         validate_data_model(instance)
     }
+}
+
+/// A Lexicon position (a method's `input.schema` or `output.schema`, or its parameters as an
+/// object) compiled to a validator. It checks the strict Lexicon semantics and nothing more: no
+/// authoring normalization, so a value either is what the Lexicon declares or is refused.
+pub struct PositionValidator(jsonschema::Validator);
+
+impl PositionValidator {
+    /// Whether `value` conforms to the position: the pass-or-fail check, cheaper than collecting
+    /// [`Self::violations`].
+    pub fn is_valid(&self, value: &Value) -> bool {
+        self.0.is_valid(value)
+    }
+
+    /// Every way `value` departs from the position, as `path: message` lines; empty when it
+    /// conforms.
+    pub fn violations(&self, value: &Value) -> Vec<String> {
+        self.0
+            .iter_errors(value)
+            .map(|error| format!("{}: {error}", error.instance_path()))
+            .collect()
+    }
+}
+
+/// Compiles `position`, written in the Lexicon `primary` (so `#name` references resolve in its
+/// definitions), to a validator. `carried` are the other files a reference may name; a reference
+/// to a file that is not carried is refused, as admission refuses it. This is the datum Lexicon
+/// compiler run over a method's file: a method's `main` signature is skipped rather than
+/// compiled, and the position is compiled as a nested one, so a record is not admitted.
+pub fn compile_position(
+    primary: &Value,
+    carried: &[&Value],
+    position: &Value,
+    path: &str,
+) -> Result<PositionValidator> {
+    let mut compiler = Compiler::index(
+        std::iter::once(primary).chain(carried.iter().copied()),
+        true,
+    )?;
+    compiler.compile_definitions()?;
+    let id = primary["id"].as_str().expect("an indexed file has an id");
+    bound(position)?;
+    let mut document = compiler.position(id, position, path, 1)?;
+    document
+        .as_object_mut()
+        .expect("a compiled position is an object")
+        .insert("$defs".to_owned(), Value::Object(compiler.definitions));
+    let validator = options()
+        .with_retriever(super::codec::CarriedSchemaRetriever)
+        .build(&document)
+        .map_err(|error| {
+            LexiconAdmissionError::Compilation(Box::new(CodecError::InvalidSchema {
+                message: error.to_string(),
+            }))
+        })?;
+    Ok(PositionValidator(validator))
 }
 
 #[cfg(test)]

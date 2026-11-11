@@ -13,9 +13,9 @@ import org.example.daybook.uniffi.types.WellKnownFacetTag
 class EditorSessionControllerOrderingTest {
     @Test
     fun `makePrimaryOrderUrls moves selected to front and dedupes`() {
-        val a = "db+facet:///self/org.example.daybook.note/main"
-        val b = "db+facet:///self/org.example.daybook.blob/main"
-        val c = "db+facet:///self/org.example.daybook.imagemetadata/main"
+        val a = "dtxt:datum:self/org.example.daybook.note/main"
+        val b = "dtxt:datum:self/org.example.daybook.blob/main"
+        val c = "dtxt:datum:self/org.example.daybook.imagemetadata/main"
 
         val result = makePrimaryOrderUrls(b, listOf(a, b, c, b, a))
 
@@ -63,7 +63,7 @@ class EditorSessionControllerOrderingTest {
         val displayable = listOf(blobMain, noteMain).sortedBy { keySortLabel(it) }
         val bodyOrder =
             listOf(
-                "db+facet:///self/org.example.daybook.unknown/main",
+                "dtxt:datum:self/org.example.daybook.unknown/main",
                 buildSelfFacetRefUrl(noteMain),
                 buildSelfFacetRefUrl(noteMain),
             )
@@ -75,10 +75,10 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen moves selected among seen and preserves unseen slots`() {
-        val seenA = "db+facet:///self/org.example.daybook.note/a#ha"
-        val seenB = "db+facet:///self/org.example.daybook.note/b#hb"
-        val seenC = "db+facet:///self/org.example.daybook.imagemetadata/main#hc"
-        val unseen = "db+facet:///self/org.example.daybook.embedding/main#hu"
+        val seenA = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val seenB = "dtxt:datum:self/org.example.daybook.note/b#hb"
+        val seenC = "dtxt:datum:self/org.example.daybook.imagemetadata/main#hc"
+        val unseen = "dtxt:datum:self/org.example.daybook.embedding/main#hu"
 
         val result =
             reorderBodyOrderPreservingUnseen(
@@ -93,10 +93,10 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen crystallizes missing seen refs before moving`() {
-        val seenA = "db+facet:///self/org.example.daybook.note/a#ha"
-        val seenB = "db+facet:///self/org.example.daybook.note/b#hb"
-        val seenC = "db+facet:///self/org.example.daybook.imagemetadata/main#hc"
-        val unseen = "db+facet:///self/org.example.daybook.ocrresult/main#hu"
+        val seenA = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val seenB = "dtxt:datum:self/org.example.daybook.note/b#hb"
+        val seenC = "dtxt:datum:self/org.example.daybook.imagemetadata/main#hc"
+        val unseen = "dtxt:datum:self/org.example.daybook.ocrresult/main#hu"
 
         val result =
             reorderBodyOrderPreservingUnseen(
@@ -135,8 +135,8 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen crystallizes from empty base using seen order`() {
-        val a = "db+facet:///self/org.example.daybook.note/a#ha"
-        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+        val a = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val b = "dtxt:datum:self/org.example.daybook.note/b#hb"
 
         val result =
             reorderBodyOrderPreservingUnseen(
@@ -151,7 +151,7 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen returns null for single seen item boundary moves`() {
-        val a = "db+facet:///self/org.example.daybook.note/a#ha"
+        val a = "dtxt:datum:self/org.example.daybook.note/a#ha"
 
         assertNull(
             reorderBodyOrderPreservingUnseen(
@@ -173,14 +173,14 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen returns null when selected ref not found after canonicalization`() {
-        val a = "db+facet:///self/org.example.daybook.note/a#ha"
-        val b = "db+facet:///self/org.example.daybook.note/b#hb"
+        val a = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val b = "dtxt:datum:self/org.example.daybook.note/b#hb"
 
         val result =
             reorderBodyOrderPreservingUnseen(
                 baseUrls = listOf(a, b),
                 seenUrls = listOf(a, b),
-                selectedRef = "db+facet:///self/org.example.daybook.note/missing#hx",
+                selectedRef = "dtxt:datum:self/org.example.daybook.note/missing#hx",
                 direction = 1,
             )
 
@@ -189,9 +189,9 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen returns null at start and end boundaries`() {
-        val a = "db+facet:///self/org.example.daybook.note/a#ha"
-        val b = "db+facet:///self/org.example.daybook.note/b#hb"
-        val c = "db+facet:///self/org.example.daybook.note/c#hc"
+        val a = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val b = "dtxt:datum:self/org.example.daybook.note/b#hb"
+        val c = "dtxt:datum:self/org.example.daybook.note/c#hc"
 
         assertNull(
             reorderBodyOrderPreservingUnseen(
@@ -213,9 +213,9 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen swaps at start and end boundaries when valid`() {
-        val a = "db+facet:///self/org.example.daybook.note/a#ha"
-        val b = "db+facet:///self/org.example.daybook.note/b#hb"
-        val c = "db+facet:///self/org.example.daybook.note/c#hc"
+        val a = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val b = "dtxt:datum:self/org.example.daybook.note/b#hb"
+        val c = "dtxt:datum:self/org.example.daybook.note/c#hc"
 
         val moveStartDown =
             reorderBodyOrderPreservingUnseen(
@@ -238,11 +238,11 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen dedupes canonical urls and respects stripFacetRefFragment`() {
-        val aBase = "db+facet:///self/org.example.daybook.note/a#old"
-        val aSeen = "db+facet:///self/org.example.daybook.note/a#new"
-        val bBase = "db+facet:///self/org.example.daybook.note/b#old"
-        val bSeen = "db+facet:///self/org.example.daybook.note/b#new"
-        val unseen = "db+facet:///self/org.example.daybook.embedding/main#hu"
+        val aBase = "dtxt:datum:self/org.example.daybook.note/a#old"
+        val aSeen = "dtxt:datum:self/org.example.daybook.note/a#new"
+        val bBase = "dtxt:datum:self/org.example.daybook.note/b#old"
+        val bSeen = "dtxt:datum:self/org.example.daybook.note/b#new"
+        val unseen = "dtxt:datum:self/org.example.daybook.embedding/main#hu"
 
         val result =
             reorderBodyOrderPreservingUnseen(
@@ -257,10 +257,10 @@ class EditorSessionControllerOrderingTest {
 
     @Test
     fun `reorderBodyOrderPreservingUnseen appends missing seen canonicals in original seen order`() {
-        val a = "db+facet:///self/org.example.daybook.note/a#ha"
-        val b = "db+facet:///self/org.example.daybook.note/b#hb"
-        val c = "db+facet:///self/org.example.daybook.note/c#hc"
-        val x = "db+facet:///self/org.example.daybook.embedding/main#hx"
+        val a = "dtxt:datum:self/org.example.daybook.note/a#ha"
+        val b = "dtxt:datum:self/org.example.daybook.note/b#hb"
+        val c = "dtxt:datum:self/org.example.daybook.note/c#hc"
+        val x = "dtxt:datum:self/org.example.daybook.embedding/main#hx"
 
         val result =
             reorderBodyOrderPreservingUnseen(

@@ -1,7 +1,7 @@
 //! The Wasm executor for nodule handlers: the [`NoduleExecutor`] of kind `"wasm"`.
 //!
 //! One wash-runtime [`Host`] runs every nodule handler as a workload of its own: one
-//! `wasi:http/handler@0.3.0` component per (plug, revision). A call enters the workload through
+//! `wasi:http/handler@0.3.0` component per (cartridge, revision). A call enters the workload through
 //! [`Ingress::dispatch_request`], the in-process entry point of our wash-runtime fork, so
 //! nothing here is reachable over the network:
 //!
@@ -12,7 +12,7 @@
 //!   authority, because nodule network facilities are not granted.
 //!
 //! A nodule learns its own dispatch capability from the `x-nodule-capability` header of every
-//! request it serves and presents it as `authorization` on its outgoing calls. Identity is not
+//! request it serves and presents it as `authorization: Bearer <id>` on its outgoing calls. Identity is not
 //! the guest's to claim: [`Egress`] signs each call with the actor of the workload it came from.
 //!
 //! Handler bytes come from the in-process [`BlobService`]. A handler whose bytes are not in the
@@ -27,21 +27,22 @@
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
-use big_nodule::dispatch::Caller;
-use big_nodule::dispatch::Provider;
-use big_nodule::dispatch::ProviderError;
+use big_cartridges_core::CartridgeId;
+use big_dispatch::Caller;
+use big_dispatch::Provider;
+use big_dispatch::ProviderError;
+use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Readiness;
+use big_nodule::egress;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
 use big_nodule::executor::Reensure;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchProtocol;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::Invoke;
-use big_nodule_core::inventory::Readiness;
-use big_plugs_core::PlugId;
+use big_nodule::wire::delivery_headers;
+use big_nodule::wire::gateway_error;
+use big_nodule::wire::provider_result;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
@@ -51,8 +52,7 @@ use http_body_util::Full;
 use http_body_util::Limited;
 use serde_json::Value;
 use serde_json::json;
-use service_utils_rs::Client;
-use service_utils_rs::ClientError;
+use service_client_native_rs::Client;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 use std::collections::BTreeMap;
@@ -85,7 +85,7 @@ use wasmtime_wasi_http::WasiBody;
 const KIND: &str = "wasm";
 
 /// The authority every request is addressed to. The workload is picked by id, not by `Host`
-/// (a plug id like `did:key:z6Mk.../photos` is not a valid URI authority), so this is only what the
+/// (a cartridge id like `did:key:z6Mk.../photos` is not a valid URI authority), so this is only what the
 /// guest sees in its `Host` header.
 const AUTHORITY: &str = "nodule.local";
 
@@ -94,35 +94,28 @@ const AUTHORITY: &str = "nodule.local";
 /// generous 64 MiB bounds a hostile or mistaken envelope without constraining real handlers.
 const MAX_HANDLER_OCTETS: u64 = 64 * 1024 * 1024;
 
-/// Response bodies larger than this fail the call. dispatch's output is a JSON value held in
-/// memory (several times its encoded size once parsed) and returned over a service call, so it
-/// is capped at 4 MiB; anything bigger belongs in a blob that the operation returns an id for.
-const MAX_RESPONSE_OCTETS: usize = 4 * 1024 * 1024;
+/// Message bodies larger than this fail the call, in both directions: a handler's response and a
+/// guest's outgoing request into dispatch. Either is a JSON value held in memory (several times
+/// its encoded size once parsed) and carried over a service call, so it is capped at 4 MiB;
+/// anything bigger belongs in a blob that the operation passes or returns an id for.
+const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
 
 /// The authority a guest addresses dispatch at. It resolves nowhere: [`Egress`] answers it.
 const DISPATCH_AUTHORITY: &str = "dispatch.local";
-
-/// The header every delivered request carries the nodule's own dispatch capability in, as
-/// `Capability <id>`. Absent when the nodule is granted no operations.
-const CAPABILITY_HEADER: &str = "x-nodule-capability";
-
-/// The status a transport failure (workload gone, body failed, oversize response) is reported
-/// under, as an HTTP gateway would.
-const BAD_GATEWAY: u16 = 502;
 
 /// Hosts nodule handlers as wash workloads. Built by [`boot`].
 pub struct WasmExecutor {
     host: Arc<Host>,
     ingress: Arc<Ingress<Sealed, Egress>>,
     blobs: Arc<BlobService>,
-    /// What `ensure` started, by plug. Never locked across an await: `ensure` and `retire` are
+    /// What `ensure` started, by cartridge. Never locked across an await: `ensure` and `retire` are
     /// only called from the nodule service's state actor, one at a time, so the check, start
-    /// and insert in `ensure` cannot interleave with another call for the same plug.
-    hosted: Mutex<BTreeMap<PlugId, Running>>,
+    /// and insert in `ensure` cannot interleave with another call for the same cartridge.
+    hosted: Mutex<BTreeMap<CartridgeId, Running>>,
     /// The signer of each running workload's outgoing calls, shared with [`Egress`].
     signers: Signers,
-    /// The plugs waiting on a blob that was not in the store, to be woken on its arrival.
-    arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<PlugId, Reensure>>>>,
+    /// The cartridges waiting on a blob that was not in the store, to be woken on its arrival.
+    arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<CartridgeId, Reensure>>>>,
 }
 
 struct Running {
@@ -222,14 +215,6 @@ pub async fn boot(
 }
 
 impl WasmExecutor {
-    /// Whether a workload is running for `plug_id`.
-    pub fn hosts(&self, plug_id: &PlugId) -> bool {
-        self.hosted
-            .lock()
-            .expect("hosted lock")
-            .contains_key(plug_id)
-    }
-
     /// The signer is forgotten only once the workload is stopped, so its in-flight requests keep
     /// their identity while it drains; [`Egress`] answers any call that still outlives it as a
     /// gone upstream.
@@ -254,11 +239,11 @@ impl NoduleExecutor for WasmExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
-        let workload_id = format!("nodule/{}/{}", spec.plug_id, spec.revision);
+        let workload_id = format!("nodule/{}/{}", spec.cartridge_id, spec.revision);
         let handler = BlobId::new(spec.handler.digest.0);
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
-            match hosted.get(&spec.plug_id) {
+            match hosted.get(&spec.cartridge_id) {
                 Some(running)
                     if running.workload_id == workload_id && running.handler == handler =>
                 {
@@ -267,9 +252,9 @@ impl NoduleExecutor for WasmExecutor {
                     running.provider.set_capability(spec.capability);
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
-                // Another revision (or handler) of the plug: the reconciler retires first, but
-                // an executor does not rely on that to keep one workload per plug.
-                Some(_) => hosted.remove(&spec.plug_id),
+                // Another revision (or handler) of the cartridge: the reconciler retires first, but
+                // an executor does not rely on that to keep one workload per cartridge.
+                Some(_) => hosted.remove(&spec.cartridge_id),
                 None => None,
             }
         };
@@ -283,12 +268,12 @@ impl NoduleExecutor for WasmExecutor {
             .expect("arrivals lock")
             .entry(handler)
             .or_default()
-            .insert(spec.plug_id.clone(), spec.reensure.clone());
+            .insert(spec.cartridge_id.clone(), spec.reensure.clone());
         let Some(info) = self.blobs.stat(&handler).await.expect("blob store stat") else {
             return Hosted::NotReady(Readiness::ArtifactsUnavailable);
         };
         if info.length_octets > MAX_HANDLER_OCTETS {
-            tracing::warn!(plug = %spec.plug_id, octets = info.length_octets, "handler artifact over the size cap");
+            tracing::warn!(cartridge = %spec.cartridge_id, octets = info.length_octets, "handler artifact over the size cap");
             return Hosted::NotReady(Readiness::ExecutorUnavailable);
         }
         let Some(bytes) = self
@@ -319,7 +304,7 @@ impl NoduleExecutor for WasmExecutor {
             .workload_start(WorkloadStartRequest {
                 workload_id: workload_id.clone(),
                 workload: Workload {
-                    namespace: spec.plug_id.to_string(),
+                    namespace: spec.cartridge_id.to_string(),
                     name: spec.revision.to_string(),
                     annotations: Default::default(),
                     service: None,
@@ -342,21 +327,21 @@ impl NoduleExecutor for WasmExecutor {
                 .lock()
                 .expect("signers lock")
                 .remove(&workload_id);
-            tracing::warn!(plug = %spec.plug_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
+            tracing::warn!(cartridge = %spec.cartridge_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
             return Hosted::NotReady(Readiness::ExecutorUnavailable);
         }
         self.arrivals
             .lock()
             .expect("arrivals lock")
             .get_mut(&handler)
-            .map(|waiting| waiting.remove(&spec.plug_id));
+            .map(|waiting| waiting.remove(&spec.cartridge_id));
         let provider = Arc::new(WasmProvider {
             ingress: Arc::clone(&self.ingress),
             workload_id: workload_id.clone(),
             capability: Mutex::new(spec.capability),
         });
         self.hosted.lock().expect("hosted lock").insert(
-            spec.plug_id.clone(),
+            spec.cartridge_id.clone(),
             Running {
                 workload_id,
                 handler,
@@ -366,14 +351,25 @@ impl NoduleExecutor for WasmExecutor {
         Hosted::Ready(provider)
     }
 
-    async fn retire(&self, plug_id: &PlugId) {
-        let running = self.hosted.lock().expect("hosted lock").remove(plug_id);
+    fn hosts(&self, cartridge_id: &CartridgeId) -> bool {
+        self.hosted
+            .lock()
+            .expect("hosted lock")
+            .contains_key(cartridge_id)
+    }
+
+    async fn retire(&self, cartridge_id: &CartridgeId) {
+        let running = self
+            .hosted
+            .lock()
+            .expect("hosted lock")
+            .remove(cartridge_id);
         if let Some(running) = running {
             self.stop_workload(&running).await;
         }
         let mut arrivals = self.arrivals.lock().expect("arrivals lock");
         arrivals.retain(|_, waiting| {
-            waiting.remove(plug_id);
+            waiting.remove(cartridge_id);
             !waiting.is_empty()
         });
     }
@@ -383,7 +379,7 @@ impl NoduleExecutor for WasmExecutor {
 struct WasmProvider {
     ingress: Arc<Ingress<Sealed, Egress>>,
     workload_id: String,
-    /// The nodule's own dispatch capability, delivered in [`CAPABILITY_HEADER`]. Replaced in
+    /// The nodule's own dispatch capability, delivered in [`NODULE_CAPABILITY_HEADER`]. Replaced in
     /// place when the nodule's grants change.
     capability: Mutex<Option<CapId>>,
 }
@@ -394,53 +390,36 @@ impl WasmProvider {
     }
 }
 
-/// The wire form of a capability id, which is how the guest sees it in `authorization`.
-fn capability_header(authority: impl serde::Serialize) -> String {
-    let Value::String(id) = serde_json::to_value(authority).expect("a capability id serializes")
-    else {
-        unreachable!("a capability id serializes as a string");
-    };
-    format!("Capability {id}")
-}
-
-fn gateway_error(message: impl std::fmt::Display) -> ProviderError {
-    ProviderError::Failed {
-        status: BAD_GATEWAY,
-        body: json!({ "error": "BadGateway", "message": message.to_string() }),
-    }
-}
-
 #[async_trait]
 impl Provider for WasmProvider {
     async fn call(
         &self,
         caller: &Caller,
         operation: &str,
+        request: &RequestContext,
         context: &InvocationContext,
         input: Value,
     ) -> Result<Value, ProviderError> {
-        let mut request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
-            .header(hyper::header::CONTENT_TYPE, "application/json")
-            .header(
-                hyper::header::AUTHORIZATION,
-                capability_header(caller.authorization.authority),
-            );
-        if let Some(capability) = *self.capability.lock().expect("capability lock") {
-            request = request.header(CAPABILITY_HEADER, capability_header(capability));
-        }
-        if let Some(key) = &context.idempotency_key {
-            request = request.header("idempotency-key", key);
-        }
-        if let Some(deadline) = context.deadline_unix_ms {
-            request = request.header("x-request-deadline-unix-ms", deadline);
-        }
+        // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
+        let headers = delivery_headers(
+            caller,
+            request,
+            context,
+            *self.capability.lock().expect("capability lock"),
+        );
+        let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
+            .header(hyper::header::CONTENT_TYPE, "application/json");
+        http_request
+            .headers_mut()
+            .expect("a fresh request builder has headers")
+            .extend(headers);
         let body = Full::new(Bytes::from(
             serde_json::to_vec(&input).expect("a JSON value serializes"),
         ))
         .map_err(|never| match never {})
         .boxed_unsync();
         // The operation is an NSID the router resolved, so the URI and headers are valid.
-        let request = request.body(body).expect("a well-formed request");
+        let request = http_request.body(body).expect("a well-formed request");
 
         let response = self
             .ingress
@@ -448,34 +427,12 @@ impl Provider for WasmProvider {
             .await
             .map_err(gateway_error)?;
         let status = response.status();
-        let body = Limited::new(response.into_body(), MAX_RESPONSE_OCTETS)
+        let body = Limited::new(response.into_body(), MAX_MESSAGE_OCTETS)
             .collect()
             .await
             .map_err(gateway_error)?
             .to_bytes();
-
-        if status.is_success() {
-            return if body.is_empty() {
-                Ok(Value::Null)
-            } else {
-                serde_json::from_slice(&body)
-                    .map_err(|error| gateway_error(format!("response is not JSON: {error}")))
-            };
-        }
-        let body = serde_json::from_slice::<Value>(&body)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
-        if status == hyper::StatusCode::BAD_REQUEST {
-            // XRPC errors are `{ "error", "message" }`; the message is what a caller can act on.
-            return Err(ProviderError::InvalidInput(
-                body.get("message")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| body.to_string(), str::to_owned),
-            ));
-        }
-        Err(ProviderError::Failed {
-            status: status.as_u16(),
-            body,
-        })
+        provider_result(status, &body)
     }
 }
 
@@ -533,14 +490,10 @@ impl Router for Sealed {
 /// makes it the caller identity of a nested call.
 type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
 
-/// The `dispatch.local` egress: the only outgoing request a workload can make.
-///
-/// `POST /xrpc/<nsid>` with `authorization: Capability <id>` is invoked through dispatch with
-/// the calling workload's nodule actor as the signer. Dispatch then admits the call as it admits
-/// any other: the capability must be live, permit the NSID and be bound to that actor, so a
-/// guest that presents another nodule's capability id is denied there. Nothing else the guest
-/// says (headers, body) is trusted as identity. `idempotency-key` and
-/// `x-request-deadline-unix-ms` pass through as the call's [`InvocationContext`].
+/// The `dispatch.local` egress of the wash host: adapts a workload's outgoing `wasi:http`
+/// request to [`big_nodule::egress::call`], which authorizes it for every executor alike. What
+/// is specific to this executor is the signer: the workload's own actor, found by the host's
+/// workload id (not guest-controllable) in [`Signers`].
 #[derive(Clone)]
 struct Egress {
     dispatch: Client<DispatchProtocol>,
@@ -548,169 +501,33 @@ struct Egress {
 }
 
 impl Egress {
-    /// Reads the guest's request and runs it through dispatch. A malformed request is answered
-    /// like an XRPC server would, not refused as a transport failure.
     async fn call(
         &self,
         workload_id: &str,
         request: hyper::Request<WasiBody>,
     ) -> (hyper::StatusCode, Value) {
-        let bad = |status: hyper::StatusCode, error: &str, message: &str| {
-            (status, json!({ "error": error, "message": message }))
-        };
         let (parts, body) = request.into_parts();
-        let operation = match parts.uri.path().strip_prefix("/xrpc/") {
-            Some(operation) if parts.method == hyper::Method::POST => operation.to_owned(),
-            _ => {
-                return bad(
-                    hyper::StatusCode::NOT_FOUND,
-                    "NotFound",
-                    "dispatch.local serves POST /xrpc/<nsid> only",
-                );
-            }
-        };
-        let header = |name: &str| {
-            parts
-                .headers
-                .get(name)
-                .map(|value| value.to_str().map(str::to_owned))
-        };
-        let Some(Ok(authorization)) = header(hyper::header::AUTHORIZATION.as_str()) else {
-            return bad(
-                hyper::StatusCode::UNAUTHORIZED,
-                "AuthRequired",
-                "an `authorization: Capability <id>` header is required",
-            );
-        };
-        let Some(authority) = authorization
-            .strip_prefix("Capability ")
-            .and_then(|id| serde_json::from_value::<CapId>(Value::String(id.to_owned())).ok())
-        else {
-            return bad(
-                hyper::StatusCode::UNAUTHORIZED,
-                "AuthRequired",
-                "the authorization header is not `Capability <id>`",
-            );
-        };
-        let deadline_unix_ms = match header("x-request-deadline-unix-ms").transpose() {
-            Ok(value) => match value.map(|value| value.parse::<u64>()).transpose() {
-                Ok(deadline) => deadline,
-                Err(_) => {
-                    return bad(
-                        hyper::StatusCode::BAD_REQUEST,
-                        "InvalidRequest",
-                        "the deadline header is not a millisecond timestamp",
-                    );
-                }
-            },
-            Err(_) => {
-                return bad(
-                    hyper::StatusCode::BAD_REQUEST,
-                    "InvalidRequest",
-                    "the deadline header is not text",
-                );
-            }
-        };
-        let Ok(idempotency_key) = header("idempotency-key").transpose() else {
-            return bad(
-                hyper::StatusCode::BAD_REQUEST,
-                "InvalidRequest",
-                "the idempotency-key header is not text",
-            );
-        };
-        let Ok(body) = Limited::new(body, MAX_RESPONSE_OCTETS).collect().await else {
-            return bad(
+        let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
+            return (
                 hyper::StatusCode::PAYLOAD_TOO_LARGE,
-                "InvalidRequest",
-                "the request body failed or is too large",
+                json!({ "error": "InvalidRequest", "message": "the request body failed or is too large" }),
             );
         };
-        let body = body.to_bytes();
-        let input = if body.is_empty() {
-            Value::Null
-        } else if let Ok(input) = serde_json::from_slice(&body) {
-            input
-        } else {
-            return bad(
-                hyper::StatusCode::BAD_REQUEST,
-                "InvalidRequest",
-                "the request body is not JSON",
-            );
-        };
-
-        // A workload that has been stopped (its nodule disabled, upgraded or retired) while one
-        // of its requests was still running has no identity left to call with. That is a
-        // lifecycle race, not a broken invariant, so it is answered the way a proxy answers a
-        // call from a drained upstream rather than crashing the node.
-        let Some(signer) = self
+        let signer = self
             .signers
             .lock()
             .expect("signers lock")
             .get(workload_id)
-            .copied()
-        else {
-            return bad(
-                hyper::StatusCode::SERVICE_UNAVAILABLE,
-                "WorkloadStopped",
-                "the calling handler has been stopped",
-            );
-        };
-        let result = self
-            .dispatch
-            .call(
-                RequestContext::root(),
-                Invoke {
-                    authorization: Authorization { authority, signer },
-                    operation,
-                    input,
-                    context: InvocationContext {
-                        deadline_unix_ms,
-                        idempotency_key,
-                    },
-                },
-            )
-            .await;
-        match result {
-            Ok(output) => (hyper::StatusCode::OK, output.output),
-            Err(ClientError::Operation(error)) => dispatch_error_response(error),
-            Err(ClientError::Transport { message, .. }) => {
-                panic!("in-process dispatch transport failed: {message}")
-            }
-        }
-    }
-}
-
-/// The HTTP form of a dispatch failure, which is the inverse of [`WasmProvider::call`]'s mapping
-/// of a handler's response onto dispatch's errors: denied 403, unknown operation 404, not ready
-/// 503, invalid input 400 as an XRPC `{ error, message }`, a provider's own error as it came, a
-/// deadline 504. The failures of the services behind dispatch are gateway errors.
-fn dispatch_error_response(error: DispatchError) -> (hyper::StatusCode, Value) {
-    use hyper::StatusCode;
-    let named = |status: StatusCode, name: &str| {
-        (
-            status,
-            json!({ "error": name, "message": error.to_string() }),
+            .copied();
+        egress::call(
+            &self.dispatch,
+            signer,
+            &parts.method,
+            parts.uri.path(),
+            &parts.headers,
+            &body.to_bytes(),
         )
-    };
-    match &error {
-        DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
-        DispatchError::UnknownOperation => named(StatusCode::NOT_FOUND, "UnknownOperation"),
-        DispatchError::NotReady { .. } => named(StatusCode::SERVICE_UNAVAILABLE, "NotReady"),
-        DispatchError::InvalidInput(message) => (
-            StatusCode::BAD_REQUEST,
-            json!({ "error": "InvalidRequest", "message": message }),
-        ),
-        DispatchError::DeadlineExceeded => named(StatusCode::GATEWAY_TIMEOUT, "DeadlineExceeded"),
-        DispatchError::Provider { status, body } => (
-            StatusCode::from_u16(*status).expect("a provider answered a valid status"),
-            body.clone(),
-        ),
-        DispatchError::AuthorityUnavailable(_) => {
-            named(StatusCode::SERVICE_UNAVAILABLE, "AuthorityUnavailable")
-        }
-        DispatchError::Context(_) | DispatchError::Authority(_) => {
-            named(StatusCode::BAD_GATEWAY, "BadGateway")
-        }
+        .await
     }
 }
 

@@ -20,7 +20,6 @@ mod interlude {
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
-use crate::keyhive_storage::KEYHIVE_SUBDIR;
 use sqlite_rs as sqlite_rs_alias;
 use sqlite_rs::Database;
 mod sqlite {
@@ -56,7 +55,9 @@ pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
 pub(crate) mod keyhive_conn;
+pub(crate) mod keyhive_files;
 pub(crate) mod keyhive_listener;
+pub use keyhive_files::KeyhiveFiles;
 pub(crate) mod keyhive_storage;
 pub mod rpc;
 
@@ -79,6 +80,7 @@ pub use runtime2::types::GetDocError;
 pub use runtime2::types::GroupScopeController;
 pub use runtime2::types::GroupScopeHandle;
 pub use runtime2::types::KeyhiveSyncCancelled;
+pub use runtime2::types::NoWriteAccess;
 pub use runtime2::types::PutDocError;
 pub use runtime2::types::SyncDocError;
 pub use runtime2::types::SyncDocOutcome;
@@ -129,6 +131,7 @@ pub use keyhive::BigKeyhiveAgent;
 pub use keyhive::BigKeyhiveAuthority;
 pub use keyhive::BigKeyhiveGroup;
 pub use keyhive::BigKeyhiveHandle;
+pub use keyhive::groups_with_member;
 pub use keyhive_core;
 
 pub use changes::BigRepoAccess;
@@ -211,7 +214,7 @@ pub struct Config {
     /// Single identity seed used to derive both the Keyhive individual and
     /// the Subduction signer.
     pub node_identity_seed: [u8; 32],
-    pub storage: StorageConfig,
+    pub storage: Storage,
     /// Scope key used to isolate this BigRepo instance's data in SQLite storage.
     pub scope_key: Arc<str>,
     pub hidden_parts: HashSet<PartKey>,
@@ -230,10 +233,70 @@ pub struct Config {
     pub keyhive_change_notifs: bool,
 }
 
+/// The storage resources a repo is handed. The repo opens no location itself: the composition
+/// root opens the database and the keyhive archive directory and passes them in, so the root
+/// alone decides where a node lives (ADR 033 section 8).
+#[derive(Clone)]
+pub struct Storage {
+    /// The database holding the repo's partition stores, keyhive event log and secret blobs.
+    /// Several repos may share one database when their [`Config::scope_key`]s differ.
+    pub sql: Database,
+    pub keyhive: KeyhiveStorage,
+}
+
+impl std::fmt::Debug for Storage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Storage")
+            .field("keyhive", &self.keyhive)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Storage {
+    /// A repo that lives and dies with the process: a fresh ephemeral database from `runtime`
+    /// (its temp directory goes when the last handle drops) and in-memory keyhive archives.
+    pub fn memory(runtime: &sqlite_rs::SqliteRuntime) -> Res<Self> {
+        Ok(Self {
+            sql: runtime.ephemeral(&[])?,
+            keyhive: KeyhiveStorage::Memory,
+        })
+    }
+
+    /// The repo's storage rooted at `directory`, for embedders that want "a repo in a directory":
+    /// the database at `big_repo.sqlite` and the keyhive archives under `keyhive/`. This is an
+    /// opener for the composition root to call, not something the repo does at boot.
+    ///
+    /// `secrets` sources the keyhive data-encryption keys from the OS keyring; `None` keeps them
+    /// as 0600 files under the keyhive directory.
+    pub fn in_directory(
+        runtime: &sqlite_rs::SqliteRuntime,
+        directory: &std::path::Path,
+        secrets: Option<Arc<secrets_rs::SecretStore>>,
+    ) -> Res<Self> {
+        std::fs::create_dir_all(directory).wrap_err_with(|| {
+            format!(
+                "failed creating BigRepo data directory: {}",
+                directory.display()
+            )
+        })?;
+        Ok(Self {
+            sql: runtime.database(
+                directory.join("big_repo.sqlite"),
+                &[],
+                "_sqlite_rs_migrations",
+            ),
+            keyhive: KeyhiveStorage::Files(KeyhiveFiles::open(directory.join("keyhive"), secrets)?),
+        })
+    }
+}
+
+/// Where the keyhive archives live. The event log and secret blobs are in [`Storage::sql`].
 #[derive(Debug, Clone)]
-pub enum StorageConfig {
-    Disk { path: PathBuf },
+pub enum KeyhiveStorage {
+    /// Ephemeral by design: all keyhive state including key material is process-local.
     Memory,
+    Files(KeyhiveFiles),
 }
 
 #[derive(educe::Educe)]
@@ -287,10 +350,7 @@ impl BigRepo {
     ///
     /// The [`Config::scope_key`] isolates this instance's data from other
     /// BigRepo instances sharing the same SQLite database.
-    pub async fn boot(
-        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
-        config: Config,
-    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
         #[cfg(test)]
         let keyhive_change_notifs = config.keyhive_change_notifs;
         let Config {
@@ -303,18 +363,8 @@ impl BigRepo {
             group_part_group_scope,
             ..
         } = config;
-        let sql = match &storage {
-            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
-            StorageConfig::Disk { path } => {
-                std::fs::create_dir_all(path).wrap_err_with(|| {
-                    format!("failed creating BigRepo data directory: {}", path.display())
-                })?;
-                let db_path = path.join("big_repo.sqlite");
-                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
-            }
-        };
         let store = SqliteBigRepoStore::new_with_config(
-            sql,
+            storage.sql.clone(),
             Arc::clone(&scope_key),
             big_sync_core::BuckId::MAX_LEVEL,
             big_sync::HostPartStoreConfig {
@@ -445,13 +495,10 @@ impl BigRepo {
         // identity to the Keyhive individual identifier, so BigRepo derives
         // both identities from this one seed.
         let sync_policy = runtime2::types::BigRepoSyncPolicy::default();
-        let keyhive_storage = match &storage {
-            StorageConfig::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
-            StorageConfig::Disk { path } => {
-                let keyhive_root = path.join(KEYHIVE_SUBDIR);
-                // Key material goes through the OS keyring where available;
-                // fsync'd files remain the fallback of record.
-                BigRepoKeyhiveStorage::fs_with_secret_store(keyhive_events.clone(), keyhive_root)
+        let keyhive_storage = match storage.keyhive {
+            KeyhiveStorage::Memory => BigRepoKeyhiveStorage::memory_sqlite(keyhive_events.clone()),
+            KeyhiveStorage::Files(files) => {
+                BigRepoKeyhiveStorage::files(keyhive_events.clone(), files)
                     .await
                     .wrap_err("failed booting keyhive storage")?
             }
@@ -1141,7 +1188,13 @@ impl BigRepo {
         Ok(())
     }
 
-    /// Grant document access.
+    /// Grant document access and return once Keyhive has reconciled it, so the caller can
+    /// treat the grant as visible (read-your-writes).
+    ///
+    /// The reconciliation wait is the dominant cost of a grant, and it waits for the projection
+    /// to reach the admission watermark as of the call. A caller with several grants should
+    /// therefore run them concurrently rather than one after another: their waits overlap, so
+    /// the batch costs about one reconciliation.
     ///
     /// Reader grants also attempt a key-only causal checkpoint so the readable
     /// history survives reopen and sync without mutating document content. A
@@ -1175,7 +1228,6 @@ impl BigRepo {
         if access.is_reader() && !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
             tracing::debug!(%doc_id, "document grant causal checkpoint deferred to durable event reconciliation");
         }
-
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }
@@ -1517,6 +1569,9 @@ impl BigDocHandle {
         self.with_document_read(|doc| doc.save()).await
     }
 
+    /// Run `operation` against the document and commit whatever it changed. A commit
+    /// refused because this node's keyhive access is not writable fails with a report
+    /// carrying [`NoWriteAccess`]; the change never persisted.
     pub async fn with_document<F, R>(&self, operation: F) -> Res<R>
     where
         F: FnOnce(&mut automerge::Automerge) -> R,
@@ -1539,14 +1594,14 @@ impl BigDocHandle {
         // The refusal is rendered by the same function the worker's commit gate
         // uses, so it names the recorded reason: reporting a worker teardown as
         // an earlier rejected commit is what made that failure unattributable.
-        if let Some(message) = self
+        if let Some(refusal) = self
             .handle
             .bundle
             .broken_reason()
             .map(runtime2::types::HandleValidity::Broken)
-            .and_then(runtime2::types::invalid_handle_message)
+            .and_then(runtime2::types::invalid_handle_error)
         {
-            return Err(ferr!("{message}"));
+            return Err(refusal);
         }
 
         // All automerge work happens under a short sync lock; nothing is held
@@ -1560,27 +1615,25 @@ impl BigDocHandle {
                 return (out, None);
             }
 
-            // Capture the current materialization while holding the same lock
-            // as the mutation. Any newly retained head must remain
-            // independently loadable after sedimentree minimization discards
-            // its predecessors.
-            let snapshot = doc.save();
+            // Each loose commit carries exactly the Automerge change it names
+            // (as a change chunk, compressed when Automerge finds it worth it),
+            // never a materialization of the document. Minimization deletes a
+            // loose commit only when a stored fragment covers its range
+            // (`CommitDag::simplify` in sedimentree_core), and that fragment's
+            // blob is the Automerge bundle of the same members
+            // (`process_pending_fragment_requests`), so the fragments plus the
+            // remaining loose commits always load the whole history.
             let changes = doc
                 .get_changes(&before_heads)
                 .into_iter()
-                .map(|change| {
+                .map(|mut change| {
                     let head = CommitId::new(change.hash().0);
                     let parents = change
                         .deps()
                         .iter()
                         .map(|dep| CommitId::new(dep.0))
                         .collect::<BTreeSet<_>>();
-                    let bytes = if after_heads.contains(&change.hash()) {
-                        snapshot.clone()
-                    } else {
-                        change.raw_bytes().to_vec()
-                    };
-                    (head, parents, bytes)
+                    (head, parents, change.bytes().into_owned())
                 })
                 .collect::<Vec<_>>();
             let patches = if self

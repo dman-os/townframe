@@ -33,12 +33,19 @@ impl Projection {
             .is_some_and(|access| access >= Access::Read))
     }
 
-    pub async fn apply(&self, admission: &Admission, inventory: &DocId, digest: BlobId) -> Res<()> {
+    /// Publish the pair as decided at `generation`; see `Admission::publish`.
+    pub async fn apply(
+        &self,
+        admission: &Admission,
+        inventory: &DocId,
+        digest: BlobId,
+        generation: u64,
+    ) -> Res<()> {
         let projection = self.clone();
         let inventory = inventory.clone();
         let target = inventory.clone();
         admission
-            .publish(&inventory, digest, move |mut state, length| {
+            .publish(&inventory, digest, generation, move |mut state, length| {
                 Box::pin(async move {
                     let ownership = projection.service.ownership.clone();
                     ownership

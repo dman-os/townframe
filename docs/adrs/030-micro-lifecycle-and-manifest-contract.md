@@ -518,7 +518,7 @@ holds), and the manifest is filed in the envelope's micro contribution under the
 manifest is a new NSID. The standalone stand-in form is the `<name>.manifest.json` sidecar, flat
 JSON of the manifest's members plus `id`, `package_version` and `authority` (`Sidecar` in
 `clay_mdk`); the loader splits it into the package identity and the manifest, and
-`big_plugs`' micro importer reads the same JSON. **Authority.** A package may *declare* only
+`big_cartridges`' micro importer reads the same JSON. **Authority.** A package may *declare* only
 NSIDs under its authority: its collection contracts, the schemas they name, and the contract of each
 call it publishes. Every other NSID it touches is a request, and admission refuses a package that
 declares outside its authority. A declared contract may still name a selector, key, value or
@@ -550,12 +550,12 @@ Request {                        // the one request shape of ADR 028 §4, also u
 ```
 
 `necessity` and `resolution` are skipped on serialization when they equal their default, exactly
-as `big_plugs_core::request::Request` does, so the canonical JSON of a manifest stays minimal.
+as `big_cartridges_core::request::Request` does, so the canonical JSON of a manifest stays minimal.
 `binding` is the local stable name used by configured requirement bindings and
 `initial-context.require(binding)`. A requirement does not grant authority and a
 provider declaration is not a live provision. A contract is an NSID (AT Protocol syntax,
 `clay_collection::Nsid`, validated at deserialization); compatibility lives in the NSID, so there is
-no version inside it. The wire shape mirrors `big_plugs_core::request::Request`
+no version inside it. The wire shape mirrors `big_cartridges_core::request::Request`
 (camelCase, open strings), which replaces Clay's copy once that crate is reachable. A call
 publication's contract is the NSID of its request and response Lexicons, and the WIT
 `publish-call` takes it as a string.
@@ -665,7 +665,7 @@ Built:
 
 Not built:
 
-- manifest admission from the `big_plugs_core` envelope (a stand-in sidecar and local namespace
+- manifest admission from the `big_cartridges_core` envelope (a stand-in sidecar and local namespace
   stand for it) and the installer/uninstall flow around it;
 - schema validation of collection keys and values (limits, attachment indices and selector
   ceilings are enforced; Lexicon validation is not); and

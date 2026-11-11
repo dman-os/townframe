@@ -257,18 +257,16 @@ impl Ctx {
     }
 
     /// Blob pin candidates from one Blob facet value: the facet's digest plus
-    /// any `db+blob` component URLs, keyed by representation hash.
+    /// any `dtxt:blob:` component URLs, keyed by representation hash.
     fn blob_pins_from_facet_value(blob: &daybook_types::doc::Blob) -> Vec<(String, u64)> {
         let mut out = Vec::new();
         if let Some(urls) = &blob.urls {
             for url_str in urls {
                 if let Ok(url) = url_str.parse::<url::Url>()
-                    && (url.scheme() == crate::blobs::BLOB_SCHEME || url.scheme() == "daybook-blob")
+                    && let Some(hash) = crate::blobs::blob_facet_url_digest(&url)
+                    && hash.parse::<crate::blobs::BlobId>().is_ok()
                 {
-                    let hash = url.path().trim_start_matches('/');
-                    if hash.parse::<crate::blobs::BlobId>().is_ok() {
-                        out.push((hash.to_string(), blob.length_octets));
-                    }
+                    out.push((hash.to_string(), blob.length_octets));
                 }
             }
         }
@@ -361,7 +359,7 @@ impl Ctx {
                 // stores can key on. Accept either digest spelling: ADR 003 §3
                 // makes the multihash form canonical and it is the *only*
                 // carrier a cipherBlob facet has, whereas a `Blob` facet also
-                // carries `db+blob:///` URLs in the bare form.
+                // carries `dtxt:blob:` URLs in the bare form.
                 if crate::blobs::digest_str_to_blob_id_lenient(digest).is_some() {
                     current_pins
                         .cipher
@@ -1642,8 +1640,8 @@ mod tests {
                             digest: "bafakedigest".to_string(),
                             inline: None,
                             urls: Some(vec![
-                                format!("{}:///{hash_1}", crate::blobs::BLOB_SCHEME),
-                                format!("{}:///{hash_2}", crate::blobs::BLOB_SCHEME),
+                                crate::blobs::blob_url(&hash_1),
+                                crate::blobs::blob_url(&hash_2),
                             ]),
                         })),
                     ),
@@ -1681,7 +1679,7 @@ mod tests {
                             length_octets: 1234,
                             digest: "bafakedigest".to_string(),
                             inline: None,
-                            urls: Some(vec![format!("{}:///{hash_1}", crate::blobs::BLOB_SCHEME)]),
+                            urls: Some(vec![crate::blobs::blob_url(&hash_1)]),
                         })),
                     )]
                     .into(),
@@ -1712,7 +1710,7 @@ mod tests {
                             length_octets: 1234,
                             digest: "bafakedigest".to_string(),
                             inline: None,
-                            urls: Some(vec![format!("{}:///{hash_1}", crate::blobs::BLOB_SCHEME)]),
+                            urls: Some(vec![crate::blobs::blob_url(&hash_1)]),
                         })),
                     )]
                     .into(),
@@ -1827,7 +1825,7 @@ mod tests {
                 Arc::new(WflowBundleManifest {
                     keys: vec!["wflow1".into()],
                     component_urls: vec![
-                        format!("{}:///{hash}", crate::blobs::BLOB_SCHEME)
+                        crate::blobs::blob_url(&hash)
                             .parse()
                             .unwrap(),
                     ],
@@ -1844,7 +1842,7 @@ mod tests {
         // 2. Enable: the config revision's PlugEnabled drives the core
         //    inventory pins.
         let ref_url: url::Url =
-            format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+            format!("dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch=main")
                 .parse()?;
         plugs.enable_plug(&ref_url).await?;
         wait_for_pin_presence(drawer, &core_inventory_doc_id, &hash, true).await?;
@@ -1898,10 +1896,7 @@ mod tests {
                         length_octets: 1234,
                         digest: reserved.clone(),
                         inline: None,
-                        urls: Some(vec![format!(
-                            "{}:///{control_hash}",
-                            crate::blobs::BLOB_SCHEME
-                        )]),
+                        urls: Some(vec![crate::blobs::blob_url(&control_hash)]),
                     })),
                 )]
                 .into(),
@@ -2097,7 +2092,7 @@ mod tests {
                 Arc::new(WflowBundleManifest {
                     keys: vec!["wflow1".into()],
                     component_urls: vec![
-                        format!("{}:///{hash}", crate::blobs::BLOB_SCHEME)
+                        crate::blobs::blob_url(&hash)
                             .parse()
                             .unwrap(),
                     ],
@@ -2111,7 +2106,7 @@ mod tests {
         };
         let doc_id = test_context.rt.plugs_repo.add(manifest).await?;
         let ref_url: url::Url =
-            format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+            format!("dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch=main")
                 .parse()?;
         let consumed_before = plug_events_progress_row(&sql).await?.unwrap_or(0);
         test_context.rt.plugs_repo.enable_plug(&ref_url).await?;
@@ -2319,7 +2314,7 @@ mod tests {
         let (key_doc_id, key_heads) =
             crate::test_support::stage_key_doc(&drawer, &big_blobs::encrypt::MasterKey::random())
                 .await?;
-        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/org.example.daybook.jwk/relay");
         let cipher_digest = crate::blobs::blob_id_to_digest_str(cipher.clone());
         // A plain document first: a cipherBlob facet is system-managed, so it takes
         // the scope the encryption worker writes it with rather than a user write.
@@ -2518,10 +2513,7 @@ mod tests {
                         length_octets: 1234,
                         digest: "bafakedigest".to_string(),
                         inline: None,
-                        urls: Some(vec![format!(
-                            "{}:///{plaintext_hash}",
-                            crate::blobs::BLOB_SCHEME
-                        )]),
+                        urls: Some(vec![crate::blobs::blob_url(&plaintext_hash)]),
                     })),
                 )]
                 .into(),
@@ -2536,7 +2528,7 @@ mod tests {
         let (key_doc_id, key_heads) =
             crate::test_support::stage_key_doc(drawer, &big_blobs::encrypt::MasterKey::random())
                 .await?;
-        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/org.example.daybook.jwk/relay");
         let cipher_facet_key = FacetKey::from(WellKnownFacetTag::CipherBlob);
         drawer
             .update_at_heads_with_scope(

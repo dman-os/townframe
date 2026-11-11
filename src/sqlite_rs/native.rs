@@ -313,6 +313,19 @@ pub struct Migration<'sql> {
 
 type Job = Box<dyn FnOnce() + Send>;
 
+/// INSTR: process-wide SQLite counters: write leases, read leases, write-gate wait ns, worker jobs, worker busy ns.
+pub static INSTR_SQL: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5]; // INSTR
+/// INSTR: every 16th lease's caller (first frames outside sqlite_rs, tokio, std and futures), counted by (write, frames).
+pub static INSTR_SQL_CALLERS: StdMutex<Option<std::collections::HashMap<String, u64>>> = StdMutex::new(None); // INSTR
+fn instr_sample_caller(write: bool) { // INSTR
+    static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // INSTR
+    if !TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(16) { return; } // INSTR
+    let trace = std::backtrace::Backtrace::force_capture().to_string(); // INSTR
+    let frames: Vec<&str> = trace.lines().map(str::trim).filter(|line| !line.starts_with("at ") && line.contains(": ")).map(|line| line.split_once(": ").unwrap().1).filter(|name| (name.starts_with("big_") || name.starts_with("<big_") || name.starts_with("subduction") || name.starts_with("<subduction") || name.starts_with("keyhive") || name.starts_with("<keyhive") || name.starts_with("service_utils") || name.starts_with("<service_utils")) && !name.contains("{{closure}}{{closure}}{{closure}}")).take(3).collect(); // INSTR
+    let key = format!("{} {}", if write { "W" } else { "R" }, frames.join(" <- ")); // INSTR
+    *INSTR_SQL_CALLERS.lock().unwrap().get_or_insert_with(std::collections::HashMap::new).entry(key).or_default() += 1; // INSTR
+} // INSTR
+
 struct RuntimeInner {
     cfg: RuntimeConfig,
     tx: std::sync::mpsc::Sender<Job>,
@@ -341,7 +354,10 @@ impl RuntimeInner {
     {
         let (reply_tx, reply_rx) = oneshot::channel::<std::thread::Result<SqlResult<T>>>();
         let job: Job = Box::new(move || {
+            let instr_start = std::time::Instant::now(); // INSTR
             let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
+            INSTR_SQL[3].fetch_add(1, Ordering::Relaxed); // INSTR
+            INSTR_SQL[4].fetch_add(instr_start.elapsed().as_nanos() as u64, Ordering::Relaxed); // INSTR
             if let Err(Err(payload)) = reply_tx.send(out) {
                 std::panic::resume_unwind(payload);
             }
@@ -550,7 +566,11 @@ impl Database {
         } else {
             Arc::clone(&self.inner.reader_gate)
         };
+        instr_sample_caller(write); // INSTR
+        let instr_start = std::time::Instant::now(); // INSTR
         let permit = gate.acquire_owned().await.map_err(|_| SqlError::Closed)?;
+        INSTR_SQL[usize::from(!write)].fetch_add(1, Ordering::Relaxed); // INSTR
+        if write { INSTR_SQL[2].fetch_add(instr_start.elapsed().as_nanos() as u64, Ordering::Relaxed); } // INSTR
         self.drain_overflow();
         self.inner.in_use.fetch_add(1, Ordering::SeqCst);
         let mut lease = Lease {

@@ -13,7 +13,8 @@ use big_cabinet_core::drawer::GroupKey;
 use big_sync::HostPartStore;
 use big_sync::MemoryPartStore;
 use futures::future::BoxFuture;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::StopToken;
 use sqlite_rs::SqliteRuntime;
 use std::sync::Mutex;
@@ -26,6 +27,8 @@ struct State {
     writes: Vec<WriteDatums>,
     capabilities: std::collections::HashMap<CapId, (DocId, bool)>,
     mint_errors: BTreeMap<(DocId, bool), DocsError>,
+    /// Inventories this node's keyhive standing cannot commit to.
+    read_only: BTreeSet<DocId>,
 }
 
 #[derive(Default)]
@@ -59,7 +62,7 @@ impl DocsStub {
                 Box::pin(async move {
                     let mut state = docs.0.lock().unwrap();
                     if let Some(error) = state.mint_errors.get(&(document.clone(), write)) {
-                        return Err(ClientError::Operation(error.clone()));
+                        return Err(ClientError::Method(error.clone()));
                     }
                     let capability =
                         CapId::from_bytes((state.capabilities.len() as u128 + 1).to_be_bytes());
@@ -74,6 +77,14 @@ impl DocsStub {
             }),
             policy,
         )
+    }
+
+    fn writable(self: &Arc<Self>) -> InventoryWriteAccess {
+        let docs = Arc::clone(self);
+        Arc::new(move |inventory: DocId| {
+            let writable = !docs.0.lock().unwrap().read_only.contains(&inventory);
+            Box::pin(async move { Ok(writable) })
+        })
     }
 
     fn assert_scope(state: &State, capability: CapId, document: &DocId, write: bool) {
@@ -209,6 +220,7 @@ fn accepted(value: serde_json::Value) -> DatumRead {
             heads: vec![ChangeHash([1; 32])],
             clock: 1,
         },
+        authors: Vec::new(),
     }
 }
 fn absent() -> DatumRead {
@@ -254,9 +266,9 @@ impl Harness {
         )
         .await?;
         let (blobs, stop) = crate::boot(crate::Config {
-            storage: crate::Storage::Memory,
+            storage: crate::Storage::memory().unwrap(),
             sql: sql.clone(),
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: capability(),
@@ -276,8 +288,9 @@ impl Harness {
         Retention::new(
             self.sql.clone(),
             Arc::clone(&self.service),
-            Client::direct(Arc::clone(&self.docs)),
+            Client::new(Transport::direct(Arc::clone(&self.docs))),
             self.docs.metadata(),
+            self.docs.writable(),
             Arc::clone(&self.parts) as SharedPartStore,
         )
         .await
@@ -638,6 +651,102 @@ async fn self_doc_child_targets_parent_inventories_not_its_own_or_ancestors() ->
     Ok(())
 }
 
+/// A doc entered into this node's drawer from a peer's drawer is a candidate for the peer's
+/// inventory too, where the node holds only keyhive Read. Retention must not stage pins there:
+/// the metadata capability would authorize the write (the operator is a cabinet superuser) and
+/// keyhive would refuse it at commit. A grant later makes the target claimable; losing write
+/// keeps what was claimed, as a denied write does.
+#[tokio::test]
+async fn retention_claims_only_inventories_this_node_can_write() -> Res<()> {
+    let h = Harness::new().await?;
+    let mut retention = h.retention().await?;
+    let (own, own_sensitive, document, own_inventory) = (id(1), id(2), id(3), id(4));
+    let (peer, peer_sensitive, peer_inventory) = (id(5), id(6), id(7));
+    h.drawer(&own, &own_sensitive, &document, false).await?;
+    h.drawer(&peer, &peer_sensitive, &document, false).await?;
+    h.target(&own, MetaRoot::Public, &own, "node", &own_inventory)
+        .await?;
+    h.target(&peer, MetaRoot::Public, &peer, "node", &peer_inventory)
+        .await?;
+    h.docs
+        .0
+        .lock()
+        .unwrap()
+        .read_only
+        .insert(peer_inventory.clone());
+    let (pair, _) = h.pair().await?;
+    retention
+        .replace(
+            &document,
+            std::slice::from_ref(&pair),
+            BTreeMap::new(),
+            false,
+        )
+        .await?;
+    assert_eq!(
+        retention.flush().await?,
+        BTreeSet::from([own_inventory.clone()])
+    );
+    h.assert_parts(pair.ciphertext, std::slice::from_ref(&own_inventory))
+        .await?;
+    assert!(h.docs.pin(&peer_inventory, pair.ciphertext).is_none());
+    assert!(
+        h.docs
+            .0
+            .lock()
+            .unwrap()
+            .writes
+            .iter()
+            .all(|write| write.doc_id != peer_inventory),
+        "no write is attempted on an inventory the node cannot write"
+    );
+    assert_eq!(
+        h.sql
+            .query("SELECT inventory_id FROM big_blobs_writer_claims", ())
+            .await?
+            .all::<String>()?,
+        vec![own_inventory.to_string()]
+    );
+
+    h.docs.0.lock().unwrap().read_only.clear();
+    retention.refresh_targets(&document).await?;
+    assert_eq!(
+        retention.flush().await?,
+        BTreeSet::from([peer_inventory.clone()])
+    );
+    h.assert_parts(
+        pair.ciphertext,
+        &[own_inventory.clone(), peer_inventory.clone()],
+    )
+    .await?;
+
+    h.docs
+        .0
+        .lock()
+        .unwrap()
+        .read_only
+        .insert(peer_inventory.clone());
+    let writes = h.docs.0.lock().unwrap().writes.len();
+    retention
+        .replace(&document, &[], BTreeMap::new(), false)
+        .await?;
+    assert_eq!(
+        retention.flush().await?,
+        BTreeSet::from([own_inventory.clone()])
+    );
+    h.assert_parts(pair.ciphertext, std::slice::from_ref(&peer_inventory))
+        .await?;
+    assert!(h.docs.pin(&peer_inventory, pair.ciphertext).is_some());
+    assert!(
+        h.docs.0.lock().unwrap().writes[writes..]
+            .iter()
+            .all(|write| write.doc_id != peer_inventory),
+        "losing write keeps the claim instead of removing the pin"
+    );
+    h.stop.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn denied_writer_effects_survive_restart_and_pin_uncertainty() -> Res<()> {
     let h = Harness::new().await?;
@@ -675,8 +784,9 @@ async fn denied_writer_effects_survive_restart_and_pin_uncertainty() -> Res<()> 
     let mut retention = Retention::new(
         sql,
         Arc::clone(&h.service),
-        Client::direct(Arc::clone(&h.docs)),
+        Client::new(Transport::direct(Arc::clone(&h.docs))),
         h.docs.metadata(),
+        h.docs.writable(),
         Arc::clone(&h.parts) as SharedPartStore,
     )
     .await?;

@@ -147,9 +147,14 @@ async fn publication_is_ordered_with_invalidation_and_survives_caller_cancellati
     let (release, resume) = tokio::sync::oneshot::channel();
     let publisher = admission.clone();
     let target = inventory.clone();
+    let generation = admission
+        .state(&inventory, digest)
+        .await?
+        .unwrap()
+        .generation;
     let publication = tokio::spawn(async move {
         publisher
-            .publish(&target, digest, move |state, _| {
+            .publish(&target, digest, generation, move |state, _| {
                 Box::pin(async move {
                     assert!(state.advertisable());
                     started.send(()).unwrap();
@@ -164,12 +169,21 @@ async fn publication_is_ordered_with_invalidation_and_survives_caller_cancellati
     release.send(()).unwrap();
     admission.authorize(&inventory, false).await?;
     admission
-        .publish(&inventory, digest, |state, _| {
-            Box::pin(async move {
-                assert!(!state.advertisable());
-                Ok(true)
-            })
-        })
+        .publish(
+            &inventory,
+            digest,
+            admission
+                .state(&inventory, digest)
+                .await?
+                .unwrap()
+                .generation,
+            |state, _| {
+                Box::pin(async move {
+                    assert!(!state.advertisable());
+                    Ok(true)
+                })
+            },
+        )
         .await?;
     assert!(publication.await.unwrap_err().is_cancelled());
     stop.stop().await;
@@ -194,12 +208,21 @@ async fn final_publication_proof_rearms_a_pair_when_cached_bytes_disappear() -> 
     admission.available(&inventory, digest, true).await?;
     assert!(admission.begin(&inventory, digest).await?.is_none());
     admission
-        .publish(&inventory, digest, |state, _| {
-            Box::pin(async move {
-                assert!(state.bytes);
-                Ok(false)
-            })
-        })
+        .publish(
+            &inventory,
+            digest,
+            admission
+                .state(&inventory, digest)
+                .await?
+                .unwrap()
+                .generation,
+            |state, _| {
+                Box::pin(async move {
+                    assert!(state.bytes);
+                    Ok(false)
+                })
+            },
+        )
         .await?;
     let state = admission.state(&inventory, digest).await?.unwrap();
     assert!(!state.bytes);
@@ -225,9 +248,14 @@ async fn shutdown_drains_accepted_operations_before_database_reopen() -> Res<()>
     let (release, resume) = tokio::sync::oneshot::channel();
     let publisher = admission.clone();
     let target = inventory.clone();
+    let generation = admission
+        .state(&inventory, digest)
+        .await?
+        .unwrap()
+        .generation;
     let publication = tokio::spawn(async move {
         publisher
-            .publish(&target, digest, move |_, _| {
+            .publish(&target, digest, generation, move |_, _| {
                 Box::pin(async move {
                     started.send(()).unwrap();
                     resume.await.unwrap();

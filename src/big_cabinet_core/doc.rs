@@ -1,20 +1,18 @@
 use crate::DatumKey;
 use crate::authority::AuthorityServiceError;
-use crate::authority::Authorization;
 use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
 use crate::dmeta::DocId;
+use crate::dmeta::Uuid7;
 use crate::drawer::DrawerAccess;
 use crate::query::DatumSelection;
 use crate::query::Predicate;
 pub use automerge::ChangeHash;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as Json;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -35,6 +33,7 @@ pub use inspection::UnsafeDatumInspection;
 pub use inspection::UnsafeInspectDatum;
 pub use inspection::VerifiedSignatureEvidence;
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct CommandId(String);
@@ -67,41 +66,65 @@ impl std::fmt::Display for CommandId {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "at", content = "heads", rename_all = "camelCase")]
 pub enum At {
     Current,
-    Heads(Vec<ChangeHash>),
+    Heads(#[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))] Vec<ChangeHash>),
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "camelCase")]
 pub enum WriteMode {
     IfDocUnchanged {
+        #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         heads: Vec<ChangeHash>,
     },
     IfDatumsUnchanged {
         datums: BTreeMap<DatumKey, DatumVersion>,
     },
     AtHeads {
+        #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         heads: Vec<ChangeHash>,
     },
     AtCurrent,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumVersion {
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
     pub clock: u64,
 }
 
+/// An actor that wrote the version of a datum a read or listing reports (attribution).
+///
+/// These are the actors of the evidence the gate verified as currently covering the version, one
+/// per distinct actor and sorted by actor id; a slot with concurrent current writes lists every
+/// author. `url` is the actor URL (`dtxt:actor:<node key>[/<path>]`) taken from that verified
+/// evidence rather than from the local actor registry, so authors on other nodes resolve too.
+/// What the evidence is (today a per-datum signature) may change; the meaning of the field does not.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatumAuthor {
+    pub actor: Uuid7,
+    pub url: String,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum DatumRead {
     Accepted {
         value: Json,
         version: DatumVersion,
+        /// Who wrote the accepted version, as the gate verified it for this read.
+        authors: Vec<DatumAuthor>,
     },
     Absent {
         version: DatumVersion,
@@ -120,25 +143,36 @@ pub enum DatumRead {
     },
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumsRead {
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
     pub datums: BTreeMap<DatumKey, DatumRead>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumListing {
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
     pub datums: BTreeMap<DatumKey, DatumVersion>,
+    /// The authors of each row's version, present only for rows of a listing that asked
+    /// (`ListDatums::with_authors`) and whose version the gate accepted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authors: BTreeMap<DatumKey, Vec<DatumAuthor>>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteReceipt {
     pub doc_id: DocId,
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumPatch {
@@ -154,13 +188,16 @@ impl DatumPatch {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreSnapshot<S> {
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
     pub value: S,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum StoreError {
     #[error("document operation failed: {0}")]
@@ -184,6 +221,7 @@ pub trait DatumStore: Clone + Send + 'static {
     fn hydrate(read: &DatumsRead) -> Self;
     fn diff(before: &Self, after: &Self) -> Result<DatumPatch, StoreError>;
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum Unaccepted {
@@ -191,6 +229,7 @@ pub enum Unaccepted {
     Rejected { reason: String },
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum DocsError {
     #[error("request context failed: {0}")]
@@ -208,7 +247,10 @@ pub enum DocsError {
     #[error("document is not locally available")]
     DocNotFound,
     #[error("requested heads are unknown: {heads:?}")]
-    UnknownHeads { heads: Vec<ChangeHash> },
+    UnknownHeads {
+        #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
+        heads: Vec<ChangeHash>,
+    },
     #[error("a command id is 1..=256 bytes")]
     InvalidCommand,
     #[error("command {command} is still in flight; retry once it resolves")]
@@ -225,6 +267,7 @@ pub enum DocsError {
     InvalidValue { datum_key: DatumKey, reason: String },
     #[error("the write condition no longer holds at {heads:?}")]
     Conflict {
+        #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         heads: Vec<ChangeHash>,
         datums: BTreeMap<DatumKey, DatumVersion>,
     },
@@ -245,6 +288,7 @@ pub enum DocsError {
     UnrelatedHistory,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DocScope {
@@ -254,14 +298,20 @@ pub struct DocScope {
     pub drawers: BTreeMap<DocId, DrawerAccess>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDocCapability {
-    pub authorization: Authorization,
     pub scope: DocScope,
     pub rights: Rights,
+    /// The actor the new handle is bound to; `None` binds it to the presented handle's own
+    /// subject. Naming another actor is an introduction: the presented handle needs
+    /// `Rights::DELEGATE`, and the actor must be live and a strict descendant of the presented
+    /// handle's subject in the actor tree (anyone else is `Escalation`).
+    pub subject: Option<Uuid7>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDoc {
@@ -270,6 +320,7 @@ pub struct CreateDoc {
     pub placement: String,
     pub datums: BTreeMap<DatumKey, Json>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteDatums {
@@ -283,6 +334,7 @@ pub struct WriteDatums {
     #[serde(default)]
     pub remove: BTreeSet<DatumKey>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchDoc {
@@ -295,6 +347,7 @@ pub struct BranchDoc {
     pub stealth: bool,
     pub placement: String,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeDoc {
@@ -305,6 +358,7 @@ pub struct MergeDoc {
     pub at: At,
     pub target_id: DocId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadDatums {
@@ -316,14 +370,20 @@ pub struct ReadDatums {
     #[serde(default)]
     pub optimistic: bool,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDatums {
     pub capability: CapId,
     pub doc_id: DocId,
     pub at: At,
+    /// Also report each row's authors. Off by default: it runs the gate per row, which a plain
+    /// listing never does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub with_authors: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum DatumRefSelector {
@@ -338,6 +398,7 @@ pub enum DatumRefSelector {
         datum_key: Option<DatumKey>,
     },
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryDatumRefs {
@@ -346,6 +407,7 @@ pub struct QueryDatumRefs {
     pub drawer_id: Option<DocId>,
     pub selector: DatumRefSelector,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueriedDatumRef {
@@ -354,13 +416,24 @@ pub struct QueriedDatumRef {
     pub path: String,
     pub target_doc_id: DocId,
     pub target_datum_key: DatumKey,
+    #[serde(with = "crate::reference::head_list")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<ChangeHash>,
+}
+
+/// The result of [`QueryDatumRefs`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueriedDatumRefs {
+    pub refs: Vec<QueriedDatumRef>,
 }
 
 /// One long poll over the datum-set frontier (ADR 023, ADR 025).
 ///
 /// The predicate selects documents and the selection names which of their datums are delivered.
 /// A current-state read is a poll from `after = 0` with `hold_ms = 0`, paged until `caught_up`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PollDatums {
@@ -378,6 +451,7 @@ pub struct PollDatums {
     pub hold_ms: u32,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatumPage {
@@ -390,9 +464,11 @@ pub struct DatumPage {
 
 /// One revision-stamped fact a poll delivers.
 ///
-/// `enter` carries the document's current selected datums so a consumer that did not know the
-/// document converges from this event alone; `datum` is the cheaper form for a document the
-/// consumer already holds; `leave` is idempotent for a consumer that never held it.
+/// `datum` is one selected row of a document that matches the predicate: sent when the row
+/// changed, and for every selected row of a document that moved into the result (a move-in,
+/// ADR 025 §7). `leave` is a move-out and is idempotent for a consumer that never held the
+/// document. The consumer tracks which documents it holds; the server keeps no state.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -400,11 +476,6 @@ pub struct DatumPage {
     rename_all_fields = "camelCase"
 )]
 pub enum DatumEvent {
-    Enter {
-        revision: u64,
-        doc_id: DocId,
-        datums: BTreeMap<DatumKey, ObservedDatum>,
-    },
     Datum {
         revision: u64,
         doc_id: DocId,
@@ -417,6 +488,7 @@ pub enum DatumEvent {
     },
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "state",
@@ -425,26 +497,18 @@ pub enum DatumEvent {
 )]
 pub enum ObservedDatum {
     Present {
+        #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
         doc_heads: Vec<ChangeHash>,
         version: DatumVersion,
     },
     Removed {
+        #[cfg_attr(feature = "schemars", schemars(with = "Option<Vec<String>>"))]
         doc_heads: Option<Vec<ChangeHash>>,
         version: DatumVersion,
     },
 }
-macro_rules! operations {
-    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = DocsError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.docs.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(DocsError));
-        }
-    )*};
-}
-operations! {
+method_core::methods! {
+    error = DocsError, nsid_prefix = "org.example.daybook.docs.";
     MintDocCapability => Capability, procedure, "mintDocCapability";
     CreateDoc => WriteReceipt, procedure, "createDoc";
     WriteDatums => WriteReceipt, procedure, "writeDatums";
@@ -453,7 +517,7 @@ operations! {
     ReadDatums => DatumsRead, procedure, "readDatums";
     ListDatums => DatumListing, procedure, "listDatums";
     PollDatums => DatumPage, procedure, "pollDatums";
-    QueryDatumRefs => Vec<QueriedDatumRef>, procedure, "queryDatumRefs";
+    QueryDatumRefs => QueriedDatumRefs, procedure, "queryDatumRefs";
     UnsafeInspectDatum => UnsafeDatumInspection, procedure, "unsafeInspectDatum";
     InspectDatumClaims => DatumClaimsInspection, procedure, "inspectDatumClaims";
     GetDocAvailability => DocAvailability, query, "getDocAvailability";

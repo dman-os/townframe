@@ -27,7 +27,7 @@ use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 use serde::Deserialize;
 use serde::Serialize;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
@@ -358,7 +358,7 @@ impl BlobProjection {
                     Ok(read) => read,
                     Err(
                         ClientError::Transport { .. }
-                        | ClientError::Operation(
+                        | ClientError::Method(
                             DocsError::Denied
                             | DocsError::Authority(
                                 AuthorityServiceError::InvalidCapability
@@ -584,19 +584,10 @@ fn reference_from_read(route: &DatumRoute, datum: DatumRead) -> Prepared {
 }
 
 fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
-    blob.digest.parse().ok().or_else(|| {
-        blob.urls
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .find_map(|text| {
-                let url = text.parse::<url::Url>().ok()?;
-                if !matches!(url.scheme(), "db+blob" | "daybook-blob") {
-                    return None;
-                }
-                url.path().trim_start_matches('/').parse().ok()
-            })
-    })
+    blob.digest
+        .parse()
+        .ok()
+        .or_else(|| crate::documents::url_blob_id(blob))
 }
 
 #[cfg(test)]

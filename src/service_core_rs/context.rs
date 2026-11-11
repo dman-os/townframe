@@ -1,5 +1,6 @@
 use crate::cancellation::CancellationSignal;
 use crate::cancellation::CancellationTransport;
+use method_core::ContextError;
 use opentelemetry::Context;
 use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::trace::TraceContextExt;
@@ -13,22 +14,6 @@ use std::time::UNIX_EPOCH;
 use tokio::time::Instant;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum ContextError {
-    #[error("request context is missing a request id")]
-    MissingRequestId,
-    #[error("request was cancelled")]
-    Cancelled,
-    #[error("request cancellation key is already admitted")]
-    CancellationAlreadyAdmitted,
-    #[error("request cancellation scope capacity exhausted (limit {limit})")]
-    CancellationCapacityExceeded { limit: usize },
-    #[error("subscription capacity exhausted (limit {limit})")]
-    StreamCapacityExceeded { limit: usize },
-    #[error("request exceeded its time budget")]
-    DeadlineExceeded,
-}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpMetadata {
@@ -61,6 +46,31 @@ impl TraceContext {
         headers.clear();
         TraceContextPropagator::new().inject_context(&context, &mut headers);
         Self { headers }
+    }
+
+    /// The trace of the next hop: the same trace id and flags, a fresh span id, so the hop's
+    /// span is a child of this one (W3C Trace Context). No trace stays no trace: a hop does not
+    /// invent one. A random span id comes from the random bits of a v7 uuid.
+    pub fn child_span(&self) -> Self {
+        let Some(traceparent) = self.traceparent() else {
+            return self.clone();
+        };
+        let mut parts = traceparent.split('-');
+        let (Some(version), Some(trace_id), Some(_parent_span), Some(flags)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return self.clone();
+        };
+        let span_id = u64::from_be_bytes(
+            Uuid::now_v7().as_bytes()[8..]
+                .try_into()
+                .expect("a uuid has 8 trailing bytes"),
+        )
+        .max(1);
+        Self::from_headers(
+            Some(&format!("{version}-{trace_id}-{span_id:016x}-{flags}")),
+            self.tracestate(),
+        )
     }
 
     pub fn traceparent(&self) -> Option<&str> {
@@ -109,6 +119,19 @@ impl RequestContext {
             } else {
                 self.trace.clone()
             },
+            ..self.clone()
+        }
+    }
+
+    /// The context of the next hop of a chain (a nested call, or delivery to a handler): a fresh
+    /// request id, because the id is this hop's admission and cancellation key and a nested
+    /// call runs while its outer call is in flight, and a child span of the same trace. The
+    /// remaining budget carries over; the chain is the trace, not the request id.
+    pub fn next_hop(&self) -> Self {
+        Self {
+            request_id: Uuid::now_v7(),
+            trace: self.trace.child_span(),
+            cancellation: CancellationSignal::default(),
             ..self.clone()
         }
     }
@@ -193,6 +216,38 @@ fn wall_clock_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_next_hop_has_a_new_request_id_and_a_child_span_of_the_same_trace() {
+        let mut context = RequestContext::root();
+        context.trace = TraceContext::from_headers(
+            Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            Some("vendor=1"),
+        );
+        let hop = context.next_hop();
+        assert_ne!(hop.request_id, context.request_id);
+        let (outer, inner) = (
+            context
+                .trace
+                .traceparent()
+                .unwrap()
+                .split('-')
+                .collect::<Vec<_>>(),
+            hop.trace
+                .traceparent()
+                .unwrap()
+                .split('-')
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            (inner[0], inner[1], inner[3]),
+            (outer[0], outer[1], outer[3])
+        );
+        assert_ne!(inner[2], outer[2]);
+        assert_eq!(hop.trace.tracestate(), Some("vendor=1"));
+        let untraced = TraceContext::default();
+        assert_eq!(untraced.child_span(), untraced);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn child_and_receiver_do_not_extend_deadlines() {
