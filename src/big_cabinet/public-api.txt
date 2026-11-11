@@ -45,7 +45,7 @@ pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn at (& self ,
 pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn load (context : & RequestContext , docs : Client < DocsProtocol > , capability : CapId , doc_id : DocId ,) -> Result < (Self , StopToken) , StoreError >
 pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn mutate < O > (& self , context : & RequestContext , command : Option < CommandId > , edit : impl FnOnce (& mut S) -> Result < O , StoreError > + Send + 'static ,) -> Result < (O , Option < WriteReceipt >) , StoreError > where O : Send + 'static ,
 pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn snapshot (& self) -> Result < StoreSnapshot < S > , StoreError >
-pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn watch (& self) -> Result < EventStream < StoreSnapshot < S > , StoreError > , StoreError >
+pub impl big_cabinet::datum_store::DatumStoreHandle < S >::async fn watch (& self) -> Result < watch :: Receiver < u64 > , StoreError >
 pub impl big_cabinet::doc::DocsRepo::async fn mint_inspection_handle (& self , doc_id : DocId , subject : Uuid7 ,) -> Result < Capability , DocsError >
 pub impl big_cabinet::doc::DocsRepo::async fn recover (& self) -> Result < () , DocsError >
 pub impl big_cabinet::doc::access::LedgerAccess::async fn open (sql : Database , authority : Client < AuthorityProtocol > , namespace : Namespace ,) -> Result < Self , AccessError >
