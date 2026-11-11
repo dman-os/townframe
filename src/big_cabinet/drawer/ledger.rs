@@ -123,6 +123,7 @@ impl LedgerFailure for DrawersError {
             | Self::AuthorityUnavailable(_)
             | Self::DocsUnavailable(_)
             | Self::Keyhive(_)
+            | Self::UnknownGroup(_)
             | Self::Storage(_)
             | Self::RosterUnreadable(_) => true,
             Self::Docs(error) => matches!(
@@ -138,6 +139,8 @@ impl LedgerFailure for DrawersError {
             | Self::Authority(_)
             | Self::UnknownDrawer(_)
             | Self::UnknownPeer(_)
+            | Self::InvalidKey(_)
+            | Self::UnknownPrincipal(_)
             | Self::ForeignLayout(_)
             | Self::SelfDoc(_)
             | Self::AlreadyDrawer(_)
