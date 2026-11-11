@@ -28,9 +28,9 @@ use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_ndk_testing::TestNode;
 use intxt_core::generic;
-use intxt_core::work;
 use intxt_core::methods::AddToIntxt;
 use intxt_core::methods::AddedToIntxt;
+use intxt_core::work;
 use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
@@ -49,8 +49,9 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 /// A node that admitted intxt's cartridge, serving its handler natively, with the operations the
 /// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
-    let cartridge = intxt_core::cartridge::cartridge(intxt_core::cartridge::handler_artifact(
-        b"placeholder: the native test harness never reads the handler bytes",
+    let cartridge = intxt_core::cartridge::cartridge(
+        intxt_core::cartridge::handler_artifact(
+            b"placeholder: the native test harness never reads the handler bytes",
         ),
         &crate::REQUIRED_OPERATIONS,
     );
@@ -58,9 +59,7 @@ async fn boot() -> TestNode {
     // The ceiling of what a nodule can be granted covers the registered cartridge's own
     // authority only, so the foreign operations it calls must be added to it.
     let operations = DispatchScope {
-        operations: crate::REQUIRED_OPERATIONS
-            .map(str::to_owned)
-            .into(),
+        operations: crate::REQUIRED_OPERATIONS.map(str::to_owned).into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()

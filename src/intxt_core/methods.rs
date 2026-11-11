@@ -2,12 +2,12 @@
 //! `addToIntxt` and `recordObservations`. The handlers live in `intxt_nodule`; callers (the host's
 //! CLI, the cartridge, tests) need only these types.
 
-use big_cabinet_core::DocId;
-use big_cabinet_core::ActorUrl;
-use big_cabinet_core::drawer::protocol::DrawerId;
-use big_cabinet_core::reference::DatumReference;
 use crate::capture::Batch;
 use crate::capture::RecordedIds;
+use big_cabinet_core::ActorUrl;
+use big_cabinet_core::DocId;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::reference::DatumReference;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;

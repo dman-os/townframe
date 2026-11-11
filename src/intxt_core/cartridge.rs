@@ -36,7 +36,6 @@ pub const AUTHORITY: &str = "org.example.intxt";
 /// The key of the handler artifact in the cartridge.
 pub const HANDLER_ARTIFACT: &str = "handler";
 
-
 /// The envelope of the handler component `wasm`: the cartridge's artifact for it. The digest is
 /// the component's BLAKE3, which is also the id of the blob a node stores it under, so putting
 /// the bytes in the node's blob store is what makes the artifact available.
@@ -96,7 +95,7 @@ pub fn cartridge(handler: Artifact, requires: &[&str]) -> Cartridge {
         sidecar,
         requires: requires
             .iter()
-            .map(|nsid| Request::new(nsid, nsid))
+            .map(|nsid| Request::new(*nsid, *nsid))
             .collect(),
         handler: Some(big_nodule_core::Handler {
             artifact: HANDLER_ARTIFACT.into(),
