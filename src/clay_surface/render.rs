@@ -222,7 +222,7 @@ pub(crate) fn static_attribute(
     }
     Ok(vocabulary!(
         None => None => [
-            "id", "class", "title", "role", "tabindex", "hidden", "lang", "dir",
+            "id", "class", "style", "title", "role", "tabindex", "hidden", "lang", "dir",
             "contenteditable", "draggable", "spellcheck", "translate",
             "value", "checked", "disabled", "readonly", "required", "multiple", "selected",
             "name", "type", "placeholder", "autocomplete", "inputmode", "pattern",
@@ -269,8 +269,8 @@ const XLINK_NAMESPACE: &str = "http://www.w3.org/1999/xlink";
 /// may set, this decides which values those names may carry. Every value that can make the host
 /// request, navigate to, or autofill from something the guest names is refused here, so a batch
 /// carrying one faults the presentation exactly as an unknown name does. Names that exist only to
-/// carry such values (`src`, `srcset`, `action`, `target`, `download`, raw `style`, ...) are not in
-/// the vocabulary at all.
+/// carry such values (`src`, `srcset`, `action`, `target`, `download`, ...) are not in the
+/// vocabulary at all.
 ///
 /// A removal (`None`, `false`) is always admitted. The checks are single byte-scans over the
 /// value with a fixed token list; nothing here allocates.
@@ -335,18 +335,47 @@ pub(crate) fn attribute_value_policy(
                 return Err("svg paint value carries a url");
             }
         }
-        (_, Some("style")) => {
-            if css_value_is_forbidden(text, CSS_FETCHING_TOKENS) {
-                return Err("style value can fetch or escape its box");
-            }
-            // Containment traps absolute and fixed boxes on the hosts that support it; the
-            // value is also refused so a host without containment support is not the only
-            // line of defence.
-            if name == "position" && css_value_is_forbidden(text, &["fixed", "sticky"]) {
-                return Err("style position escapes its box");
+        (_, Some("style")) => style_value_policy(text)?,
+        // A raw `style="a:b; c:d"` string, which standard Dioxus writes. It is never trusted: it
+        // is parsed here as a declaration list and every declaration must pass the same checks
+        // as a per-property `style:<name>` attribute (an allowlisted property, or a custom
+        // property `--*` of any name, with a value that passes `style_value_policy`). One bad
+        // declaration refuses the whole attribute. The stored and rendered value is the guest's
+        // original string, not a re-serialization: the parse only validates, the byte scan
+        // already refuses the constructs (escapes, comments, control characters) on which a
+        // browser's parse could differ from this one, and re-emitting would add a serializer
+        // whose output nobody reviews.
+        ("style", None) => {
+            for (property, value) in crate::stylesheet::inline_declarations(text)? {
+                if !property.starts_with("--")
+                    && !matches!(
+                        static_attribute(
+                            &DATA_ATTRIBUTES,
+                            &property.to_ascii_lowercase(),
+                            Some("style")
+                        ),
+                        Ok(Some(_))
+                    )
+                {
+                    return Err("style property is not in the vocabulary");
+                }
+                style_value_policy(&value)?;
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// The value rule shared by `style:<property>` attributes and the declarations of a raw `style`
+/// string. `position: fixed` and `sticky` are deliberately allowed: every presentation sits in
+/// the host box ([`PRESENTATION_BOX_STYLE`]) whose `contain: layout paint` makes it the
+/// containing block of fixed descendants, so a fixed element is positioned and clipped inside
+/// its presentation and cannot reach the viewport, and sticky never leaves its scroll container.
+/// The stylesheet sanitizer likewise keeps `position`.
+fn style_value_policy(value: &str) -> Result<(), &'static str> {
+    if css_value_is_forbidden(value, CSS_FETCHING_TOKENS) {
+        return Err("style value can fetch or escape its box");
     }
     Ok(())
 }

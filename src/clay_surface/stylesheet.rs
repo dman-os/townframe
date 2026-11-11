@@ -159,6 +159,59 @@ impl<'i> DeclarationParser<'i> for Sanitizer {
     }
 }
 
+/// The declarations of an inline `style` attribute as `(name, value)` pairs. The whole string
+/// must parse as a declaration list with no at-rules or nested rules, and a value is refused if
+/// any token of it can fetch (see [`fetches`]); one bad declaration is an `Err`. Property names
+/// are not judged here.
+pub(crate) fn inline_declarations(text: &str) -> Result<Vec<(String, String)>, &'static str> {
+    struct Inline;
+    impl<'i> DeclarationParser<'i> for Inline {
+        type Declaration = (String, String);
+        type Error = ();
+
+        fn parse_value(
+            &mut self,
+            name: CowRcStr<'i>,
+            input: &mut Parser<'i>,
+            _declaration_start: &ParserState,
+        ) -> Result<Self::Declaration, ParseError<()>> {
+            input.skip_whitespace();
+            let start = input.position();
+            if fetches(input) {
+                return Err(ParseError::custom(()));
+            }
+            let value = input.slice_from(start).trim();
+            if value.is_empty() {
+                return Err(ParseError::custom(()));
+            }
+            Ok((name.to_string(), value.to_owned()))
+        }
+    }
+    impl<'i> AtRuleParser<'i> for Inline {
+        type Prelude = ();
+        type AtRule = (String, String);
+        type Error = ();
+    }
+    impl<'i> QualifiedRuleParser<'i> for Inline {
+        type Prelude = ();
+        type QualifiedRule = (String, String);
+        type Error = ();
+    }
+    impl<'i> RuleBodyItemParser<'i, (String, String), ()> for Inline {
+        fn parse_declarations(&self) -> bool {
+            true
+        }
+
+        fn parse_qualified(&self) -> bool {
+            false
+        }
+    }
+    let mut parser = Parser::new(text);
+    RuleBodyParser::new(&mut parser, &mut Inline)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "style attribute is not a list of safe declarations")
+}
+
 impl<'i> AtRuleParser<'i> for Sanitizer {
     /// The at-rule's lowercase name and its prelude text.
     type Prelude = (String, String);

@@ -854,12 +854,22 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
             Some("http://www.w3.org/1999/xlink"),
             text("https://evil.example/"),
         ),
-        // Raw style bypasses every per-property check.
+        // A raw style string is held to the per-property checks, declaration by declaration.
         (
             "style",
             None,
             text("position:fixed;inset:0;background:url(//evil/x)"),
         ),
+        ("style", None, text("--x: url(//evil/x)")),
+        ("style", None, text("height:1px; background:url(x)")),
+        ("style", None, text("height:1px; --a: image-set('x' 1x)")),
+        ("style", None, text("height:1px; background:\\75rl(x)")),
+        ("style", None, text("height:1px; background:ur/**/l(x)")),
+        ("style", None, text("height:1px; unknown-prop: 1")),
+        ("style", None, text("height:1px; color")),
+        ("style", None, text("height:1px; @import 'x';")),
+        ("style", None, text("a { color: red }")),
+        ("style", None, text("height:")),
         // Focus theft and password-manager autofill.
         ("autofocus", None, AttributeValue::Boolean(true)),
         ("accesskey", None, text("k")),
@@ -892,10 +902,6 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
         ("width", style, text("attr(data-x px)")),
         ("width", style, text("expression(alert(1))")),
         ("color", style, text("red; @import 'x'")),
-        ("position", style, text("fixed")),
-        ("position", style, text(" FIXED ")),
-        ("position", style, text("sticky")),
-        ("position", style, text("-webkit-sticky")),
     ];
     for (name, namespace, value) in hostile {
         let batch = set_attribute_batch(name, namespace, value.clone());
@@ -931,6 +937,21 @@ fn benign_link_and_style_values_are_admitted() {
         ("background-color", Some("style"), text("rgb(1 2 3 / 50%)")),
         ("position", Some("style"), text("relative")),
         ("position", Some("style"), text("absolute")),
+        // The presentation box contains fixed descendants, so these cannot escape it.
+        ("position", Some("style"), text("fixed")),
+        ("position", Some("style"), text("sticky")),
+        // Raw style strings as standard Dioxus and the Pierre port write them.
+        (
+            "style",
+            None,
+            text("--diffs-annotation-min-height:0px; height: 120px"),
+        ),
+        ("style", None, text("overflow-anchor:none")),
+        (
+            "style",
+            None,
+            text("position:sticky;top:0;--x: calc(1px + 2px);"),
+        ),
         ("width", Some("style"), text("calc(100% - 4px)")),
         ("font-family", Some("style"), text("system-ui, sans-serif")),
         ("opacity", Some("style"), AttributeValue::Float(0.5)),
