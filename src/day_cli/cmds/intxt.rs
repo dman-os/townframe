@@ -1,11 +1,12 @@
-//! intxt's operations, run as the operator until intxt's nodule can run them itself (ledger D41).
+//! intxt's commands, the subcommands of `day x` (`day x intxt install|new|add`), hard-coded until
+//! command bindings are generated from installed cartridges. `day x <nsid>` reaches a cartridge's
+//! operations directly, so a command is only what the operations cannot do yet.
 //!
-//! Creating an intxt creates a drawer, and a nodule cannot create a drawer yet: the nodule service
-//! grants a nodule's actor access only to drawers that already exist. Once the operator can
-//! consent to a nodule creating drawers, `new` becomes intxt's `createIntxt` operation, called with
-//! `day x`, and this module goes. `add` follows it into the nodule once the nodule can be lent
-//! the reach to enter a document in a drawer. `install` goes once cartridges are installed through
-//! `day` in general.
+//! They run as the operator, not through intxt's nodule (ledger D41). `new` is the operator-side
+//! form of the nodule's `createIntxt`, and `add` of `addToIntxt` (which also finds the drawer a part
+//! is lent from itself, where `add` takes `--from`); `add` stays here because the nodule's handler
+//! has no packaged component for a real node to host yet. `install` goes once cartridges are
+//! installed through `day` in general.
 
 use crate::client::NodeClient;
 use crate::interlude::*;
