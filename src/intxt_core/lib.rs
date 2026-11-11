@@ -2,12 +2,14 @@
 //!
 //! References between datums are `dtxt:` URLs (ADR 035). A field naming a whole datum is a
 //! [`DatumReference`]; a field naming a position inside one (a comment's target, an op's cause) is
-//! a [`Location`]. Both are indexed by their datum part, so "what points at this" is one query, and
-//! both take their pin from a sibling `refHeads` field (ADR 035 §2.8). Actor URLs are
+//! a [`Location`]. Both are indexed by their datum part, so "what points at this" is one query. A
+//! reference read at a version is a [`DatumPin`] object holding the location and its heads (ADR 035
+//! §2.8). Actor URLs are
 //! [`ActorUrl`]s, which are not indexed.
 //!
 //! [`DatumReference`]: big_cabinet_core::DatumReference
 //! [`Location`]: big_cabinet_core::Location
+//! [`DatumPin`]: big_cabinet_core::reference::DatumPin
 //! [`ActorUrl`]: big_cabinet_core::ActorUrl
 
 pub mod annotation;

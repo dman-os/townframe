@@ -122,8 +122,10 @@ fn the_adr_examples_are_valid_datums() {
     ]}));
     codec_round_trip::<annotation::Comment>(json!({
         "targets": [{
-            "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.note/main#content/[12@a3f-40@a3f]",
-            "refHeads": ["z11111111111111111111111111111111"],
+            "source": {
+                "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.note/main#content/%5B12@a3f-40@a3f%5D",
+                "heads": ["z11111111111111111111111111111111"]
+            },
             "lines": {"start": 120, "end": 124},
             "quote": {"exact": "fn parse(", "prefix": "pub ", "suffix": "value: &str)"}
         }],
@@ -131,7 +133,7 @@ fn the_adr_examples_are_valid_datums() {
         "motivation": "commenting"
     }));
     codec_round_trip::<annotation::Comment>(json!({
-        "targets": [{"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/0193"}],
+        "targets": [{"source": {"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/0193"}}],
         "body": {"mime": "text/markdown", "content": "Because the slot can contain `/`."},
         "motivation": "replying",
         "replyTo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/0193"
@@ -142,7 +144,7 @@ fn the_adr_examples_are_valid_datums() {
         "title": "Move references to dtxt:",
         "status": "completed",
         "targets": [{
-            "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.promptTurn/t20",
+            "source": {"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.promptTurn/t20"},
             "to": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.promptTurn/t45"
         }],
         "order": "15"
@@ -171,7 +173,7 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::WorktreeOp>(json!({
         "at": "2026-11-10T21:04:11Z",
         "kind": "edit",
-        "cause": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.promptTurn/t41#toolCalls/{\"id\":\"toolu_01\"}",
+        "cause": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.promptTurn/t41#toolCalls/%7B%22id%22:%22toolu_01%22%7D",
         "files": {"src/big_cabinet_core/reference.rs": ["z11111111111111111111111111111111"]},
         "deleted": ["src/old.rs"],
         "renames": {"src/new.rs": "src/older.rs"}
@@ -251,7 +253,7 @@ fn the_adr_examples_are_valid_datums() {
 #[test]
 fn future_fields_and_vocabulary_values_are_carried() {
     codec_round_trip::<annotation::Comment>(json!({
-        "targets": [{"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.note/main", "selector": {"kind": "svg"}}],
+        "targets": [{"source": {"ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.note/main"}, "selector": {"kind": "svg"}}],
         "body": {"mime": "text/markdown", "content": "Looks right.", "language": "en"},
         "motivation": "approving",
         "visibility": "team"
