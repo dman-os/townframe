@@ -538,6 +538,162 @@ mod library {
         );
         client.stop().await.unwrap();
     }
+
+    /// `intxt add` includes captured parts: each gets an entry keyed by the part's identity, the
+    /// body lists the entries in the order they were added, adding a part again changes nothing,
+    /// and the parts' documents are entered in the intxt's drawer so its members can read them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn intxt_add_includes_parts_once_and_shares_their_documents() {
+        use crate::cmds::intxt;
+        use big_cabinet_core::DocId;
+        use big_cabinet_core::doc::CreateDoc;
+        use big_cabinet_core::doc::DocScope;
+        use big_cabinet_core::drawer::DrawerAccess;
+        use big_cabinet_core::drawer::protocol::ListDocs;
+        use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+        use big_cabinet_core::reference::DatumReference;
+
+        let (_tmp, dir) = new_node();
+        let client = NodeClient::connect(&dir).await.unwrap();
+        intxt::install(&client).await.unwrap();
+        let captures = intxt::create(&client, "captures".into(), None)
+            .await
+            .unwrap();
+        let review = intxt::create(&client, "review".into(), None).await.unwrap();
+        let capture = |tag: &str, value: serde_json::Value| {
+            let client = &client;
+            let captures = &captures;
+            let tag = tag.to_owned();
+            async move {
+                let placement = format!("drawer {captures}");
+                let capability = intxt::doc_capability(
+                    client,
+                    DocScope {
+                        create: [placement.clone()].into(),
+                        ..DocScope::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let mut value = value;
+                value["$type"] = tag.clone().into();
+                let doc: DocId = intxt::call(
+                    client,
+                    CreateDoc {
+                        capability,
+                        command: intxt::command("capture"),
+                        placement,
+                        datums: [(format!("{tag}/main").parse().unwrap(), value)].into(),
+                    },
+                )
+                .await
+                .unwrap()
+                .doc_id;
+                format!("dtxt:datum:{doc}/{tag}/main")
+                    .parse::<DatumReference>()
+                    .unwrap()
+            }
+        };
+        let worktree = capture(
+            "org.example.intxt.work.worktree",
+            json!({
+                "clone": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitClone/0193c",
+                "id": "0193a",
+                "path": "/work/townframe",
+                "files": {},
+                "opLogs": []
+            }),
+        )
+        .await;
+        let session = capture(
+            "org.example.intxt.work.agentSession",
+            json!({"harness": "claude-code", "sessionId": "eb26ecaa", "cwd": "/work/townframe"}),
+        )
+        .await;
+
+        let added = [
+            intxt::add(&client, &review, &worktree, &captures)
+                .await
+                .unwrap(),
+            intxt::add(&client, &review, &session, &captures)
+                .await
+                .unwrap(),
+            intxt::add(&client, &review, &worktree, &captures)
+                .await
+                .unwrap(),
+        ];
+        assert_eq!(
+            added.map(|entry| entry.to_string()),
+            [
+                format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+                format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
+                format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+            ]
+        );
+        let (_, entry) = intxt::read_at(
+            &client,
+            &review,
+            &"org.example.intxt.work.worktreeEntry/0193a"
+                .parse()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            entry,
+            json!({"$type": "org.example.intxt.work.worktreeEntry", "worktree": worktree.to_string()})
+        );
+        let (_, body) = intxt::read_at(
+            &client,
+            &review,
+            &"org.example.intxt.body/main".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({"$type": "org.example.intxt.body", "order": [
+                "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
+                "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
+            ]})
+        );
+
+        let listing = intxt::call(
+            &client,
+            MintDrawerCapability {
+                scope: big_cabinet_core::drawer::protocol::DrawerScope {
+                    drawers: [(review.clone(), DrawerAccess::Read)].into(),
+                    create: false,
+                },
+                rights: big_cabinet_core::authority::Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+        let listed = intxt::call(
+            &client,
+            ListDocs {
+                capability: listing,
+                drawer_id: review.clone(),
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+        for part in [&worktree, &session] {
+            let big_cabinet_core::reference::ReferenceDocId::Concrete(doc) = part.document() else {
+                unreachable!()
+            };
+            assert!(
+                listed.docs.iter().any(|listed| &listed.doc_id == doc),
+                "{doc} is not in the intxt's drawer: {listed:?}"
+            );
+        }
+        client.stop().await.unwrap();
+    }
 }
 
 mod blackbox {
