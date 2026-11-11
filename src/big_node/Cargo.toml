@@ -10,6 +10,8 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 big_blobs.workspace = true
 big_blobs_core.workspace = true
 big_cabinet.workspace = true
@@ -29,6 +31,9 @@ service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 utils_rs.workspace = true
+
+#
+# misc
 futures.workspace = true
 tokio = { workspace = true, features = ["net", "sync", "rt", "time", "macros"] }
 async-trait.workspace = true
@@ -42,9 +47,14 @@ subduction_iroh.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+#
+# internal
 method_core.workspace = true
 method_lexicon.workspace = true
 big_cartridges_core = { workspace = true, features = ["test-support"] }
+
+#
+# misc
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 rand.workspace = true

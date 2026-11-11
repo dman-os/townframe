@@ -10,7 +10,6 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-blake3.workspace = true
 #
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
@@ -42,6 +41,7 @@ autosurgeon = { workspace = true }
 #
 # encoding
 serde.workspace = true
+blake3.workspace = true
 serde_json = { workspace = true }
 sqlite_rs.workspace = true
 rand.workspace = true
