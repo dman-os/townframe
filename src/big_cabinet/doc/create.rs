@@ -151,8 +151,7 @@ impl DocsService {
         };
         let signatures = self.sign(context, capability, &claims).await?;
         let tx = doc.transaction();
-        let (tx, signed) = self.stage(tx, plan, Some(&signatures))?;
-        assert_eq!(signed, claims, "a plan stages the same claims twice");
+        let (tx, _) = self.stage(tx, plan, Some((&claims, &signatures)))?;
         tx.commit();
         Ok(doc)
     }
