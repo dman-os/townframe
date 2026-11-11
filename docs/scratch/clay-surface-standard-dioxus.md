@@ -146,19 +146,34 @@ modern-web-guidance, HN 2026-11). What carries over, for the primary (webview) b
 - **Guidance vs. instruction for agents:** models take a suggestion as a command. Sonnet briefs
   and `.agents/skills` should say MUST only for real requirements and mark the rest as options.
 
-## Build order (Sonnet, one item each, at most two at once)
+## Build order and status (2026-11-11)
 
-1. Element commands: port the spike's wire, guest backing and host side onto #80. Tests: a guest
-   component's `scroll`, `get_scroll_offset` and `set_focus` reach the host in order within one
-   dispatch; an unsupported read comes back as a `MountedError`. **(Running, 2026-11-11.)**
-2. `data-*` interner: grammar, interning, the 4096 bound. Tests: Pierre's 60 names pass, a bad
-   name is refused, the 4097th distinct name is refused, a repeated name doesn't grow the interner.
-3. `visible` + `overflow-anchor`.
-4. Shadow roots: the interpreter patch in the dioxus fork (mount children into the shadow root,
-   `composedPath()` targets), with tests on desktop's and web's interpreter.
-5. Stylesheet: the `SetStyleSheet` mutation, the sanitizer, the `<style>` in the root and the
-   shared theme sheet. Tests: insta snapshots of sanitized output for Pierre's `style.css` and a
-   hostile sheet (every fetch path).
+All on `feat/clay-standard-dioxus` (stacked on #80), built by Sonnet agents, reviewed and rerun
+before each push.
+
+1. **Element commands — done** (`e1fe3f49`). Every command carries a request id and is answered,
+   so a failed scroll or focus is an `Err` as in plain Dioxus. Handles and the mounted set follow
+   the tree (retired on Remove, ReplaceWith, subtree drop, recycled id, clear), so they stay
+   bounded and a recycled id never reaches a stale handle. A command for an element that is gone
+   is an error reply, never a host panic. `ScrollBy` dropped (no Dioxus API emits it);
+   `scroll_to` added.
+2. **`data-*` — done** (`ea4604a5`, `0d26f1a8`). Process-wide interner capped at 4096 names, and
+   a per-surface cap of 512 distinct names (kept across `clear()`), so one micro can't spend the
+   shared budget.
+3. **`visible` + `overflow-anchor` — done** (`b23a24d2`). `visible` was already forwarded by
+   Dioxus's event-group list; only the probe was missing.
+4. **Shadow roots — done.** dioxus fork `clay/shadow-roots` at `ba8feef7`, pinned in townframe at
+   `453f9b79`. Harness: 11/11 in headless Chromium, and it fails on the unpatched JS. Web Rust
+   side type-checked only; Wry (WebKitGTK) not yet exercised.
+5. **Stylesheet — done** (`fc565583`, `1eaf3a62`). Sanitizer also drops `image()` and
+   `cross-fade()`, and scans custom properties. The sheet is charged to the retained budget;
+   `media` wraps the sheet in `@media`; unknown `Style` attributes refuse the flush. One sheet per
+   guest VirtualDom, sent to every mount (per-mount sheets would need Dioxus's render-target id).
+6. **Pierre's markup — running.** `<style>` elements with sanitized text, same-document `<use
+   href="#…">` only, autonomous custom elements through the bounded interner, and the other tags
+   the diff view emits.
+
+Still untested end to end: a real wasm micro calling these. The lab micro is that test.
 
 ## Operator decisions (2026-11-11)
 
