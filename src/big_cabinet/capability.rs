@@ -40,12 +40,10 @@ pub struct Invocation<S> {
     /// The handle the call signs through (`Authorization::signer`, `SignDatumClaim { via }`), so
     /// the call's authority to sign is exactly that handle's.
     pub via: CapId,
-    /// The public identity of the signing handle's subject, the actor `via` signs as.
+    /// The public identity of the signing handle's subject, the actor `via` signs as. On a path
+    /// that resolves an [`Authorization`] ([`DomainCapabilities::source`]) it is also the
+    /// presenter: the actor holding the credential, which a scoped handle must be bound to.
     pub signer: Actor,
-    /// The actor a scoped handle was minted for, whichever signer is presenting it now. `None`
-    /// for an identity, which is nobody's handle. A domain whose handles are personal (dispatch)
-    /// refuses a presenter that is not this actor.
-    pub bound_signer: Option<Uuid7>,
     pub rights: Rights,
     pub originating_actor: Option<Uuid7>,
 }
@@ -174,7 +172,7 @@ impl DomainCapabilities {
         signer: CapId,
     ) -> Result<Invocation<S>, Error> {
         let cap = self.inspect(context, capability).await?;
-        let (bound, subject) = self.bound(&cap)?;
+        let (bound, _) = self.bound(&cap)?;
         let signing = if signer == capability {
             cap.clone()
         } else {
@@ -185,7 +183,6 @@ impl DomainCapabilities {
             authority: DomainAuthority::Scoped(bound.scope),
             handle: capability,
             via: signer,
-            bound_signer: Some(subject),
             signer: signer_actor,
             rights: cap.rights,
             originating_actor: bound.originating_actor,
@@ -196,6 +193,12 @@ impl DomainCapabilities {
     /// the handle the call signs through. The signer must be live, carry `USE` and be bound to
     /// an actor; naming a handle there is how a service acts for an authenticated caller without
     /// any introduction, since signing is exactly as wide as the handle the caller presented.
+    ///
+    /// A scoped handle is its holder's: it was minted bound to one actor (its `subject`) and only
+    /// that actor may present it. The presenter is the actor the `signer` handle is bound to, so a
+    /// scoped `authority` whose subject is anyone else is `Unauthorized`, and a leaked handle id
+    /// is a dead number under another actor's signer. An identity `authority` is nobody's handle
+    /// (it may be presented under a descendant's signer), so it is not checked here.
     pub async fn source<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
@@ -224,36 +227,24 @@ impl DomainCapabilities {
                 handle: authorization.authority,
                 via: authorization.signer,
                 originating_actor: Some(actor.actor_id),
-                bound_signer: None,
                 signer,
                 rights: resolved.capability.rights,
             }),
             None => {
                 let (bound, bound_subject) = self.bound(&resolved.capability)?;
+                if bound_subject != signer.actor_id {
+                    return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+                }
                 Ok(Invocation {
                     authority: DomainAuthority::Scoped(bound.scope),
                     handle: authorization.authority,
                     via: authorization.signer,
-                    bound_signer: Some(bound_subject),
                     signer,
                     rights: resolved.capability.rights,
                     originating_actor: bound.originating_actor,
                 })
             }
         }
-    }
-
-    /// The actor whose identity capability `signer` is: the presenter an [`Authorization`] names,
-    /// for a domain whose handles are personal and so must know who is holding one. A
-    /// capability that is not an identity capability is `UnrecognizedActor`.
-    pub async fn presenter(&self, context: &RequestContext, signer: CapId) -> Result<Actor, Error> {
-        self.authority
-            .call(context.child(), ResolveAuthority { capability: signer })
-            .await?
-            .actor
-            .ok_or(ClientError::Method(
-                AuthorityServiceError::UnrecognizedActor,
-            ))
     }
 
     /// Mint a handle for `scope` from the handle `caller` presented as its authority. The new

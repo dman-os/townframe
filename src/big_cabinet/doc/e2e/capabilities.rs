@@ -776,7 +776,7 @@ async fn bound_creation_requests(
         node,
         Authorization {
             authority: source.capability_id,
-            signer: signer.capability,
+            signer: owner.capability,
         },
         create_scope.clone(),
         Rights::USE | Rights::NARROW,
@@ -1385,7 +1385,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
             &node,
             Authorization {
                 authority: issued.capability_id,
-                signer: signer.capability,
+                signer: owner.capability,
             },
             DocScope {
                 read: BTreeSet::from([write_doc.clone()]),
@@ -1454,6 +1454,51 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     expected.push((owner.actor.actor_id, unsupported));
     assert_eq!(*policy.proofs.lock().unwrap(), expected);
     node.stop().await;
+}
+
+#[tokio::test]
+async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let intruder = actor(&node, "intruder", Rights::USE).await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("held"))])
+        .await
+        .unwrap();
+    let scope = DocScope {
+        read: BTreeSet::from([created.doc_id.clone()]),
+        ..DocScope::default()
+    };
+    let held = mint(
+        &node,
+        Authorization::identity(owner.capability),
+        scope.clone(),
+        Rights::USE | Rights::NARROW,
+    )
+    .await;
+    assert_eq!(held.subject, Some(owner.actor.actor_id));
+    let mint_as = async |signer: CapId| {
+        op(node
+            .client()
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: held.capability_id,
+                    signer,
+                }
+                .metadata(),
+                MintDocCapability {
+                    scope: scope.clone(),
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await)
+    };
+    // Its holder narrows it; another actor presenting the same id under its own signer is
+    // refused.
+    mint_as(owner.capability).await.unwrap();
+    assert_eq!(mint_as(intruder.capability).await, Err(DocsError::Denied));
 }
 
 #[tokio::test]
