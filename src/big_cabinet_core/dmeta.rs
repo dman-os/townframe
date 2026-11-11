@@ -171,10 +171,13 @@ pub struct ActorMetadata {
 
 /// The compact provenance datum. Maps are ordered so snapshots and derived evidence are stable.
 ///
-/// There is one index of aliases, `datum_uuids`, keyed by the alias. A per-datum reverse list would
-/// be a second copy of the same facts, and the two copies are exactly what a merge can pull apart.
-/// The chosen alias for a signature — the lexicographically smallest one visible in the writing
-/// transaction — is derived from this index by the repository, which holds the reverse lookup.
+/// A datum's aliases live under the datum itself, in [`DatumMetadata::uuids`] (ADR 020, the dmeta
+/// cut, item 5), so finding them is a read of that one entry rather than a scan of an index the
+/// document grows by one binding per datum. Nothing looks a datum up by alias; a claim signs its
+/// `(key, uuid)` pair, so an alias that also appears under another key cannot be taken for this
+/// one. The chosen alias for a signature is the lexicographically smallest one in the union of
+/// `uuids` across every concurrent copy of the datum's entry, as visible in the writing
+/// transaction.
 #[macros::datum(authority = "org.example.daybook")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,8 +196,6 @@ pub struct Dmeta {
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<Uuid7, String>"))]
     pub doc_uuids: BTreeMap<Uuid7, DocId>,
     #[serde(default)]
-    pub datum_uuids: BTreeMap<Uuid7, DatumKey>,
-    #[serde(default)]
     pub datums: BTreeMap<DatumKey, DatumMetadata>,
     /// Members a newer dmeta wrote that this declaration does not name. An open datum keeps them,
     /// so a reader that has not been taught a new field does not delete it on the way back.
@@ -209,7 +210,6 @@ impl Dmeta {
             updated_at: Vec::new(),
             actors: BTreeMap::new(),
             doc_uuids: BTreeMap::new(),
-            datum_uuids: BTreeMap::new(),
             datums: BTreeMap::new(),
             extra: crate::datum::Extra::new(),
         }
@@ -240,26 +240,13 @@ impl Dmeta {
         }
     }
 
-    /// Record an alias without selecting content. Multiple aliases for one key are durable evidence
-    /// of concurrent creation even after the conflict that produced them is no longer visible.
-    pub fn record_datum_alias(&mut self, uuid: Uuid7, key: DatumKey) -> Result<(), DmetaError> {
-        match self.datum_uuids.entry(uuid) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(key);
-                Ok(())
-            }
-            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &key => Ok(()),
-            std::collections::btree_map::Entry::Occupied(_) => Err(DmetaError::ReboundAlias),
-        }
-    }
-
-    /// Whether more than one creator independently opened this slot.
+    /// Whether more than one creator independently opened this slot. Several aliases for one key
+    /// are durable evidence of concurrent creation even after the conflict that produced them is
+    /// no longer visible.
     pub fn has_concurrent_creation(&self, key: &DatumKey) -> bool {
-        self.datum_uuids
-            .values()
-            .filter(|alias| *alias == key)
-            .count()
-            > 1
+        self.datums
+            .get(key)
+            .is_some_and(|metadata| metadata.uuids.len() > 1)
     }
 }
 
@@ -277,6 +264,13 @@ impl Dmeta {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DatumMetadata {
+    /// The aliases bound to this datum, each mapped to `true`: a set stored as a map so that
+    /// concurrent insertions merge by key. A binding is immutable once written, and the entry
+    /// carries no datum key to rebind. Concurrent creators of the datum each create this entry, so
+    /// Automerge keeps several copies and shows one; every reader unions `uuids` across all of
+    /// them rather than reading the visible copy.
+    #[serde(default)]
+    pub uuids: BTreeMap<Uuid7, bool>,
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
     pub deleted_at: Vec<Timestamp>,
