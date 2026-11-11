@@ -88,11 +88,15 @@ pub enum LineHoverHighlight {
     Line,
 }
 
+/// `PointerEvent.pointerType`. The platform may also report `""` (type undetectable) or a vendor
+/// string; upstream only ever compares the value against `'mouse'`, so every such value is
+/// `Other` and behaves as a non-mouse pointer, as it does upstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerType {
     Mouse,
     Touch,
     Pen,
+    Other,
 }
 
 /// The parts of a `PointerEvent`/`MouseEvent` the manager reads. `target` is

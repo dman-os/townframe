@@ -368,9 +368,7 @@ fn pointer_payload(data: &PointerData, target: Option<NodeKey>) -> PointerEventD
             "mouse" => PointerType::Mouse,
             "touch" => PointerType::Touch,
             "pen" => PointerType::Pen,
-            other => {
-                panic!("the platform reports a pointer type of mouse, touch or pen, got {other:?}")
-            }
+            _ => PointerType::Other,
         },
         // `-1` is the platform's "no button changed state" (a move).
         button: data.trigger_button().map_or(-1, MouseButton::into_web_code),

@@ -230,6 +230,7 @@ fn pointer_type_name(pointer_type: PointerType) -> &'static str {
         PointerType::Mouse => "mouse",
         PointerType::Touch => "touch",
         PointerType::Pen => "pen",
+        PointerType::Other => "",
     }
 }
 
