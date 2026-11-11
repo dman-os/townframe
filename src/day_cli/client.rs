@@ -1,16 +1,23 @@
-//! One client type over the two ways to reach a node (ADR 033 section 5).
+//! One client type over the ways to reach a node (ADR 033 section 5).
 //!
-//! - **Daemon:** a process already serves the node on its Unix socket; calls are `POST
-//!   /xrpc/<nsid>` over it, and the kernel's peer credentials make this process the operator.
-//! - **In process:** nothing serves the node, so this process boots it for as long as the
-//!   client lives and serves the same XRPC router to itself, without a socket. The request goes
+//! Whoever holds the node lock serves the node's Unix socket for as long as it holds it, so a
+//! node has one process and every other `day` is a client of it.
+//!
+//! - **Socket:** another process holds the node; calls are `POST /xrpc/<nsid>` over its socket,
+//!   and the kernel's peer credentials make this process the operator. If that process is still
+//!   booting, the client blocks on the node's boot lock until its socket is up, bounded by the
+//!   connect deadline.
+//! - **Holder:** nothing holds the node, so this process boots it, serves the socket for other
+//!   `day`s, and serves the same XRPC router to itself without a socket. The request goes
 //!   through the very router and `Anonymous::Acts(operator)` admission the listener uses, so
-//!   routing, admission and the error mapping are not reimplemented here.
+//!   routing, admission and the error mapping are not reimplemented here. After its command the
+//!   holder stays up until the last client has disconnected.
 //!
 //! Commands see only [`NodeClient::call`]; the mode is a fact they can report, not a branch they
 //! take.
 
 use crate::context::Booted;
+use crate::context::LockRole;
 use crate::context::NodeDir;
 use crate::context::SocketState;
 use crate::interlude::*;
@@ -24,10 +31,17 @@ use tower::ServiceExt;
 /// The bound on one request or response body, the same as the listener's.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// How long a client waits for a node another process is booting, or is shutting down, before it
+/// gives up.
+pub const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
+    /// The node is held by `day node run`, with the peers service its `node.json` asks for.
     Daemon,
+    /// The node is held by a command (this one, or another running at the same time), which
+    /// attaches no peers service.
     InProcess,
 }
 
@@ -63,57 +77,87 @@ impl Reply {
 }
 
 enum Transport {
-    Daemon(service_client_native_rs::XrpcClient),
+    Socket(service_client_native_rs::XrpcClient),
     /// The booted node and the router that serves it. They are dropped together on stop: the
     /// router holds the dispatch client, which must not outlive the node it calls.
-    InProcess(Box<(Booted, axum::Router)>),
+    Holder(Box<(Booted, axum::Router)>),
 }
 
 pub struct NodeClient {
     transport: Transport,
+    mode: Mode,
     socket: SocketState,
 }
 
 impl NodeClient {
-    /// Reaches the node in `dir`: through its daemon if the socket is live, otherwise by booting
-    /// it here. A node that something else has booted but is not yet serving (a daemon still
-    /// starting, another command) is an error: two processes must not open one node's storage.
-    pub async fn connect(dir: &NodeDir) -> Res<Self> {
-        let socket = dir.probe_socket().await?;
-        if socket == SocketState::Live {
-            let http =
-                service_client_native_rs::XrpcClient::unix(dir.socket_path()?, MAX_BODY_BYTES)
+    /// Reaches the node in `dir`: through the socket of the process that holds it, or, if none
+    /// does, by booting it here. Finding the node held by a process that is still booting waits
+    /// for its socket, and finding it held by one that is shutting down waits for the lock, both
+    /// bounded by `deadline`.
+    pub async fn connect(dir: &NodeDir, deadline: std::time::Duration) -> Res<Self> {
+        let found = dir.probe_socket().await?;
+        tokio::time::timeout(deadline, Self::acquire(dir, found))
+            .await
+            .map_err(|_| {
+                eyre::eyre!(
+                    "the node at {} stayed held by another process for {deadline:?}",
+                    dir.root().display()
+                )
+            })?
+    }
+
+    async fn acquire(dir: &NodeDir, found: SocketState) -> Res<Self> {
+        loop {
+            let held = match dir.try_lock(LockRole::Command)? {
+                Ok(lock) => {
+                    let booted = Booted::boot(dir, lock, LockRole::Command).await?;
+                    let router = big_dispatch::xrpc_router(
+                        booted.node.dispatch.client.clone(),
+                        Anonymous::Acts(Authorization::identity(booted.node.authority.root)),
+                        MAX_BODY_BYTES,
+                    )
+                    .into_router();
+                    return Ok(Self {
+                        transport: Transport::Holder(Box::new((booted, router))),
+                        mode: Mode::InProcess,
+                        socket: found,
+                    });
+                }
+                Err(held) => held,
+            };
+            // The holder's socket is up once its boot lock is released.
+            let waiting = dir.clone();
+            tokio::task::spawn_blocking(move || waiting.wait_until_serving())
+                .await
+                .expect(ERROR_TOKIO)?;
+            if dir.probe_socket().await? == SocketState::Live {
+                let socket = match held.socket {
+                    Some(socket) => socket,
+                    None => dir.socket_path()?,
+                };
+                let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
                     .map_err(|error| eyre::eyre!("{error:?}"))?;
-            return Ok(Self {
-                transport: Transport::Daemon(http),
-                socket,
-            });
+                return Ok(Self {
+                    transport: Transport::Socket(http),
+                    mode: if held.role == Some(LockRole::Daemon) {
+                        Mode::Daemon
+                    } else {
+                        Mode::InProcess
+                    },
+                    socket: SocketState::Live,
+                });
+            }
+            // No socket: the holder is shutting down, or it was only a process probing the lock.
+            // Either way the lock is the signal, so wait for it to be free and try again.
+            let waiting = dir.clone();
+            tokio::task::spawn_blocking(move || waiting.wait_for_lock_release())
+                .await
+                .expect(ERROR_TOKIO)?;
         }
-        let lock = match dir.try_lock()? {
-            Ok(lock) => lock,
-            Err(held) => eyre::bail!(
-                "{held} has the node at {} open but is not serving its socket; try again once it has finished starting",
-                dir.root().display()
-            ),
-        };
-        let booted = Booted::boot(dir, lock, false).await?;
-        let router = big_dispatch::xrpc_router(
-            booted.node.dispatch.client.clone(),
-            Anonymous::Acts(Authorization::identity(booted.node.authority.root)),
-            MAX_BODY_BYTES,
-        )
-        .into_router();
-        Ok(Self {
-            transport: Transport::InProcess(Box::new((booted, router))),
-            socket,
-        })
     }
 
     pub fn mode(&self) -> Mode {
-        match self.transport {
-            Transport::Daemon(_) => Mode::Daemon,
-            Transport::InProcess(_) => Mode::InProcess,
-        }
+        self.mode
     }
 
     /// The socket's state when the client connected: for an in-process client, whether it found
@@ -129,7 +173,7 @@ impl NodeClient {
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         ensure_nsid(nsid)?;
         match &self.transport {
-            Transport::Daemon(client) => {
+            Transport::Socket(client) => {
                 let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
                 let request = match verb {
                     HttpMethod::Post => client.http_client().post(url).json(input),
@@ -141,7 +185,7 @@ impl NodeClient {
                     body: response.json().await?,
                 })
             }
-            Transport::InProcess(running) => {
+            Transport::Holder(running) => {
                 let router = running.1.clone();
                 let request = match verb {
                     HttpMethod::Post => http::Request::post(format!("/xrpc/{nsid}"))
@@ -167,13 +211,23 @@ impl NodeClient {
         }
     }
 
-    /// Stops the node this client booted. A daemon client has nothing to stop.
+    /// Stops the node this client booted, once no other client is connected to it. A client of
+    /// another process's node has nothing to stop.
     pub async fn stop(self) -> Res<()> {
         match self.transport {
-            Transport::Daemon(_) => Ok(()),
-            Transport::InProcess(running) => {
+            Transport::Socket(_) => Ok(()),
+            Transport::Holder(running) => {
                 let (booted, router) = *running;
                 drop(router);
+                let mut clients = booted
+                    .node
+                    .unix_clients
+                    .clone()
+                    .expect("a holder boots with its socket attached");
+                clients
+                    .wait_for(|open| *open == 0)
+                    .await
+                    .wrap_err("the node's socket listener ended while clients were connected")?;
                 booted.stop().await
             }
         }
