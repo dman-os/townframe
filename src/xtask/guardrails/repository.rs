@@ -223,6 +223,10 @@ impl Repository {
                     findings.append(&mut diagnostics);
                 }
             }
+            findings.extend(crate::guardrails::manifests::scan(
+                self,
+                &package.manifest_path,
+            )?);
             findings.sort();
             report.findings.insert(package.name.clone(), findings);
             report

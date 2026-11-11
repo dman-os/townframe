@@ -187,7 +187,7 @@ pub fn run_check(root: &Path, package: Option<&str>, json: bool) -> Res<bool> {
     let report = repo.scan(package)?;
     let mut findings = repo.check(&report)?;
     findings.extend(matrix::validate(&repo)?);
-    findings.extend(manifests::validate(&repo)?);
+    findings.extend(manifests::scan_root(&repo)?);
     if json {
         println!("{}", serde_json::to_string_pretty(&findings)?);
     } else {
