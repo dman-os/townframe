@@ -79,12 +79,10 @@ impl Reply {
 enum Transport {
     /// One HTTP/1 connection to the holder's socket, opened in [`NodeClient::acquire`] and never
     /// idled out. The holder counts it, and a holder that has finished its own command accepts
-    /// no new connection, so every call goes over this one: `gate` lets one call at a time use
-    /// it, which is what keeps the HTTP client from opening a second.
-    Socket {
-        http: reqwest::Client,
-        gate: tokio::sync::Mutex<()>,
-    },
+    /// no new connection, so every call goes over this one. Commands call one operation at a
+    /// time; a call made while another is in flight would open a second connection, which a
+    /// draining holder refuses (an error, not a hang).
+    Socket(reqwest::Client),
     /// The booted node and the router that serves it. They are dropped together on stop: the
     /// router holds the dispatch client, which must not outlive the node it calls.
     Holder(Box<(Booted, axum::Router)>),
@@ -158,10 +156,7 @@ impl NodeClient {
             {
                 Ok(_) => {
                     return Ok(Self {
-                        transport: Transport::Socket {
-                            http,
-                            gate: tokio::sync::Mutex::new(()),
-                        },
+                        transport: Transport::Socket(http),
                         mode: if held.role == Some(LockRole::Daemon) {
                             Mode::Daemon
                         } else {
@@ -202,8 +197,7 @@ impl NodeClient {
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         ensure_nsid(nsid)?;
         match &self.transport {
-            Transport::Socket { http, gate } => {
-                let _one_call_at_a_time = gate.lock().await;
+            Transport::Socket(http) => {
                 let url = format!("http://localhost/xrpc/{nsid}");
                 let request = match verb {
                     HttpMethod::Post => http.post(url).json(input),
@@ -245,7 +239,7 @@ impl NodeClient {
     /// another process's node has nothing to stop.
     pub async fn stop(self) -> Res<()> {
         match self.transport {
-            Transport::Socket { .. } => Ok(()),
+            Transport::Socket(_) => Ok(()),
             Transport::Holder(running) => {
                 let (booted, router) = *running;
                 drop(router);
