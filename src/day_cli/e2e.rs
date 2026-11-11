@@ -325,6 +325,37 @@ mod library {
         connect(&dir).await.unwrap().stop().await.unwrap();
     }
 
+    /// `node run` against a node a command has open waits for the command, instead of refusing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_daemon_waits_for_a_command_that_has_the_node_open() {
+        let (_tmp, dir) = new_node();
+        let holder = connect(&dir).await.unwrap();
+        let (ready, serving) = oneshot::channel();
+        let (stop, stopped) = oneshot::channel::<()>();
+        let daemon = tokio::spawn({
+            let dir = dir.clone();
+            async move {
+                crate::cmds::daemon::serve(
+                    &dir,
+                    |_| {
+                        ready.send(()).expect("the test waits for readiness");
+                        Ok(())
+                    },
+                    async {
+                        stopped.await.expect("the test stops the daemon by sending");
+                    },
+                )
+                .await
+            }
+        });
+        holder.stop().await.unwrap();
+        serving
+            .await
+            .expect("the daemon booted once the command finished");
+        stop.send(()).unwrap();
+        daemon.await.unwrap().unwrap();
+    }
+
     /// A command that arrives while the holder is still booting waits for the socket, and is
     /// answered once it is up.
     #[tokio::test(flavor = "multi_thread")]
