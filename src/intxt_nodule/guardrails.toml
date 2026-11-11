@@ -1,12 +1,18 @@
 version = 1
 role = "plugin"
-dependency_reason = "intxt as a cartridge: the manifest that admits intxt's vocabularies to a node, with the storage forms their Lexicons cannot state, and later the nodule handlers serving its operations."
+dependency_reason = "intxt as a cartridge: the manifest that admits intxt's vocabularies to a node, with the storage forms their Lexicons cannot state, and the nodule handler serving its operations (`createIntxt`)."
 allowed_dependencies = [
     "big_cabinet_core",
+    "big_dispatch_core",
+    "big_ndk",
     "big_cartridges_core",
     "big_ndk_testing",
     "big_nodule_core",
     "intxt_core",
+    "method_core",
+    "method_lexicon",
+    "service_client_core_rs",
+    "service_core_rs",
     "service_utils_rs",
 ]
 allow_external_api_types = false

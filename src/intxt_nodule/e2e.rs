@@ -16,6 +16,7 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
+use big_dispatch_core::DispatchScope;
 use big_ndk_testing::TestNode;
 use intxt_core::generic;
 use intxt_core::work;
@@ -25,11 +26,23 @@ use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+/// A node that admitted intxt's cartridge, serving its handler natively, with the four
+/// operations the handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
-    let node = big_ndk_testing::node().boot().await;
     let cartridge = crate::cartridge();
     let id = cartridge.id.clone();
-    node.admit(cartridge).await;
+    // The ceiling of what a nodule can be granted covers the registered cartridge's own
+    // authority only, so the foreign operations it calls must be added to it.
+    let operations = DispatchScope {
+        operations: crate::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+        ..DispatchScope::default()
+    };
+    let node = big_ndk_testing::node()
+        .with_operation_ceiling(operations.clone())
+        .with_nodule(cartridge, crate::Intxt)
+        .boot()
+        .await;
+    node.grant(&id, operations).await;
     node.enable(&id).await;
     node
 }
@@ -207,5 +220,36 @@ async fn concurrent_line_edits_to_a_note_both_land() {
     }
     let read = read(&node, &receipt.doc_id, std::slice::from_ref(&note)).await;
     assert_eq!(read[&note], content(["ONE", "two", "THREE"]).1);
+    node.stop().await;
+}
+
+/// `createIntxt`, called as the operator, creates the drawer and writes the three descriptor
+/// datums of ADR 036 §2 on its descriptor document, each tagged with its `$type`.
+#[tokio::test]
+async fn create_intxt_writes_the_descriptor_datums() {
+    let node = boot().await;
+    let created = node
+        .call(crate::CreateIntxt {
+            title: "Port the sync".to_owned(),
+            description: Some("Notes *in markdown*".to_owned()),
+        })
+        .await
+        .unwrap();
+    let keys = [
+        key::<generic::Intxt>("main"),
+        key::<generic::Title>("main"),
+        key::<generic::Body>("main"),
+    ];
+    assert_eq!(
+        read(&node, &created.drawer_id, &keys).await,
+        BTreeMap::from([
+            datum::<generic::Intxt>("main", json!({"empty": true})),
+            datum::<generic::Title>(
+                "main",
+                json!({"title": "Port the sync", "description": "Notes *in markdown*"}),
+            ),
+            datum::<generic::Body>("main", json!({"order": []})),
+        ])
+    );
     node.stop().await;
 }
