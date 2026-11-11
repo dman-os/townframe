@@ -367,6 +367,15 @@ fn admitted_schemas_reject_wrong_known_field_shapes() {
     }
 }
 
+/// A value carrying the `$bytes` object, which only a self-describing codec reads back: its
+/// deserializer reads a JSON value, so a non-self-describing codec such as postcard cannot.
+fn protocol_json<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: T) {
+    assert_eq!(
+        serde_json::from_value::<T>(serde_json::to_value(&value).unwrap()).unwrap(),
+        value
+    );
+}
+
 fn protocol_wire<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: T) {
     assert_eq!(
         serde_json::from_value::<T>(serde_json::to_value(&value).unwrap()).unwrap(),
@@ -385,16 +394,27 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
         service_core_rs::Envelope<P>: irpc::Channels<Proto, Tx = service_core_rs::Reply<P>>,
     {
     }
+    unary::<MintBlobsCapability, BlobsProtocol>();
     unary::<PutBlob, BlobsProtocol>();
     unary::<ReadBlob, BlobsProtocol>();
     unary::<StatBlob, BlobsProtocol>();
     let _: Option<<PutBlob as method_core::Method>::Output> = None::<BlobInfo>;
     assert_eq!(
         BlobsProtocol::METHODS.unary,
-        [PutBlob::XRPC, ReadBlob::XRPC, StatBlob::XRPC]
+        [
+            MintBlobsCapability::XRPC,
+            PutBlob::XRPC,
+            ReadBlob::XRPC,
+            StatBlob::XRPC
+        ]
     );
     assert!(BlobsProtocol::METHODS.stream.is_empty());
     for (operation, nsid, output) in [
+        (
+            MintBlobsCapability::XRPC,
+            "org.example.daybook.blobs.mintCapability",
+            "Capability",
+        ),
         (PutBlob::XRPC, "org.example.daybook.blobs.put", "BlobInfo"),
         (
             ReadBlob::XRPC,
@@ -435,7 +455,7 @@ fn protocol_requests_accept_capability_ids_not_resolved_records() {
     let blob_id = BlobId::new([4; 32]);
     check(PutBlob {
         capability,
-        bytes: vec![0, 1, 255],
+        bytes: vec![0, 1, 255].into(),
     });
     check(ReadBlob {
         capability,
@@ -454,9 +474,45 @@ fn protocol_requests_results_and_errors_round_trip() {
     use big_cabinet_core::authority::CapId;
     let capability = CapId::from_bytes([1; 16]);
     let blob_id = BlobId::new([4; 32]);
-    protocol_wire(PutBlob {
+    let put = PutBlob {
         capability,
-        bytes: vec![0, 1, 255],
+        bytes: vec![0, 1, 255].into(),
+    };
+    // Bytes are the datum model's bytes object, not an array of numbers.
+    assert_eq!(
+        serde_json::to_value(&put).unwrap()["bytes"],
+        json!({"$bytes": "AAH/"})
+    );
+    protocol_json(put);
+    assert!(
+        serde_json::from_value::<PutBlob>(json!({
+            "capability": capability,
+            "bytes": [0, 1, 255]
+        }))
+        .is_err()
+    );
+    let scope = BlobsScope {
+        put: true,
+        read: BTreeSet::from([blob_id]),
+    };
+    assert_eq!(
+        serde_json::to_value(&scope).unwrap(),
+        json!({"put": true, "read": [blob_id.to_string()]})
+    );
+    protocol_json(scope.clone());
+    assert!(scope.covers(&BlobsScope {
+        put: false,
+        read: BTreeSet::from([blob_id]),
+    }));
+    assert!(!scope.covers(&BlobsScope {
+        put: false,
+        read: BTreeSet::from([BlobId::new([5; 32])]),
+    }));
+    assert!(!BlobsScope::default().covers(&scope));
+    protocol_json(MintBlobsCapability {
+        scope,
+        rights: big_cabinet_core::authority::Rights::USE,
+        subject: None,
     });
     let read = ReadBlob {
         capability,
@@ -491,8 +547,8 @@ fn protocol_requests_results_and_errors_round_trip() {
         serde_json::from_value::<BlobStat>(serde_json::to_value(&stat).unwrap()).unwrap(),
         stat
     );
-    protocol_wire(BlobRange {
-        bytes: vec![0, 255],
+    protocol_json(BlobRange {
+        bytes: vec![0, 255].into(),
         length_octets: 123456789,
     });
     protocol_wire(Option::<BlobInfo>::None);

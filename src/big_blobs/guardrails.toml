@@ -47,6 +47,7 @@ features = []
 "src/big_blobs/ownership/sqlite/migrations/001_byte_owners_and_effects.sql" = "bf7b0f086613a73cfc4b7aa195950f7a029c5c33ea1be2fbd3aa0786bbb1b260"
 "src/big_blobs/ownership/sqlite/migrations/002_upload_receipts.sql" = "5dc01efec2eef4950d2b27d82879e142f4cf4af00fdabccac48851d7a55a6e0f"
 "src/big_blobs/ownership/sqlite/migrations/003_pair_root_triggers.sql" = "fe8120b73359d7b1d82ddd34b2708521286656ffed77bd184ffaef939d39a309"
+"src/big_blobs/ownership/sqlite/migrations/004_upload_receipts_held_digest.sql" = "2da18425cc8b2cb1b1e141a7c07ae13fbdaaaec54cbc34f8434d5c23f19c3731"
 "src/big_blobs/pair_roots/sqlite/migrations/001_pair_root.sql" = "70620dea815704cdd8988550a793ecdc7e7678028026671e82eba89eb51285a7"
 "src/big_blobs/pair_roots/sqlite/migrations/002_virtual_pairs.sql" = "ae1bc555c9f78cd3072de15ae3f111a668287b1c5bc6bb8e8b96dd475aa6e7e7"
 "src/big_blobs/projection/sqlite/migrations/001_blob_projection.sql" = "f79252412463d3774fdeea4c6a6b40a258a9c233501fdb46f6df1006669c04f8"

@@ -3,6 +3,7 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: [iroh]
 
+impl Handler < MintBlobsCapability > for big_blobs::service::BlobService
 impl Handler < PutBlob > for big_blobs::service::BlobService
 impl Handler < ReadBlob > for big_blobs::service::BlobService
 impl Handler < StatBlob > for big_blobs::service::BlobService
@@ -42,8 +43,6 @@ pub impl big_blobs::service::BlobService::async fn open_availability (& self , a
 pub impl big_blobs::service::BlobService::async fn read_all (& self , blob_id : & BlobId , max_octets : u64) -> Res < Option < Vec < u8 > > >
 pub impl big_blobs::service::BlobService::async fn release_import (& self , imported : & ImportedBlob) -> Res < () >
 pub impl big_blobs::service::BlobService::async fn stat (& self , blob_id : & BlobId) -> Res < Option < BlobInfo > >
-pub impl big_blobs::service::BlobService::fn put_object () -> & 'static str
-pub impl big_blobs::service::BlobService::fn read_object (blob_id : & BlobId) -> String
 pub impl big_blobs::service::BlobService::fn store (& self) -> & Store
 pub impl big_blobs::service::Storage::async fn filesystem (root : PathBuf) -> Res < Self >
 pub impl big_blobs::service::Storage::fn memory () -> Res < Self >
@@ -70,7 +69,7 @@ pub struct big_blobs::projection::BlobProjection  {  }
 pub struct big_blobs::projection::BlobReference  { route: DatumRoute, blob_id: BlobId, length_octets: u64 }
 pub struct big_blobs::service::BlobService  { provider: Arc < CipherBlobProvider >, roots: PairRoots }
 pub struct big_blobs::service::Blobs  { service: Arc < BlobService >, host: Arc < Host < Arc < BlobService > > >, client: Client < BlobsProtocol > }
-pub struct big_blobs::service::Config  { storage: Storage, sql: Database, authority: Client < AuthorityProtocol >, namespace: Namespace }
+pub struct big_blobs::service::Config  { storage: Storage, sql: Database, authority: Client < AuthorityProtocol >, namespace: Namespace, operator: Uuid7 }
 pub struct big_blobs::service::ImportedBlob  { info: BlobInfo }
 pub struct big_blobs::service::Storage  {  }
 pub struct big_blobs::sync::BlobSyncBackend  {  }

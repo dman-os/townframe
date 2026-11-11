@@ -1,8 +1,7 @@
 //! The cartridge registry end to end: the service over the real drawer, docs and blob stack.
 
-use super::blobs::blob_cap;
+use super::blobs::put_cap;
 use super::*;
-use big_blobs::BlobService;
 use big_blobs_core::BlobInfo;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::doc::WriteDatums;
@@ -54,8 +53,8 @@ async fn put(node: &BigNode, bytes: &[u8]) -> BlobInfo {
         .call(
             RequestContext::root(),
             PutBlob {
-                capability: blob_cap(node, BlobService::put_object().into(), Vec::new()).await,
-                bytes: bytes.to_vec(),
+                capability: put_cap(node).await,
+                bytes: bytes.to_vec().into(),
             },
         )
         .await

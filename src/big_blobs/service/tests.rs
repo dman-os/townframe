@@ -31,6 +31,7 @@ async fn reopen(
         storage: Storage::filesystem(directory.join("store")).await?,
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -71,6 +72,7 @@ async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<(
             storage,
             sql: sql.clone(),
             authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+            operator: Uuid7::new(),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([7; 16]),
@@ -133,6 +135,7 @@ async fn shutdown_drains_cancelled_publication_before_closing_store() -> Res<()>
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),
@@ -194,6 +197,7 @@ async fn complete_virtual_outboard_is_unavailable_after_final_owner_release() ->
         storage: Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([7; 16]),

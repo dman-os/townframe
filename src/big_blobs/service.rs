@@ -3,12 +3,17 @@ use crate::ownership::ByteOwnership;
 use crate::pair_roots::PairRoots;
 use big_blobs_core::BlobId;
 use big_blobs_core::protocol::*;
+use big_cabinet::authority::DomainAuthority;
+use big_cabinet::capability::DomainCapabilities;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
-use big_cabinet_core::authority::InspectCapability;
+use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::dmeta::Bytes as BytesObject;
+use big_cabinet_core::dmeta::Uuid7;
 use big_sync::keyed_frontier::SqliteFrontierCodec;
 use big_sync::keyed_frontier::SqliteFrontierSelector;
 use big_sync::keyed_frontier::SqliteKeyedFrontier;
@@ -133,7 +138,12 @@ pub struct Config {
     pub sql: Database,
     pub authority: Client<AuthorityProtocol>,
     pub namespace: Namespace,
+    /// The node operator: the one identity that may mint a blobs handle of any scope.
+    pub operator: Uuid7,
 }
+
+/// The prefix of every capability object this domain mints; the scope follows it as JSON.
+const SCOPE_PREFIX: &str = "big_blobs/scope/v1/";
 
 #[derive(Clone)]
 struct AvailabilityCodec;
@@ -167,8 +177,8 @@ pub struct BlobService {
     pub provider: Arc<CipherBlobProvider>,
     pub roots: PairRoots,
     pub(crate) ownership: ByteOwnership,
-    authority: Client<AuthorityProtocol>,
-    namespace: Namespace,
+    capabilities: DomainCapabilities,
+    operator: Uuid7,
     availability: SqliteKeyedFrontier<AvailabilityCodec>,
     _owner: Option<std::fs::File>,
 }
@@ -176,6 +186,7 @@ pub struct BlobService {
 service_utils_rs::bind_service_protocol! {
     pub struct BlobsBinding for BlobsProtocol => BlobsMessage {
         unary {
+            MintBlobsCapability(MintBlobsCapability),
             PutBlob(PutBlob),
             ReadBlob(ReadBlob),
             StatBlob(StatBlob)
@@ -223,8 +234,8 @@ pub async fn boot(config: Config) -> Res<(Blobs, StopToken)> {
         provider,
         roots,
         ownership,
-        authority: config.authority,
-        namespace: config.namespace,
+        capabilities: DomainCapabilities::new(config.authority, config.namespace, SCOPE_PREFIX),
+        operator: config.operator,
         availability,
         _owner: owner,
     });
@@ -258,38 +269,28 @@ impl BlobService {
         &self.store
     }
 
-    pub fn put_object() -> &'static str {
-        "big_blobs/put/v1"
-    }
-
-    pub fn read_object(blob_id: &BlobId) -> String {
-        format!("big_blobs/read/v1/{blob_id}")
-    }
-
+    /// Resolves `capability` to the scope its handle was minted with and requires `permits` to
+    /// hold of it. Only a handle this domain minted resolves: an identity, or a capability from
+    /// any other namespace, is `Denied`.
     async fn authorize(
         &self,
         context: &RequestContext,
         capability: CapId,
-        object: &str,
+        permits: impl FnOnce(&BlobsScope) -> bool,
     ) -> Result<(), BlobsError> {
-        let cap = self
-            .authority
-            .call(context.child(), InspectCapability { capability })
+        let invocation = self
+            .capabilities
+            .resolve::<BlobsScope>(context, capability)
             .await
-            .map_err(|error| match error {
-                ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
-                ClientError::Method(
-                    AuthorityServiceError::InvalidCapability | AuthorityServiceError::Unauthorized,
-                ) => BlobsError::Denied,
-                other => storage_error(other),
-            })?;
-        if cap.issuer_id != self.namespace.namespace_id
-            || !cap.rights.contains(Rights::USE)
-            || cap.object != object
-        {
-            return Err(BlobsError::Denied);
+            .map_err(authority_error)?;
+        let DomainAuthority::Scoped(scope) = invocation.authority else {
+            unreachable!("resolving a bare handle yields its scope, never an identity")
+        };
+        if permits(&scope) {
+            Ok(())
+        } else {
+            Err(BlobsError::Denied)
         }
-        Ok(())
     }
 
     pub async fn stat(&self, blob_id: &BlobId) -> Res<Option<BlobInfo>> {
@@ -402,9 +403,64 @@ impl BlobService {
     }
 }
 
+fn authority_error(error: ClientError<AuthorityServiceError>) -> BlobsError {
+    match error {
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
+            AuthorityServiceError::InvalidCapability
+            | AuthorityServiceError::Unauthorized
+            | AuthorityServiceError::UnrecognizedActor
+            | AuthorityServiceError::Escalation,
+        ) => BlobsError::Denied,
+        other => storage_error(other),
+    }
+}
+
 fn storage_error(error: impl std::fmt::Display) -> BlobsError {
     BlobsError::Storage {
         reason: error.to_string(),
+    }
+}
+
+impl Handler<MintBlobsCapability> for BlobService {
+    async fn call(
+        &self,
+        request: Envelope<MintBlobsCapability>,
+    ) -> Result<ResponseEnvelope<Capability>, BlobsError> {
+        let params = request.params;
+        let authorization = Authorization::from_metadata(&request.metadata)?;
+        let caller = self
+            .capabilities
+            .source::<BlobsScope>(&request.context, authorization)
+            .await
+            .map_err(authority_error)?;
+        if !caller.rights.contains(Rights::USE) {
+            return Err(BlobsError::Denied);
+        }
+        // The operator's identity mints any scope; a scoped handle only a subset of its own. Any
+        // other identity is nobody this service knows. The rights subset and `NARROW` checks
+        // are `DomainCapabilities::mint`'s.
+        match &caller.authority {
+            DomainAuthority::Identity(actor) if *actor == self.operator => {}
+            DomainAuthority::Identity(_) => return Err(BlobsError::Denied),
+            DomainAuthority::Scoped(scope) if !scope.covers(&params.scope) => {
+                return Err(BlobsError::Denied);
+            }
+            DomainAuthority::Scoped(_) => {}
+        }
+        Ok(self
+            .capabilities
+            .mint(
+                &request.context,
+                &caller,
+                params.subject,
+                params.scope,
+                params.rights,
+                Vec::new(),
+            )
+            .await
+            .map_err(authority_error)?
+            .into())
     }
 }
 
@@ -413,20 +469,19 @@ impl Handler<PutBlob> for BlobService {
         &self,
         request: Envelope<PutBlob>,
     ) -> Result<ResponseEnvelope<BlobInfo>, BlobsError> {
-        self.authorize(
-            &request.context,
-            request.params.capability,
-            Self::put_object(),
-        )
+        self.authorize(&request.context, request.params.capability, |scope| {
+            scope.put
+        })
         .await?;
-        if request.params.bytes.len() > MAX_PUT_BYTES {
+        let bytes = request.params.bytes.as_slice();
+        if bytes.len() > MAX_PUT_BYTES {
             return Err(BlobsError::InvalidInput {
                 reason: format!(
                     "put exceeds {MAX_PUT_BYTES} bytes; use the native streaming import for large content"
                 ),
             });
         }
-        let stream = futures::stream::iter([Ok(Bytes::from(request.params.bytes))]);
+        let stream = futures::stream::iter([Ok(Bytes::copy_from_slice(bytes))]);
         Ok(self
             .import_stream(stream)
             .await
@@ -442,11 +497,9 @@ impl Handler<ReadBlob> for BlobService {
         request: Envelope<ReadBlob>,
     ) -> Result<ResponseEnvelope<BlobRange>, BlobsError> {
         let params = request.params;
-        self.authorize(
-            &request.context,
-            params.capability,
-            &Self::read_object(&params.blob_id),
-        )
+        self.authorize(&request.context, params.capability, |scope| {
+            scope.read.contains(&params.blob_id)
+        })
         .await?;
         if params.length > MAX_READ_BYTES {
             return Err(BlobsError::InvalidInput {
@@ -475,7 +528,7 @@ impl Handler<ReadBlob> for BlobService {
             .map_err(storage_error)?;
         reader.read_exact(&mut bytes).await.map_err(storage_error)?;
         Ok(BlobRange {
-            bytes,
+            bytes: BytesObject::from(bytes),
             length_octets: info.length_octets,
         }
         .into())
@@ -487,11 +540,9 @@ impl Handler<StatBlob> for BlobService {
         &self,
         request: Envelope<StatBlob>,
     ) -> Result<ResponseEnvelope<BlobStat>, BlobsError> {
-        self.authorize(
-            &request.context,
-            request.params.capability,
-            &Self::read_object(&request.params.blob_id),
-        )
+        self.authorize(&request.context, request.params.capability, |scope| {
+            scope.read.contains(&request.params.blob_id)
+        })
         .await?;
         Ok(BlobStat {
             info: self
