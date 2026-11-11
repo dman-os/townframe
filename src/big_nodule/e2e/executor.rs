@@ -286,6 +286,47 @@ async fn an_upgrade_retires_the_old_revision_before_ensuring_the_new_one() {
     node.shutdown().await;
 }
 
+/// Starting the new revision's workload can take as long as compiling it. Callers meanwhile get
+/// the retryable not-ready answer, not an unknown operation as if the nodule were gone.
+#[tokio::test]
+async fn an_operation_stays_registered_not_ready_while_an_upgrade_starts_the_new_revision() {
+    let executor = FakeExecutor::hosting(Arc::<Echo>::default(), true);
+    let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
+    let operator = node.operator();
+    node.admit(operator, serving_cartridge_of(PHOTOS, "1.0.0", OWN, "one"))
+        .await
+        .unwrap();
+    node.set_enabled(PHOTOS, true).await;
+    assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
+
+    executor.slow_ensure(Duration::from_millis(100));
+    let (upgraded, during) = tokio::join!(
+        node.admit(operator, serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two")),
+        async {
+            let mut answers = Vec::new();
+            for _ in 0..20 {
+                answers.push(node.invoke(operator, OWN, json!({})).await);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            answers
+        }
+    );
+    assert_eq!(upgraded.unwrap().readiness, Readiness::Ready);
+    let not_ready = Err(not_ready(NotReadyReason::Provider(Readiness::Initializing)));
+    assert!(
+        during.contains(&not_ready),
+        "no call met the starting revision"
+    );
+    assert!(
+        during
+            .iter()
+            .all(|answer| answer.is_ok() || *answer == not_ready),
+        "a call during the upgrade was answered {during:?}"
+    );
+    assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_again() {
     let executor = FakeExecutor::new();
