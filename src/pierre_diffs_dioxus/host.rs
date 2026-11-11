@@ -18,8 +18,8 @@
 //! `request_animation_frame` queues the callback and every handler ends by running the queue
 //! (`flush_frames`): the queue is "the end of the current dispatch". The browser delivers scroll
 //! and resize events about once per frame, so one dispatch stands in for one frame. A callback
-//! that queues again (the render queue's follow-up frame) waits for the next dispatch, which is
-//! the layout events of the render it just caused: measurements the follow-up needs.
+//! that queues again (the render queue's follow-up frame) gets a spawned executor tick even when no
+//! later event arrives; this preserves the layout pass's follow-up without spinning in the flush.
 //!
 //! Timers. Standard Dioxus has no timer either, so the embedder passes a `sleep` function and a
 //! timeout is a spawned task that awaits it (`clear_timeout` cancels the task). A callback that
@@ -87,6 +87,9 @@ type FrameCallback = Box<dyn FnOnce(f64)>;
 struct Frames {
     next_id: FrameId,
     pending: Vec<(FrameId, FrameCallback)>,
+    scheduled_flush: bool,
+    #[cfg(test)]
+    flush_count: usize,
 }
 
 pub(crate) struct DioxusHost {
@@ -270,14 +273,46 @@ impl DioxusHost {
 
     // Frames.
 
-    /// The end of a dispatch: runs every callback queued so far. Callbacks queued while these run
-    /// wait for the next flush.
+    /// The end of a dispatch: runs every callback queued so far. A callback that queues another
+    /// frame is flushed on the next executor tick.
     pub(crate) fn flush_frames(&self) {
-        let pending = std::mem::take(&mut self.frames.borrow_mut().pending);
+        let pending = {
+            let mut frames = self.frames.borrow_mut();
+            #[cfg(test)]
+            {
+                frames.flush_count += 1;
+            }
+            std::mem::take(&mut frames.pending)
+        };
         // No consumer reads the timestamp (the render queues ignore it) and standard Dioxus has
         // no clock to read one from.
         for (_, callback) in pending {
             callback(0.0);
+        }
+
+        let should_schedule = {
+            let mut frames = self.frames.borrow_mut();
+            if frames.pending.is_empty() || frames.scheduled_flush {
+                false
+            } else {
+                frames.scheduled_flush = true;
+                true
+            }
+        };
+        if should_schedule {
+            // A callback can queue the render queue's follow-up frame. If no browser event arrives,
+            // it still needs a dispatch, so schedule one executor tick later. The flag stays set
+            // until that task starts: an event may flush the queue before then, and must not create
+            // a second task. This is a spawned task rather than a loop in this flush because a
+            // callback could queue another frame forever.
+            let host = self
+                .weak_self
+                .upgrade()
+                .expect("the host is alive while a frame flush is scheduled");
+            spawn(async move {
+                host.frames.borrow_mut().scheduled_flush = false;
+                host.flush_frames();
+            });
         }
     }
 
@@ -285,6 +320,11 @@ impl DioxusHost {
     #[cfg(test)]
     pub(crate) fn frames_pending(&self) -> usize {
         self.frames.borrow().pending.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn flush_count(&self) -> usize {
+        self.frames.borrow().flush_count
     }
 
     fn mounted_of(&self, node: NodeKey) -> Rc<MountedData> {

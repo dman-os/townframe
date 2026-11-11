@@ -380,8 +380,10 @@ fn the_nodes_the_port_registered_are_the_ones_rendered_with_listeners() {
 }
 
 #[test]
-fn a_dispatch_runs_the_frames_it_queued_and_a_follow_up_waits_for_the_next() {
+fn a_dispatch_runs_queued_frames_and_a_follow_up_runs_on_the_next_executor_tick() {
     let host = DioxusHost::new_scrolling("10px", Clock::default().sleep(), 20.0);
+    let mut dom = VirtualDom::new(Empty);
+    dom.rebuild_in_place();
     let ran = Rc::new(Cell::new(0));
     let queue = {
         let (ran, host) = (Rc::clone(&ran), Rc::clone(&host));
@@ -392,17 +394,40 @@ fn a_dispatch_runs_the_frames_it_queued_and_a_follow_up_waits_for_the_next() {
             host.request_animation_frame(Box::new(move |_| ran.set(ran.get() + 10)));
         }
     };
-    host.request_animation_frame(Box::new(move |_| queue()));
-    let cancelled = host.request_animation_frame(Box::new(|_| unreachable!("cancelled")));
-    host.cancel_animation_frame(cancelled);
-    assert_eq!(ran.get(), 0, "nothing runs before the dispatch ends");
-    assert_eq!(host.frames_pending(), 1);
-    host.flush_frames();
+    dom.in_scope(ScopeId::ROOT, || {
+        host.request_animation_frame(Box::new(move |_| queue()));
+        let cancelled = host.request_animation_frame(Box::new(|_| unreachable!("cancelled")));
+        host.cancel_animation_frame(cancelled);
+        assert_eq!(ran.get(), 0, "nothing runs before the dispatch ends");
+        host.flush_frames();
+    });
     assert_eq!(ran.get(), 1, "the queued frame ran, its follow-up did not");
     assert_eq!(host.frames_pending(), 1);
-    host.flush_frames();
-    assert_eq!(ran.get(), 11);
+    assert_eq!(host.flush_count(), 1);
+
+    run_tasks(&mut dom);
+    assert_eq!(ran.get(), 11, "the follow-up ran without another event");
     assert_eq!(host.frames_pending(), 0);
+    assert_eq!(host.flush_count(), 2);
+
+    dom.in_scope(ScopeId::ROOT, || {
+        let ran = Rc::clone(&ran);
+        let callback_host = Rc::clone(&host);
+        host.request_animation_frame(Box::new(move |_| {
+            ran.set(ran.get() + 1);
+            for amount in [10, 100] {
+                let ran = Rc::clone(&ran);
+                callback_host.request_animation_frame(Box::new(move |_| ran.set(ran.get() + amount)));
+            }
+        }));
+        host.flush_frames();
+    });
+    assert_eq!(host.frames_pending(), 2, "both follow-ups wait for one scheduled flush");
+    assert_eq!(host.flush_count(), 3);
+    run_tasks(&mut dom);
+    assert_eq!(ran.get(), 122);
+    assert_eq!(host.frames_pending(), 0);
+    assert_eq!(host.flush_count(), 4, "two follow-ups needed only one extra flush");
 }
 
 /// A file made of rows the test lays out itself, so the scroll fix has an edit to see.
