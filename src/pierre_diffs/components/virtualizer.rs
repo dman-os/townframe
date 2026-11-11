@@ -4,8 +4,8 @@
 // Changes: the class is `Virtualizer<Host>` and every DOM read, write and
 // observer registration goes through the `VirtualizerHost` trait (geometry,
 // scroll writes, observers and listeners from the platform; the structural
-// reads (first child, the anchor line queries, which search the file element's shadow root when
-// it has one) are the port's `Document`'s); the control flow,
+// reads (first child and anchor line queries, which search the file element's shadow root)
+// are the port's `Document`'s); the control flow,
 // dirty flags, anchor selection and scroll fixing are upstream's, statement for
 // statement. Everything a DOM does to the class from outside becomes a public
 // method the host calls: the `handleElementScroll`, `handleWindowScroll`,
@@ -725,22 +725,16 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
         self.mark_dom_dirty();
     }
 
-    /// Where the lines are: `fileElement.shadowRoot`. A file element with no shadow root is
-    /// searched itself, which is what the scripted worlds of the oracles declare.
-    fn line_scope(document: &Document, file_element: NodeKey) -> NodeKey {
-        document.shadow_root(file_element).unwrap_or(file_element)
-    }
-
-    /// `fileElement.shadowRoot?.querySelectorAll('[data-line][data-line-index]')`
-    /// in document order, skipping lines without a `dataset.lineIndex`.
+    // Upstream line 318: fileElement.shadowRoot?.querySelectorAll("[data-line][data-line-index]") ?? []
+    /// The query returns lines in document order, skipping elements without a `dataset.lineIndex`.
     fn anchor_lines(&self, file_element: NodeKey) -> impl Iterator<Item = AnchorLine<NodeKey>> {
         let document = self.host.document();
-        document
-            .query_by_attribute(
-                Self::line_scope(document, file_element),
-                "data-line-index",
-                None,
-            )
+        let elements = document
+            .shadow_root(file_element)
+            .map_or_else(Vec::new, |shadow_root| {
+                document.query_by_attribute(shadow_root, "data-line-index", None)
+            });
+        elements
             .into_iter()
             .filter(|element| document.get_attribute(*element, "data-line").is_some())
             .filter_map(|element| {
@@ -751,15 +745,12 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
             })
     }
 
-    /// `fileElement.shadowRoot?.querySelector('[data-line][data-line-index="{line_index}"]')`.
+    // Upstream line 272: fileElement.shadowRoot?.querySelector(`[data-line][data-line-index="${lineIndex}"]`)
     fn find_anchor_line(&self, file_element: NodeKey, line_index: &str) -> Option<NodeKey> {
         let document = self.host.document();
+        let shadow_root = document.shadow_root(file_element)?;
         document
-            .query_by_attribute(
-                Self::line_scope(document, file_element),
-                "data-line-index",
-                Some(line_index),
-            )
+            .query_by_attribute(shadow_root, "data-line-index", Some(line_index))
             .into_iter()
             .find(|element| document.get_attribute(*element, "data-line").is_some())
     }
