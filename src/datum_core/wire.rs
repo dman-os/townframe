@@ -10,10 +10,10 @@
 //! enum encoding is not the contract. An open union has a fallback that keeps a member this build
 //! does not know about, and no serde attribute expresses that.
 
-use crate::datum::DatumMember;
-use crate::datum::Extra;
+use crate::DatumMember;
+use crate::Extra;
 #[cfg(feature = "schemars")]
-use crate::datum::Openness;
+use crate::Openness;
 #[cfg(feature = "schemars")]
 use schemars::JsonSchema;
 #[cfg(feature = "schemars")]

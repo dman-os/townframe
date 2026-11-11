@@ -214,7 +214,7 @@ fn undeclared_positions_follow_the_canonical_rules_recursively() {
 /// A union branch is published whole: the `$type` const and `required` are added to the payload's
 /// own schema, so a constraint the payload states — here the object it has to be — survives into
 /// the branch rather than being replaced by it. The branch itself is built by
-/// [`crate::datum::wire`]'s own tests; this is the codec honouring what it built.
+/// `datum_core`'s wire module's own tests; this is the codec honouring what it built.
 #[test]
 fn a_union_branch_keeps_its_payloads_own_constraints() {
     let document = json!({
