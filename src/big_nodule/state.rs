@@ -2187,6 +2187,7 @@ fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Op
                 Operation {
                     kind: *kind,
                     lexicon,
+                    privileged: false,
                 },
             )
         })

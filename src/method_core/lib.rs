@@ -58,6 +58,11 @@ pub struct XrpcMethod {
     pub output_schema: &'static str,
     pub error_schema: &'static str,
     pub long_poll: bool,
+    /// Whether the method confers authority its caller does not already hold, or manages the
+    /// nodules that run on the node. A dispatch scope reaches a privileged method only when it
+    /// says so (`DispatchScope::privileged`), so a scope that names every authority still cannot
+    /// reach it. Methods that only narrow the presented handle are not privileged.
+    pub privileged: bool,
 }
 
 impl XrpcMethod {
@@ -70,6 +75,7 @@ impl XrpcMethod {
             output_schema: "",
             error_schema: "",
             long_poll: false,
+            privileged: false,
         }
     }
 
@@ -82,6 +88,7 @@ impl XrpcMethod {
             output_schema: "",
             error_schema: "",
             long_poll: false,
+            privileged: false,
         }
     }
 
@@ -94,6 +101,7 @@ impl XrpcMethod {
             output_schema: "",
             error_schema: "",
             long_poll: false,
+            privileged: false,
         }
     }
 
@@ -112,6 +120,12 @@ impl XrpcMethod {
     /// pool instead of consuming an ordinary unary slot.
     pub const fn long_poll(mut self) -> Self {
         self.long_poll = true;
+        self
+    }
+
+    /// Marks the method as privileged: see [`Self::privileged`].
+    pub const fn privileged(mut self) -> Self {
+        self.privileged = true;
         self
     }
 }
@@ -210,14 +224,15 @@ macro_rules! __method_schema {
 macro_rules! methods {
     (
         error = $error:ty, nsid_prefix = $prefix:literal;
-        $($request:ident => $output:ty, $kind:ident, $nsid:literal;)*
+        $($request:ident => $output:ty, $kind:ident, $nsid:literal $(, $attribute:ident)*;)*
     ) => {$(
         impl $crate::Method for $request {
             type Output = $output;
             type Error = $error;
             const XRPC: $crate::XrpcMethod =
                 $crate::XrpcMethod::$kind(concat!($prefix, $nsid))
-                    .with_schemas(stringify!($output), stringify!($error));
+                    .with_schemas(stringify!($output), stringify!($error))
+                    $(.$attribute())*;
         }
         $crate::__method_schema!($request, $output, $error);
     )*};

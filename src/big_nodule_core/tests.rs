@@ -706,6 +706,7 @@ fn grants_never_exceed_requests() {
         authorities: ["org.example.tags", "org.example.search"]
             .map(String::from)
             .into(),
+        privileged: false,
     };
     let (applied, unrequested) = nodule.bind_operations(&grants);
     // The `org.example.tags` prefix is applied as the two requested operations it covers, not as
@@ -729,6 +730,7 @@ fn grants_never_exceed_requests() {
     let only_apply = DispatchScope {
         operations: ["org.example.tags.apply".to_owned()].into(),
         authorities: Default::default(),
+        privileged: false,
     };
     let unmet: Vec<_> = nodule
         .unmet_requests(&only_apply)
@@ -985,6 +987,7 @@ mod admission_tests {
         let scope = DispatchScope {
             operations: ["org.example.search.query".to_owned()].into(),
             authorities: ["org.example.callee".to_owned()].into(),
+            privileged: false,
         };
         config.set_method_grants(&id, scope.clone()).unwrap();
         let resolved = |config: &NoduleConfig| {

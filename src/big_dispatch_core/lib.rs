@@ -22,7 +22,11 @@ use std::collections::BTreeSet;
 
 /// The operations a minted dispatch handle may invoke: individual NSIDs, and authority
 /// prefixes that cover every NSID at or under them (`org.example.photos` covers
-/// `org.example.photos.list`, not `org.example.photosynthesis.list`).
+/// `org.example.photos.list`, not `org.example.photosynthesis.list`). The authority
+/// [`Self::ALL_AUTHORITIES`] covers every NSID. A scope reaches a privileged method (see
+/// [`method_core::XrpcMethod::privileged`]) only when `privileged` is set, whatever its names
+/// cover: privilege is a separate bit rather than a list of excluded names, so attenuation stays
+/// monotone (a scope covers another only when it holds every bit the other does).
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -31,22 +35,30 @@ pub struct DispatchScope {
     pub operations: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub authorities: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub privileged: bool,
 }
 
 impl DispatchScope {
+    /// The authority that owns every NSID.
+    pub const ALL_AUTHORITIES: &'static str = "*";
+
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty() && self.authorities.is_empty()
+        self.operations.is_empty() && self.authorities.is_empty() && !self.privileged
     }
 
     /// Whether `nsid` is `authority` itself or lives under `authority.`: the one NSID-prefix
     /// rule for authorities, whole segments only (`org.example.photos` owns
     /// `org.example.photos.list`, not `org.example.photosynthesis`).
     pub fn authority_owns(authority: &str, nsid: &str) -> bool {
-        nsid.strip_prefix(authority)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        authority == Self::ALL_AUTHORITIES
+            || nsid
+                .strip_prefix(authority)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
     }
 
-    /// Whether a holder of this scope may invoke `nsid`.
+    /// Whether this scope names `nsid`, ignoring privilege: what a nodule's grant is matched
+    /// against its requests with, before any method is resolved.
     pub fn permits(&self, nsid: &str) -> bool {
         self.operations.contains(nsid)
             || self
@@ -55,10 +67,17 @@ impl DispatchScope {
                 .any(|a| Self::authority_owns(a, nsid))
     }
 
+    /// Whether a holder of this scope may invoke the method `nsid`, whose declaration says
+    /// whether it is `privileged`.
+    pub fn admits(&self, nsid: &str, privileged: bool) -> bool {
+        self.permits(nsid) && (!privileged || self.privileged)
+    }
+
     /// Whether everything `other` permits is also permitted here: the attenuation check a mint
     /// applies, so a handle can only hand out a narrower scope than it holds.
     pub fn covers(&self, other: &Self) -> bool {
-        other.operations.iter().all(|nsid| self.permits(nsid))
+        (!other.privileged || self.privileged)
+            && other.operations.iter().all(|nsid| self.permits(nsid))
             && other.authorities.iter().all(|authority| {
                 self.authorities
                     .iter()
@@ -228,6 +247,7 @@ mod tests {
         DispatchScope {
             operations: operations.iter().map(|s| (*s).to_owned()).collect(),
             authorities: authorities.iter().map(|s| (*s).to_owned()).collect(),
+            privileged: false,
         }
     }
 
@@ -239,6 +259,36 @@ mod tests {
         assert!(held.permits("org.example.photos.list"));
         assert!(!held.permits("org.example.photosynthesis.list"));
         assert!(!held.permits("org.example.search.other"));
+    }
+
+    #[test]
+    fn the_all_authority_owns_every_nsid_and_only_it_covers_itself() {
+        let all = scope(&[], &[DispatchScope::ALL_AUTHORITIES]);
+        assert!(all.permits("org.example.photos.list"));
+        assert!(all.covers(&scope(&[], &["org.example.photos"])));
+        assert!(all.covers(&all));
+        let some = scope(&[], &["org.example"]);
+        assert!(!some.covers(&all));
+    }
+
+    #[test]
+    fn privilege_is_a_separate_monotone_bit() {
+        let mut all = scope(&[], &[DispatchScope::ALL_AUTHORITIES]);
+        assert!(all.admits("org.example.daybook.blobs.put", false));
+        assert!(!all.admits("org.example.daybook.nodules.admitNodule", true));
+        let mut privileged = all.clone();
+        privileged.privileged = true;
+        assert!(privileged.admits("org.example.daybook.nodules.admitNodule", true));
+        // Privilege alone names nothing.
+        let bare = DispatchScope {
+            privileged: true,
+            ..Default::default()
+        };
+        assert!(!bare.admits("org.example.daybook.nodules.admitNodule", true));
+        assert!(privileged.covers(&all));
+        assert!(!all.covers(&privileged));
+        all.privileged = true;
+        assert!(all.covers(&privileged));
     }
 
     #[test]

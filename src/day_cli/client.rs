@@ -180,8 +180,8 @@ impl NodeClient {
     }
 }
 
-/// Refuses text that cannot be an NSID or an NSID prefix (an authority): what the router and
-/// `node.json`'s dispatch scopes are keyed by.
+/// Refuses text that cannot be an NSID or an NSID prefix (an authority): what the router is
+/// keyed by.
 pub fn ensure_nsid(nsid: &str) -> Res<()> {
     eyre::ensure!(
         !nsid.is_empty()
