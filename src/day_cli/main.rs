@@ -272,7 +272,7 @@ enum StaticCommands {
     /// Run an operation or a cartridge's command, through the node's dispatch router
     ///
     /// `day x <nsid> [input]` calls the operation `nsid` and prints the JSON answer. A cartridge's
-    /// commands are the subcommands of `day x` (`day x intxt new ..`) and have no other spelling;
+    /// commands are the subcommands of `day x` (`day x intxt install ..`) and have no other spelling;
     /// they are hard-coded until they are generated from the installed cartridges' command
     /// bindings. An NSID always contains dots, so it cannot be a command's name.
     #[clap(visible_alias = "x", args_conflicts_with_subcommands = true)]
@@ -298,7 +298,7 @@ enum StaticCommands {
 /// The commands of `day x`, one per cartridge.
 #[derive(Debug, clap::Subcommand)]
 enum ExecCommands {
-    /// Create and install intxts (stopgaps until intxt's nodule runs these as operations)
+    /// Install intxt, which the nodule's operations (`day x org.example.intxt.createIntxt`, ..) then serve
     Intxt {
         #[clap(subcommand)]
         command: cmds::intxt::IntxtCommands,
@@ -349,18 +349,14 @@ mod tests {
             nsid: None,
             command:
                 Some(ExecCommands::Intxt {
-                    command:
-                        cmds::intxt::IntxtCommands::New {
-                            title,
-                            description: None,
-                        },
+                    command: cmds::intxt::IntxtCommands::Install { handler },
                 }),
             ..
-        } = parse(&["x", "intxt", "new", "t"])
+        } = parse(&["x", "intxt", "install", "--handler", "intxt_guest.wasm"])
         else {
-            panic!("`day x intxt new t` is the intxt command");
+            panic!("`day x intxt install` is the intxt command");
         };
-        assert_eq!(title, "t");
+        assert_eq!(handler, PathBuf::from("intxt_guest.wasm"));
         let StaticCommands::Exec {
             nsid: Some(nsid),
             input: Some(input),
@@ -375,6 +371,6 @@ mod tests {
 
     #[test]
     fn intxt_is_no_top_level_command() {
-        assert!(Cli::try_parse_from(["day", "intxt", "new", "t"]).is_err());
+        assert!(Cli::try_parse_from(["day", "intxt", "install"]).is_err());
     }
 }
