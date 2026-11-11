@@ -278,7 +278,7 @@ fn builtin_list() -> &'static [Builtin] {
             nodules::SetNoduleDrawerGrants,
             nodules::SetNoduleMethodGrants,
             nodules::ConfirmNoduleResolution,
-            nodules::SetNoduleSubstitution,
+            nodules::SetNoduleDevTakeover,
             nodules::SetMethodRoute,
             nodules::UninstallNodule,
             nodules::GetNodule,

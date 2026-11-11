@@ -1432,10 +1432,10 @@ mod declaration {
     #[test]
     fn the_config_datums_declare_publish_and_admit() {
         use crate::config::MethodRoute;
+        use crate::config::NoduleDevTakeover;
         use crate::config::NoduleGrants;
         use crate::config::NoduleInstall;
         use crate::config::NoduleSettings;
-        use crate::config::NoduleSubstitution;
         use crate::config::config_universe;
 
         let universe = config_universe();
@@ -1450,7 +1450,7 @@ mod declaration {
                 NoduleInstall::ID,
                 NoduleSettings::ID,
                 NoduleGrants::ID,
-                NoduleSubstitution::ID,
+                NoduleDevTakeover::ID,
                 MethodRoute::ID
             ]
         );
