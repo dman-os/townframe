@@ -1,0 +1,16 @@
+version = 1
+role = "plugin"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_dioxus_kit",
+    "clay_mdk",
+    "micro_lab_manifest",
+    "pierre_diffs_dioxus",
+]
+allow_external_api_types = false
+
+# One authored micro, two targets (isomorphic MDK): linked natively through its `ACTIVATE`
+# entry, or built as the wasm32-wasip3 component guest (ADR 018 Phase 1).
+[builds.native]
+
+[builds.wasm32-wasip3]

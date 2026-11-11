@@ -9444,6 +9444,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_lab"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "dioxus-core",
+ "micro_lab_manifest",
+ "pierre_diffs_dioxus",
+]
+
+[[package]]
+name = "micro_lab_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "insta",
+ "micro_layout_manifest",
+ "serde_json",
+]
+
+[[package]]
 name = "micro_layout"
 version = "0.1.0"
 dependencies = [

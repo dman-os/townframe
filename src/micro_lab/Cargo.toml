@@ -1,0 +1,26 @@
+[package]
+name = "micro_lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clay_dioxus_kit = { workspace = true }
+micro_lab_manifest = { workspace = true }
+pierre_diffs_dioxus = { workspace = true }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+
+# One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
+# other target links the in-process backend.
+[target.'cfg(target_os = "wasi")'.dependencies]
+clay_mdk = { workspace = true, features = ["guest"] }
+
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+clay_mdk = { workspace = true, features = ["in_process", "view"] }
+
+[dev-dependencies]
+dioxus-core = { workspace = true }

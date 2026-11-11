@@ -27,8 +27,8 @@ export async function prepareDayframePackages(
 
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_collection_probe"]
-    : ["micro_counter", "micro_layout"];
+    ? ["micro_counter", "micro_layout", "micro_lab", "micro_collection_probe"]
+    : ["micro_counter", "micro_layout", "micro_lab"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3`;
@@ -48,6 +48,7 @@ export async function prepareDayframePackages(
   const components: Record<string, [string, string]> = {
     counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
     layout: ["wasm32-wasip3/debug/micro_layout.wasm", "layout"],
+    lab: ["wasm32-wasip3/debug/micro_lab.wasm", "lab"],
     ...(testFixtures
       ? {
         collectionProbe: [
@@ -83,7 +84,7 @@ export async function prepareDayframePackages(
     console.log(`${variable}=${artifact}`);
   }
 
-  // The counter and the layout are also packages: the desktop shell scans a package directory for
+  // The counter, the layout and the lab are also packages: the desktop shell scans a package directory for
   // `<name>.manifest.json` sidecars paired with `<name>.component.wasm`, so prepare that
   // directory beside the raw fixtures. STAND-IN until `big_plugs` delivers manifests; each
   // sidecar is emitted from the package's manifest crate.
@@ -93,6 +94,7 @@ export async function prepareDayframePackages(
     const [name, manifestCrate] of [
       ["counter", "micro_counter_manifest"],
       ["layout", "micro_layout_manifest"],
+      ["lab", "micro_lab_manifest"],
     ]
   ) {
     await $`cp ${directory.join(`${name}.component.wasm`)} ${
