@@ -523,7 +523,10 @@ impl Egress {
             &self.dispatch,
             signer,
             &parts.method,
-            parts.uri.path(),
+            parts
+                .uri
+                .path_and_query()
+                .map_or(parts.uri.path(), |target| target.as_str()),
             &parts.headers,
             &body.to_bytes(),
         )

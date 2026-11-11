@@ -41,6 +41,15 @@ impl Spec {
     fn relay(&self) -> String {
         format!("{}.relay", self.authority)
     }
+
+    fn ask(&self) -> String {
+        format!("{}.ask", self.authority)
+    }
+
+    /// The query [`Asker`] serves, which answers the parameters it was called with.
+    fn peek(&self) -> String {
+        format!("{}.peek", self.authority)
+    }
 }
 
 fn caller() -> Spec {
@@ -98,7 +107,7 @@ fn cartridge_with_echo_input(spec: &Spec, calls: &[String], echo_input: Value) -
             .collect(),
         ..Default::default()
     };
-    let operations = [spec.echo(), spec.relay()];
+    let operations = [spec.echo(), spec.relay(), spec.ask()];
     for nsid in &operations {
         let input = if *nsid == spec.echo() {
             echo_input.clone()
@@ -113,7 +122,29 @@ fn cartridge_with_echo_input(spec: &Spec, calls: &[String], echo_input: Value) -
         artifact: "handler".into(),
         extra: Default::default(),
     });
-    nodule.implements = operations.into();
+    nodule.lexicons.push(
+        serde_json::from_value(json!({
+            "lexicon": 1,
+            "id": spec.peek(),
+            "defs": { "main": {
+                "type": "query",
+                "parameters": {
+                    "type": "params",
+                    "required": ["n", "label"],
+                    "properties": {
+                        "n": { "type": "integer" },
+                        "label": { "type": "string" }
+                    }
+                },
+                "output": {
+                    "encoding": "application/json",
+                    "schema": { "type": "object", "properties": {} }
+                }
+            }}
+        }))
+        .unwrap(),
+    );
+    nodule.implements = operations.into_iter().chain([spec.peek()]).collect();
     let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
     cartridge.authority = Some(spec.authority.to_owned());
     cartridge.artifacts.push(Artifact {
@@ -165,9 +196,65 @@ struct CallRelay {
     input: Option<Value>,
 }
 
+/// Asks the nodule to call the callee's `peek` through the typed client, with these parameters.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Ask {
+    n: u32,
+    label: String,
+}
+
+/// The callee's `peek` as the typed client of a caller names it: a query, so a `GET`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CallPeek {
+    n: u32,
+    label: String,
+}
+
 method_core::methods! {
     error = RelayError, nsid_prefix = "org.example.test.";
     CallRelay => Value, procedure, "relay";
+    Ask => Value, procedure, "ask";
+}
+
+mod callee_query {
+    use super::CallPeek;
+    use super::RelayError;
+    use serde_json::Value;
+
+    method_core::methods! {
+        error = RelayError, nsid_prefix = "org.example.callee.";
+        CallPeek => Value, query, "peek";
+    }
+}
+
+/// The fixture plus two operations that exercise queries. `ask` calls the callee's `peek`
+/// through the typed client, so the call leaves as `GET /xrpc/<nsid>?<params>` to
+/// `dispatch.local`. `peek` is a query a `big_ndk` nodule cannot declare a typed handler for
+/// (the kit serves procedures only), so it answers by hand: dispatch hands a provider a query's
+/// input as the JSON its Lexicon `parameters` coerce the query string to, which it echoes.
+#[derive(Default, Clone)]
+struct Asker;
+
+impl big_ndk::Nodule for Asker {
+    async fn route(&self, nsid: &str, cx: &big_ndk::Cx, body: &[u8]) -> Option<big_ndk::Reply> {
+        match nsid.rsplit('.').next() {
+            Some("ask") => Some(big_ndk::invoke::<Self, Ask>(self, cx, body).await),
+            Some("peek") => Some(big_ndk::Reply {
+                status: http::StatusCode::OK,
+                body: serde_json::from_slice(body)
+                    .expect("dispatch hands a query its input as JSON"),
+            }),
+            _ => Fixture.route(nsid, cx, body).await,
+        }
+    }
+}
+
+impl big_ndk::Handler<Ask> for Asker {
+    async fn call(&self, cx: &big_ndk::Cx, Ask { n, label }: Ask) -> Result<Value, RelayError> {
+        cx.call(CallPeek { n, label })
+            .await
+            .map_err(|error| RelayError::UpstreamFailed(format!("{error:?}")))
+    }
 }
 
 /// A traceparent in the outer call's trace (same trace id) under a span of its own.
@@ -462,6 +549,83 @@ async fn a_handlers_domain_error_reaches_the_caller_typed() {
         Err(crate::CallError::Method(RelayError::InvalidRequest(
             "no authority and no nodule capability".into()
         )))
+    );
+    node.stop().await;
+}
+
+/// `dispatch.local` serves a query as XRPC does, `GET /xrpc/<nsid>?<params>`, decoded by the
+/// same Lexicon `parameters` as the node's listener, and refuses a verb that is not the method's
+/// kind as the listener does.
+#[tokio::test]
+async fn dispatch_local_serves_queries_over_get_and_refuses_a_verb_mismatch() {
+    let (a, b) = (caller(), callee());
+    let node = super::node()
+        .with_nodule(cartridge(&a, &[b.peek(), b.echo()]), Asker)
+        .with_nodule(cartridge(&b, &[]), Asker)
+        .boot()
+        .await;
+    for spec in [&a, &b] {
+        node.enable(&spec.cartridge).await;
+    }
+    node.grant(
+        &a.cartridge,
+        DispatchScope {
+            authorities: [b.authority.to_owned()].into(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    // The typed client's GET: the parameters travel percent-encoded in the query string and
+    // reach the callee as the typed object its Lexicon `parameters` coerce them to (`n` an
+    // integer, the label decoded), which `peek` answers.
+    let answered = node
+        .call(Ask {
+            n: 3,
+            label: "a&b c=d".to_owned(),
+        })
+        .await;
+    assert_eq!(answered, Ok(json!({ "n": 3, "label": "a&b c=d" })));
+
+    // A query string off the callee's `parameters` is refused by dispatch as the listener
+    // refuses it, and the handler sees the refusal as a 400.
+    let relay_operation = a.relay();
+    let through = |operation: &str, query: Option<&str>| {
+        let mut input = json!({ "operation": operation, "input": { "n": 1 } });
+        if let Some(query) = query {
+            input["query"] = json!(query);
+        }
+        invoke(&node, &relay_operation, input, Default::default())
+    };
+    let off_parameters = through(&b.peek(), Some("n=three&label=x")).await.unwrap();
+    assert_eq!(off_parameters["status"], 400, "{off_parameters}");
+    assert!(
+        off_parameters["body"]["message"]
+            .as_str()
+            .unwrap()
+            .contains('n'),
+        "{off_parameters}"
+    );
+
+    // The wrong verb for the method's kind is dispatch's `InvalidRequest`, 400, whichever way
+    // it is wrong.
+    let post_to_query = through(&b.peek(), None).await.unwrap();
+    assert_eq!(post_to_query["status"], 400, "{post_to_query}");
+    assert!(
+        post_to_query["body"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected GET"),
+        "{post_to_query}"
+    );
+    let get_to_procedure = through(&b.echo(), Some("n=1")).await.unwrap();
+    assert_eq!(get_to_procedure["status"], 400, "{get_to_procedure}");
+    assert!(
+        get_to_procedure["body"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected POST"),
+        "{get_to_procedure}"
     );
     node.stop().await;
 }

@@ -1,8 +1,12 @@
 //! The `dispatch.local` egress, independent of what hosts the handler: the only outgoing request
 //! a nodule's handler can make.
 //!
-//! `POST /xrpc/<nsid>` with `authorization: Bearer <capability id>` is invoked through dispatch
-//! with the calling workload's nodule actor as the signer. Dispatch then admits the call as it
+//! `GET /xrpc/<nsid>?<params>` (a query) or `POST /xrpc/<nsid>` (a procedure), as the typed
+//! client sends them, with `authorization: Bearer <capability id>`, is invoked through dispatch
+//! with the calling workload's nodule actor as the signer. A GET reaches dispatch as the same
+//! [`HttpForm::Get`] the node's XRPC listener (`big_dispatch::xrpc_router`) hands it, so the
+//! query string is decoded by the method's Lexicon `parameters` in one place, and a verb that
+//! is not the method's kind is refused by dispatch as it is for the listener. Dispatch then admits the call as it
 //! admits any other: the capability must be live, permit the NSID and be bound to that actor, so
 //! a handler that presents another nodule's capability id is denied there. Nothing else the
 //! handler says (headers, body) is trusted as identity. The trace and `x-timeout-ms` budget
@@ -14,6 +18,7 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use http::HeaderMap;
@@ -47,16 +52,38 @@ pub async fn call(
     let bad = |status: StatusCode, error: &str, message: &str| {
         (status, json!({ "error": error, "message": message }))
     };
-    let operation = match path.strip_prefix("/xrpc/") {
-        Some(operation) if method == Method::POST => operation.to_owned(),
+    let Some(target) = path.strip_prefix("/xrpc/") else {
+        return bad(
+            StatusCode::NOT_FOUND,
+            "NotFound",
+            "dispatch.local serves GET and POST /xrpc/<nsid> only",
+        );
+    };
+    // The query string stays percent-encoded: dispatch decodes it, as it does for the listener.
+    let (operation, query) = target.split_once('?').unwrap_or((target, ""));
+    let http = match *method {
+        Method::GET => {
+            if !body.is_empty() {
+                return bad(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "query operations must not carry a request body",
+                );
+            }
+            HttpForm::Get {
+                query: query.to_owned(),
+            }
+        }
+        Method::POST => HttpForm::Post,
         _ => {
             return bad(
-                StatusCode::NOT_FOUND,
-                "NotFound",
-                "dispatch.local serves POST /xrpc/<nsid> only",
+                StatusCode::METHOD_NOT_ALLOWED,
+                "InvalidRequest",
+                "dispatch.local serves GET and POST /xrpc/<nsid> only",
             );
         }
     };
+    let operation = operation.to_owned();
     // The same parser every XRPC server hop uses: trace, the budget from the relative
     // `x-timeout-ms`, `authorization` and `idempotency-key`. The nested call is a hop of its
     // own: a fresh request id (the handler's id is the delivery hop's, and the outer call is
@@ -110,7 +137,7 @@ pub async fn call(
                 input,
                 context: InvocationContext {
                     idempotency_key,
-                    http: None,
+                    http: Some(http),
                 },
             },
         )

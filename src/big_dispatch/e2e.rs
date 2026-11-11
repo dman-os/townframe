@@ -727,3 +727,75 @@ async fn the_wrong_http_verb_for_a_methods_kind_is_invalid() {
     }
     h.shutdown().await;
 }
+
+/// A cartridge's operation that refers to the node's reference defs is checked with them
+/// resolved, whether the provider carried no copy or carried the node's own: the input's
+/// reference is validated as a reference (a malformed one is refused at its path), not left as
+/// an unresolved `ref` that no object satisfies.
+#[tokio::test]
+async fn an_operation_referring_to_the_nodes_reference_defs_is_validated_with_them() {
+    let h = harness().await;
+    for (nsid, carried) in [
+        ("org.example.contract.tagBare", Vec::new()),
+        (
+            "org.example.contract.tagVendored",
+            vec![big_cabinet_core::reference::defs_lexicon()],
+        ),
+    ] {
+        let tag = json!({"lexicon": 1, "id": nsid, "defs": {"main": {
+            "type": "procedure",
+            "input": {"encoding": "application/json", "schema": {
+                "type": "object", "required": ["part"],
+                "properties": {"part": {"type": "ref", "ref": "org.example.daybook.defs#datumRef"}}
+            }},
+            "output": {"encoding": "application/json", "schema": {"type": "object", "properties": {}}},
+        }}});
+        let canned = Arc::new(Canned {
+            output: json!({}),
+            seen: Default::default(),
+        });
+        h.dispatch
+            .router
+            .register(
+                nsid,
+                [(
+                    nsid.to_owned(),
+                    Operation {
+                        kind: Some(OperationKind::Procedure),
+                        lexicon: Some(LexiconSource { file: tag, carried }),
+                    },
+                )],
+                ProviderState::Ready(ProviderKind::BuiltIn(
+                    Arc::clone(&canned) as Arc<dyn Provider>
+                )),
+            )
+            .unwrap();
+        let valid = json!({"part": "dtxt:datum:self/org.example.note/one"});
+        h.invoke(h.operator(), nsid, valid.clone()).await.unwrap();
+        assert_eq!(*canned.seen.lock().unwrap(), [valid], "{nsid}");
+        let Err(DispatchError::InvalidInput(message)) =
+            h.invoke(h.operator(), nsid, json!({"part": 7})).await
+        else {
+            panic!("{nsid}: a value that is not a reference is refused");
+        };
+        // Refused against the def's own `string` shape at the field's path: unresolved, the
+        // `ref` would have been judged as an `object` (the error a cartridge that neither
+        // requested nor vendored the defs used to see).
+        assert!(message.contains("/part"), "{nsid}: {message}");
+        assert!(message.contains(r#"of type "string""#), "{nsid}: {message}");
+        // A string that is not a URI is refused at the same path by the def's `format: "uri"`,
+        // which an operation's compilation keeps: dispatch has no reference walk to refuse it.
+        let Err(DispatchError::InvalidInput(message)) = h
+            .invoke(h.operator(), nsid, json!({"part": "not a reference"}))
+            .await
+        else {
+            panic!("{nsid}: a string that is not a URI is refused");
+        };
+        assert!(message.contains("/part"), "{nsid}: {message}");
+        assert!(
+            !message.contains("of type"),
+            "{nsid}: refused by the format, not as a type error: {message}"
+        );
+    }
+    h.shutdown().await;
+}
