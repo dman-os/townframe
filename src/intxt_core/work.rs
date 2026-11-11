@@ -378,6 +378,12 @@ pub enum MessageKind {
     Interrupt,
     #[serde(rename = "spawnPrompt")]
     SpawnPrompt,
+    /// Text the harness injected that the model saw: reminders and records it marks as meta.
+    #[serde(rename = "meta")]
+    Meta,
+    /// A message from another agent session.
+    #[serde(rename = "crossSession")]
+    CrossSession,
     #[serde(rename = "compactionSummary")]
     CompactionSummary,
     #[datum(other)]
@@ -404,6 +410,10 @@ pub struct ToolCall {
     /// are found through their `cause`, not listed here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diffs: Vec<ToolDiff>,
+    /// The output as the harness showed it to the model, stored whole, truncation the harness
+    /// applied included and none of ours added (ledger D37).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
