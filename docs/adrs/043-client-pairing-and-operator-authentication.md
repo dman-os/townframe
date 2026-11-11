@@ -70,6 +70,8 @@ The key binding says *who* is calling and nothing else. Every authority comes fr
 - Tests that relied on the anonymous-is-operator socket now authenticate as the operator explicitly.
 - The `day` blackbox tests also have to clean up the new keyring entry, as they already do for the node's existing entries (`big_node::delete_secrets`).
 
+- Signing must stay cheap for short-lived callers: intxt's capture runs `day` from hook processes many times a minute. Each call is one keyring read (a Secret Service lookup on an already unlocked collection, no prompt) plus one signature. If the read shows up in measurements, the precedent is an agent that holds unlocked keys (ssh-agent), and in daemon mode that's the node's own process. Measure before adding one.
+
 ## Open questions
 
 1. The parent's consent: does approving a plugin under intxt's actor need intxt's own agreement, or is the operator's approval enough, since the operator owns both?
