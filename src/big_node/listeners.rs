@@ -281,10 +281,13 @@ impl ConnectionAcceptor for OwnerOnly {
                 };
                 let accepted = tokio::select! {
                     accepted = inner.accept() => Some(accepted?),
-                    requested = self.drain.wait_for(|requested| *requested) => {
-                        requested.expect("the node holds the drain sender while it serves");
-                        None
-                    }
+                    () = async {
+                        // Nobody left to ask for a drain (the node dropped its handle): the
+                        // listener serves until it is stopped.
+                        if self.drain.wait_for(|requested| *requested).await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
+                    } => None,
                 };
                 let Some((stream, peer)) = accepted else {
                     // Dropping the acceptor closes the socket, so a later connect is refused
