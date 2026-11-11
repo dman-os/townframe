@@ -240,7 +240,8 @@ pub(crate) fn static_attribute(
             "viewBox", "preserveAspectRatio", "d", "fill", "fill-rule", "fill-opacity", "stroke",
             "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
             "stroke-dashoffset", "stroke-opacity", "opacity", "transform", "cx", "cy", "r",
-            "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "points", "xmlns", "clip-path"
+            "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "points", "xmlns", "clip-path", "clip-rule",
+            "slot"
         ],
         Some("style") => Some("style") => [
             "display", "position", "top", "right", "bottom", "left", "inset", "z-index",

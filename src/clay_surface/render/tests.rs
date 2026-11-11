@@ -282,6 +282,8 @@ fn supported_attributes_are_reviewable() {
         "points",
         "xmlns",
         "clip-path",
+        "clip-rule",
+        "slot",
     ];
     let style = [
         "display",

@@ -120,6 +120,8 @@ expression: supported
 - points
 - xmlns
 - clip-path
+- clip-rule
+- slot
 - "style:display"
 - "style:position"
 - "style:top"
