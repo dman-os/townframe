@@ -164,6 +164,12 @@ pub(crate) enum Command {
         binding: String,
         reply: Reply<NoduleRecord>,
     },
+    SetMethodRoute {
+        context: RequestContext,
+        pattern: String,
+        provider: Option<String>,
+        reply: Reply<()>,
+    },
     SetSubstitution {
         context: RequestContext,
         cartridge_id: CartridgeId,
@@ -565,6 +571,12 @@ impl State {
                 )
                 .await
             }
+            Command::SetMethodRoute {
+                context,
+                pattern,
+                provider,
+                reply,
+            } => answer(reply, self.set_method_route(&context, pattern, provider)).await,
             Command::SetSubstitution {
                 context,
                 cartridge_id,
@@ -689,6 +701,16 @@ impl State {
             .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
+    async fn set_method_route(
+        &mut self,
+        context: &RequestContext,
+        pattern: String,
+        provider: Option<String>,
+    ) -> Res<()> {
+        self.mutate_config(context, move |config| config.set_route(&pattern, provider))
+            .await
+    }
+
     async fn set_drawer_grants(
         &mut self,
         context: &RequestContext,
@@ -753,7 +775,7 @@ impl State {
         // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
         // change is still what the offers say, and the one offer is the cartridge to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
-        let index = ProviderIndex::new(&resolved);
+        let index = ProviderIndex::new(&resolved, snapshot.value.routes()?);
         let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(cartridge_id) else {
             unreachable!("a request awaiting confirmation belongs to an admitted nodule")
         };
@@ -955,7 +977,11 @@ impl State {
         // Providers are indexed from the snapshot, not read back from the routing table as the
         // loop registers them, so a dependent that sorts before its provider resolves in the
         // same pass.
-        let providers = ProviderIndex::new(&resolved);
+        // Routes and claims are pushed in one pass, so dispatch never routes by a table that
+        // disagrees with the one dependents were resolved against.
+        let routes = snapshot.value.routes()?;
+        self.stores.dispatch.set_routes(routes.clone());
+        let providers = ProviderIndex::new(&resolved, routes);
         let mut new_records = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
             match resolution {
@@ -1633,7 +1659,10 @@ impl State {
                 .locks
                 .get(cartridge_id)
                 .and_then(|locks| locks.get(&request.binding))
-                .filter(|pin| pin.contract == request.contract);
+                .filter(|pin| pin.contract == request.contract)
+                // A route is the operator's consent, so a routed request re-pins to whatever
+                // the route names instead of waiting on a confirmation.
+                .filter(|_| !providers.is_routed(&request.contract));
             let offers = providers.offers(
                 &request.contract,
                 self.stores
