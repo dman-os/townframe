@@ -354,6 +354,61 @@ fn own_references_resolve_and_foreign_ones_pass() {
     foreign.admit(Some(PHOTOS)).unwrap();
 }
 
+/// The node's reference defs resolve for any cartridge without a request or a vendored copy; a
+/// vendored copy is accepted only when it is the node's own, and a def the library lacks is
+/// refused.
+#[test]
+fn the_nodes_reference_defs_resolve_without_a_request_or_a_vendored_copy() {
+    let tagging = |reference: &str| {
+        let mut nodule = Nodule::default();
+        nodule.lexicons.push(file(json!({
+            "lexicon": 1,
+            "id": "org.example.photos.tag",
+            "defs": { "main": {
+                "type": "procedure",
+                "input": {
+                    "encoding": "application/json",
+                    "schema": {
+                        "type": "object",
+                        "properties": { "part": { "type": "ref", "ref": reference } },
+                    },
+                },
+            }},
+        })));
+        nodule.handler = Some(Handler {
+            artifact: "handler".into(),
+            extra: Default::default(),
+        });
+        nodule.implements = ["org.example.photos.tag".to_owned()].into();
+        nodule
+    };
+    for reference in [
+        "org.example.daybook.defs#datumRef",
+        "org.example.daybook.defs#datumLocation",
+        "org.example.daybook.defs#datumPin",
+    ] {
+        tagging(reference).admit(Some(PHOTOS)).unwrap();
+    }
+    refuse(
+        tagging("org.example.daybook.defs#datumNope"),
+        "declares no definition `datumNope`",
+    );
+
+    let mut vendored = tagging("org.example.daybook.defs#datumRef");
+    let copy = big_cabinet_core::reference::defs_lexicon();
+    vendored.lexicons.push(file(copy.clone()));
+    vendored.admit(Some(PHOTOS)).unwrap();
+
+    let mut conflicting = tagging("org.example.daybook.defs#datumRef");
+    let mut altered = copy;
+    altered["defs"]["datumRef"]["description"] = json!("a different datumRef");
+    conflicting.lexicons.push(file(altered));
+    refuse(
+        conflicting,
+        "`org.example.daybook.defs` is a type library the node provides; a vendored copy must equal the node's",
+    );
+}
+
 #[test]
 fn the_handler_implements_each_declared_operation_once() {
     let mut twice = photos();

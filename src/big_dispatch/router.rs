@@ -284,7 +284,17 @@ impl Router {
                 let Some(source) = &operation.lexicon else {
                     continue;
                 };
-                let carried: Vec<&Value> = source.carried.iter().collect();
+                // The node's own type libraries resolve for every operation, a nodule's or a
+                // built-in's, whatever the provider carried: a provider's copy of one is
+                // replaced by the node's (admission refused a differing one), so the library is
+                // carried exactly once.
+                let libraries = big_cabinet_core::reference::node_type_libraries();
+                let carried: Vec<&Value> = source
+                    .carried
+                    .iter()
+                    .filter(|file| !libraries.iter().any(|library| library["id"] == file["id"]))
+                    .chain(libraries)
+                    .collect();
                 let compiled =
                     MethodContract::compile(&source.file, &carried).map_err(|source| {
                         ContractError {

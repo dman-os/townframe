@@ -470,3 +470,4 @@ pub use big_cabinet_core::reference::defs :: DATUM_REF
 pub use big_cabinet_core::reference::defs :: DEFS_NSID
 pub use big_cabinet_core::reference::defs :: LEXICON_REF
 pub use big_cabinet_core::reference::defs :: defs_lexicon
+pub use big_cabinet_core::reference::defs :: node_type_libraries
