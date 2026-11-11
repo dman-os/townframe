@@ -241,7 +241,11 @@ What the stress test asks of Clay, beyond the needs table:
   gutter utility and hunk expansion reach `InteractionManager` in the plain Dioxus view. Each
   handler reports its own node key (Dioxus events don't name their target), and drags hit-test from
   cached row geometry; divergences are in `PARITY.md`. Not yet tried by hand in a window.
-- **In progress:** touch drags on non-virtualized diffs (short files, the phone's common case), and
-  J4/J5 in the lab over mock state: reply and resolve, and an inline draft annotation row opened
-  from a selection (inline, not a sheet, while sheets are broken: shell ledger P1).
-
+- **Touch drags** select ranges on non-virtualized diffs too (rows and hunk separators are measured
+  for the hit-test on both views).
+- **J4/J5 in the lab, over mock state:** reply, resolve and reopen; selecting a line or range (or
+  the gutter "+") opens an inline draft annotation row, and Submit adds a thread on that range.
+  The embedder clears the selection through `Interaction::selected_lines`. Two crashes this
+  surfaced are fixed in `pierre_diffs`: the interaction manager held keys of rows a re-render had
+  freed, where upstream holds detached elements; `setup` now forgets them. Unverified: the draft's
+  focus (`MountedData::set_focus`) in a real window, the gutter "+" path, and IME.
