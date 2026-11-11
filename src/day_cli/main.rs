@@ -281,7 +281,7 @@ enum StaticCommands {
 /// The commands of `day x`, one per cartridge.
 #[derive(Debug, clap::Subcommand)]
 enum ExecCommands {
-    /// intxt: record agent work and its git history, and package it (`day x intxt --help`)
+    /// Record agent work and its git history, and package it (`day x intxt --help`)
     Intxt {
         #[clap(subcommand)]
         command: cmds::intxt::IntxtCommands,
