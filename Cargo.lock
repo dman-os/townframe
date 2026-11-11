@@ -4297,6 +4297,7 @@ dependencies = [
  "dioxus-native",
  "dioxus-native-dom",
  "micro_counter_manifest",
+ "micro_lab_manifest",
  "micro_layout_manifest",
  "micro_sample",
  "micro_settings",
