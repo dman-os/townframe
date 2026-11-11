@@ -225,3 +225,23 @@ What the stress test asks of Clay, beyond the needs table:
   every backend, together with host contract 1 (commands from a handler run before paint).
 - **A micro embedded inside an annotation row** of a virtualized diff inside a micro: nested
   embedding, with the embedded micro's height feeding the virtualizer through `onresize`.
+
+## Status (2026-11-11, evening)
+
+- **Fuel policy (operator):** guests build optimized, like plugs (`cargo x plug build-oci` builds
+  `--release`) and `dayframe_web` (`wasm-release`). `x/dayframe-packages.ts` now builds every
+  Dayframe guest with `--profile wasm-release`, and `FUEL_PER_CALL` stays at 50M. Measured on the
+  lab's mock review: the first diff render of a 12-line file costs ~95M fuel in the dev profile and
+  ~9.6M optimized, so a dev-profile guest measured the budget against code no user runs.
+- **Lab stress-test findings, resolved on `feat/micro-lab`:** guest traps record their reason
+  (trap code first, then the wasm backtrace) as the micro's fault; `clip-rule` and the `slot`
+  attribute are admitted; the host stack overflow was one ~145 KB debug frame per tree level in the
+  tag match, now ~13 KB per level, so `MAX_TREE_DEPTH` (64) fits a 2 MiB stack. The lab e2e passes.
+- **Diff view interaction (`feat/pierre-dioxus-host`):** hover, line and range selection, the
+  gutter utility and hunk expansion reach `InteractionManager` in the plain Dioxus view. Each
+  handler reports its own node key (Dioxus events don't name their target), and drags hit-test from
+  cached row geometry; divergences are in `PARITY.md`. Not yet tried by hand in a window.
+- **In progress:** touch drags on non-virtualized diffs (short files, the phone's common case), and
+  J4/J5 in the lab over mock state: reply and resolve, and an inline draft annotation row opened
+  from a selection (inline, not a sheet, while sheets are broken: shell ledger P1).
+
