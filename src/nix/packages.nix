@@ -69,8 +69,8 @@
       outputHashes = {
         "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8" =
           "sha256-dIhUdjaf/dlWufOu6X7694DqP7MHRpvOBdzXx6HFOi4=";
-        "git+https://github.com/dman-os/dioxus?rev=ba8feef7fb2bce7efd06ea65a12d02af33598706#ba8feef7fb2bce7efd06ea65a12d02af33598706" =
-          "sha256-YmpmlXey3yzAyXZ6iGa+5kGVNjEGEDG5hKxc1IpMXrA=";
+        "git+https://github.com/dman-os/dioxus?rev=34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3#34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" =
+          "sha256-dXB6DQwQPdP+5zfsMCMpYYl8iHsruhpkpBXyOqTqjvk=";
         "git+https://github.com/dman-os/iroh-blobs?rev=b3d641036c807b30d9fc62fd22a83801a38386d3#b3d641036c807b30d9fc62fd22a83801a38386d3" =
           "sha256-9S3fDD2eMHVECWvnX32I+RnPUNd2lRp3S6+TPZRBYGw=";
         "git+https://github.com/dman-os/keyhive?rev=1063446711dcca3848430044f239830dc948290c#1063446711dcca3848430044f239830dc948290c" =

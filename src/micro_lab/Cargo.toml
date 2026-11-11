@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 clay_dioxus_kit = { workspace = true }
 micro_lab_manifest = { workspace = true }
 pierre_diffs_dioxus = { workspace = true }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
 # other target links the in-process backend.

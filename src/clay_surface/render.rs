@@ -346,21 +346,24 @@ pub(crate) fn attribute_value_policy(
         // browser's parse could differ from this one, and re-emitting would add a serializer
         // whose output nobody reviews.
         ("style", None) => {
-            for (property, value) in crate::stylesheet::inline_declarations(text)? {
-                if !property.starts_with("--")
-                    && !matches!(
-                        static_attribute(
-                            &DATA_ATTRIBUTES,
-                            &property.to_ascii_lowercase(),
-                            Some("style")
-                        ),
+            crate::stylesheet::check_inline_declarations(text, |property, value| {
+                // CSS property names are ASCII case-insensitive; only a name that isn't already
+                // lowercase pays for a copy.
+                let property = if property.bytes().any(|byte| byte.is_ascii_uppercase()) {
+                    std::borrow::Cow::Owned(property.to_ascii_lowercase())
+                } else {
+                    std::borrow::Cow::Borrowed(property)
+                };
+                let admitted = property.starts_with("--")
+                    || matches!(
+                        static_attribute(&DATA_ATTRIBUTES, &property, Some("style")),
                         Ok(Some(_))
-                    )
-                {
+                    );
+                if !admitted {
                     return Err("style property is not in the vocabulary");
                 }
-                style_value_policy(&value)?;
-            }
+                style_value_policy(value)
+            })?
         }
         _ => {}
     }

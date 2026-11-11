@@ -356,13 +356,13 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
 blitz-dom = "=0.3.0-beta.4"
 ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
@@ -372,8 +372,8 @@ ui = { path = "./src/ui" }
 wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3" }
 # blitz 0.3.0-beta.4 plus a fix: a form control added and dropped in one mutation batch stayed
 # queued and the mutator's flush indexed its freed node id. Every blitz crate comes from the same
 # rev, since blitz-dom reaches its siblings by path inside that workspace.

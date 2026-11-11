@@ -143,8 +143,10 @@ fn supported_tags_are_reviewable() {
 
 // Vocabulary here is names only; `attribute_value_policy` decides values. `xlink:href` is in the
 // snapshot for the sake of SVG `<use>`, and only `<use>` (with a `#fragment`) accepts it: the
-// policy refuses it on every other element. The raw `style` attribute is in the vocabulary again (standard Dioxus writes it) but its
-// value is parsed and held to the `style:` checks. `src`, `srcset`, `action` and the other names that exist only to carry a URL are absent on purpose (egress closure).
+// policy refuses it on every other element. The raw `style` attribute is in the vocabulary
+// (standard Dioxus writes it), but its value is parsed and held to the `style:` checks. `src`,
+// `srcset`, `action` and the other names that exist only to carry a URL are absent on purpose
+// (egress closure).
 #[test]
 fn supported_attributes_are_reviewable() {
     let plain = [
