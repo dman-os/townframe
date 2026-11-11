@@ -868,3 +868,27 @@ fn normal_touch_line_selection_holds_range_while_dragging_over_the_gutter_utilit
     assert_eq!(harness.manager.get_selection(), Some(range(4, 1)));
     harness.manager.clean_up();
 }
+
+// Not in upstream's file. A render replaces rows the manager still holds as the hovered line;
+// upstream's `clearHoveredLine` then removes an attribute from a detached element, which is a
+// no-op, while here the discarded node's key is stale.
+#[test]
+fn clean_up_after_the_hovered_rows_were_discarded_does_not_touch_them() {
+    let mut options = InteractionManagerOptions::default();
+    options.base.line_hover_highlight =
+        Some(crate::managers::interaction_manager::LineHoverHighlight::Both);
+    let harness = Harness::new(InteractionManagerMode::File, options);
+    let fixture = harness.file_pre(3);
+    harness.manager.setup(&fixture.pre);
+    harness.dispatch(
+        fixture.content_rows[1],
+        "pointermove",
+        &Pointer::new(PointerType::Mouse),
+    );
+    assert!(harness.manager.get_hovered_line().is_some());
+
+    harness.dom.doc.discard(fixture.content_rows[1]);
+    harness.dom.doc.discard(fixture.gutter_rows[1]);
+    harness.manager.clean_up();
+    assert_eq!(harness.manager.get_hovered_line(), None);
+}

@@ -1230,12 +1230,15 @@ impl<Host: InteractionHost> InteractionManager<Host> {
         let Some(hovered_line) = self.hovered_line.borrow_mut().take() else {
             return;
         };
-        self.host
-            .document()
-            .remove_attribute(hovered_line.line_element, "data-hovered");
-        self.host
-            .document()
-            .remove_attribute(hovered_line.number_element, "data-hovered");
+        // A render replaces the rows the pointer was over without telling the manager, and the
+        // owner frees the replaced nodes. Upstream then removes the attribute from a detached
+        // element, a no-op; a freed node here is a stale key, so the no-op is spelled out.
+        let document = self.host.document();
+        for element in [hovered_line.line_element, hovered_line.number_element] {
+            if document.exists(element) {
+                document.remove_attribute(element, "data-hovered");
+            }
+        }
     }
 
     fn set_hovered_line(&self, hovered_line: LineEventBaseProps<NodeKey>) {

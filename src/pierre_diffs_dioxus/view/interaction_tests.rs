@@ -800,3 +800,15 @@ fn clicking_a_collapsed_hunks_expand_button_shows_the_hidden_lines() {
         "expanding shows more rows than {before}"
     );
 }
+
+#[test]
+fn dropping_the_view_after_a_render_replaced_the_hovered_rows_cleans_up() {
+    let mut rig = Rig::new(pair(40, &[2, 39]), false, false, true);
+    let hovered = rig.line(1);
+    rig.pointer(hovered, "pointermove", Pointer::mouse(10.0, 10.0));
+    assert!(rig.document().has_attribute(hovered, "data-hovered"));
+    let button = rig.query("data-expand-button", None)[0];
+    rig.click(button, Pointer::mouse(20.0, 200.0).pressed());
+    // `use_drop` runs `FileDiff::clean_up`, which clears the hover it still holds.
+    drop(rig);
+}
