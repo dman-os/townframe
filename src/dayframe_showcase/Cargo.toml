@@ -8,6 +8,7 @@ dioxus = { workspace = true }
 ui = { workspace = true }
 clay_dioxus_kit = { workspace = true }
 pierre_diffs_dioxus = { workspace = true }
+review_mock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The virtualized diff's timers: `FileDiffView` takes a sleep function, and desktop's runtime has

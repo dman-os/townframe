@@ -4,6 +4,7 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "clay_dioxus_kit",
     "pierre_diffs_dioxus",
+    "review_mock",
     "ui",
 ]
 allow_external_api_types = false
