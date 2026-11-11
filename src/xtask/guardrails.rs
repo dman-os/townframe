@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod contracts;
 pub mod docs;
+pub mod manifests;
 pub mod matrix;
 pub mod policy;
 pub mod repository;
@@ -186,6 +187,7 @@ pub fn run_check(root: &Path, package: Option<&str>, json: bool) -> Res<bool> {
     let report = repo.scan(package)?;
     let mut findings = repo.check(&report)?;
     findings.extend(matrix::validate(&repo)?);
+    findings.extend(manifests::validate(&repo)?);
     if json {
         println!("{}", serde_json::to_string_pretty(&findings)?);
     } else {
