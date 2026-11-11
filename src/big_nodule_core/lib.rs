@@ -121,8 +121,10 @@ pub struct Handler {
 /// A nodule's datum Lexicons split for the schema registry: see [`Nodule::registrable_datums`].
 #[derive(Debug, Default)]
 pub struct RegistrableDatums<'a> {
-    /// `(nsid, file, sidecar)` of each record the nodule holds; see [`Nodule::sidecar`].
+    /// `(nsid, file, sidecar)` of each datum the nodule holds: a `main` that is a record or an
+    /// object, under its authority; see [`Nodule::sidecar`].
     pub held: Vec<(&'a str, &'a IndexMap<String, Value>, Option<&'a Value>)>,
+    /// Every other datum file: a type library (no `main`), or a datum outside the authority.
     pub carried: Vec<&'a IndexMap<String, Value>>,
 }
 
@@ -363,11 +365,12 @@ impl Nodule {
     }
 
     /// The datum Lexicons this nodule brings to the node's schema registry, split for
-    /// registration under the envelope's `authority`: the records it holds (under the authority,
-    /// a `main` record) are its to register; every other datum file is carried so the held ones
-    /// can resolve references to vendored copies and shared type libraries, but is never
-    /// registered by this nodule. A vendored copy of a record is the holder's to register, so
-    /// registering it here would shadow the holder's.
+    /// registration under the envelope's `authority`: the datums it holds (under the authority,
+    /// a datum Lexicon, whose `main` is a record or an object) are its to register; every other
+    /// file is carried so the held ones can resolve references to vendored copies and shared type
+    /// libraries, but is never registered by this nodule. A Lexicon without a `main` datum is a
+    /// type library and is always carried. A vendored copy of a datum is the holder's to register,
+    /// so registering it here would shadow the holder's.
     pub fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_> {
         let mut split = RegistrableDatums::default();
         for file in self.datum_lexicons() {
@@ -375,13 +378,17 @@ impl Nodule {
                 .get("id")
                 .and_then(Value::as_str)
                 .expect("admission checked every Lexicon states its NSID");
-            let is_record = file
-                .get("defs")
-                .and_then(|defs| defs.get("main"))
-                .and_then(|main| main.get("type"))
-                .and_then(Value::as_str)
-                == Some("record");
-            if is_record
+            // Rust-declared datums publish an `object` main (their stored values carry no
+            // `$type`, which a Lexicon `record` would require); hand-written ones may state a
+            // `record`. Either is a datum; a file with no `main` is a type library.
+            let is_datum = matches!(
+                file.get("defs")
+                    .and_then(|defs| defs.get("main"))
+                    .and_then(|main| main.get("type"))
+                    .and_then(Value::as_str),
+                Some("record" | "object")
+            );
+            if is_datum
                 && authority.is_some_and(|authority| DispatchScope::authority_owns(authority, id))
             {
                 split.held.push((id, file, self.sidecar.get(id)));
