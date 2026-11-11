@@ -22,6 +22,15 @@
 //!   and width) and of one content column (for the top its first row starts at, which includes
 //!   the code block's own padding no stylesheet read could see), and every later lookup moves the
 //!   anchor by how far the scroller and the stack above the column have moved since.
+//!
+//! Heights are border boxes (`onresize`), and a row's CSS margin is outside one. The stylesheet
+//! gives a hunk separator a block margin above and below it (`--diffs-gap-block`, 8px by default,
+//! zero on the first hunk's top and the last one's bottom), which no event reports and no
+//! stylesheet read could see, so rows stacked by heights alone sit higher than they are by that
+//! gap for every separator above them and a drag would resolve rows below the pointer. The frame
+//! therefore also carries the margin above each separator and above the row after one, read
+//! from their client rects at drag start (`margin_anchors`, `Geometry::margins`): rows that are
+//! stacked without margins do not need any.
 
 use std::collections::HashMap;
 
@@ -38,7 +47,7 @@ pub(crate) struct ScrollSample {
 }
 
 /// What the engine measured when a drag started; see the module docs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HitFrame {
     /// The `pre`'s client left edge and width.
     pub(crate) pre_left: f64,
@@ -49,6 +58,9 @@ pub(crate) struct HitFrame {
     /// The column's top in the scroller's content, and the scroll position, at the measurement.
     pub(crate) content_offset: f64,
     pub(crate) scroll_top: f64,
+    /// The CSS margin above a row of a content column, for the rows that have one
+    /// (`Geometry::margins`); a row not listed has none.
+    pub(crate) margins: HashMap<NodeKey, f64>,
 }
 
 pub(crate) struct Geometry {
@@ -65,6 +77,20 @@ fn stacks_children(document: &Document, parent: NodeKey) -> bool {
         .tag_name(parent)
         .eq_ignore_ascii_case("#shadow-root")
         || document.has_attribute(parent, "data-content")
+}
+
+/// The rows whose margin the frame measures: the hunk separators of a content column and the row
+/// after each (whose top shows the margin below the separator). Nothing else in a column has a
+/// margin.
+pub(crate) fn is_margin_anchor(document: &Document, node: NodeKey) -> bool {
+    let in_content = document
+        .parent(node)
+        .is_some_and(|parent| document.has_attribute(parent, "data-content"));
+    in_content
+        && (document.has_attribute(node, "data-separator")
+            || document
+                .previous_element_sibling(node)
+                .is_some_and(|previous| document.has_attribute(previous, "data-separator")))
 }
 
 /// A line of code or its gutter row: what the layout estimates at `line_height`.
@@ -177,6 +203,7 @@ impl Geometry {
             .into_iter()
             .filter(|row| !document.tag_name(row).is_empty())
         {
+            top += frame.margins.get(&row).copied().unwrap_or(0.0);
             let bottom = top + self.height(document, row);
             if (top..bottom).contains(&y) {
                 return Some(row);
@@ -184,6 +211,40 @@ impl Geometry {
             top = bottom;
         }
         None
+    }
+
+    /// The margin above each anchor row of each content column of `pre`, given the client tops
+    /// the platform reported for the anchors (`is_margin_anchor`) and the client top of the
+    /// columns' first row. Each column is stacked by heights, and at an anchor the margin is how
+    /// far its reported top is below where the stack has reached.
+    pub(crate) fn margins(
+        &self,
+        document: &Document,
+        pre: NodeKey,
+        content_client_top: f64,
+        anchor_tops: &HashMap<NodeKey, f64>,
+    ) -> HashMap<NodeKey, f64> {
+        let mut margins = HashMap::new();
+        for column in document.child_nodes(pre).into_iter().filter_map(|code| {
+            document
+                .child_nodes(code)
+                .into_iter()
+                .find(|child| document.has_attribute(child, "data-content"))
+        }) {
+            let mut top = content_client_top;
+            for row in document
+                .child_nodes(column)
+                .into_iter()
+                .filter(|row| !document.tag_name(row).is_empty())
+            {
+                if let Some(anchor_top) = anchor_tops.get(&row) {
+                    margins.insert(row, anchor_top - top);
+                    top = *anchor_top;
+                }
+                top += self.height(document, row);
+            }
+        }
+        margins
     }
 
     /// The node's distance from the top of the scroller's content; see the module docs. The
@@ -348,6 +409,7 @@ mod hit_tests {
             content_client_top: 50.0,
             content_offset: 0.0,
             scroll_top: 0.0,
+            margins: HashMap::new(),
         }
     }
 

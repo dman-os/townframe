@@ -3,6 +3,8 @@
 //! `host.rs` because it reads the host's private caches.
 
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use dioxus::html::MountedError;
@@ -13,6 +15,7 @@ use pierre_diffs::managers::interaction_manager::InteractionHost;
 
 use super::DioxusHost;
 use crate::geometry::HitFrame;
+use crate::geometry::is_margin_anchor;
 
 /// The pointer handlers a node renders with.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +56,7 @@ pub(crate) struct PointerState {
     /// Whether a drag asked for the document-level pointer listeners.
     document_listeners: Cell<bool>,
     /// What `element_from_point` measures from; present only while a drag has one.
-    frame: Cell<Option<HitFrame>>,
+    frame: RefCell<Option<HitFrame>>,
 }
 
 impl PointerState {
@@ -106,35 +109,45 @@ impl PointerState {
         }
     }
 
-    /// The nodes the hit-test frame is measured from need `MountedData`: the `pre` and the
-    /// content columns, while the pointer acts on rows.
+    /// The nodes the hit-test frame is measured from need `MountedData`: the `pre`, the content
+    /// columns and the rows whose margin is measured (`is_margin_anchor`), while the pointer acts
+    /// on rows.
     pub(crate) fn wants_mounted(&self, document: &Document, node: NodeKey) -> bool {
         self.rows.get()
-            && self
-                .pre
-                .get()
-                .is_some_and(|pre| node == pre || document.has_attribute(node, "data-content"))
+            && self.pre.get().is_some_and(|pre| {
+                node == pre
+                    || document.has_attribute(node, "data-content")
+                    || is_margin_anchor(document, node)
+            })
     }
 }
 
-/// Measures the hit-test frame (see `HitFrame`). Two client rects are async commands, so the
+/// Measures the hit-test frame (see `HitFrame`). The client rects are async commands, so the
 /// frame lands a task later; until then `element_from_point` answers `Unavailable` and the
 /// manager follows the event path.
 fn measure_frame(host: &Rc<DioxusHost>) {
     let Some(pre) = host.pointer.pre.get() else {
         return;
     };
-    let Some(content) = host
-        .document
-        .query_by_attribute(pre, "data-content", None)
-        .into_iter()
-        .next()
-    else {
+    let columns = host.document.query_by_attribute(pre, "data-content", None);
+    let Some(content) = columns.first().copied() else {
         return;
     };
+    // The nodes measured: the `pre`, the first column, and every margin anchor of every column.
+    let measured: Vec<NodeKey> = [pre, content]
+        .into_iter()
+        .chain(columns.iter().flat_map(|column| {
+            host.document
+                .child_nodes(column)
+                .into_iter()
+                .filter(|row| is_margin_anchor(&host.document, *row))
+        }))
+        .collect();
     let mounted = host.mounted.borrow();
-    let (Some(pre_mounted), Some(content_mounted)) =
-        (mounted.get(&pre).cloned(), mounted.get(&content).cloned())
+    let Some(handles) = measured
+        .iter()
+        .map(|node| mounted.get(node).cloned())
+        .collect::<Option<Vec<_>>>()
     else {
         // Not mounted yet: the drag follows the event path.
         return;
@@ -142,34 +155,45 @@ fn measure_frame(host: &Rc<DioxusHost>) {
     drop(mounted);
     let host = Rc::clone(host);
     dioxus::prelude::spawn(async move {
-        let (pre_rect, content_rect) = match (
-            pre_mounted.get_client_rect().await,
-            content_mounted.get_client_rect().await,
-        ) {
-            (Ok(pre_rect), Ok(content_rect)) => (pre_rect, content_rect),
-            // A renderer without client rects has no hit-test, which the manager is built to
-            // handle.
-            (Err(MountedError::NotSupported), _) | (_, Err(MountedError::NotSupported)) => {
-                return;
+        let mut tops = HashMap::new();
+        let mut pre_rect = None;
+        let mut content_rect = None;
+        for (node, handle) in measured.iter().zip(&handles) {
+            let rect = match handle.get_client_rect().await {
+                Ok(rect) => rect,
+                // A renderer without client rects has no hit-test, which the manager is built to
+                // handle.
+                Err(MountedError::NotSupported) => return,
+                Err(error) => panic!("the platform measures a mounted element: {error}"),
+            };
+            if *node == pre {
+                pre_rect = Some(rect);
+            } else if *node == content {
+                content_rect = Some(rect);
             }
-            (Err(error), _) | (_, Err(error)) => {
-                panic!("the platform measures a mounted element: {error}")
-            }
-        };
+            // Only the margin anchors' tops are read back (`Geometry::margins`).
+            tops.insert(*node, rect.origin.y);
+        }
+        let (pre_rect, content_rect) = (
+            pre_rect.expect("the pre was measured"),
+            content_rect.expect("the column was measured"),
+        );
         // The drag may have ended while the rects were in flight.
         if !host.pointer.document_listeners.get() || !host.document.exists(content) {
             return;
         }
         let geometry = host.geometry.borrow();
         let scroll_top = host.scroll_top();
-        host.pointer.frame.set(Some(HitFrame {
+        let margins = geometry.margins(&host.document, pre, content_rect.origin.y, &tops);
+        *host.pointer.frame.borrow_mut() = Some(HitFrame {
             pre_left: pre_rect.origin.x,
             pre_width: pre_rect.size.width,
             content,
             content_client_top: content_rect.origin.y,
             content_offset: geometry.top_in_content(&host.document, host.container, content),
             scroll_top,
-        }));
+            margins,
+        });
     });
 }
 
@@ -184,7 +208,8 @@ impl InteractionHost for DioxusHost {
     /// measuring rows, a renderer without client rects). A frame whose column the document dropped is
     /// stale in the same way.
     fn element_from_point(&self, x: f64, y: f64) -> HitTest<NodeKey> {
-        let (Some(frame), Some(pre)) = (self.pointer.frame.get(), self.pointer.pre.get()) else {
+        let frame = self.pointer.frame.borrow();
+        let (Some(frame), Some(pre)) = (frame.as_ref(), self.pointer.pre.get()) else {
             return HitTest::Unavailable;
         };
         if !self.document.exists(frame.content) {
@@ -196,7 +221,7 @@ impl InteractionHost for DioxusHost {
             &self.document,
             self.container,
             pre,
-            &frame,
+            frame,
             scroll_top,
             (x, y),
         ) {
@@ -220,7 +245,7 @@ impl InteractionHost for DioxusHost {
     /// hit-tests.
     fn add_document_listeners(&self) {
         self.pointer.document_listeners.set(true);
-        self.pointer.frame.set(None);
+        *self.pointer.frame.borrow_mut() = None;
         measure_frame(
             &self
                 .weak_self
@@ -231,6 +256,6 @@ impl InteractionHost for DioxusHost {
 
     fn remove_document_listeners(&self) {
         self.pointer.document_listeners.set(false);
-        self.pointer.frame.set(None);
+        *self.pointer.frame.borrow_mut() = None;
     }
 }
