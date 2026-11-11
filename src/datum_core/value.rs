@@ -44,7 +44,6 @@ values!(
     crate::UnknownMember,
 );
 
-
 macro_rules! containers {
     ($($container:path),* $(,)?) => {
         $(impl<T: DatumShape> DatumShape for $container {

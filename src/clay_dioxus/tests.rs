@@ -933,7 +933,121 @@ fn a_guest_stylesheet_renders_as_the_first_child_of_the_shadow_root() {
     dom.rebuild(&mut tree);
     assert_eq!(
         tree.outline(),
-        "(div[data-dioxus-shadow,style](style(#),button[class](#)))"
+        "(div[data-dioxus-shadow,style](style(#),div[data-clay-presentation,style](button[class](#))))"
     );
     assert_eq!(tree.text_content(), ".btn {\ncolor: red;\n}0");
+}
+
+/// A hostile parent presentation registers `input` and `keydown` on an ancestor of the slot that
+/// mounts a child presentation. Events that begin inside the child must reach only the child's
+/// listeners; the parent still receives events on its own elements.
+#[test]
+fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentation() {
+    use dioxus_html::Code;
+    use dioxus_html::Key;
+    use dioxus_html::Location;
+    use dioxus_html::Modifiers;
+    use dioxus_html::SerializedFormData;
+    use dioxus_html::SerializedKeyboardData;
+
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let viewer = host.start("viewer");
+    let layout = host.start("hostile parent");
+    let child = host.start("child");
+    let child_events = Rc::new(RefCell::new(Vec::new()));
+    let parent_events = Rc::new(RefCell::new(Vec::new()));
+    let (reference, _child_surface) = components
+        .publish_surface(&child, {
+            let child_events = child_events.clone();
+            move |_, writer| {
+                writer.apply(&[
+                    Mutation::PushId(0),
+                    Mutation::CreateElement(("input".into(), None)),
+                    Mutation::SetId(1),
+                    Mutation::AddEventListener("input".into()),
+                    Mutation::AddEventListener("keydown".into()),
+                    Mutation::AppendChildren(1),
+                    Mutation::Pop,
+                ])?;
+                let child_events = child_events.clone();
+                Ok(SurfaceSession::new(move |event| {
+                    child_events.borrow_mut().push(event.name);
+                    EventResponse::default()
+                }))
+            }
+        })
+        .unwrap();
+    let (parent, _parent_surface) = components
+        .publish_surface(&layout, {
+            let parent_events = parent_events.clone();
+            move |_, writer| {
+                writer.apply(&[
+                    Mutation::PushId(0),
+                    Mutation::CreateElement(("div".into(), None)),
+                    Mutation::SetId(1),
+                    Mutation::AddEventListener("input".into()),
+                    Mutation::AddEventListener("keydown".into()),
+                    Mutation::MountComponent(reference),
+                    Mutation::AppendChildren(1),
+                    Mutation::AppendChildren(1),
+                    Mutation::Pop,
+                ])?;
+                let parent_events = parent_events.clone();
+                Ok(SurfaceSession::new(move |event| {
+                    parent_events.borrow_mut().push(event.name);
+                    EventResponse::default()
+                }))
+            }
+        })
+        .unwrap();
+    fn app(props: (NativeComponents, Instance, ComponentRef)) -> Element {
+        use_context_provider(|| props.0.clone());
+        rsx! { ComponentMount { owner: props.1, reference: props.2 } }
+    }
+    let mut dom = VirtualDom::new_with_props(app, (components, viewer, parent));
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let fire = |name: &str, data: EventData, id| {
+        dom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            name,
+            dioxus_core::Event::new(data.into_any(), true),
+            id,
+        );
+    };
+    let input = || EventData::Form(SerializedFormData::new("typed".into(), Vec::new()));
+    let keydown = || {
+        EventData::Keyboard(SerializedKeyboardData::new(
+            Key::Character("a".into()),
+            Code::KeyA,
+            Location::Standard,
+            false,
+            Modifiers::empty(),
+            false,
+        ))
+    };
+
+    let child_input = host_tree
+        .listener_id("input", "input")
+        .expect("the child's input is in the host tree");
+    fire("input", input(), child_input);
+    fire("keydown", keydown(), child_input);
+    assert_eq!(&*child_events.borrow(), &["input", "keydown"]);
+    assert_eq!(
+        &*parent_events.borrow(),
+        &[] as &[&str],
+        "the parent's ancestor listeners saw events from inside the child"
+    );
+
+    // The barrier is at the boundary only: the parent's own element still receives its events.
+    let parent_div = host_tree
+        .listener_id("div", "input")
+        .expect("the parent's div is in the host tree");
+    fire("input", input(), parent_div);
+    fire("keydown", keydown(), parent_div);
+    assert_eq!(&*parent_events.borrow(), &["input", "keydown"]);
+    assert_eq!(child_events.borrow().len(), 2);
+    drop(dom);
+    host.close();
 }

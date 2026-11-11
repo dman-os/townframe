@@ -65,9 +65,7 @@ pub(super) fn deliver(
     let cause = match trapped {
         Ok(Ok(())) => None,
         Ok(Err(trap)) => Some(format!("guest trapped in a document delivery: {trap}")),
-        Err(super::Suspended) => {
-            Some("a document delivery suspended on its first poll".to_owned())
-        }
+        Err(super::Suspended) => Some("a document delivery suspended on its first poll".to_owned()),
     };
     if let Some(cause) = cause {
         guard.take();

@@ -6,6 +6,7 @@ use cssparser::AtRuleParser;
 use cssparser::CowRcStr;
 use cssparser::DeclarationParser;
 use cssparser::ParseError;
+use cssparser::ParseErrorKind;
 use cssparser::Parser;
 use cssparser::ParserState;
 use cssparser::QualifiedRuleParser;
@@ -157,6 +158,74 @@ impl<'i> DeclarationParser<'i> for Sanitizer {
         }
         Ok(format!("{name}: {value};"))
     }
+}
+
+/// Checks an inline `style` attribute in place. The whole string must parse as a declaration
+/// list with no at-rules or nested rules, a value is refused if any token of it can fetch (see
+/// [`fetches`]), and every `(property, value)` pair that passes is handed to `check`, which judges
+/// the property name. The first refusal is the `Err`. Nothing is collected: inline styles sit on
+/// the render path and the pairs are borrowed from `text`.
+pub(crate) fn check_inline_declarations(
+    text: &str,
+    check: impl FnMut(&str, &str) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    struct Inline<F>(F);
+    impl<'i, F: FnMut(&str, &str) -> Result<(), &'static str>> DeclarationParser<'i> for Inline<F> {
+        type Declaration = ();
+        type Error = &'static str;
+
+        fn parse_value(
+            &mut self,
+            name: CowRcStr<'i>,
+            input: &mut Parser<'i>,
+            _declaration_start: &ParserState,
+        ) -> Result<(), ParseError<&'static str>> {
+            input.skip_whitespace();
+            let start = input.position();
+            if fetches(input) {
+                return Err(ParseError::custom(
+                    "style value can fetch or escape its box",
+                ));
+            }
+            let value = input.slice_from(start).trim();
+            if value.is_empty() {
+                return Err(ParseError::custom("style declaration has no value"));
+            }
+            (self.0)(&name, value).map_err(ParseError::custom)
+        }
+    }
+    impl<'i, F> AtRuleParser<'i> for Inline<F> {
+        type Prelude = ();
+        type AtRule = ();
+        type Error = &'static str;
+    }
+    impl<'i, F> QualifiedRuleParser<'i> for Inline<F> {
+        type Prelude = ();
+        type QualifiedRule = ();
+        type Error = &'static str;
+    }
+    impl<'i, F: FnMut(&str, &str) -> Result<(), &'static str>>
+        RuleBodyItemParser<'i, (), &'static str> for Inline<F>
+    {
+        fn parse_declarations(&self) -> bool {
+            true
+        }
+
+        fn parse_qualified(&self) -> bool {
+            false
+        }
+    }
+    let mut parser = Parser::new(text);
+    let mut inline = Inline(check);
+    for item in RuleBodyParser::new(&mut parser, &mut inline) {
+        if let Err((error, _, _)) = item {
+            return Err(match error.kind {
+                ParseErrorKind::Custom(reason) => reason,
+                _ => "style attribute is not a list of declarations",
+            });
+        }
+    }
+    Ok(())
 }
 
 impl<'i> AtRuleParser<'i> for Sanitizer {

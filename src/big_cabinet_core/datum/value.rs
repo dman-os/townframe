@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use unicode_segmentation::UnicodeSegmentation;
 
-
 type Result<T> = std::result::Result<T, GrammarError>;
 
 /// Admits an object schema identified by `target` (`nsid` or `nsid#def`) and every schema position
