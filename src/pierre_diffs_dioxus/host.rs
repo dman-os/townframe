@@ -225,6 +225,15 @@ impl DioxusHost {
             || self.is_measured(node)
     }
 
+    /// Whether this host keeps row heights: a virtualized one always (the port reads them), a
+    /// static one only while the pointer can drag over rows, which is the one thing that reads
+    /// heights there (`element_from_point`). A static view's cost is then one `onresize` per
+    /// measured row (the rows `is_measured` lists) and one `onmounted` on the `pre` and a
+    /// content column: it is for short diffs, and a long one is what the virtualized view is for.
+    fn measures_rows(&self) -> bool {
+        self.is_interactive() || self.pointer.acts_on_rows()
+    }
+
     pub(crate) fn wants_visible(&self, node: NodeKey) -> bool {
         self.registrations.borrow().visible.contains(&node)
     }
@@ -236,16 +245,32 @@ impl DioxusHost {
     /// The nodes whose heights the port reads without registering them (`reconcileHeights`
     /// reads each line row and its annotation, the virtualizer the container, the scroll anchor
     /// the header above the lines): every one needs `onresize` to be answerable.
+    ///
+    /// A static host reads none of them, so it measures them only for the hit-test
+    /// (`measures_rows`). Hunk separators are measured on every host, and only into the geometry
+    /// cache (`Dispatch::resized`): the port estimates a separator in its metrics but never reads
+    /// one from layout, and no style in the document sets its height, so the rows stacked below
+    /// one (hit-testing, the scroll fix's tops) are off by its height without a measurement.
     fn is_measured(&self, node: NodeKey) -> bool {
-        node == self.container
-            || [
-                "data-line",
-                "data-line-annotation",
-                "data-no-newline",
-                "data-diffs-header",
-            ]
-            .iter()
-            .any(|name| self.document.has_attribute(node, name))
+        self.measures_rows()
+            && (node == self.container
+                || [
+                    "data-line",
+                    "data-line-annotation",
+                    "data-no-newline",
+                    "data-diffs-header",
+                ]
+                .iter()
+                .any(|name| self.document.has_attribute(node, name))
+                || self.document.has_attribute(node, "data-separator"))
+    }
+
+    /// The scroller's position; a static view has none, and its rows sit where the page puts
+    /// them, which the frame measured at drag start already includes.
+    fn scroll_top(&self) -> f64 {
+        self.scroller.as_ref().map_or(0.0, |scroller| {
+            self.geometry.borrow().scroll(scroller.root).top
+        })
     }
 
     /// The scroll side a node's listener was registered for (`None` for the scroller itself).
@@ -409,9 +434,9 @@ impl ResizeManagerHost for DioxusHost {
         &self.document
     }
 
-    /// The last `onresize` of the node. A static host measures nothing, so every node reads as 0:
-    /// `ResizeManager` seeds a split annotation pair's `min-height` from the larger of the
-    /// two, and 0 sets no minimum.
+    /// The last `onresize` of the node. A static host measures rows only for the pointer (and
+    /// observes nothing), so `ResizeManager`, which reads a split annotation pair's heights as it
+    /// observes them, sees none.
     fn bounding_height(&self, element: NodeKey) -> f64 {
         self.geometry.borrow().height(&self.document, element)
     }

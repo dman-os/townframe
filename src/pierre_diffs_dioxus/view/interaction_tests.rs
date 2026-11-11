@@ -61,6 +61,10 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
 struct Recorder {
     selected: Rc<RefCell<Vec<Option<SelectedLineRange>>>>,
     view: Rc<RefCell<Option<Rc<View<()>>>>>,
+    /// The embedder's `Interaction::selected_lines`, read on every render of the page, and the
+    /// signal that re-renders it.
+    controlled: Rc<RefCell<Option<SelectedLineRange>>>,
+    rerender: Rc<std::cell::Cell<Option<Signal<u32>>>>,
 }
 
 impl PartialEq for Recorder {
@@ -81,6 +85,9 @@ struct PageProps {
 #[component]
 fn Page(props: PageProps) -> Element {
     let selected = Rc::clone(&props.recorder.selected);
+    let rerender = use_signal(|| 0_u32);
+    props.recorder.rerender.set(Some(rerender));
+    let _: u32 = rerender();
     let never: Rc<dyn Fn(Duration) -> SleepFuture> = Rc::new(|_| Box::pin(std::future::pending()));
     let view = use_view(&FileDiffViewProps::<()> {
         input: props.input.clone(),
@@ -97,6 +104,7 @@ fn Page(props: PageProps) -> Element {
             Interaction {
                 line_hover_highlight: LineHoverHighlight::Both,
                 enable_line_selection: true,
+                selected_lines: props.recorder.controlled.borrow().clone(),
                 on_line_selected: Some(Callback::new(move |range| {
                     selected.borrow_mut().push(range);
                 })),
@@ -396,11 +404,15 @@ fn rows_get_pointer_handlers_only_when_the_options_give_the_pointer_something_to
         listeners(true),
         [
             "click",
+            // The rows' heights and the `pre`'s and a column's client rects, which a drag's
+            // hit-testing reads.
+            "mounted",
             "pointercancel",
             "pointerdown",
             "pointerleave",
             "pointermove",
-            "pointerup"
+            "pointerup",
+            "resize"
         ]
     );
 }
@@ -495,7 +507,7 @@ fn drag_rig() -> (Rig, [f64; 2]) {
         Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
         Engine::Static(_) => unreachable!("a virtualized rig"),
     };
-    let dispatch = Rc::clone(rig.view.dispatch.as_ref().expect("a virtualized view"));
+    let dispatch = Rc::clone(&rig.view.dispatch);
     // The pre sits at x 100, 800 wide; its first row starts at y 50.
     rig.dom.in_scope(ScopeId::ROOT, || {
         dispatch.mounted(root, MountedData::new(rect(100.0, 0.0, 800.0, 600.0)));
@@ -562,6 +574,207 @@ fn a_drag_selects_the_rows_under_the_pointer_from_the_cached_geometry() {
     );
 }
 
+/// A non-virtualized view with the platform's part scripted: the `pre` at x 100, 800 wide, its
+/// first row at y 50, every row 20 high, delivered as the `onmounted` and `onresize` the
+/// renderer asked for.
+fn static_drag_rig() -> Rig {
+    let mut rig = Rig::new(pair(8, &[7]), false, true, true);
+    let (pre, column) = (rig.pre(), rig.query("data-content", None)[0]);
+    let rows = rig.document().child_nodes(column);
+    let dispatch = Rc::clone(&rig.view.dispatch);
+    rig.dom.in_scope(ScopeId::ROOT, || {
+        let hears = |node, name: &str| {
+            dispatch
+                .listeners(node)
+                .iter()
+                .any(|attribute| attribute.name == name)
+        };
+        // Only what the renderer attached a listener to hears anything.
+        assert!(hears(pre, "onmounted") && hears(column, "onmounted"));
+        assert!(!hears(column, "onresize"), "a column is not a row");
+        dispatch.mounted(pre, MountedData::new(rect(100.0, 50.0, 800.0, 400.0)));
+        dispatch.mounted(column, MountedData::new(rect(140.0, 50.0, 760.0, 400.0)));
+        for row in rows
+            .iter()
+            .filter(|row| !rig.document().tag_name(*row).is_empty())
+        {
+            assert!(hears(*row, "onresize"), "a row is measured");
+            dispatch.resized(*row, 20.0, 760.0);
+        }
+    });
+    rig.settle();
+    rig
+}
+
+#[test]
+fn a_touch_drag_across_the_rows_of_a_non_virtualized_view_selects_the_range() {
+    let mut rig = static_drag_rig();
+    let start = rig.number(1);
+    let row_y = |index: usize| 50.0 + 20.0 * (index as f64 + 0.5);
+    let touch = |x, y| Pointer {
+        kind: "touch",
+        ..Pointer::mouse(x, y)
+    };
+    rig.pointer(
+        start,
+        "pointerdown",
+        Pointer {
+            button: 0,
+            buttons: 1,
+            ..touch(120.0, row_y(0))
+        },
+    );
+    assert!(rig.view.host.pointer.document_listeners_active());
+    // The frame was measured with no scroller to read.
+    assert_eq!(
+        pierre_diffs::managers::interaction_manager::InteractionHost::element_from_point(
+            &*rig.view.host,
+            500.0,
+            row_y(3),
+        ),
+        pierre_diffs::managers::interaction_manager::HitTest::Element(rig.line(4))
+    );
+    // A touch keeps naming the row the drag began on; the coordinates name the rows.
+    for index in 1..=3 {
+        rig.pointer(
+            start,
+            "pointermove",
+            Pointer {
+                buttons: 1,
+                ..touch(500.0, row_y(index))
+            },
+        );
+    }
+    let top = rig.view.host.top();
+    rig.pointer(top, "pointerup", touch(500.0, row_y(3)));
+    assert_eq!(rig.last_selection(), Some(range(1, 4)));
+    assert!(!rig.view.host.pointer.document_listeners_active());
+}
+
+#[test]
+fn a_view_whose_pointer_has_no_rows_to_act_on_measures_none() {
+    let rig = Rig::new(pair(5, &[3]), false, true, false);
+    let (line, pre) = (rig.line(2), rig.pre());
+    let dispatch = Rc::clone(&rig.view.dispatch);
+    rig.dom.in_scope(ScopeId::ROOT, || {
+        for node in [line, pre] {
+            assert!(dispatch.listeners(node).is_empty());
+        }
+    });
+}
+
+/// A collapsed hunk's separator sits between rows of the content column and is as tall as the
+/// stylesheet makes it, which no `style` in the document says. Every node that hears `onresize`
+/// reports its scripted height (a line 20, a separator 32), as the platform would.
+#[test]
+fn a_touch_drag_across_a_collapsed_hunk_separator_lands_on_the_row_below_it() {
+    for virtualized in [false, true] {
+        let mut rig = Rig::new(pair(30, &[3, 20]), virtualized, false, true);
+        let host = Rc::clone(&rig.view.host);
+        let dispatch = Rc::clone(&rig.view.dispatch);
+        // The virtualized view renders its window once the scroller reports its size; the nodes
+        // below are those of the settled render.
+        if let Some(scroller) = host.scroller() {
+            let (root, content, container) = (scroller.root, scroller.content, host.container());
+            let content_height = match &rig.view.engine {
+                Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
+                Engine::Static(_) => unreachable!("a virtualized view"),
+            };
+            rig.dom.in_scope(ScopeId::ROOT, || {
+                dispatch.mounted(root, MountedData::new(rect(100.0, 0.0, 800.0, 600.0)));
+                dispatch.resized(root, 600.0, 800.0);
+                dispatch.resized(content, content_height, 800.0);
+                dispatch.visible(container, true);
+            });
+            rig.settle();
+        }
+        let (pre, column) = (rig.pre(), rig.query("data-content", None)[0]);
+        let height_of = |document: &Document, node: NodeKey| {
+            if document.has_attribute(node, "data-separator") {
+                32.0
+            } else {
+                20.0
+            }
+        };
+        let rows: Vec<NodeKey> = rig
+            .document()
+            .child_nodes(column)
+            .into_iter()
+            .filter(|row| !rig.document().tag_name(*row).is_empty())
+            .collect();
+        let at_separator = rows
+            .iter()
+            .position(|row| rig.document().has_attribute(*row, "data-separator"))
+            .expect("a collapsed hunk renders a separator in the column");
+        let (above, separator, below) = (
+            rows[at_separator - 1],
+            rows[at_separator],
+            rows[at_separator + 1],
+        );
+        rig.dom.in_scope(ScopeId::ROOT, || {
+            let hears = |node| {
+                dispatch
+                    .listeners(node)
+                    .iter()
+                    .any(|attribute| attribute.name == "onresize")
+            };
+            dispatch.mounted(pre, MountedData::new(rect(100.0, 50.0, 800.0, 600.0)));
+            dispatch.mounted(column, MountedData::new(rect(140.0, 50.0, 760.0, 600.0)));
+            for row in &rows {
+                if hears(*row) {
+                    dispatch.resized(*row, height_of(rig.document(), *row), 760.0);
+                }
+            }
+        });
+        rig.settle();
+        let start = rig.number(1);
+        let touch = |x, y| Pointer {
+            kind: "touch",
+            buttons: 1,
+            ..Pointer::mouse(x, y)
+        };
+        rig.pointer(
+            start,
+            "pointerdown",
+            Pointer {
+                button: 0,
+                ..touch(120.0, 60.0)
+            },
+        );
+        // The client top of `below`: the first row at y 50, then each row's scripted height.
+        let top_of = |target: NodeKey| {
+            50.0 + rows
+                .iter()
+                .take_while(|row| **row != target)
+                .map(|row| height_of(rig.document(), *row))
+                .sum::<f64>()
+        };
+        let at = |node: NodeKey, offset: f64| {
+            pierre_diffs::managers::interaction_manager::InteractionHost::element_from_point(
+                &*rig.view.host,
+                500.0,
+                top_of(node) + offset,
+            )
+        };
+        use pierre_diffs::managers::interaction_manager::HitTest::Element;
+        assert_eq!(
+            at(above, 10.0),
+            Element(above),
+            "virtualized: {virtualized}"
+        );
+        assert_eq!(
+            at(separator, 16.0),
+            Element(separator),
+            "virtualized: {virtualized}"
+        );
+        assert_eq!(
+            at(below, 10.0),
+            Element(below),
+            "virtualized: {virtualized}"
+        );
+    }
+}
+
 #[test]
 fn a_drag_whose_button_came_up_outside_the_view_ends_on_the_next_move() {
     let mut rig = Rig::new(pair(5, &[3]), false, true, true);
@@ -594,4 +807,50 @@ fn clicking_a_collapsed_hunks_expand_button_shows_the_hidden_lines() {
         rows(&rig) > before,
         "expanding shows more rows than {before}"
     );
+}
+
+#[test]
+fn dropping_the_view_after_a_render_replaced_the_hovered_rows_cleans_up() {
+    let mut rig = Rig::new(pair(40, &[2, 39]), false, false, true);
+    let hovered = rig.line(1);
+    rig.pointer(hovered, "pointermove", Pointer::mouse(10.0, 10.0));
+    assert!(rig.document().has_attribute(hovered, "data-hovered"));
+    let button = rig.query("data-expand-button", None)[0];
+    rig.click(button, Pointer::mouse(20.0, 200.0).pressed());
+    // `use_drop` runs `FileDiff::clean_up`, which clears the hover it still holds.
+    drop(rig);
+}
+
+#[test]
+fn the_embedder_sets_and_clears_the_selection_through_the_interaction_prop() {
+    let mut rig = Rig::new(pair(8, &[7]), false, true, true);
+    let set = |rig: &mut Rig, range: Option<SelectedLineRange>| {
+        *rig.recorder.controlled.borrow_mut() = range;
+        let mut rerender = rig.recorder.rerender.get().expect("the page rendered");
+        rig.dom.in_scope(ScopeId::ROOT, || rerender += 1);
+        rig.settle();
+    };
+    set(&mut rig, Some(range(2, 4)));
+    let mut lines = rig.selected_lines();
+    lines.sort();
+    assert_eq!(lines, ["2", "3", "4"]);
+    // The write is the embedder's own: it is not reported back.
+    assert!(rig.recorder.selected.borrow().is_empty());
+
+    // A render that leaves the prop as it was keeps a selection the user made since.
+    let six = rig.number(6);
+    let press = Pointer::mouse(5.0, 5.0).pressed();
+    rig.pointer(six, "pointerdown", press);
+    rig.pointer(six, "pointerup", Pointer { button: 0, ..press }.dragging());
+    assert_eq!(rig.last_selection(), Some(range(6, 6)));
+    let mut rerender = rig.recorder.rerender.get().expect("the page rendered");
+    rig.dom.in_scope(ScopeId::ROOT, || rerender += 1);
+    rig.settle();
+    assert_eq!(rig.selected_lines(), ["6"]);
+
+    // Setting another range replaces it; clearing removes the highlight.
+    set(&mut rig, Some(range(3, 3)));
+    assert_eq!(rig.selected_lines(), ["3"]);
+    set(&mut rig, None);
+    assert_eq!(rig.selected_lines(), Vec::<String>::new());
 }

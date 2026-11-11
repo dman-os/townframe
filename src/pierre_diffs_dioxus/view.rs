@@ -46,6 +46,7 @@ use pierre_diffs::highlighter_types::PlainTextHighlighter;
 use pierre_diffs::js_collections::PtrEq;
 use pierre_diffs::managers::interaction_manager::InteractionManager;
 use pierre_diffs::managers::interaction_manager::LineHoverHighlight;
+use pierre_diffs::managers::interaction_manager::SelectionWriteOptions;
 use pierre_diffs::managers::resize_manager::ResizeObserverHub;
 use pierre_diffs::managers::universal_rendering_manager::UniversalRenderingManager;
 use pierre_diffs::types::options::DiffStyle;
@@ -60,6 +61,7 @@ use pierre_diffs::utils::parse_patch_files::ParsePatchError;
 use pierre_diffs::utils::parse_patch_files::parse_patch_files;
 
 use crate::events::Dispatch;
+use crate::events::ObservingManagers;
 use crate::events::Pointers;
 use crate::host::DioxusHost;
 use crate::host::SleepFuture;
@@ -143,6 +145,13 @@ pub struct Interaction {
     pub enable_line_selection: bool,
     /// The built-in button that follows the hovered line or the selection.
     pub enable_gutter_utility: bool,
+    /// The selection the embedder sets (`FileDiff::setSelectedLines`): applied when this value
+    /// changes, never on a render that leaves it as it was, so a user's own selection stands until
+    /// the embedder sets another value. `None` clears. To keep the selection controlled, store
+    /// what `on_line_selected` reports and pass it back here: setting what the view already shows
+    /// does nothing, and clearing it later (after a draft annotation is submitted or cancelled)
+    /// is a change to `None`. The write does not call `on_line_selected`.
+    pub selected_lines: Option<SelectedLineRange>,
     /// The selection after a click or a drag, `None` when it was cleared.
     pub on_line_selected: Option<Callback<Option<SelectedLineRange>>>,
     /// The built-in gutter utility's click: a drag from the button selects a range and ends in
@@ -251,6 +260,15 @@ impl<A: Clone + PartialEq + 'static> Engine<A> {
         }
     }
 
+    fn set_selected_lines(&self, range: Option<SelectedLineRange>, options: SelectionWriteOptions) {
+        match self {
+            Self::Static(file_diff) => file_diff.set_selected_lines(range, options),
+            Self::Virtualized { instance, .. } => {
+                instance.file_diff().set_selected_lines(range, options);
+            }
+        }
+    }
+
     fn clean_up(&self) {
         match self {
             Self::Static(file_diff) => file_diff.lifecycle().clean_up(false),
@@ -268,8 +286,8 @@ impl<A: Clone + PartialEq + 'static> Engine<A> {
 struct View<A: Clone + PartialEq + 'static> {
     host: Rc<DioxusHost>,
     engine: Engine<A>,
-    /// The listeners' destination; present when the host is interactive.
-    dispatch: Option<Rc<Dispatch>>,
+    /// The listeners' destination.
+    dispatch: Rc<Dispatch>,
     /// Where the pointer events of the interaction handlers go.
     pointers: Rc<Pointers>,
     interaction: InteractionCallbacks,
@@ -278,6 +296,8 @@ struct View<A: Clone + PartialEq + 'static> {
     render_annotation: AnnotationCallback<A>,
     /// True while `sync` runs; see the module docs.
     syncing: Rc<Cell<bool>>,
+    /// The `Interaction::selected_lines` last written to the engine.
+    applied_selection: RefCell<Option<SelectedLineRange>>,
     applied: RefCell<Option<Applied<A>>>,
 }
 
@@ -338,7 +358,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             &render_annotation,
             &interaction,
         );
-        let (host, engine, dispatch) = match &props.virtualized {
+        let (host, engine, managers) = match &props.virtualized {
             None => {
                 let host = DioxusHost::new_static();
                 let file_diff = FileDiff::new(
@@ -370,6 +390,10 @@ impl<A: Clone + PartialEq + 'static> View<A> {
                 version += 1;
             }
         })));
+        let dispatch = Rc::new(Dispatch {
+            host: Rc::clone(&host),
+            managers,
+        });
         Self {
             host,
             engine,
@@ -379,6 +403,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             slots,
             render_annotation,
             syncing,
+            applied_selection: RefCell::new(None),
             applied: RefCell::new(None),
         }
     }
@@ -391,7 +416,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         virtualization: &Virtualization,
         highlighter: Rc<dyn DiffsHighlighter>,
         options: FileDiffOptions<pierre_diffs::document::NodeKey, SlotContent, A>,
-    ) -> (Rc<DioxusHost>, Engine<A>, Option<Rc<Dispatch>>) {
+    ) -> (Rc<DioxusHost>, Engine<A>, Option<ObservingManagers>) {
         let metrics = PartialVirtualFileMetrics::default();
         let host = DioxusHost::new_scrolling(
             &virtualization.height,
@@ -418,21 +443,39 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             metrics,
             None,
         );
-        let dispatch = Rc::new(Dispatch {
-            host: Rc::clone(&host),
+        let managers = ObservingManagers {
             hub,
             virtualizer: Rc::clone(&virtualizer),
             scroll_sync: Rc::clone(instance.file_diff().scroll_sync_manager()),
             instance: Rc::clone(&instance) as InstanceRef,
-        });
+        };
         (
             host,
             Engine::Virtualized {
                 instance,
                 virtualizer,
             },
-            Some(dispatch),
+            Some(managers),
         )
+    }
+
+    /// Writes the embedder's selection when it differs from the one last written. Before the
+    /// first render the manager has no rows yet and keeps the range, which its setup renders; the
+    /// `FileDiff` defers a write that arrives while a refresh rebuilds the rows.
+    fn sync_selection(&self, selected_lines: &Option<SelectedLineRange>) {
+        if *self.applied_selection.borrow() == *selected_lines {
+            return;
+        }
+        *self.applied_selection.borrow_mut() = selected_lines.clone();
+        self.syncing.set(true);
+        self.engine.set_selected_lines(
+            selected_lines.clone(),
+            SelectionWriteOptions {
+                notify: Some(false),
+                ..SelectionWriteOptions::default()
+            },
+        );
+        self.syncing.set(false);
     }
 
     /// Brings the `FileDiff` to `props`. Called from the component body, so the document is
@@ -446,6 +489,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
                 || props.interaction.enable_gutter_utility
                 || props.interaction.on_gutter_utility_click.is_some(),
         );
+        self.sync_selection(&props.interaction.selected_lines);
         let unchanged = self.applied.borrow().as_ref().is_some_and(|applied| {
             applied.input == props.input
                 && applied.options == ViewOptions::of(props)
@@ -498,7 +542,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         Renderer {
             document,
             slots: &self.slots,
-            dispatch: self.dispatch.as_ref(),
+            dispatch: &self.dispatch,
             pointers: &self.pointers,
         }
         .render(self.host.top())

@@ -53,8 +53,8 @@ pub(crate) struct Renderer<'a> {
     pub(crate) document: &'a Document,
     pub(crate) slots: &'a SlotTable,
     /// The view's event wiring: a node the host registered for resize, visibility or scroll
-    /// renders with that listener. A static view has none.
-    pub(crate) dispatch: Option<&'a Rc<Dispatch>>,
+    /// renders with that listener.
+    pub(crate) dispatch: &'a Rc<Dispatch>,
     /// The pointer handlers of the nodes the interaction manager listens through.
     pub(crate) pointers: &'a Rc<Pointers>,
 }
@@ -86,9 +86,7 @@ impl Renderer<'_> {
             .into_iter()
             .map(|(name, value)| Attribute::new(attribute_name(&name), value, None, false))
             .collect();
-        if let Some(dispatch) = self.dispatch {
-            attributes.extend(dispatch.listeners(key));
-        }
+        attributes.extend(self.dispatch.listeners(key));
         attributes.extend(self.pointers.listeners(key));
         let children: Vec<Element> = if let Some(shadow_root) = document.shadow_root(key) {
             attributes.push(Attribute::new("data-dioxus-shadow", "", None, false));

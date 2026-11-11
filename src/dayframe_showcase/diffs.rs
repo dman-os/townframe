@@ -63,6 +63,7 @@ pub fn DiffsFoundation() -> Element {
                 range.start, range.end
             ));
         })),
+        ..Interaction::default()
     };
     rsx! {
         div {
