@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::hook::Hook;
-use crate::snapshot::ChangeKind;
 use crate::testing::Repo;
 use crate::testing::git_in;
+use intxt_core::capture::ChangeKind;
+use intxt_core::capture::RecordedWorktree;
 use serde_json::Value;
 use serde_json::json;
 use std::io::Write;
@@ -121,12 +122,15 @@ fn recorded_for(prepared: &Prepared, next_seq: u64) -> RecordedIds {
                             worktree: Some(format!("w-{}", worktree.identity.worktree_id)),
                             clone: Some("c".into()),
                             repo: Some("r".into()),
+                            extra: Default::default(),
                         },
                         next_seq,
+                        extra: Default::default(),
                     },
                 )
             })
             .collect(),
+        extra: Default::default(),
     }
 }
 
@@ -217,7 +221,8 @@ fn a_bash_call_that_edits_a_file_becomes_a_caused_op_and_nothing_persists_withou
         Some(Cause {
             agent_id: None,
             turn: Some("u1".into()),
-            tool_use_id: "t1".into()
+            tool_use_id: "t1".into(),
+            extra: Default::default(),
         })
     );
     assert_eq!(op.changes.len(), 1);
@@ -329,7 +334,7 @@ fn a_session_that_touches_two_worktrees_observes_both() {
     .unwrap();
     assert_eq!(post.batch.worktrees.len(), 1);
     let linked = &post.batch.worktrees[0];
-    assert_eq!(linked.identity.root, linked_root);
+    assert_eq!(Path::new(&linked.identity.root), linked_root);
     assert_eq!(linked.ops.len(), 1);
     assert_eq!(linked.ops[0].changes[0].path, "a.txt");
     assert!(linked.ops[0].cause.is_some());
@@ -344,7 +349,7 @@ fn a_session_that_touches_two_worktrees_observes_both() {
         .batch
         .worktrees
         .iter()
-        .map(|w| w.identity.root.as_path())
+        .map(|w| Path::new(&w.identity.root))
         .collect();
     assert_eq!(roots, [linked_root.as_path()]);
     assert_eq!(stop.batch.worktrees[0].next_seq, 1);

@@ -12,13 +12,16 @@
 
 use crate::Error;
 use crate::git::Git;
+use intxt_core::capture::BlobReason;
+use intxt_core::capture::Change;
+use intxt_core::capture::ChangeKind;
+use intxt_core::capture::Content;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::Stdio;
 
 /// Files larger than this are kept as blobs, not collaborative text (ledger D43).
@@ -44,55 +47,6 @@ pub struct Snapshot {
     /// Path → content hash for every path that differs from the index; `None` is a path the
     /// index has and the worktree lacks.
     dirty: BTreeMap<String, Option<String>>,
-}
-
-/// What happened to a path between two snapshots.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChangeKind {
-    Added,
-    Modified,
-    Deleted,
-    /// A path that disappeared and another that appeared with identical content. A file that
-    /// was also edited is not recognised: it is a deletion and an addition.
-    Renamed {
-        from: String,
-    },
-}
-
-/// Why content is not text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BlobReason {
-    /// Not valid UTF-8, or holds a NUL.
-    Binary,
-    /// Over 256 KiB.
-    Large,
-    /// A known lockfile, or `linguist-generated` or `-diff` in `.gitattributes`.
-    Generated,
-}
-
-/// A path's content after a change (D43).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Content {
-    /// Valid UTF-8, at most 256 KiB, not generated: collaborative text.
-    Text(String),
-    /// Everything else. Only the location is returned, so a later layer uploads it from disk
-    /// without it being read here; `hash` is what `git hash-object` gave when the snapshot was
-    /// taken, to check that the file is still what was observed.
-    Blob {
-        path: PathBuf,
-        size: u64,
-        hash: String,
-        reason: BlobReason,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
-    /// The path after the change (the old path of a deletion), relative to the worktree root.
-    pub path: String,
-    pub kind: ChangeKind,
-    /// The content after the change; none for a deletion.
-    pub content: Option<Content>,
 }
 
 impl Snapshot {
@@ -184,17 +138,13 @@ impl Snapshot {
 
         // A deletion and an addition with one content hash are a rename; each deletion pairs
         // with at most one addition, in path order.
-        let mut changes: Vec<(String, ChangeKind, Option<&String>)> = Vec::new();
+        let mut changes: Vec<(String, ChangeKind, Option<&String>, Option<&String>)> = Vec::new();
         let mut unpaired_deletions = Vec::new();
         for (from, hash) in deleted {
             match added.iter().position(|(_, added_hash)| *added_hash == hash) {
                 Some(at) => {
                     let (to, hash) = added.remove(at);
-                    changes.push((
-                        to.clone(),
-                        ChangeKind::Renamed { from: from.clone() },
-                        Some(hash),
-                    ));
+                    changes.push((to.clone(), ChangeKind::Renamed, Some(from), Some(hash)));
                 }
                 None => unpaired_deletions.push(from),
             }
@@ -202,36 +152,38 @@ impl Snapshot {
         changes.extend(
             added
                 .into_iter()
-                .map(|(path, hash)| (path.clone(), ChangeKind::Added, Some(hash))),
+                .map(|(path, hash)| (path.clone(), ChangeKind::Added, None, Some(hash))),
         );
         changes.extend(
             modified
                 .into_iter()
-                .map(|(path, hash)| (path.clone(), ChangeKind::Modified, Some(hash))),
+                .map(|(path, hash)| (path.clone(), ChangeKind::Modified, None, Some(hash))),
         );
         changes.extend(
             unpaired_deletions
                 .into_iter()
-                .map(|path| (path.clone(), ChangeKind::Deleted, None)),
+                .map(|path| (path.clone(), ChangeKind::Deleted, None, None)),
         );
         changes.sort_by(|a, b| a.0.cmp(&b.0));
 
         let live: Vec<&str> = changes
             .iter()
-            .filter(|(_, _, hash)| hash.is_some())
-            .map(|(path, _, _)| path.as_str())
+            .filter(|(_, _, _, hash)| hash.is_some())
+            .map(|(path, _, _, _)| path.as_str())
             .collect();
         let generated = generated_paths(&Git::new(root), &live)?;
         changes
             .into_iter()
-            .map(|(path, kind, hash)| {
+            .map(|(path, kind, from, hash)| {
                 let content = hash
                     .map(|hash| classify(root, &path, hash, generated.contains(path.as_str())))
                     .transpose()?;
                 Ok(Change {
                     path,
                     kind,
+                    from: from.cloned(),
                     content,
+                    extra: Default::default(),
                 })
             })
             .collect()
@@ -354,17 +306,12 @@ fn classify(
     } else {
         None
     };
-    let blob = |reason| Content::Blob {
-        path: file.clone(),
-        size,
-        hash: hash.to_owned(),
-        reason,
-    };
+    let blob = |reason| Content::blob(size, hash, reason);
     if let Some(reason) = reason {
         return Ok(blob(reason));
     }
     match String::from_utf8(std::fs::read(&file)?) {
-        Ok(text) if !text.contains('\0') => Ok(Content::Text(text)),
+        Ok(text) if !text.contains('\0') => Ok(Content::text(text)),
         _ => Ok(blob(BlobReason::Binary)),
     }
 }

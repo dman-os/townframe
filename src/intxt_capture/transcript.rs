@@ -81,6 +81,19 @@ pub struct Imported {
     pub spawned: Vec<String>,
 }
 
+impl Imported {
+    /// What the batch carries of this import: the datums, without the importer's offset and the
+    /// spawned subagents the host acts on itself.
+    pub fn into_batch(self) -> intxt_core::capture::Imported {
+        intxt_core::capture::Imported {
+            session: self.session,
+            turns: self.turns,
+            plan: self.plan,
+            extra: Default::default(),
+        }
+    }
+}
+
 /// Importer of one Claude Code transcript. All state between calls is here and serializes.
 ///
 /// It keeps a turn's value only while the turn can still change (it is the current turn, or a

@@ -21,16 +21,21 @@ use crate::identity;
 use crate::identity::Identity;
 use crate::observe;
 use crate::observe::WorktreeState;
-use crate::snapshot::Change;
 use crate::snapshot::Snapshot;
 use crate::transcript::Imported;
 use crate::transcript::TranscriptImporter;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::datum::DatumMember;
+use intxt_core::capture::Batch;
+use intxt_core::capture::Cause;
+use intxt_core::capture::Op;
+use intxt_core::capture::RecordedIds;
+use intxt_core::capture::SessionBatch;
+use intxt_core::capture::SubagentBatch;
+use intxt_core::capture::WorktreeBatch;
+use intxt_core::capture::WorktreeDocs;
+use intxt_core::capture::WorktreeIdentity;
 use intxt_core::work::AgentSession;
-use intxt_core::work::GitCommit;
-use intxt_core::work::GitObservation;
-use intxt_core::work::GitRef;
 use intxt_core::work::OpKind;
 use jiff::Timestamp;
 use serde::Deserialize;
@@ -43,109 +48,17 @@ use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
 
-// ---- what a hook observed ----------------------------------------------------------------
-
-/// Which tool call a change belongs to, symbolically. The recorder turns it into a `Location`
-/// once it knows the session document: the call is `toolCalls[id]` of `promptTurn/<turn>`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cause {
-    /// The subagent whose session holds the call; none for the main session.
-    pub agent_id: Option<String>,
-    /// The turn holding the call. None when the transcript did not yet have the call at this
-    /// hook (the harness writes it concurrently).
-    pub turn: Option<String>,
-    pub tool_use_id: String,
-}
-
-/// One op of a worktree's log, without its sequence number (the recorder numbers them).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Op {
-    pub at: Timestamp,
-    pub kind: OpKind,
-    pub cause: Option<Cause>,
-    pub changes: Vec<Change>,
-    pub git: Option<GitObservation>,
-}
-
-/// The document ids the recorder holds for a worktree (§5); none before it first recorded one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorktreeDocs {
-    pub worktree: Option<String>,
-    pub clone: Option<String>,
-    pub repo: Option<String>,
-}
-
-/// Everything observed in one worktree by one hook: the input of one `recordObservations` call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorktreeBatch {
-    pub identity: Identity,
-    pub docs: WorktreeDocs,
-    /// The sequence number of `ops[0]`.
-    pub next_seq: u64,
-    pub ops: Vec<Op>,
-    pub commits: BTreeMap<String, GitCommit>,
-    pub refs: BTreeMap<String, GitRef>,
-    /// The reflog lost entries since the last observation; the last op is a synthetic move.
-    pub reflog_gap: bool,
-}
-
-/// A subagent's session, imported.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SubagentBatch {
-    pub agent_id: String,
-    pub doc: Option<String>,
-    pub imported: Imported,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionBatch {
-    pub session_id: String,
-    pub doc: Option<String>,
-    pub imported: Imported,
-    pub subagents: Vec<SubagentBatch>,
-}
-
-/// What one hook invocation observed, shaped as `recordObservations` takes it (ADR 039 §4).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Batch {
-    pub session: SessionBatch,
-    /// Only worktrees with something to record.
-    pub worktrees: Vec<WorktreeBatch>,
-    /// Ops of a post hook whose tool call the transcript did not show yet, so they carry no cause
-    /// (and are not retried). For the CLI to report.
-    pub uncaused_tool_calls: u64,
-}
-
-impl Batch {
-    /// Nothing was observed: the hook can commit without recording.
-    pub fn is_empty(&self) -> bool {
-        let quiet = |imported: &Imported| {
-            imported.session.is_none() && imported.turns.is_empty() && imported.plan.is_none()
-        };
-        quiet(&self.session.imported)
-            && self
-                .session
-                .subagents
-                .iter()
-                .all(|agent| quiet(&agent.imported))
-            && self.worktrees.is_empty()
+/// The wire form of an identity: what the recorder is told of a worktree.
+fn wire(identity: &Identity) -> WorktreeIdentity {
+    WorktreeIdentity {
+        root: identity.root.display().to_string(),
+        clone_path: identity.common_dir.display().to_string(),
+        clone_id: identity.clone_id.clone(),
+        worktree_id: identity.worktree_id.clone(),
+        remotes: identity.remotes.clone(),
+        roots: identity.roots.clone(),
+        extra: Default::default(),
     }
-}
-
-/// What the recorder answers: the document ids it created or knows, and the next sequence number
-/// of each worktree it wrote ops to, keyed by worktree root.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RecordedIds {
-    pub session: Option<String>,
-    /// Agent id → the subagent session's document.
-    pub subagents: BTreeMap<String, String>,
-    pub worktrees: BTreeMap<PathBuf, RecordedWorktree>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordedWorktree {
-    pub docs: WorktreeDocs,
-    pub next_seq: u64,
 }
 
 // ---- local state ---------------------------------------------------------------------------
@@ -272,7 +185,7 @@ fn import(importer: &mut TranscriptImporter, path: &Path) -> Result<Imported, Er
 fn import_transcripts(
     hook: &Hook,
     session: &mut SessionHost,
-) -> Result<(Imported, Vec<SubagentBatch>), Error> {
+) -> Result<(intxt_core::capture::Imported, Vec<SubagentBatch>), Error> {
     // The transcript first: any hook brings the session up to date.
     let imported = import(&mut session.importer, &hook.transcript_path)?;
     for turn_id_and_turn in &imported.turns {
@@ -317,10 +230,11 @@ fn import_transcripts(
         subagents.push(SubagentBatch {
             agent_id: agent_id.clone(),
             doc: agent.doc.clone(),
-            imported,
+            imported: imported.into_batch(),
+            extra: Default::default(),
         });
     }
-    Ok((imported, subagents))
+    Ok((imported.into_batch(), subagents))
 }
 
 /// One worktree's part of a hook: a pre-snapshot on `PreToolUse`, otherwise the ops of the
@@ -356,6 +270,7 @@ fn observe_worktree(
             cause: None,
             changes: observation.earlier,
             git: None,
+            extra: Default::default(),
         });
     }
     let before_window = ops.len();
@@ -374,6 +289,7 @@ fn observe_worktree(
                 Vec::new()
             },
             git: Some(mv.observation.clone()),
+            extra: Default::default(),
         });
     }
     if let Some(changes) = changes.filter(|changes| !changes.is_empty()) {
@@ -383,6 +299,7 @@ fn observe_worktree(
             cause: cause.cloned(),
             changes,
             git: None,
+            extra: Default::default(),
         });
     }
     let uncaused = if tool_cause.is_some() && cause.is_none() {
@@ -395,13 +312,14 @@ fn observe_worktree(
     }
     Ok((
         Some(WorktreeBatch {
-            identity: observation.identity,
+            identity: wire(&observation.identity),
             docs: host.docs.clone(),
             next_seq: host.next_seq,
             ops,
             commits: git.commits,
             refs: git.refs,
             reflog_gap: git.reflog_gap,
+            extra: Default::default(),
         }),
         uncaused,
     ))
@@ -448,6 +366,7 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
                 agent_id: located.and_then(|(agent, _)| agent.clone()),
                 turn: located.map(|(_, turn)| turn.clone()),
                 tool_use_id: tool_use_id.clone(),
+                extra: Default::default(),
             })
         }
         _ => None,
@@ -481,9 +400,11 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
                 doc: session.doc.clone(),
                 imported,
                 subagents,
+                extra: Default::default(),
             },
             worktrees: batches,
             uncaused_tool_calls,
+            extra: Default::default(),
         },
         session_path: session_path.to_owned(),
         session,
@@ -511,7 +432,7 @@ impl Prepared {
                 .doc = Some(doc);
         }
         for pending in &mut self.worktrees {
-            match recorded.worktrees.get(&pending.root) {
+            match recorded.worktrees.get(&pending.root.display().to_string()) {
                 Some(recorded) => {
                     pending.host.docs = recorded.docs.clone();
                     pending.host.next_seq = recorded.next_seq;

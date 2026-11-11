@@ -13,6 +13,7 @@
 //! [`ActorUrl`]: big_cabinet_core::ActorUrl
 
 pub mod annotation;
+pub mod capture;
 pub mod generic;
 pub mod work;
 
