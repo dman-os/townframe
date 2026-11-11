@@ -123,6 +123,37 @@ fn a_common_error_is_named_as_dispatch_names_its_refusals() {
     }
 }
 
+/// The wire names a method error by the variant that wraps `ContextError`
+/// (`service_core_rs::xrpc::error_name` looks for the key `Context`), while the Lexicon finds
+/// that variant by its `ContextError` payload. Each built-in error enum must therefore call
+/// its context variant exactly `Context`. The enums are only reachable through their
+/// schemars output here, so the check reads the schema's externally tagged branches.
+#[test]
+fn every_builtin_error_enum_names_its_context_variant_context() {
+    let mut failures = Vec::new();
+    for (nsid, _, schemas) in super::builtin_list() {
+        let schemas = schemas();
+        let error = serde_json::to_value(&schemas.error).unwrap();
+        let branches = super::resolve(&error, &schemas.definitions)["oneOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{nsid}: the error is not an enum"))
+            .clone();
+        let carriers: Vec<&str> = branches
+            .iter()
+            .filter_map(|branch| branch.get("properties")?.as_object())
+            .flatten()
+            .filter(|(_, payload)| payload.get("$ref") == Some(&json!("#/$defs/ContextError")))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if carriers != ["Context"] {
+            failures.push(format!(
+                "{nsid}: the ContextError carriers are {carriers:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const POSITIONS: [super::Position; 4] = [
     super::Position::Input,
     super::Position::Output,
