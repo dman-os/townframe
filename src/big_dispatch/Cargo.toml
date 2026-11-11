@@ -10,6 +10,8 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 method_lexicon.workspace = true
 # internal
@@ -19,12 +21,14 @@ big_dispatch_core.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 
+#
 # encoding
 serde_json.workspace = true
 http.workspace = true
 serde_urlencoded = "0.7"
 irpc.workspace = true
 
+#
 # errors and state
 futures.workspace = true
 async-trait.workspace = true
@@ -33,7 +37,12 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+#
+# internal
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
+
+#
+# misc
 keyring-core = { version = "1.0", default-features = false }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
