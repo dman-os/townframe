@@ -1306,14 +1306,24 @@ impl State {
             return readiness;
         };
         // Upgrading to another revision replaces the workload: the old one stops being routed
-        // to (the registration below swaps it in one step) and is retired before the new one
-        // is ensured.
+        // to and is retired before the new one is ensured (an executor hosts one workload per
+        // cartridge, so the two cannot overlap). Ensuring can take as long as compiling the
+        // new handler, so the operations stay registered meanwhile, not ready, and callers get
+        // the retryable answer instead of an unknown operation; the registration after
+        // `ensure` replaces it in one step.
         if self
             .hosted
             .get(&cartridge_id)
             .is_some_and(|hosted| *hosted != installed.revision)
         {
-            self.stores.dispatch.unbind(&provider_id);
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(Readiness::Initializing),
+                )
+                .expect("claims without a Lexicon compile nothing");
             self.retire(&cartridge_id).await;
         }
         let (handler, _) = installed
