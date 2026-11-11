@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::eyre::WrapErr;
 use utils_rs::prelude::eyre::bail;
@@ -105,9 +106,12 @@ impl Listener {
         path: &Path,
         dispatch: Client<DispatchProtocol>,
         operator: Authorization,
-    ) -> Res<Self> {
+    ) -> Res<(Self, UnixClients)> {
         use std::os::unix::fs::MetadataExt;
         let listener = bind_owner_only(path).await?;
+        let (connections, open) = watch::channel(0);
+        let (drain, drain_requested) = watch::channel(false);
+        let (closed, listener_closed) = watch::channel(false);
         // The socket file belongs to the uid the node runs as, which is how that uid is
         // learned without a syscall of its own.
         let owner_uid = std::fs::symlink_metadata(path)?.uid();
@@ -115,17 +119,28 @@ impl Listener {
         let (task, shutdown) = service_utils_rs::xrpc::serve_with_acceptor(
             OwnerOnly {
                 owner_uid,
-                inner: UnixConnectionAcceptor::new(listener),
+                inner: Some(UnixConnectionAcceptor::new(listener)),
+                socket: path.to_owned(),
+                connections,
+                drain: drain_requested,
+                closed,
             },
             router.into_router(),
             MAX_CONNECTIONS,
         )
         .await?;
-        Ok(Self {
-            shutdown,
-            task,
-            socket: Some(path.to_owned()),
-        })
+        Ok((
+            Self {
+                shutdown,
+                task,
+                socket: Some(path.to_owned()),
+            },
+            UnixClients {
+                open,
+                drain,
+                listener_closed,
+            },
+        ))
     }
 
     #[cfg(not(unix))]
@@ -133,10 +148,52 @@ impl Listener {
         _path: &Path,
         _dispatch: Client<DispatchProtocol>,
         _operator: Authorization,
-    ) -> Res<Self> {
+    ) -> Res<(Self, UnixClients)> {
         bail!("Unix socket listeners are only available on Unix platforms")
     }
 }
+
+/// What a node's Unix socket listener is serving, and how to wind it down without closing a
+/// client that is still connected.
+pub struct UnixClients {
+    open: watch::Receiver<usize>,
+    drain: watch::Sender<bool>,
+    listener_closed: watch::Receiver<bool>,
+}
+
+impl UnixClients {
+    /// Stops accepting connections and returns once the socket is closed and its file removed:
+    /// a connect after this is refused, never accepted and then aborted. Connections accepted
+    /// before keep being served.
+    pub async fn close_listener(&self) -> Res<()> {
+        self.drain.send_replace(true);
+        self.listener_closed
+            .clone()
+            .wait_for(|closed| *closed)
+            .await
+            .wrap_err(ENDED)?;
+        Ok(())
+    }
+
+    /// Returns once every accepted connection has ended.
+    pub async fn wait_until_idle(&self) -> Res<()> {
+        self.open
+            .clone()
+            .wait_for(|open| *open == 0)
+            .await
+            .wrap_err(ENDED)?;
+        Ok(())
+    }
+
+    /// Closes the listener, then waits until the clients it had accepted are gone. Stopping the
+    /// node after this closes no client.
+    pub async fn drain(&self) -> Res<()> {
+        self.close_listener().await?;
+        self.wait_until_idle().await
+    }
+}
+
+const ENDED: &str = "the Unix socket listener ended before it was drained";
 
 /// Whether a peer may connect to the operator's socket: only the uid the node runs as.
 fn admits(owner_uid: u32, peer: &PeerCredentials) -> bool {
@@ -147,19 +204,105 @@ fn admits(owner_uid: u32, peer: &PeerCredentials) -> bool {
 /// it keeps accepting past, and closes, any connection whose uid is not the owner's.
 struct OwnerOnly {
     owner_uid: u32,
-    inner: UnixConnectionAcceptor,
+    /// The listening socket; `None` once it was closed on request ([`UnixClients::drain`]).
+    inner: Option<UnixConnectionAcceptor>,
+    socket: PathBuf,
+    drain: watch::Receiver<bool>,
+    /// Set when the listening socket has been closed and its file removed.
+    closed: watch::Sender<bool>,
+    /// The number of admitted connections still open.
+    connections: watch::Sender<usize>,
+}
+
+/// An admitted connection, counted open until it is dropped: the serving loop drops the stream
+/// when the connection ends, so the count falls whichever side closed it.
+struct Counted {
+    inner: tokio::net::UnixStream,
+    connections: watch::Sender<usize>,
+}
+
+impl Counted {
+    fn new(inner: tokio::net::UnixStream, connections: watch::Sender<usize>) -> Self {
+        connections.send_modify(|open| *open += 1);
+        Self { inner, connections }
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.connections.send_modify(|open| *open -= 1);
+    }
+}
+
+impl tokio::io::AsyncRead for Counted {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Counted {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 impl ConnectionAcceptor for OwnerOnly {
-    type Stream = tokio::net::UnixStream;
+    type Stream = Counted;
     type Peer = PeerCredentials;
 
     fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
         Box::pin(async move {
             loop {
-                let (stream, peer) = self.inner.accept().await?;
+                let Some(inner) = self.inner.as_mut() else {
+                    // Closed: the serving loop keeps its open connections and accepts no more.
+                    return std::future::pending().await;
+                };
+                let accepted = tokio::select! {
+                    accepted = inner.accept() => Some(accepted?),
+                    () = async {
+                        // Nobody left to ask for a drain (the node dropped its handle): the
+                        // listener serves until it is stopped.
+                        if self.drain.wait_for(|requested| *requested).await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
+                    } => None,
+                };
+                let Some((stream, peer)) = accepted else {
+                    // Dropping the acceptor closes the socket, so a later connect is refused
+                    // instead of being accepted and then aborted at stop.
+                    self.inner = None;
+                    match std::fs::remove_file(&self.socket) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                    self.closed.send_replace(true);
+                    continue;
+                };
                 if admits(self.owner_uid, &peer) {
-                    return Ok((stream, peer));
+                    return Ok((Counted::new(stream, self.connections.clone()), peer));
                 }
                 tracing::warn!(
                     uid = peer.uid,

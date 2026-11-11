@@ -417,3 +417,39 @@ async fn a_socket_directory_other_users_can_enter_is_refused() {
     );
     assert!(!parent.join("node.sock").exists());
 }
+
+#[tokio::test]
+async fn draining_closes_the_listener_first_and_keeps_the_clients_it_had_accepted() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, spec) = boot_listening(&secrets, unix(&socket)).await;
+    let clients = node
+        .unix_clients
+        .as_ref()
+        .expect("the socket listener runs");
+
+    // A client with a request answered holds an accepted, counted connection.
+    let client = XrpcClient::unix(&socket, MAX_RESPONSE).unwrap();
+    let (status, _) = post(&client, &spec.echo(), None, json!({ "n": 1 })).await;
+    assert_eq!(status, 200);
+
+    clients.close_listener().await.unwrap();
+    // Closed means refused for a newcomer, while the accepted client is still served.
+    let refused = tokio::net::UnixStream::connect(&socket).await.unwrap_err();
+    assert!(
+        matches!(
+            refused.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+        "{refused:?}"
+    );
+    let (status, _) = post(&client, &spec.echo(), None, json!({ "n": 2 })).await;
+    assert_eq!(status, 200);
+
+    // Idle once the last client has gone.
+    drop(client);
+    clients.wait_until_idle().await.unwrap();
+
+    shutdown(node, stop).await;
+}

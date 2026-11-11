@@ -15,7 +15,6 @@ allowed_dependencies = [
     "method_core",
     "secrets_rs",
     "service_client_core_rs",
-    "service_client_native_rs",
     "service_utils_rs",
     "sqlite_rs",
     "utils_rs",

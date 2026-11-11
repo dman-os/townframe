@@ -97,8 +97,8 @@ pub async fn config() -> Res<Arc<Config>> {
         .map(Arc::clone)
 }
 
-/// The client for the node: its daemon if one is serving, otherwise a node booted in this
-/// process. The shutdown callback owns the client and stops it at [`shutdown`]; commands hold
+/// The client for the node: the process holding it if there is one, otherwise a node booted in
+/// this process. The shutdown callback owns the client and stops it at [`shutdown`]; commands hold
 /// clones only while they run.
 pub async fn node() -> Res<Arc<NodeClient>> {
     static NODE: tokio::sync::OnceCell<std::sync::Weak<NodeClient>> =
@@ -106,7 +106,9 @@ pub async fn node() -> Res<Arc<NodeClient>> {
     let owner = NODE
         .get_or_try_init(|| async {
             let conf = config().await?;
-            let client = Arc::new(NodeClient::connect(&conf.node_dir).await?);
+            let client = Arc::new(
+                NodeClient::connect(&conf.node_dir, crate::client::CONNECT_DEADLINE).await?,
+            );
             let weak = Arc::downgrade(&client);
             register_shutdown(move || async move {
                 Arc::try_unwrap(client)
