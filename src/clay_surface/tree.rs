@@ -3,6 +3,7 @@
 use crate::render::CUSTOM_ELEMENTS;
 use crate::render::DATA_ATTRIBUTES;
 use crate::render::NamesExhausted;
+use crate::render::attribute_value_policy;
 use crate::render::intern_custom_element;
 use crate::render::is_custom_element_name;
 use crate::render::is_data_attribute_name;

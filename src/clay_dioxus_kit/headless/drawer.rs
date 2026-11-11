@@ -52,12 +52,26 @@ pub fn Drawer(
             class: skin.root,
             "data-state": "open",
             "data-value": "leading",
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:row;justify-content:flex-start",
+            position: "absolute",
+            top: "0",
+            right: "0",
+            bottom: "0",
+            left: "0",
+            z_index: "{layer}",
+            display: "flex",
+            flex_direction: "row",
+            justify_content: "flex-start",
             button {
                 class: skin.scrim,
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
-                style: "position:absolute;top:0;right:0;bottom:0;left:0;border:0;padding:0",
+                position: "absolute",
+                top: "0",
+                right: "0",
+                bottom: "0",
+                left: "0",
+                border: "0",
+                padding: "0",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
@@ -65,7 +79,9 @@ pub fn Drawer(
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
-                style: "position:relative;min-height:0;min-width:0",
+                position: "relative",
+                min_height: "0",
+                min_width: "0",
                 onkeydown: move |event| {
                     if event.key() == Key::Named(NamedKey::Escape) {
                         event.prevent_default();

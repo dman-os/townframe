@@ -29,9 +29,15 @@ mod wit {
     });
 }
 
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use wit::wasi::http::client;
-use wit::wasi::http::types::{ErrorCode, Fields, Method, Request, Response, Scheme};
+use wit::wasi::http::types::ErrorCode;
+use wit::wasi::http::types::Fields;
+use wit::wasi::http::types::Method;
+use wit::wasi::http::types::Request;
+use wit::wasi::http::types::Response;
+use wit::wasi::http::types::Scheme;
 
 struct Component;
 wit::export!(Component with_types_in wit);
@@ -60,10 +66,7 @@ impl wit::exports::wasi::http::handler::Guest for Component {
         };
         let route = operation.rsplit('.').next().unwrap_or_default();
         if !matches!(route, "echo" | "relay") {
-            return Ok(json_response(
-                404,
-                &json!({ "error": "UnknownOperation" }),
-            ));
+            return Ok(json_response(404, &json!({ "error": "UnknownOperation" })));
         }
         let route = route.to_owned();
 
@@ -115,7 +118,10 @@ impl wit::exports::wasi::http::handler::Guest for Component {
             Ok((status, body)) => {
                 let body = serde_json::from_slice::<Value>(&body)
                     .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()));
-                Ok(json_response(200, &json!({ "status": status, "body": body })))
+                Ok(json_response(
+                    200,
+                    &json!({ "status": status, "body": body }),
+                ))
             }
             Err(error) => Ok(json_response(
                 502,
