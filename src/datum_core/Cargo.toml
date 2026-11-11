@@ -32,5 +32,10 @@ jiff = { workspace = true, optional = true }
 automerge = { workspace = true, optional = true }
 
 [dev-dependencies]
+#
+# internal
 macros.workspace = true
+
+#
+# misc
 serde = { workspace = true, features = ["derive"] }

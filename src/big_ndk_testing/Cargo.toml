@@ -10,6 +10,8 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 big_blobs.workspace = true
@@ -29,6 +31,9 @@ service_core_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 utils_rs.workspace = true
+
+#
+# misc
 async-trait.workspace = true
 http.workspace = true
 keyring-core = { version = "1.0", default-features = false }
@@ -36,6 +41,11 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
-serde.workspace = true
+#
+# internal
 test_nodule_handlers.workspace = true
+
+#
+# misc
+serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
