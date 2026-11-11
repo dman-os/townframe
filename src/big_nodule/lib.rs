@@ -108,8 +108,8 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 /// the subsystem actor it provisions nodule actors under and that actor's registry path, the
 /// namespace it mints management handles in, the operator whose identity administers nodules,
 /// the dispatch router it registers each admitted nodule's implemented operations in, the dispatch
-/// client and operator-granted dispatch handle it mints every nodule's own handle from (the
-/// ceiling of what any nodule may be granted to invoke), the optional executor that hosts their
+/// client and dispatch handle it mints every nodule's own handle from (a
+/// handle covering every authority but no privileged method), the optional executor that hosts their
 /// handlers, the node's schema repo it registers each enabled nodule's datum Lexicons in, and its
 /// database. Without an executor a handler is never
 /// ready: its operations are registered not ready with the nodule's own readiness.
