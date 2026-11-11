@@ -30,9 +30,7 @@ impl Core {
         docs_group: &BigKeyhiveGroup,
         doc: &DocId,
     ) -> Result<Option<Access>, DrawersError> {
-        let key =
-            ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32().map_err(keyhive_error)?)
-                .map_err(|_| keyhive_error(format!("{doc} is not a valid Ed25519 point")))?;
+        let key = keyhive_key(doc)?;
         Ok(self
             .big_repo
             .keyhive()
