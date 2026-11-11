@@ -866,7 +866,7 @@ and denied.
 **Deferred:** the wflow service and durable procedures (a separate PR after the wflow
 rework); POSIX providers; triage and processors; BigTasks; network and XRPC exposure;
 consumers of command and view bindings; single-instance services; generalising
-`NoduleGrants` to operation grants.
+`NoduleGrants` to method grants.
 
 ### First implementation stage: catalog and runtime management
 
@@ -1043,7 +1043,7 @@ decisions in full.
   and `EveryStart`. Done-ness is host-local and keyed by (cartridge, init key, revision), so there is
   no synced `PerInstall`. Readiness is gated by `Initializing`/`InitFailed` instead of queues.
   Local targets are called directly on the provider, and foreign targets go through dispatch
-  under the nodule's operation grant. Waiters are woken on any readiness transition.
+  under the nodule's method grant. Waiters are woken on any readiness transition.
 - **Downgrades (review §5).** Allowed as an explicit runtime action. They are a runtime concern,
   not a catalog one. Automatic acceptance only ever moves forward (ADR 028 §3).
 - **Retired prefixes (review §6).** Not addressed in this PR. Reserving historical NSIDs or
