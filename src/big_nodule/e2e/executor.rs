@@ -45,6 +45,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::sync::watch;
 
 const OWN: &str = "org.example.photos.list";
@@ -69,6 +70,8 @@ struct FakeState {
     ensures: usize,
     log: Vec<String>,
     reensure: BTreeMap<CartridgeId, Reensure>,
+    /// How long `ensure` takes, as a wasm workload compiling and instantiating does.
+    ensure_takes: Duration,
 }
 
 impl FakeExecutor {
@@ -87,6 +90,10 @@ impl FakeExecutor {
             provider,
             ready_answers: watch::channel(0).0,
         })
+    }
+
+    pub(super) fn slow_ensure(&self, takes: Duration) {
+        self.state.lock().unwrap().ensure_takes = takes;
     }
 
     pub(super) fn log(&self) -> Vec<String> {
@@ -119,6 +126,8 @@ impl NoduleExecutor for FakeExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
+        let takes = self.state.lock().unwrap().ensure_takes;
+        tokio::time::sleep(takes).await;
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
         if state.hosted.get(&spec.cartridge_id) != Some(&spec.handler.digest) {
@@ -272,6 +281,47 @@ async fn an_upgrade_retires_the_old_revision_before_ensuring_the_new_one() {
             format!("retire {PHOTOS}"),
             host_of(PHOTOS, "two"),
         ]
+    );
+    assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
+    node.shutdown().await;
+}
+
+/// Starting the new revision's workload can take as long as compiling it. Callers meanwhile get
+/// the retryable not-ready answer, not an unknown operation as if the nodule were gone.
+#[tokio::test]
+async fn an_operation_stays_registered_not_ready_while_an_upgrade_starts_the_new_revision() {
+    let executor = FakeExecutor::hosting(Arc::<Echo>::default(), true);
+    let node = super::node_with(Some(Arc::clone(&executor) as Arc<dyn NoduleExecutor>)).await;
+    let operator = node.operator();
+    node.admit(operator, serving_cartridge_of(PHOTOS, "1.0.0", OWN, "one"))
+        .await
+        .unwrap();
+    node.set_enabled(PHOTOS, true).await;
+    assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
+
+    executor.slow_ensure(Duration::from_millis(100));
+    let (upgraded, during) = tokio::join!(
+        node.admit(operator, serving_cartridge_of(PHOTOS, "1.1.0", OWN, "two")),
+        async {
+            let mut answers = Vec::new();
+            for _ in 0..20 {
+                answers.push(node.invoke(operator, OWN, json!({})).await);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            answers
+        }
+    );
+    assert_eq!(upgraded.unwrap().readiness, Readiness::Ready);
+    let not_ready = Err(not_ready(NotReadyReason::Provider(Readiness::Initializing)));
+    assert!(
+        during.contains(&not_ready),
+        "no call met the starting revision"
+    );
+    assert!(
+        during
+            .iter()
+            .all(|answer| answer.is_ok() || *answer == not_ready),
+        "a call during the upgrade was answered {during:?}"
     );
     assert!(node.invoke(operator, OWN, json!({})).await.is_ok());
     node.shutdown().await;
