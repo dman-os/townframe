@@ -47,12 +47,21 @@ pub async fn serve(
     ready: impl FnOnce(&Booted) -> Res<()>,
     shutdown: impl Future<Output = ()>,
 ) -> Res<()> {
-    let lock = match dir.try_lock(LockRole::Daemon)? {
-        Ok(lock) => lock,
-        Err(held) => eyre::bail!(
-            "{held} already has the node at {} open",
-            dir.root().display()
-        ),
+    let lock = loop {
+        match dir.try_lock(LockRole::Daemon)? {
+            Ok(lock) => break lock,
+            Err(held) if held.role == Some(LockRole::Command) => {
+                // A command has the node open for the length of its work: wait for it.
+                let waiting = dir.clone();
+                tokio::task::spawn_blocking(move || waiting.wait_for_lock_release())
+                    .await
+                    .expect(ERROR_TOKIO)?;
+            }
+            Err(held) => eyre::bail!(
+                "{held} already has the node at {} open",
+                dir.root().display()
+            ),
+        }
     };
     dir.ensure_run_dir()?;
     let booted = Booted::boot(dir, lock, LockRole::Daemon).await?;
