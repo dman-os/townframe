@@ -14,10 +14,10 @@
 
 pub mod annotation;
 pub mod capture;
-#[cfg(feature = "client")]
-pub mod client;
 #[cfg(feature = "cartridge")]
 pub mod cartridge;
+#[cfg(feature = "client")]
+pub mod client;
 pub mod generic;
 pub mod methods;
 pub mod work;
