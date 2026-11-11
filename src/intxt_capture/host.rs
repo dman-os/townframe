@@ -3,7 +3,7 @@
 //!
 //! A hook runs [`prepare`], which imports the transcript and observes the session's worktrees
 //! while holding their locks, and returns a [`Prepared`] with the [`Batch`] to record. Recording
-//! happens elsewhere (the `recordObservations` operation); its answer goes to
+//! happens elsewhere (the client library's `record_observations`, in `intxt_core::client`); its answer goes to
 //! [`Prepared::commit`], which persists the new state and releases the locks. A [`Prepared`]
 //! dropped without committing persists nothing, so a failed record is observed again, from the
 //! old state, by the next hook.

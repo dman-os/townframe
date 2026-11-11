@@ -56,7 +56,7 @@ pub enum IntxtCommands {
     ///
     /// Stores the built handler component in the node's blob store, admits the cartridge that
     /// names it, grants the nodule the methods it calls, and enables it, which registers intxt's records and
-    /// serves `createIntxt`, `addToIntxt` and `recordObservations`.
+    /// serves `createIntxt` and `addToIntxt`.
     Install {
         /// The handler component: `src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm`,
         /// built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest

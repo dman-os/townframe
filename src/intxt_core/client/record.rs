@@ -1,5 +1,4 @@
-//! `recordObservations` (ADR 039 §4): turns what one capture hook observed into the datums of
-//! ADR 040.
+//! The recorder (ADR 039 §4): turns what one capture hook observed into the datums of ADR 040.
 //!
 //! The host calls it once per hook, holding every touched worktree's lock, so the calls for one
 //! worktree arrive one at a time and its op log stays single-writer. Every document is written
@@ -13,8 +12,21 @@
 //! worktree datum. The session is recorded before the worktrees, since an op's `cause` names a
 //! turn of the session document.
 
-use crate::Caller;
-use crate::to_value;
+use super::Caller;
+use super::to_value;
+use crate::capture::Batch;
+use crate::capture::Cause;
+use crate::capture::ChangeKind;
+use crate::capture::Content;
+use crate::capture::ContentClass;
+use crate::capture::Imported;
+use crate::capture::RecordedIds;
+use crate::capture::RecordedWorktree;
+use crate::capture::WorktreeBatch;
+use crate::capture::WorktreeDocs;
+use crate::generic;
+use crate::methods::IntxtError;
+use crate::work;
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
@@ -28,27 +40,15 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::drawer_placement;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::Location;
 use big_cabinet_core::reference::ReferenceDocId;
 use big_cabinet_core::reference::head_text;
-use intxt_core::capture::Batch;
-use intxt_core::capture::Cause;
-use intxt_core::capture::ChangeKind;
-use intxt_core::capture::Content;
-use intxt_core::capture::ContentClass;
-use intxt_core::capture::Imported;
-use intxt_core::capture::RecordedIds;
-use intxt_core::capture::RecordedWorktree;
-use intxt_core::capture::WorktreeBatch;
-use intxt_core::capture::WorktreeDocs;
-use intxt_core::generic;
-use intxt_core::methods::IntxtError;
-use intxt_core::methods::RecordObservations;
-use intxt_core::work;
 use serde_json::Value;
 use serde_json::json;
+use service_client_core_rs::xrpc::HttpTransport;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -147,14 +147,14 @@ struct PendingFile {
     content: Option<Content>,
 }
 
-struct Recorder<'a> {
-    caller: &'a Caller<'a>,
+struct Recorder<'a, H> {
+    caller: &'a Caller<H>,
     placement: String,
     create_capability: CapId,
     machine: &'a ActorUrl,
 }
 
-impl Recorder<'_> {
+impl<H: HttpTransport> Recorder<'_, H> {
     async fn create(
         &self,
         step: &str,
@@ -304,7 +304,7 @@ struct WorktreeState {
     changed: bool,
 }
 
-impl Recorder<'_> {
+impl<H: HttpTransport> Recorder<'_, H> {
     /// The repository, clone and worktree documents, created when missing. The repository's
     /// `gitRepo` slot is its smallest root commit, which every clone of the project on every
     /// machine derives alike (ledger D13); a repository with no commit yet has none, so it has no
@@ -791,49 +791,48 @@ impl Recorder<'_> {
     }
 }
 
-fn text_of(content: &intxt_core::capture::Content) -> Option<String> {
+fn text_of(content: &Content) -> Option<String> {
     (content.class == ContentClass::Text)
         .then(|| content.text.clone())
         .flatten()
 }
 
-impl big_ndk::Handler<RecordObservations> for crate::Intxt {
-    async fn call(
-        &self,
-        cx: &big_ndk::Cx,
-        input: RecordObservations,
-    ) -> Result<RecordedIds, IntxtError> {
-        let caller = Caller::new(cx)?;
-        let placement = drawer_placement(&input.drawer);
-        let create_capability = caller
-            .doc_capability(DocScope {
-                create: [placement.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
-        let recorder = Recorder {
-            caller: &caller,
-            placement,
-            create_capability,
-            machine: &input.machine,
-        };
-        let sessions = recorder.record_session(&input.batch).await?;
-        let mut worktrees = BTreeMap::new();
-        for worktree in &input.batch.worktrees {
-            worktrees.insert(
-                worktree.identity.root.clone(),
-                recorder.record_worktree(worktree, &sessions).await?,
-            );
-        }
-        Ok(RecordedIds {
-            session: sessions.main.map(|doc| doc.to_string()),
-            subagents: sessions
-                .subagents
-                .into_iter()
-                .map(|(agent, doc)| (agent, doc.to_string()))
-                .collect(),
-            worktrees,
-            extra: Default::default(),
+/// [`Caller::record_observations`].
+pub(super) async fn record_observations<H: HttpTransport>(
+    caller: &Caller<H>,
+    drawer: &DrawerId,
+    machine: &ActorUrl,
+    batch: &Batch,
+) -> Result<RecordedIds, IntxtError> {
+    let placement = drawer_placement(drawer);
+    let create_capability = caller
+        .doc_capability(DocScope {
+            create: [placement.clone()].into(),
+            ..DocScope::default()
         })
+        .await?;
+    let recorder = Recorder {
+        caller,
+        placement,
+        create_capability,
+        machine,
+    };
+    let sessions = recorder.record_session(batch).await?;
+    let mut worktrees = BTreeMap::new();
+    for worktree in &batch.worktrees {
+        worktrees.insert(
+            worktree.identity.root.clone(),
+            recorder.record_worktree(worktree, &sessions).await?,
+        );
     }
+    Ok(RecordedIds {
+        session: sessions.main.map(|doc| doc.to_string()),
+        subagents: sessions
+            .subagents
+            .into_iter()
+            .map(|(agent, doc)| (agent, doc.to_string()))
+            .collect(),
+        worktrees,
+        extra: Default::default(),
+    })
 }

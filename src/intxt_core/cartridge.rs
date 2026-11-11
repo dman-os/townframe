@@ -8,9 +8,8 @@
 //! writer replacing the value. Without the sidecar every position would keep the plain JSON kind
 //! its Lexicon states.
 //!
-//! It also serves operations through a handler (`intxt_nodule::Intxt`): `createIntxt`,
-//! `addToIntxt` and `recordObservations`. The handler's Lexicons are projected from the Rust types
-//! of its methods.
+//! It also serves operations through a handler (`intxt_nodule::Intxt`): `createIntxt` and
+//! `addToIntxt`. The handler's Lexicons are projected from the Rust types of its methods.
 
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::DatumMember;
@@ -28,7 +27,6 @@ use serde_json::Value;
 use crate::methods::AddToIntxt;
 use crate::methods::CreateIntxt;
 use crate::methods::REQUIRED_OPERATIONS;
-use crate::methods::RecordObservations;
 
 /// The authority every intxt record is under. A cartridge registers only NSIDs it owns, so the
 /// generic datums intxt holds until they migrate out before the beta (ledger D39) are under it too.
@@ -85,10 +83,6 @@ pub fn cartridge(handler: Artifact) -> Cartridge {
                     method_lexicon::lexicon::<AddToIntxt>()
                         .expect("addToIntxt's types project a Lexicon"),
                 ),
-                as_map(
-                    method_lexicon::lexicon::<RecordObservations>()
-                        .expect("recordObservations's types project a Lexicon"),
-                ),
             ])
             .collect(),
         sidecar,
@@ -103,7 +97,6 @@ pub fn cartridge(handler: Artifact) -> Cartridge {
         implements: vec![
             CreateIntxt::XRPC.nsid.to_owned(),
             AddToIntxt::XRPC.nsid.to_owned(),
-            RecordObservations::XRPC.nsid.to_owned(),
         ],
         ..Default::default()
     };

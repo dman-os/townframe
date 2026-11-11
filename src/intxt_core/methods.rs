@@ -1,10 +1,8 @@
-//! The methods intxt's nodule serves, as their request, output and error types: `createIntxt`,
-//! `addToIntxt` and `recordObservations`. The handlers live in `intxt_nodule`; callers (the host's
-//! CLI, the cartridge, tests) need only these types.
+//! The methods intxt's nodule serves, as their request, output and error types: `createIntxt` and
+//! `addToIntxt`. The handlers live in `intxt_nodule`; callers (the host's CLI, the cartridge,
+//! tests) need only these types. Recording what capture observed is not a method: it is the
+//! client library's recorder (`intxt_core::client`).
 
-use crate::capture::Batch;
-use crate::capture::RecordedIds;
-use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DocId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::MintDocCapability;
@@ -96,17 +94,4 @@ method_core::methods! {
     error = IntxtError, nsid_prefix = "org.example.intxt.";
     CreateIntxt => IntxtCreated, procedure, "createIntxt";
     AddToIntxt => AddedToIntxt, procedure, "addToIntxt";
-    RecordObservations => RecordedIds, procedure, "recordObservations";
-}
-
-/// Records what a capture hook observed in `drawer`, the node's capture drawer.
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecordObservations {
-    /// Where the documents are created.
-    pub drawer: DrawerId,
-    /// The node the clones are on (`gitClone.machine`): the host knows it, the recorder does not.
-    pub machine: ActorUrl,
-    pub batch: Batch,
 }

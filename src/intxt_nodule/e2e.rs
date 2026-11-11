@@ -27,6 +27,7 @@ use big_cabinet_core::reference::ReferenceDocId;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_ndk_testing::TestNode;
+use intxt_core::client::Caller;
 use intxt_core::generic;
 use intxt_core::methods::AddToIntxt;
 use intxt_core::methods::AddedToIntxt;
@@ -34,14 +35,60 @@ use intxt_core::work;
 use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use tower::ServiceExt;
 
 mod capture;
+
+/// A [`Caller`] as the node's operator, which the node admits when no capability is presented
+/// (the way `day`'s connection to it is), over the node's own XRPC router: what `day x intxt
+/// capture` does. `key` starts its command ids, as a batch's idempotency key does.
+fn operator(node: &TestNode, key: &str) -> Caller<Router> {
+    let big_node = node.big_node();
+    let router = big_dispatch::xrpc_router(
+        big_node.dispatch.client.clone(),
+        big_dispatch::Anonymous::Acts(Authorization::identity(big_node.authority.root)),
+        16 * 1024 * 1024,
+    )
+    .into_router();
+    Caller::new(Router(router), RequestContext::root(), None, key.to_owned())
+}
+
+/// An in-process XRPC transport: requests go through the router without a socket.
+struct Router(axum::Router);
+
+impl HttpTransport for Router {
+    async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        let mut builder = http::Request::builder()
+            .method(request.method)
+            .uri(format!("/{}", request.path));
+        *builder.headers_mut().unwrap() = request.headers;
+        let response = self
+            .0
+            .clone()
+            .oneshot(builder.body(axum::body::Body::from(request.body)).unwrap())
+            .await
+            .unwrap_or_else(|never| match never {});
+        let (parts, body) = response.into_parts();
+        Ok(XrpcResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: axum::body::to_bytes(body, usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        })
+    }
+}
 
 /// Each document creation is a command of its own; the node refuses a reused command id.
 static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
