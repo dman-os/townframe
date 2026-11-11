@@ -15,6 +15,12 @@
 //! The observer ignores edits made while `View::sync` runs: writing a signal during the render
 //! that reads it would only schedule a second, identical render.
 //!
+//! Interaction (`FileDiffViewProps::interaction`) is the `InteractionManager`'s: line hover,
+//! line and range selection, the gutter utility and hunk expansion. Pointer events reach it
+//! through `events::Pointers`, from handlers the renderer attaches to the nodes it resolves
+//! targets from; its edits (`data-hovered`, `data-selected-line`) reach Dioxus like any other
+//! later edit.
+//!
 //! Virtualized mode (`FileDiffViewProps::virtualized`) swaps the engine for a
 //! `VirtualizedFileDiff` under a `Virtualizer` and renders a scroller around the diff; the
 //! events of its nodes reach the managers through `events.rs`. Edits the managers make from
@@ -38,6 +44,8 @@ use pierre_diffs::components::virtualizer::VirtualizerConfig;
 use pierre_diffs::highlighter_types::DiffsHighlighter;
 use pierre_diffs::highlighter_types::PlainTextHighlighter;
 use pierre_diffs::js_collections::PtrEq;
+use pierre_diffs::managers::interaction_manager::InteractionManager;
+use pierre_diffs::managers::interaction_manager::LineHoverHighlight;
 use pierre_diffs::managers::resize_manager::ResizeObserverHub;
 use pierre_diffs::managers::universal_rendering_manager::UniversalRenderingManager;
 use pierre_diffs::types::options::DiffStyle;
@@ -45,12 +53,14 @@ use pierre_diffs::types::patch::FileContents;
 use pierre_diffs::types::patch::FileDiffMetadata;
 use pierre_diffs::types::patch::ParsePatchOptions;
 use pierre_diffs::types::view::DiffLineAnnotation;
+use pierre_diffs::types::view::SelectedLineRange;
 use pierre_diffs::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
 use pierre_diffs::utils::compute_virtual_file_metrics::compute_virtual_file_metrics;
 use pierre_diffs::utils::parse_patch_files::ParsePatchError;
 use pierre_diffs::utils::parse_patch_files::parse_patch_files;
 
 use crate::events::Dispatch;
+use crate::events::Pointers;
 use crate::host::DioxusHost;
 use crate::host::SleepFuture;
 use crate::render::Renderer;
@@ -123,6 +133,24 @@ pub struct Virtualization {
     pub sleep: PtrEq<dyn Fn(Duration) -> SleepFuture>,
 }
 
+/// What the pointer does in the view: Pierre's interaction options, minus the ones that hand out
+/// the view's internal nodes. Off by default, as upstream's are.
+#[derive(Clone, PartialEq, Default)]
+pub struct Interaction {
+    /// Which part of the line under the mouse is highlighted (`data-hovered`).
+    pub line_hover_highlight: LineHoverHighlight,
+    /// Clicking a line number selects the line, shift-click extends, dragging selects a range.
+    pub enable_line_selection: bool,
+    /// The built-in button that follows the hovered line or the selection.
+    pub enable_gutter_utility: bool,
+    /// The selection after a click or a drag, `None` when it was cleared.
+    pub on_line_selected: Option<Callback<Option<SelectedLineRange>>>,
+    /// The built-in gutter utility's click: a drag from the button selects a range and ends in
+    /// this call with it. Giving it selects that gesture's behaviour, so it needs
+    /// `enable_gutter_utility`.
+    pub on_gutter_utility_click: Option<Callback<SelectedLineRange>>,
+}
+
 #[derive(Props, Clone, PartialEq)]
 pub struct FileDiffViewProps<A: Clone + PartialEq + 'static> {
     pub input: DiffInput,
@@ -149,15 +177,27 @@ pub struct FileDiffViewProps<A: Clone + PartialEq + 'static> {
     /// when the view mounts, and switching it needs a new view.
     #[props(default)]
     pub virtualized: Option<Virtualization>,
+    /// Hover, selection and the gutter utility; none by default. Hunk expansion needs no option:
+    /// a collapsed hunk's separator expands on click.
+    #[props(default)]
+    pub interaction: Interaction,
 }
 
 type AnnotationCallback<A> = Rc<RefCell<Option<Callback<DiffLineAnnotation<A>, Element>>>>;
+
+/// The caller's current interaction callbacks, read when the manager calls them.
+type InteractionCallbacks = Rc<RefCell<Interaction>>;
 
 /// The props that become `FileDiffOptions`; a change needs `set_options` and a forced render.
 #[derive(Clone, Copy, PartialEq)]
 struct ViewOptions {
     diff_style: DiffStyle,
     expand_unchanged: bool,
+    line_hover_highlight: LineHoverHighlight,
+    enable_line_selection: bool,
+    enable_gutter_utility: bool,
+    /// Whether `on_gutter_utility_click` is given: the manager reads its presence.
+    has_gutter_utility_click: bool,
 }
 
 impl ViewOptions {
@@ -165,6 +205,10 @@ impl ViewOptions {
         Self {
             diff_style: props.diff_style,
             expand_unchanged: props.expand_unchanged,
+            line_hover_highlight: props.interaction.line_hover_highlight,
+            enable_line_selection: props.interaction.enable_line_selection,
+            enable_gutter_utility: props.interaction.enable_gutter_utility,
+            has_gutter_utility_click: props.interaction.on_gutter_utility_click.is_some(),
         }
     }
 }
@@ -226,6 +270,9 @@ struct View<A: Clone + PartialEq + 'static> {
     engine: Engine<A>,
     /// The listeners' destination; present when the host is interactive.
     dispatch: Option<Rc<Dispatch>>,
+    /// Where the pointer events of the interaction handlers go.
+    pointers: Rc<Pointers>,
+    interaction: InteractionCallbacks,
     slots: Rc<SlotTable>,
     /// The caller's current callback, read when an annotation's content is made.
     render_annotation: AnnotationCallback<A>,
@@ -238,10 +285,32 @@ fn file_diff_options<A: Clone + 'static>(
     view_options: ViewOptions,
     slots: &Rc<SlotTable>,
     render_annotation: &AnnotationCallback<A>,
+    interaction: &InteractionCallbacks,
 ) -> FileDiffOptions<pierre_diffs::document::NodeKey, SlotContent, A> {
     let mut options = FileDiffOptions::default();
     options.base.diff_style = Some(view_options.diff_style);
     options.base.expand_unchanged = Some(view_options.expand_unchanged);
+    options.interaction.line_hover_highlight = Some(view_options.line_hover_highlight);
+    options.interaction.enable_line_selection = Some(view_options.enable_line_selection);
+    options.interaction.enable_gutter_utility = Some(view_options.enable_gutter_utility);
+    // The callbacks read the caller's current ones when they run (`Callback` is `Copy`, so the
+    // borrow ends before the call, which may re-enter `sync`).
+    let callbacks = Rc::clone(interaction);
+    options.interaction.on_line_selected = Some(Rc::new(move |range| {
+        let callback = callbacks.borrow().on_line_selected;
+        if let Some(callback) = callback {
+            callback.call(range.cloned());
+        }
+    }));
+    if view_options.has_gutter_utility_click {
+        let callbacks = Rc::clone(interaction);
+        options.interaction.on_gutter_utility_click = Some(Rc::new(move |range| {
+            let callback = callbacks.borrow().on_gutter_utility_click;
+            callback
+                .expect("the option is set only while the caller gives the callback")
+                .call(range);
+        }));
+    }
     let slots = Rc::clone(slots);
     let render_annotation = Rc::clone(render_annotation);
     options.render_annotation = Some(PtrEq::new(Rc::new(move |annotation, _file_diff| {
@@ -258,11 +327,17 @@ impl<A: Clone + PartialEq + 'static> View<A> {
     fn new(props: &FileDiffViewProps<A>, version: Signal<u64>) -> Self {
         let slots = Rc::new(SlotTable::default());
         let render_annotation: AnnotationCallback<A> = Rc::default();
+        let interaction: InteractionCallbacks = Rc::new(RefCell::new(props.interaction.clone()));
         let highlighter: Rc<dyn DiffsHighlighter> = match &props.highlighter {
             Some(highlighter) => Rc::clone(&highlighter.0),
             None => Rc::new(PlainTextHighlighter),
         };
-        let options = file_diff_options(ViewOptions::of(props), &slots, &render_annotation);
+        let options = file_diff_options(
+            ViewOptions::of(props),
+            &slots,
+            &render_annotation,
+            &interaction,
+        );
         let (host, engine, dispatch) = match &props.virtualized {
             None => {
                 let host = DioxusHost::new_static();
@@ -279,6 +354,13 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             }
             Some(virtualization) => Self::virtualized(virtualization, highlighter, options),
         };
+        let manager: Rc<InteractionManager<DioxusHost>> = match &engine {
+            Engine::Static(file_diff) => Rc::clone(file_diff.interaction_manager()),
+            Engine::Virtualized { instance, .. } => {
+                Rc::clone(instance.file_diff().interaction_manager())
+            }
+        };
+        let pointers = Pointers::new(Rc::clone(&host), manager);
         let syncing = Rc::new(Cell::new(false));
         let observer_syncing = Rc::clone(&syncing);
         host_document(&host).set_observer(Some(Rc::new(move |_document, _mutation| {
@@ -292,6 +374,8 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             host,
             engine,
             dispatch,
+            pointers,
+            interaction,
             slots,
             render_annotation,
             syncing,
@@ -355,6 +439,13 @@ impl<A: Clone + PartialEq + 'static> View<A> {
     /// current when the same render reads it.
     fn sync(&self, props: &FileDiffViewProps<A>) {
         *self.render_annotation.borrow_mut() = props.render_annotation;
+        *self.interaction.borrow_mut() = props.interaction.clone();
+        self.host.pointer.set_rows(
+            props.interaction.line_hover_highlight != LineHoverHighlight::Disabled
+                || props.interaction.enable_line_selection
+                || props.interaction.enable_gutter_utility
+                || props.interaction.on_gutter_utility_click.is_some(),
+        );
         let unchanged = self.applied.borrow().as_ref().is_some_and(|applied| {
             applied.input == props.input
                 && applied.options == ViewOptions::of(props)
@@ -364,23 +455,24 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             return;
         }
         let annotations = Rc::new(props.annotations.clone());
-        let style_changed = self
+        let options_changed = self
             .applied
             .borrow()
             .as_ref()
             .is_some_and(|applied| applied.options != ViewOptions::of(props));
         self.syncing.set(true);
-        if style_changed {
+        if options_changed {
             self.engine.set_options(file_diff_options(
                 ViewOptions::of(props),
                 &self.slots,
                 &self.render_annotation,
+                &self.interaction,
             ));
         }
         let mut render_props = FileDiffRenderProps {
             file_container: Some(self.host.container()),
             line_annotations: Some(Rc::clone(&annotations)),
-            force_render: style_changed,
+            force_render: options_changed,
             ..FileDiffRenderProps::default()
         };
         match &props.input {
@@ -407,6 +499,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             document,
             slots: &self.slots,
             dispatch: self.dispatch.as_ref(),
+            pointers: &self.pointers,
         }
         .render(self.host.top())
     }
@@ -440,6 +533,8 @@ pub fn FileDiffView<A: Clone + PartialEq + 'static>(props: FileDiffViewProps<A>)
     use_view(&props).element()
 }
 
+#[cfg(test)]
+mod interaction_tests;
 #[cfg(test)]
 mod virtual_tests;
 

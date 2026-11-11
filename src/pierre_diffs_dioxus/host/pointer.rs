@@ -1,0 +1,237 @@
+//! The pointer half of the host: which nodes render pointer handlers, the drag's document-level
+//! listener flag, and `element_from_point` over the cached row geometry. It is a child of
+//! `host.rs` because it reads the host's private caches.
+
+use std::cell::Cell;
+use std::rc::Rc;
+
+use dioxus::html::MountedError;
+use pierre_diffs::document::Document;
+use pierre_diffs::document::NodeKey;
+use pierre_diffs::managers::interaction_manager::HitTest;
+use pierre_diffs::managers::interaction_manager::InteractionHost;
+
+use super::DioxusHost;
+use crate::geometry::HitFrame;
+
+/// The pointer handlers a node renders with.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PointerListeners {
+    /// `click`: a hunk's expand controls and the `pre`.
+    pub(crate) click: bool,
+    /// `pointerdown` and `pointermove`: the nodes the manager resolves rows from.
+    pub(crate) press_and_move: bool,
+    /// `pointerleave`: the `pre` only, because the event does not bubble.
+    pub(crate) leave: bool,
+    /// `pointermove`, `pointerup` and `pointercancel` for a drag, on the view's top node.
+    pub(crate) document: bool,
+}
+
+/// The nodes a hunk's expansion is clicked on.
+const EXPAND_ATTRIBUTES: [&str; 2] = ["data-expand-button", "data-unmodified-lines"];
+
+/// The attributes that make a node something the manager resolves a row target from: the ones
+/// `resolvePointerTarget`, the selection rows and the gutter utility path read.
+const ROW_TARGET_ATTRIBUTES: [&str; 6] = [
+    "data-line",
+    "data-column-number",
+    "data-line-annotation",
+    "data-gutter-buffer",
+    "data-utility-button",
+    "data-gutter-utility-slot",
+];
+
+#[derive(Default)]
+pub(crate) struct PointerState {
+    /// The `pre` the `InteractionManager` listens on, while it listens.
+    pre: Cell<Option<NodeKey>>,
+    /// Whether the view's options give the pointer anything to do on a row (hover, selection,
+    /// the gutter utility). Hunk expansion alone leaves it false: the manager listens for the
+    /// expand clicks (upstream attaches its listeners whenever separators expand), but a view
+    /// that only expands has no use for a move or press on every line.
+    rows: Cell<bool>,
+    /// Whether a drag asked for the document-level pointer listeners.
+    document_listeners: Cell<bool>,
+    /// What `element_from_point` measures from; present only while a drag has one.
+    frame: Cell<Option<HitFrame>>,
+}
+
+impl PointerState {
+    /// Sets whether pointers act on rows; the view calls it with its props.
+    pub(crate) fn set_rows(&self, rows: bool) {
+        self.rows.set(rows);
+    }
+
+    /// Whether a drag asked for the document-level listeners, which the handlers read.
+    pub(crate) fn document_listeners_active(&self) -> bool {
+        self.document_listeners.get()
+    }
+
+    /// Which pointer handlers `node` renders with; none unless the manager listens.
+    pub(crate) fn listeners(
+        &self,
+        document: &Document,
+        top: NodeKey,
+        node: NodeKey,
+    ) -> PointerListeners {
+        let Some(pre) = self.pre.get() else {
+            return PointerListeners::default();
+        };
+        let rows = self.rows.get();
+        let is_pre = node == pre;
+        let expands = EXPAND_ATTRIBUTES
+            .iter()
+            .any(|name| document.has_attribute(node, name));
+        PointerListeners {
+            click: is_pre || expands,
+            press_and_move: rows
+                && (is_pre
+                    || expands
+                    || ROW_TARGET_ATTRIBUTES
+                        .iter()
+                        .any(|name| document.has_attribute(node, name))
+                    // Content slotted into the gutter utility or an annotation row is a light
+                    // child of the host that renders inside the shadow tree's slot.
+                    || document.get_attribute(node, "slot").is_some_and(|slot| {
+                        slot == "gutter-utility-slot" || slot.starts_with("annotation-")
+                    })),
+            leave: rows && is_pre,
+            document: rows && node == top,
+        }
+    }
+
+    /// The nodes the hit-test frame is measured from need `MountedData`: the `pre` and the
+    /// content columns, on a host that measures rows.
+    pub(crate) fn wants_mounted(
+        &self,
+        document: &Document,
+        interactive: bool,
+        node: NodeKey,
+    ) -> bool {
+        interactive
+            && self.rows.get()
+            && self
+                .pre
+                .get()
+                .is_some_and(|pre| node == pre || document.has_attribute(node, "data-content"))
+    }
+}
+
+/// Measures the hit-test frame (see `HitFrame`). Two client rects are async commands, so the
+/// frame lands a task later; until then `element_from_point` answers `Unavailable` and the
+/// manager follows the event path.
+fn measure_frame(host: &Rc<DioxusHost>) {
+    let Some(pre) = host.pointer.pre.get() else {
+        return;
+    };
+    let Some(content) = host
+        .document
+        .query_by_attribute(pre, "data-content", None)
+        .into_iter()
+        .next()
+    else {
+        return;
+    };
+    let mounted = host.mounted.borrow();
+    let (Some(pre_mounted), Some(content_mounted)) =
+        (mounted.get(&pre).cloned(), mounted.get(&content).cloned())
+    else {
+        // Not mounted yet: the drag follows the event path.
+        return;
+    };
+    drop(mounted);
+    let host = Rc::clone(host);
+    dioxus::prelude::spawn(async move {
+        let (pre_rect, content_rect) = match (
+            pre_mounted.get_client_rect().await,
+            content_mounted.get_client_rect().await,
+        ) {
+            (Ok(pre_rect), Ok(content_rect)) => (pre_rect, content_rect),
+            // A renderer without client rects has no hit-test, which the manager is built to
+            // handle.
+            (Err(MountedError::NotSupported), _) | (_, Err(MountedError::NotSupported)) => {
+                return;
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                panic!("the platform measures a mounted element: {error}")
+            }
+        };
+        // The drag may have ended while the rects were in flight.
+        if !host.pointer.document_listeners.get() || !host.document.exists(content) {
+            return;
+        }
+        let geometry = host.geometry.borrow();
+        host.pointer.frame.set(Some(HitFrame {
+            pre_left: pre_rect.origin.x,
+            pre_width: pre_rect.size.width,
+            content,
+            content_client_top: content_rect.origin.y,
+            content_offset: geometry.top_in_content(&host.document, host.container, content),
+            scroll_top: geometry.scroll(host.scroller_root()).top,
+        }));
+    });
+}
+
+impl InteractionHost for DioxusHost {
+    fn document(&self) -> &Document {
+        &self.document
+    }
+
+    /// Answered from the cached row geometry, not the engine (see `Geometry::element_at`).
+    /// `Unavailable` is the port's "callers fall back to the event path": the answer while no
+    /// frame is measured (no drag, the rects still in flight, a static host that measures no
+    /// rows, a renderer without client rects). A frame whose column the document dropped is
+    /// stale in the same way.
+    fn element_from_point(&self, x: f64, y: f64) -> HitTest<NodeKey> {
+        let (Some(frame), Some(pre)) = (self.pointer.frame.get(), self.pointer.pre.get()) else {
+            return HitTest::Unavailable;
+        };
+        if !self.document.exists(frame.content) {
+            return HitTest::Unavailable;
+        }
+        let geometry = self.geometry.borrow();
+        let scroll_top = geometry.scroll(self.scroller_root()).top;
+        match geometry.element_at(
+            &self.document,
+            self.container,
+            pre,
+            &frame,
+            scroll_top,
+            (x, y),
+        ) {
+            Some(row) => HitTest::Element(row),
+            None => HitTest::NoElement,
+        }
+    }
+
+    /// The renderer attaches the handlers to the nodes that name `pre` as their listening root
+    /// (`PointerState::listeners`): registering is recording the `pre`.
+    fn add_pre_listeners(&self, pre: NodeKey) {
+        self.pointer.pre.set(Some(pre));
+    }
+
+    fn remove_pre_listeners(&self, _pre: NodeKey) {
+        self.pointer.pre.set(None);
+    }
+
+    /// The flag the handlers read (see the module docs of `host.rs`). The hit-test frame is
+    /// measured now, because the drag that asked for these listeners is the only thing that
+    /// hit-tests.
+    fn add_document_listeners(&self) {
+        self.pointer.document_listeners.set(true);
+        self.pointer.frame.set(None);
+        if self.is_interactive() {
+            measure_frame(
+                &self
+                    .weak_self
+                    .upgrade()
+                    .expect("the host is alive while it is called"),
+            );
+        }
+    }
+
+    fn remove_document_listeners(&self) {
+        self.pointer.document_listeners.set(false);
+        self.pointer.frame.set(None);
+    }
+}

@@ -174,6 +174,7 @@ fn Page(props: PageProps) -> Element {
             height: format!("{VIEWPORT}px"),
             sleep: props.clock.clone(),
         }),
+        interaction: Interaction::default(),
     });
     *props.shared.0.borrow_mut() = Some(Rc::clone(&view));
     view.element()
@@ -417,17 +418,26 @@ fn a_dispatch_runs_queued_frames_and_a_follow_up_runs_on_the_next_executor_tick(
             ran.set(ran.get() + 1);
             for amount in [10, 100] {
                 let ran = Rc::clone(&ran);
-                callback_host.request_animation_frame(Box::new(move |_| ran.set(ran.get() + amount)));
+                callback_host
+                    .request_animation_frame(Box::new(move |_| ran.set(ran.get() + amount)));
             }
         }));
         host.flush_frames();
     });
-    assert_eq!(host.frames_pending(), 2, "both follow-ups wait for one scheduled flush");
+    assert_eq!(
+        host.frames_pending(),
+        2,
+        "both follow-ups wait for one scheduled flush"
+    );
     assert_eq!(host.flush_count(), 3);
     run_tasks(&mut dom);
     assert_eq!(ran.get(), 122);
     assert_eq!(host.frames_pending(), 0);
-    assert_eq!(host.flush_count(), 4, "two follow-ups needed only one extra flush");
+    assert_eq!(
+        host.flush_count(),
+        4,
+        "two follow-ups needed only one extra flush"
+    );
 }
 
 /// A file made of rows the test lays out itself, so the scroll fix has an edit to see.

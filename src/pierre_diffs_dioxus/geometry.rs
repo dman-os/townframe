@@ -16,6 +16,12 @@
 //! * A height nothing has measured yet (a row the port rendered a moment ago). It reads as the
 //!   layout's own line estimate, so reconciling heights against an unmeasured row sees no change,
 //!   instead of seeing a row that shrank to nothing.
+//! * A row under a client coordinate (`element_at`). Nothing reports where a row is in the
+//!   client's coordinates, only how tall it is. A `HitFrame` anchors the stacked heights: when a
+//!   drag starts the host asks the engine for the client rects of the `pre` (for its left edge
+//!   and width) and of one content column (for the top its first row starts at, which includes
+//!   the code block's own padding no stylesheet read could see), and every later lookup moves the
+//!   anchor by how far the scroller and the stack above the column have moved since.
 
 use std::collections::HashMap;
 
@@ -29,6 +35,20 @@ pub(crate) struct ScrollSample {
     pub(crate) left: f64,
     pub(crate) scroll_height: f64,
     pub(crate) client_height: f64,
+}
+
+/// What the engine measured when a drag started; see the module docs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HitFrame {
+    /// The `pre`'s client left edge and width.
+    pub(crate) pre_left: f64,
+    pub(crate) pre_width: f64,
+    /// The content column whose top was measured, and that top in client coordinates.
+    pub(crate) content: NodeKey,
+    pub(crate) content_client_top: f64,
+    /// The column's top in the scroller's content, and the scroll position, at the measurement.
+    pub(crate) content_offset: f64,
+    pub(crate) scroll_top: f64,
 }
 
 pub(crate) struct Geometry {
@@ -112,6 +132,58 @@ impl Geometry {
             return self.line_height;
         }
         0.0
+    }
+
+    /// `elementFromPoint` over the rows of the `pre`: the child of a content column (a line, an
+    /// annotation, a buffer) whose client box holds `(x, y)`, or `None` when the point is outside
+    /// the `pre` or between rows. A split diff's two code columns share the width equally (the
+    /// stylesheet's `1fr 1fr`); a unified one has the whole width. The gutter is not hit-tested
+    /// apart from its row: the row's content element answers for it, which the manager
+    /// normalizes back to the row anyway.
+    pub(crate) fn element_at(
+        &self,
+        document: &Document,
+        container: NodeKey,
+        pre: NodeKey,
+        frame: &HitFrame,
+        scroll_top: f64,
+        (x, y): (f64, f64),
+    ) -> Option<NodeKey> {
+        let local_x = x - frame.pre_left;
+        if !(0.0..frame.pre_width).contains(&local_x) {
+            return None;
+        }
+        let is_split = document.get_attribute(pre, "data-diff-type").as_deref() == Some("split");
+        let column_width = frame.pre_width / if is_split { 2.0 } else { 1.0 };
+        // The column whose span holds `local_x`, in document order.
+        let content = document
+            .child_nodes(pre)
+            .into_iter()
+            .filter(|child| document.has_attribute(child, "data-code"))
+            .zip((1..).map(|index| f64::from(index) * column_width))
+            .find(|(_, right_edge)| local_x < *right_edge)
+            .and_then(|(column, _)| {
+                document
+                    .child_nodes(column)
+                    .into_iter()
+                    .find(|child| document.has_attribute(child, "data-content"))
+            })?;
+        let moved = (self.top_in_content(document, container, frame.content)
+            - frame.content_offset)
+            - (scroll_top - frame.scroll_top);
+        let mut top = frame.content_client_top + moved;
+        for row in document
+            .child_nodes(content)
+            .into_iter()
+            .filter(|row| !document.tag_name(row).is_empty())
+        {
+            let bottom = top + self.height(document, row);
+            if (top..bottom).contains(&y) {
+                return Some(row);
+            }
+            top = bottom;
+        }
+        None
     }
 
     /// The node's distance from the top of the scroller's content; see the module docs. The
@@ -216,5 +288,134 @@ mod tests {
             geometry.top_in_content(&document, container, lines[1]),
             320.0
         );
+    }
+}
+
+#[cfg(test)]
+mod hit_tests {
+    use super::*;
+
+    /// container (shadow root: pre[split] > two code columns, each gutter + content of 3 lines)
+    struct Split {
+        document: Document,
+        container: NodeKey,
+        pre: NodeKey,
+        content: [NodeKey; 2],
+        rows: [[NodeKey; 3]; 2],
+    }
+
+    fn split() -> Split {
+        let document = Document::new();
+        let container = document.create_element("diffs-container");
+        let shadow = document.attach_shadow(container);
+        let pre = document.create_element("pre");
+        document.set_attribute(pre, "data-diff-type", "split");
+        document.append_child(shadow, pre);
+        let columns = ["data-deletions", "data-additions"].map(|side| {
+            let code = document.create_element("code");
+            document.set_attribute(code, "data-code", "");
+            document.set_attribute(code, side, "");
+            document.append_child(pre, code);
+            let gutter = document.create_element("div");
+            document.set_attribute(gutter, "data-gutter", "");
+            let content = document.create_element("div");
+            document.set_attribute(content, "data-content", "");
+            document.append_child(code, gutter);
+            document.append_child(code, content);
+            let rows = [0, 1, 2].map(|index| {
+                let row = document.create_element("div");
+                document.set_attribute(row, "data-line", &(index + 1).to_string());
+                document.append_child(content, row);
+                row
+            });
+            (content, rows)
+        });
+        Split {
+            document,
+            container,
+            pre,
+            content: [columns[0].0, columns[1].0],
+            rows: [columns[0].1, columns[1].1],
+        }
+    }
+
+    fn frame(split: &Split) -> HitFrame {
+        // The pre is 800 wide at client x 100, and its first row starts at client y 50.
+        HitFrame {
+            pre_left: 100.0,
+            pre_width: 800.0,
+            content: split.content[0],
+            content_client_top: 50.0,
+            content_offset: 0.0,
+            scroll_top: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_point_is_answered_with_the_row_of_the_column_it_is_in() {
+        let split = split();
+        let geometry = Geometry::new(20.0);
+        let frame = frame(&split);
+        let at = |x, y, scroll| {
+            geometry.element_at(
+                &split.document,
+                split.container,
+                split.pre,
+                &frame,
+                scroll,
+                (x, y),
+            )
+        };
+        // Left half is the deletions column, right half the additions; rows are 20 high.
+        assert_eq!(at(150.0, 55.0, 0.0), Some(split.rows[0][0]));
+        assert_eq!(at(150.0, 95.0, 0.0), Some(split.rows[0][2]));
+        assert_eq!(at(650.0, 75.0, 0.0), Some(split.rows[1][1]));
+        // Above the first row, below the last, left or right of the pre: nothing.
+        assert_eq!(at(150.0, 49.0, 0.0), None);
+        assert_eq!(at(150.0, 110.0, 0.0), None);
+        assert_eq!(at(99.0, 60.0, 0.0), None);
+        assert_eq!(at(900.0, 60.0, 0.0), None);
+        // The scroller moved 40 down since the measurement: the rows moved up with it.
+        assert_eq!(at(150.0, 35.0, 40.0), Some(split.rows[0][1]));
+    }
+
+    #[test]
+    fn measured_row_heights_move_the_rows_below_them() {
+        let split = split();
+        let mut geometry = Geometry::new(20.0);
+        geometry.record_size(split.rows[0][0], 45.0);
+        let frame = frame(&split);
+        let at = |y| {
+            geometry.element_at(
+                &split.document,
+                split.container,
+                split.pre,
+                &frame,
+                0.0,
+                (150.0, y),
+            )
+        };
+        // A wrapped first row takes 45, so the second row starts at 95.
+        assert_eq!(at(90.0), Some(split.rows[0][0]));
+        assert_eq!(at(100.0), Some(split.rows[0][1]));
+    }
+
+    #[test]
+    fn a_unified_diff_gives_its_one_column_the_whole_width() {
+        let split = split();
+        split.document.remove_attribute(split.pre, "data-diff-type");
+        let geometry = Geometry::new(20.0);
+        let frame = frame(&split);
+        let hit = geometry.element_at(
+            &split.document,
+            split.container,
+            split.pre,
+            &frame,
+            0.0,
+            (850.0, 55.0),
+        );
+        // x 850 is in the second half of a split, but a unified pre has only the first column,
+        // which spans it.
+        assert_eq!(hit, Some(split.rows[0][0]));
     }
 }

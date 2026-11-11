@@ -26,6 +26,7 @@ use pierre_diffs::document::NodeKey;
 use pierre_diffs::utils::dom::css_wrappers::wrap_core_css;
 
 use crate::events::Dispatch;
+use crate::events::Pointers;
 use crate::slot::SlotTable;
 
 /// The core stylesheet in the layer order the port's theme CSS expects, built once.
@@ -54,6 +55,8 @@ pub(crate) struct Renderer<'a> {
     /// The view's event wiring: a node the host registered for resize, visibility or scroll
     /// renders with that listener. A static view has none.
     pub(crate) dispatch: Option<&'a Rc<Dispatch>>,
+    /// The pointer handlers of the nodes the interaction manager listens through.
+    pub(crate) pointers: &'a Rc<Pointers>,
 }
 
 impl Renderer<'_> {
@@ -86,6 +89,7 @@ impl Renderer<'_> {
         if let Some(dispatch) = self.dispatch {
             attributes.extend(dispatch.listeners(key));
         }
+        attributes.extend(self.pointers.listeners(key));
         let children: Vec<Element> = if let Some(shadow_root) = document.shadow_root(key) {
             attributes.push(Attribute::new("data-dioxus-shadow", "", None, false));
             // Dioxus rejects a literal key, hence the interpolation.

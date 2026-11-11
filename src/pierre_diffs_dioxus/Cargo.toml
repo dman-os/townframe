@@ -15,7 +15,10 @@ pierre_diffs = { workspace = true }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "34ca2b0fa2d5ffea1179bbec7a071bcd546fd4f3", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 [dev-dependencies]
+# The tests deliver events as the serialized payloads a renderer would convert from.
+dioxus-html = { workspace = true, features = ["serialize"] }
 dioxus-ssr.workspace = true
+serde_json.workspace = true
 futures.workspace = true
 insta.workspace = true
 

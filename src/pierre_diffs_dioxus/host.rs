@@ -21,6 +21,17 @@
 //! that queues again (the render queue's follow-up frame) gets a spawned executor tick even when no
 //! later event arrives; this preserves the layout pass's follow-up without spinning in the flush.
 //!
+//! Pointers. The manager takes every pointer event as data with its target as a node key, but a
+//! Dioxus event does not say which element it hit, only which element's handler is running. So
+//! the renderer attaches the pointer handlers to the nodes the manager resolves targets from
+//! (`pointer_listeners`: the `pre` upstream listens on, its lines, line numbers, expand buttons,
+//! utility and annotation wrappers) and a handler reports the node it is attached to; the manager
+//! walks up from there as it walks up `composedPath()`. The document-level listeners of a drag are
+//! a flag (`add_document_listeners`) that the handlers on the nodes and on the view's top node
+//! read: events bubble to the top node, so a pointer move or up anywhere in the view reaches the
+//! manager while a drag is active, and the flag keeps them from reaching it otherwise.
+//! `element_from_point` answers from the cached row geometry (see `geometry.rs`).
+//!
 //! Timers. Standard Dioxus has no timer either, so the embedder passes a `sleep` function and a
 //! timeout is a spawned task that awaits it (`clear_timeout` cancels the task). A callback that
 //! runs from a task flushes the frame queue itself, since no handler is around it.
@@ -45,8 +56,6 @@ use pierre_diffs::components::virtualizer::VirtualizerHost;
 use pierre_diffs::document::Document;
 use pierre_diffs::document::NodeKey;
 use pierre_diffs::hast;
-use pierre_diffs::managers::interaction_manager::HitTest;
-use pierre_diffs::managers::interaction_manager::InteractionHost;
 use pierre_diffs::managers::resize_manager::ResizeManagerHost;
 use pierre_diffs::managers::scroll_sync_manager::ScrollSide;
 use pierre_diffs::managers::scroll_sync_manager::ScrollSyncHost;
@@ -55,8 +64,11 @@ use pierre_diffs::managers::universal_rendering_manager::AnimationFrames;
 use pierre_diffs::managers::universal_rendering_manager::FrameId;
 use pierre_diffs::utils::dom::scrollbar_gutter::ScrollbarGutterHost;
 
+mod pointer;
+
 use crate::geometry::Geometry;
 use crate::geometry::ScrollSample;
+use pointer::PointerState;
 
 /// What an embedder supplies for timers: a future that resolves after the duration.
 pub type SleepFuture = Pin<Box<dyn std::future::Future<Output = ()>>>;
@@ -107,6 +119,8 @@ pub(crate) struct DioxusHost {
     frames: RefCell<Frames>,
     timers: RefCell<HashMap<TimeoutId, Task>>,
     next_timeout: Cell<TimeoutId>,
+    /// What the `InteractionManager`'s listeners and hit-testing need (see `host/pointer.rs`).
+    pub(crate) pointer: PointerState,
 }
 
 impl DioxusHost {
@@ -174,6 +188,7 @@ impl DioxusHost {
             frames: RefCell::default(),
             timers: RefCell::default(),
             next_timeout: Cell::new(0),
+            pointer: PointerState::default(),
         })
     }
 
@@ -664,26 +679,6 @@ impl VirtualizerHost for DioxusHost {
             "{message} ({virtualizer_id}): {size_change} -> {new_size}; the Dioxus view does not enable resize debugging"
         );
     }
-}
-
-impl InteractionHost for DioxusHost {
-    fn document(&self) -> &Document {
-        &self.document
-    }
-
-    /// Hit-testing needs layout this step does not have; `Unavailable` is the port's "callers
-    /// fall back to the event path", which is what a host without `elementFromPoint` gets.
-    fn element_from_point(&self, _x: f64, _y: f64) -> HitTest<NodeKey> {
-        HitTest::Unavailable
-    }
-
-    fn add_pre_listeners(&self, _pre: NodeKey) {}
-
-    fn remove_pre_listeners(&self, _pre: NodeKey) {}
-
-    fn add_document_listeners(&self) {}
-
-    fn remove_document_listeners(&self) {}
 }
 
 impl ScrollbarGutterHost for DioxusHost {
