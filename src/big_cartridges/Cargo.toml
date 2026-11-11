@@ -10,6 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
 # internal
 utils_rs.workspace = true
 big_blobs.workspace = true
@@ -21,16 +22,23 @@ service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 
+#
 # encoding
 bytes.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+#
 # errors and state
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+#
+# internal
 big_cartridges_core = { workspace = true, features = ["schemars", "test-support"] }
+
+#
+# misc
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

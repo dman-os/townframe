@@ -10,6 +10,8 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 # internal
 utils_rs.workspace = true
@@ -23,10 +25,13 @@ service_client_core_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 
+#
+# misc
 # service protocol declaration: `service_protocol!` expands to irpc and tracing
 irpc.workspace = true
 tracing.workspace = true
 
+#
 # encoding
 automerge.workspace = true
 serde.workspace = true
@@ -36,21 +41,27 @@ uuid = { workspace = true, features = ["v4"] }
 atproto-dasl.workspace = true
 jiff.workspace = true
 
+#
 # crypto and identity
 ed25519-dalek.workspace = true
 rand.workspace = true
 zeroize = "1"
 
+#
 # streams
 futures.workspace = true
-
 # errors and durable authority state
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+#
+# internal
 big_sync = { workspace = true, features = ["test-support"] }
 big_repo = { workspace = true, features = ["test-support"] }
+
+#
+# misc
 iroh.workspace = true
 subduction_iroh.workspace = true
 insta = { workspace = true, features = ["json"] }

@@ -14,9 +14,14 @@ default = []
 iroh-http = ["dep:iroh", "dep:hyper", "dep:hyper-util", "dep:http-body-util"]
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 service_core_rs.workspace = true
 service_client_core_rs.workspace = true
+
+#
+# misc
 futures.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
 irpc.workspace = true

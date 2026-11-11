@@ -13,11 +13,16 @@ path = "lib.rs"
 schemars = ["method_core/schemars"]
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 big_cabinet_core = { workspace = true, features = ["schemars"] }
 big_sync_core = { workspace = true, default-features = false }
 service_core_rs.workspace = true
 macros.workspace = true
+
+#
+# misc
 serde.workspace = true
 serde_json.workspace = true
 schemars = "1.2"

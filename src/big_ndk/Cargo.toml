@@ -10,9 +10,14 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 service_core_rs.workspace = true
 service_client_core_rs.workspace = true
+
+#
+# misc
 http.workspace = true
 serde_json.workspace = true
 # The workspace pins wit-bindgen with default features off (the `std` feature breaks per-task

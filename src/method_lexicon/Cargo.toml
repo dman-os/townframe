@@ -10,15 +10,25 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 method_core = { workspace = true, features = ["schemars"] }
 big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
-serde_json.workspace = true
-thiserror.workspace = true
 big_blobs_core = { workspace = true, features = ["schemars"] }
 big_cartridges_core = { workspace = true, features = ["schemars"] }
 big_dispatch_core = { workspace = true, features = ["schemars"] }
 big_nodule_core = { workspace = true, features = ["schemars"] }
 
+#
+# misc
+serde_json.workspace = true
+thiserror.workspace = true
+
 [dev-dependencies]
+#
+# internal
 service_core_rs.workspace = true
+
+#
+# misc
 insta = { workspace = true, features = ["json"] }
