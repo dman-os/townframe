@@ -4,7 +4,7 @@
 //! where it is):
 //!
 //! ```text
-//! <node>/node.json        identity seed, operator policy and peers, created by `day init` (0600)
+//! <node>/node.json        identity seed, operator policy and peers, created by `day node init` (0600)
 //! <node>/node.lock        flock held for as long as a process has the node booted; holds its pid
 //! <node>/run/daemon.log   the background daemon's stderr
 //! <node>/node.sqlite, repo/, blobs/   the node's own storage, opened by `big_node::Bindings`
@@ -77,7 +77,7 @@ pub struct NodeDir {
     socket_dir: PathBuf,
 }
 
-/// What `day init` records. The identity seed is the node's keyhive identity and, through it, its
+/// What `day node init` records. The identity seed is the node's keyhive identity and, through it, its
 /// node id (ADR 033 section 6: one node key).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,7 +90,7 @@ pub struct NodeSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers: Option<PeerSettings>,
     /// Run the node as a relay (ADR 038 section 3): accept any peer and mirror every drawer the
-    /// node is a member of, which a user grants with `day drawers invite`. A relay needs the
+    /// node is a member of, which a user grants with `day drawers add-member`. A relay needs the
     /// network attachment, so this requires a `peers` section.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub relay: bool,
@@ -267,7 +267,7 @@ impl NodeDir {
         let path = self.settings_path();
         let bytes = std::fs::read(&path).wrap_err_with(|| {
             format!(
-                "reading {}; is there a node here? (`day init`)",
+                "reading {}; is there a node here? (`day node init`)",
                 path.display()
             )
         })?;
