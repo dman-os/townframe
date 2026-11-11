@@ -153,6 +153,22 @@ fn try_static_cli() -> Res<StaticCliResult> {
 }
 
 async fn static_cli(cli: Cli) -> Res<ExitCode> {
+    if let StaticCommands::Exec {
+        nsid: None,
+        command: None,
+        ..
+    } = &cli.command
+    {
+        Cli::command()
+            .find_subcommand_mut("exec")
+            .expect("exec is a subcommand")
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "give an operation's NSID or a command (see `day x --help`)",
+            )
+            .print()?;
+        return Ok(ExitCode::from(2));
+    }
     if let StaticCommands::Init { dir, relay } = &cli.command {
         return cmds::init::run(dir.clone(), *relay).await;
     }
@@ -172,9 +188,17 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Nodules { command } => cmds::nodules::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
-        StaticCommands::Intxt { command } => cmds::intxt::run(command).await,
         StaticCommands::Status { json } => cmds::status::run(json).await,
-        StaticCommands::Exec { nsid, input, get } => cmds::exec::run(nsid, input, get).await,
+        StaticCommands::Exec {
+            nsid,
+            input,
+            get,
+            command,
+        } => match (command, nsid) {
+            (Some(ExecCommands::Intxt { command }), _) => cmds::intxt::run(command).await,
+            (None, Some(nsid)) => cmds::exec::run(nsid, input, get).await,
+            (None, None) => unreachable!("checked before the node was opened"),
+        },
     }
 }
 
@@ -239,33 +263,45 @@ enum StaticCommands {
         #[clap(subcommand)]
         command: cmds::drawers::DrawersCommands,
     },
-    /// Create and install intxts (a stopgap until intxt's nodule runs these as operations)
-    Intxt {
-        #[clap(subcommand)]
-        command: cmds::intxt::IntxtCommands,
-    },
     /// Show the node's id, how it was reached, and what it runs
     Status {
         /// Print JSON instead of text
         #[arg(long)]
         json: bool,
     },
-    /// Execute an operation through the node's dispatch router and print the JSON answer
-    #[clap(visible_alias = "x")]
+    /// Run an operation or a cartridge's command, through the node's dispatch router
+    ///
+    /// `day x <nsid> [input]` calls the operation `nsid` and prints the JSON answer. A cartridge's
+    /// commands are the subcommands of `day x` (`day x intxt new ..`) and have no other spelling;
+    /// they are hard-coded until they are generated from the installed cartridges' command
+    /// bindings. An NSID always contains dots, so it cannot be a command's name.
+    #[clap(visible_alias = "x", args_conflicts_with_subcommands = true)]
     Exec {
         /// The operation's NSID, such as org.example.daybook.nodules.listNodules
-        nsid: String,
+        nsid: Option<String>,
         /// The operation's input as JSON (default: {})
         input: Option<String>,
         /// Call a query: send the input, an object of primitives, as the query string of a GET
         /// instead of the JSON body of a POST
         #[arg(long)]
         get: bool,
+        #[clap(subcommand)]
+        command: Option<ExecCommands>,
     },
     /// Generate shell completions
     Completions {
         #[clap(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+/// The commands of `day x`, one per cartridge.
+#[derive(Debug, clap::Subcommand)]
+enum ExecCommands {
+    /// Create and install intxts (stopgaps until intxt's nodule runs these as operations)
+    Intxt {
+        #[clap(subcommand)]
+        command: cmds::intxt::IntxtCommands,
     },
 }
 
@@ -294,5 +330,51 @@ impl StaticCliResult {
             }
             StaticCliResult::Exit(_) => unreachable!("can't happen"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> StaticCommands {
+        Cli::try_parse_from(std::iter::once("day").chain(args.iter().copied()))
+            .unwrap()
+            .command
+    }
+
+    #[test]
+    fn x_dispatches_a_command_or_an_nsid() {
+        let StaticCommands::Exec {
+            nsid: None,
+            command:
+                Some(ExecCommands::Intxt {
+                    command:
+                        cmds::intxt::IntxtCommands::New {
+                            title,
+                            description: None,
+                        },
+                }),
+            ..
+        } = parse(&["x", "intxt", "new", "t"])
+        else {
+            panic!("`day x intxt new t` is the intxt command");
+        };
+        assert_eq!(title, "t");
+        let StaticCommands::Exec {
+            nsid: Some(nsid),
+            input: Some(input),
+            command: None,
+            get: false,
+        } = parse(&["x", "org.example.a.b", "{}"])
+        else {
+            panic!("`day x org.example.a.b '{{}}'` is an operation call");
+        };
+        assert_eq!((nsid.as_str(), input.as_str()), ("org.example.a.b", "{}"));
+    }
+
+    #[test]
+    fn intxt_is_no_top_level_command() {
+        assert!(Cli::try_parse_from(["day", "intxt", "new", "t"]).is_err());
     }
 }
