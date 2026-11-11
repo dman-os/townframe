@@ -116,7 +116,7 @@ async fn start(dir: &NodeDir) -> Res<ExitCode> {
     let mut child = tokio::process::Command::new(std::env::current_exe()?)
         .arg("--node")
         .arg(dir.root())
-        .args(["daemon", "run"])
+        .args(["node", "run"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(log)
