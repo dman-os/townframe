@@ -11,3 +11,6 @@ features = ["manifest", "schemars"]
 
 [builds.native]
 features = ["manifest", "schemars"]
+
+[builds.wasm32-wasip3]
+features = ["manifest"]
