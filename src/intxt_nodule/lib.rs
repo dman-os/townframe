@@ -137,9 +137,9 @@ async fn as_caller<M: Unary>(
         })
 }
 
-/// `value` as the `main` slot of record `tag`, tagged with its `$type` as every record value is.
-fn datum(mut value: Value, tag: &str) -> (DatumKey, Value) {
-    value["$type"] = tag.into();
+/// `value` as the `main` slot of record `tag`; the key names the type, so the value carries no
+/// tag of its own.
+fn datum(value: Value, tag: &str) -> (DatumKey, Value) {
     (
         DatumKey::new(tag, b"main").expect("`main` is a valid slot"),
         value,
@@ -245,14 +245,14 @@ pub fn cartridge() -> Cartridge {
             let document = bundle
                 .document(&datum.name)
                 .expect("every declared datum renders its document");
-            let document = reached_only(Value::from(document), &datum.name);
+            let document = Value::from(document);
             declares_storage(&document).then(|| (datum.id.clone(), document))
         })
         .collect();
     let nodule = Nodule {
         lexicons: lexicons
             .into_iter()
-            .map(|lexicon| as_map(as_record(lexicon.file)))
+            .map(|lexicon| as_map(lexicon.file))
             .chain([as_map(
                 method_lexicon::lexicon::<CreateIntxt>()
                     .expect("createIntxt's types project a Lexicon"),
@@ -299,43 +299,6 @@ pub fn cartridge() -> Cartridge {
     cartridge
 }
 
-/// `document` keeping only the `$defs` its datum `name` reaches. `Bundle::document` carries every
-/// definition in scope, so one document per record grows with the square of the vocabulary:
-/// intxt's 25 came to 22,701 JSON nodes, past the 16,384 a stored datum may hold.
-fn reached_only(mut document: Value, name: &str) -> Value {
-    let defs = document["$defs"].take();
-    let mut reached = serde_json::Map::new();
-    let mut pending = vec![name.to_owned()];
-    while let Some(name) = pending.pop() {
-        if reached.contains_key(&name) {
-            continue;
-        }
-        let def = defs[&name].clone();
-        refs(&def, &mut pending);
-        reached.insert(name, def);
-    }
-    document["$defs"] = Value::Object(reached);
-    document
-}
-
-/// Pushes the name of every `#/$defs/<name>` reference in `value` onto `names`.
-fn refs(value: &Value, names: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            if let Some(name) = map
-                .get("$ref")
-                .and_then(Value::as_str)
-                .and_then(|target| target.strip_prefix("#/$defs/"))
-            {
-                names.push(name.to_owned());
-            }
-            map.values().for_each(|value| refs(value, names));
-        }
-        Value::Array(items) => items.iter().for_each(|value| refs(value, names)),
-        _ => {}
-    }
-}
-
 /// Whether `value` declares a storage form anywhere: a record that declares none needs no
 /// sidecar, since without one every position keeps the plain JSON kind its Lexicon states.
 fn declares_storage(value: &Value) -> bool {
@@ -344,16 +307,6 @@ fn declares_storage(value: &Value) -> bool {
         Value::Array(items) => items.iter().any(declares_storage),
         _ => false,
     }
-}
-
-/// `file` with its `main` definition stated as a record. `Bundle::lexicons` publishes a datum's
-/// `main` as the bare object the node registers its built-in datums with, but a nodule holds only
-/// the Lexicons whose `main` is a record (ADR 028 §4). The key is `any`: intxt keys its slots by
-/// UUIDv7, `main`, or a content-derived key such as a commit sha (ADR 036 §1).
-fn as_record(mut file: Value) -> Value {
-    let main = file["defs"]["main"].take();
-    file["defs"]["main"] = serde_json::json!({"type": "record", "key": "any", "record": main});
-    file
 }
 
 fn as_map(value: Value) -> IndexMap<String, Value> {
