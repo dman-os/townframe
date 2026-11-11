@@ -12,7 +12,10 @@
 
 mod record;
 
+use crate::capture::Batch;
+use crate::capture::RecordedIds;
 use crate::methods::IntxtError;
+use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
@@ -24,6 +27,7 @@ use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use method_core::Unary;
 use serde::Serialize;
 use serde_json::Value;
@@ -63,6 +67,18 @@ impl<H: HttpTransport> Caller<H> {
             capability: capability.map(str::to_owned),
             command_base,
         }
+    }
+
+    /// Records what a capture hook observed in `drawer`, the node's capture drawer, as the
+    /// datums of ADR 040, and answers the documents it recorded them in. `machine` is the node
+    /// the clones are on (`gitClone.machine`): the host knows it, the recorder does not.
+    pub async fn record_observations(
+        &self,
+        drawer: &DrawerId,
+        machine: &ActorUrl,
+        batch: &Batch,
+    ) -> Result<RecordedIds, IntxtError> {
+        record::record_observations(self, drawer, machine, batch).await
     }
 
     /// The command id of `step` writing `content`: the base, the step's fixed suffix and a short

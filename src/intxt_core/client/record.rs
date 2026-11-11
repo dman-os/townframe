@@ -797,45 +797,42 @@ fn text_of(content: &Content) -> Option<String> {
         .flatten()
 }
 
-impl<H: HttpTransport> Caller<H> {
-    /// Records what a capture hook observed in `drawer`, the node's capture drawer. `machine` is
-    /// the node the clones are on (`gitClone.machine`): the host knows it, the recorder does not.
-    pub async fn record_observations(
-        &self,
-        drawer: &DrawerId,
-        machine: &ActorUrl,
-        batch: &Batch,
-    ) -> Result<RecordedIds, IntxtError> {
-        let placement = drawer_placement(drawer);
-        let create_capability = self
-            .doc_capability(DocScope {
-                create: [placement.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
-        let recorder = Recorder {
-            caller: self,
-            placement,
-            create_capability,
-            machine,
-        };
-        let sessions = recorder.record_session(batch).await?;
-        let mut worktrees = BTreeMap::new();
-        for worktree in &batch.worktrees {
-            worktrees.insert(
-                worktree.identity.root.clone(),
-                recorder.record_worktree(worktree, &sessions).await?,
-            );
-        }
-        Ok(RecordedIds {
-            session: sessions.main.map(|doc| doc.to_string()),
-            subagents: sessions
-                .subagents
-                .into_iter()
-                .map(|(agent, doc)| (agent, doc.to_string()))
-                .collect(),
-            worktrees,
-            extra: Default::default(),
+/// [`Caller::record_observations`].
+pub(super) async fn record_observations<H: HttpTransport>(
+    caller: &Caller<H>,
+    drawer: &DrawerId,
+    machine: &ActorUrl,
+    batch: &Batch,
+) -> Result<RecordedIds, IntxtError> {
+    let placement = drawer_placement(drawer);
+    let create_capability = caller
+        .doc_capability(DocScope {
+            create: [placement.clone()].into(),
+            ..DocScope::default()
         })
+        .await?;
+    let recorder = Recorder {
+        caller,
+        placement,
+        create_capability,
+        machine,
+    };
+    let sessions = recorder.record_session(batch).await?;
+    let mut worktrees = BTreeMap::new();
+    for worktree in &batch.worktrees {
+        worktrees.insert(
+            worktree.identity.root.clone(),
+            recorder.record_worktree(worktree, &sessions).await?,
+        );
     }
+    Ok(RecordedIds {
+        session: sessions.main.map(|doc| doc.to_string()),
+        subagents: sessions
+            .subagents
+            .into_iter()
+            .map(|(agent, doc)| (agent, doc.to_string()))
+            .collect(),
+        worktrees,
+        extra: Default::default(),
+    })
 }
