@@ -21,6 +21,7 @@ intxt_core = { path = "../intxt_core" }
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
 big_cartridges_core.workspace = true
 big_nodule_core.workspace = true
+http.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 method_core = { workspace = true, features = ["schemars"] }
 method_lexicon = { path = "../method_lexicon" }

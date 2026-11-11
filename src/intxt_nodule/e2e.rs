@@ -1,6 +1,8 @@
 //! intxt's vocabularies written and read through a real node that admitted intxt's cartridge,
 //! so they are stored as its sidecar says.
 
+use crate::AddToIntxt;
+use crate::AddedToIntxt;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
@@ -16,25 +18,38 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::ListDocs;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::ReferenceDocId;
 use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
 use big_ndk_testing::TestNode;
 use intxt_core::generic;
 use intxt_core::work;
+use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 /// A node that admitted intxt's cartridge, serving its handler natively, with the four
 /// operations the handler calls granted to it, and the nodule enabled.
+/// Each document creation is a command of its own; the node refuses a reused command id.
+static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
+
 async fn boot() -> TestNode {
     let cartridge = crate::cartridge();
     let id = cartridge.id.clone();
     // The ceiling of what a nodule can be granted covers the registered cartridge's own
     // authority only, so the foreign operations it calls must be added to it.
     let operations = DispatchScope {
-        operations: crate::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+        operations: crate::ops::REQUIRED_OPERATIONS.map(str::to_owned).into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()
@@ -75,9 +90,13 @@ async fn capability(node: &TestNode, scope: DocScope) -> big_cabinet_core::autho
         .capability_id
 }
 
-/// Creates a document in the node's local drawer holding `datums`.
-async fn create(node: &TestNode, datums: BTreeMap<DatumKey, Value>) -> WriteReceipt {
-    let placement = format!("drawer {}", node.big_node().drawers.local().present_id);
+/// Creates a document in `drawer` holding `datums`.
+async fn create_in(
+    node: &TestNode,
+    drawer: &DocId,
+    datums: BTreeMap<DatumKey, Value>,
+) -> WriteReceipt {
+    let placement = format!("drawer {drawer}");
     let capability = capability(
         node,
         DocScope {
@@ -93,13 +112,22 @@ async fn create(node: &TestNode, datums: BTreeMap<DatumKey, Value>) -> WriteRece
             RequestContext::root(),
             CreateDoc {
                 capability,
-                command: CommandId::try_from("create".to_owned()).unwrap(),
+                command: CommandId::try_from(format!(
+                    "create-{}",
+                    NEXT_COMMAND.fetch_add(1, Ordering::Relaxed)
+                ))
+                .unwrap(),
                 placement,
                 datums,
             },
         )
         .await
         .unwrap()
+}
+
+/// Creates a document in the node's local drawer holding `datums`.
+async fn create(node: &TestNode, datums: BTreeMap<DatumKey, Value>) -> WriteReceipt {
+    create_in(node, &node.big_node().drawers.local().present_id, datums).await
 }
 
 async fn write(node: &TestNode, document: &DocId, mode: WriteMode, set: BTreeMap<DatumKey, Value>) {
@@ -249,5 +277,155 @@ async fn create_intxt_writes_the_descriptor_datums() {
             datum::<generic::Body>("main", json!({"order": []})),
         ])
     );
+    node.stop().await;
+}
+
+/// `addToIntxt` includes parts once: each part is an entry in the intxt and a place in its body's
+/// order, adding one again changes neither, and the parts' documents are in the intxt's drawer.
+#[tokio::test]
+async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
+    let node = boot().await;
+    let intxt = async |title: &str| {
+        node.call(crate::CreateIntxt {
+            title: title.to_owned(),
+            description: None,
+        })
+        .await
+        .unwrap()
+        .drawer_id
+    };
+    let captures = intxt("captures").await;
+    let review = intxt("review").await;
+    let capture = async |datums: BTreeMap<DatumKey, Value>| {
+        let tag = datums.keys().next().unwrap().tag().to_string();
+        let receipt = create_in(&node, &captures, datums).await;
+        format!("dtxt:datum:{}/{tag}/main", receipt.doc_id)
+            .parse::<DatumReference>()
+            .unwrap()
+    };
+    let worktree = capture(BTreeMap::from([datum::<work::Worktree>(
+        "main",
+        json!({
+            "clone": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitClone/0193c",
+            "id": "0193a",
+            "path": "/work/townframe",
+            "files": {},
+            "opLogs": []
+        }),
+    )]))
+    .await;
+    let session = capture(BTreeMap::from([datum::<work::AgentSession>(
+        "main",
+        json!({"harness": "claude-code", "sessionId": "eb26ecaa", "cwd": "/work/townframe"}),
+    )]))
+    .await;
+
+    let mut added = Vec::new();
+    for part in [&worktree, &session, &worktree] {
+        let AddedToIntxt { entry } = node
+            .call(AddToIntxt {
+                intxt: review.clone(),
+                part: part.clone(),
+            })
+            .await
+            .unwrap();
+        added.push(entry.to_string());
+    }
+    assert_eq!(
+        added,
+        [
+            format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+            format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
+            format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+        ]
+    );
+    let entries = [
+        key::<work::WorktreeEntry>("0193a"),
+        key::<work::SessionEntry>("eb26ecaa"),
+        key::<generic::Body>("main"),
+    ];
+    assert_eq!(
+        read(&node, &review, &entries).await,
+        BTreeMap::from([
+            datum::<work::WorktreeEntry>("0193a", json!({"worktree": worktree.to_string()})),
+            datum::<work::SessionEntry>("eb26ecaa", json!({"session": session.to_string()})),
+            datum::<generic::Body>(
+                "main",
+                json!({"order": [
+                    "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
+                    "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
+                ]}),
+            ),
+        ])
+    );
+
+    let node_drawers = &node.big_node().drawers;
+    let listing = node_drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.big_node().authority.root).metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: [(review.clone(), DrawerAccess::Read)].into(),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    let listed = node_drawers
+        .client
+        .call(
+            RequestContext::root(),
+            ListDocs {
+                capability: listing,
+                drawer_id: review.clone(),
+                offset: 0,
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+    for part in [&worktree, &session] {
+        let ReferenceDocId::Concrete(doc) = part.document() else {
+            unreachable!("the parts were named by document")
+        };
+        assert!(
+            listed.docs.iter().any(|listed| &listed.doc_id == doc),
+            "{doc} is not in the intxt's drawer: {listed:?}"
+        );
+    }
+    node.stop().await;
+}
+
+/// Retrying `createIntxt` under one idempotency key reuses its commands, so it answers the same
+/// drawer instead of creating a second one; another key creates another.
+#[tokio::test]
+async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
+    let node = boot().await;
+    let create = async |key: &str| {
+        let output = node
+            .invoke(
+                crate::CreateIntxt::XRPC.nsid,
+                json!({"title": "Retried"}),
+                InvocationContext {
+                    idempotency_key: Some(key.to_owned()),
+                    http: None,
+                },
+                RequestContext::root(),
+            )
+            .await
+            .unwrap();
+        serde_json::from_value::<crate::IntxtCreated>(output)
+            .unwrap()
+            .drawer_id
+    };
+    let first = create("retry-1").await;
+    assert_eq!(create("retry-1").await, first);
+    assert_ne!(create("retry-2").await, first);
     node.stop().await;
 }
