@@ -50,7 +50,11 @@ enum Screen {
     /// J3.
     File { change: usize, file: usize },
     /// J4.
-    Thread { change: usize, file: usize, thread: usize },
+    Thread {
+        change: usize,
+        file: usize,
+        thread: usize,
+    },
 }
 
 impl Screen {

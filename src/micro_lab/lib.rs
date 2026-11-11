@@ -43,7 +43,8 @@ clay_mdk::export_micro!(activate, micro_lab_manifest::manifest);
 /// The lab's model and view in one root-scope render: the list of experiments, or the open one.
 fn view() -> Element {
     let mut open = use_signal(|| None::<&'static str>);
-    let experiment = open().and_then(|id| EXPERIMENTS.iter().find(|experiment| experiment.id == id));
+    let experiment =
+        open().and_then(|id| EXPERIMENTS.iter().find(|experiment| experiment.id == id));
     match experiment {
         Some(experiment) => (experiment.open)(Callback::new(move |()| open.set(None))),
         None => rsx! {
