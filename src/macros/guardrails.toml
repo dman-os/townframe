@@ -5,3 +5,5 @@ allowed_dependencies = []
 allow_external_api_types = false
 
 [builds.native]
+
+[builds.wasm32-wasip3]
