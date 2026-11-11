@@ -45,6 +45,7 @@ pub use native::CanonicalF64;
 pub use native::NativeReadBudget;
 pub use native::NativeReadError;
 pub use native::NativeValue;
+pub use native::ResourceLimit;
 pub use native::encode_native;
 use serde::Deserialize;
 use serde::Serialize;
