@@ -133,8 +133,8 @@ fn try_static_cli() -> Res<StaticCliResult> {
     // would drop the serving future with the node still booted.
     let owns_signals = matches!(
         cli.command,
-        StaticCommands::Daemon {
-            command: cmds::daemon::DaemonCommands::Run
+        StaticCommands::Node {
+            command: cmds::node::NodeCommands::Run
         }
     );
     lazy::rt()
@@ -164,12 +164,15 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             .expect("exec is a subcommand")
             .error(
                 clap::error::ErrorKind::MissingRequiredArgument,
-                "give an operation's NSID or a command (see `day x --help`)",
+                "give a method's NSID or a command (see `day x --help`)",
             )
             .print()?;
         return Ok(ExitCode::from(2));
     }
-    if let StaticCommands::Init { dir, relay } = &cli.command {
+    if let StaticCommands::Node {
+        command: cmds::node::NodeCommands::Init { dir, relay },
+    } = &cli.command
+    {
         return cmds::init::run(dir.clone(), *relay).await;
     }
 
@@ -177,17 +180,16 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     if !conf.node_dir.is_initialized() {
         error!(
             path = ?conf.cli_config.node_path,
-            "node not initialized at resolved path; run `day init`",
+            "node not initialized at resolved path; run `day node init`",
         );
         return Ok(ExitCode::FAILURE);
     }
 
     match cli.command {
-        StaticCommands::Init { .. } | StaticCommands::Completions { .. } => unreachable!(),
-        StaticCommands::Daemon { command } => cmds::daemon::run(command).await,
+        StaticCommands::Completions { .. } => unreachable!(),
+        StaticCommands::Node { command } => cmds::node::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
-        StaticCommands::Status { json } => cmds::status::run(json).await,
         StaticCommands::Exec {
             nsid,
             input,
@@ -233,39 +235,26 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum StaticCommands {
-    /// Set up a new node directory with a fresh identity
-    Init {
-        /// The directory to create the node in (default: the --node directory)
-        dir: Option<PathBuf>,
-        /// Run the node as a relay: it accepts any peer and mirrors the drawers it is made a
-        /// member of
-        #[arg(long)]
-        relay: bool,
-    },
-    /// Run, start, stop and inspect the node's background daemon
-    Daemon {
+    /// Set up, run, stop and inspect the node
+    Node {
         #[clap(subcommand)]
-        command: cmds::daemon::DaemonCommands,
+        command: cmds::node::NodeCommands,
     },
     /// Manage the peers the node's daemon dials at start
+    #[clap(visible_alias = "peer")]
     Peers {
         #[clap(subcommand)]
         command: cmds::peers::PeersCommands,
     },
     /// Share drawers with other nodes
+    #[clap(visible_alias = "drawer")]
     Drawers {
         #[clap(subcommand)]
         command: cmds::drawers::DrawersCommands,
     },
-    /// Show the node's id, how it was reached, and what it runs
-    Status {
-        /// Print JSON instead of text
-        #[arg(long)]
-        json: bool,
-    },
-    /// Run an operation or a cartridge's command, through the node's dispatch router
+    /// Run a method or a cartridge's command, through the node's dispatch router
     ///
-    /// `day x <nsid> [input]` calls the operation `nsid` and prints the JSON answer. A cartridge's
+    /// `day x <nsid> [input]` calls the method `nsid` and prints the JSON answer. A cartridge's
     /// commands are the subcommands of `day x` (`day x intxt install ..`) and have no other spelling;
     /// they are hard-coded until they are generated from the installed cartridges' command
     /// bindings. An NSID always contains dots, so it cannot be a command's name.

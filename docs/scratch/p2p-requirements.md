@@ -1,6 +1,10 @@
 # P2P requirements and forcing functions
 
-**Status:** Draft for the operator (2026-11-11, D42 "Sisters and mothers"). This lists what every P2P subsystem asks of a node relationship, before the relationship vocabulary is named.
+Status: Draft for the operator.
+Owner: Townframe maintainers
+Updated: 2026-11-11
+Scope: What every P2P subsystem asks of a node relationship (D42 "Sisters and mothers"), before the relationship vocabulary is named.
+
 
 **Builds on:** [ADR 038](../adrs/038-node-orientations-and-the-relay-alpha.md), which already settled two things:
 - Per drawer, keyhive's access levels (`relay`, `read`, `write`, `admin`) are the only vocabulary.

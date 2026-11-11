@@ -30,7 +30,7 @@
 //! the command's stdin) is written from memory of Claude Code's hooks documentation and has not
 //! been checked against it here; verify it before relying on it. Add `--node <dir>` (or set
 //! `DAY_NODE`) to name the node, and `"timeout"` to a hook if a recording can take long. The
-//! command needs the node's daemon (`day daemon start`) and fails fast without one: booting the
+//! command needs the node's daemon (`day node start`) and fails fast without one: booting the
 //! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
 
 //! # ACP agents
@@ -143,7 +143,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
 pub(crate) async fn require_daemon(dir: &crate::context::NodeDir) -> Res<()> {
     eyre::ensure!(
         dir.probe_socket().await? == crate::context::SocketState::Live,
-        "no daemon is serving the node at {}; start it with `day daemon start`",
+        "no daemon is serving the node at {}; start it with `day node start`",
         dir.root().display()
     );
     Ok(())

@@ -4,7 +4,7 @@ An NSID nothing claims is the router's `UnknownMethod`. Input that is not JSON i
 before the node is booted.
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
 $ day exec org.example.nothing.here
