@@ -61,6 +61,10 @@ fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
 struct Recorder {
     selected: Rc<RefCell<Vec<Option<SelectedLineRange>>>>,
     view: Rc<RefCell<Option<Rc<View<()>>>>>,
+    /// The embedder's `Interaction::selected_lines`, read on every render of the page, and the
+    /// signal that re-renders it.
+    controlled: Rc<RefCell<Option<SelectedLineRange>>>,
+    rerender: Rc<std::cell::Cell<Option<Signal<u32>>>>,
 }
 
 impl PartialEq for Recorder {
@@ -81,6 +85,9 @@ struct PageProps {
 #[component]
 fn Page(props: PageProps) -> Element {
     let selected = Rc::clone(&props.recorder.selected);
+    let rerender = use_signal(|| 0_u32);
+    props.recorder.rerender.set(Some(rerender));
+    let _: u32 = rerender();
     let never: Rc<dyn Fn(Duration) -> SleepFuture> = Rc::new(|_| Box::pin(std::future::pending()));
     let view = use_view(&FileDiffViewProps::<()> {
         input: props.input.clone(),
@@ -97,6 +104,7 @@ fn Page(props: PageProps) -> Element {
             Interaction {
                 line_hover_highlight: LineHoverHighlight::Both,
                 enable_line_selection: true,
+                selected_lines: props.recorder.controlled.borrow().clone(),
                 on_line_selected: Some(Callback::new(move |range| {
                     selected.borrow_mut().push(range);
                 })),
@@ -811,4 +819,38 @@ fn dropping_the_view_after_a_render_replaced_the_hovered_rows_cleans_up() {
     rig.click(button, Pointer::mouse(20.0, 200.0).pressed());
     // `use_drop` runs `FileDiff::clean_up`, which clears the hover it still holds.
     drop(rig);
+}
+
+#[test]
+fn the_embedder_sets_and_clears_the_selection_through_the_interaction_prop() {
+    let mut rig = Rig::new(pair(8, &[7]), false, true, true);
+    let set = |rig: &mut Rig, range: Option<SelectedLineRange>| {
+        *rig.recorder.controlled.borrow_mut() = range;
+        let mut rerender = rig.recorder.rerender.get().expect("the page rendered");
+        rig.dom.in_scope(ScopeId::ROOT, || rerender += 1);
+        rig.settle();
+    };
+    set(&mut rig, Some(range(2, 4)));
+    let mut lines = rig.selected_lines();
+    lines.sort();
+    assert_eq!(lines, ["2", "3", "4"]);
+    // The write is the embedder's own: it is not reported back.
+    assert!(rig.recorder.selected.borrow().is_empty());
+
+    // A render that leaves the prop as it was keeps a selection the user made since.
+    let six = rig.number(6);
+    let press = Pointer::mouse(5.0, 5.0).pressed();
+    rig.pointer(six, "pointerdown", press);
+    rig.pointer(six, "pointerup", Pointer { button: 0, ..press }.dragging());
+    assert_eq!(rig.last_selection(), Some(range(6, 6)));
+    let mut rerender = rig.recorder.rerender.get().expect("the page rendered");
+    rig.dom.in_scope(ScopeId::ROOT, || rerender += 1);
+    rig.settle();
+    assert_eq!(rig.selected_lines(), ["6"]);
+
+    // Setting another range replaces it; clearing removes the highlight.
+    set(&mut rig, Some(range(3, 3)));
+    assert_eq!(rig.selected_lines(), ["3"]);
+    set(&mut rig, None);
+    assert_eq!(rig.selected_lines(), Vec::<String>::new());
 }
