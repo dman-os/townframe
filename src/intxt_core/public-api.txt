@@ -6,6 +6,7 @@
 impl Default for intxt_core::generic::Intxt
 pub const intxt_core::cartridge::AUTHORITY: & str
 pub const intxt_core::cartridge::HANDLER_ARTIFACT: & str
+pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 8]
 pub enum intxt_core::annotation::Motivation { # [serde (rename = "assessing")] Assessing, # [serde (rename = "bookmarking")] Bookmarking, # [serde (rename = "classifying")] Classifying, # [serde (rename = "commenting")] Commenting, # [serde (rename = "describing")] Describing, # [serde (rename = "editing")] Editing, # [serde (rename = "highlighting")] Highlighting, # [serde (rename = "identifying")] Identifying, # [serde (rename = "linking")] Linking, # [serde (rename = "moderating")] Moderating, # [serde (rename = "questioning")] Questioning, # [serde (rename = "replying")] Replying, # [serde (rename = "tagging")] Tagging, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::Progress { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::StructureKind { # [serde (rename = "task")] Task, # [serde (rename = "decision")] Decision, # [serde (rename = "section")] Section, # [datum (other)] Unknown (String) }
@@ -26,7 +27,7 @@ pub impl intxt_core::capture::Content::fn blob (size : u64 , hash : impl Into < 
 pub impl intxt_core::capture::Content::fn text (text : impl Into < String >) -> Self
 pub impl intxt_core::capture::Content::fn with_blob (mut self , blob : BlobRef) -> Self
 pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
-pub intxt_core::cartridge::fn cartridge (handler : Artifact , requires : & [& str]) -> Cartridge
+pub intxt_core::cartridge::fn cartridge (handler : Artifact) -> Cartridge
 pub intxt_core::cartridge::fn handler_artifact (wasm : & [u8]) -> Artifact
 pub intxt_core::fn declarations () -> Universe
 pub mod intxt_core::annotation

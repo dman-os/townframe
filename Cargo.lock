@@ -4181,7 +4181,6 @@ dependencies = [
  "http",
  "intxt_capture",
  "intxt_core",
- "intxt_nodule",
  "libc",
  "method_core",
  "rand 0.9.5",
