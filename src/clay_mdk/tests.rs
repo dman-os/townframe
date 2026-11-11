@@ -92,6 +92,7 @@ fn replay(batch: &[presentation::Mutation], to: &mut impl WriteMutations) {
             Mutation::CreateElement((tag, ns)) => to.create_element(tag, ns.as_deref()),
             Mutation::CreateText(value) => to.create_text(value),
             Mutation::MountComponent(_) => unreachable!("counter fixture has no component grants"),
+            Mutation::SetStyleSheet(_) => unreachable!("counter fixture sets no stylesheet"),
             Mutation::CloneNode => to.clone(),
             Mutation::AppendChildren(m) => to.append_children(*m as usize),
             Mutation::ReplaceWith(m) => to.replace_with(*m as usize),
@@ -827,6 +828,17 @@ impl presentation::HostSurface for TestHost {
             }
         }
     }
+    fn element_command(
+        &mut self,
+        _surface: Resource<Surface>,
+        _element: u32,
+        _command: presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), PresentationError>> {
+        Ok(Err(PresentationError::Unsupported(
+            "element commands".into(),
+        )))
+    }
+
     fn retain(
         &mut self,
         surface: Resource<Surface>,
@@ -1028,6 +1040,33 @@ fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     assert_eq!(sdk_text_edits(&mut dom, second), ["19"]);
     assert!(!dom.edits.contains_key(&first));
     dom.unmount_target(11);
+}
+
+/// A read the host cannot answer comes back as an error reply, which the guest surfaces as the
+/// standard Dioxus `MountedError`, and a value reply decodes. Drives the guest's reply plumbing
+/// directly: a native test has no surface to send a command over.
+#[tokio::test]
+async fn sdk_element_replies_complete_reads_and_surface_errors_as_mounted_errors() {
+    fn offset_x(value: &serde_json::Value) -> f64 {
+        value["x"].as_f64().unwrap()
+    }
+    fn app() -> dioxus_core::Element {
+        dioxus_core::VNode::empty()
+    }
+    let dom = crate::GuestDom::new(app);
+
+    let (answered, wait) = dom.replies.begin();
+    dom.complete_reply(&serde_json::json!({"request": answered, "value": {"x": 3.0, "y": 4.0}}));
+    assert_eq!(crate::guest::settle(wait, offset_x).await.unwrap(), 3.0);
+
+    let (refused, wait) = dom.replies.begin();
+    assert_ne!(answered, refused);
+    dom.complete_reply(&serde_json::json!({"request": refused, "error": "not measurable"}));
+    let error = crate::guest::settle(wait, offset_x).await.unwrap_err();
+    assert!(
+        matches!(error, dioxus_html::MountedError::OperationFailed(ref cause) if cause.to_string() == "not measurable"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -1781,4 +1820,99 @@ async fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_sibli
     rig.click(&second, second_button).await?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
+}
+
+/// Standard `document::Style` with inline text becomes the guest's stylesheet, the text a mount
+/// is sent as `set-style-sheet`; `document::Stylesheet` (a `<link>`) is egress and the next
+/// flush refuses it. A native test has no surface to send the mutation over, so this reads the
+/// guest document where `GuestDom::render` takes it from.
+#[test]
+fn sdk_document_style_sets_the_stylesheet_and_stylesheet_links_are_refused() {
+    use dioxus::document::Style;
+    use dioxus::document::Stylesheet;
+    use dioxus::prelude::*;
+
+    fn styled() -> Element {
+        rsx! {
+            Style { ":host {{ display: block }}" }
+            p { "content" }
+        }
+    }
+    let mut dom = crate::GuestDom::new(styled);
+    dom.mount_target(1);
+    dom.render().unwrap();
+    assert_eq!(
+        dom.head.sheet.borrow().as_deref(),
+        Some(":host { display: block }")
+    );
+
+    fn linked() -> Element {
+        rsx! { Stylesheet { href: "https://example.invalid/a.css" } }
+    }
+    let mut dom = crate::GuestDom::new(linked);
+    dom.mount_target(1);
+    let error = dom.render().unwrap_err();
+    assert!(
+        matches!(&error, crate::presentation::PresentationError::InvalidBatch(reason) if reason.contains("<link>")),
+        "{error:?}"
+    );
+    assert!(dom.head.sheet.borrow().is_none());
+}
+
+/// `document::Style { media }` wraps the sheet in `@media`, a malformed query is refused, `title`
+/// and `nonce` are ignored, and any other attribute refuses the flush.
+#[test]
+fn sdk_document_style_attributes_are_honoured_ignored_or_refused() {
+    use dioxus::document::Style;
+    use dioxus::prelude::*;
+
+    fn flush(
+        app: fn() -> Element,
+    ) -> (
+        crate::GuestDom,
+        Result<(), crate::presentation::PresentationError>,
+    ) {
+        let mut dom = crate::GuestDom::new(app);
+        dom.mount_target(1);
+        let result = dom.render();
+        (dom, result)
+    }
+
+    let (dom, result) =
+        flush(|| rsx! { Style { media: "(min-width: 600px)", "a {{ color: red }}" } });
+    result.unwrap();
+    assert_eq!(
+        dom.head.sheet.borrow().as_deref(),
+        Some("@media (min-width: 600px) {\na { color: red }\n}")
+    );
+
+    let (dom, result) = flush(|| rsx! { Style { title: "t", nonce: "n", "a {{ color: red }}" } });
+    result.unwrap();
+    assert_eq!(dom.head.sheet.borrow().as_deref(), Some("a { color: red }"));
+
+    for (label, app) in [
+        (
+            "malformed media",
+            (|| rsx! { Style { media: "a }} @import x {{", "a {{ color: red }}" } })
+                as fn() -> Element,
+        ),
+        (
+            "empty media",
+            || rsx! { Style { media: "  ", "a {{ color: red }}" } },
+        ),
+        (
+            "unknown attribute",
+            || rsx! { Style { class: "x", "a {{ color: red }}" } },
+        ),
+    ] {
+        let (dom, result) = flush(app);
+        assert!(
+            matches!(
+                &result,
+                Err(crate::presentation::PresentationError::InvalidBatch(_))
+            ),
+            "{label}: {result:?}"
+        );
+        assert!(dom.head.sheet.borrow().is_none(), "{label}");
+    }
 }

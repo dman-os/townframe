@@ -586,14 +586,21 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
         let tree = props.tree.borrow();
         let child = tree.node(SurfaceNodeId::ROOT).children[0];
         let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
-        let rendered = tree.render_node(child, &dispatch, &|_| {
-            unreachable!("test has no component slots")
-        })?;
+        let rendered = tree.render_node(
+            child,
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )?;
         props
             .keys
             .borrow_mut()
             .push(rendered.key().map(str::to_owned));
-        tree.render(&dispatch, &|_| unreachable!("test has no component slots"))
+        tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
     }
     let tree = Rc::new(std::cell::RefCell::new(SurfaceTree::new()));
     tree.borrow_mut().apply(&counter_initial_batch()).unwrap();
@@ -793,9 +800,11 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     }
     fn app(props: Props) -> Element {
         let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
-        props
-            .tree
-            .render(&dispatch, &|_| unreachable!("test has no component slots"))
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
     }
     let mut tree = SurfaceTree::new();
     tree.apply(&[
@@ -834,6 +843,163 @@ fn valid_static_attributes_namespaces_and_listeners_project_into_host_vdom() {
     assert!(
         matches!(&svg.kind, SurfaceNodeKind::Element { tag, namespace: Some(namespace), .. }
         if tag == "svg" && namespace == "http://www.w3.org/2000/svg")
+    );
+}
+
+#[test]
+fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        tree: SurfaceTree,
+    }
+    fn app(props: Props) -> Element {
+        let dispatch: SurfaceEventHandler = Rc::new(|_| EventResponse::default());
+        props.tree.render(
+            &dispatch,
+            &|_| unreachable!("test has no component slots"),
+            &crate::ElementHandles::default(),
+        )
+    }
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetAttribute((
+            "data-line-index".into(),
+            None,
+            AttributeValue::Text("3,1".into()),
+        )),
+        Mutation::SetAttribute((
+            "overflow-anchor".into(),
+            Some("style".into()),
+            AttributeValue::Text("none".into()),
+        )),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    // A refused batch poisons the tree, so each malformed name gets a fresh one.
+    for bad in ["data-", "data-Line", "data-a:b", "data-a b"] {
+        let error = SurfaceTree::new()
+            .apply(&[
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetAttribute((bad.into(), None, AttributeValue::Text("x".into()))),
+                Mutation::AppendChildren(1),
+            ])
+            .expect_err("malformed data-* name must be refused");
+        assert_eq!(
+            error,
+            PresentationError::Unsupported("attribute name or namespace".into()),
+            "{bad}"
+        );
+    }
+    let mut dom = dioxus_core::VirtualDom::new_with_props(app, Props { tree });
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let div = host_tree.node(host_tree.node(SurfaceNodeId::ROOT).children[0]);
+    let SurfaceNodeKind::Element { attributes, .. } = &div.kind else {
+        panic!("expected an element")
+    };
+    assert_eq!(
+        attributes.get(&("data-line-index".to_owned(), None)),
+        Some(&AttributeValue::Text("3,1".into()))
+    );
+}
+
+#[test]
+fn a_later_stylesheet_replaces_the_earlier_one_and_is_sanitized_at_ingress() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[Mutation::SetStyleSheet(
+        "a { color: red; background: url(x.png) }".into(),
+    )])
+    .unwrap();
+    assert_eq!(tree.stylesheet, "a {\ncolor: red;\n}");
+    tree.apply(&[Mutation::SetStyleSheet("b { margin: 0 }".into())])
+        .unwrap();
+    assert_eq!(tree.stylesheet, "b {\nmargin: 0;\n}");
+    let oversized = "a { color: red }".repeat(SurfaceTree::MAX_STRING_BYTES);
+    assert_eq!(
+        SurfaceTree::new().apply(&[Mutation::SetStyleSheet(oversized)]),
+        Err(PresentationError::Unsupported("string byte limit".into()))
+    );
+}
+
+#[test]
+fn a_stylesheet_is_charged_to_the_retained_budget_and_a_replacement_releases_its_bytes() {
+    // Sheets already in the sanitizer's output form, so stored length equals raw length.
+    let sheet = |len: usize| format!("a {{\n--p: {};\n}}", "x".repeat(len - 12));
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[Mutation::SetStyleSheet(sheet(100))]).unwrap();
+    assert_eq!(tree.retained_bytes, 100);
+    // Fill the rest of the budget with text, leaving less than a full string of room.
+    let text = [
+        Mutation::CreateText("x".repeat(SurfaceTree::MAX_STRING_BYTES)),
+        Mutation::AppendChildren(1),
+    ];
+    for _ in 0..SurfaceTree::MAX_RETAINED_BYTES / SurfaceTree::MAX_STRING_BYTES - 1 {
+        tree.apply(&text).unwrap();
+    }
+    let leave = 1000;
+    let left = SurfaceTree::MAX_RETAINED_BYTES - tree.retained_bytes - leave;
+    tree.apply(&[
+        Mutation::CreateText("x".repeat(left)),
+        Mutation::AppendChildren(1),
+    ])
+    .unwrap();
+    let free = SurfaceTree::MAX_RETAINED_BYTES - tree.retained_bytes;
+    assert_eq!(free, leave);
+    // Replacing the 100-byte sheet releases it: the new one may use the free room plus those 100.
+    let mut fits = tree.clone();
+    fits.apply(&[Mutation::SetStyleSheet(sheet(free + 100))])
+        .unwrap();
+    assert_eq!(fits.retained_bytes, SurfaceTree::MAX_RETAINED_BYTES);
+    // One byte more is refused.
+    assert_eq!(
+        tree.apply(&[Mutation::SetStyleSheet(sheet(free + 101))]),
+        Err(PresentationError::Unsupported("retained byte limit".into()))
+    );
+}
+
+#[test]
+fn data_attribute_names_are_capped_per_surface() {
+    let cap = SurfaceTree::MAX_DATA_ATTRIBUTE_NAMES;
+    let set_names = |names: &mut dyn Iterator<Item = String>| {
+        let mut batch = vec![Mutation::CreateElement(("div".into(), None))];
+        batch
+            .extend(names.map(|name| {
+                Mutation::SetAttribute((name, None, AttributeValue::Text("x".into())))
+            }));
+        batch.push(Mutation::AppendChildren(1));
+        batch
+    };
+    // Spread over batches: one element holds at most MAX_ATTRIBUTES_PER_NODE attributes.
+    let mut surface = SurfaceTree::new();
+    for chunk in (0..cap)
+        .collect::<Vec<_>>()
+        .chunks(SurfaceTree::MAX_ATTRIBUTES_PER_NODE)
+    {
+        let mut names = chunk.iter().map(|index| format!("data-cap-a{index}"));
+        surface
+            .apply(&set_names(&mut names))
+            .expect("within the per-surface cap");
+    }
+    // Repeating names (including after other work) consumes no budget.
+    let mut repeats =
+        (0..SurfaceTree::MAX_ATTRIBUTES_PER_NODE).map(|index| format!("data-cap-a{index}"));
+    surface
+        .apply(&set_names(&mut repeats))
+        .expect("repeats are free");
+    // A second surface has its own budget, though it shares names with the first.
+    let mut other = SurfaceTree::new();
+    let mut fresh = ["data-cap-a0".to_owned(), "data-cap-b0".to_owned()].into_iter();
+    other
+        .apply(&set_names(&mut fresh))
+        .expect("independent budget");
+    // The 513th distinct name on the first surface is refused.
+    let mut one_more = std::iter::once("data-cap-a-over".to_owned());
+    assert_eq!(
+        surface.apply(&set_names(&mut one_more)),
+        Err(PresentationError::InvalidBatch(
+            "too many distinct data-* attribute names on this surface".into()
+        ))
     );
 }
 
@@ -1113,4 +1279,48 @@ fn short_adversarial_instruction_sequences_preserve_invariants_without_unwinding
             }
         }
     }
+}
+
+#[test]
+fn elements_leaving_the_tree_are_retired_by_id_through_remove_replace_steal_and_clear() {
+    let create = |id: u32| {
+        vec![
+            Mutation::PushId(0),
+            Mutation::CreateElement(("div".into(), None)),
+            Mutation::SetId(id),
+            Mutation::AppendChildren(1),
+            Mutation::Pop,
+        ]
+    };
+    let mut tree = SurfaceTree::new();
+    for id in 1..=3 {
+        tree.apply(&create(id)).unwrap();
+    }
+    assert!(tree.take_retired_elements().is_empty());
+    // Remove.
+    tree.apply(&[Mutation::PushId(1), Mutation::Remove])
+        .unwrap();
+    assert_eq!(tree.take_retired_elements(), [1].into());
+    // ReplaceWith: the replaced element retires, its replacement does not.
+    tree.apply(&[
+        Mutation::PushId(2),
+        Mutation::CreateElement(("span".into(), None)),
+        Mutation::SetId(4),
+        Mutation::ReplaceWith(1),
+    ])
+    .unwrap();
+    assert_eq!(tree.take_retired_elements(), [2].into());
+    // A recycled id taken by another node retires the node that held it.
+    tree.apply(&[
+        Mutation::PushId(0),
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetId(3),
+        Mutation::AppendChildren(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.take_retired_elements(), [3].into());
+    // Clear retires everything still in the tree.
+    tree.clear();
+    assert_eq!(tree.take_retired_elements(), [3, 4].into());
 }

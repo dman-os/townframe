@@ -190,7 +190,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     pub(super) fn validate_mutation(
-        &self,
+        &mut self,
         mutation: &Mutation<C>,
         bytes: &mut usize,
         work: &mut usize,
@@ -245,6 +245,20 @@ impl<C: Clone> SurfaceTree<C> {
                 self.validate_attribute(top, name, ns.as_deref(), value, bytes, work)
             }
             Mutation::SetText(text) => self.validate_text(top, text, bytes, work),
+            Mutation::SetStyleSheet(sheet) => {
+                Self::charge_work(work, 1 + sheet.len() / 64)?;
+                Self::charge_string(bytes, sheet)?;
+                // The stored sheet is charged to the surface's retained budget like node bytes
+                // are, and a replacement releases the sheet it replaces. The raw length bounds
+                // the sanitized one, so this check is conservative.
+                let mut retained = self.retained_bytes - self.stylesheet.len();
+                Self::charge(
+                    &mut retained,
+                    sheet.len(),
+                    Self::MAX_RETAINED_BYTES,
+                    "retained byte limit",
+                )
+            }
             Mutation::AddEventListener(name) | Mutation::RemoveEventListener(name) => {
                 self.validate_listener(top, mutation, name, bytes)
             }
@@ -314,7 +328,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     fn validate_attribute(
-        &self,
+        &mut self,
         top: SurfaceNodeId,
         name: &str,
         ns: Option<&str>,
@@ -329,10 +343,35 @@ impl<C: Clone> SurfaceTree<C> {
         if let AttributeValue::Text(text) = value {
             Self::charge_string(bytes, text)?;
         }
-        if static_attribute(name, ns).is_none() {
-            return Err(PresentationError::Unsupported(
-                "attribute name or namespace".into(),
+        // The process-wide interner leaks every distinct data-* name (Dioxus attribute names are
+        // `&'static str`), so its 4096-name budget is shared by every micro. The per-surface cap
+        // keeps one micro from spending it all. It is checked before interning so a surface that
+        // is over budget interns nothing new, and it counts every distinct name the surface
+        // uses, including names other surfaces already interned.
+        let new_data_name = ns.is_none()
+            && is_data_attribute_name(name)
+            && !self.data_attribute_names.contains(name);
+        if new_data_name && self.data_attribute_names.len() >= Self::MAX_DATA_ATTRIBUTE_NAMES {
+            return Err(PresentationError::InvalidBatch(
+                "too many distinct data-* attribute names on this surface".into(),
             ));
+        }
+        match static_attribute(&DATA_ATTRIBUTES, name, ns) {
+            Ok(Some((interned, _))) => {
+                if new_data_name {
+                    self.data_attribute_names.insert(interned);
+                }
+            }
+            Ok(None) => {
+                return Err(PresentationError::Unsupported(
+                    "attribute name or namespace".into(),
+                ));
+            }
+            Err(DataAttributeNamesExhausted) => {
+                return Err(PresentationError::InvalidBatch(
+                    "too many distinct data-* attribute names".into(),
+                ));
+            }
         }
         if matches!(value, AttributeValue::Float(float) if !float.is_finite()) {
             return Err(PresentationError::Unsupported(

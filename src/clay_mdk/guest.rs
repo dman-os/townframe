@@ -15,6 +15,8 @@
 //! resyncs do.
 pub use dom::GuestDom;
 pub(crate) use dom::Slots;
+#[cfg(test)]
+pub(crate) use dom::settle;
 
 use crate::Access;
 use crate::Capability;

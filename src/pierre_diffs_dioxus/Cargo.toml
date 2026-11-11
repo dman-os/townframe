@@ -12,7 +12,7 @@ pierre_diffs = { workspace = true }
 # Spelled out (not `dioxus.workspace = true`) so default features stay off, as in
 # `clay_dioxus_kit`: the diff view needs the macro, signals, hooks and element vocabulary only,
 # never a renderer or launcher, so it links into native, browser and wasm guest builds alike.
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 [dev-dependencies]
 dioxus-ssr.workspace = true

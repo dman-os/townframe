@@ -5,6 +5,7 @@ use crate::tree::SurfaceNodeId;
 use crate::tree::SurfaceNodeKind;
 use crate::tree::SurfaceTree;
 use crate::wire::AttributeValue;
+use crate::wire::ElementHandles;
 use crate::wire::Event;
 use crate::wire::NodeId;
 use crate::wire::SurfaceEventHandler;
@@ -17,11 +18,18 @@ impl<C: Clone> SurfaceTree<C> {
         &self,
         dispatch: &SurfaceEventHandler,
         component: &dyn Fn(&C) -> Element,
+        handles: &ElementHandles,
     ) -> Element {
         let root_children = &self.node(SurfaceNodeId::ROOT).children;
+        // The guest's sanitized stylesheet comes first, so every rule of the mount precedes the
+        // mount's content. A renderer that gives the mount a shadow root (see `MountedSurface`)
+        // scopes it there; otherwise it is a light-DOM `<style>`.
         rsx! {
+            if !self.stylesheet.is_empty() {
+                style { "{self.stylesheet}" }
+            }
             for &child in root_children {
-                {self.render_node(child, dispatch, component)}
+                {self.render_node(child, dispatch, component, handles)}
             }
         }
     }
@@ -31,6 +39,7 @@ impl<C: Clone> SurfaceTree<C> {
         id: SurfaceNodeId,
         dispatch: &SurfaceEventHandler,
         component: &dyn Fn(&C) -> Element,
+        handles: &ElementHandles,
     ) -> Element {
         let node = self.node(id);
         match &node.kind {
@@ -51,7 +60,9 @@ impl<C: Clone> SurfaceTree<C> {
                 let mut attrs = Vec::with_capacity(attributes.len() + listeners.len());
                 for ((name, ns), value) in attributes {
                     let (attr_name, attr_ns) =
-                        static_attribute(name, ns.as_deref()).expect("validated surface attribute");
+                        static_attribute(&DATA_ATTRIBUTES, name, ns.as_deref())
+                            .expect("validated surface attribute")
+                            .expect("validated surface attribute");
                     let volatile = attr_name == "value" || attr_name == "checked";
                     let attr_value = match value {
                         AttributeValue::Text(text) => {
@@ -76,6 +87,7 @@ impl<C: Clone> SurfaceTree<C> {
                                 self.revision,
                                 guest_node_id,
                                 dispatch.clone(),
+                                handles,
                             )
                             .expect("validated surface listener"),
                         );
@@ -84,7 +96,7 @@ impl<C: Clone> SurfaceTree<C> {
                 let children = node
                     .children
                     .iter()
-                    .map(|&child| self.render_node(child, dispatch, component));
+                    .map(|&child| self.render_node(child, dispatch, component, handles));
                 let key = id.1;
                 render_element_tag(tag, namespace.as_deref(), key, attrs, children)
             }
@@ -92,10 +104,66 @@ impl<C: Clone> SurfaceTree<C> {
     }
 }
 
+/// Maximum number of distinct `data-*` names the process-wide interner will hold.
+const DATA_ATTRIBUTE_NAME_LIMIT: usize = 4096;
+
+/// The process-wide interner behind [`static_attribute`]'s open `data-*` names.
+pub(crate) static DATA_ATTRIBUTES: DataAttributeInterner =
+    DataAttributeInterner::new(DATA_ATTRIBUTE_NAME_LIMIT);
+
+/// The interner already holds its limit of distinct names and the requested one is new.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DataAttributeNamesExhausted;
+
+/// Dioxus attribute names are `&'static str`, so each distinct guest-chosen `data-*` name is
+/// leaked once and deduplicated here. The distinct-name bound is what keeps a guest from growing
+/// host memory without limit by minting names; a repeated name costs nothing.
+pub(crate) struct DataAttributeInterner {
+    limit: usize,
+    names: std::sync::Mutex<std::collections::BTreeSet<&'static str>>,
+}
+
+impl DataAttributeInterner {
+    pub(crate) const fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            names: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+        }
+    }
+
+    /// `name` must already be a well-formed `data-*` name (see [`is_data_attribute_name`]).
+    pub(crate) fn intern(&self, name: &str) -> Result<&'static str, DataAttributeNamesExhausted> {
+        let mut names = self.names.lock().expect("interner lock is never poisoned");
+        if let Some(&interned) = names.get(name) {
+            return Ok(interned);
+        }
+        if names.len() >= self.limit {
+            return Err(DataAttributeNamesExhausted);
+        }
+        let interned: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        names.insert(interned);
+        Ok(interned)
+    }
+}
+
+/// `data-` followed by one or more of `[a-z0-9-._]`: the HTML custom data attribute form,
+/// without namespace colons, uppercase, or whitespace.
+pub(crate) fn is_data_attribute_name(name: &str) -> bool {
+    name.strip_prefix("data-").is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'))
+    })
+}
+
+/// Resolves a wire attribute to the names Dioxus needs. `Ok(None)` is an unsupported name;
+/// `Err` means a well-formed new `data-*` name would exceed the interner's bound.
 pub(crate) fn static_attribute(
+    data_names: &DataAttributeInterner,
     name: &str,
     namespace: Option<&str>,
-) -> Option<(&'static str, Option<&'static str>)> {
+) -> Result<Option<(&'static str, Option<&'static str>)>, DataAttributeNamesExhausted> {
     macro_rules! vocabulary {
         ($($ns:pat => $canonical:expr => [$($name:literal),* $(,)?]),* $(,)?) => {
             match (name, namespace) {
@@ -104,7 +172,10 @@ pub(crate) fn static_attribute(
             }
         };
     }
-    vocabulary!(
+    if namespace.is_none() && is_data_attribute_name(name) {
+        return data_names.intern(name).map(|name| Some((name, None)));
+    }
+    Ok(vocabulary!(
         None => None => [
             "id", "class", "style", "title", "role", "tabindex", "hidden", "lang", "dir",
             "accesskey", "contenteditable", "draggable", "spellcheck", "translate",
@@ -115,7 +186,7 @@ pub(crate) fn static_attribute(
             "href", "target", "rel", "download", "src", "alt", "width", "height", "loading",
             "srcset", "sizes", "crossorigin", "referrerpolicy", "open", "datetime", "start",
             "reversed", "colspan", "rowspan", "scope", "headers", "label", "low", "high",
-            "optimum", "data-testid", "data-state", "data-value",
+            "optimum",
             "aria-label", "aria-labelledby", "aria-describedby", "aria-hidden", "aria-live",
             "aria-atomic", "aria-busy", "aria-controls", "aria-current", "aria-disabled",
             "aria-expanded", "aria-haspopup", "aria-invalid", "aria-modal", "aria-multiline",
@@ -135,7 +206,8 @@ pub(crate) fn static_attribute(
             "gap", "row-gap", "column-gap", "flex", "flex-direction", "flex-wrap", "flex-grow",
             "flex-shrink", "flex-basis", "align-items", "align-self", "justify-content",
             "grid-template-columns", "grid-template-rows", "grid-column", "grid-row",
-            "overflow", "overflow-x", "overflow-y", "color", "background", "background-color",
+            "overflow", "overflow-x", "overflow-y", "overflow-anchor", "color", "background",
+            "background-color",
             "border", "border-color", "border-width", "border-style", "border-radius",
             "font", "font-family", "font-size", "font-weight", "font-style", "line-height",
             "text-align", "text-decoration", "text-overflow", "white-space", "word-break",
@@ -143,7 +215,7 @@ pub(crate) fn static_attribute(
             "box-shadow", "transform", "transform-origin", "transition", "object-fit"
         ],
         Some("http://www.w3.org/1999/xlink") => Some("http://www.w3.org/1999/xlink") => ["href"]
-    )
+    ))
 }
 
 macro_rules! expand_surface_event_listener {
@@ -174,17 +246,19 @@ macro_rules! expand_surface_event_listener {
             revision: u64,
             element: NodeId,
             dispatch: SurfaceEventHandler,
+            handles: &ElementHandles,
         ) -> Option<dioxus_core::Attribute> {
             match raw_name {
                 $(
                     $(
                         stringify!($raw) => {
                             let event_name = stringify!($raw);
+                            let handles = handles.clone();
                             let listener = ListenerCallback::new(
                                 move |evt: dioxus_core::Event<PlatformEventData>| {
                                     let platform_rc = evt.data();
                                     let data_json = expand_surface_event_listener!(
-                                        @serialize $group, $data, platform_rc.as_ref()
+                                        @serialize $group, $data, platform_rc.as_ref(), element, &handles
                                     );
                                     let response = dispatch(Event {
                                         revision,
@@ -214,11 +288,16 @@ macro_rules! expand_surface_event_listener {
             }
         }
     };
-    (@serialize Mounted, $data:ident, $platform:expr) => {{
-        let _ = $platform;
+    // A mounted element's host handle is what element commands act on; the guest is told only
+    // that the element exists (its payload is `null`) and builds its own `MountedData` that
+    // sends commands back over the surface.
+    (@serialize Mounted, $data:ident, $platform:expr, $element:expr, $handles:expr) => {{
+        let platform: &PlatformEventData = $platform;
+        $handles.insert($element, dioxus_html::MountedData::from(platform));
         "null".to_owned()
     }};
-    (@serialize $group:ident, $data:ident, $platform:expr) => {{
+    (@serialize $group:ident, $data:ident, $platform:expr, $element:expr, $handles:expr) => {{
+        let _ = (&$element, &$handles);
         pastey::paste! {
             let platform: &PlatformEventData = $platform;
             if let Some(serialized) = platform.downcast::<dioxus_html::[<Serialized $data>]>() {

@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 micro_counter_manifest = { workspace = true }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd06ea65a12d02af33598706", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
 # other target links the in-process backend (the browser shell hosts native micros on
