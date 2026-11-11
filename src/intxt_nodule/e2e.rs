@@ -8,11 +8,13 @@ use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::ResourceLimit;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
@@ -32,6 +34,7 @@ use intxt_core::work;
 use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
+use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -427,5 +430,93 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
     let first = create("retry-1").await;
     assert_eq!(create("retry-1").await, first);
     assert_ne!(create("retry-2").await, first);
+    node.stop().await;
+}
+
+/// A file document far past the old per-value node cap reads back as written, and an edit of one
+/// line from the heads it was created at lands, as it does for a small file.
+#[tokio::test]
+async fn a_large_note_reads_back_and_takes_a_line_edit() {
+    let node = boot().await;
+    let lines = |edited: Option<usize>| -> String {
+        (0..4_000)
+            .map(|line| match edited {
+                Some(at) if at == line => format!("line {line:05} EDITED\n"),
+                _ => format!("line {line:05} of a generated file, long enough to add up\n"),
+            })
+            .collect()
+    };
+    let note = |content: String| {
+        datum::<generic::Note>("main", json!({"mime": "text/plain", "content": content}))
+    };
+    let original = lines(None);
+    assert!(original.len() > 200 * 1024, "{} bytes", original.len());
+    let (key, value) = note(original);
+    let receipt = create(&node, BTreeMap::from([(key.clone(), value.clone())])).await;
+    assert_eq!(
+        read(&node, &receipt.doc_id, std::slice::from_ref(&key)).await[&key],
+        value
+    );
+    let (_, edited) = note(lines(Some(2_000)));
+    write(
+        &node,
+        &receipt.doc_id,
+        WriteMode::AtHeads {
+            heads: receipt.heads.clone(),
+        },
+        BTreeMap::from([(key.clone(), edited.clone())]),
+    )
+    .await;
+    assert_eq!(
+        read(&node, &receipt.doc_id, std::slice::from_ref(&key)).await[&key],
+        edited
+    );
+    node.stop().await;
+}
+
+/// A value past the per-value budget is refused by name, through the docs service client the
+/// helpers here use (an in-process call, so no request-body limit is in the way).
+#[tokio::test]
+async fn a_note_past_the_value_budget_is_refused_by_name() {
+    let node = boot().await;
+    let (key, small) =
+        datum::<generic::Note>("main", json!({"mime": "text/plain", "content": "x"}));
+    let receipt = create(&node, BTreeMap::from([(key.clone(), small)])).await;
+    let capability = capability(
+        &node,
+        DocScope {
+            write: BTreeSet::from([receipt.doc_id.clone()]),
+            ..DocScope::default()
+        },
+    )
+    .await;
+    let (_, oversized) = datum::<generic::Note>(
+        "main",
+        json!({"mime": "text/plain", "content": "x".repeat(17 * 1024 * 1024)}),
+    );
+    let error = node
+        .big_node()
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability,
+                command: None,
+                doc_id: receipt.doc_id.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(key.clone(), oversized)]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    let ClientError::Method(DocsError::ValueTooLarge {
+        datum_key, limit, ..
+    }) = error
+    else {
+        panic!("expected ValueTooLarge, got {error:?}");
+    };
+    assert_eq!((datum_key, limit), (key, ResourceLimit::Bytes));
     node.stop().await;
 }
