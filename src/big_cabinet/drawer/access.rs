@@ -294,7 +294,8 @@ fn access_error(error: DrawersError) -> AccessError {
         | DrawersError::AuthorityUnavailable(_)
         | DrawersError::DocsUnavailable(_)
         | DrawersError::Storage(_)
-        | DrawersError::Keyhive(_) => AccessError::Unavailable(error.to_string()),
+        | DrawersError::Keyhive(_)
+        | DrawersError::UnknownGroup(_) => AccessError::Unavailable(error.to_string()),
         other => AccessError::Refused(other.to_string()),
     }
 }
