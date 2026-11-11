@@ -796,6 +796,7 @@ values!(
     crate::dmeta::Uuid7,
     crate::dmeta::MultibaseKey,
     crate::dmeta::SignatureBytes,
+    crate::dmeta::DatumSignature,
     crate::dmeta::Bytes,
     crate::DatumKey,
     crate::DatumReference,

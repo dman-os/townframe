@@ -16,7 +16,6 @@ fn datum_key(value: &str) -> DatumKey {
 
 const PORTABLE_PROOF: &str = r#"{
         "createdAt": "1970-01-01T00:00:00Z",
-        "updatedAt": [],
         "actors": {
             "01890f3e-1234-7000-8000-000000000002": {
                 "createdAt": [],
@@ -34,9 +33,7 @@ const PORTABLE_PROOF: &str = r#"{
                 "updatedAt": [],
                 "deletedAt": [],
                 "signatures": [{
-                    "actorUuid": "01890f3e-1234-7000-8000-000000000002",
-                    "docUuid": "01890f3e-1234-7000-8000-000000000009",
-                    "signature": {"$bytes": "WcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="},
+                    "signature": {"$bytes": "AQGJDz4SNHAAgAAAAAAAAAIBiQ8+EjRwAIAAAAAAAAAJWcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="},
                     "message": {"$bytes": "ZGF5Ym9vay5kYXR1bS1jbGFpbS52MQCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
                 }]
             }
@@ -147,8 +144,16 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
     assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
     #[cfg(feature = "schemars")]
     {
+        // The declared position holds the ordinary entry, one bytes value; the carried map form
+        // (message, witness, unknown members) is outside it until compaction defines how the
+        // position widens, since Lexicon has no bytes-or-map type.
         let schema = serde_json::to_value(schemars::schema_for!(Dmeta)).unwrap();
-        assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&wire));
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(!validator.is_valid(&wire));
+        let mut ordinary = wire.clone();
+        ordinary["datums"][key]["signatures"][0] =
+            wire["datums"][key]["signatures"][0]["signature"].clone();
+        assert!(validator.is_valid(&ordinary));
     }
 
     let reference =
@@ -216,9 +221,15 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
             assert!(map.insert(invalid.into(), value).is_none());
             assert!(serde_json::from_value::<Dmeta>(malformed).is_err());
         }
-        let mut malformed = fixture["datums"]["org.example.note/main"]["signatures"][0].clone();
-        malformed["actorUuid"] = serde_json::json!(invalid);
-        assert!(serde_json::from_value::<DatumSignature>(malformed).is_err());
+        // A packed entry names its actor in raw bytes, and a peer's wrong-version UUID there is
+        // refused like any other malformed entry.
+        let (_, entry) = signed_entry(&claim_for(&native_value()));
+        let mut packed = entry.packed();
+        packed[1..17].copy_from_slice(Uuid::parse_str(invalid).unwrap().as_bytes());
+        assert!(matches!(
+            DatumSignature::from_packed(&packed),
+            Err(DmetaError::InvalidUuidVersion)
+        ));
     }
 }
 
@@ -286,8 +297,7 @@ fn actor_keys_are_multibase_but_signatures_are_fixed_length_bytes() {
     assert!(text[..text.len() - 1].parse::<MultibaseKey>().is_err());
     assert!(format!("{text}1").parse::<MultibaseKey>().is_err());
 
-    let fixture: serde_json::Value = serde_json::from_str(PORTABLE_PROOF).unwrap();
-    let json = fixture["datums"]["org.example.note/main"]["signatures"][0]["signature"].clone();
+    let json = serde_json::json!({"$bytes": "WcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="});
     let signature: SignatureBytes = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(signature.as_bytes().len(), 64);
     assert_eq!(serde_json::to_value(&signature).unwrap(), json);
@@ -317,6 +327,71 @@ fn actor_keys_are_multibase_but_signatures_are_fixed_length_bytes() {
     ] {
         assert!(serde_json::from_value::<SignatureBytes>(malformed).is_err());
     }
+}
+
+/// ADR 020, the dmeta cut, item 2: an ordinary entry is one bytes value, `0x01`, the actor UUID, the
+/// document UUID and the 64 signature bytes, and a peer's entry that is anything else is refused.
+#[test]
+fn an_ordinary_signature_entry_is_one_packed_bytes_value() {
+    let (_, entry) = signed_entry(&claim_for(&native_value()));
+    let packed = entry.packed();
+    assert_eq!(packed.len(), 97);
+    assert_eq!(packed[0], 0x01);
+    assert_eq!(&packed[1..17], entry.actor_uuid.as_uuid().as_bytes());
+    assert_eq!(&packed[17..33], entry.doc_uuid.as_uuid().as_bytes());
+    assert_eq!(&packed[33..], entry.signature.as_bytes());
+    assert_eq!(DatumSignature::from_packed(&packed).unwrap(), entry);
+    // It is the bare bytes object on the wire, and reads back the same.
+    let wire = serde_json::to_value(&entry).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"$bytes": data_encoding::BASE64.encode(&packed)})
+    );
+    assert_eq!(
+        serde_json::from_value::<DatumSignature>(wire).unwrap(),
+        entry
+    );
+
+    // A wrong length or an unknown format byte is malformed, never decoded as another entry.
+    for length in [0, 1, 32, 96, 98] {
+        assert!(matches!(
+            DatumSignature::from_packed(&vec![1; length]),
+            Err(DmetaError::MalformedSignatureEntry)
+        ));
+    }
+    for format in [0x00, 0x02, 0xff] {
+        let mut wrong = packed;
+        wrong[0] = format;
+        assert!(matches!(
+            DatumSignature::from_packed(&wrong),
+            Err(DmetaError::MalformedSignatureEntry)
+        ));
+        assert!(
+            serde_json::from_value::<DatumSignature>(
+                serde_json::json!({"$bytes": data_encoding::BASE64.encode(&wrong)})
+            )
+            .is_err()
+        );
+    }
+}
+
+/// An entry that carries a message or an inherited witness stays a map whose `signature` member is
+/// the same packed value; an ordinary entry never is one.
+#[test]
+fn a_carried_signature_entry_is_a_map_around_the_packed_value() {
+    let claim = claim_for(&native_value());
+    let (_, mut entry) = signed_entry(&claim);
+    entry.carry_message(&claim).unwrap();
+    let wire = serde_json::to_value(&entry).unwrap();
+    assert_eq!(
+        wire["signature"],
+        serde_json::json!({"$bytes": data_encoding::BASE64.encode(&entry.packed())})
+    );
+    assert!(wire.get("actorUuid").is_none() && wire.get("docUuid").is_none());
+    assert_eq!(
+        serde_json::from_value::<DatumSignature>(wire).unwrap(),
+        entry
+    );
 }
 
 #[test]

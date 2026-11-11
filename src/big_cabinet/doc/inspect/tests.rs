@@ -6,6 +6,7 @@ use automerge::ChangeHash;
 use automerge::ObjId;
 use automerge::ObjType;
 use automerge::ReadDoc;
+use automerge::ScalarValue;
 use automerge::transaction::Transactable;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::AttenuateCapability;
@@ -189,17 +190,24 @@ impl Fixture {
             ..signed
         };
         signed.verify().unwrap();
+        let packed = DatumSignature {
+            extra: Default::default(),
+            actor_uuid: actor,
+            doc_uuid,
+            signature: signed.signature.clone(),
+            message: None,
+            inherited: None,
+        }
+        .packed();
         let (marker, introduction_hash, parents, automerge_actor) = document
             .with_document(|doc| {
                 let parents = doc.get_heads();
                 let automerge_actor = Bytes::from(doc.get_actor().to_bytes().to_vec());
                 let mut tx = doc.transaction();
                 tx.put(&datums, DATUM, vec![0_u8, 255, 128]).unwrap();
-                let marker = tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
-                tx.put(&marker, "actorUuid", actor.to_string()).unwrap();
-                tx.put(&marker, "docUuid", doc_uuid.to_string()).unwrap();
-                tx.put(&marker, "signature", signed.signature.as_bytes().to_vec())
+                tx.insert(&signatures, 0, ScalarValue::Bytes(packed.to_vec()))
                     .unwrap();
+                let marker = tx.get(&signatures, 0).unwrap().unwrap().1;
                 tx.put(&bindings, doc_uuid.to_string(), doc_id.to_string())
                     .unwrap();
                 let hash = tx.commit().0.unwrap();
@@ -327,15 +335,17 @@ impl Fixture {
                     }
                     _ => unreachable!(),
                 };
+                // The entry is one packed bytes value: format byte, actor, document, then the
+                // signature bytes if any are given.
+                let mut entry = vec![0x01];
+                entry.extend(actor_uuid.as_uuid().as_bytes());
+                entry.extend(doc_uuid.as_uuid().as_bytes());
+                entry.extend(bytes.unwrap_or_default());
                 let mut tx = doc.transaction();
                 tx.delete(&signatures, 0).unwrap();
-                let marker = tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
-                tx.put(&marker, "actorUuid", actor_uuid.to_string())
+                tx.insert(&signatures, 0, ScalarValue::Bytes(entry))
                     .unwrap();
-                tx.put(&marker, "docUuid", doc_uuid.to_string()).unwrap();
-                if let Some(bytes) = bytes {
-                    tx.put(&marker, "signature", bytes).unwrap();
-                }
+                let marker = tx.get(&signatures, 0).unwrap().unwrap().1;
                 tx.commit();
                 (marker, doc.get_heads())
             })
@@ -507,7 +517,7 @@ async fn unknown_heads_resource_refusal_and_unsupported_values_are_not_rejection
 }
 
 #[tokio::test]
-async fn missing_signature_bytes_is_forgery_and_does_not_poison_descendants() {
+async fn a_truncated_signature_entry_is_forgery_and_does_not_poison_descendants() {
     let fixture = Fixture::new().await;
     let (marker, heads) = fixture.replace_signature(None).await;
     let mut request = fixture.request();
@@ -520,7 +530,7 @@ async fn missing_signature_bytes_is_forgery_and_does_not_poison_descendants() {
         evidence: vec![DatumClaimEvidence {
             marker: marker.to_string(),
             result: SignatureEvidence::ProvenForgery {
-                reason: "malformed witness: signature bytes".into(),
+                reason: "malformed witness: signature entry".into(),
             },
         }],
     };

@@ -7,6 +7,7 @@ impl Default for big_cabinet_core::dmeta::Uuid7
 impl Deserialize < 'de > for big_cabinet_core::authority::Rights
 impl Deserialize < 'de > for big_cabinet_core::dmeta::Bytes
 impl Deserialize < 'de > for big_cabinet_core::dmeta::Cid
+impl Deserialize < 'de > for big_cabinet_core::dmeta::DatumSignature
 impl Deserialize < 'de > for big_cabinet_core::dmeta::MultibaseKey
 impl Deserialize < 'de > for big_cabinet_core::dmeta::SignatureBytes
 impl Deserialize < 'de > for big_cabinet_core::dmeta::Uuid7
@@ -35,6 +36,7 @@ impl FromStr for big_cabinet_core::reference::Location
 impl Serialize for big_cabinet_core::authority::Rights
 impl Serialize for big_cabinet_core::dmeta::Bytes
 impl Serialize for big_cabinet_core::dmeta::Cid
+impl Serialize for big_cabinet_core::dmeta::DatumSignature
 impl Serialize for big_cabinet_core::dmeta::MultibaseKey
 impl Serialize for big_cabinet_core::dmeta::SignatureBytes
 impl Serialize for big_cabinet_core::drawer::GroupKey
@@ -65,6 +67,7 @@ impl fmt :: Display for big_cabinet_core::reference::Location
 impl schemars :: JsonSchema for big_cabinet_core::authority::Rights
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::Bytes
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::Cid
+impl schemars :: JsonSchema for big_cabinet_core::dmeta::DatumSignature
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::MultibaseKey
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::SignatureBytes
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::Uuid7
@@ -104,7 +107,7 @@ pub enum big_cabinet_core::authority::AuthorityServiceError { # [error ("request
 pub enum big_cabinet_core::authority::CapabilityStatus { Live, Retracted }
 pub enum big_cabinet_core::datum::operation::OperationKind { Query, Procedure, Subscription }
 pub enum big_cabinet_core::dmeta::ClaimOperation { Set, Remove }
-pub enum big_cabinet_core::dmeta::DmetaError { # [error ("an actor or datum alias must be an RFC 9562 UUIDv7")] InvalidUuidVersion, # [error ("a datum UUID alias cannot be rebound to another key")] ReboundAlias, # [error ("signed message evidence is unavailable")] MissingMessage, # [error ("signature and claim contexts disagree")] WrongContext, # [error ("claim operation and value CID disagree")] InvalidClaim, # [error ("malformed datum claim: {0}")] MalformedClaim (& 'static str), # [error ("invalid Ed25519 public key")] InvalidPublicKey, # [error ("invalid Ed25519 signature")] InvalidSignature }
+pub enum big_cabinet_core::dmeta::DmetaError { # [error ("an actor or datum alias must be an RFC 9562 UUIDv7")] InvalidUuidVersion, # [error ("a datum UUID alias cannot be rebound to another key")] ReboundAlias, # [error ("signed message evidence is unavailable")] MissingMessage, # [error ("signature and claim contexts disagree")] WrongContext, # [error ("claim operation and value CID disagree")] InvalidClaim, # [error ("malformed datum claim: {0}")] MalformedClaim (& 'static str), # [error ("invalid Ed25519 public key")] InvalidPublicKey, # [error ("invalid Ed25519 signature")] InvalidSignature, # [error ("a signature entry is the format byte 0x01, two UUIDv7s and a 64 byte signature")] MalformedSignatureEntry }
 pub enum big_cabinet_core::doc::At { Current, Heads (# [cfg_attr (feature = "schemars" , schemars (with = "Vec<String>"))] Vec < ChangeHash >) }
 pub enum big_cabinet_core::doc::DatumEvent { Datum { revision : u64 , doc_id : DocId , datum_key : DatumKey , datum : ObservedDatum , }, Leave { revision : u64 , doc_id : DocId , } }
 pub enum big_cabinet_core::doc::DatumRead { Accepted { value : Json , version : DatumVersion , # [doc = " Who wrote the accepted version, as the gate verified it for this read."] authors : Vec < DatumAuthor > , }, Absent { version : DatumVersion , }, Pending { reason : String , version : DatumVersion , value : Option < Json > , }, Rejected { reason : String , }, Undecodable { reason : String , version : DatumVersion , } }
@@ -154,6 +157,8 @@ pub impl big_cabinet_core::dmeta::DatumClaim::fn cbor_fields (& self) -> Result 
 pub impl big_cabinet_core::dmeta::DatumClaim::fn from_cbor_fields (bytes : & [u8]) -> Result < Self , DmetaError >
 pub impl big_cabinet_core::dmeta::DatumClaim::fn from_signing_bytes (bytes : & [u8]) -> Result < Self , DmetaError >
 pub impl big_cabinet_core::dmeta::DatumClaim::fn signing_bytes (& self) -> Result < Vec < u8 > , DmetaError >
+pub impl big_cabinet_core::dmeta::DatumSignature::fn from_packed (bytes : & [u8]) -> Result < Self , DmetaError >
+pub impl big_cabinet_core::dmeta::DatumSignature::fn packed (& self) -> [u8 ; Self :: PACKED_LENGTH]
 pub impl big_cabinet_core::dmeta::Dmeta::fn doc_uuid (& mut self , document : & DocId , minted : Uuid7) -> Result < Uuid7 , DmetaError >
 pub impl big_cabinet_core::dmeta::Dmeta::fn has_concurrent_creation (& self , key : & DatumKey) -> bool
 pub impl big_cabinet_core::dmeta::Dmeta::fn new (created_at : Timestamp) -> Self
@@ -260,7 +265,7 @@ pub struct big_cabinet_core::dmeta::Cid  {  }
 pub struct big_cabinet_core::dmeta::DatumClaim  { origin_document: DocId, datum_key: DatumKey, chosen_uuid: Uuid7, actor_uuid: Uuid7, operation: ClaimOperation, value_cid: Option < Cid >, predecessors: Vec < SignatureId > }
 pub struct big_cabinet_core::dmeta::DatumMetadata  { uuids: BTreeMap < Uuid7 , bool >, updated_at: Vec < Timestamp >, deleted_at: Vec < Timestamp >, signatures: Vec < DatumSignature >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::DatumSignature  { actor_uuid: Uuid7, signature: SignatureBytes, doc_uuid: Uuid7, message: Option < Bytes >, inherited: Option < InheritedWitness >, extra: crate :: datum :: Extra }
-pub struct big_cabinet_core::dmeta::Dmeta  { created_at: Timestamp, updated_at: Vec < Timestamp >, actors: BTreeMap < Uuid7 , ActorMetadata >, doc_uuids: BTreeMap < Uuid7 , DocId >, datums: BTreeMap < DatumKey , DatumMetadata >, extra: crate :: datum :: Extra }
+pub struct big_cabinet_core::dmeta::Dmeta  { created_at: Timestamp, actors: BTreeMap < Uuid7 , ActorMetadata >, doc_uuids: BTreeMap < Uuid7 , DocId >, datums: BTreeMap < DatumKey , DatumMetadata >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::DocIdentity  { id: DocId, created_at: Timestamp }
 pub struct big_cabinet_core::dmeta::InheritedWitness  { origin_doc: DocId, message: Bytes, value: Option < Bytes >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::MultibaseKey  {  }
