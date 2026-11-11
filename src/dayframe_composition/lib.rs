@@ -4,14 +4,20 @@
 //! engine-specific factory for it. Engine-specific guest factories (Wasmtime on desktop, `wcmp`
 //! on the web) and native built-ins are both just catalog entries (ADR 018 §7).
 //!
+//! The frame is the shell micro's (ADR 032): `Application` mounts the roots the catalog
+//! registered, which is the shell's frame filling the window, laid out from its panels. It
+//! supplies the shell what only the host knows, as [`HostInputs`]. The micro lifecycle controls
+//! are a Settings section ([`lifecycle`]).
+//!
 //! The catalog is explicit configuration, not a heuristic: each entry says whether the
 //! supervisor starts the micro eagerly, which provider satisfies each of its requirements, and
 //! which declared collections it may read or write. The root declares the collections the
 //! manifests name and installs every manifest-declared row into the declaring micro's
 //! manifest installation scope (ADR 031 §4), so rows are visible while their micro is stopped.
 //! There is no supervisor reconfiguration yet: enablement and startup are fixed by the catalog
-//! except for the enable/disable/retry controls of the lifecycle panel.
+//! except for the enable/disable/retry controls of the lifecycle section.
 mod bindings;
+pub mod lifecycle;
 
 use bindings::BindingsDatum;
 use bindings::DeclaredCollections;
@@ -54,6 +60,9 @@ use clay_store::BatchOp;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
 use dioxus::prelude::*;
+pub use micro_shell::HostInputs;
+pub use micro_shell::Insets;
+pub use micro_shell::Renderer;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cell::RefCell;
@@ -102,6 +111,53 @@ pub type FactoryBuilder = Box<
 >;
 
 impl InstalledMicro {
+    /// Satisfy every requirement of this micro from `provider`, whose package is `offered`:
+    /// each binds the provider's publication of the same name. A catalog convention that
+    /// spares each launcher spelling the same table out; a micro whose requirements come from
+    /// several providers sets `requirements` itself.
+    ///
+    /// A requirement the provider cannot satisfy is refused: it names no publication of the
+    /// provider, or the provider's call publication implements another contract NSID than the
+    /// one required. A presentation publication declares no contract on the wire (every
+    /// presentation shares the reserved presentation-component contract), so a requirement of
+    /// one is checked by name only.
+    pub fn satisfied_by(
+        mut self,
+        provider: &MicroId,
+        offered: &clay_mdk::Sidecar,
+    ) -> Result<Self, String> {
+        for request in &self.sidecar.manifest.requires {
+            let publication = offered
+                .manifest
+                .publications
+                .iter()
+                .find(|publication| publication.name == request.binding)
+                .ok_or_else(|| {
+                    format!(
+                        "{} requires {:?}, which {provider} does not publish",
+                        self.id, request.binding
+                    )
+                })?;
+            match &publication.contract {
+                Some(contract) if *contract != request.contract => {
+                    return Err(format!(
+                        "{} requires {:?} under {}, but {provider} publishes it under {contract}",
+                        self.id, request.binding, request.contract
+                    ));
+                }
+                _ => {}
+            }
+            self.requirements.insert(
+                request.binding.clone(),
+                Requirement {
+                    provider: SupervisorId::from(provider),
+                    publication: request.binding.clone(),
+                },
+            );
+        }
+        Ok(self)
+    }
+
     /// An on-demand, unlocked micro with no requirements, admitted disabled.
     pub fn new(
         id: MicroId,
@@ -245,7 +301,7 @@ struct ManagedMicro {
 /// next read returns the latest revision, so a quick disable then enable converges on the
 /// final datum. A changed binding resolution replaces the factory's bindings and closes the
 /// micro so its next start sees them (no hot rebinding); eager roots are then started again.
-/// A close error is published for the lifecycle panel.
+/// A close error is published for the lifecycle section.
 async fn reconcile_installs(
     installs: DocumentWatch,
     supervisor: Rc<Supervisor<CapabilityPublication>>,
@@ -300,7 +356,7 @@ async fn reconcile_installs(
                     }
                     micro.applied = resolution;
                     // A failed eager start is recorded as that micro's `Faulted` state, which
-                    // the lifecycle panel shows; there is no other consumer for the report.
+                    // the lifecycle section shows; there is no other consumer for the report.
                     drop(supervisor.reconcile().await);
                 }
                 tag => unreachable!("the install watch selects no tag {tag}"),
@@ -333,7 +389,7 @@ pub struct CompositionRuntime {
     /// Applies changes of the install document to the supervisor; taken by the one
     /// [`Self::serve`].
     reconcile_installs: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
-    /// Close errors from the install reconciler, for the lifecycle panel.
+    /// Close errors from the install reconciler, for the lifecycle section.
     lifecycle_failure: watch::Sender<Option<String>>,
     /// The roots mirror's feed loop, taken by the one [`Self::serve`].
     feed: Rc<RefCell<Option<LocalFuture<'static, ()>>>>,
@@ -342,7 +398,7 @@ pub struct CompositionRuntime {
     shutdown: Rc<Notify>,
     /// Installation defects the launcher or the root found while assembling the catalog
     /// (unreadable or manifest-less package files, a failed package-index fetch, a manifest
-    /// contributing to an undeclared collection). Shown in the lifecycle panel; never fatal,
+    /// contributing to an undeclared collection). Shown in the lifecycle section; never fatal,
     /// because one bad package must not take the shell down.
     pub installation_errors: Vec<String>,
 }
@@ -625,7 +681,7 @@ impl CompositionRuntime {
                 let mut reconciling = tokio::task::spawn_local(reconcile_installs);
                 let supervisor = Rc::clone(&self.supervisor);
                 // A failed eager start is recorded as the micro's `Faulted` state, which the
-                // lifecycle panel shows; there is no other consumer for the report.
+                // lifecycle section shows; there is no other consumer for the report.
                 tokio::task::spawn_local(async move { supervisor.reconcile().await });
                 tokio::select! {
                     never = self.supervisor.drive() => never,
@@ -788,10 +844,32 @@ impl CompositionRuntime {
     }
 }
 
+/// The shell UI. `host` is what the launcher knows about its window: the whole viewport and the
+/// system chrome overlapping it. The application is the frame the shell micro's root draws,
+/// edge to edge: this pads it by the insets and hands the shell the size that remains, so the
+/// shell and the kit below it never see an inset. It also provides the contexts in-process
+/// presentations read: the native component host, the shell's `HostInputs` and the runtime
+/// itself (the lifecycle section reads it).
 #[component]
-pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
+pub fn Application(runtime: Signal<CompositionRuntime>, host: HostInputs) -> Element {
     let shell = runtime.read().clone();
     use_context_provider(|| shell.components.clone());
+    use_context_provider(|| shell.clone());
+    let insets = host.insets;
+    let (window_width, window_height) = (host.width, host.height);
+    let frame_width = use_memo(move || {
+        let insets = insets();
+        (window_width() - insets.left - insets.right).max(1.0)
+    });
+    let frame_height = use_memo(move || {
+        let insets = insets();
+        (window_height() - insets.top - insets.bottom).max(1.0)
+    });
+    use_context_provider(|| HostInputs {
+        width: frame_width.into(),
+        height: frame_height.into(),
+        ..host
+    });
     // The composition outlives this scope's tasks: shutdown must keep being served after the
     // scope is gone, so it is spawned forever and stopped by `request_shutdown`.
     let serving = shell.clone();
@@ -801,134 +879,29 @@ pub fn Application(runtime: Signal<CompositionRuntime>) -> Element {
     let stopping = shell.clone();
     use_drop(move || stopping.request_shutdown());
 
-    let mut states = use_signal(|| 0_u64);
-    let supervisor = Rc::clone(&shell.supervisor);
-    use_future(move || {
-        let mut changes = supervisor.changes();
-        async move {
-            while changes.changed().await.is_ok() {
-                states += 1;
-            }
-        }
-    });
-    let _ = states();
-    let mut failure = use_signal(|| None::<String>);
-    // Micros whose toggle is being written; the button is inert until the datum is stored.
-    let mut toggling = use_signal(BTreeSet::<MicroId>::new);
-    let failures = shell.lifecycle_failures();
-    use_future(move || {
-        let mut failures = failures.clone();
-        async move {
-            while failures.changed().await.is_ok() {
-                failure.set(failures.borrow_and_update().clone());
-            }
-        }
-    });
-    let mut settings_open = use_signal(|| true);
     let roots = use_rows(&shell.roots);
+    let Insets {
+        top,
+        right,
+        bottom,
+        left,
+    } = insets();
+    let (width, height) = (window_width(), window_height());
 
+    // The root's presentation is a row attachment: a lazy endpoint the shell redeems, which
+    // starts the micro that publishes it. Arranging other micros' presentations is the root's
+    // job (the shell's panels); the composition never pushes components.
     rsx! {
-        section { class: "flex flex-col gap-6 rounded-lg border border-border bg-surface p-6 text-foreground",
-            header { class: "flex flex-wrap items-center gap-4",
-                h1 { class: "text-2xl font-semibold", "Dayframe" }
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": if settings_open() { "Close Settings" } else { "Open Settings" },
-                    onclick: move |_| settings_open.toggle(),
-                    if settings_open() { "Close Settings" } else { "Open Settings" }
-                }
-            }
-            // A pinned root (the toolbar) shows however Settings is folded; the toggle covers
-            // every other root.
-            for row in roots.iter().filter(|row| row.value.pinned || settings_open()) {
-                div { key: "{row.key}", "aria-label": "{row.value.title}",
-                    // The root's presentation is a row attachment: a lazy endpoint the
-                    // shell redeems, which starts the micro that publishes it. A micro that
-                    // arranges other micros' presentations (the layout, ADR 031 §13) redeems
-                    // them itself through slots of its own; the shell never pushes components.
+        div {
+            class: "bg-background text-foreground",
+            style: "box-sizing:border-box;overflow:hidden;width:{width}px;height:{height}px;padding:{top}px {right}px {bottom}px {left}px",
+            for row in roots.iter() {
+                div {
+                    key: "{row.key}",
+                    "aria-label": "{row.value.title}",
+                    style: "width:100%;height:100%;min-width:0;min-height:0",
                     PresentationSlot {
                         reference: row.attachments[row.value.content.index()].clone(),
-                    }
-                }
-            }
-            details { class: "rounded-md border border-border p-4",
-                summary { "Micro lifecycle controls" }
-                p { "Enablement and configuration are stored in documents on this device. A mock node stands in for sync, so they are not shared with other devices." }
-                for error in shell.installation_errors.clone() {
-                    p { key: "install-{error}", role: "status", "Package installation failed: {error}" }
-                }
-                if let Some(problem) = failure() {
-                    p { role: "alert", "{problem}" }
-                }
-                for micro in shell.micros() {
-                    p {
-                        key: "status-{micro}",
-                        role: "status",
-                        {
-                            let state = match shell.state(micro) {
-                                MicroState::Unconfigured(missing) => {
-                                    format!("needs configuration ({})", missing.join(", "))
-                                }
-                                state => format!("{state:?}"),
-                            };
-                            if shell.is_locked(micro) {
-                                format!("{} runtime (locked): {state}", micro.name())
-                            } else {
-                                format!("{} runtime: {state}", micro.name())
-                            }
-                        }
-                    }
-                }
-                div { class: "mt-4 flex flex-wrap gap-2",
-                    for micro in shell.micros().to_vec() {
-                        if !shell.is_locked(&micro) {
-                            {
-                                let state = shell.state(&micro);
-                                let toggle = micro.clone();
-                                let runtime = shell.clone();
-                                // The label follows what the user asked for, not the supervisor's
-                                // state, which lags it while a close is in flight.
-                                let wanted = shell.is_enabled(&micro);
-                                // Labels show the plug name, never the namespace DID.
-                                let name = micro.name().to_owned();
-                                let label = if wanted {
-                                    format!("Disable {name} micro")
-                                } else {
-                                    format!("Enable {name} micro")
-                                };
-                                let busy = toggling.read().contains(&micro);
-                                let retry = matches!(state, MicroState::Faulted(_)).then(|| {
-                                    (Rc::clone(&shell.supervisor), SupervisorId::from(&micro))
-                                });
-                                rsx! {
-                                    button {
-                                        key: "toggle-{micro}",
-                                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                                        "aria-label": "{label}",
-                                        disabled: busy,
-                                        onclick: move |_| {
-                                            let runtime = runtime.clone();
-                                            let micro = toggle.clone();
-                                            toggling.write().insert(micro.clone());
-                                            spawn(async move {
-                                                runtime.set_enabled(&micro, !wanted).await;
-                                                toggling.write().remove(&micro);
-                                            });
-                                        },
-                                        "{label}"
-                                    }
-                                    if let Some((supervisor, micro)) = retry {
-                                        button {
-                                            key: "retry-{micro}",
-                                            class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                                            "aria-label": "Retry {name} micro",
-                                            onclick: move |_| supervisor.retry(&micro),
-                                            "Retry {name} micro"
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }

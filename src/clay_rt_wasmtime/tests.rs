@@ -1051,7 +1051,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let owner = host.start("ingress-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(
@@ -1067,12 +1067,17 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
         .collect::<Vec<_>>();
     *edits.last_mut().unwrap() =
         wit_presentation::Mutation::MountComponent(Resource::new_borrow(u32::MAX));
+    // The guest is answered `Revoked` so it unwinds instead of aborting; the budget is the
+    // micro's recorded fault.
     assert!(matches!(
         HostSurface::apply(&mut state, Resource::new_borrow(surface.rep()), edits).unwrap(),
-        Err(wit_presentation::PresentationError::Unsupported(message))
-            if message == "batch mutation limit"
+        Err(wit_presentation::PresentationError::Revoked)
     ));
     assert!(!writer.is_live());
+    assert!(
+        host.fault(&owner)
+            .is_some_and(|fault| fault.contains("batch mutation limit"))
+    );
     HostSurface::drop(&mut state, surface).unwrap();
     HostMountPoint::drop(&mut state, placement).unwrap();
     host.close();
@@ -1213,6 +1218,62 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
         "wasmtime must fail a blocking sync-typed call with CannotBlock on the first poll, \
          not return Pending"
     );
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
+/// A guest whose `dispatch` commits a batch over the surface mutation budget faults only its own
+/// micro: the surface is withdrawn, the instance closes, and the budget is the recorded cause,
+/// reached through the guest's graceful `Revoked` unwind, not a trap. Pinned by
+/// `overbudget_fixture`.
+#[tokio::test]
+async fn over_budget_batch_faults_the_micro_with_the_budget_as_cause() {
+    let host = Host::new();
+    let owner = host.start("overbudget");
+    let package = WasmPackage::from_env("overbudget")
+        .await
+        .expect("prepared overbudget component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    struct LiveSink(AtomicBool);
+
+    impl SurfaceSink<ComponentRef> for LiveSink {
+        fn is_live(&self) -> bool {
+            !self.0.load(Ordering::Acquire)
+        }
+
+        fn apply(&self, _edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            Ok(0)
+        }
+
+        fn withdraw(&self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let writer = Arc::new(LiveSink(AtomicBool::new(false)));
+    let session = runtime
+        .mount("view", Arc::clone(&writer) as _)
+        .expect("mount stays inside the budget");
+    assert!(writer.is_live());
+
+    let response = session.handler()(Event {
+        revision: 1,
+        element: clay_surface::NodeId::try_from(1_u32).unwrap(),
+        name: "click".into(),
+        bubbles: true,
+        data_json: "{}".into(),
+    });
+    assert_eq!(response, EventResponse::default());
+    assert!(!writer.is_live(), "the breach withdraws the surface");
+    assert_eq!(host.check(&owner), Err(clay_host::AccessError::Revoked));
+    let fault = host
+        .fault(&owner)
+        .expect("the breach is recorded as a fault");
+    assert!(fault.contains("batch mutation limit"), "{fault}");
     drop(session);
     drop(driver);
     host.close();

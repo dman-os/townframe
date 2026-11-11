@@ -10,5 +10,6 @@ Interaction rules apply to reusable UI primitives. Product-specific workflows ma
 - **INTERACTION-004** Motion MUST use named duration and easing values when motion is part of the foundation contract. Reduced-motion behavior MUST be defined before motion tokens become normative.
 - **INTERACTION-005** A component MUST NOT start repeated or unbounded visual work in response to pointer movement. State changes SHOULD be idempotent and bounded.
 - **INTERACTION-006** Theme changes MUST preserve semantic roles. A theme MAY override token values, but it MUST NOT change the meaning of a role.
+- **INTERACTION-007** Motion that is not itself the content MUST be removed (not merely shortened) when the user prefers reduced motion: the element appears in its final state. Every animation utility is paired with `motion-reduce:animate-none` at its use site. A renderer that does not evaluate `prefers-reduced-motion` (Blitz today) always animates, so the animation MUST also be short (the `motion.duration-*` tokens) and MUST play once, on entry.
 
 Renderer-specific event and scrolling limitations belong in implementation documentation and are not token semantics.

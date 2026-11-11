@@ -118,12 +118,18 @@ fn breakpoints() -> Vec<&'static str> {
 
 /// Distance between neighbouring breakpoints, in px.
 ///
-/// A function of the window alone, deliberately *not* of the breakpoint count:
-/// the index is not stretched to fit its contents. Ten breakpoints make a short
-/// strip sitting where the first ten of a full one would, rather than the same
-/// strip spread out — so a breakpoint keeps its identity wherever it is.
-fn spacing(height: f64) -> f64 {
-    height * SPAN_FRAC / (REFERENCE_COUNT - 1) as f64
+/// A function of the window alone up to [`REFERENCE_COUNT`] breakpoints,
+/// deliberately *not* of how many there are: the index is not stretched to fit
+/// its contents. Ten breakpoints make a short strip sitting where the first ten
+/// of a full one would, rather than the same strip spread out — so a breakpoint
+/// keeps its identity wherever it is.
+///
+/// Past the reference count the strip would no longer fit the window (and the
+/// pull's slack would go negative), so the spacing shrinks to keep the whole
+/// index spanning [`SPAN_FRAC`] of it: "the whole index fits on screen at once"
+/// holds for any list, at the cost of tighter labels.
+fn spacing(height: f64, count: usize) -> f64 {
+    height * SPAN_FRAC / (count.max(REFERENCE_COUNT) - 1) as f64
 }
 
 /// Where the resting index starts, so it is centred in the window.
@@ -301,7 +307,7 @@ impl ArcGeometry {
         } else {
             (viewport.0, FALLBACK_HEIGHT)
         };
-        let base_spacing = spacing(height);
+        let base_spacing = spacing(height, count);
         let spacing = if settle > 0.0 {
             base_spacing * ACTIVE_SPACING_MULTIPLIER
         } else {
@@ -434,7 +440,7 @@ impl ArcGeometry {
         count: usize,
         commit: Callback<f64>,
         focus: Signal<f64>,
-        live: Signal<String>,
+        live: &str,
     ) -> Element {
         let active = self.active;
         let active_label = self.active_label;
@@ -485,8 +491,7 @@ pub fn ArcIndex(
     on_select: EventHandler<usize>,
 ) -> Element {
     assert!(!items.is_empty(), "ArcIndex requires at least one item");
-    let items = use_signal(|| items);
-    let count = items.read().len();
+    let count = items.len();
 
     // Continuous position in breakpoint space. The fractional part drives the
     // in-between spacing so the strip glides instead of stepping.
@@ -503,7 +508,6 @@ pub fn ArcIndex(
     // been superseded and stop writing.
     let generation = use_signal(|| 0u64);
     let announced = use_signal(|| usize::MAX);
-    let live = use_signal(String::new);
     let mut hovered = use_signal(|| None::<usize>);
 
     let height = if viewport.1 > 0.0 {
@@ -513,8 +517,10 @@ pub fn ArcIndex(
     };
     let geometry = ArcGeometry::new(
         viewport,
-        &items.read(),
-        *focus.read(),
+        &items,
+        // The list is the caller's and may shrink between renders; a focus
+        // left past its end would place the strip off the list.
+        (*focus.read()).min((count - 1) as f64),
         *settle.read(),
         *thumb_x.read(),
         *pull.read(),
@@ -527,7 +533,7 @@ pub fn ArcIndex(
 
     // `use_callback` so the same closure can be handed to several handlers.
     let commit = use_callback(move |next: f64| {
-        commit_breakpoint(next, count, focus, announced, items, live, on_select);
+        commit_breakpoint(next, count, focus, announced, on_select);
     });
     let press_strip = use_callback(move |point: (f64, f64)| {
         begin_press(
@@ -597,7 +603,7 @@ pub fn ArcIndex(
                 },
             }
 
-            {geometry.accessibility(count, commit, focus, live)}
+            {geometry.accessibility(count, commit, focus, items.get(*announced.read()).copied().unwrap_or(""))}
         }
     }
 }
@@ -607,8 +613,6 @@ fn commit_breakpoint(
     count: usize,
     mut focus: Signal<f64>,
     mut announced: Signal<usize>,
-    items: Signal<Vec<&'static str>>,
-    mut live: Signal<String>,
     on_select: EventHandler<usize>,
 ) {
     let clamped = next.clamp(0.0, (count - 1) as f64);
@@ -617,9 +621,6 @@ fn commit_breakpoint(
     let index = clamped.round() as usize;
     if index != *announced.peek() {
         announced.set(index);
-        if let Some(label) = items.read().get(index) {
-            live.set((*label).to_string());
-        }
         on_select.call(index);
     }
 }

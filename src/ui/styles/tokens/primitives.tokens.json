@@ -63,6 +63,15 @@
         "$value": { "colorSpace": "srgb", "components": [0, 0, 0], "alpha": 1 }
       }
     },
+    "overlay": {
+      "black-32": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0, 0, 0],
+          "alpha": 0.32
+        }
+      }
+    },
     "blue": {
       "100": {
         "$value": {
@@ -151,6 +160,17 @@
           "spread": { "value": 0, "unit": "px" }
         }
       ]
+    }
+  },
+  "motion": {
+    "duration": {
+      "$type": "duration",
+      "short": { "$value": { "value": 150, "unit": "ms" } },
+      "medium": { "$value": { "value": 250, "unit": "ms" } }
+    },
+    "easing": {
+      "$type": "cubicBezier",
+      "decelerate": { "$value": [0.05, 0.7, 0.1, 1] }
     }
   }
 }
