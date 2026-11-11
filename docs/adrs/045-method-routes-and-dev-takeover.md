@@ -52,6 +52,14 @@ Taking over a slot stays available, but only as a dev hook:
 
 The existing machinery (`filler`, `code_source`, `resolve_entry`, `FilledBy`) is reused under the new names. No route, install, upgrade or confirmation ever writes a takeover.
 
+### 6. Details settled in implementation (2026-11-12)
+
+- The method is `org.example.daybook.nodules.setMethodRoute`, because it's declared with the nodule service's methods. The datum is still `org.example.daybook.dispatch.route/<pattern>`. Both move when routes get a store of their own (§2).
+- A disabled nodule claims nothing, so a route to it is `RouteTargetMissing`, not the nodule's `NotReady(Disabled)`. The routed provider's own not-ready states show only for providers that register `NotReady` claims.
+- Requests a route covers are not pinned in the resolution locks at all: the route is the pin. A route whose target is missing leaves them `NoProvider`, and they resolve again on their own when the target returns.
+- `setMethodRoute` refuses patterns that are empty, `*`, or not a valid NSID or whole-segment authority prefix.
+- A stored route datum that doesn't decode or validate is treated as outside input, because any client with a capability on the document can write it. It refuses only the requests its pattern covers, with the reason on the affected records, and every other nodule keeps reconciling.
+
 ## Consequences
 
 - `NoduleSubstitution`/`setNoduleSubstitution` are renamed, with no aliases (pre-release). `big_nodule_core`'s public API is re-blessed.
