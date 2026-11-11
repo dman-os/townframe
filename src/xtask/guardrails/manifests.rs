@@ -21,7 +21,7 @@
 //! internal crates.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::guardrails::Finding;
 use crate::guardrails::repository::Repository;
@@ -43,59 +43,65 @@ struct Entry<'a> {
     group: Option<String>,
 }
 
-pub fn validate(repo: &Repository) -> Res<Vec<Finding>> {
-    let mut manifests: BTreeSet<PathBuf> = repo
-        .packages
-        .values()
-        .map(|package| package.manifest_path.clone())
-        .collect();
-    manifests.insert(repo.root.join("Cargo.toml"));
-    manifests.extend(
-        repo.workspace_manifests
-            .iter()
-            .map(|manifest| repo.root.join(manifest)),
-    );
+/// Lints the root `Cargo.toml`, which no crate policy owns, so its findings cannot be exempted.
+pub fn scan_root(repo: &Repository) -> Res<Vec<Finding>> {
+    scan(repo, &repo.root.join("Cargo.toml"))
+}
+
+/// Lints one manifest. `ERROR_PATH_DEPENDENCY` is reported per declaration. Internal crates
+/// outside the `internal` group are one `ERROR_DEPENDENCY_GROUP` finding per manifest whose
+/// `actual` is the offender count, so a crate's `guardrails.toml` can exempt a legacy manifest
+/// at its current count and `bless` ratchets the ceiling down as it is migrated.
+pub fn scan(repo: &Repository, manifest: &Path) -> Res<Vec<Finding>> {
+    let relative_path = relative(&repo.root, manifest)?;
+    let text = std::fs::read_to_string(manifest)?;
+    let value: toml::Value =
+        toml::from_str(&text).wrap_err_with(|| format!("parse {relative_path}"))?;
     let mut findings = Vec::new();
-    for manifest in &manifests {
-        let relative_path = relative(&repo.root, manifest)?;
-        let text = std::fs::read_to_string(manifest)?;
-        let value: toml::Value =
-            toml::from_str(&text).wrap_err_with(|| format!("parse {relative_path}"))?;
-        for entry in entries(&text, &value)? {
-            let package = entry
-                .spec
-                .get("package")
-                .and_then(toml::Value::as_str)
-                .unwrap_or(&entry.key);
-            if repo.packages.contains_key(package) && entry.group.as_deref() != Some("internal") {
-                findings.push(Finding::new(
-                    "ERROR_DEPENDENCY_GROUP",
-                    &relative_path,
-                    &entry.key,
-                    entry.line,
-                    format!(
-                        "`{package}` is an internal crate; list it under a `#` / `# internal` comment header"
-                    ),
-                ));
-            }
-            if !entry.workspace_level && entry.spec.get("path").is_some() {
-                findings.push(Finding::new(
-                    "ERROR_PATH_DEPENDENCY",
-                    &relative_path,
-                    &entry.key,
-                    entry.line,
-                    format!(
-                        "`{}` is a path dependency; declare it once in `[workspace.dependencies]` of this manifest's workspace and write `{} = {{ workspace = true }}` here",
-                        entry.key, entry.key
-                    ),
-                ));
-            }
+    let mut ungrouped = Vec::new();
+    for entry in entries(&text, &value)? {
+        let package = entry
+            .spec
+            .get("package")
+            .and_then(toml::Value::as_str)
+            .unwrap_or(&entry.key);
+        if repo.packages.contains_key(package) && entry.group.as_deref() != Some("internal") {
+            ungrouped.push((entry.line, package.to_string()));
         }
+        if !entry.workspace_level && entry.spec.get("path").is_some() {
+            findings.push(Finding::new(
+                "ERROR_PATH_DEPENDENCY",
+                &relative_path,
+                &entry.key,
+                entry.line,
+                format!(
+                    "`{}` is a path dependency; declare it once in `[workspace.dependencies]` of this manifest's workspace and write `{} = {{ workspace = true }}` here",
+                    entry.key, entry.key
+                ),
+            ));
+        }
+    }
+    if let Some((first_line, _)) = ungrouped.first() {
+        let mut finding = Finding::new(
+            "ERROR_DEPENDENCY_GROUP",
+            &relative_path,
+            "dependency-groups",
+            *first_line,
+            format!(
+                "internal crates must sit under a `#` / `# internal` comment header; outside it: {}",
+                ungrouped
+                    .iter()
+                    .map(|(line, name)| format!("{name} (line {line})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+        finding.actual = ungrouped.len();
+        findings.push(finding);
     }
     findings.sort();
     Ok(findings)
 }
-
 /// Walks the manifest text for dependency declarations, pairing each with its parsed spec.
 ///
 /// A line-based pass is needed for line numbers; the table a header names is recovered by

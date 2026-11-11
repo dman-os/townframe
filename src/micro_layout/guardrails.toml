@@ -12,3 +12,12 @@ allow_external_api_types = false
 [builds.native]
 
 [builds.wasm32-wasip3]
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/micro_layout/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"
