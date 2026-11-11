@@ -21,7 +21,6 @@ intxt_core = { path = "../intxt_core" }
 method_core.workspace = true
 service_client_core_rs.workspace = true
 service_core_rs.workspace = true
-http.workspace = true
 schemars = { version = "1.2", optional = true }
 serde.workspace = true
 serde_json.workspace = true

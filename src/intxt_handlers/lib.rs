@@ -35,10 +35,6 @@ use big_cabinet_core::drawer::protocol::ListDocDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
-use http::HeaderMap;
-use http::HeaderValue;
-use http::Method as HttpMethod;
-use http::header::CONTENT_TYPE;
 use intxt_core::generic;
 use intxt_core::work;
 use method_core::ContextError;
@@ -48,10 +44,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use service_client_core_rs::Client;
-use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::Xrpc;
-use service_client_core_rs::xrpc::XrpcRequest;
-use service_client_core_rs::xrpc::write_context_headers;
 use service_core_rs::HttpMetadata;
 use service_core_rs::xrpc::bearer_header_value;
 
@@ -191,47 +184,6 @@ impl<'a> Caller<'a> {
                 operation: M::XRPC.nsid.to_owned(),
                 reason: error.to_string(),
             })
-    }
-
-    /// Calls the query `input` as a POST of its JSON, which is the one form dispatch.local serves:
-    /// the typed client sends a query as a GET with its input in the query string, and egress
-    /// answers that `404 dispatch.local serves POST /xrpc/<nsid> only`.
-    async fn query<M: Unary>(&self, input: M) -> Result<M::Output, IntxtError> {
-        let upstream = |reason: String| IntxtError::Upstream {
-            operation: M::XRPC.nsid.to_owned(),
-            reason,
-        };
-        let mut headers = HeaderMap::new();
-        write_context_headers(
-            &mut headers,
-            &self.cx.next_hop(),
-            &HttpMetadata {
-                authorization: Some(bearer_header_value(self.capability)),
-                idempotency_key: None,
-            },
-        )
-        .expect("context headers are valid HTTP");
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let response = self
-            .cx
-            .transport()
-            .send(XrpcRequest {
-                method: HttpMethod::POST,
-                path: format!("xrpc/{}", M::XRPC.nsid),
-                headers,
-                body: serde_json::to_vec(&input).expect("a method input serializes"),
-            })
-            .await
-            .map_err(|error| upstream(format!("transport failed: {}", error.message)))?;
-        if !response.status.is_success() {
-            return Err(upstream(format!(
-                "HTTP {}: {}",
-                response.status,
-                String::from_utf8_lossy(&response.body)
-            )));
-        }
-        serde_json::from_slice(&response.body)
-            .map_err(|error| upstream(format!("an unexpected answer: {error}")))
     }
 
     async fn doc_capability(&self, scope: DocScope) -> Result<CapId, IntxtError> {
@@ -448,7 +400,7 @@ impl big_ndk::Handler<AddToIntxt> for Intxt {
             .await?;
 
         let from = caller
-            .query(ListDocDrawers {
+            .call(ListDocDrawers {
                 doc_id: part_doc.clone(),
             })
             .await?

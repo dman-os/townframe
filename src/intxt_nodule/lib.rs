@@ -22,7 +22,6 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::Contribution;
 use big_cartridges_core::Digest;
 use big_cartridges_core::NoduleContribution;
-use big_cartridges_core::request::Necessity;
 use big_cartridges_core::request::Request;
 use big_nodule_core::Nodule;
 use indexmap::IndexMap;
@@ -59,11 +58,7 @@ pub fn cartridge() -> Cartridge {
         lexicons: lexicons
             .into_iter()
             .map(|lexicon| as_map(lexicon.file))
-            // The cartridge carries a copy of every Lexicon it depends on (ADR 028): the
-            // reference defs that `addToIntxt`'s `part` refers to, which dispatch checks calls
-            // against.
             .chain([
-                as_map(big_cabinet_core::reference::defs_lexicon()),
                 as_map(
                     method_lexicon::lexicon::<CreateIntxt>()
                         .expect("createIntxt's types project a Lexicon"),
@@ -78,18 +73,6 @@ pub fn cartridge() -> Cartridge {
         requires: intxt_handlers::REQUIRED_OPERATIONS
             .into_iter()
             .map(|nsid| Request::new(nsid, nsid))
-            // The operations' Lexicons refer to the reference defs (`addToIntxt`'s `part` is a
-            // `#datumRef`), and admission lets an operation Lexicon refer outside the authority
-            // only to a requested contract.
-            .chain([{
-                let mut request =
-                    Request::new("reference-defs", big_cabinet_core::reference::DEFS_NSID);
-                request.access = Some("read".to_owned());
-                // Required, the request holds the nodule at `ProviderMissing`: no provider
-                // is bound to a type library, which the node itself carries.
-                request.necessity = Necessity::Optional;
-                request
-            }])
             .collect(),
         handler: Some(big_nodule_core::Handler {
             artifact: HANDLER_ARTIFACT.into(),
