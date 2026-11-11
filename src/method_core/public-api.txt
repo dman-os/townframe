@@ -16,10 +16,10 @@ pub impl method_core::XrpcMethod::const fn privileged (mut self) -> Self
 pub impl method_core::XrpcMethod::const fn procedure (nsid : & 'static str) -> Self
 pub impl method_core::XrpcMethod::const fn query (nsid : & 'static str) -> Self
 pub impl method_core::XrpcMethod::const fn subscription (nsid : & 'static str) -> Self
-pub impl method_core::XrpcMethod::const fn with_schemas (mut self , output_schema : & 'static str , error_schema : & 'static str ,) -> Self
+pub impl method_core::XrpcMethod::const fn with_output_schema (mut self , output_schema : & 'static str) -> Self
 pub method_core::schema::fn collect < Request , Output , Error > () -> MethodSchemas where Request : schemars :: JsonSchema , Output : schemars :: JsonSchema , Error : schemars :: JsonSchema ,
 pub mod method_core::schema
-pub struct method_core::XrpcMethod  { nsid: & 'static str, kind: MethodKind, method: HttpMethod, input: HttpInput, output_schema: & 'static str, error_schema: & 'static str, long_poll: bool, privileged: bool }
+pub struct method_core::XrpcMethod  { nsid: & 'static str, kind: MethodKind, method: HttpMethod, input: HttpInput, output_schema: & 'static str, long_poll: bool, privileged: bool }
 pub struct method_core::schema::MethodSchemas  { request: Schema, output: Schema, error: Schema, definitions: serde_json :: Map < String , serde_json :: Value > }
 pub trait method_core::Method { type Output; type Error; const XRPC: XrpcMethod }
 pub trait method_core::ServiceError {  }

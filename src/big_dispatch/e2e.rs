@@ -353,6 +353,35 @@ async fn a_minted_scope_invokes_only_what_it_covers_and_only_narrows() {
 }
 
 #[tokio::test]
+async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
+    let h = harness().await;
+    h.register_echo();
+    let operator = h.operator();
+    let bystander = h.bystander().await;
+    let echo_only = h
+        .mint_dispatch(operator, authorities(&["org.example.echo"]))
+        .await
+        .unwrap();
+    assert!(h.invoke(echo_only, ECHO, json!({})).await.is_ok());
+
+    // The handle is bound to the operator. Another actor presenting it under its own signer is
+    // refused on every path through the domain, the invoke and the mint alike.
+    let stolen = Authorization {
+        authority: echo_only.authority,
+        signer: bystander.signer,
+    };
+    assert_eq!(
+        h.invoke(stolen, ECHO, json!({})).await,
+        Err(DispatchError::Denied)
+    );
+    assert_eq!(
+        h.mint_dispatch(stolen, DispatchScope::default()).await,
+        Err(DispatchError::Denied)
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_elapsed_budget_fails_before_the_provider_and_a_running_call_is_cut_off() {
     let h = harness().await;
     let echo = h.register_echo();
