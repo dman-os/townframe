@@ -3,5 +3,11 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: []
 
+impl big_ndk :: Handler < CreateIntxt > for intxt_nodule::Intxt
+impl big_ndk :: Nodule for intxt_nodule::Intxt
 pub const intxt_nodule::AUTHORITY: & str
+pub enum intxt_nodule::IntxtError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [doc = " A call the handler made was refused or failed; `reason` is what the callee answered."] # [error ("{operation} failed: {reason}")] Upstream { operation : String , reason : String } }
 pub intxt_nodule::fn cartridge () -> Cartridge
+pub struct intxt_nodule::CreateIntxt  { title: String, description: Option < String > }
+pub struct intxt_nodule::Intxt  {  }
+pub struct intxt_nodule::IntxtCreated  { drawer_id: DrawerId }
