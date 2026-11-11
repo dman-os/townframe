@@ -8134,6 +8134,7 @@ dependencies = [
 name = "intxt_nodule"
 version = "0.1.0"
 dependencies = [
+ "big_blobs_core",
  "big_cabinet_core",
  "big_cartridges_core",
  "big_dispatch_core",

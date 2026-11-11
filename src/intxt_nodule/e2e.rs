@@ -304,9 +304,11 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     let captures = intxt("captures").await;
     let review = intxt("review").await;
     let capture = async |datums: BTreeMap<DatumKey, Value>| {
-        let tag = datums.keys().next().unwrap().tag().to_string();
+        let first = datums.keys().next().unwrap().clone();
+        let tag = first.tag().to_string();
+        let slot = String::from_utf8(first.slot_bytes().to_vec()).unwrap();
         let receipt = create_in(&node, &captures, datums).await;
-        format!("dtxt:datum:{}/{tag}/main", receipt.doc_id)
+        format!("dtxt:datum:{}/{tag}/{slot}", receipt.doc_id)
             .parse::<DatumReference>()
             .unwrap()
     };
@@ -326,9 +328,19 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         json!({"harness": "claude-code", "sessionId": "eb26ecaa", "cwd": "/work/townframe"}),
     )]))
     .await;
+    // A fork shares its upstream's root commit, so a repository's entry is keyed by its document,
+    // not by the `gitRepo` slot.
+    let repo = capture(BTreeMap::from([datum::<work::GitRepo>(
+        "9a0e5d2c",
+        json!({"roots": ["9a0e5d2c"], "remotes": []}),
+    )]))
+    .await;
+    let ReferenceDocId::Concrete(repo_doc) = repo.document().clone() else {
+        unreachable!("the parts were named by document")
+    };
 
     let mut added = Vec::new();
-    for part in [&worktree, &session, &worktree] {
+    for part in [&worktree, &session, &worktree, &repo] {
         let AddedToIntxt { entry } = node
             .call(AddToIntxt {
                 intxt: review.clone(),
@@ -344,9 +356,11 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
             format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
             format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
             format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+            format!("dtxt:datum:{review}/org.example.intxt.work.repoEntry/{repo_doc}"),
         ]
     );
     let entries = [
+        key::<work::RepoEntry>(&repo_doc.to_string()),
         key::<work::WorktreeEntry>("0193a"),
         key::<work::SessionEntry>("eb26ecaa"),
         key::<generic::Body>("main"),
@@ -356,11 +370,13 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         BTreeMap::from([
             datum::<work::WorktreeEntry>("0193a", json!({"worktree": worktree.to_string()})),
             datum::<work::SessionEntry>("eb26ecaa", json!({"session": session.to_string()})),
+            datum::<work::RepoEntry>(&repo_doc.to_string(), json!({"repo": repo.to_string()})),
             datum::<generic::Body>(
                 "main",
                 json!({"order": [
                     "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
                     "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
+                    format!("dtxt:datum:self/org.example.intxt.work.repoEntry/{repo_doc}"),
                 ]}),
             ),
         ])
@@ -397,7 +413,7 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         )
         .await
         .unwrap();
-    for part in [&worktree, &session] {
+    for part in [&worktree, &session, &repo] {
         let ReferenceDocId::Concrete(doc) = part.document() else {
             unreachable!("the parts were named by document")
         };

@@ -244,6 +244,25 @@ pub struct Content {
     pub hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<BlobReason>,
+    /// `blob`: where the host put the bytes (ledger D45). Absent when it did not: a file over
+    /// 8 MiB is recorded as changed, with its size and git hash only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<BlobRef>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A blob the host put in the node's blob service: the fields of the file document's
+/// `org.example.daybook.blob` datum.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BlobRef {
+    /// The blob's digest as the blob service spells it (`BlobId::digest_str`: `z` and the
+    /// base58btc of the BLAKE3 multihash).
+    pub digest: String,
+    pub length_octets: u64,
+    pub mime: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -256,8 +275,16 @@ impl Content {
             size: None,
             hash: None,
             reason: None,
+            blob: None,
             extra: Extra::default(),
         }
+    }
+
+    /// This blob content with the bytes' reference.
+    #[must_use]
+    pub fn with_blob(mut self, blob: BlobRef) -> Self {
+        self.blob = Some(blob);
+        self
     }
 
     pub fn blob(size: u64, hash: impl Into<String>, reason: BlobReason) -> Self {
@@ -267,6 +294,7 @@ impl Content {
             size: Some(size),
             hash: Some(hash.into()),
             reason: Some(reason),
+            blob: None,
             extra: Extra::default(),
         }
     }

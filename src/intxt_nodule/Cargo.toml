@@ -21,6 +21,7 @@ method_lexicon = { path = "../method_lexicon" }
 serde_json.workspace = true
 
 [dev-dependencies]
+big_blobs_core = { path = "../big_blobs_core" }
 intxt_capture = { path = "../intxt_capture" }
 tempfile.workspace = true
 big_dispatch_core.workspace = true
