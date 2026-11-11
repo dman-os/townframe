@@ -15,10 +15,13 @@ fn admitted_schema(id: &str) -> CompiledSchema {
     bundle.validate().unwrap();
     let lexicons = bundle.lexicons().unwrap();
     let lexicon = lexicons.iter().find(|lexicon| lexicon.id == id).unwrap();
+    // The reference defs a datum field refers to are carried by every registration.
+    let defs = big_cabinet_core::reference::defs_lexicon();
     let carried: Vec<&Value> = lexicons
         .iter()
         .filter(|other| other.id != id)
         .map(|other| &other.file)
+        .chain([&defs])
         .collect();
     bundle
         .validate_lexicon(id, &lexicon.file, &carried)
