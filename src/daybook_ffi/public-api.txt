@@ -3,6 +3,7 @@
 # configuration: {"target":"x86_64-unknown-linux-gnu","default_features":true,"features":[]}
 # exposed_external_crates: []
 
+pub macro daybook_ffi::uniffi_repo_listeners! { ($ t_repo : ty , $ t_event : ty) }
 pub use daybook_ffi::daybook_core :: app :: AppCtx
 pub use daybook_ffi::daybook_core :: app :: Database
 pub use daybook_ffi::daybook_core :: repo :: RepoOpenOptions
