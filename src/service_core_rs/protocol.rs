@@ -79,8 +79,8 @@ macro_rules! service_method {
         impl ::method_core::Method for $params {
             type Output = $output;
             type Error = $error;
-            const XRPC: ::method_core::XrpcMethod = ::method_core::XrpcMethod::$kind($nsid)
-                .with_schemas(stringify!($output), stringify!($error));
+            const XRPC: ::method_core::XrpcMethod =
+                ::method_core::XrpcMethod::$kind($nsid).with_output_schema(stringify!($output));
         }
         ::method_core::__method_schema!($params, $output, $error);
     };
@@ -89,7 +89,7 @@ macro_rules! service_method {
             type Output = ::method_core::EventStream<$event, $error>;
             type Error = $error;
             const XRPC: ::method_core::XrpcMethod = ::method_core::XrpcMethod::subscription($nsid)
-                .with_schemas(stringify!($event), stringify!($error));
+                .with_output_schema(stringify!($event));
         }
         impl ::method_core::Subscription for $params {
             type Event = $event;
