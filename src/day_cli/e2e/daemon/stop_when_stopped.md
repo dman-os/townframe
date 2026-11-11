@@ -1,4 +1,4 @@
-# `daemon stop` with no daemon is not an error
+# `node stop` with no daemon is not an error
 
 ```console
 $ day node init
