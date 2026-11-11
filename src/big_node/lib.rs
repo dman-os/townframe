@@ -9,6 +9,7 @@ pub use info::GET_NODE_INFO;
 pub use info::NodeInfo;
 use listeners::Listener;
 pub use listeners::Listeners;
+pub use listeners::UnixClients;
 
 use big_blobs::BlobService;
 use big_cabinet::Authority;
@@ -211,10 +212,10 @@ pub struct BigNode {
     pub registry_drawer: DrawerId,
     /// What the node listens on, as bound (a TCP port of `0` in the config is resolved here).
     pub listeners: Listeners,
-    /// How many connections the Unix socket listener is serving right now, when it runs. A
-    /// process that opened the node only to serve its own command watches this fall to zero
-    /// before it stops the node, so it never closes a client that is still connected.
-    pub unix_clients: Option<tokio::sync::watch::Receiver<usize>>,
+    /// The Unix socket listener's connections, when it runs. A process that opened the node only
+    /// to serve its own command drains them before it stops the node, so it never closes a
+    /// client that is still connected.
+    pub unix_clients: Option<UnixClients>,
     /// The network attachment, when the config asked for one.
     pub peers: Option<peers::Peers>,
 }
@@ -654,7 +655,7 @@ async fn attach_listeners(
     node: &BigNode,
     requested: Listeners,
     stop: &mut StopToken,
-) -> Res<(Listeners, Option<tokio::sync::watch::Receiver<usize>>)> {
+) -> Res<(Listeners, Option<UnixClients>)> {
     let mut bound = Listeners::default();
     let mut clients = None;
     if let Some(path) = requested.unix_socket {
