@@ -869,12 +869,13 @@ fn normal_touch_line_selection_holds_range_while_dragging_over_the_gutter_utilit
     harness.manager.clean_up();
 }
 
-// Not in upstream's file. A render replaces rows the manager still holds as the hovered line;
-// upstream's `clearHoveredLine` then removes an attribute from a detached element, which is a
-// no-op, while here the discarded node's key is stale.
+// Not in upstream's file. A render replaces the rows the pointer was over; the owner runs the
+// manager's `setup` for the new rows and only then frees the replaced ones. Upstream's hovered
+// line and utility anchor would be detached elements by then; here `setup` ends them while the
+// rows exist, so freeing the rows leaves no stale key behind (see `forget_replaced_rows`).
 #[test]
-fn clean_up_after_the_hovered_rows_were_discarded_does_not_touch_them() {
-    let mut options = InteractionManagerOptions::default();
+fn setup_forgets_the_hovered_line_and_utility_anchor_of_rows_a_render_replaced() {
+    let mut options = options_with_utility();
     options.base.line_hover_highlight =
         Some(crate::managers::interaction_manager::LineHoverHighlight::Both);
     let harness = Harness::new(InteractionManagerMode::File, options);
@@ -886,9 +887,25 @@ fn clean_up_after_the_hovered_rows_were_discarded_does_not_touch_them() {
         &Pointer::new(PointerType::Mouse),
     );
     assert!(harness.manager.get_hovered_line().is_some());
+    assert!(harness.has_descendant(fixture.gutter_rows[1], "data-gutter-utility-slot"));
 
-    harness.dom.doc.discard(fixture.content_rows[1]);
-    harness.dom.doc.discard(fixture.gutter_rows[1]);
-    harness.manager.clean_up();
+    // The render: the rows are replaced, `setup` runs, then the old rows are freed.
+    for row in [fixture.content_rows[1], fixture.gutter_rows[1]] {
+        harness.dom.doc.remove(row);
+    }
+    harness.manager.setup(&fixture.pre);
     assert_eq!(harness.manager.get_hovered_line(), None);
+    assert!(!harness.has_descendant(fixture.pre, "data-gutter-utility-slot"));
+    for row in [fixture.content_rows[1], fixture.gutter_rows[1]] {
+        harness.dom.doc.discard(row);
+    }
+
+    // The manager still owns the utility: it places it on the next hover, and cleans up.
+    harness.dispatch(
+        fixture.content_rows[2],
+        "pointermove",
+        &Pointer::new(PointerType::Mouse),
+    );
+    assert!(harness.has_descendant(fixture.gutter_rows[2], "data-gutter-utility-slot"));
+    harness.manager.clean_up();
 }
