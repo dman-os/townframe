@@ -34,6 +34,7 @@
 //! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
 
 pub(crate) mod capture;
+mod record;
 
 use crate::client::NodeClient;
 use crate::interlude::*;
@@ -81,10 +82,27 @@ pub enum IntxtCommands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Record an ACP session: run the agent command, passing everything through
+    ///
+    /// An ACP client (an editor) launches this in place of the agent, e.g. `day x intxt record --
+    /// claude-code-acp`. It spawns the agent, forwards the client's stdin to it and its stdout to
+    /// the client unchanged, and records the session's messages, tool calls and plan, and the edits
+    /// each prompt turn made in the session's working directory, in the node's capture drawer.
+    /// Needs the node's daemon; without one the session runs unrecorded. A recording that fails
+    /// says why on stderr and stops, and the session goes on. Exits with the agent's status.
+    Record {
+        /// Record the agent's thinking (`agent_thought_chunk`) as well
+        #[arg(long)]
+        thinking: bool,
+        /// The agent's command and arguments
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        agent: Vec<String>,
+    },
 }
 
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
+        IntxtCommands::Record { thinking, agent } => record::run(agent, thinking).await,
         IntxtCommands::Install { handler } => {
             let client = lazy::node().await?;
             let wasm = std::fs::read(&handler)
@@ -219,9 +237,7 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
     )
     .await?;
 
-    let cartridge = intxt_core::cartridge::cartridge(
-        intxt_core::cartridge::handler_artifact(wasm),
-    );
+    let cartridge = intxt_core::cartridge::cartridge(intxt_core::cartridge::handler_artifact(wasm));
     let cartridge_id = cartridge.id.clone();
     call(
         client,
@@ -236,7 +252,9 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
         SetNoduleOperationGrants {
             cartridge_id: cartridge_id.clone(),
             operations: DispatchScope {
-                operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+                operations: intxt_core::methods::REQUIRED_OPERATIONS
+                    .map(str::to_owned)
+                    .into(),
                 ..DispatchScope::default()
             },
         },

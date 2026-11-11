@@ -15,6 +15,7 @@ intxt_core = { path = "../intxt_core" }
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+similar = "2.7"
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
