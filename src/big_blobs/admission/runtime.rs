@@ -170,8 +170,10 @@ impl InventoryMirrors {
         }
         let deferred =
             !available && state.fetch_eligible() && !state.fetching && transfers.len() >= 8;
+        // Settle only the generation this decision was made on: an observation or pin that landed
+        // while it ran leaves the pair dirty for the next round instead of being settled unseen.
         self.projection
-            .apply(&self.admission, inventory, digest)
+            .apply(&self.admission, inventory, digest, state.generation)
             .await?;
         drop(guards);
         Ok(deferred)
@@ -186,8 +188,22 @@ impl InventoryMirrors {
                 self.admission
                     .available(&attempt.inventory, attempt.digest, true)
                     .await?;
+                // Publish the pair as it stands now, whatever moved it during the transfer: its
+                // bytes are local, so no change since can need a fetch decision that publishing
+                // the newer generation would skip (unlike `project_pair`'s, made before a fetch).
+                let generation = self
+                    .admission
+                    .state(&attempt.inventory, attempt.digest)
+                    .await?
+                    .expect("a completed attempt's pair exists")
+                    .generation;
                 self.projection
-                    .apply(&self.admission, &attempt.inventory, attempt.digest)
+                    .apply(
+                        &self.admission,
+                        &attempt.inventory,
+                        attempt.digest,
+                        generation,
+                    )
                     .await?;
                 drop(guards);
             }

@@ -43,6 +43,9 @@ impl Harness {
     }
 
     async fn boot(path: Option<&std::path::Path>, seed: u8) -> Res<Self> {
+        // A panic in any task (an iroh protocol handler, a worker) must fail the test, not leave it
+        // waiting on a notification the dead task would have sent.
+        utils_rs::testing::setup_tracing_once();
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
             node_identity_seed: [seed; 32],

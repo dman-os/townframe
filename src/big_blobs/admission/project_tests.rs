@@ -84,9 +84,16 @@ impl Harness {
             .await
     }
 
+    /// Publish the pair as it stands now, as the runtime does for a decision it just made.
     async fn apply(&self, inventory: &DocId, digest: BlobId) -> Res<()> {
+        let generation = self
+            .admission
+            .state(inventory, digest)
+            .await?
+            .expect("an applied pair exists")
+            .generation;
         self.projection
-            .apply(&self.admission, inventory, digest)
+            .apply(&self.admission, inventory, digest, generation)
             .await
     }
 }
@@ -300,6 +307,44 @@ async fn virtual_publication_requires_provider_and_physical_plaintext_dependency
             .await?
             .is_empty()
     );
+    harness.stop.stop().await;
+    harness.repo_stop.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_change_landing_during_a_decision_stays_dirty_for_the_next_round() -> Res<()> {
+    let harness = Harness::boot().await?;
+    let inventory = harness.inventory().await?;
+    let digest = BlobId::new(*Hash::new(b"observed mid-decision").as_bytes());
+    harness.pin(&inventory, digest, 21).await?;
+    // The runtime reads the pair, finds nothing to fetch (no source has it yet), and goes on to
+    // publish what it decided.
+    let decided = harness
+        .admission
+        .state(&inventory, digest)
+        .await?
+        .unwrap()
+        .generation;
+    // A source reports the digest before that publish lands.
+    harness
+        .admission
+        .observe(&inventory, digest, &PeerKey::new([95; 32]), 1, true, None)
+        .await?;
+    harness
+        .projection
+        .apply(&harness.admission, &inventory, digest, decided)
+        .await?;
+    // The observation is a newer generation no decision saw: it must still be dirty, or nothing
+    // would ever consider fetching it.
+    let dirty = harness.admission.dirty().await?;
+    let pending = dirty
+        .iter()
+        .find(|(dirty_inventory, dirty_digest, _)| {
+            *dirty_inventory == inventory && *dirty_digest == digest
+        })
+        .expect("the observed pair is still dirty");
+    assert!(pending.2 > decided);
     harness.stop.stop().await;
     harness.repo_stop.stop().await?;
     Ok(())

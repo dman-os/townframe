@@ -415,16 +415,26 @@ impl State {
         Ok(())
     }
 
+    /// Publish the pair as the caller decided it at `generation`, and settle that generation.
+    ///
+    /// A pair that has moved past `generation` since is left as it is. Every move bumps the
+    /// generation and marks the pair dirty, so the next round decides it again; settling the new
+    /// generation here would mark a change clean that no decision (whether to fetch it, above all)
+    /// ever saw, and nothing would wake for it again.
     pub(super) async fn publish(
         &self,
         inventory: &DocId,
         digest: BlobId,
+        generation: u64,
         effect: impl FnOnce(PairState, Option<u64>) -> futures::future::BoxFuture<'static, Res<bool>>,
     ) -> Res<()> {
         let Some(pair) = self.state(inventory, digest).await? else {
             return Ok(());
         };
-        let generation = i64::try_from(pair.generation)?;
+        if pair.generation != generation {
+            return Ok(());
+        }
+        let generation = i64::try_from(generation)?;
         let length = self.length(inventory, digest).await?;
         let invalidated = sqlite::queries::invalidate_publish(
             &self.sql,
