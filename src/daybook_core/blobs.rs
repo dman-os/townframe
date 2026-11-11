@@ -158,9 +158,8 @@ pub fn blob_url_digest(url: &url::Url) -> Option<&str> {
 /// The digest text of a `Blob` facet's URL: a `dtxt:blob:` URL or the older `daybook-blob`
 /// spelling that stored facets may still carry.
 pub fn blob_facet_url_digest(url: &url::Url) -> Option<&str> {
-    blob_url_digest(url).or_else(|| {
-        (url.scheme() == "daybook-blob").then(|| url.path().trim_start_matches('/'))
-    })
+    blob_url_digest(url)
+        .or_else(|| (url.scheme() == "daybook-blob").then(|| url.path().trim_start_matches('/')))
 }
 
 /// The content digest of a blob: the blake3 hash of its bytes.

@@ -264,7 +264,7 @@ pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
                 nodules::ConfigureNodule,
                 nodules::SetNoduleEnabled,
                 nodules::SetNoduleDrawerGrants,
-                nodules::SetNoduleOperationGrants,
+                nodules::SetNoduleMethodGrants,
                 nodules::ConfirmNoduleResolution,
                 nodules::SetNoduleSubstitution,
                 nodules::UninstallNodule,

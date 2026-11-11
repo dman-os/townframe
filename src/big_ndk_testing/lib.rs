@@ -45,7 +45,7 @@ use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleMethodGrants;
 use executor::Hosting;
 use executor::NativeExecutor;
 use executor::Registered;
@@ -251,17 +251,13 @@ impl TestNode {
         .await
     }
 
-    /// Sets the operations the nodule of `cartridge_id` may invoke, which it holds as a dispatch
+    /// Sets the methods the nodule of `cartridge_id` may invoke, which it holds as a dispatch
     /// capability minted from them. The grant is bounded by what the nodule's cartridge requested and
     /// by the node's ceiling, and the record says whether it was applied.
-    pub async fn grant(
-        &self,
-        cartridge_id: &CartridgeId,
-        operations: DispatchScope,
-    ) -> NoduleRecord {
-        self.nodules(SetNoduleOperationGrants {
+    pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
+        self.nodules(SetNoduleMethodGrants {
             cartridge_id: cartridge_id.clone(),
-            operations,
+            methods,
         })
         .await
     }
@@ -306,7 +302,7 @@ fn config(
     secrets: Arc<SecretStore>,
     sql: Database,
     storage: big_repo::Storage,
-    nodule_operations: DispatchScope,
+    nodule_methods: DispatchScope,
 ) -> Config {
     Config {
         repo: big_repo::Config {
@@ -323,7 +319,7 @@ fn config(
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
         blob_storage: big_blobs::Storage::memory().unwrap(),
-        nodule_operations,
+        nodule_methods,
         listeners: Default::default(),
         peers: None,
     }

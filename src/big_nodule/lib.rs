@@ -5,7 +5,7 @@
 //! lives in the node's config drawer document and is projected through
 //! [`big_cabinet::DatumStoreHandle`] over [`big_nodule_core::config::NoduleConfig`].
 //! Host-specific state (each nodule's durable local actor, the service-owned drawer grant
-//! capabilities and the dispatch handles minted from operation grants applied on this node)
+//! capabilities and the dispatch handles minted from method grants applied on this node)
 //! lives in SQLite.
 
 #![recursion_limit = "256"]
@@ -68,7 +68,7 @@ use big_nodule_core::protocol::NodulesMessage;
 use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleMethodGrants;
 use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::protocol::UninstallNodule;
 use service_client_native_rs::Client;
@@ -374,20 +374,20 @@ impl NoduleService {
             .await
     }
 
-    async fn set_operation_grants(
+    async fn set_method_grants(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: SetNoduleOperationGrants,
+        params: SetNoduleMethodGrants,
     ) -> Res<NoduleRecord> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
-            .ask(|reply| Command::SetOperationGrants {
+            .ask(|reply| Command::SetMethodGrants {
                 context,
                 cartridge_id: params.cartridge_id,
-                operations: params.operations,
+                methods: params.methods,
                 reply,
             })
             .await
@@ -472,7 +472,7 @@ handlers! {
     ConfigureNodule => configure: NoduleRecord;
     SetNoduleEnabled => set_enabled: NoduleRecord;
     SetNoduleDrawerGrants => set_drawer_grants: NoduleRecord;
-    SetNoduleOperationGrants => set_operation_grants: NoduleRecord;
+    SetNoduleMethodGrants => set_method_grants: NoduleRecord;
     ConfirmNoduleResolution => confirm_resolution: NoduleRecord;
     SetNoduleSubstitution => set_substitution: NoduleRecord;
     UninstallNodule => uninstall: ();
@@ -488,7 +488,7 @@ service_utils_rs::bind_service_protocol! {
             ConfigureNodule(ConfigureNodule),
             SetNoduleEnabled(SetNoduleEnabled),
             SetNoduleDrawerGrants(SetNoduleDrawerGrants),
-            SetNoduleOperationGrants(SetNoduleOperationGrants),
+            SetNoduleMethodGrants(SetNoduleMethodGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleSubstitution(SetNoduleSubstitution),
             UninstallNodule(UninstallNodule),

@@ -106,9 +106,9 @@ pub struct Config {
     /// The blob store, opened by the composition root.
     pub blob_storage: big_blobs::Storage,
     /// The operator's grant of dispatch to the nodule service: the ceiling of what any nodule
-    /// can be granted to invoke. A nodule's own operation grants are minted from it, so a grant
+    /// can be granted to invoke. A nodule's own method grants are minted from it, so a grant
     /// outside it is reported on the nodule's record as not applied.
-    pub nodule_operations: DispatchScope,
+    pub nodule_methods: DispatchScope,
     /// The attachments that serve the node's router. Empty is a complete node.
     pub listeners: Listeners,
     /// The network attachment: the Iroh endpoint, the peers service and the peer policy. `None`
@@ -380,7 +380,7 @@ impl BigNode {
                 &authority,
                 nodules_actor.actor.actor_id,
                 dispatch_namespace,
-                config.nodule_operations,
+                config.nodule_methods,
                 &mut stop,
             )
             .await?;

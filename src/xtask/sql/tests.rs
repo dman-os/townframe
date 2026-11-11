@@ -380,7 +380,10 @@ fn schema_dependencies_are_ordered_and_cycles_rejected() -> Res<()> {
         "CREATE TABLE child (parent_id INTEGER REFERENCES parent(id)) STRICT;",
     )?;
     std::fs::write(beta.join("sqlite/dependencies.txt"), "../../alpha\n")?;
-    assert_eq!(schema_units(root.path(), &beta)?, vec![alpha.clone(), beta.clone()]);
+    assert_eq!(
+        schema_units(root.path(), &beta)?,
+        vec![alpha.clone(), beta.clone()]
+    );
     process_unit(Mode::Check, root.path(), &beta)?;
     std::fs::write(alpha.join("sqlite/dependencies.txt"), "../../beta\n")?;
     let error = schema_units(root.path(), &beta).expect_err("dependency cycle");

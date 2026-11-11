@@ -91,7 +91,7 @@ fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) 
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
         blob_storage: big_blobs::Storage::memory().unwrap(),
-        nodule_operations: big_dispatch_core::DispatchScope {
+        nodule_methods: big_dispatch_core::DispatchScope {
             authorities: ["org.example".to_owned()].into(),
             ..Default::default()
         },
