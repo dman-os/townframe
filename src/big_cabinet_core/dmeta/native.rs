@@ -16,6 +16,8 @@ use automerge::ScalarValue;
 use automerge::ScalarValueRef;
 use automerge::Value;
 use automerge::ValueRef;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// A binary64 with canonical NaN bits and distinct signed zeros.
@@ -62,8 +64,52 @@ pub enum NativeReadError {
     Automerge(#[from] automerge::AutomergeError),
     #[error("unsupported native value: {0}")]
     Unsupported(&'static str),
-    #[error("native traversal resource limit exceeded: {0}")]
-    ResourceLimit(&'static str),
+    #[error(
+        "native traversal {limit} limit exceeded: the read needed {needed} with {available} left"
+    )]
+    ResourceLimit {
+        limit: ResourceLimit,
+        /// What the refused step needed of the limit: the bytes of the value, one node, or the
+        /// depth it reached.
+        needed: usize,
+        /// What the limit had left when the step was refused (for depth, the whole limit).
+        available: usize,
+    },
+}
+
+/// Which of the read budget's limits a read exceeded.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResourceLimit {
+    Bytes,
+    Nodes,
+    Depth,
+}
+
+impl ResourceLimit {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bytes => "bytes",
+            Self::Nodes => "nodes",
+            Self::Depth => "depth",
+        }
+    }
+
+    /// The limit's value in [`NativeReadBudget::default`], which a repository write reads under.
+    pub fn default_maximum(self) -> usize {
+        match self {
+            Self::Bytes => NativeReadBudget::MAX_BYTES,
+            Self::Nodes => NativeReadBudget::MAX_NODES,
+            Self::Depth => NativeReadBudget::MAX_DEPTH,
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,12 +136,20 @@ impl NativeReadBudget {
 
     fn visit(&mut self, depth: usize) -> Result<(), NativeReadError> {
         if depth >= self.max_depth {
-            return Err(NativeReadError::ResourceLimit("depth"));
+            return Err(NativeReadError::ResourceLimit {
+                limit: ResourceLimit::Depth,
+                needed: depth + 1,
+                available: self.max_depth,
+            });
         }
         self.nodes = self
             .nodes
             .checked_sub(1)
-            .ok_or(NativeReadError::ResourceLimit("nodes"))?;
+            .ok_or(NativeReadError::ResourceLimit {
+                limit: ResourceLimit::Nodes,
+                needed: 1,
+                available: 0,
+            })?;
         Ok(())
     }
 
@@ -103,7 +157,11 @@ impl NativeReadBudget {
         self.bytes = self
             .bytes
             .checked_sub(count)
-            .ok_or(NativeReadError::ResourceLimit("bytes"))?;
+            .ok_or(NativeReadError::ResourceLimit {
+                limit: ResourceLimit::Bytes,
+                needed: count,
+                available: self.bytes,
+            })?;
         Ok(())
     }
 }
@@ -156,13 +214,25 @@ impl NativeValue {
                     _ => 0,
                 };
                 if bytes > budget.bytes {
-                    return Err(NativeReadError::ResourceLimit("bytes"));
+                    return Err(NativeReadError::ResourceLimit {
+                        limit: ResourceLimit::Bytes,
+                        needed: bytes,
+                        available: budget.bytes,
+                    });
                 }
                 if budget.nodes == 0 {
-                    return Err(NativeReadError::ResourceLimit("nodes"));
+                    return Err(NativeReadError::ResourceLimit {
+                        limit: ResourceLimit::Nodes,
+                        needed: 1,
+                        available: 0,
+                    });
                 }
                 if budget.max_depth == 0 {
-                    return Err(NativeReadError::ResourceLimit("depth"));
+                    return Err(NativeReadError::ResourceLimit {
+                        limit: ResourceLimit::Depth,
+                        needed: 1,
+                        available: 0,
+                    });
                 }
                 ValueRef::Scalar(value.into_owned().into())
             }
@@ -241,21 +311,32 @@ impl NativeValue {
                 if !marks.is_empty() {
                     return Err(NativeReadError::Unsupported("text marks"));
                 }
-                let entries = match heads {
-                    Some(heads) => doc.list_range_at(id, .., heads),
-                    None => doc.list_range(id, ..),
-                };
-                for item in entries {
-                    budget.visit(depth)?;
-                    let ValueRef::Scalar(ScalarValueRef::Str(value)) = item.value else {
-                        return Err(NativeReadError::Unsupported("embedded text value"));
-                    };
-                    budget.consume_bytes(value.len())?;
-                }
-                Ok(Self::Text(match heads {
+                let text = match heads {
                     Some(heads) => doc.text_at(id, heads)?,
                     None => doc.text(id)?,
-                }))
+                };
+                // Automerge renders every non-string element of a text (an embedded scalar, a
+                // block) as U+FFFC, so a text without that character holds only string
+                // elements and the one `text` read above is the whole content: its cost is its
+                // bytes, which the byte budget bounds, so it is charged as the one node already
+                // visited plus its bytes and not per character. Only a text that does contain
+                // U+FFFC (a literal one is indistinguishable from the placeholder) walks its
+                // elements to refuse an embedded value; that walk really visits each element, so
+                // each is charged as a node.
+                if text.contains('\u{fffc}') {
+                    let entries = match heads {
+                        Some(heads) => doc.list_range_at(id, .., heads),
+                        None => doc.list_range(id, ..),
+                    };
+                    for item in entries {
+                        budget.visit(depth)?;
+                        let ValueRef::Scalar(ScalarValueRef::Str(_)) = item.value else {
+                            return Err(NativeReadError::Unsupported("embedded text value"));
+                        };
+                    }
+                }
+                budget.consume_bytes(text.len())?;
+                Ok(Self::Text(text))
             }
         }
     }

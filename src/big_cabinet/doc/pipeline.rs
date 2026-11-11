@@ -48,6 +48,32 @@ impl Failure {
     }
 }
 
+/// The refusal for a value the write could not read back: one over the read budget says which
+/// limit and how far over, so a client can act on it. The write reads under the default budget,
+/// so the maximum is the default's, and the read stopped at the first step that did not fit, so
+/// the observed amount is what the limit had already spent plus that step's need.
+fn native_read_refusal(key: &DatumKey, error: NativeReadError) -> DocsError {
+    match error {
+        NativeReadError::ResourceLimit {
+            limit,
+            needed,
+            available,
+        } => {
+            let maximum = limit.default_maximum();
+            DocsError::ValueTooLarge {
+                datum_key: key.clone(),
+                limit,
+                observed: (maximum - available + needed) as u64,
+                maximum: maximum as u64,
+            }
+        }
+        error => DocsError::InvalidValue {
+            datum_key: key.clone(),
+            reason: format!("{error:?}"),
+        },
+    }
+}
+
 pub(crate) fn digest(value: &impl serde::Serialize) -> [u8; 32] {
     *blake3::hash(&serde_json::to_vec(value).expect("a request serializes")).as_bytes()
 }
@@ -192,12 +218,8 @@ impl DocsService {
                     alias
                 }
             };
-            let native = NativeValue::read_at(&tx, &datums, key.to_string()).map_err(|error| {
-                DocsError::InvalidValue {
-                    datum_key: key.clone(),
-                    reason: format!("{error:?}"),
-                }
-            })?;
+            let native = NativeValue::read_at(&tx, &datums, key.to_string())
+                .map_err(|error| native_read_refusal(&key, error))?;
             let removed = native.is_none();
             claims.insert(
                 key.clone(),

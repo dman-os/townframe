@@ -141,6 +141,40 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
 }
 
 #[tokio::test]
+async fn a_value_over_the_read_budget_names_its_datum_and_limit() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let created = node
+        .create(&alice, "create", [(key("main"), note("x"))])
+        .await
+        .unwrap();
+    let maximum = ResourceLimit::Bytes.default_maximum();
+    // The read charged the map keys (`$type`, `value`) and the `$type` string before it reached the value
+    // that did not fit, and `observed` counts them.
+    let spent_before_value = "$type".len() + NOTE.len() + "value".len();
+    let error = node
+        .write(
+            &alice,
+            &created.doc_id,
+            WriteMode::AtCurrent,
+            [(key("main"), note(&"x".repeat(maximum + 1)))],
+            [],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        DocsError::ValueTooLarge {
+            datum_key: key("main"),
+            limit: ResourceLimit::Bytes,
+            observed: (maximum + 1 + spent_before_value) as u64,
+            maximum: maximum as u64,
+        }
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn refused_writes_commit_nothing() {
     let node = Node::boot().await;
     let alice = node.writer("alice").await;

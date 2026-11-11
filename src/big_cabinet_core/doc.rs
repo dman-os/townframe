@@ -4,6 +4,7 @@ use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
 use crate::dmeta::DocId;
+use crate::dmeta::ResourceLimit;
 use crate::dmeta::Uuid7;
 use crate::drawer::DrawerAccess;
 use crate::query::DatumSelection;
@@ -265,6 +266,18 @@ pub enum DocsError {
     SetAndRemoved { datum_key: DatumKey },
     #[error("datum {datum_key} value is invalid: {reason}")]
     InvalidValue { datum_key: DatumKey, reason: String },
+    #[error(
+        "datum {datum_key} value is too large: it needs {observed} {limit} and the limit is {maximum}"
+    )]
+    ValueTooLarge {
+        datum_key: DatumKey,
+        limit: ResourceLimit,
+        /// What the read of the value had reached when it was refused. The read stops at the
+        /// limit, so this is the amount the value needed up to that point, not necessarily its
+        /// whole size.
+        observed: u64,
+        maximum: u64,
+    },
     #[error("the write condition no longer holds at {heads:?}")]
     Conflict {
         #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]

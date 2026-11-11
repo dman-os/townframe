@@ -73,7 +73,7 @@ impl From<NativeReadError> for ClaimHistoryError {
         match error {
             NativeReadError::Automerge(error) => error.into(),
             NativeReadError::Unsupported(kind) => Self::Unsupported(kind),
-            NativeReadError::ResourceLimit(limit) => Self::ResourceRefused(limit),
+            NativeReadError::ResourceLimit { limit, .. } => Self::ResourceRefused(limit.name()),
         }
     }
 }
