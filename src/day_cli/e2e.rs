@@ -790,9 +790,12 @@ mod blackbox {
         assert!(day(&["node", "init"]).status.success());
         let started = day(&["node", "start"]);
         assert!(started.status.success(), "{}", text(&started));
+        // The lock records the holder's pid on its first line.
         let pid: u32 = std::fs::read_to_string(node.join("node.lock"))
             .unwrap()
-            .trim()
+            .lines()
+            .next()
+            .unwrap()
             .parse()
             .unwrap();
         // SAFETY: kill(2) takes plain integers.
@@ -832,8 +835,11 @@ mod blackbox {
 
         // And a daemon can start over a stale socket too.
         assert!(day(&["node", "start"]).status.success());
-        let pid_again = std::fs::read_to_string(node.join("node.lock")).unwrap();
-        assert_ne!(pid_again.trim().parse::<u32>().unwrap(), pid);
+        let lock_again = std::fs::read_to_string(node.join("node.lock")).unwrap();
+        assert_ne!(
+            lock_again.lines().next().unwrap().parse::<u32>().unwrap(),
+            pid
+        );
         let stopped = day(&["node", "stop"]);
         assert!(stopped.status.success(), "{}", text(&stopped));
     }
