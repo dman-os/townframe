@@ -613,7 +613,7 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
             RequestContext::root(),
             Authorization {
                 authority: source,
-                signer: cartridge.capability,
+                signer: bob.capability,
             }
             .metadata(),
             MintDrawerCapability {
@@ -790,6 +790,61 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         DrawersError::Denied
     );
     node.stop().await;
+}
+
+#[tokio::test]
+async fn a_drawer_handle_presented_by_an_actor_it_is_not_bound_to_is_refused() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let bob = node.actor("bob").await;
+    let drawer = node.collection(&alice, "workspace").await;
+    let doc = node
+        .create_doc(&alice, &drawer, "initial-note")
+        .await
+        .unwrap();
+    node.grant(&alice, &drawer, &bob, Access::Write).await;
+    let scope = DrawerScope {
+        drawers: [(drawer.clone(), Access::Write)].into(),
+        create: false,
+    };
+    let held = node.mint_drawer(&bob, scope.clone()).await.unwrap();
+    let stolen = Authorization {
+        authority: held,
+        signer: alice.capability,
+    }
+    .metadata();
+    // The handle is bound to bob. Alice, who holds more standing than bob, presenting its id
+    // under her own signer is refused for a mint and for the document-to-drawer lookup.
+    assert_eq!(
+        node.drawers()
+            .call_with(
+                RequestContext::root(),
+                stolen.clone(),
+                MintDrawerCapability {
+                    scope,
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .map_err(op)
+            .unwrap_err(),
+        DrawersError::Denied
+    );
+    assert_eq!(
+        node.drawers()
+            .call_with(
+                RequestContext::root(),
+                stolen,
+                ListDocDrawers {
+                    doc_id: doc.clone()
+                },
+            )
+            .await
+            .map_err(op)
+            .unwrap_err(),
+        DrawersError::Denied
+    );
 }
 
 #[tokio::test]
@@ -1304,7 +1359,7 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             RequestContext::root(),
             Authorization {
                 authority: source,
-                signer: cartridge.capability,
+                signer: alice.capability,
             }
             .metadata(),
             MintDrawerCapability {
@@ -1446,7 +1501,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
             context.child(),
             Authorization {
                 authority: source,
-                signer: cartridge.capability,
+                signer: alice.capability,
             }
             .metadata(),
             MintDrawerCapability {
