@@ -8,6 +8,7 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_byte_owners_and_effects.sql", sql: include_str!("migrations/001_byte_owners_and_effects.sql") },
     Migration { version: 2, name: "002_upload_receipts.sql", sql: include_str!("migrations/002_upload_receipts.sql") },
     Migration { version: 3, name: "003_pair_root_triggers.sql", sql: include_str!("migrations/003_pair_root_triggers.sql") },
+    Migration { version: 4, name: "004_upload_receipts_held_digest.sql", sql: include_str!("migrations/004_upload_receipts_held_digest.sql") },
 ];
 
 pub const CONTAINS_SQL: &str = include_str!("queries/contains.sql");
@@ -39,6 +40,11 @@ pub async fn delete_owner_digest(db: &impl crate::sqlite_rs_alias::Executor, own
 pub const DELETE_PIN_ROOT_SQL: &str = include_str!("queries/delete_pin_root.sql");
 pub async fn delete_pin_root(db: &impl crate::sqlite_rs_alias::Executor, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(DELETE_PIN_ROOT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
+}
+
+pub const DELETE_UPLOAD_OWNERS_BY_DIGEST_SQL: &str = include_str!("queries/delete_upload_owners_by_digest.sql");
+pub async fn delete_upload_owners_by_digest(db: &impl crate::sqlite_rs_alias::Executor, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_UPLOAD_OWNERS_BY_DIGEST_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
 }
 
 pub const DEPENDENCIES_SQL: &str = include_str!("queries/dependencies.sql");
@@ -133,6 +139,11 @@ pub async fn reconcile_owners(db: &impl crate::sqlite_rs_alias::QueryExecutor, d
 pub const RELEASE_STAGING_SQL: &str = include_str!("queries/release_staging.sql");
 pub async fn release_staging(db: &impl crate::sqlite_rs_alias::Executor, owner: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(RELEASE_STAGING_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(owner)]).await
+}
+
+pub const RELEASE_UPLOADS_BY_DIGEST_SQL: &str = include_str!("queries/release_uploads_by_digest.sql");
+pub async fn release_uploads_by_digest(db: &impl crate::sqlite_rs_alias::Executor, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(RELEASE_UPLOADS_BY_DIGEST_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
 }
 
 pub const RETAINED_SQL: &str = include_str!("queries/retained.sql");

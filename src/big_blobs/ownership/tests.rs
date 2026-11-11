@@ -632,7 +632,8 @@ async fn adopted_document_ownership_and_staging_tombstone_survive_filesystem_res
 }
 
 #[tokio::test]
-async fn virtual_staging_adoption_keeps_dependencies_until_the_last_independent_hold() -> Res<()> {
+async fn a_document_claim_releases_every_virtual_upload_hold_and_carries_the_dependencies()
+-> Res<()> {
     let h = Harness::new().await?;
     let (cipher, plain) = add_encrypted(
         &h.store,
@@ -655,23 +656,52 @@ async fn virtual_staging_adoption_keeps_dependencies_until_the_last_independent_
         h.ownership.stage(imported.clone(), tag).await?;
     }
     h.ownership.resolve_pair(&id).await?;
+    assert_eq!(
+        h.sql
+            .query(
+                "SELECT COUNT(*) FROM big_blobs_byte_owners WHERE owner GLOB 'upload:*'",
+                ()
+            )
+            .await?
+            .all::<i64>()?,
+        vec![2]
+    );
     h.ownership
         .claim("document:retention:virtual", &[id])
         .await?;
+    // Both independent holds are released by the one document claim, which now carries the bytes
+    // and the plaintext dependency.
+    assert_eq!(
+        h.sql
+            .query(
+                "SELECT COUNT(*) FROM big_blobs_upload_receipts WHERE released = 0",
+                ()
+            )
+            .await?
+            .all::<i64>()?,
+        vec![0]
+    );
+    assert_eq!(
+        h.sql
+            .query("SELECT owner FROM big_blobs_byte_owners", ())
+            .await?
+            .all::<String>()?,
+        vec!["document:retention:virtual".to_owned()]
+    );
+    // Adopting or releasing an already released import is a no-op.
     h.ownership
         .adopt(&first, "document:retention:virtual")
         .await?;
-    h.ownership.release("document:retention:virtual").await?;
     h.ownership.release_import(&first).await?;
+    h.ownership.release_import(&second).await?;
     assert!(h.ownership.contains(&id).await?);
     assert!(h.ownership.contains(&plaintext).await?);
     assert!(h.rooted("owned", &id).await?);
     assert!(h.rooted("owned", &plaintext).await?);
-    assert!(!h.rooted("pin", &id).await?);
+    assert!(h.rooted("pin", &id).await?);
     assert!(has_pair_tags(&h.store, cipher).await?);
     assert!(h.provider.reader_for(&cipher).is_some());
-    assert!(!h.store.blobs().get_bytes(cipher).await?.is_empty());
-    h.ownership.release_import(&second).await?;
+    h.ownership.release("document:retention:virtual").await?;
     assert!(!h.ownership.contains(&id).await?);
     assert!(!h.ownership.contains(&plaintext).await?);
     assert!(!h.rooted("owned", &id).await?);
@@ -1273,7 +1303,7 @@ async fn adoption_requires_committed_ownership_of_the_durable_staging_digest() -
 }
 
 #[tokio::test]
-async fn failed_staging_handoff_preserves_committed_document_and_staging_owners() -> Res<()> {
+async fn a_failed_upload_hold_release_rolls_back_the_document_claim() -> Res<()> {
     let h = Harness::new().await?;
     let (tag, id) = h.blob(b"failed handoff").await?;
     let imported = ImportedBlob::new(BlobInfo {
@@ -1281,18 +1311,17 @@ async fn failed_staging_handoff_preserves_committed_document_and_staging_owners(
         length_octets: 14,
     });
     h.ownership.stage(imported.clone(), tag).await?;
-    h.ownership
-        .claim("document:retention:target", &[id])
-        .await?;
     h.sql
         .execute_batch(
             "CREATE TRIGGER fail_staging_handoff BEFORE DELETE ON big_blobs_byte_owners
          BEGIN SELECT RAISE(FAIL, 'injected staging handoff failure'); END;",
         )
         .await?;
+    // The document claim releases the upload hold in the same transaction, so a failure to
+    // release it leaves the staged hold exactly as it was and commits no document claim.
     let error = h
         .ownership
-        .adopt(&imported, "document:retention:target")
+        .claim("document:retention:target", &[id])
         .await
         .unwrap_err();
     assert!(
@@ -1309,18 +1338,18 @@ async fn failed_staging_handoff_preserves_committed_document_and_staging_owners(
     );
     assert_eq!(
         h.sql
-            .query("SELECT COUNT(*) FROM big_blobs_byte_owners", ())
+            .query("SELECT owner FROM big_blobs_byte_owners", ())
             .await?
-            .all::<i64>()?,
-        vec![2]
+            .all::<String>()?,
+        vec![imported.owner()]
     );
     assert!(h.rooted("owned", &id).await?);
-    assert!(h.rooted("pin", &id).await?);
+    assert!(!h.rooted("pin", &id).await?);
     h.sql
         .execute("DROP TRIGGER fail_staging_handoff", ())
         .await?;
     h.ownership
-        .adopt(&imported, "document:retention:target")
+        .claim("document:retention:target", &[id])
         .await?;
     h.ownership.release_import(&imported).await?;
     assert!(h.ownership.contains(&id).await?);

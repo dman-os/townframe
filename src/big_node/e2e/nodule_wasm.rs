@@ -6,7 +6,6 @@
 //! `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release`.
 
 use super::*;
-use big_blobs::BlobService;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::datum::DatumMember;
 use big_cartridges_core::Artifact;
@@ -156,9 +155,8 @@ pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
         .call(
             RequestContext::root(),
             PutBlob {
-                capability: blobs::blob_cap(node, BlobService::put_object().into(), Vec::new())
-                    .await,
-                bytes: bytes.to_vec(),
+                capability: blobs::put_cap(node).await,
+                bytes: bytes.to_vec().into(),
             },
         )
         .await

@@ -36,6 +36,7 @@ async fn runtime_drains_257_dirty_pairs_from_one_coalesced_notification() -> Res
         storage: crate::Storage::memory().unwrap(),
         sql: sql.clone(),
         authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: Uuid7::new(),
         namespace: Namespace {
             namespace_id: Uuid7::new(),
             capability: CapId::from_bytes([125; 16]),
