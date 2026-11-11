@@ -29,8 +29,8 @@ use big_dispatch_core::InvocationContext;
 use big_ndk_testing::TestNode;
 use intxt_core::generic;
 use intxt_core::work;
-use intxt_handlers::AddToIntxt;
-use intxt_handlers::AddedToIntxt;
+use intxt_core::methods::AddToIntxt;
+use intxt_core::methods::AddedToIntxt;
 use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
@@ -49,21 +49,23 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 /// A node that admitted intxt's cartridge, serving its handler natively, with the operations the
 /// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
-    let cartridge = crate::cartridge(crate::handler_artifact(
+    let cartridge = intxt_core::cartridge::cartridge(intxt_core::cartridge::handler_artifact(
         b"placeholder: the native test harness never reads the handler bytes",
-    ));
+        ),
+        &crate::REQUIRED_OPERATIONS,
+    );
     let id = cartridge.id.clone();
     // The ceiling of what a nodule can be granted covers the registered cartridge's own
     // authority only, so the foreign operations it calls must be added to it.
     let operations = DispatchScope {
-        operations: intxt_handlers::REQUIRED_OPERATIONS
+        operations: crate::REQUIRED_OPERATIONS
             .map(str::to_owned)
             .into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()
         .with_operation_ceiling(operations.clone())
-        .with_nodule(cartridge, intxt_handlers::Intxt)
+        .with_nodule(cartridge, crate::Intxt)
         .boot()
         .await;
     node.grant(&id, operations).await;
@@ -264,7 +266,7 @@ async fn concurrent_line_edits_to_a_note_both_land() {
 async fn create_intxt_writes_the_descriptor_datums() {
     let node = boot().await;
     let created = node
-        .call(intxt_handlers::CreateIntxt {
+        .call(intxt_core::methods::CreateIntxt {
             title: "Port the sync".to_owned(),
             description: Some("Notes *in markdown*".to_owned()),
         })
@@ -295,7 +297,7 @@ async fn create_intxt_writes_the_descriptor_datums() {
 async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     let node = boot().await;
     let intxt = async |title: &str| {
-        node.call(intxt_handlers::CreateIntxt {
+        node.call(intxt_core::methods::CreateIntxt {
             title: title.to_owned(),
             description: None,
         })
@@ -435,7 +437,7 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
     let create = async |key: &str| {
         let output = node
             .invoke(
-                intxt_handlers::CreateIntxt::XRPC.nsid,
+                intxt_core::methods::CreateIntxt::XRPC.nsid,
                 json!({"title": "Retried"}),
                 InvocationContext {
                     idempotency_key: Some(key.to_owned()),
@@ -445,7 +447,7 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
             )
             .await
             .unwrap();
-        serde_json::from_value::<intxt_handlers::IntxtCreated>(output)
+        serde_json::from_value::<intxt_core::methods::IntxtCreated>(output)
             .unwrap()
             .drawer_id
     };

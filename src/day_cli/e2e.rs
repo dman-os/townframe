@@ -484,7 +484,7 @@ mod library {
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../wasm_utils_rs/target/wasm32-wasip3/release/intxt_guest.wasm")
+                    .join("../wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm")
             })
     }
 
@@ -494,7 +494,7 @@ mod library {
     /// executor.
     ///
     /// Needs the component, built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml
-    /// -p intxt_guest --target wasm32-wasip3 --release`.
+    /// -p intxt_nodule_guest --target wasm32-wasip3 --release`.
     pub(super) async fn intxt_node() -> (tempfile::TempDir, NodeClient) {
         use crate::cmds::intxt;
         use big_dispatch_core::Readiness;
@@ -511,7 +511,7 @@ mod library {
         let wasm_path = guest_path();
         let wasm = std::fs::read(&wasm_path).unwrap_or_else(|error| {
             panic!(
-                "{}: {error}; build it with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_guest --target wasm32-wasip3 --release` or set INTXT_GUEST_WASM",
+                "{}: {error}; build it with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release` or set INTXT_GUEST_WASM",
                 wasm_path.display()
             )
         });

@@ -1,5 +1,5 @@
 [package]
-name = "intxt_guest"
+name = "intxt_nodule_guest"
 workspace = "../wasm_utils_rs"
 version.workspace = true
 edition.workspace = true
@@ -13,4 +13,4 @@ path = "lib.rs"
 
 [dependencies]
 big_ndk.workspace = true
-intxt_handlers.workspace = true
+intxt_nodule.workspace = true

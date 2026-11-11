@@ -23,10 +23,10 @@ members = [
     "../plug_dayledger_routines",
     "../test_wflows",
     "../test_nodule_guest",
-    "../intxt_guest",
+    "../intxt_nodule_guest",
     "../clay_rt_wcmp_web",
 ]
-default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows", "../test_nodule_guest", "../intxt_guest"]
+default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows", "../test_nodule_guest", "../intxt_nodule_guest"]
 
 [workspace.package]
 version = "0.1.0"
@@ -37,7 +37,7 @@ rust-version = "1.91"
 wasm_utils_rs = { path = "." }
 big_ndk = { path = "../big_ndk" }
 test_nodule_handlers = { path = "../test_nodule_handlers" }
-intxt_handlers = { path = "../intxt_handlers" }
+intxt_nodule = { path = "../intxt_nodule" }
 method_core = { path = "../method_core", default-features = false }
 service_core_rs = { path = "../service_core_rs", default-features = false }
 service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
@@ -95,7 +95,7 @@ debug = "line-tables-only"
 # The nodule component is put in the blob service, which takes at most 8 MiB per put
 # (`big_blobs_core::MAX_PUT_BYTES`), and the line tables of every linked crate made it 8.27 MiB:
 # stripping the final link of this one guest leaves 1.82 MiB. Other guests keep their debug info.
-[profile.release.package.intxt_guest]
+[profile.release.package.intxt_nodule_guest]
 strip = "symbols"
 
 [profile.wasm-release]

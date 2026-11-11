@@ -352,11 +352,11 @@ mod tests {
                     command: cmds::intxt::IntxtCommands::Install { handler },
                 }),
             ..
-        } = parse(&["x", "intxt", "install", "--handler", "intxt_guest.wasm"])
+        } = parse(&["x", "intxt", "install", "--handler", "intxt_nodule_guest.wasm"])
         else {
             panic!("`day x intxt install` is the intxt command");
         };
-        assert_eq!(handler, PathBuf::from("intxt_guest.wasm"));
+        assert_eq!(handler, PathBuf::from("intxt_nodule_guest.wasm"));
         let StaticCommands::Exec {
             nsid: Some(nsid),
             input: Some(input),

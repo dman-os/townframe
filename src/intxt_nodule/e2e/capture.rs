@@ -13,7 +13,7 @@ use intxt_core::capture::Batch;
 use intxt_core::capture::BlobRef;
 use intxt_core::capture::Content;
 use intxt_core::capture::RecordedIds;
-use intxt_handlers::RecordObservations;
+use intxt_core::methods::RecordObservations;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -54,7 +54,7 @@ struct Session {
 /// A session in a fresh git repository, recording into a new intxt drawer of `node`.
 async fn start(node: &TestNode) -> Session {
     let drawer = node
-        .call(intxt_handlers::CreateIntxt {
+        .call(intxt_core::methods::CreateIntxt {
             title: "capture".to_owned(),
             description: None,
         })
@@ -198,7 +198,7 @@ async fn value(node: &TestNode, doc: &str, tag: &str, slot: &str) -> Value {
 async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
     let node = boot().await;
     let drawer = node
-        .call(intxt_handlers::CreateIntxt {
+        .call(intxt_core::methods::CreateIntxt {
             title: "capture".to_owned(),
             description: None,
         })
@@ -365,7 +365,7 @@ async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
 async fn a_changed_batch_under_the_same_key_records_the_change() {
     let node = boot().await;
     let drawer = node
-        .call(intxt_handlers::CreateIntxt {
+        .call(intxt_core::methods::CreateIntxt {
             title: "capture".to_owned(),
             description: None,
         })
@@ -455,7 +455,7 @@ async fn is_absent(node: &TestNode, doc: &str, tag: &str, slot: &str) -> bool {
 async fn a_blob_file_is_a_blob_datum_until_it_becomes_text() {
     let node = boot().await;
     let drawer = node
-        .call(intxt_handlers::CreateIntxt {
+        .call(intxt_core::methods::CreateIntxt {
             title: "capture".to_owned(),
             description: None,
         })

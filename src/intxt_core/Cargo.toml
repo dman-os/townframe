@@ -13,15 +13,26 @@ path = "lib.rs"
 # and a vocabulary crate always needs its schemas.
 [features]
 default = ["schemars"]
-schemars = []
+# Also the schemas the methods' Lexicons are projected from: `methods!` and the derives test this
+# crate's own feature.
+schemars = ["method_core/schemars"]
+# Host-only: the cartridge builder (`intxt_core::cartridge`), which admits these vocabularies and
+# the nodule's methods to a node. A wasm guest never enables it.
+cartridge = ["schemars", "dep:big_cartridges_core", "dep:big_nodule_core", "dep:indexmap", "dep:method_lexicon"]
 
 [dependencies]
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
 macros = { path = "../macros" }
 automerge.workspace = true
+big_cartridges_core = { path = "../big_cartridges_core", default-features = false, optional = true }
+big_nodule_core = { path = "../big_nodule_core", default-features = false, optional = true }
+indexmap = { version = "2", features = ["serde"], optional = true }
 jiff.workspace = true
+method_core.workspace = true
+method_lexicon = { path = "../method_lexicon", optional = true }
 schemars = "1.2"
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]

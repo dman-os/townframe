@@ -1,16 +1,23 @@
 version = 1
 role = "domain"
-dependency_reason = "intxt's datum vocabularies are Cabinet datum declarations and nothing else."
-allowed_dependencies = ["big_cabinet_core", "macros"]
+dependency_reason = "intxt's datum vocabularies are Cabinet datum declarations, the types of the methods its nodule serves, and (behind the host-only `cartridge` feature) the cartridge that admits both to a node."
+allowed_dependencies = [
+    "big_cabinet_core",
+    "big_cartridges_core",
+    "big_nodule_core",
+    "macros",
+    "method_core",
+    "method_lexicon",
+]
 allow_external_api_types = false
 
 [api]
 target = "x86_64-unknown-linux-gnu"
 default_features = true
-features = []
+features = ["cartridge"]
 
 [builds.native]
-required_features = ["schemars"]
+required_features = ["cartridge"]
 
 [builds.wasm32-wasip3]
 required_features = ["schemars"]

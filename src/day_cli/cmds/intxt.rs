@@ -63,8 +63,8 @@ pub enum IntxtCommands {
     /// (install prints the exact command) and restart the daemon, which reads the
     /// ceiling at start. Install never edits node.json.
     Install {
-        /// The handler component: `src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_guest.wasm`,
-        /// built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_guest
+        /// The handler component: `src/wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm`,
+        /// built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest
         /// --target wasm32-wasip3 --release`
         #[arg(long)]
         handler: PathBuf,
@@ -219,7 +219,10 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
     )
     .await?;
 
-    let cartridge = intxt_nodule::cartridge(intxt_nodule::handler_artifact(wasm));
+    let cartridge = intxt_core::cartridge::cartridge(
+        intxt_core::cartridge::handler_artifact(wasm),
+        &intxt_nodule::REQUIRED_OPERATIONS,
+    );
     let cartridge_id = cartridge.id.clone();
     call(
         client,

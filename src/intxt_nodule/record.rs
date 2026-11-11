@@ -14,7 +14,6 @@
 //! turn of the session document.
 
 use crate::Caller;
-use crate::IntxtError;
 use crate::to_value;
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumKey;
@@ -46,6 +45,8 @@ use intxt_core::capture::RecordedWorktree;
 use intxt_core::capture::WorktreeBatch;
 use intxt_core::capture::WorktreeDocs;
 use intxt_core::generic;
+use intxt_core::methods::IntxtError;
+use intxt_core::methods::RecordObservations;
 use intxt_core::work;
 use serde::Deserialize;
 use serde::Serialize;
@@ -59,18 +60,6 @@ const BLOB_TAG: &str = "org.example.daybook.blob";
 
 /// Ops per op-log document (ADR 040 §3).
 const OPS_PER_LOG: u64 = 256;
-
-/// Records what a capture hook observed in `drawer`, the node's capture drawer.
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecordObservations {
-    /// Where the documents are created.
-    pub drawer: DrawerId,
-    /// The node the clones are on (`gitClone.machine`): the host knows it, the recorder does not.
-    pub machine: ActorUrl,
-    pub batch: Batch,
-}
 
 fn invalid(reason: impl Into<String>) -> IntxtError {
     IntxtError::Invalid(reason.into())

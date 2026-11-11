@@ -10,22 +10,23 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
+big_ndk.workspace = true
+blake3.workspace = true
 intxt_core = { path = "../intxt_core" }
-intxt_handlers = { path = "../intxt_handlers", features = ["schemars"] }
-big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
-big_cartridges_core.workspace = true
-big_nodule_core.workspace = true
-indexmap = { version = "2", features = ["serde"] }
-method_core = { workspace = true, features = ["schemars"] }
-method_lexicon = { path = "../method_lexicon" }
+method_core.workspace = true
+service_client_core_rs.workspace = true
+service_core_rs.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 big_blobs_core = { path = "../big_blobs_core" }
-intxt_capture = { path = "../intxt_capture" }
-tempfile.workspace = true
-big_dispatch_core.workspace = true
 big_cabinet_core = { path = "../big_cabinet_core" }
+big_dispatch_core.workspace = true
 big_ndk_testing = { path = "../big_ndk_testing" }
+intxt_capture = { path = "../intxt_capture" }
+intxt_core = { path = "../intxt_core", features = ["cartridge"] }
 service_utils_rs.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

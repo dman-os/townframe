@@ -14,7 +14,10 @@
 
 pub mod annotation;
 pub mod capture;
+#[cfg(feature = "cartridge")]
+pub mod cartridge;
 pub mod generic;
+pub mod methods;
 pub mod work;
 
 use big_cabinet_core::datum::Declaration;
