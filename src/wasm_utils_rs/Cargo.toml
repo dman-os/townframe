@@ -92,5 +92,11 @@ codegen-units = 1
 lto = "thin"
 debug = "line-tables-only"
 
+# The nodule component is put in the blob service, which takes at most 8 MiB per put
+# (`big_blobs_core::MAX_PUT_BYTES`), and the line tables of every linked crate made it 8.27 MiB:
+# stripping the final link of this one guest leaves 1.82 MiB. Other guests keep their debug info.
+[profile.release.package.intxt_guest]
+strip = "symbols"
+
 [profile.wasm-release]
 inherits = "release"
