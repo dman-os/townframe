@@ -8119,7 +8119,6 @@ version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
  "big_ndk",
- "http",
  "intxt_core",
  "method_core",
  "schemars 1.2.3",
@@ -8140,12 +8139,14 @@ dependencies = [
  "big_ndk_testing",
  "big_nodule_core",
  "indexmap 2.14.2",
+ "intxt_capture",
  "intxt_core",
  "intxt_handlers",
  "method_core",
  "method_lexicon",
  "serde_json",
  "service_utils_rs",
+ "tempfile",
  "tokio",
 ]
 

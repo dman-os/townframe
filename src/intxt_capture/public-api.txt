@@ -6,15 +6,12 @@
 impl From < String > for intxt_capture::hook::Event
 pub enum intxt_capture::Error { # [error ("io: {0}")] Io (# [from] std :: io :: Error), # [error ("git {args}: {stderr}")] Git { args : String , stderr : String }, # [doc = " git printed something this crate cannot read: a path that is not UTF-8 or contains a"] # [doc = " newline, or a log line of an unknown shape."] # [error ("{0}")] Format (String), # [doc = " A hook's JSON input lacks a required field or is not JSON."] # [error ("hook input: {0}")] Hook (String), # [error (transparent)] Transcript (# [from] crate :: transcript :: ImportError), # [doc = " A state file is not what this version wrote."] # [error ("state file {path}: {reason}")] State { path : String , reason : String } }
 pub enum intxt_capture::hook::Event { SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop, PreCompact, SessionEnd, Other (String) }
-pub enum intxt_capture::snapshot::BlobReason { # [doc = " Not valid UTF-8, or holds a NUL."] Binary, # [doc = " Over 256 KiB."] Large, # [doc = " A known lockfile, or `linguist-generated` or `-diff` in `.gitattributes`."] Generated }
-pub enum intxt_capture::snapshot::ChangeKind { Added, Modified, Deleted, # [doc = " A path that disappeared and another that appeared with identical content. A file that"] # [doc = " was also edited is not recognised: it is a deletion and an addition."] Renamed { from : String , } }
-pub enum intxt_capture::snapshot::Content { # [doc = " Valid UTF-8, at most 256 KiB, not generated: collaborative text."] Text (String), # [doc = " Everything else. Only the location is returned, so a later layer uploads it from disk"] # [doc = " without it being read here; `hash` is what `git hash-object` gave when the snapshot was"] # [doc = " taken, to check that the file is still what was observed."] Blob { path : PathBuf , size : u64 , hash : String , reason : BlobReason , } }
 pub enum intxt_capture::transcript::ImportError { # [error ("reading the transcript: {0}")] Io (# [from] std :: io :: Error), # [error ("the transcript is {len} bytes, shorter than the offset {offset} already imported")] Shrank { len : u64 , offset : u64 }, # [error ("transcript line at byte {at}: {reason}")] Line { at : u64 , reason : String }, # [error ("transcript record {uuid}: {reason}")] Record { uuid : String , reason : String } }
 pub impl intxt_capture::hook::Hook::fn parse (input : & [u8]) -> Result < Self , Error >
-pub impl intxt_capture::host::Batch::fn is_empty (& self) -> bool
 pub impl intxt_capture::host::Prepared::fn commit (mut self , recorded : RecordedIds) -> Result < () , Error >
 pub impl intxt_capture::snapshot::Snapshot::fn diff (& self , after : & Snapshot , root : & Path) -> Result < Vec < Change > , Error >
 pub impl intxt_capture::snapshot::Snapshot::fn take (root : & Path) -> Result < Self , Error >
+pub impl intxt_capture::transcript::Imported::fn into_batch (self) -> intxt_core :: capture :: Imported
 pub impl intxt_capture::transcript::TranscriptImporter::fn import (& mut self , tail : & [u8]) -> Result < Imported , ImportError >
 pub impl intxt_capture::transcript::TranscriptImporter::fn import_file (& mut self , path : & Path) -> Result < Imported , ImportError >
 pub impl intxt_capture::transcript::TranscriptImporter::fn new (parent : Option < DatumReference >) -> Self
@@ -36,20 +33,10 @@ pub struct intxt_capture::git::GitObserved  { head: Head, moves: Vec < GitMove >
 pub struct intxt_capture::git::GitState  {  }
 pub struct intxt_capture::git::Head  { reference: Option < String >, target: Option < String > }
 pub struct intxt_capture::hook::Hook  { session_id: String, transcript_path: PathBuf, cwd: PathBuf, event: Event, tool_name: Option < String >, tool_use_id: Option < String >, tool_input: Option < Value >, extra: BTreeMap < String , Value > }
-pub struct intxt_capture::host::Batch  { session: SessionBatch, worktrees: Vec < WorktreeBatch >, uncaused_tool_calls: u64 }
-pub struct intxt_capture::host::Cause  { agent_id: Option < String >, turn: Option < String >, tool_use_id: String }
-pub struct intxt_capture::host::Op  { at: Timestamp, kind: OpKind, cause: Option < Cause >, changes: Vec < Change >, git: Option < GitObservation > }
 pub struct intxt_capture::host::Prepared  { batch: Batch }
-pub struct intxt_capture::host::RecordedIds  { session: Option < String >, subagents: BTreeMap < String , String >, worktrees: BTreeMap < PathBuf , RecordedWorktree > }
-pub struct intxt_capture::host::RecordedWorktree  { docs: WorktreeDocs, next_seq: u64 }
-pub struct intxt_capture::host::SessionBatch  { session_id: String, doc: Option < String >, imported: Imported, subagents: Vec < SubagentBatch > }
-pub struct intxt_capture::host::SubagentBatch  { agent_id: String, doc: Option < String >, imported: Imported }
-pub struct intxt_capture::host::WorktreeBatch  { identity: Identity, docs: WorktreeDocs, next_seq: u64, ops: Vec < Op >, commits: BTreeMap < String , GitCommit >, refs: BTreeMap < String , GitRef >, reflog_gap: bool }
-pub struct intxt_capture::host::WorktreeDocs  { worktree: Option < String >, clone: Option < String >, repo: Option < String > }
 pub struct intxt_capture::identity::Identity  { root: PathBuf, git_dir: PathBuf, common_dir: PathBuf, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String > }
 pub struct intxt_capture::observe::Observation  { identity: Identity, changes: Vec < Change >, earlier: Vec < Change >, git: GitObserved }
 pub struct intxt_capture::observe::WorktreeState  {  }
-pub struct intxt_capture::snapshot::Change  { path: String, kind: ChangeKind, content: Option < Content > }
 pub struct intxt_capture::snapshot::Snapshot  {  }
 pub struct intxt_capture::transcript::Imported  { offset: u64, session: Option < AgentSession >, turns: BTreeMap < String , PromptTurn >, plan: Option < Plan >, spawned: Vec < String > }
 pub struct intxt_capture::transcript::TranscriptImporter  {  }
