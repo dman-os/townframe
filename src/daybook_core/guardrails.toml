@@ -704,3 +704,12 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 "src/daybook_core/progress/sqlite/migrations/001_progress.sql" = "b5a44f62a6e73cb6c95724498132d79b47e77dda8b356f2869fd0e4629e8aac7"
 "src/daybook_core/rt/sqlite/migrations/001_dispatch_init.sql" = "d9aa0c7bfc351de816f375ed45cee0d9574935a104be4f888db9d3ae36bc2c2b"
 "src/daybook_core/sqlite/migrations/001_kvstore.sql" = "779cb26b883b8ae107f1046566639a82cc98ab44706631aecc7583d623e6d061"
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/daybook_core/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 5
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"
