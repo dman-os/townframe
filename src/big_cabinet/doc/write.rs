@@ -129,9 +129,7 @@ impl DocsService {
                 }
                 plan.predecessors = predecessors;
                 let instr_verified = instr_inner.elapsed(); // INSTR
-                let tx = doc
-                    .transaction_at(PatchLog::null(), &base)
-                    .expect("a null patch log matches any document");
+                let tx = Self::begin(doc, &base);
                 let (tx, claims) = self.stage(tx, plan, None)?;
                 tx.rollback();
                 tracing::debug!(changes = doc.get_changes(&[]).len(), ?instr_verified, staged = ?instr_inner.elapsed(), "INSTR commit_write stage split"); // INSTR
@@ -147,11 +145,8 @@ impl DocsService {
             .with_document(|doc| -> Result<_, DocsError> {
                 Self::condition(doc, mode)?;
                 doc.set_actor(doc_actor(&self.node_issuer, plan.document));
-                let tx = doc
-                    .transaction_at(PatchLog::null(), &base)
-                    .expect("a null patch log matches any document");
-                let (tx, signed) = self.stage(tx, plan, Some(&signatures))?;
-                assert_eq!(signed, claims, "a plan stages the same claims twice");
+                let tx = Self::begin(doc, &base);
+                let (tx, _) = self.stage(tx, plan, Some((&claims, &signatures)))?;
                 let options = match command {
                     Some(command) => CommitOptions::default().with_message(command.as_str()),
                     None => CommitOptions::default(),
