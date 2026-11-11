@@ -5,6 +5,7 @@
 use super::Node;
 use super::executor::FakeExecutor;
 use super::id;
+use super::init::PING;
 use super::init::Probe;
 use super::init::init_cartridge;
 use super::init::necessity;
@@ -26,8 +27,11 @@ use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::SetNoduleDevTakeover;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleMethodGrants;
+use big_nodule_core::providers::LockedProvider;
+use big_nodule_core::providers::RequestStatus;
 use std::sync::Arc;
 
+const ALPHA: &str = example_cartridge!("alpha");
 const BETA: &str = example_cartridge!("beta");
 const FORK: &str = example_cartridge!("fork");
 const GAMMA: &str = example_cartridge!("gamma");
@@ -138,6 +142,43 @@ async fn the_slot_runs_the_dev_builds_code_and_reports_who_fills_it() {
     // The fork's own slot is just an installed cartridge.
     let own = node.record(FORK).await;
     assert_eq!((own.filled_by, own.readiness), (None, Readiness::Disabled));
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn dependents_of_the_slot_stay_satisfied_with_the_dev_builds_version() {
+    let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC])).await;
+    node.admit(
+        node.operator(),
+        with_requests(
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
+            vec![necessity(BETA_PING, Necessity::Required)],
+        ),
+    )
+    .await
+    .unwrap();
+    node.grant_operations(ALPHA, &["org.example.beta"]).await;
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+
+    // Dependents name the slot, which the takeover still offers under its own id with the dev
+    // build's version: no provider change to confirm, only the version moves, as for an upgrade.
+    node.take_over(BETA, Some(FORK)).await.unwrap();
+    let record = node.record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert_eq!(
+        record.requests[BETA_PING],
+        RequestStatus {
+            contract: BETA_PING.to_owned(),
+            locked: Some(LockedProvider {
+                contract: BETA_PING.to_owned(),
+                provider: BETA.to_owned(),
+                version: Some("1.5.0".parse().unwrap()),
+                lexicon_revision: None,
+            }),
+            unresolved: None,
+        }
+    );
     node.shutdown().await;
 }
 

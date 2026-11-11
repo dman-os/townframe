@@ -18,6 +18,7 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Version;
 use big_cartridges_core::request::Request;
 use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Route;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -51,6 +52,9 @@ pub enum Unresolved {
     NoProvider,
     /// More than one does. Disabling one resolves it, as with dispatch's `Ambiguous`.
     Ambiguous { providers: Vec<String> },
+    /// A damaged route covers the contract (see `NoduleConfig::routes`), so it is held rather
+    /// than sent to whichever provider claims it. `reason` names the route.
+    RouteInvalid { reason: String },
     /// The one provider's Lexicon is older than the request's `minRevision`.
     RevisionTooOld {
         provider: String,
@@ -144,7 +148,7 @@ pub struct ProviderIndex {
     /// table lags it until that nodule's turn in the pass).
     nodules: BTreeSet<CartridgeId>,
     /// The operator's routes (ADR 045), pattern to provider id, as dispatch's router holds them.
-    routes: BTreeMap<String, String>,
+    routes: BTreeMap<String, Route>,
 }
 
 impl ProviderIndex {
@@ -157,7 +161,7 @@ impl ProviderIndex {
     /// `routes` are the operator's routes (ADR 045): see [`Self::offers`].
     pub fn new(
         resolved: &BTreeMap<CartridgeId, NoduleResolution>,
-        routes: BTreeMap<String, String>,
+        routes: BTreeMap<String, Route>,
     ) -> Self {
         let mut offers: BTreeMap<String, Vec<LockedProvider>> = BTreeMap::new();
         for (cartridge_id, resolution) in resolved {
@@ -204,6 +208,15 @@ impl ProviderIndex {
         DispatchScope::route_target(&self.routes, nsid).is_some()
     }
 
+    /// Why `nsid` is covered by a damaged route, if it is: such a request resolves to no one
+    /// and says why, instead of falling to whichever provider claims it.
+    pub fn route_problem(&self, nsid: &str) -> Option<&str> {
+        match DispatchScope::route_target(&self.routes, nsid) {
+            Some(Route::Invalid(reason)) => Some(reason),
+            _ => None,
+        }
+    }
+
     /// Everything on offer for `nsid`: the enabled nodules that implement or hold it plus
     /// `native`, the provider ids the node itself serves it under (dispatch's routing table for
     /// an operation, the boot schemas for a datum), from which the nodule service's
@@ -230,8 +243,10 @@ impl ProviderIndex {
                     lexicon_revision: None,
                 }),
         );
-        if let Some(target) = DispatchScope::route_target(&self.routes, nsid) {
-            offers.retain(|offer| offer.provider == target);
+        match DispatchScope::route_target(&self.routes, nsid) {
+            Some(Route::Provider(target)) => offers.retain(|offer| &offer.provider == target),
+            Some(Route::Invalid(_)) => offers.clear(),
+            None => {}
         }
         offers
     }

@@ -60,14 +60,14 @@ impl DispatchScope {
 
     /// The provider `nsid` is routed to, if any route covers it (ADR 045): `routes` maps an exact
     /// NSID or an authority prefix (whole segments, as [`Self::authority_owns`] matches them) to a
-    /// provider id, and the longest matching pattern decides, so an exact NSID beats the prefix
+    /// [`Route`], and the longest matching pattern decides, so an exact NSID beats the prefix
     /// over it. The router and whoever predicts what it will resolve share this one rule.
-    pub fn route_target<'a>(routes: &'a BTreeMap<String, String>, nsid: &str) -> Option<&'a str> {
+    pub fn route_target<'a>(routes: &'a BTreeMap<String, Route>, nsid: &str) -> Option<&'a Route> {
         routes
             .iter()
             .filter(|(pattern, _)| Self::authority_owns(pattern, nsid))
             .max_by_key(|(pattern, _)| pattern.len())
-            .map(|(_, provider)| provider.as_str())
+            .map(|(_, route)| route)
     }
 
     /// Whether this scope names `nsid`, ignoring privilege: what a nodule's grant is matched
@@ -210,7 +210,24 @@ pub struct InvokeOutput {
 pub enum NotReadyReason {
     Provider(Readiness),
     Ambiguous,
-    RouteTargetMissing { provider: String },
+    RouteTargetMissing {
+        provider: String,
+    },
+    /// A route covering the operation is damaged (it does not decode or validate), so the
+    /// operation is refused rather than sent to whichever provider claims it; `reason` names the
+    /// route and what is wrong with it.
+    RouteInvalid {
+        reason: String,
+    },
+}
+
+/// What a route pattern resolves to, as the nodule service hands it to the router.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// Calls go to the provider with this id.
+    Provider(String),
+    /// The route's stored datum is damaged: calls it covers are refused, with this reason.
+    Invalid(String),
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
