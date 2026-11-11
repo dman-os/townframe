@@ -16,6 +16,7 @@ dioxus = { git = "https://github.com/dman-os/dioxus", rev = "ba8feef7fb2bce7efd0
 
 [dev-dependencies]
 dioxus-ssr.workspace = true
+futures.workspace = true
 insta.workspace = true
 
 [lints]

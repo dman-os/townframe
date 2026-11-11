@@ -17,6 +17,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::LazyLock;
 
 use dioxus::prelude::*;
@@ -24,6 +25,7 @@ use pierre_diffs::document::Document;
 use pierre_diffs::document::NodeKey;
 use pierre_diffs::utils::dom::css_wrappers::wrap_core_css;
 
+use crate::events::Dispatch;
 use crate::slot::SlotTable;
 
 /// The core stylesheet in the layer order the port's theme CSS expects, built once.
@@ -49,6 +51,9 @@ fn attribute_name(name: &str) -> &'static str {
 pub(crate) struct Renderer<'a> {
     pub(crate) document: &'a Document,
     pub(crate) slots: &'a SlotTable,
+    /// The view's event wiring: a node the host registered for resize, visibility or scroll
+    /// renders with that listener. A static view has none.
+    pub(crate) dispatch: Option<&'a Rc<Dispatch>>,
 }
 
 impl Renderer<'_> {
@@ -78,6 +83,9 @@ impl Renderer<'_> {
             .into_iter()
             .map(|(name, value)| Attribute::new(attribute_name(&name), value, None, false))
             .collect();
+        if let Some(dispatch) = self.dispatch {
+            attributes.extend(dispatch.listeners(key));
+        }
         let children: Vec<Element> = if let Some(shadow_root) = document.shadow_root(key) {
             attributes.push(Attribute::new("data-dioxus-shadow", "", None, false));
             // Dioxus rejects a literal key, hence the interpolation.

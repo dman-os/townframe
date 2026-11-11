@@ -4346,6 +4346,7 @@ dependencies = [
  "pierre_diffs_dioxus",
  "serde",
  "serde_json",
+ "tokio",
  "ui",
 ]
 
@@ -12103,6 +12104,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "dioxus-ssr",
+ "futures",
  "insta",
  "pierre_diffs",
 ]
