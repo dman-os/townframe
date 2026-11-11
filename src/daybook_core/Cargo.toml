@@ -125,7 +125,7 @@ iroh-blobs.workspace = true
 
 #
 # crypto (RFC 8188 aes128gcm envelope)
-big_blobs = { path = "../big_blobs" }
+big_blobs.workspace = true
 
 # actors
 irpc-iroh.workspace = true

@@ -12,8 +12,8 @@ path = "lib.rs"
 [dependencies]
 # internal
 utils_rs.workspace = true
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
@@ -44,7 +44,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 big_cartridges_core = { workspace = true, features = ["test-support"] }
-big_blobs_core = { path = "../big_blobs_core" }
+big_blobs_core.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
 irpc.workspace = true
