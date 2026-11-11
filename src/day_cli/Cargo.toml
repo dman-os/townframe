@@ -22,8 +22,8 @@ big_node.workspace = true
 big_dispatch.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core" }
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest"] }
 
 #
 # cli

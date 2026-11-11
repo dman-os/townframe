@@ -10,9 +10,9 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-big_blobs_core = { path = "../big_blobs_core" }
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_blobs_core.workspace = true
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_repo.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true

@@ -13,7 +13,7 @@ path = "lib.rs"
 method_core.workspace = true
 # internal
 utils_rs.workspace = true
-big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_sync_core.workspace = true
 big_sync.workspace = true
 big_repo.workspace = true
