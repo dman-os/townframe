@@ -418,4 +418,67 @@ mod rendered {
         let third = switch_to(&mut dom, 2);
         assert!(third.contains("Int(2)"), "{third}");
     }
+
+    /// A release with no press of the strip's own (a scrollbar drag let go over the grab
+    /// band) leaves the strip at rest: no settle animation starts, so the overlay never
+    /// turns on `pointer-events`.
+    #[test]
+    fn a_release_without_a_press_leaves_the_strip_at_rest() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        // Handlers read their event data through the converter a renderer installs.
+        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+        runtime.block_on(async {
+            let mut dom = VirtualDom::new(app);
+            let first = dom.rebuild_to_vec();
+            assert!(
+                format!("{first:?}").contains("pointer-events:none"),
+                "{first:?}"
+            );
+            // Every element the renderer registered: a stray release lands wherever the
+            // cursor is, and none of them may engage the strip.
+            let targets: Vec<_> = first
+                .edits
+                .iter()
+                .filter_map(|edit| match edit {
+                    dioxus_core::Mutation::SetId { id } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            assert!(!targets.is_empty(), "{first:?}");
+            let release: dioxus_html::SerializedPointerData =
+                serde_json::from_value(serde_json::json!({
+                    "pointer_id": 1, "width": 1.0, "height": 1.0, "pressure": 0.0,
+                    "tangential_pressure": 0.0, "tilt_x": 0, "tilt_y": 0, "twist": 0,
+                    "pointer_type": "mouse", "is_primary": true,
+                    "alt_key": false, "button": 0, "buttons": 0,
+                    "client_x": 1050.0, "client_y": 400.0, "ctrl_key": false,
+                    "meta_key": false, "offset_x": 0.0, "offset_y": 0.0,
+                    "page_x": 1050.0, "page_y": 400.0, "screen_x": 1050.0,
+                    "screen_y": 400.0, "shift_key": false,
+                }))
+                .expect("pointer data");
+            for target in targets {
+                dom.runtime().handle_event_for_target(
+                    dioxus_core::RenderTargetId::ROOT,
+                    "pointerup",
+                    dioxus_core::Event::new(
+                        dioxus_html::EventData::Pointer(release.clone()).into_any(),
+                        true,
+                    ),
+                    target,
+                );
+            }
+            // Long enough for several settle ticks had a release started.
+            let _ =
+                tokio::time::timeout(Duration::from_millis(SETTLE_MS), dom.wait_for_work()).await;
+            let after = format!("{:?}", dom.render_immediate_to_vec());
+            assert!(
+                !after.contains("pointer-events:auto"),
+                "a stray release engaged the strip: {after}"
+            );
+        });
+    }
 }

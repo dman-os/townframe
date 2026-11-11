@@ -567,8 +567,20 @@ pub fn ArcIndex(
                 pull.set(pull_for(point.y, top, spacing, count, height));
                 thumb_x.set(Some(point.x));
             },
-            onpointerup: move |_| release_strip.call(()),
-            onpointercancel: move |_| release_strip.call(()),
+            // Only a gesture this strip started is released. A release can arrive
+            // without one: a scrollbar drag captures the pointer, so its press never
+            // reaches the grab band, but the release bubbles here when the cursor ends
+            // over the band, and settling from rest would flash the strip engaged.
+            onpointerup: move |_| {
+                if thumb_x.peek().is_some() {
+                    release_strip.call(());
+                }
+            },
+            onpointercancel: move |_| {
+                if thumb_x.peek().is_some() {
+                    release_strip.call(());
+                }
+            },
             onwheel: move |event| {
                 let delta = event.data().delta().strip_units();
                 let travel = if delta.y.abs() > delta.x.abs() { delta.y } else { delta.x };
