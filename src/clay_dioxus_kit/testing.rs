@@ -17,46 +17,17 @@ use dioxus_core::Event;
 use dioxus_core::RenderTargetId;
 use dioxus_core::VirtualDom;
 use dioxus_core::WriteMutations;
-use dioxus_html::AnimationData;
-use dioxus_html::BeforeInputData;
-use dioxus_html::CancelData;
-use dioxus_html::ClipboardData;
 use dioxus_html::Code;
-use dioxus_html::CompositionData;
-use dioxus_html::DragData;
 use dioxus_html::EventData;
-use dioxus_html::FocusData;
-use dioxus_html::FormData;
-use dioxus_html::HtmlEventConverter;
-use dioxus_html::ImageData;
 use dioxus_html::Key;
-use dioxus_html::KeyboardData;
 use dioxus_html::Location;
-use dioxus_html::MediaData;
 use dioxus_html::Modifiers;
-use dioxus_html::MountedData;
-use dioxus_html::MountedResult;
-use dioxus_html::MouseData;
-use dioxus_html::PlatformEventData;
-use dioxus_html::PointerData;
-use dioxus_html::RenderedElementBacking;
-use dioxus_html::ResizeData;
-use dioxus_html::ScrollData;
-use dioxus_html::SelectionData;
-use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::SerializedKeyboardData;
 use dioxus_html::SerializedMouseData;
 use dioxus_html::SerializedPointInteraction;
 use dioxus_html::SerializedPointerData;
-use dioxus_html::ToggleData;
-use dioxus_html::TouchData;
-use dioxus_html::TransitionData;
-use dioxus_html::VisibleData;
-use dioxus_html::WheelData;
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::rc::Rc;
 
 // The vocabulary a Wasm guest's tree may use, mirrored from `clay_surface::render` (the host
 // refuses a mutation batch naming anything else). The kit cannot depend on a `clay_*` crate, so
@@ -344,87 +315,6 @@ const WIRE_STYLE_PROPERTIES: &[&str] = &[
     "object-fit",
 ];
 
-/// The serialized converter, except that a mounted event carries the element backing the test
-/// supplies (the serialized one has none), so a test can observe what a handler asks of the
-/// element.
-struct HarnessConverter(SerializedHtmlEventConverter);
-
-/// What a test's `mounted` event carries: taken once, by the converter.
-type MountedPayload = Rc<Cell<Option<MountedData>>>;
-
-impl HtmlEventConverter for HarnessConverter {
-    fn convert_mounted_data(&self, event: &PlatformEventData) -> MountedData {
-        event
-            .downcast::<MountedPayload>()
-            .expect("a mounted event carries a MountedPayload")
-            .take()
-            .expect("a mounted event is converted once")
-    }
-    fn convert_animation_data(&self, event: &PlatformEventData) -> AnimationData {
-        self.0.convert_animation_data(event)
-    }
-    fn convert_before_input_data(&self, event: &PlatformEventData) -> BeforeInputData {
-        self.0.convert_before_input_data(event)
-    }
-    fn convert_cancel_data(&self, event: &PlatformEventData) -> CancelData {
-        self.0.convert_cancel_data(event)
-    }
-    fn convert_clipboard_data(&self, event: &PlatformEventData) -> ClipboardData {
-        self.0.convert_clipboard_data(event)
-    }
-    fn convert_composition_data(&self, event: &PlatformEventData) -> CompositionData {
-        self.0.convert_composition_data(event)
-    }
-    fn convert_drag_data(&self, event: &PlatformEventData) -> DragData {
-        self.0.convert_drag_data(event)
-    }
-    fn convert_focus_data(&self, event: &PlatformEventData) -> FocusData {
-        self.0.convert_focus_data(event)
-    }
-    fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
-        self.0.convert_form_data(event)
-    }
-    fn convert_image_data(&self, event: &PlatformEventData) -> ImageData {
-        self.0.convert_image_data(event)
-    }
-    fn convert_keyboard_data(&self, event: &PlatformEventData) -> KeyboardData {
-        self.0.convert_keyboard_data(event)
-    }
-    fn convert_media_data(&self, event: &PlatformEventData) -> MediaData {
-        self.0.convert_media_data(event)
-    }
-    fn convert_mouse_data(&self, event: &PlatformEventData) -> MouseData {
-        self.0.convert_mouse_data(event)
-    }
-    fn convert_pointer_data(&self, event: &PlatformEventData) -> PointerData {
-        self.0.convert_pointer_data(event)
-    }
-    fn convert_resize_data(&self, event: &PlatformEventData) -> ResizeData {
-        self.0.convert_resize_data(event)
-    }
-    fn convert_scroll_data(&self, event: &PlatformEventData) -> ScrollData {
-        self.0.convert_scroll_data(event)
-    }
-    fn convert_selection_data(&self, event: &PlatformEventData) -> SelectionData {
-        self.0.convert_selection_data(event)
-    }
-    fn convert_toggle_data(&self, event: &PlatformEventData) -> ToggleData {
-        self.0.convert_toggle_data(event)
-    }
-    fn convert_touch_data(&self, event: &PlatformEventData) -> TouchData {
-        self.0.convert_touch_data(event)
-    }
-    fn convert_transition_data(&self, event: &PlatformEventData) -> TransitionData {
-        self.0.convert_transition_data(event)
-    }
-    fn convert_visible_data(&self, event: &PlatformEventData) -> VisibleData {
-        self.0.convert_visible_data(event)
-    }
-    fn convert_wheel_data(&self, event: &PlatformEventData) -> WheelData {
-        self.0.convert_wheel_data(event)
-    }
-}
-
 /// A node of the retained DOM, by index into [`Dom::nodes`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Node(usize);
@@ -694,7 +584,7 @@ impl Page {
 
     fn from_vdom(mut vdom: VirtualDom) -> Self {
         // Event payloads are the serialized forms; without a converter `event.data()` panics.
-        dioxus_html::set_event_converter(Box::new(HarnessConverter(SerializedHtmlEventConverter)));
+        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
         let mut dom = Dom::new();
         vdom.rebuild(&mut dom);
         Self { vdom, dom }
@@ -889,47 +779,6 @@ impl Page {
         );
         let data: SerializedPointerData = serde_json::from_value(json).expect("pointer data");
         self.dispatch(node, name, EventData::Pointer(data));
-    }
-
-    /// The renderer's `onmounted` for `node`, backed by an element that records the focus it is
-    /// asked for (`Some(true)` once focused). Spawned work is polled once, which finishes any task
-    /// whose futures are already ready, as the recording backing's are.
-    pub(crate) fn mount(&mut self, node: Node) -> Rc<Cell<Option<bool>>> {
-        struct Recorder(Rc<Cell<Option<bool>>>);
-        impl RenderedElementBacking for Recorder {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-            fn set_focus(
-                &self,
-                focus: bool,
-            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = MountedResult<()>>>>
-            {
-                self.0.set(Some(focus));
-                Box::pin(async { Ok(()) })
-            }
-        }
-        let focused = Rc::new(Cell::new(None));
-        let data = MountedData::new(Recorder(Rc::clone(&focused)));
-        let element = self.element_id(node);
-        self.vdom.runtime().handle_event_for_target(
-            RenderTargetId::ROOT,
-            "mounted",
-            Event::new(
-                Rc::new(PlatformEventData::new(Box::new(MountedPayload::new(
-                    Cell::new(Some(data)),
-                )))),
-                false,
-            ),
-            element,
-        );
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        {
-            let mut work = std::pin::pin!(self.vdom.wait_for_work());
-            let _poll: std::task::Poll<()> = std::future::Future::poll(work.as_mut(), &mut context);
-        }
-        self.settle();
-        focused
     }
 
     /// A `keydown` of `key`.

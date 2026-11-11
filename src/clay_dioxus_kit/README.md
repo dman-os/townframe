@@ -96,9 +96,7 @@ the rest are enforced by review.
   details) is `aria-hidden` too.
 - **KIT-052** Activation uses native `<button>`s. A widget that needs `tabindex` is gated on
   `Renderer::takes_focus` (set through `Split::renderer`); browser engines opt in and the web
-  build carries the keyboard tests. Modal panels (`Sheet`, `Drawer`) are the one exception: `tabindex="-1"` and focus moved in on
-  mount (`headless::focus_on_mount`, which faults if the renderer cannot focus), so Escape works;
-  the focus trap and restore are not built. (The Blitz
+  build carries the keyboard tests. (The Blitz
   `tabindex` panic that motivated the gate is fixed in the pinned dioxus fork; K7 ledger notes.)
   Focus is neither trapped nor restored anywhere yet; Blitz has `set_focus` and Tab traversal but
   no `inert` and no focus events for programmatic focus (K7 ledger notes); `Sheet` is not
@@ -256,7 +254,7 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | KIT-011 | `conventions::styled_parts_use_semantic_tokens_only` (no palette or `white`/`black` utilities, no `[...]` except the `data-[state=...]` variant and its `group-` form) |
 | KIT-012 | `conventions::styled_components_take_no_class_or_style` |
 | KIT-040 | `conventions::breakpoints_live_in_width_rs_and_nothing_measures_the_dom` (no `600.0`/`840.0` outside `width.rs`; no `get_client_rect`, `onmounted`, `use_window`, `web_sys`, ...) |
-| KIT-052 | `conventions::tabindex_is_only_the_renderer_focus_gate` (`tabindex` only in `headless/sections.rs`, gated on `.takes_focus()`, and `-1` on the modal panels; focus moves only in `headless.rs`) |
+| KIT-052 | `conventions::tabindex_is_only_the_renderer_focus_gate` (`tabindex` only in `headless/sections.rs`, gated on `.takes_focus()`; no `autofocus`/`set_focus`/`.focus(`) |
 | KIT-053 | the harness panics on a tag, attribute or style property outside the guest vocabulary |
 | KIT-071 | `conventions::tests_neither_sleep_nor_wait` (no sleeps, timers, clocks, threads, async runtimes) |
 | KIT-072 | `conventions::a_component_is_a_public_headless_module_and_a_private_styled_one` (every `headless/<name>.rs` has a `#[test]`) |

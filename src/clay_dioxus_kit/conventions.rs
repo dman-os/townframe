@@ -334,9 +334,10 @@ fn styled_components_take_no_class_or_style() {
 /// measures the DOM (Blitz panics on rect reads inside handlers; a guest has no DOM).
 #[test]
 fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
-    const MEASURING: [&str; 9] = [
+    const MEASURING: [&str; 10] = [
         "get_client_rect",
         "getBoundingClientRect",
+        "onmounted",
         "MountedData",
         "get_scroll_offset",
         "get_scroll_size",
@@ -355,10 +356,6 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
                     .map(|literal| format!("breakpoint literal `{literal}` outside width.rs"))
             }));
         }
-        // The harness hands handlers an element backing; it measures nothing.
-        if source.path == "testing.rs" {
-            continue;
-        }
         violations.extend(source.violations("KIT-040", |line| {
             MEASURING
                 .iter()
@@ -369,9 +366,8 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
     assert_no_violations(violations);
 }
 
-/// `KIT-052`: `tabindex` (which panics Blitz) is set only by the `Split::renderer` path
-/// (`Renderer::takes_focus`) and by the modal panels (`Sheet`, `Drawer`), which take `-1` and are
-/// focused on mount by `headless::focus_on_mount`, the one place focus moves programmatically.
+/// `KIT-052`: `tabindex` (which panics Blitz) is set only by the `Split::renderer` path (`Renderer::takes_focus`),
+/// and nothing moves focus programmatically.
 #[test]
 fn tabindex_is_only_the_renderer_focus_gate() {
     let mut violations = Vec::new();
@@ -381,13 +377,8 @@ fn tabindex_is_only_the_renderer_focus_gate() {
             continue;
         }
         violations.extend(source.violations("KIT-052", |line| {
-            let modal_panel =
-                ["headless/sheet.rs", "headless/drawer.rs"].contains(&source.path.as_str());
-            if line.contains("tabindex") && source.path != "headless/sections.rs" && !modal_panel {
+            if line.contains("tabindex") && source.path != "headless/sections.rs" {
                 return Some("`tabindex` outside the Sections renderer gate".into());
-            }
-            if source.path == "headless.rs" {
-                return None;
             }
             if line.contains("let tabindex") && !line.contains(".takes_focus()") {
                 return Some("`tabindex` not gated on `Renderer::takes_focus`".into());
