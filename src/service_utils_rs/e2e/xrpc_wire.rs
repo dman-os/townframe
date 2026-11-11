@@ -11,7 +11,6 @@ use crate::sample::SampleError;
 use crate::sample::SampleProtocol;
 use crate::xrpc::DOMAIN_ERROR_FIELD;
 use crate::xrpc::DOMAIN_ERROR_STATUS;
-use method_core::Method;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_client_native_rs::XrpcClient;
