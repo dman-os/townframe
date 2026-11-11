@@ -66,6 +66,8 @@ pub impl service_core_rs::xrpc::XrpcErrorEnvelope::fn message (& self) -> Option
 pub impl service_core_rs::xrpc::XrpcErrorEnvelope::fn new (error : String , message : Option < String > , details : BTreeMap < String , Value > ,) -> Result < Self , XrpcDomainDetailsError >
 pub impl service_core_rs::xrpc::crate :: ResponseMetadata::fn read_headers (headers : & HeaderMap) -> Result < Self , String >
 pub impl service_core_rs::xrpc::crate :: ResponseMetadata::fn write_headers (& self , headers : & mut HeaderMap)
+pub macro service_core_rs::declare_service_protocol! { ($ vis : vis enum $ protocol : ident => $ message : ident { unary { $ ($ variant : ident ($ params : ty)) ,* $ (,) ? } stream { $ ($ stream_variant : ident ($ stream_params : ty)) ,* $ (,) ? } }) }
+pub macro service_core_rs::service_method! { ($ params : ty => $ output : ty , $ error : ty , $ kind : ident ($ nsid : literal)); ($ params : ty => stream $ event : ty , $ error : ty , $ nsid : literal) }
 pub mod service_core_rs::cancellation
 pub mod service_core_rs::context
 pub mod service_core_rs::operation

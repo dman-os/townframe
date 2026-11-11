@@ -50,6 +50,8 @@ pub impl big_cartridges_core::request::Request::fn validate_all (requests : & [S
 pub impl big_cartridges_core::signature::Cartridge::fn sign_with (& mut self , sign : impl FnOnce (& [u8]) -> [u8 ; 64])
 pub impl big_cartridges_core::signature::Cartridge::fn signing_message (& self) -> Vec < u8 >
 pub impl big_cartridges_core::signature::Cartridge::fn verify_signature (& self) -> Result < () , SignatureError >
+pub macro big_cartridges_core::example_cartridge! { ($ name : literal) }
+pub macro big_cartridges_core::example_namespace! { () }
 pub mod big_cartridges_core::catalog
 pub mod big_cartridges_core::protocol
 pub mod big_cartridges_core::registry
