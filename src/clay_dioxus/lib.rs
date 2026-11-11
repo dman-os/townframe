@@ -619,6 +619,8 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
     // content) inside, so a micro's stylesheet and `:host` rules apply to this mount only. An
     // interpreter without that support leaves them as light-DOM children. `display: contents`
     // keeps the wrapper out of layout.
+    // A presentation mounted under another guest's surface is a child: its box stops bubbling.
+    let nested = !path.surfaces.is_empty();
     rsx! {
         div {
             "data-dioxus-shadow": "",
@@ -631,6 +633,7 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
                     }
                 },
                 &handles,
+                nested,
             )}
         }
     }

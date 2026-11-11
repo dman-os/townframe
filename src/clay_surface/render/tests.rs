@@ -18,6 +18,10 @@ const SVG_NS: &str = "http://www.w3.org/2000/svg";
 //    (extending vocabulary means extending the probes); a removal or rename then shows
 //    up as a reviewable snapshot diff, and the known-unknowns pin the closed domain ────
 
+// The snapshot grew by `style`, `slot`, `bdi` and the SVG `symbol` and `use`: the markup Pierre's
+// diff view emits that the vocabulary lacked. None can fetch or run anything on the host:
+// `style` text and `use` hrefs are policed at ingress (tree tests), and `slot`/`bdi` are inert
+// without scripting. Autonomous custom elements are admitted by name, not listed here.
 #[test]
 fn supported_tags_are_reviewable() {
     let probes: Vec<(&str, Option<&str>)> = vec![
@@ -89,6 +93,9 @@ fn supported_tags_are_reviewable() {
         ("output", None),
         ("time", None),
         ("data", None),
+        ("style", None),
+        ("slot", None),
+        ("bdi", None),
         ("svg", Some(SVG_NS)),
         ("g", Some(SVG_NS)),
         ("path", Some(SVG_NS)),
@@ -98,10 +105,23 @@ fn supported_tags_are_reviewable() {
         ("polyline", Some(SVG_NS)),
         ("polygon", Some(SVG_NS)),
         ("defs", Some(SVG_NS)),
+        ("symbol", Some(SVG_NS)),
+        ("use", Some(SVG_NS)),
     ];
+    // Custom element names are not in this static vocabulary; they are admitted by
+    // `is_custom_element_name` and interned (see the custom element tests).
     for unknown in [
         ("unknown-widget", None),
+        ("unknownwidget", None),
         ("svg", None),
+        ("symbol", None),
+        ("use", None),
+        ("script", None),
+        ("link", None),
+        ("iframe", None),
+        ("image", Some(SVG_NS)),
+        ("foreignObject", Some(SVG_NS)),
+        ("style", Some(SVG_NS)),
         ("div", Some(SVG_NS)),
         ("div", Some("unknown")),
     ] {
@@ -121,6 +141,10 @@ fn supported_tags_are_reviewable() {
     insta::assert_yaml_snapshot!(supported);
 }
 
+// Vocabulary here is names only; `attribute_value_policy` decides values. `xlink:href` is in the
+// snapshot for the sake of SVG `<use>`, and only `<use>` (with a `#fragment`) accepts it: the
+// policy refuses it on every other element. The raw `style` attribute is in the vocabulary again (standard Dioxus writes it) but its
+// value is parsed and held to the `style:` checks. `src`, `srcset`, `action` and the other names that exist only to carry a URL are absent on purpose (egress closure).
 #[test]
 fn supported_attributes_are_reviewable() {
     let plain = [
@@ -194,6 +218,7 @@ fn supported_attributes_are_reviewable() {
         "low",
         "high",
         "optimum",
+        "media",
         "data-testid",
         "data-state",
         "data-value",
@@ -322,6 +347,7 @@ fn supported_attributes_are_reviewable() {
         "word-break",
         "cursor",
         "pointer-events",
+        "touch-action",
         "user-select",
         "opacity",
         "visibility",
@@ -364,7 +390,7 @@ fn supported_attributes_are_reviewable() {
 
 #[test]
 fn data_attribute_names_are_open_within_the_documented_form() {
-    let interner = DataAttributeInterner::new(DATA_ATTRIBUTE_NAME_LIMIT);
+    let interner = NameInterner::new(DATA_ATTRIBUTE_NAME_LIMIT);
     let pierre_style = [
         "data-line",
         "data-line-index",
@@ -470,14 +496,18 @@ fn data_attribute_names_are_open_within_the_documented_form() {
 
 #[test]
 fn data_attribute_interner_is_bounded_and_deduplicates() {
-    let interner = DataAttributeInterner::new(4096);
+    let interner = NameInterner::new(4096);
     for index in 0..4096 {
         interner
-            .intern(&format!("data-n{index}"))
+            .intern(&format!("data-n{index}"), |_| ())
             .expect("within bound");
     }
-    let first = interner.intern("data-n0").expect("repeat does not grow");
-    let again = interner.intern("data-n0").expect("repeat does not grow");
+    let (first, ()) = interner
+        .intern("data-n0", |_| ())
+        .expect("repeat does not grow");
+    let (again, ()) = interner
+        .intern("data-n0", |_| ())
+        .expect("repeat does not grow");
     assert!(
         std::ptr::eq(first, again),
         "a repeated name is the same leaked str"
@@ -487,12 +517,12 @@ fn data_attribute_interner_is_bounded_and_deduplicates() {
         Ok(Some(("data-n4095", None)))
     );
     assert_eq!(
-        interner.intern("data-one-too-many"),
-        Err(DataAttributeNamesExhausted)
+        interner.intern("data-one-too-many", |_| ()),
+        Err(NamesExhausted)
     );
     assert_eq!(
         static_attribute(&interner, "data-one-too-many", None),
-        Err(DataAttributeNamesExhausted)
+        Err(NamesExhausted)
     );
     // The allowlist is not charged against the bound.
     assert_eq!(
@@ -650,6 +680,7 @@ fn listener_app(props: ListenerProps) -> Element {
         &dispatch,
         &|_| unreachable!("test has no component slots"),
         &crate::ElementHandles::default(),
+        false,
     )
 }
 
@@ -825,4 +856,73 @@ fn visible_events_reach_a_guest_onvisible_handler() {
     assert_eq!((bounding.origin.y, bounding.size.height), (10.0, 40.0));
     let root = visible.get_root_bounds().unwrap();
     assert_eq!(root.size.width, 200.0);
+}
+
+#[test]
+fn custom_element_names_follow_the_html_rule_narrowed_to_ascii() {
+    for good in [
+        "diffs-container",
+        "a-b",
+        "x-1",
+        "my-el.name_2",
+        "a-",
+        &format!("a-{}", "b".repeat(MAX_CUSTOM_ELEMENT_NAME_BYTES - 2)),
+    ] {
+        assert!(is_custom_element_name(good), "{good:?} is a valid name");
+    }
+    for bad in [
+        "",
+        "-",
+        "a",
+        "div",
+        "1-a",
+        "-a",
+        "A-b",
+        "a-B",
+        "a b-c",
+        "a-b:c",
+        "a-b>",
+        "é-a",
+        "a-é",
+        "annotation-xml",
+        "color-profile",
+        "font-face",
+        "font-face-src",
+        "font-face-uri",
+        "font-face-format",
+        "font-face-name",
+        "missing-glyph",
+        &format!("a-{}", "b".repeat(MAX_CUSTOM_ELEMENT_NAME_BYTES - 1)),
+    ] {
+        assert!(!is_custom_element_name(bad), "{bad:?} is not admitted");
+    }
+    // `font-facet` merely shares a prefix with the reserved names.
+    assert!(is_custom_element_name("font-facet"));
+}
+
+#[test]
+fn custom_element_interner_is_bounded_deduplicates_and_builds_one_template_per_name() {
+    let interner = NameInterner::<Template>::new(3);
+    let first = intern_custom_element(&interner, "x-one").expect("within bound");
+    let again = intern_custom_element(&interner, "x-one").expect("repeat does not grow");
+    assert!(std::ptr::eq(first, again));
+    intern_custom_element(&interner, "x-two").unwrap();
+    intern_custom_element(&interner, "x-three").unwrap();
+    assert_eq!(
+        intern_custom_element(&interner, "x-four"),
+        Err(NamesExhausted)
+    );
+    intern_custom_element(&interner, "x-two").expect("a held name stays available when full");
+    let template = |name: &str| {
+        interner
+            .intern(name, |_| unreachable!("already interned"))
+            .unwrap()
+            .1
+    };
+    assert_eq!(
+        template("x-one"),
+        template("x-one"),
+        "one template per name, not one per render"
+    );
+    assert_ne!(template("x-one"), template("x-two"));
 }

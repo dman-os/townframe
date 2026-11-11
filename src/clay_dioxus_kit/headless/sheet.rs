@@ -72,12 +72,26 @@ pub fn Sheet(
             class: skin.root,
             "data-state": "open",
             "data-value": placement.value(),
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:{direction};justify-content:flex-end",
+            position: "absolute",
+            top: "0",
+            right: "0",
+            bottom: "0",
+            left: "0",
+            z_index: "{layer}",
+            display: "flex",
+            flex_direction: "{direction}",
+            justify_content: "flex-end",
             button {
                 class: skin.scrim,
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
-                style: "position:absolute;top:0;right:0;bottom:0;left:0;border:0;padding:0",
+                position: "absolute",
+                top: "0",
+                right: "0",
+                bottom: "0",
+                left: "0",
+                border: "0",
+                padding: "0",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
@@ -85,7 +99,9 @@ pub fn Sheet(
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
-                style: "position:relative;min-height:0;min-width:0",
+                position: "relative",
+                min_height: "0",
+                min_width: "0",
                 onkeydown: move |event| {
                     if event.key() == Key::Named(NamedKey::Escape) {
                         event.prevent_default();

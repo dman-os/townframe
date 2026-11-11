@@ -99,8 +99,8 @@ mod wry {
     /// paths are on and a split drag survives the pointer leaving the window. No platform back gesture reaches a desktop webview; the shell's own back button
     /// is the only way back.
     pub(crate) fn use_host_inputs() -> HostInputs {
-        use dioxus::desktop::WindowEvent;
         use dioxus::desktop::tao::event::Event;
+        use dioxus::desktop::WindowEvent;
         let window = dioxus::desktop::use_window();
         let logical_size = move || {
             let window = &dioxus::desktop::window().window;

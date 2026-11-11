@@ -82,8 +82,10 @@ impl Layout {
         let launch = Launch::new(runtime.clone(), super::WIDE_PX);
         let host = launch.host.clone();
         let mut ui = HeadlessDom::new(composed, launch);
-        ui.wait_until("home offers the layout", |ui| ui.find(OPEN_LAYOUT).is_some())
-            .await;
+        ui.wait_until("home offers the layout", |ui| {
+            ui.find(OPEN_LAYOUT).is_some()
+        })
+        .await;
         ui.click(OPEN_LAYOUT);
         // The toggles list the installed panels, which the guest reads from its mirror of the
         // collection: they appear once the layout is running and bootstrapped.
@@ -327,14 +329,20 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
 #[tokio::test(flavor = "current_thread")]
 async fn hiding_a_native_panel_leaves_the_layout_mounted() {
     let Layout { mut ui, .. } = Layout::start_on(wasmi_runtime().await, &["dayframe.sample"]).await;
-    ui.wait_until("the sample's panel is mounted", |ui| ui.find(SAMPLE_FLAG).is_some())
-        .await;
+    ui.wait_until("the sample's panel is mounted", |ui| {
+        ui.find(SAMPLE_FLAG).is_some()
+    })
+    .await;
     for _round in 0..6 {
         ui.click(HIDE_SAMPLE);
-        ui.wait_until("the sample's panel is gone", |ui| ui.find(SAMPLE_PANEL).is_none())
-            .await;
-        ui.wait_until("the layout offers the panel again", |ui| ui.find(SHOW_SAMPLE).is_some())
-            .await;
+        ui.wait_until("the sample's panel is gone", |ui| {
+            ui.find(SAMPLE_PANEL).is_none()
+        })
+        .await;
+        ui.wait_until("the layout offers the panel again", |ui| {
+            ui.find(SHOW_SAMPLE).is_some()
+        })
+        .await;
         ui.click(SHOW_SAMPLE);
         ui.wait_until("the sample's panel is mounted again", |ui| {
             ui.find(SAMPLE_FLAG).is_some()
