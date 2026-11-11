@@ -1,0 +1,485 @@
+//! intxt's operations, served by the nodule's handler: `createIntxt` and `addToIntxt`.
+//!
+//! Every call the handler makes presents the capability its own caller presented as the
+//! authority (`as_caller`), not the nodule's: the drawers and documents belong to whoever asked,
+//! and the nodule is not a confused deputy. Every `CommandId` is the caller's idempotency key
+//! plus a per-step suffix, so a retried call with the same key reuses the same commands and the
+//! services that dedupe by command answer the earlier result. Dispatch itself does not dedupe on
+//! the key: it only forwards it to the provider.
+
+use big_cabinet_core::DatumKey;
+use big_cabinet_core::DocId;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::ChangeHash;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::WriteDatums;
+use big_cabinet_core::doc::WriteMode;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::AddDoc;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::CreateLayout;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::ListDocDrawers;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::ReferenceDocId;
+use http::HeaderMap;
+use http::HeaderValue;
+use http::Method as HttpMethod;
+use http::header::CONTENT_TYPE;
+use intxt_core::generic;
+use intxt_core::work;
+use method_core::ContextError;
+use method_core::Method;
+use method_core::Unary;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use service_client_core_rs::Client;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::Xrpc;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::write_context_headers;
+use service_core_rs::HttpMetadata;
+use service_core_rs::xrpc::bearer_header_value;
+
+/// Creates an intxt (ADR 036 §2): a drawer, marked as an intxt, with a title and an empty body.
+/// The drawer is owned by the caller, whose authority the handler presents.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateIntxt {
+    pub title: String,
+    /// Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The new intxt: its drawer, whose id is its descriptor document's id.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntxtCreated {
+    pub drawer_id: DrawerId,
+}
+
+/// Includes a part (a worktree, a git repository or an agent session datum) in an intxt: writes
+/// the entry for it and appends the entry to the intxt's body, then enters the part's document in
+/// the intxt's drawer at Read so everyone the intxt is shared with can read it.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddToIntxt {
+    pub intxt: DrawerId,
+    /// The part, named by its document id (not `self`).
+    pub part: DatumReference,
+}
+
+/// The entry the part has in the intxt. Adding the same part again answers the same entry.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedToIntxt {
+    pub entry: DatumReference,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum IntxtError {
+    #[error("request context failed: {0}")]
+    Context(#[from] ContextError),
+    /// A call the handler made was refused or failed; `reason` is what the callee answered.
+    #[error("{operation} failed: {reason}")]
+    Upstream { operation: String, reason: String },
+    /// The request named something an intxt cannot include or a document that is not what it
+    /// was said to be.
+    #[error("invalid request: {0}")]
+    Invalid(String),
+    /// The caller reaches the part through no drawer at Read or above, so there is nothing to
+    /// lend the intxt's drawer.
+    #[error("the part's document {0} is reached through no drawer at Read or above")]
+    NotReachable(DocId),
+}
+
+method_core::methods! {
+    error = IntxtError, nsid_prefix = "org.example.intxt.";
+    CreateIntxt => IntxtCreated, procedure, "createIntxt";
+    AddToIntxt => AddedToIntxt, procedure, "addToIntxt";
+}
+
+/// The operations of other authorities the handler calls, which the cartridge requests.
+pub(crate) const REQUIRED_OPERATIONS: [&str; 7] = [
+    MintDrawerCapability::XRPC.nsid,
+    CreateDrawer::XRPC.nsid,
+    MintDocCapability::XRPC.nsid,
+    WriteDatums::XRPC.nsid,
+    ReadDatums::XRPC.nsid,
+    ListDocDrawers::XRPC.nsid,
+    AddDoc::XRPC.nsid,
+];
+
+/// The intxt nodule's handler. A fresh value serves each request (`big_ndk::export_nodule!`
+/// cannot be used here because the guest wrapper, not this crate, owns the export), so it holds
+/// no state.
+#[derive(Debug, Default, Clone)]
+pub struct Intxt;
+
+impl big_ndk::Nodule for Intxt {
+    async fn route(&self, nsid: &str, cx: &big_ndk::Cx, body: &[u8]) -> Option<big_ndk::Reply> {
+        if nsid == CreateIntxt::XRPC.nsid {
+            return Some(big_ndk::invoke::<Self, CreateIntxt>(self, cx, body).await);
+        }
+        if nsid == AddToIntxt::XRPC.nsid {
+            return Some(big_ndk::invoke::<Self, AddToIntxt>(self, cx, body).await);
+        }
+        None
+    }
+}
+
+/// What a handler needs to call as its caller: the caller's capability and the base of the
+/// command ids.
+struct Caller<'a> {
+    cx: &'a big_ndk::Cx,
+    capability: &'a str,
+    /// The idempotency key, or the request id when the caller sent none (nothing to dedupe
+    /// against, so every call is its own).
+    command_base: String,
+}
+
+impl<'a> Caller<'a> {
+    fn new(cx: &'a big_ndk::Cx) -> Result<Self, IntxtError> {
+        Ok(Self {
+            cx,
+            capability: cx
+                .caller_capability()
+                .ok_or(ContextError::Unauthenticated)?,
+            command_base: cx
+                .idempotency_key()
+                .map_or_else(|| cx.request().request_id.to_string(), str::to_owned),
+        })
+    }
+
+    /// The command id of `step`: the base and the step's fixed suffix.
+    fn command(&self, step: &str) -> Result<CommandId, IntxtError> {
+        CommandId::try_from(format!("{}/{step}", self.command_base)).map_err(|error| {
+            IntxtError::Invalid(format!("the idempotency key makes no command id: {error}"))
+        })
+    }
+
+    /// Calls `input` presenting the caller's capability as the authority of the call.
+    async fn call<M: Unary>(&self, input: M) -> Result<M::Output, IntxtError> {
+        let metadata = HttpMetadata {
+            authorization: Some(bearer_header_value(self.capability)),
+            idempotency_key: None,
+        };
+        Client::new(Xrpc(self.cx.transport()))
+            .call_with(self.cx.next_hop(), metadata, input)
+            .await
+            .map_err(|error| IntxtError::Upstream {
+                operation: M::XRPC.nsid.to_owned(),
+                reason: error.to_string(),
+            })
+    }
+
+    /// Calls the query `input` as a POST of its JSON, which is the one form dispatch.local serves:
+    /// the typed client sends a query as a GET with its input in the query string, and egress
+    /// answers that `404 dispatch.local serves POST /xrpc/<nsid> only`.
+    async fn query<M: Unary>(&self, input: M) -> Result<M::Output, IntxtError> {
+        let upstream = |reason: String| IntxtError::Upstream {
+            operation: M::XRPC.nsid.to_owned(),
+            reason,
+        };
+        let mut headers = HeaderMap::new();
+        write_context_headers(
+            &mut headers,
+            &self.cx.next_hop(),
+            &HttpMetadata {
+                authorization: Some(bearer_header_value(self.capability)),
+                idempotency_key: None,
+            },
+        )
+        .expect("context headers are valid HTTP");
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let response = self
+            .cx
+            .transport()
+            .send(XrpcRequest {
+                method: HttpMethod::POST,
+                path: format!("xrpc/{}", M::XRPC.nsid),
+                headers,
+                body: serde_json::to_vec(&input).expect("a method input serializes"),
+            })
+            .await
+            .map_err(|error| upstream(format!("transport failed: {}", error.message)))?;
+        if !response.status.is_success() {
+            return Err(upstream(format!(
+                "HTTP {}: {}",
+                response.status,
+                String::from_utf8_lossy(&response.body)
+            )));
+        }
+        serde_json::from_slice(&response.body)
+            .map_err(|error| upstream(format!("an unexpected answer: {error}")))
+    }
+
+    async fn doc_capability(&self, scope: DocScope) -> Result<CapId, IntxtError> {
+        Ok(self
+            .call(MintDocCapability {
+                scope,
+                rights: Rights::USE,
+                subject: None,
+            })
+            .await?
+            .capability_id)
+    }
+
+    /// The document's heads and the accepted value of `key` in it at those heads.
+    async fn read(
+        &self,
+        doc: &DocId,
+        key: &DatumKey,
+    ) -> Result<(Vec<ChangeHash>, Value), IntxtError> {
+        let capability = self
+            .doc_capability(DocScope {
+                read: [doc.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        let mut read = self
+            .call(ReadDatums {
+                capability,
+                doc_id: doc.clone(),
+                at: At::Current,
+                datums: Some([key.clone()].into()),
+                optimistic: false,
+            })
+            .await?;
+        match read.datums.remove(key) {
+            Some(DatumRead::Accepted { value, .. }) => Ok((read.heads, value)),
+            other => Err(IntxtError::Invalid(format!(
+                "{key} in {doc} is not readable: {other:?}"
+            ))),
+        }
+    }
+}
+
+/// `value` at `slot` of record `tag`; the key names the type, so the value carries no tag of its
+/// own.
+fn datum(value: Value, tag: &str, slot: &str) -> (DatumKey, Value) {
+    (
+        DatumKey::new(tag, slot.as_bytes()).expect("a slot taken from a valid key or `main`"),
+        value,
+    )
+}
+
+fn to_value(value: &impl Serialize) -> Value {
+    serde_json::to_value(value).expect("a record serializes")
+}
+
+impl big_ndk::Handler<CreateIntxt> for Intxt {
+    /// Four calls: a capability to create drawers, the drawer, a capability to write its
+    /// descriptor document (the drawer's id is the descriptor's `DocId`), and the three
+    /// descriptor datums in one write. A failure between the calls leaves a plain drawer, which a
+    /// reader does not show as an intxt.
+    async fn call(&self, cx: &big_ndk::Cx, input: CreateIntxt) -> Result<IntxtCreated, IntxtError> {
+        let caller = Caller::new(cx)?;
+        let drawers = caller
+            .call(MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: Default::default(),
+                    create: true,
+                },
+                rights: Rights::USE,
+                subject: None,
+            })
+            .await?
+            .capability_id;
+        let drawer_id = caller
+            .call(CreateDrawer {
+                capability: drawers,
+                command: caller.command("create-drawer")?,
+                layout: CreateLayout::SingleGroup,
+            })
+            .await?
+            .drawer_id;
+        let descriptor = caller
+            .doc_capability(DocScope {
+                write: [drawer_id.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        caller
+            .call(WriteDatums {
+                capability: descriptor,
+                command: Some(caller.command("write-descriptor")?),
+                doc_id: drawer_id.clone(),
+                mode: WriteMode::AtCurrent,
+                set: [
+                    datum(
+                        to_value(&generic::Intxt::default()),
+                        generic::Intxt::ID,
+                        "main",
+                    ),
+                    datum(
+                        to_value(&generic::Title {
+                            title: input.title,
+                            description: input.description,
+                            extra: Default::default(),
+                        }),
+                        generic::Title::ID,
+                        "main",
+                    ),
+                    datum(
+                        to_value(&generic::Body {
+                            order: Vec::new(),
+                            extra: Default::default(),
+                        }),
+                        generic::Body::ID,
+                        "main",
+                    ),
+                ]
+                .into(),
+                remove: Default::default(),
+            })
+            .await?;
+        Ok(IntxtCreated { drawer_id })
+    }
+}
+
+impl big_ndk::Handler<AddToIntxt> for Intxt {
+    /// Writes the entry for the part and appends it to the body in one write, based on the heads
+    /// the body was read at, so two writers adding different parts both land in the body's list;
+    /// then enters the part's document in the intxt's drawer at Read. The entry's slot is the
+    /// part's own identity (ADR 040: the worktree's UUID, the repository datum's slot, the
+    /// harness's session id), so two writers adding the same part write one entry.
+    ///
+    /// The drawer the part's document is lent from is the first, ordered by drawer id, that the
+    /// caller reaches it through at Read or above, other than the intxt's own: the drawers
+    /// protocol does not say which of them are the node's local ones, so none is preferred.
+    async fn call(&self, cx: &big_ndk::Cx, input: AddToIntxt) -> Result<AddedToIntxt, IntxtError> {
+        let caller = Caller::new(cx)?;
+        let AddToIntxt { intxt, part } = input;
+        let ReferenceDocId::Concrete(part_doc) = part.document() else {
+            return Err(IntxtError::Invalid(
+                "a part is named by its document id, not `self`".to_owned(),
+            ));
+        };
+        let (_, part_value) = caller.read(part_doc, part.key()).await?;
+        let tag = part.key().tag().to_string();
+        let malformed = |error: serde_json::Error| {
+            IntxtError::Invalid(format!("{part} is not a valid `{tag}`: {error}"))
+        };
+        let (entry_key, entry) = if tag == work::Worktree::ID {
+            let worktree: work::Worktree = serde_json::from_value(part_value).map_err(malformed)?;
+            datum(
+                to_value(&work::WorktreeEntry {
+                    worktree: part.clone(),
+                    extra: Default::default(),
+                }),
+                work::WorktreeEntry::ID,
+                &worktree.id,
+            )
+        } else if tag == work::GitRepo::ID {
+            datum(
+                to_value(&work::RepoEntry {
+                    repo: part.clone(),
+                    extra: Default::default(),
+                }),
+                work::RepoEntry::ID,
+                std::str::from_utf8(part.key().slot_bytes())
+                    .map_err(|error| IntxtError::Invalid(format!("{part}'s slot: {error}")))?,
+            )
+        } else if tag == work::AgentSession::ID {
+            let session: work::AgentSession =
+                serde_json::from_value(part_value).map_err(malformed)?;
+            datum(
+                to_value(&work::SessionEntry {
+                    session: part.clone(),
+                    extra: Default::default(),
+                }),
+                work::SessionEntry::ID,
+                &session.session_id,
+            )
+        } else {
+            return Err(IntxtError::Invalid(format!(
+                "`{tag}` is not a part an intxt includes: name a worktree, gitRepo or agentSession datum"
+            )));
+        };
+
+        let body_key = DatumKey::new(generic::Body::ID, b"main").expect("`main` is a valid slot");
+        let (body_heads, body_value) = caller.read(&intxt, &body_key).await?;
+        let mut body: generic::Body = serde_json::from_value(body_value)
+            .map_err(|error| IntxtError::Invalid(format!("{intxt} has no valid body: {error}")))?;
+        let entry_ref = DatumReference::new(ReferenceDocId::SelfDoc, entry_key.clone());
+        if !body.order.contains(&entry_ref) {
+            body.order.push(entry_ref.clone());
+        }
+        let descriptor = caller
+            .doc_capability(DocScope {
+                write: [intxt.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        caller
+            .call(WriteDatums {
+                capability: descriptor,
+                command: Some(caller.command("write-entry")?),
+                doc_id: intxt.clone(),
+                mode: WriteMode::AtHeads { heads: body_heads },
+                set: [
+                    (entry_key, entry),
+                    datum(to_value(&body), generic::Body::ID, "main"),
+                ]
+                .into(),
+                remove: Default::default(),
+            })
+            .await?;
+
+        let from = caller
+            .query(ListDocDrawers {
+                doc_id: part_doc.clone(),
+            })
+            .await?
+            .drawers
+            .into_iter()
+            .find(|drawer| drawer.access >= DrawerAccess::Read && drawer.drawer_id != intxt)
+            .ok_or_else(|| IntxtError::NotReachable(part_doc.clone()))?
+            .drawer_id;
+        let drawers = caller
+            .call(MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: [
+                        (intxt.clone(), DrawerAccess::Write),
+                        (from, DrawerAccess::Read),
+                    ]
+                    .into(),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            })
+            .await?
+            .capability_id;
+        caller
+            .call(AddDoc {
+                capability: drawers,
+                reach: drawers,
+                command: caller.command("add-doc")?,
+                drawer_id: intxt.clone(),
+                doc_id: part_doc.clone(),
+                access: DrawerAccess::Read,
+            })
+            .await?;
+        Ok(AddedToIntxt {
+            entry: DatumReference::new(ReferenceDocId::Concrete(intxt), entry_ref.key().clone()),
+        })
+    }
+}
