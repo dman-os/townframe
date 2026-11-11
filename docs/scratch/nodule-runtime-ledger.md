@@ -840,6 +840,22 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - **Guardrails:** ban path dependencies (internal crates go through `[workspace.dependencies]`, as `big_dispatch_core/Cargo.toml:19` doesn't); require dependency sections grouped under `#\n# internal` comment headers; track exported macros in the public API, shape to be decided. *Action:* the guardrails lane.
   - **Share wasm machinery between big_nodule_wasm and Clay's** (non-blocking). There are three ways we run wasm: guests in the browser where the host is wasm too (wcmp); guests on wasmtime with a native host; and guests on wasmtime whose host is itself wasm (the multi-process goal). *Action:* recorded for when the whole node runs inside wasmCloud.
   - **Inbound admission (`big_node/peers/policy.rs`):** the node should never answer a peer it doesn't expect, iroh pings included, unless it holds a ticket we issued. With today's application model, a node that isn't a relay accepts inbound connections only from sisters; ticket-based reach-outs come later. The operator: "a rich part of our node's design and a mistake that I'd ignored it." *Action:* added to the P2P requirements as F11, to be designed with sisters and mothers.
+  - **Survey answers (2026-11-12, read-only lane; file:line are in its report, summarized here):**
+    - *big_repo outside the cabinet:* big_blobs, big_node, big_ndk_testing, big_nodule (dev only), day_cli and daybook_core depend on it.
+      - Four groups need a cabinet service:
+        - (A) a membership/access watch, plus "list my memberships" and "get access". `big_blobs/permissions.rs` and `big_node/peers/access.rs` each build the same `KeyhiveAccessRevisionStore` + `ConcurrentDeltaWalker` over `repo.database()`, and `peers/policy.rs:122` and `admission/project.rs:26` query keyhive directly.
+        - (B) a doc materialization watch (`big_blobs/workers.rs:332,435`, the frontier store).
+        - (C) a doc interest/readiness lease (`admission/observe.rs:89,108`).
+        - (D) the node's own peer id.
+      - Sync and transport plumbing in `big_node/peers*` and blob part bookkeeping stay below the cabinet. Blob part bookkeeping should go behind a big_sync interface rather than big_repo.
+      - Boot-only uses (day_cli, big_ndk_testing) disappear if node boot takes a node-level storage config.
+      - These are the in-process handles that block running services in separate address spaces.
+    - *`sqlite_rs/native.rs`:* required. It's the native rusqlite runtime used by about 16 crates, already excluded from wasm by target cfg. A `native` feature (default on), plus `vec` for sqlite-vec, would gate it by feature instead. Low value unless a non-wasm consumer needs portable-only.
+    - *method/service crates:* `method_core` (no deps, wasm) sits under `service_core_rs` (wasm), `service_client_core_rs` (wasm), `service_client_native_rs` and `service_utils_rs` (native runtime), and `method_lexicon` (host only). The split is real: it keeps the wasm-buildable and host-only halves apart. The lane proposes renames: `method_core`→`call_core`, drop the `_rs` suffixes, and `service_utils_rs`→`service_host`. That's about 540 mechanical sites. A merge of method_core into service_core is possible but costs the zero-dependency property.
+    - *`src/proptest-regressions/`:* proptest's committed failure seeds. They land under `src/` because these crates' `lib.rs` sit in `src/<crate>/`. Three files are orphans whose tests #79 deleted (`oracle.txt`, `tree/property_tests.txt`, `micros/composition/tests.txt`). Three are live and replayed on every run. Proposal: delete the orphans, run the five live seeds once, and optionally set `FileFailurePersistence::WithSource` so seeds sit beside their crates.
+    - *daybook_*/plug_*:* still needed for the workflow engine (`rt.rs` plus `wflow*`), the plug routines (plabels, dayledger), daybook's blob pin/encryption pipeline (to compare against big_blobs before deleting), sync bootstrap/clone/tickets, tables/progress/index and the facet cache, image tools and embeddings, and `daybook_ffi` for the Kotlin app. `daybook_types` is still used by clay/dayframe crates.
+      - Proposed order: move clay/dayframe off `daybook_types`; decide workflows (cartridge feature or wflow); port or drop the plug routines; drop `daybook_ffi` with `daybook_compose`; then delete the rest.
+      - Open for the operator: is the Kotlin app dropped outright or replaced by dayframe?
 
 ## Deferred
 
