@@ -528,7 +528,7 @@ async fn concurrent_foreign_write_merges_at_loaded_heads_and_watch_streams_updat
     .await
     .unwrap();
     let mut watch = store.watch().await.unwrap();
-    let first = watch.next().await.unwrap().unwrap();
+    let first = store.snapshot().await.unwrap();
     assert_eq!(
         first.value.entries,
         BTreeMap::from([("a".into(), "v1".into())])
@@ -570,11 +570,11 @@ async fn concurrent_foreign_write_merges_at_loaded_heads_and_watch_streams_updat
     );
 
     loop {
-        let next = tokio::time::timeout(Duration::from_secs(5), watch.next())
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
             .await
             .unwrap()
-            .unwrap()
             .unwrap();
+        let next = store.snapshot().await.unwrap();
         if next.value.entries == merged.value.entries {
             break;
         }
@@ -597,11 +597,11 @@ async fn concurrent_foreign_write_merges_at_loaded_heads_and_watch_streams_updat
         .unwrap();
 
     loop {
-        let next = tokio::time::timeout(Duration::from_secs(5), watch.next())
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
             .await
             .unwrap()
-            .unwrap()
             .unwrap();
+        let next = store.snapshot().await.unwrap();
         if !next.value.entries.contains_key("a") {
             assert_eq!(
                 next.value.entries,
@@ -715,7 +715,7 @@ async fn rejected_entry_is_preserved_and_access_loss_surfaces_on_empty_and_popul
     assert!(bob_store.snapshot().await.is_ok());
 
     let mut bob_watch = bob_store.watch().await.unwrap();
-    let initial_empty = bob_watch.next().await.unwrap().unwrap();
+    let initial_empty = bob_store.snapshot().await.unwrap();
     assert!(initial_empty.value.entries.is_empty());
 
     harness
@@ -724,11 +724,10 @@ async fn rejected_entry_is_preserved_and_access_loss_surfaces_on_empty_and_popul
             &[LedgerAccess::object(AccessRequest::Read(&empty_doc))],
         )
         .await;
-    let lost = tokio::time::timeout(Duration::from_secs(5), bob_watch.next())
+    tokio::time::timeout(Duration::from_secs(5), bob_watch.changed())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(lost, Err(StoreError::AccessLost));
     assert_eq!(bob_store.snapshot().await, Err(StoreError::AccessLost));
 
     drop(bob_watch);
