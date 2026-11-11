@@ -10,6 +10,50 @@ fn file(value: Value) -> IndexMap<String, Value> {
     serde_json::from_value(value).unwrap()
 }
 
+/// A datum whose `main` is a record or an object under the authority is held; a Lexicon with no
+/// `main` (a type library) and a datum outside the authority are carried.
+#[test]
+fn registrable_datums_hold_record_and_object_mains_under_the_authority() {
+    let mut nodule = Nodule::default();
+    for (id, defs) in [
+        (
+            "org.example.photos.record",
+            json!({"main": {"type": "record", "key": "any", "record": {"type": "object", "properties": {}}}}),
+        ),
+        (
+            "org.example.photos.object",
+            json!({"main": {"type": "object", "properties": {}}}),
+        ),
+        (
+            "org.example.photos.library",
+            json!({"shared": {"type": "object", "properties": {}}}),
+        ),
+        (
+            "org.example.other.object",
+            json!({"main": {"type": "object", "properties": {}}}),
+        ),
+    ] {
+        nodule
+            .lexicons
+            .push(file(json!({"lexicon": 1, "id": id, "defs": defs})));
+    }
+    let split = nodule.registrable_datums(Some(PHOTOS));
+    let held: Vec<&str> = split.held.iter().map(|(id, ..)| *id).collect();
+    assert_eq!(
+        held,
+        ["org.example.photos.record", "org.example.photos.object"]
+    );
+    let carried: Vec<&str> = split
+        .carried
+        .iter()
+        .map(|file| file["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        carried,
+        ["org.example.photos.library", "org.example.other.object"]
+    );
+}
+
 /// The photo browser of ADR 027 §3: declares its own datum, query and subscription, requires
 /// the search vocabulary, and carries a command, view and processor binding it never interprets.
 fn photos() -> Nodule {

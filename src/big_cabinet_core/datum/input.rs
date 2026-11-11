@@ -88,7 +88,7 @@ impl Bundle<'_> {
             .find(|datum| datum.id == tag)
             .map(|datum| {
                 serde_json::to_value(
-                    self.document(&datum.name)
+                    Self::document_over(&datum.name, self.defs_in_scope())
                         .expect("validated datum definition"),
                 )
                 .expect("schema serializes")

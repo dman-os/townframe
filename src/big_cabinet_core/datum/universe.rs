@@ -398,11 +398,34 @@ impl<'a> Bundle<'a> {
         self.resolve(name)
     }
 
+    /// The datum's sidecar document: `$ref` to its definition, and under `$defs` that definition
+    /// and every definition it reaches. Only the reached ones: a cartridge ships one document per
+    /// record, so carrying every definition in scope would grow its sidecars with the square of
+    /// its vocabulary.
     pub fn document(&self, datum_name: &str) -> Option<Schema> {
-        let defs = self.defs_in_scope();
-        if !defs.contains_key(datum_name) {
+        let scope = self.defs_in_scope();
+        if !scope.contains_key(datum_name) {
             return None;
         }
+        let mut defs = Map::new();
+        let mut pending = vec![datum_name.to_owned()];
+        while let Some(name) = pending.pop() {
+            if defs.contains_key(&name) {
+                continue;
+            }
+            let Some(definition) = scope.get(&name) else {
+                continue;
+            };
+            local_refs(definition, &mut pending);
+            defs.insert(name, definition.clone());
+        }
+        Self::document_over(datum_name, defs)
+    }
+
+    /// A document that refers to `datum_name` and carries `defs` as it is given. [`Bundle::document`]
+    /// hands it the reached definitions; the admission check hands it every definition in scope,
+    /// because it must also reject a malformed definition nothing reaches.
+    pub(super) fn document_over(datum_name: &str, defs: Map<String, Value>) -> Option<Schema> {
         let mut root = Map::new();
         root.insert(
             "$schema".to_owned(),
@@ -459,13 +482,34 @@ impl<'a> Bundle<'a> {
     }
 
     /// Every definition in scope, flattened, nearest cartridge first: the context a reference resolves in.
-    fn defs_in_scope(&self) -> Map<String, Value> {
+    pub(super) fn defs_in_scope(&self) -> Map<String, Value> {
         let mut defs = Map::new();
         for (name, schema, _owner) in self.definitions() {
             defs.entry(name.to_owned())
                 .or_insert_with(|| serde_json::to_value(schema).expect("a schema is a JSON value"));
         }
         defs
+    }
+}
+
+/// The names of the local definitions `schema` refers to (`#/$defs/<name>`), anywhere inside it.
+fn local_refs(schema: &Value, names: &mut Vec<String>) {
+    match schema {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if key == "$ref"
+                    && let Some(name) = value
+                        .as_str()
+                        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                {
+                    names.push(name.to_owned());
+                } else {
+                    local_refs(value, names);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| local_refs(item, names)),
+        _ => {}
     }
 }
 
@@ -641,5 +685,41 @@ mod tests {
             Bundle::new(&universe, Vec::new()).validate(),
             Err(UniverseError::Undeclared { name, .. }) if name == "NotCarried"
         ));
+    }
+
+    #[test]
+    fn a_document_carries_only_what_its_datum_reaches() {
+        let reaching = json!({
+            "type": "object",
+            "properties": {"value": {"$ref": "#/$defs/Reached"}}
+        });
+        let mut universe = universe_with_schema(
+            reaching,
+            vec![carried_type("Reached"), carried_type("Unrelated")],
+        );
+        universe.datums.push(DatumDecl {
+            id: "org.example.schema.other".to_owned(),
+            name: "Other".to_owned(),
+            schema: Schema::try_from(json!({
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/Unrelated"}}
+            }))
+            .expect("other schema"),
+            flags: Vec::new(),
+        });
+        let bundle = Bundle::new(&universe, Vec::new());
+
+        // The sidecar is pruned; the admission check's document is not.
+        let everything = Bundle::document_over("Main", bundle.defs_in_scope()).expect("Main");
+        let everything = serde_json::to_value(everything).expect("a schema serializes");
+        assert!(everything["$defs"]["Unrelated"].is_object(), "{everything}");
+
+        let document = serde_json::to_value(bundle.document("Main").expect("Main is in scope"))
+            .expect("a schema serializes");
+        let defs = document["$defs"].as_object().expect("document has $defs");
+        assert!(defs.contains_key("Main"), "{document}");
+        assert!(defs.contains_key("Reached"), "{document}");
+        assert!(!defs.contains_key("Unrelated"), "{document}");
+        assert!(!defs.contains_key("Other"), "{document}");
     }
 }
