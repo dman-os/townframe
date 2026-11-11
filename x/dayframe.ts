@@ -132,7 +132,7 @@ switch (command) {
       await $`cargo metadata --locked --no-deps --format-version 1`
         .json<{ target_directory: string }>();
     const apks =
-      await $`find ${metadata.target_directory} -name '*.apk' -path '*dayframe_mobile*' -printf '%T@ %p\n'`
+      await $`find -H ${metadata.target_directory} -name '*.apk' -path '*dayframe_mobile*' -printf '%T@ %p\n'`
         .text();
     const apk = apks.trim().split("\n").filter(Boolean).sort().pop()?.split(
       " ",
