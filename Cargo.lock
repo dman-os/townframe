@@ -8108,27 +8108,16 @@ version = "0.1.0"
 dependencies = [
  "automerge",
  "big_cabinet_core",
+ "big_cartridges_core",
+ "big_nodule_core",
+ "indexmap 2.14.2",
  "jiff",
  "macros",
- "schemars 1.2.3",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "intxt_handlers"
-version = "0.1.0"
-dependencies = [
- "big_cabinet_core",
- "big_ndk",
- "blake3",
- "intxt_core",
  "method_core",
+ "method_lexicon",
  "schemars 1.2.3",
  "serde",
  "serde_json",
- "service_client_core_rs",
- "service_core_rs",
  "thiserror 2.0.21",
 ]
 
@@ -8138,17 +8127,17 @@ version = "0.1.0"
 dependencies = [
  "big_blobs_core",
  "big_cabinet_core",
- "big_cartridges_core",
  "big_dispatch_core",
+ "big_ndk",
  "big_ndk_testing",
- "big_nodule_core",
- "indexmap 2.14.2",
+ "blake3",
  "intxt_capture",
  "intxt_core",
- "intxt_handlers",
  "method_core",
- "method_lexicon",
+ "serde",
  "serde_json",
+ "service_client_core_rs",
+ "service_core_rs",
  "service_utils_rs",
  "tempfile",
  "tokio",

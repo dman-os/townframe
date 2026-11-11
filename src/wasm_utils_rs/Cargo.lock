@@ -2507,21 +2507,15 @@ dependencies = [
  "big_cabinet_core",
  "jiff",
  "macros",
+ "method_core",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "intxt_guest"
-version = "0.1.0"
-dependencies = [
- "big_ndk",
- "intxt_handlers",
-]
-
-[[package]]
-name = "intxt_handlers"
+name = "intxt_nodule"
 version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
@@ -2533,7 +2527,14 @@ dependencies = [
  "serde_json",
  "service_client_core_rs",
  "service_core_rs",
- "thiserror 2.0.20",
+]
+
+[[package]]
+name = "intxt_nodule_guest"
+version = "0.1.0"
+dependencies = [
+ "big_ndk",
+ "intxt_nodule",
 ]
 
 [[package]]
