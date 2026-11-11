@@ -116,6 +116,9 @@ pub impl daybook_types::manifest::RoutineManifest::fn facet_acl (& self) -> Vec 
 pub impl daybook_types::manifest::RoutineManifest::fn read_facet_set (& self ,) -> (std :: collections :: HashSet < String > , std :: collections :: HashSet < crate :: doc :: FacetKey > ,)
 pub impl daybook_types::manifest::RoutineManifest::fn referenced_tags (& self) -> std :: collections :: HashSet < FacetTag >
 pub impl daybook_types::view::ViewSpec::fn validate (& self) -> Res < () >
+pub macro daybook_types::custom_type_set! { () }
+pub macro daybook_types::define_enum_and_tag! { (@ item $ (# [$ attr : meta]) * struct $ key : ident $ body : tt); (@ item $ (# [$ attr : meta]) * type $ key : ident ($ alias : path)); (@ item $ (# [$ attr : meta]) * enum $ key : ident $ body : tt); ($ reverse_domain_name : literal , $ (# [$ attr_tag : meta]) * $ tag_ty_name : ident , $ (# [$ attr_pay : meta]) * $ ty_name : ident { $ ($ (# [$ attr_item : meta]) * $ ($ domain_key : literal) ? $ key : ident $ kind : tt $ body : tt) ,* $ (,) ? }) }
+pub macro daybook_types::domain_name! { ($ domain_key_opt : literal or $ key_sure : ident); (or $ key_sure : ident) }
 pub mod daybook_types::doc
 pub mod daybook_types::doc::user_path
 pub mod daybook_types::manifest

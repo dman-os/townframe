@@ -286,32 +286,34 @@ pub fn extract_crate_public_api(
         .map(|dep| dep.name.replace('-', "_"))
         .collect();
 
-    let mut items = BTreeSet::new();
-    let mut exposed_external = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    walk_public_module(
-        &entry,
-        &package.name,
-        &external_deps,
-        &mut visited,
-        &mut items,
-        &mut exposed_external,
-    )?;
-    Ok((items.into_iter().collect(), exposed_external))
+    let mut walk = ApiWalk {
+        external_deps: &external_deps,
+        visited: BTreeSet::new(),
+        items: BTreeSet::new(),
+        exposed_external: BTreeSet::new(),
+    };
+    walk_public_module(&mut walk, &entry, &package.name, true)?;
+    Ok((walk.items.into_iter().collect(), walk.exposed_external))
+}
+
+/// State threaded through the module-tree walk that builds a crate's API snapshot.
+struct ApiWalk<'a> {
+    external_deps: &'a BTreeSet<String>,
+    visited: BTreeSet<PathBuf>,
+    items: BTreeSet<String>,
+    exposed_external: BTreeSet<String>,
 }
 
 fn walk_public_module(
+    walk: &mut ApiWalk,
     file_path: &Path,
     mod_prefix: &str,
-    external_deps: &BTreeSet<String>,
-    visited: &mut BTreeSet<PathBuf>,
-    items: &mut BTreeSet<String>,
-    exposed_external: &mut BTreeSet<String>,
+    public: bool,
 ) -> Res<()> {
     let canon = file_path
         .canonicalize()
         .unwrap_or_else(|_| file_path.to_path_buf());
-    if !visited.insert(canon) {
+    if !walk.visited.insert(canon) {
         return Ok(());
     }
     let text = std::fs::read_to_string(file_path)
@@ -328,15 +330,7 @@ fn walk_public_module(
     } else {
         parent_dir.join(file_stem)
     };
-    collect_public_items(
-        &parsed.items,
-        mod_prefix,
-        &child_search_dir,
-        external_deps,
-        visited,
-        items,
-        exposed_external,
-    )
+    collect_public_items(walk, &parsed.items, mod_prefix, public, &child_search_dir)
 }
 
 fn is_pub(vis: &syn::Visibility) -> bool {
@@ -378,59 +372,103 @@ fn record_external_types(
 }
 
 fn collect_public_items(
+    walk: &mut ApiWalk,
     ast_items: &[syn::Item],
     mod_prefix: &str,
+    public: bool,
     child_dir: &Path,
-    external_deps: &BTreeSet<String>,
-    visited: &mut BTreeSet<PathBuf>,
-    items: &mut BTreeSet<String>,
-    exposed_external: &mut BTreeSet<String>,
 ) -> Res<()> {
     for item in ast_items {
-        if let syn::Item::Mod(item) = item
-            && is_pub(&item.vis)
-        {
+        if let syn::Item::Mod(item) = item {
+            // A private module is still walked: `#[macro_export]` puts a macro at the crate root
+            // wherever it is defined, so it can hide behind `mod macros;`. Only macros are
+            // recorded from there. Test-only modules are never part of the API.
+            if !is_pub(&item.vis) && is_cfg_test(&item.attrs) {
+                continue;
+            }
+            let public = public && is_pub(&item.vis);
             let sub_prefix = format!("{mod_prefix}::{}", item.ident);
-            items.insert(format!("pub mod {sub_prefix}"));
+            if public {
+                walk.items.insert(format!("pub mod {sub_prefix}"));
+            }
             if let Some((_, content)) = &item.content {
                 let inline_dir = child_dir.join(item.ident.to_string());
-                collect_public_items(
-                    content,
-                    &sub_prefix,
-                    &inline_dir,
-                    external_deps,
-                    visited,
-                    items,
-                    exposed_external,
-                )?;
+                collect_public_items(walk, content, &sub_prefix, public, &inline_dir)?;
             } else {
                 let candidate_file = child_dir.join(format!("{}.rs", item.ident));
                 let candidate_mod = child_dir.join(item.ident.to_string()).join("mod.rs");
                 if candidate_file.is_file() {
-                    walk_public_module(
-                        &candidate_file,
-                        &sub_prefix,
-                        external_deps,
-                        visited,
-                        items,
-                        exposed_external,
-                    )?;
+                    walk_public_module(walk, &candidate_file, &sub_prefix, public)?;
                 } else if candidate_mod.is_file() {
-                    walk_public_module(
-                        &candidate_mod,
-                        &sub_prefix,
-                        external_deps,
-                        visited,
-                        items,
-                        exposed_external,
-                    )?;
+                    walk_public_module(walk, &candidate_mod, &sub_prefix, public)?;
                 }
             }
         } else {
-            collect_public_leaf_item(item, mod_prefix, external_deps, items, exposed_external);
+            if public {
+                collect_public_leaf_item(
+                    item,
+                    mod_prefix,
+                    walk.external_deps,
+                    &mut walk.items,
+                    &mut walk.exposed_external,
+                );
+            }
+            if let syn::Item::Macro(item) = item {
+                collect_exported_macro(item, mod_prefix, &mut walk.items);
+            }
         }
     }
     Ok(())
+}
+
+fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "test")
+    })
+}
+
+/// Records a `#[macro_export] macro_rules!` as `pub macro <crate>::<name>! { (<matcher>); .. }`.
+///
+/// The matcher arms are the macro's call contract: adding an arm is additive, changing or
+/// removing one breaks callers, and the diff shows exactly which. Transcriber bodies are
+/// implementation and stay out, so editing an expansion does not churn the snapshot. One line
+/// per macro keeps the snapshot diffable, and arms follow source order because order decides
+/// which arm matches first. `#[doc(hidden)]` macros (helpers a public macro expands to) are
+/// not listed, like any other hidden item.
+fn collect_exported_macro(item: &syn::ItemMacro, mod_prefix: &str, items: &mut BTreeSet<String>) {
+    let Some(name) = &item.ident else {
+        return;
+    };
+    if !item.mac.path.is_ident("macro_rules")
+        || !item.attrs.iter().any(|attr| attr.path().is_ident("macro_export"))
+        || item.attrs.iter().any(|attr| {
+            attr.path().is_ident("doc")
+                && matches!(&attr.meta, syn::Meta::List(list) if list.tokens.to_string() == "hidden")
+        })
+    {
+        return;
+    }
+    // `macro_rules!` bodies are `(matcher) => { transcriber };` repeated, so after each
+    // matcher group the next group is its transcriber and an optional `;` separates arms.
+    let mut arms = Vec::new();
+    let mut tokens = item.mac.tokens.clone().into_iter();
+    while let Some(token) = tokens.next() {
+        if matches!(&token, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ';') {
+            continue;
+        }
+        arms.push(normalize_tokens(token));
+        for token in tokens.by_ref() {
+            if matches!(token, proc_macro2::TokenTree::Group(_)) {
+                break;
+            }
+        }
+    }
+    let krate = mod_prefix.split("::").next().unwrap_or(mod_prefix);
+    items.insert(format!(
+        "pub macro {krate}::{name}! {{ {} }}",
+        arms.join("; ")
+    ));
 }
 
 fn collect_public_leaf_item(
@@ -741,4 +779,57 @@ pub fn overlap(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exported_macros_list_matcher_arms_and_skip_hidden_and_unexported() {
+        let source = r#"
+            #[macro_export]
+            macro_rules! export_thing {
+                ($thing:ty => [$($method:ty),* $(,)?]) => { impl X for $thing {} };
+                () => { compile_error!("needs a type") };
+            }
+            #[doc(hidden)]
+            #[macro_export]
+            macro_rules! __helper { ($x:expr) => { $x }; }
+            macro_rules! private_macro { () => {}; }
+            mod hidden_module {
+                #[macro_export]
+                macro_rules! from_private_module { [$a:ident] => {}; }
+                pub fn not_public_here() {}
+            }
+            #[cfg(test)]
+            mod tests {
+                #[macro_export]
+                macro_rules! test_only { () => {}; }
+            }
+        "#;
+        let parsed = syn::parse_file(source).unwrap();
+        let external = BTreeSet::new();
+        let mut walk = ApiWalk {
+            external_deps: &external,
+            visited: BTreeSet::new(),
+            items: BTreeSet::new(),
+            exposed_external: BTreeSet::new(),
+        };
+        collect_public_items(
+            &mut walk,
+            &parsed.items,
+            "krate",
+            true,
+            Path::new("/nonexistent"),
+        )
+        .unwrap();
+        assert_eq!(
+            walk.items.into_iter().collect::<Vec<_>>(),
+            [
+                "pub macro krate::export_thing! { ($ thing : ty => [$ ($ method : ty) ,* $ (,) ?]); () }",
+                "pub macro krate::from_private_module! { [$ a : ident] }",
+            ]
+        );
+    }
 }
