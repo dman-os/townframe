@@ -90,7 +90,7 @@ fn a_session_becomes_its_datum_then_one_batch_per_turn() {
                 "Fix the config loader\nfile:///work/repo/src/config.rs"
             ),
             (1, &MessageKind::AgentMessage, "I'll look at the file."),
-            (4, &MessageKind::AgentMessage, "Now the fix."),
+            (3, &MessageKind::AgentMessage, "Now the fix."),
         ]
     );
     let calls: Vec<_> = turn
@@ -102,7 +102,7 @@ fn a_session_becomes_its_datum_then_one_batch_per_turn() {
         calls,
         [
             (2, "call_001", &ToolKind::Read, &ToolStatus::Completed),
-            (5, "call_002", &ToolKind::Edit, &ToolStatus::Completed),
+            (4, "call_002", &ToolKind::Edit, &ToolStatus::Completed),
         ]
     );
     let read = &turn.tool_calls[0];
