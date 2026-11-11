@@ -26,7 +26,7 @@ pub struct intxt_core::annotation::Content  { mime: String, content: String, ext
 pub struct intxt_core::annotation::LineRange  { start: u32, end: u32, extra: Extra }
 pub struct intxt_core::annotation::Seen  { datums: BTreeMap < String , Vec < String > >, reviewed: BTreeMap < String , String >, extra: Extra }
 pub struct intxt_core::annotation::Structure  { kind: StructureKind, title: String, body: Option < Content >, status: Option < Progress >, targets: Vec < Target >, parent: Option < DatumReference >, order: Option < String >, extra: Extra }
-pub struct intxt_core::annotation::Target  { reference: Location, ref_heads: Vec < ChangeHash >, lines: Option < LineRange >, quote: Option < TextQuote >, to: Option < DatumReference >, extra: Extra }
+pub struct intxt_core::annotation::Target  { source: DatumPin, lines: Option < LineRange >, quote: Option < TextQuote >, to: Option < Location >, extra: Extra }
 pub struct intxt_core::annotation::TextQuote  { exact: String, prefix: Option < String >, suffix: Option < String >, extra: Extra }
 pub struct intxt_core::annotation::ThreadState  { resolved: bool, extra: Extra }
 pub struct intxt_core::generic::Body  { order: Vec < DatumReference >, extra: Extra }
