@@ -21,6 +21,7 @@ service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
 big_dispatch.workspace = true
+big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
 big_blobs_core = { path = "../big_blobs_core" }
