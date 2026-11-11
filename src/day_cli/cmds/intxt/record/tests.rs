@@ -27,7 +27,10 @@ fn fake_agent() -> Vec<String> {
 /// Run the proxy over the fake agent with a client that answers causally, as an editor does: it
 /// sends each request only after the agent's previous answer arrived. Returns the agent's exit
 /// status and everything the client received.
-async fn drive(record: impl AsyncFnMut(Emit) -> Res<Option<String>>) -> (ExitStatus, Vec<u8>) {
+async fn drive(
+    record: impl AsyncFnMut(Emit) -> Res<Option<String>>,
+    stopped: impl FnMut(&str),
+) -> (ExitStatus, Vec<u8>) {
     use tokio::io::AsyncBufReadExt;
     let (mut client_writes, agent_reads) = tokio::io::duplex(64 * 1024);
     let (agent_writes, client_reads) = tokio::io::duplex(64 * 1024);
@@ -137,12 +140,20 @@ async fn an_agent_that_is_not_acp_is_still_proxied() {
         "-c".to_owned(),
         "echo not json; exit 3".to_owned(),
     ];
-    let status = proxy(&agent, false, &b""[..], &mut output, async |_: Emit| {
-        Ok(None)
-    })
+    let mut reasons: Vec<String> = Vec::new();
+    let status = proxy(
+        &agent,
+        false,
+        &b""[..],
+        &mut output,
+        TEE_CHUNKS,
+        async |_: Emit| Ok(None),
+        |reason| reasons.push(reason.to_owned()),
+    )
     .await
     .unwrap();
     assert_eq!(status.code(), Some(3));
+    assert!(reasons[0].contains("not a JSON-RPC message"), "{reasons:?}");
     assert_eq!(output, b"not json\n");
 }
 
