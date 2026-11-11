@@ -57,6 +57,12 @@ pub(crate) struct PointerState {
 }
 
 impl PointerState {
+    /// Whether a drag can start on a row: the manager listens and the options give the pointer
+    /// something to do on rows.
+    pub(crate) fn acts_on_rows(&self) -> bool {
+        self.pre.get().is_some() && self.rows.get()
+    }
+
     /// Sets whether pointers act on rows; the view calls it with its props.
     pub(crate) fn set_rows(&self, rows: bool) {
         self.rows.set(rows);
@@ -101,15 +107,9 @@ impl PointerState {
     }
 
     /// The nodes the hit-test frame is measured from need `MountedData`: the `pre` and the
-    /// content columns, on a host that measures rows.
-    pub(crate) fn wants_mounted(
-        &self,
-        document: &Document,
-        interactive: bool,
-        node: NodeKey,
-    ) -> bool {
-        interactive
-            && self.rows.get()
+    /// content columns, while the pointer acts on rows.
+    pub(crate) fn wants_mounted(&self, document: &Document, node: NodeKey) -> bool {
+        self.rows.get()
             && self
                 .pre
                 .get()
@@ -161,13 +161,14 @@ fn measure_frame(host: &Rc<DioxusHost>) {
             return;
         }
         let geometry = host.geometry.borrow();
+        let scroll_top = host.scroll_top();
         host.pointer.frame.set(Some(HitFrame {
             pre_left: pre_rect.origin.x,
             pre_width: pre_rect.size.width,
             content,
             content_client_top: content_rect.origin.y,
             content_offset: geometry.top_in_content(&host.document, host.container, content),
-            scroll_top: geometry.scroll(host.scroller_root()).top,
+            scroll_top,
         }));
     });
 }
@@ -179,8 +180,8 @@ impl InteractionHost for DioxusHost {
 
     /// Answered from the cached row geometry, not the engine (see `Geometry::element_at`).
     /// `Unavailable` is the port's "callers fall back to the event path": the answer while no
-    /// frame is measured (no drag, the rects still in flight, a static host that measures no
-    /// rows, a renderer without client rects). A frame whose column the document dropped is
+    /// frame is measured (no drag, the rects still in flight, a host that is not
+    /// measuring rows, a renderer without client rects). A frame whose column the document dropped is
     /// stale in the same way.
     fn element_from_point(&self, x: f64, y: f64) -> HitTest<NodeKey> {
         let (Some(frame), Some(pre)) = (self.pointer.frame.get(), self.pointer.pre.get()) else {
@@ -190,7 +191,7 @@ impl InteractionHost for DioxusHost {
             return HitTest::Unavailable;
         }
         let geometry = self.geometry.borrow();
-        let scroll_top = geometry.scroll(self.scroller_root()).top;
+        let scroll_top = self.scroll_top();
         match geometry.element_at(
             &self.document,
             self.container,
@@ -220,14 +221,12 @@ impl InteractionHost for DioxusHost {
     fn add_document_listeners(&self) {
         self.pointer.document_listeners.set(true);
         self.pointer.frame.set(None);
-        if self.is_interactive() {
-            measure_frame(
-                &self
-                    .weak_self
-                    .upgrade()
-                    .expect("the host is alive while it is called"),
-            );
-        }
+        measure_frame(
+            &self
+                .weak_self
+                .upgrade()
+                .expect("the host is alive while it is called"),
+        );
     }
 
     fn remove_document_listeners(&self) {

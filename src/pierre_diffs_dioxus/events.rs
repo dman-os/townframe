@@ -41,9 +41,16 @@ use pierre_diffs::managers::scroll_sync_manager::ScrollSyncManager;
 use crate::geometry::ScrollSample;
 use crate::host::DioxusHost;
 
-/// Where the events of one view go: its host cache and the managers that observe through it.
+/// Where the events of one view go: its host cache and, on a virtualized view, the managers that
+/// observe through it. A static view's dispatch records sizes and `MountedData` for the pointer's
+/// hit-testing and has no manager to tell.
 pub(crate) struct Dispatch {
     pub(crate) host: Rc<DioxusHost>,
+    pub(crate) managers: Option<ObservingManagers>,
+}
+
+/// The managers a virtualized view's resize, visibility and scroll events are delivered to.
+pub(crate) struct ObservingManagers {
     pub(crate) hub: Rc<ResizeObserverHub<DioxusHost>>,
     pub(crate) virtualizer: Rc<Virtualizer<DioxusHost>>,
     pub(crate) scroll_sync: Rc<ScrollSyncManager<DioxusHost>>,
@@ -51,6 +58,14 @@ pub(crate) struct Dispatch {
 }
 
 impl Dispatch {
+    /// The managers of a virtualized view: only its host registers visibility and scroll
+    /// listeners, so only its events reach a handler that asks for them.
+    fn managers(&self) -> &ObservingManagers {
+        self.managers
+            .as_ref()
+            .expect("only a virtualized host registers visibility and scroll listeners")
+    }
+
     pub(crate) fn mounted(&self, node: NodeKey, mounted: MountedData) {
         self.host.record_mounted(node, Rc::new(mounted));
         self.host.flush_frames();
@@ -60,13 +75,20 @@ impl Dispatch {
     /// `content_width` is `contentBoxSize.inlineSize`.
     pub(crate) fn resized(&self, node: NodeKey, border_height: f64, content_width: f64) {
         let previous = self.host.record_size(node, border_height);
-        self.hub
+        // A static view's rows are measured for the pointer's hit-testing only: nothing is
+        // reconciled against them.
+        let Some(managers) = &self.managers else {
+            self.host.flush_frames();
+            return;
+        };
+        managers
+            .hub
             .handle_shared_resize_entries(&[ResizeObserverEntry {
                 target: node,
                 border_box_block_size: border_height,
                 content_box_inline_size: content_width,
             }]);
-        self.virtualizer.handle_container_resize(&[ResizeEntry {
+        managers.virtualizer.handle_container_resize(&[ResizeEntry {
             target: node,
             block_size: border_height,
         }]);
@@ -74,14 +96,17 @@ impl Dispatch {
         // the layout that changed it arrives after that pass, so a row that grew or first
         // appeared asks for the pass that reads it (a no-op unless it has something to reconcile).
         if previous != Some(border_height) && node != self.host.container() {
-            self.virtualizer.request_height_reconcile(&self.instance);
+            managers
+                .virtualizer
+                .request_height_reconcile(&managers.instance);
         }
         self.host.flush_frames();
     }
 
     /// `IntersectionObserver`'s callback.
     pub(crate) fn visible(&self, node: NodeKey, is_intersecting: bool) {
-        self.virtualizer
+        self.managers()
+            .virtualizer
             .handle_intersection_change(&[IntersectionEntry {
                 target: node,
                 is_intersecting,
@@ -92,9 +117,13 @@ impl Dispatch {
     pub(crate) fn scrolled(&self, node: NodeKey, sample: ScrollSample) {
         self.host.record_scroll(node, sample);
         match self.host.scroll_side(node) {
-            Some(None) => self.virtualizer.handle_element_scroll(),
-            Some(Some(ScrollSide::Deletions)) => self.scroll_sync.handle_deletions_scroll(),
-            Some(Some(ScrollSide::Additions)) => self.scroll_sync.handle_additions_scroll(),
+            Some(None) => self.managers().virtualizer.handle_element_scroll(),
+            Some(Some(ScrollSide::Deletions)) => {
+                self.managers().scroll_sync.handle_deletions_scroll();
+            }
+            Some(Some(ScrollSide::Additions)) => {
+                self.managers().scroll_sync.handle_additions_scroll();
+            }
             // The listener was removed while the event was in flight.
             None => {}
         }
@@ -143,11 +172,10 @@ impl Dispatch {
         // Scroll commands and client rects go through `MountedData`, which exists only from
         // `onmounted`: a node that is scrolled or measured is a node that gets it.
         if self.host.wants_scroll(node)
-            || self.host.pointer.wants_mounted(
-                host_document(&self.host),
-                self.host.is_interactive(),
-                node,
-            )
+            || self
+                .host
+                .pointer
+                .wants_mounted(host_document(&self.host), node)
         {
             let dispatch = Rc::clone(self);
             attributes.push(listener("onmounted", move |data: MountedData| {

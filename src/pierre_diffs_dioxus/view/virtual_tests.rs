@@ -207,7 +207,7 @@ impl Rig {
     }
 
     fn dispatch(&self) -> &Rc<Dispatch> {
-        self.view.dispatch.as_ref().expect("a virtualized view")
+        &self.view.dispatch
     }
 
     fn nodes(&self) -> (NodeKey, NodeKey, NodeKey) {

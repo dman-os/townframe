@@ -396,11 +396,15 @@ fn rows_get_pointer_handlers_only_when_the_options_give_the_pointer_something_to
         listeners(true),
         [
             "click",
+            // The rows' heights and the `pre`'s and a column's client rects, which a drag's
+            // hit-testing reads.
+            "mounted",
             "pointercancel",
             "pointerdown",
             "pointerleave",
             "pointermove",
-            "pointerup"
+            "pointerup",
+            "resize"
         ]
     );
 }
@@ -495,7 +499,7 @@ fn drag_rig() -> (Rig, [f64; 2]) {
         Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
         Engine::Static(_) => unreachable!("a virtualized rig"),
     };
-    let dispatch = Rc::clone(rig.view.dispatch.as_ref().expect("a virtualized view"));
+    let dispatch = Rc::clone(&rig.view.dispatch);
     // The pre sits at x 100, 800 wide; its first row starts at y 50.
     rig.dom.in_scope(ScopeId::ROOT, || {
         dispatch.mounted(root, MountedData::new(rect(100.0, 0.0, 800.0, 600.0)));
@@ -560,6 +564,95 @@ fn a_drag_selects_the_rows_under_the_pointer_from_the_cached_geometry() {
         ),
         pierre_diffs::managers::interaction_manager::HitTest::Unavailable,
     );
+}
+
+/// A non-virtualized view with the platform's part scripted: the `pre` at x 100, 800 wide, its
+/// first row at y 50, every row 20 high, delivered as the `onmounted` and `onresize` the
+/// renderer asked for.
+fn static_drag_rig() -> Rig {
+    let mut rig = Rig::new(pair(8, &[7]), false, true, true);
+    let (pre, column) = (rig.pre(), rig.query("data-content", None)[0]);
+    let rows = rig.document().child_nodes(column);
+    let dispatch = Rc::clone(&rig.view.dispatch);
+    rig.dom.in_scope(ScopeId::ROOT, || {
+        let hears = |node, name: &str| {
+            dispatch
+                .listeners(node)
+                .iter()
+                .any(|attribute| attribute.name == name)
+        };
+        // Only what the renderer attached a listener to hears anything.
+        assert!(hears(pre, "onmounted") && hears(column, "onmounted"));
+        assert!(!hears(column, "onresize"), "a column is not a row");
+        dispatch.mounted(pre, MountedData::new(rect(100.0, 50.0, 800.0, 400.0)));
+        dispatch.mounted(column, MountedData::new(rect(140.0, 50.0, 760.0, 400.0)));
+        for row in rows
+            .iter()
+            .filter(|row| !rig.document().tag_name(*row).is_empty())
+        {
+            assert!(hears(*row, "onresize"), "a row is measured");
+            dispatch.resized(*row, 20.0, 760.0);
+        }
+    });
+    rig.settle();
+    rig
+}
+
+#[test]
+fn a_touch_drag_across_the_rows_of_a_non_virtualized_view_selects_the_range() {
+    let mut rig = static_drag_rig();
+    let start = rig.number(1);
+    let row_y = |index: usize| 50.0 + 20.0 * (index as f64 + 0.5);
+    let touch = |x, y| Pointer {
+        kind: "touch",
+        ..Pointer::mouse(x, y)
+    };
+    rig.pointer(
+        start,
+        "pointerdown",
+        Pointer {
+            button: 0,
+            buttons: 1,
+            ..touch(120.0, row_y(0))
+        },
+    );
+    assert!(rig.view.host.pointer.document_listeners_active());
+    // The frame was measured with no scroller to read.
+    assert_eq!(
+        pierre_diffs::managers::interaction_manager::InteractionHost::element_from_point(
+            &*rig.view.host,
+            500.0,
+            row_y(3),
+        ),
+        pierre_diffs::managers::interaction_manager::HitTest::Element(rig.line(4))
+    );
+    // A touch keeps naming the row the drag began on; the coordinates name the rows.
+    for index in 1..=3 {
+        rig.pointer(
+            start,
+            "pointermove",
+            Pointer {
+                buttons: 1,
+                ..touch(500.0, row_y(index))
+            },
+        );
+    }
+    let top = rig.view.host.top();
+    rig.pointer(top, "pointerup", touch(500.0, row_y(3)));
+    assert_eq!(rig.last_selection(), Some(range(1, 4)));
+    assert!(!rig.view.host.pointer.document_listeners_active());
+}
+
+#[test]
+fn a_view_whose_pointer_has_no_rows_to_act_on_measures_none() {
+    let rig = Rig::new(pair(5, &[3]), false, true, false);
+    let (line, pre) = (rig.line(2), rig.pre());
+    let dispatch = Rc::clone(&rig.view.dispatch);
+    rig.dom.in_scope(ScopeId::ROOT, || {
+        for node in [line, pre] {
+            assert!(dispatch.listeners(node).is_empty());
+        }
+    });
 }
 
 #[test]

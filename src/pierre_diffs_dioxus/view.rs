@@ -60,6 +60,7 @@ use pierre_diffs::utils::parse_patch_files::ParsePatchError;
 use pierre_diffs::utils::parse_patch_files::parse_patch_files;
 
 use crate::events::Dispatch;
+use crate::events::ObservingManagers;
 use crate::events::Pointers;
 use crate::host::DioxusHost;
 use crate::host::SleepFuture;
@@ -268,8 +269,8 @@ impl<A: Clone + PartialEq + 'static> Engine<A> {
 struct View<A: Clone + PartialEq + 'static> {
     host: Rc<DioxusHost>,
     engine: Engine<A>,
-    /// The listeners' destination; present when the host is interactive.
-    dispatch: Option<Rc<Dispatch>>,
+    /// The listeners' destination.
+    dispatch: Rc<Dispatch>,
     /// Where the pointer events of the interaction handlers go.
     pointers: Rc<Pointers>,
     interaction: InteractionCallbacks,
@@ -338,7 +339,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             &render_annotation,
             &interaction,
         );
-        let (host, engine, dispatch) = match &props.virtualized {
+        let (host, engine, managers) = match &props.virtualized {
             None => {
                 let host = DioxusHost::new_static();
                 let file_diff = FileDiff::new(
@@ -370,6 +371,10 @@ impl<A: Clone + PartialEq + 'static> View<A> {
                 version += 1;
             }
         })));
+        let dispatch = Rc::new(Dispatch {
+            host: Rc::clone(&host),
+            managers,
+        });
         Self {
             host,
             engine,
@@ -391,7 +396,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         virtualization: &Virtualization,
         highlighter: Rc<dyn DiffsHighlighter>,
         options: FileDiffOptions<pierre_diffs::document::NodeKey, SlotContent, A>,
-    ) -> (Rc<DioxusHost>, Engine<A>, Option<Rc<Dispatch>>) {
+    ) -> (Rc<DioxusHost>, Engine<A>, Option<ObservingManagers>) {
         let metrics = PartialVirtualFileMetrics::default();
         let host = DioxusHost::new_scrolling(
             &virtualization.height,
@@ -418,20 +423,19 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             metrics,
             None,
         );
-        let dispatch = Rc::new(Dispatch {
-            host: Rc::clone(&host),
+        let managers = ObservingManagers {
             hub,
             virtualizer: Rc::clone(&virtualizer),
             scroll_sync: Rc::clone(instance.file_diff().scroll_sync_manager()),
             instance: Rc::clone(&instance) as InstanceRef,
-        });
+        };
         (
             host,
             Engine::Virtualized {
                 instance,
                 virtualizer,
             },
-            Some(dispatch),
+            Some(managers),
         )
     }
 
@@ -498,7 +502,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         Renderer {
             document,
             slots: &self.slots,
-            dispatch: self.dispatch.as_ref(),
+            dispatch: &self.dispatch,
             pointers: &self.pointers,
         }
         .render(self.host.top())
