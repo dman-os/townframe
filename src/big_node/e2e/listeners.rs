@@ -417,3 +417,23 @@ async fn a_socket_directory_other_users_can_enter_is_refused() {
     );
     assert!(!parent.join("node.sock").exists());
 }
+
+#[tokio::test]
+async fn the_unix_listener_counts_the_connections_it_is_serving() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, _) = boot_listening(&secrets, unix(&socket)).await;
+    let mut clients = node.unix_clients.clone().expect("the socket listener runs");
+    assert_eq!(*clients.borrow(), 0);
+
+    let first = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    let second = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    clients.wait_for(|open| *open == 2).await.unwrap();
+    drop(first);
+    clients.wait_for(|open| *open == 1).await.unwrap();
+    drop(second);
+    clients.wait_for(|open| *open == 0).await.unwrap();
+
+    shutdown(node, stop).await;
+}

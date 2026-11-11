@@ -207,6 +207,10 @@ pub struct BigNode {
     pub registry_drawer: DrawerId,
     /// What the node listens on, as bound (a TCP port of `0` in the config is resolved here).
     pub listeners: Listeners,
+    /// How many connections the Unix socket listener is serving right now, when it runs. A
+    /// process that opened the node only to serve its own command watches this fall to zero
+    /// before it stops the node, so it never closes a client that is still connected.
+    pub unix_clients: Option<tokio::sync::watch::Receiver<usize>>,
     /// The network attachment, when the config asked for one.
     pub peers: Option<peers::Peers>,
 }
@@ -255,7 +259,8 @@ impl BigNode {
             );
         }
         stop.stages.push(self.register_built_ins());
-        self.listeners = attach_listeners(self, attachments.listeners, stop).await?;
+        (self.listeners, self.unix_clients) =
+            attach_listeners(self, attachments.listeners, stop).await?;
         Ok(())
     }
 
@@ -420,6 +425,7 @@ impl BigNode {
                 cartridges,
                 registry_drawer,
                 listeners: Listeners::default(),
+                unix_clients: None,
                 peers: None,
             };
             node.attach(attachments, &mut stop).await?;
@@ -616,10 +622,11 @@ async fn attach_listeners(
     node: &BigNode,
     requested: Listeners,
     stop: &mut StopToken,
-) -> Res<Listeners> {
+) -> Res<(Listeners, Option<tokio::sync::watch::Receiver<usize>>)> {
     let mut bound = Listeners::default();
+    let mut clients = None;
     if let Some(path) = requested.unix_socket {
-        let listener = Listener::unix(
+        let (listener, connections) = Listener::unix(
             &path,
             node.dispatch.client.clone(),
             Authorization::identity(node.authority.root),
@@ -627,13 +634,14 @@ async fn attach_listeners(
         .await?;
         stop.stages.push(Stage::Listener(listener));
         bound.unix_socket = Some(path);
+        clients = Some(connections);
     }
     if let Some(address) = requested.tcp {
         let (listener, address) = Listener::tcp(address, node.dispatch.client.clone()).await?;
         stop.stages.push(Stage::Listener(listener));
         bound.tcp = Some(address);
     }
-    Ok(bound)
+    Ok((bound, clients))
 }
 
 /// Starts the peers service. It is the last attachment, so it stops first: no connection is
