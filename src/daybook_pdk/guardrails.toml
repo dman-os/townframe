@@ -21,3 +21,12 @@ ceiling = 1
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
 reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/daybook_pdk/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"

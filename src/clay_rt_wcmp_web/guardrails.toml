@@ -5,3 +5,12 @@ allowed_dependencies = ["clay_rt_wcmp"]
 allow_external_api_types = false
 
 [builds.wasm32-unknown-unknown]
+
+[[exemptions]]
+code = "ERROR_DEPENDENCY_GROUP"
+path = "src/clay_rt_wcmp_web/Cargo.toml"
+symbol = "dependency-groups"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
+reference = "docs/scratch/nodule-runtime-ledger.md"
