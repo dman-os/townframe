@@ -10,6 +10,7 @@ allowed_dependencies = [
     "big_node",
     "big_nodule_core",
     "big_repo",
+    "intxt_capture",
     "intxt_core",
     "intxt_nodule",
     "method_core",

@@ -27,6 +27,7 @@ big_repo.workspace = true
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
+intxt_capture = { path = "../intxt_capture" }
 intxt_core = { path = "../intxt_core" }
 intxt_nodule = { path = "../intxt_nodule" }
 
