@@ -81,8 +81,18 @@ pub enum DrawersError {
     Docs(DocsError),
     #[error("document repository transport failed: {0}")]
     DocsUnavailable(String),
+    /// Keyhive storage or the engine failed; nothing the caller named is at fault.
     #[error("keyhive failed: {0}")]
     Keyhive(String),
+    /// A named group or doc id that is not a 32-byte Ed25519 point.
+    #[error("{0} is not a valid Keyhive identifier: it is not a 32-byte Ed25519 point")]
+    InvalidKey(String),
+    /// A Keyhive group this node does not hold, perhaps not yet synced.
+    #[error("group {0} is not in keyhive")]
+    UnknownGroup(GroupKey),
+    /// A principal group the caller named that this node does not hold.
+    #[error("unknown principal group {0}")]
+    UnknownPrincipal(GroupKey),
     #[error("drawer state failed: {0}")]
     Storage(String),
     #[error("{0} is not a drawer this node knows")]
