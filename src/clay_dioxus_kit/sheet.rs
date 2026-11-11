@@ -109,4 +109,41 @@ mod tests {
             "{scrim}"
         );
     }
+
+    /// An owner as an app writes it: the sheet is mounted while a signal is set, an "Open" button
+    /// sets it. Dismissal only counts if the owner's state follows, so this drives the whole loop.
+    fn owner(width: WidthClass) -> Element {
+        let mut open = use_signal(|| true);
+        rsx! {
+            button { onclick: move |_| open.set(true), "Open sheet" }
+            if open() {
+                Sheet { width, name: "Details", on_dismiss: move |()| open.set(false), "body" }
+            }
+        }
+    }
+
+    #[test]
+    fn an_owner_can_dismiss_the_sheet_by_scrim_or_escape_and_reopen_it() {
+        for width in [WidthClass::Compact, WidthClass::Expanded] {
+            let mut page = Page::with_props(owner, width);
+            assert!(page.has_role("dialog", "Details"), "{width:?} starts open");
+
+            let scrim = page.by_role("button", "Dismiss Details");
+            page.click(scrim);
+            assert!(!page.has_role("dialog", "Details"), "{width:?} scrim dismiss");
+            assert!(!page.has_role("button", "Dismiss Details"));
+
+            let open = page.by_role("button", "Open sheet");
+            page.click(open);
+            assert!(page.has_role("dialog", "Details"), "{width:?} reopens");
+
+            let dialog = page.by_role("dialog", "Details");
+            page.key(dialog, Key::Named(NamedKey::Escape));
+            assert!(!page.has_role("dialog", "Details"), "{width:?} escape dismiss");
+
+            let open = page.by_role("button", "Open sheet");
+            page.click(open);
+            assert!(page.has_role("dialog", "Details"), "{width:?} reopens again");
+        }
+    }
 }
