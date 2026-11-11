@@ -64,11 +64,12 @@ impl Renderer<'_> {
             return content;
         }
         let document = self.document;
+        let key_id = key.as_u64();
         let tag = document.tag_name(key);
         if tag.is_empty() {
             let text = document.text_content(key);
             return rsx! {
-                Fragment { key: "{key:?}", "{text}" }
+                Fragment { key: "{key_id}", "{text}" }
             };
         }
         let tag = tag.to_ascii_lowercase();
@@ -116,11 +117,12 @@ impl Renderer<'_> {
 // Dioxus has no element whose tag is a runtime value, so the tags Pierre emits are listed.
 // A tag outside the list is a port change this renderer has not caught up with.
 fn element(tag: &str, key: NodeKey, attributes: Vec<Attribute>, children: Vec<Element>) -> Element {
+    let key_id = key.as_u64();
     macro_rules! tags {
         ($($name:literal => $element:ident),* $(,)?) => {
             match tag {
                 $($name => rsx! {
-                    $element { key: "{key:?}", ..attributes, {children.into_iter()} }
+                    $element { key: "{key_id}", ..attributes, {children.into_iter()} }
                 },)*
                 other => panic!("pierre_diffs_dioxus cannot render <{other}>: add it to `tags!`"),
             }
@@ -130,7 +132,7 @@ fn element(tag: &str, key: NodeKey, attributes: Vec<Attribute>, children: Vec<El
         // A custom element: no `dioxus_elements` ident carries a hyphen, but rsx accepts it
         // spelled out.
         return rsx! {
-            diffs-container { key: "{key:?}", ..attributes, {children.into_iter()} }
+            diffs-container { key: "{key_id}", ..attributes, {children.into_iter()} }
         };
     }
     tags! {

@@ -41,6 +41,15 @@ pub struct NodeKey {
     generation: u32,
 }
 
+impl NodeKey {
+    /// The key as one integer: the generation in the high 32 bits, the slot index in the low 32.
+    /// Two live keys never share a value, and a reused slot differs by generation, so it is a
+    /// cheap stable identity for a platform layer that needs a key per node.
+    pub fn as_u64(self) -> u64 {
+        (u64::from(self.generation) << 32) | u64::from(self.index)
+    }
+}
+
 enum NodeData {
     Element { tag: String, properties: Properties },
     Text(String),
