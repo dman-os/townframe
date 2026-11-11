@@ -133,6 +133,20 @@ pub struct SetNoduleSubstitution {
     pub by: Option<CartridgeId>,
 }
 
+/// Sets, or with `provider` absent clears, the node-local route of `pattern`: an exact NSID or an
+/// authority prefix whose calls dispatch sends to the provider with that id, a built-in's or a
+/// cartridge's (ADR 045). The operator's route is also the consent of every dependent: the
+/// resolution locks of the requests it covers move to the routed provider. Served by the nodule
+/// service only until the node has a per-node store of its own.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMethodRoute {
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -310,6 +324,7 @@ method_core::methods! {
     SetNoduleMethodGrants => NoduleRecord, procedure, "setNoduleMethodGrants", privileged;
     ConfirmNoduleResolution => NoduleRecord, procedure, "confirmNoduleResolution", privileged;
     SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution", privileged;
+    SetMethodRoute => (), procedure, "setMethodRoute", privileged;
     UninstallNodule => (), procedure, "uninstallNodule", privileged;
     GetNodule => NoduleRecord, query, "getNodule";
     ListNodules => NoduleList, query, "listNodules";
@@ -326,6 +341,7 @@ declare_service_protocol! {
             SetNoduleMethodGrants(SetNoduleMethodGrants),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleSubstitution(SetNoduleSubstitution),
+            SetMethodRoute(SetMethodRoute),
             UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)
