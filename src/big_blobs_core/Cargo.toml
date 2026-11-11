@@ -14,10 +14,10 @@ schemars = ["method_core/schemars"]
 
 [dependencies]
 method_core.workspace = true
-big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
+big_cabinet_core = { workspace = true, features = ["schemars"] }
 big_sync_core = { workspace = true, default-features = false }
 service_core_rs.workspace = true
-macros = { path = "../macros" }
+macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars = "1.2"
