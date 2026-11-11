@@ -174,6 +174,49 @@ async fn a_value_over_the_read_budget_names_its_datum_and_limit() {
     node.stop().await;
 }
 
+/// A text over the budget is refused from the incoming JSON, before it is reconciled: a text is
+/// reconciled character by character, so reaching the post-reconcile read took minutes and
+/// gigabytes. The error is the one that read raises.
+#[tokio::test]
+async fn a_text_over_the_read_budget_is_refused_before_it_is_reconciled() {
+    let node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let text_key: DatumKey = format!("{TEXT_NOTE}/main").parse().unwrap();
+    let created = node
+        .create(
+            &alice,
+            "create",
+            [(text_key.clone(), json!({"$type": TEXT_NOTE, "text": "x"}))],
+        )
+        .await
+        .unwrap();
+    let maximum = ResourceLimit::Bytes.default_maximum();
+    let spent_before_value = "$type".len() + TEXT_NOTE.len() + "text".len();
+    let error = node
+        .write(
+            &alice,
+            &created.doc_id,
+            WriteMode::AtCurrent,
+            [(
+                text_key.clone(),
+                json!({"$type": TEXT_NOTE, "text": "x".repeat(maximum + 1)}),
+            )],
+            [],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        DocsError::ValueTooLarge {
+            datum_key: text_key,
+            limit: ResourceLimit::Bytes,
+            observed: (maximum + 1 + spent_before_value) as u64,
+            maximum: maximum as u64,
+        }
+    );
+    node.stop().await;
+}
+
 #[tokio::test]
 async fn refused_writes_commit_nothing() {
     let node = Node::boot().await;

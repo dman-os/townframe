@@ -51,6 +51,56 @@ fn historical_reads_use_one_shared_budget_and_preserve_native_kinds() {
     ));
 }
 
+#[test]
+fn an_incoming_json_value_is_charged_as_its_stored_form_will_be_read() {
+    let budget = |bytes, nodes| NativeReadBudget {
+        bytes,
+        nodes,
+        ..NativeReadBudget::default()
+    };
+    // The envelope charges its keys, the `$type` string and the value: 5 + 3 + 4 + 8 bytes over
+    // three nodes (the map and its two strings).
+    let value = serde_json::json!({"$type": "abc", "text": "12345678"});
+    budget(20, 3).charge_json(&value).unwrap();
+    assert!(matches!(
+        budget(19, 3).charge_json(&value),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Bytes,
+            needed: 8,
+            available: 7,
+        })
+    ));
+    assert!(matches!(
+        budget(20, 2).charge_json(&value),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Nodes,
+            ..
+        })
+    ));
+    // A string is its UTF-8 length, not its character count.
+    assert!(budget(5, 1).charge_json(&serde_json::json!("ééé")).is_err());
+    budget(6, 1).charge_json(&serde_json::json!("ééé")).unwrap();
+    // The bytes object is one node of its decoded length, padded or not, and its key is free.
+    for encoded in ["AQIDBA==", "AQIDBA"] {
+        let value = serde_json::json!({"$bytes": encoded});
+        budget(4, 1).charge_json(&value).unwrap();
+        assert!(budget(3, 1).charge_json(&value).is_err());
+    }
+    // Nesting past the depth limit is refused rather than descended.
+    let mut nested = serde_json::json!(null);
+    for _ in 0..NativeReadBudget::MAX_DEPTH - 1 {
+        nested = serde_json::json!([nested]);
+    }
+    NativeReadBudget::default().charge_json(&nested).unwrap();
+    assert!(matches!(
+        NativeReadBudget::default().charge_json(&serde_json::json!([nested])),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Depth,
+            ..
+        })
+    ));
+}
+
 fn assert_fixture(value: &NativeValue, expected: &[u8]) -> Cbor {
     let encoded = encode_native(value);
     assert_eq!(encoded, expected, "{value:?}");
