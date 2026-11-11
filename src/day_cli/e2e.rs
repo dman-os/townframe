@@ -476,87 +476,8 @@ mod library {
         );
     }
 
-    /// Stands in for the handler component where a test needs only intxt's records registered:
-    /// the node stores it and reports the nodule `ExecutorUnavailable`, since it is not a
-    /// component.
-    const PLACEHOLDER_HANDLER: &[u8] = b"not a component: these tests never call the handler";
-
-    /// An initialized node whose `node.json` lets nodules be granted what intxt's handler calls,
-    /// which is the operator's to configure before the node boots.
-    fn new_intxt_node() -> (tempfile::TempDir, NodeDir) {
-        let (tmp, dir) = new_node();
-        let path = dir.root().join("node.json");
-        let mut settings: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        settings["nodule_operations"] = json!({
-            "operations": intxt_nodule::REQUIRED_OPERATIONS
-        });
-        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
-        (tmp, dir)
-    }
-
-    /// The stopgap intxt commands (ledger D41): `install` registers intxt's records, and `new`
-    /// creates a drawer whose descriptor document carries the intxt marker, the title and an
-    /// empty body, readable as written.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn intxt_new_creates_a_drawer_marked_as_an_intxt() {
-        use crate::cmds::intxt;
-        use big_cabinet_core::doc::At;
-        use big_cabinet_core::doc::DatumRead;
-        use big_cabinet_core::doc::DocScope;
-        use big_cabinet_core::doc::MintDocCapability;
-        use big_cabinet_core::doc::ReadDatums;
-
-        let (_tmp, dir) = new_intxt_node();
-        let client = NodeClient::connect(&dir).await.unwrap();
-        intxt::install(&client, PLACEHOLDER_HANDLER).await.unwrap();
-        let drawer = intxt::create(&client, "Datum references move to dtxt:".into(), None)
-            .await
-            .unwrap();
-        let capability = intxt::call(
-            &client,
-            MintDocCapability {
-                scope: DocScope {
-                    read: [drawer.clone()].into(),
-                    ..DocScope::default()
-                },
-                rights: big_cabinet_core::authority::Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap()
-        .capability_id;
-        let read = intxt::call(
-            &client,
-            ReadDatums {
-                capability,
-                doc_id: drawer,
-                at: At::Current,
-                datums: None,
-                optimistic: false,
-            },
-        )
-        .await
-        .unwrap();
-        let accepted = |key: &str| match &read.datums[&key.parse().unwrap()] {
-            DatumRead::Accepted { value, .. } => value.clone(),
-            other => panic!("{key} was not accepted: {other:?}"),
-        };
-        assert_eq!(accepted("org.example.intxt/main"), json!({"empty": true}));
-        assert_eq!(
-            accepted("org.example.intxt.title/main"),
-            json!({"title": "Datum references move to dtxt:"})
-        );
-        assert_eq!(
-            accepted("org.example.intxt.body/main"),
-            json!({"order": []})
-        );
-        client.stop().await.unwrap();
-    }
-
     /// Where the handler component is built (see `intxt install --handler`): CI builds it before
-    /// this test, and `INTXT_GUEST_WASM` names it when it is elsewhere.
+    /// these tests, and `INTXT_GUEST_WASM` names it when it is elsewhere.
     fn guest_path() -> PathBuf {
         use std::path::Path;
         std::env::var_os("INTXT_GUEST_WASM")
@@ -567,111 +488,195 @@ mod library {
             })
     }
 
-    /// The real handler component, installed the way `day x intxt install --handler` does, is
-    /// loaded by the node's wasm executor, and `org.example.intxt.createIntxt`, reached through
-    /// the router like `day x`, creates the drawer in a guest that calls back into the node.
+    /// An initialized node whose `node.json` lets nodules be granted what intxt's handler calls
+    /// (the operator's to configure before the node boots), with the real handler component
+    /// installed the way `day x intxt install --handler` does and loaded by the node's wasm
+    /// executor.
     ///
     /// Needs the component, built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml
     /// -p intxt_guest --target wasm32-wasip3 --release`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_real_intxt_handler_serves_create_intxt_through_the_node() {
+    pub(super) async fn intxt_node() -> (tempfile::TempDir, NodeClient) {
         use crate::cmds::intxt;
-        use big_cabinet_core::doc::At;
-        use big_cabinet_core::doc::DatumRead;
-        use big_cabinet_core::doc::DocScope;
-        use big_cabinet_core::doc::MintDocCapability;
-        use big_cabinet_core::doc::ReadDatums;
-        use big_cabinet_core::drawer::protocol::DrawerId;
         use big_dispatch_core::Readiness;
-        use method_core::HttpMethod;
 
-        let path = guest_path();
-        let wasm = std::fs::read(&path).unwrap_or_else(|error| {
+        let (tmp, dir) = new_node();
+        let path = dir.root().join("node.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        settings["nodule_operations"] = json!({
+            "operations": intxt_nodule::REQUIRED_OPERATIONS
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+
+        let wasm_path = guest_path();
+        let wasm = std::fs::read(&wasm_path).unwrap_or_else(|error| {
             panic!(
                 "{}: {error}; build it with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_guest --target wasm32-wasip3 --release` or set INTXT_GUEST_WASM",
-                path.display()
+                wasm_path.display()
             )
         });
-        let (_tmp, dir) = new_intxt_node();
         let client = NodeClient::connect(&dir).await.unwrap();
         let record = intxt::install(&client, &wasm).await.unwrap();
         assert_eq!(record.readiness, Readiness::Ready);
         assert!(record.operations.unwrap().granted);
+        (tmp, client)
+    }
 
-        let reply = client
-            .call(
-                "org.example.intxt.createIntxt",
-                HttpMethod::Post,
-                &json!({"title": "made by the wasm handler"}),
-            )
-            .await
-            .unwrap();
-        assert!(reply.is_success(), "{reply:?}");
-        let drawer: DrawerId = reply.body["drawerId"].as_str().unwrap().parse().unwrap();
-
-        let capability = intxt::call(
-            &client,
-            MintDocCapability {
-                scope: DocScope {
-                    read: [drawer.clone()].into(),
-                    ..DocScope::default()
-                },
+    /// A document capability the operator mints for `scope`.
+    pub(super) async fn doc_capability(
+        client: &NodeClient,
+        scope: big_cabinet_core::doc::DocScope,
+    ) -> Res<big_cabinet_core::authority::CapId> {
+        Ok(crate::cmds::intxt::call(
+            client,
+            big_cabinet_core::doc::MintDocCapability {
+                scope,
                 rights: big_cabinet_core::authority::Rights::USE,
                 subject: None,
             },
         )
-        .await
-        .unwrap()
-        .capability_id;
-        let read = intxt::call(
-            &client,
+        .await?
+        .capability_id)
+    }
+
+    /// The document's heads and the accepted value of `key` in it at those heads.
+    pub(super) async fn read_at(
+        client: &NodeClient,
+        doc: &big_cabinet_core::DocId,
+        key: &big_cabinet_core::DatumKey,
+    ) -> Res<(Vec<big_cabinet_core::doc::ChangeHash>, serde_json::Value)> {
+        use big_cabinet_core::doc::At;
+        use big_cabinet_core::doc::DatumRead;
+        use big_cabinet_core::doc::DocScope;
+        use big_cabinet_core::doc::ReadDatums;
+
+        let capability = doc_capability(
+            client,
+            DocScope {
+                read: [doc.clone()].into(),
+                ..DocScope::default()
+            },
+        )
+        .await?;
+        let mut read = crate::cmds::intxt::call(
+            client,
             ReadDatums {
                 capability,
-                doc_id: drawer,
+                doc_id: doc.clone(),
                 at: At::Current,
-                datums: None,
+                datums: Some([key.clone()].into()),
                 optimistic: false,
             },
         )
-        .await
-        .unwrap();
-        match &read.datums[&"org.example.intxt.title/main".parse().unwrap()] {
-            DatumRead::Accepted { value, .. } => {
-                assert_eq!(value, &json!({"title": "made by the wasm handler"}))
-            }
-            other => panic!("the title was not accepted: {other:?}"),
+        .await?;
+        match read.datums.remove(key) {
+            Some(DatumRead::Accepted { value, .. }) => Ok((read.heads, value)),
+            other => eyre::bail!("{key} in {doc} is not readable: {other:?}"),
         }
+    }
+
+    /// A command id no earlier write used: the node deduplicates writes by command id.
+    pub(super) fn command(kind: &str) -> big_cabinet_core::doc::CommandId {
+        let nonce: [u8; 16] = rand::random();
+        big_cabinet_core::doc::CommandId::try_from(format!(
+            "{kind}-{}",
+            data_encoding::HEXLOWER.encode(&nonce)
+        ))
+        .expect("a kind and a hex nonce make a command id")
+    }
+
+    /// `day x <nsid> <input>`: the operation through the router, whose answer must be a success.
+    pub(super) async fn day_x(
+        client: &NodeClient,
+        nsid: &str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        let reply = client
+            .call(nsid, method_core::HttpMethod::Post, &input)
+            .await
+            .unwrap();
+        assert!(reply.is_success(), "{nsid} answered {reply:?}");
+        reply.body
+    }
+
+    /// `org.example.intxt.createIntxt`, through the real installed handler, creates a drawer whose
+    /// descriptor document carries the intxt marker, the title and an empty body, readable as
+    /// written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
+        use big_cabinet_core::drawer::protocol::DrawerId;
+
+        let (_tmp, client) = intxt_node().await;
+        let created = day_x(
+            &client,
+            "org.example.intxt.createIntxt",
+            json!({"title": "Datum references move to dtxt:"}),
+        )
+        .await;
+        let drawer: DrawerId = created["drawerId"].as_str().unwrap().parse().unwrap();
+        let accepted = |key: &str| {
+            let client = &client;
+            let drawer = &drawer;
+            let key = key.parse().unwrap();
+            async move { read_at(client, drawer, &key).await.unwrap().1 }
+        };
+        assert_eq!(
+            accepted("org.example.intxt/main").await,
+            json!({"empty": true})
+        );
+        assert_eq!(
+            accepted("org.example.intxt.title/main").await,
+            json!({"title": "Datum references move to dtxt:"})
+        );
+        assert_eq!(
+            accepted("org.example.intxt.body/main").await,
+            json!({"order": []})
+        );
         client.stop().await.unwrap();
     }
 
-    /// `intxt add` includes captured parts: each gets an entry keyed by the part's identity, the
-    /// body lists the entries in the order they were added, adding a part again changes nothing,
-    /// and the parts' documents are entered in the intxt's drawer so its members can read them.
+    /// `org.example.intxt.addToIntxt` includes captured parts: each gets an entry keyed by the
+    /// part's identity, the body lists the entries in the order they were added, adding a part
+    /// again changes nothing, and the parts' documents are entered in the intxt's drawer so its
+    /// members can read them.
     #[tokio::test(flavor = "multi_thread")]
-    async fn intxt_add_includes_parts_once_and_shares_their_documents() {
+    async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
         use crate::cmds::intxt;
         use big_cabinet_core::DocId;
         use big_cabinet_core::doc::CreateDoc;
         use big_cabinet_core::doc::DocScope;
         use big_cabinet_core::drawer::DrawerAccess;
+        use big_cabinet_core::drawer::protocol::DrawerId;
         use big_cabinet_core::drawer::protocol::ListDocs;
         use big_cabinet_core::drawer::protocol::MintDrawerCapability;
         use big_cabinet_core::reference::DatumReference;
 
-        let (_tmp, dir) = new_intxt_node();
-        let client = NodeClient::connect(&dir).await.unwrap();
-        intxt::install(&client, PLACEHOLDER_HANDLER).await.unwrap();
-        let captures = intxt::create(&client, "captures".into(), None)
-            .await
-            .unwrap();
-        let review = intxt::create(&client, "review".into(), None).await.unwrap();
+        let (_tmp, client) = intxt_node().await;
+        let create = |title: &'static str| {
+            let client = &client;
+            async move {
+                let created = day_x(
+                    client,
+                    "org.example.intxt.createIntxt",
+                    json!({ "title": title }),
+                )
+                .await;
+                created["drawerId"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<DrawerId>()
+                    .unwrap()
+            }
+        };
+        let captures = create("captures").await;
+        let review = create("review").await;
         let capture = |tag: &str, value: serde_json::Value| {
             let client = &client;
             let captures = &captures;
             let tag = tag.to_owned();
             async move {
                 let placement = format!("drawer {captures}");
-                let capability = intxt::doc_capability(
+                let capability = doc_capability(
                     client,
                     DocScope {
                         create: [placement.clone()].into(),
@@ -684,7 +689,7 @@ mod library {
                     client,
                     CreateDoc {
                         capability,
-                        command: intxt::command("capture"),
+                        command: command("capture"),
                         placement,
                         datums: [(format!("{tag}/main").parse().unwrap(), value)].into(),
                     },
@@ -714,26 +719,34 @@ mod library {
         )
         .await;
 
+        let add = |part: &DatumReference| {
+            let client = &client;
+            let review = &review;
+            let part = part.to_string();
+            async move {
+                let added = day_x(
+                    client,
+                    "org.example.intxt.addToIntxt",
+                    json!({"intxt": review, "part": part}),
+                )
+                .await;
+                added["entry"].as_str().unwrap().to_owned()
+            }
+        };
         let added = [
-            intxt::add(&client, &review, &worktree, &captures)
-                .await
-                .unwrap(),
-            intxt::add(&client, &review, &session, &captures)
-                .await
-                .unwrap(),
-            intxt::add(&client, &review, &worktree, &captures)
-                .await
-                .unwrap(),
+            add(&worktree).await,
+            add(&session).await,
+            add(&worktree).await,
         ];
         assert_eq!(
-            added.map(|entry| entry.to_string()),
+            added,
             [
                 format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
                 format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
                 format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
             ]
         );
-        let (_, entry) = intxt::read_at(
+        let (_, entry) = read_at(
             &client,
             &review,
             &"org.example.intxt.work.worktreeEntry/0193a"
@@ -743,7 +756,7 @@ mod library {
         .await
         .unwrap();
         assert_eq!(entry, json!({"worktree": worktree.to_string()}));
-        let (_, body) = intxt::read_at(
+        let (_, body) = read_at(
             &client,
             &review,
             &"org.example.intxt.body/main".parse().unwrap(),
