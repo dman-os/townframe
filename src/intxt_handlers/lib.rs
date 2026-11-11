@@ -1,4 +1,8 @@
-//! intxt's operations, served by the nodule's handler: `createIntxt` and `addToIntxt`.
+//! intxt's operations, served by the nodule's handler: `createIntxt` and `addToIntxt`. `intxt_guest`
+//! exports [`Intxt`] as the wasm component, and `intxt_nodule`'s native tests serve the same value,
+//! so both backends run one implementation. The crate has no host-only code and builds for both
+//! targets; the `schemars` feature, which only the host that projects the operations' Lexicons
+//! enables, derives the schemas.
 //!
 //! Every call the handler makes presents the capability its own caller presented as the
 //! authority (`as_caller`), not the nodule's: the drawers and documents belong to whoever asked,
@@ -116,7 +120,7 @@ method_core::methods! {
 }
 
 /// The operations of other authorities the handler calls, which the cartridge requests.
-pub(crate) const REQUIRED_OPERATIONS: [&str; 7] = [
+pub const REQUIRED_OPERATIONS: [&str; 7] = [
     MintDrawerCapability::XRPC.nsid,
     CreateDrawer::XRPC.nsid,
     MintDocCapability::XRPC.nsid,

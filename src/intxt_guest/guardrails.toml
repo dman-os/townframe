@@ -1,0 +1,7 @@
+version = 1
+role = "plugin"
+dependency_reason = "intxt's p3 wasi:http nodule component, written on the nodule development kit"
+allowed_dependencies = ["big_ndk", "intxt_handlers"]
+allow_external_api_types = false
+
+[builds.wasm32-wasip3]

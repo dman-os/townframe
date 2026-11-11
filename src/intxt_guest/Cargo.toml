@@ -1,0 +1,16 @@
+[package]
+name = "intxt_guest"
+workspace = "../wasm_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+path = "lib.rs"
+
+[dependencies]
+big_ndk.workspace = true
+intxt_handlers.workspace = true
