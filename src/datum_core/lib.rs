@@ -67,7 +67,10 @@ mod tests {
 
     #[test]
     fn the_runtime_argument_routes_the_emitted_items() {
-        assert_eq!(<Declared as DatumMember>::ID, "org.example.runtime.declared");
+        assert_eq!(
+            <Declared as DatumMember>::ID,
+            "org.example.runtime.declared"
+        );
         assert_eq!(
             <Declared as DatumShape>::SHAPE,
             Shape::Object {

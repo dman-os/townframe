@@ -25,7 +25,7 @@ use big_nodule_core::inventory::FilledBy;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleMethodGrants;
 use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
@@ -189,7 +189,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     let (node, _executor) = node_with_beta_and(fork("1.5.0", &[SYNC, MORE])).await;
     let record = node.substitute(BETA, Some(FORK)).await.unwrap();
     assert_eq!(record.readiness, Readiness::NeedsConfiguration);
-    let operations = record.operations.unwrap();
+    let operations = record.methods.unwrap();
     assert_eq!(operations.desired.operations, [SYNC.to_owned()].into());
     assert!(record.enabled);
 
@@ -201,9 +201,9 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     let record = node
         .call(
             node.operator(),
-            SetNoduleOperationGrants {
+            SetNoduleMethodGrants {
                 cartridge_id: id(BETA),
-                operations: DispatchScope {
+                methods: DispatchScope {
                     operations: [MORE.to_owned()].into(),
                     authorities: ["org.example.remote".to_owned()].into(),
                 },
@@ -213,7 +213,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
         .unwrap();
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
-        record.operations.unwrap().desired.operations,
+        record.methods.unwrap().desired.operations,
         [SYNC.to_owned(), MORE.to_owned()].into()
     );
 
@@ -222,7 +222,7 @@ async fn an_identical_request_keeps_its_grant_and_a_new_one_is_ungranted_until_c
     let record = node2.substitute(BETA, Some(FORK)).await.unwrap();
     assert_eq!(record.readiness, Readiness::Ready);
     assert_eq!(
-        record.operations.unwrap().desired.operations,
+        record.methods.unwrap().desired.operations,
         [SYNC.to_owned()].into()
     );
     node2.shutdown().await;
@@ -237,7 +237,7 @@ async fn clearing_the_substitution_reinstalls_the_slots_own_cartridge() {
 
     let record = node.substitute(BETA, None).await.unwrap();
     // The stored grants were never rewritten, so beta gets back exactly what it was granted.
-    assert_eq!(record.operations, before.operations);
+    assert_eq!(record.methods, before.methods);
     assert_eq!(record.filled_by, None);
     assert_eq!(record.version, before.version);
     assert_eq!(record.revision, before.revision);

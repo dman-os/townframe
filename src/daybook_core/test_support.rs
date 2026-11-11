@@ -642,8 +642,7 @@ pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()
         .doc_id
         .ok_or_eyre("imported test plug missing manifest doc id")?;
     let ref_url: url::Url =
-        format!("dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch=main")
-            .parse()?;
+        format!("dtxt:datum:{doc_id}/org.example.daybook.plugManifest/main?branch=main").parse()?;
     test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
     Ok(())
 }

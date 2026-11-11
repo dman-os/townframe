@@ -532,12 +532,12 @@ mod context_micro;
 #[cfg(feature = "in_process")]
 mod native;
 
+#[cfg(feature = "contract")]
+mod attachment;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod rows;
-#[cfg(feature = "contract")]
-mod attachment;
 #[cfg(feature = "contract")]
 pub use attachment::Attachment;
 #[cfg(feature = "contract")]

@@ -842,7 +842,10 @@ mod tests {
         .expect("refused");
         // Only the no-write-access break carries the typed refusal: a caller maps
         // it to a denial, and a key or teardown break is not about standing.
-        assert_eq!(no_access.downcast_ref::<NoWriteAccess>(), Some(&NoWriteAccess));
+        assert_eq!(
+            no_access.downcast_ref::<NoWriteAccess>(),
+            Some(&NoWriteAccess)
+        );
         assert!(no_key.downcast_ref::<NoWriteAccess>().is_none());
         let (no_access, no_key) = (no_access.to_string(), no_key.to_string());
         assert!(no_access.contains("no write access"), "{no_access}");

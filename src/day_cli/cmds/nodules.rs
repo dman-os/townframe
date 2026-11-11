@@ -77,7 +77,7 @@ fn apply<'a>(set: &mut BTreeSet<String>, nsids: &'a [String], add: bool) -> Vec<
         .collect()
 }
 
-/// Adds or removes the entries in `node.json`'s `nodule_operations`, printing one line per entry
+/// Adds or removes the entries in `node.json`'s `nodule_methods`, printing one line per entry
 /// and whether it changed anything. The settings are read once, when a daemon boots, so this
 /// never reaches into a running node: a serving daemon is told that it has to restart for the
 /// new ceiling to apply.
@@ -86,7 +86,7 @@ async fn edit(entries: &CeilingEntries, add: bool) -> Res<ExitCode> {
     let conf = lazy::config().await?;
     let dir = &conf.node_dir;
     let (authorities, operations) = dir.update_settings(|settings| {
-        let scope = &mut settings.nodule_operations;
+        let scope = &mut settings.nodule_methods;
         Ok((
             apply(&mut scope.authorities, &entries.authorities, add),
             apply(&mut scope.operations, &entries.operations, add),
@@ -119,7 +119,7 @@ async fn ls() -> Res<ExitCode> {
     let DispatchScope {
         operations,
         authorities,
-    } = conf.node_dir.settings()?.nodule_operations;
+    } = conf.node_dir.settings()?.nodule_methods;
     println!("authorities {}", authorities.len());
     for nsid in &authorities {
         println!("  {nsid}");
