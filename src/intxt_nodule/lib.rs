@@ -42,7 +42,6 @@ use intxt_core::methods::IntxtError;
 use intxt_core::work;
 use method_core::ContextError;
 use method_core::Method;
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
