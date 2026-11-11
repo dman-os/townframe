@@ -1,6 +1,8 @@
 //! A capture session end to end (ADR 039 §4): scripted hooks over a real git repository and a
-//! synthetic transcript, observed by `intxt_capture`'s host half and recorded through the
-//! nodule's `recordObservations`, whose answer the host commits as its state.
+//! synthetic transcript, observed by `intxt_capture`'s host half and recorded by the client
+//! library's recorder (`intxt_core::client`) against the node, whose answer the host commits as
+//! its state. The nodule is booted only because the node needs its cartridge's records, and
+//! serves `createIntxt` for the capture drawer.
 
 use super::*;
 use big_blobs_core::BlobsScope;
@@ -13,7 +15,6 @@ use intxt_core::capture::Batch;
 use intxt_core::capture::BlobRef;
 use intxt_core::capture::Content;
 use intxt_core::capture::RecordedIds;
-use intxt_core::methods::RecordObservations;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -135,26 +136,12 @@ impl Session {
         }
     }
 
-    /// Sends `batch` to `recordObservations` under idempotency key `key`.
+    /// Records `batch` with the library's recorder under idempotency key `key`.
     async fn send(&self, node: &TestNode, batch: &Batch, key: &str) -> RecordedIds {
-        let output = node
-            .invoke(
-                RecordObservations::XRPC.nsid,
-                serde_json::to_value(RecordObservations {
-                    drawer: self.drawer.clone(),
-                    machine: self.machine.clone(),
-                    batch: batch.clone(),
-                })
-                .unwrap(),
-                InvocationContext {
-                    idempotency_key: Some(key.to_owned()),
-                    http: None,
-                },
-                RequestContext::root(),
-            )
+        operator(node, key)
+            .record_observations(&self.drawer, &self.machine, batch)
             .await
-            .unwrap_or_else(|error| panic!("recordObservations refused: {error:?}"));
-        serde_json::from_value(output).unwrap()
+            .unwrap_or_else(|error| panic!("the recorder failed: {error}"))
     }
 
     /// Runs `hook`: observe, record what was observed (twice, under one idempotency key, when

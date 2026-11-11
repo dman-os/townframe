@@ -17,6 +17,7 @@ method_core.workspace = true
 utils_rs.workspace = true
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
+service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
@@ -28,7 +29,7 @@ big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet = { path = "../big_cabinet" }
 big_cabinet_core = { path = "../big_cabinet_core" }
 intxt_capture = { path = "../intxt_capture" }
-intxt_core = { path = "../intxt_core", features = ["cartridge"] }
+intxt_core = { path = "../intxt_core", features = ["cartridge", "client"] }
 
 #
 # cli

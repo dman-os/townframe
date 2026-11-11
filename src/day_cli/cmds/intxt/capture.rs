@@ -1,7 +1,8 @@
 //! `day x intxt capture`: one Claude Code hook invocation (ADR 039 §4). It reads the hook's JSON,
 //! observes the session and its worktrees with `intxt_capture`'s host half, puts the bytes of
-//! blob-classified files in the node's blob store (ledger D45), records the batch through intxt's
-//! `recordObservations` operation, and commits the recorder's answer as the host's state.
+//! blob-classified files in the node's blob store (ledger D45), records the batch with intxt's
+//! recorder (`intxt_core::client`, run here against the node's cabinet methods), and commits the
+//! recorder's answer as the host's state.
 //!
 //! Output goes to stderr only, and only under `--verbose` or for a finding the operator should
 //! see: Claude Code adds the stdout of some hooks (`SessionStart`, `UserPromptSubmit`) to the
@@ -31,7 +32,8 @@ use intxt_capture::hook::Hook;
 use intxt_core::capture::BlobRef;
 use intxt_core::capture::ContentClass;
 use intxt_core::capture::RecordedIds;
-use method_core::HttpMethod;
+use intxt_core::client::Caller;
+use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 
 /// The id of the node's capture drawer and the machine it records for, in
@@ -345,25 +347,11 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
     let capture = capture_node(client, node_dir).await?;
     put_blobs(client, &mut prepared.batch, &mut summary).await?;
     let key = idempotency_key(&prepared.batch);
-    let reply = client
-        .call_with(
-            "org.example.intxt.recordObservations",
-            HttpMethod::Post,
-            &json!({
-                "drawer": capture.drawer,
-                "machine": capture.machine,
-                "batch": &prepared.batch,
-            }),
-            Some(&key),
-        )
+    // The node's operator calls as itself, so the recorder presents no capability. The command ids
+    // start from the batch's key: a retried hook (same state, same observations) reuses them.
+    let recorded = Caller::new(client, RequestContext::root(), None, key)
+        .record_observations(&capture.drawer, &capture.machine, &prepared.batch)
         .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "recordObservations answered {}: {}",
-        reply.status,
-        reply.body
-    );
-    let recorded: RecordedIds = serde_json::from_value(reply.body)?;
     prepared.commit(recorded.clone())?;
     summary.recorded = Some(recorded);
     Ok(summary)

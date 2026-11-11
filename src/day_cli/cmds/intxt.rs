@@ -56,7 +56,7 @@ pub enum IntxtCommands {
     ///
     /// Stores the built handler component in the node's blob store, admits the cartridge that
     /// names it, grants the nodule the operations it calls, and enables it, which registers intxt's records and
-    /// serves `createIntxt`, `addToIntxt` and `recordObservations`.
+    /// serves `createIntxt` and `addToIntxt`.
     ///
     /// The node's `nodule_operations` ceiling must cover the operations the handler calls, or the
     /// grant is refused: raise it first with `day nodules ceiling add --authority <NSID prefix>`

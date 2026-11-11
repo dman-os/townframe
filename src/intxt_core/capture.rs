@@ -1,9 +1,9 @@
-//! What a capture hook observed, as `recordObservations` takes it (ADR 039 §4), and what the
-//! recorder answers. The host half (`intxt_capture`) builds a [`Batch`]; the nodule's handler
-//! turns it into the datums of ADR 040 and answers [`RecordedIds`]. They are not datums
-//! themselves: they travel as an operation's input and output, so they are open objects and open
-//! string vocabularies like the datums are (a newer host's batch is carried, not refused), and
-//! hold no nullable map values.
+//! What a capture hook observed, as the recorder takes it (ADR 039 §4), and what the recorder
+//! answers. The host half (`intxt_capture`) builds a [`Batch`]; the client library's recorder
+//! (`client::Caller::record_observations`) turns it into the datums of ADR 040 and answers
+//! [`RecordedIds`]. They are not datums themselves, but the host persists them and a newer host's
+//! batch is carried, not refused, so they are open objects and open string vocabularies like the
+//! datums are, and hold no nullable map values.
 //!
 //! A path's content in a [`Change`] is [`Content`]: collaborative text, or a blob. A blob carries
 //! no bytes and no reference yet: the host uploads blob bytes itself (ledger D45), and until that

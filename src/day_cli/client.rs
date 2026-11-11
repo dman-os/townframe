@@ -7,8 +7,8 @@
 //!   through the very router and `Anonymous::Acts(operator)` admission the listener uses, so
 //!   routing, admission and the error mapping are not reimplemented here.
 //!
-//! Commands see only [`NodeClient::call`]; the mode is a fact they can report, not a branch they
-//! take.
+//! Commands see only [`NodeClient::call`], or `&NodeClient` as an `HttpTransport` for a typed
+//! client (intxt's recorder); the mode is a fact they can report, not a branch they take.
 
 use crate::context::Booted;
 use crate::context::NodeDir;
@@ -19,12 +19,13 @@ use big_cabinet_core::authority::Authorization;
 use big_dispatch::Anonymous;
 use method_core::HttpMethod;
 use serde_json::Value;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
 use tower::ServiceExt;
 
 /// The bound on one request or response body, the same as the listener's.
-/// The header a call's idempotency key travels in (`service_core_rs::xrpc`'s name for it).
-const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
-
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -130,63 +131,76 @@ impl NodeClient {
     /// so `input` must be an object of primitives (or arrays of them), the shape a query's
     /// Lexicon `parameters` take. The node holds the verb to the method's kind.
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
-        self.call_with(nsid, verb, input, None).await
+        ensure_nsid(nsid)?;
+        let request = match verb {
+            HttpMethod::Post => {
+                let mut headers = http::HeaderMap::new();
+                headers.insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("application/json"),
+                );
+                XrpcRequest {
+                    method: http::Method::POST,
+                    path: format!("xrpc/{nsid}"),
+                    headers,
+                    body: serde_json::to_vec(input)?,
+                }
+            }
+            HttpMethod::Get => XrpcRequest {
+                method: http::Method::GET,
+                path: format!(
+                    "xrpc/{nsid}?{}",
+                    serde_urlencoded::to_string(query_pairs(input)?)?
+                ),
+                headers: http::HeaderMap::new(),
+                body: Vec::new(),
+            },
+        };
+        let response = self.exchange(request).await?;
+        Ok(Reply {
+            status: response.status.as_u16(),
+            body: serde_json::from_slice(&response.body)?,
+        })
     }
 
-    /// [`Self::call`] under an idempotency key, which the operation's handler dedupes retries by:
-    /// the node forwards it as the `idempotency-key` header of the call.
-    pub async fn call_with(
-        &self,
-        nsid: &str,
-        verb: HttpMethod,
-        input: &Value,
-        idempotency_key: Option<&str>,
-    ) -> Res<Reply> {
-        ensure_nsid(nsid)?;
+    /// Sends one encoded request to the node: over the daemon's socket, or through the router the
+    /// client serves itself. The one place either transport is spoken, for [`Self::call`] and
+    /// for typed clients over [`HttpTransport`].
+    async fn exchange(&self, request: XrpcRequest) -> Res<XrpcResponse> {
         match &self.transport {
             Transport::Daemon(client) => {
-                let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
-                let mut request = match verb {
-                    HttpMethod::Post => client.http_client().post(url).json(input),
-                    HttpMethod::Get => client.http_client().get(url).query(&query_pairs(input)?),
-                };
-                if let Some(key) = idempotency_key {
-                    request = request.header(IDEMPOTENCY_KEY_HEADER, key);
-                }
-                let response = request.send().await?;
-                Ok(Reply {
-                    status: response.status().as_u16(),
-                    body: response.json().await?,
+                let url = client.base_url().join(&request.path)?;
+                let response = client
+                    .http_client()
+                    .request(request.method, url)
+                    .headers(request.headers)
+                    .body(request.body)
+                    .send()
+                    .await?;
+                Ok(XrpcResponse {
+                    status: response.status(),
+                    headers: response.headers().clone(),
+                    body: response.bytes().await?.to_vec(),
                 })
             }
             Transport::InProcess(running) => {
-                let router = running.1.clone();
-                let mut builder = match verb {
-                    HttpMethod::Post => http::Request::post(format!("/xrpc/{nsid}"))
-                        .header(http::header::CONTENT_TYPE, "application/json"),
-                    HttpMethod::Get => http::Request::get(format!(
-                        "/xrpc/{nsid}?{}",
-                        serde_urlencoded::to_string(query_pairs(input)?)?
-                    )),
-                };
-                if let Some(key) = idempotency_key {
-                    builder = builder.header(IDEMPOTENCY_KEY_HEADER, key);
-                }
-                let request = match verb {
-                    HttpMethod::Post => {
-                        builder.body(axum::body::Body::from(serde_json::to_vec(input)?))?
-                    }
-                    HttpMethod::Get => builder.body(axum::body::Body::empty())?,
-                };
-                let response = router
-                    .oneshot(request)
+                let mut builder = http::Request::builder()
+                    .method(request.method)
+                    .uri(format!("/{}", request.path));
+                *builder
+                    .headers_mut()
+                    .expect("a builder with a valid method and URI has headers") = request.headers;
+                let response = running
+                    .1
+                    .clone()
+                    .oneshot(builder.body(axum::body::Body::from(request.body))?)
                     .await
                     .unwrap_or_else(|never| match never {});
-                let status = response.status().as_u16();
-                let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES).await?;
-                Ok(Reply {
-                    status,
-                    body: serde_json::from_slice(&bytes)?,
+                let (parts, body) = response.into_parts();
+                Ok(XrpcResponse {
+                    status: parts.status,
+                    headers: parts.headers,
+                    body: axum::body::to_bytes(body, MAX_BODY_BYTES).await?.to_vec(),
                 })
             }
         }
@@ -202,6 +216,19 @@ impl NodeClient {
                 booted.stop().await
             }
         }
+    }
+}
+
+/// The node as a transport for typed clients (`service_client_core_rs`): what a command that
+/// makes many dependent calls (intxt's recorder) is built over, with the node's operator as the
+/// caller, so it presents no capability of its own.
+impl HttpTransport for &NodeClient {
+    async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        self.exchange(request)
+            .await
+            .map_err(|error| HttpTransportError {
+                message: format!("{error:#}"),
+            })
     }
 }
 

@@ -1,9 +1,10 @@
 version = 1
 role = "plugin"
-dependency_reason = "intxt's nodule handlers (createIntxt, addToIntxt, recordObservations), written on the nodule development kit and shared by the wasm guest and the native test harness"
+dependency_reason = "intxt's nodule handlers (createIntxt, addToIntxt), written on the nodule development kit and shared by the wasm guest and the native test harness"
 allowed_dependencies = [
     "big_blobs_core",
     "big_cabinet_core",
+    "big_dispatch",
     "big_dispatch_core",
     "big_ndk",
     "big_ndk_testing",
@@ -11,7 +12,6 @@ allowed_dependencies = [
     "intxt_core",
     "method_core",
     "service_client_core_rs",
-    "service_core_rs",
     "service_utils_rs",
 ]
 allow_external_api_types = false

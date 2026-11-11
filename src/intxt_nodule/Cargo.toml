@@ -12,21 +12,23 @@ path = "lib.rs"
 [dependencies]
 big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 big_ndk.workspace = true
-blake3.workspace = true
-intxt_core = { path = "../intxt_core" }
+intxt_core = { path = "../intxt_core", features = ["client"] }
 method_core.workspace = true
-service_client_core_rs.workspace = true
-service_core_rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 big_blobs_core = { path = "../big_blobs_core" }
 big_cabinet_core = { path = "../big_cabinet_core" }
+big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_ndk_testing = { path = "../big_ndk_testing" }
 intxt_capture = { path = "../intxt_capture" }
-intxt_core = { path = "../intxt_core", features = ["cartridge"] }
+intxt_core = { path = "../intxt_core", features = ["cartridge", "client"] }
+http.workspace = true
+service_client_core_rs.workspace = true
 service_utils_rs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }
