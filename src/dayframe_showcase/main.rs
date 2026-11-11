@@ -335,12 +335,17 @@ fn content_width(width: f64) -> f64 {
     width - if width >= 1024.0 { 96.0 } else { 48.0 }
 }
 
+/// The section index of one tab. `ArcIndex` asserts a non-empty list, so every `LabTab` must list
+/// at least one section (`every_tab_lists_a_section` holds that).
 #[component]
 fn ThemeLabNav(viewport: (f64, f64), tab: LabTab) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let sections = tab.sections();
     rsx! {
+        // Keyed by tab: each tab is its own index, so a tab's gesture state and selection never
+        // carry over to a list of another length.
         ArcIndex {
+            key: "{tab.tab_id()}",
             viewport,
             items: sections.iter().map(|(_, label)| *label).collect::<Vec<_>>(),
             on_select: move |index| {
@@ -1157,5 +1162,20 @@ fn readable_text_color(value: &str) -> &'static str {
         "#111827"
     } else {
         "#ffffff"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tab_lists_a_section() {
+        for tab in LabTab::ALL {
+            assert!(
+                !tab.sections().is_empty(),
+                "{tab:?} would hand ArcIndex an empty list"
+            );
+        }
     }
 }
