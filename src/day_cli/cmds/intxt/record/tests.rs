@@ -48,8 +48,9 @@ async fn drive(record: impl AsyncFnMut(Emit) -> Res<Option<String>>) -> (ExitSta
         lines.read_to_end(&mut received).await.unwrap();
         received
     };
+    let agent = fake_agent();
     let (status, received) = tokio::join!(
-        proxy(&fake_agent(), false, agent_reads, agent_writes, record),
+        proxy(&agent, false, agent_reads, agent_writes, record),
         client
     );
     (status.unwrap(), received)
