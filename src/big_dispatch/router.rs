@@ -217,6 +217,10 @@ struct Table {
     routes: BTreeMap<String, Vec<Arc<ProviderEntry>>>,
     /// Reverse index: the NSIDs each provider currently claims.
     providers: BTreeMap<String, Vec<String>>,
+    /// The operator's routes (ADR 045): an exact NSID or an authority prefix, mapped to the id of
+    /// the provider that serves it. Provider ids are opaque here, so a built-in and a nodule are
+    /// routed alike.
+    routes_to: BTreeMap<String, String>,
 }
 
 #[derive(Default)]
@@ -231,8 +235,25 @@ impl Router {
 
     /// The provider serving `nsid`: unknown when nothing claims it, not ready when the claim is
     /// ambiguous or its provider is not serving. Ambiguity is never resolved by order.
+    ///
+    /// The longest route matching `nsid` (an exact NSID, else the longest authority prefix, whole
+    /// segments only) decides first: its provider's claim is returned whatever its state, and a
+    /// target that does not claim `nsid` is `RouteTargetMissing`, never a fall back to another
+    /// claimant. Without a matching route the claims decide.
     pub fn resolve(&self, nsid: &str) -> Result<Arc<ProviderEntry>, DispatchError> {
         let table = self.snapshot();
+        if let Some(provider) = DispatchScope::route_target(&table.routes_to, nsid) {
+            return table
+                .routes
+                .get(nsid)
+                .and_then(|claims| claims.iter().find(|entry| entry.provider_id == provider))
+                .map(Arc::clone)
+                .ok_or_else(|| DispatchError::NotReady {
+                    reason: NotReadyReason::RouteTargetMissing {
+                        provider: provider.to_owned(),
+                    },
+                });
+        }
         match table.routes.get(nsid).map(Vec::as_slice) {
             None | Some([]) => Err(DispatchError::UnknownOperation),
             Some([entry]) => Ok(Arc::clone(entry)),
@@ -255,6 +276,26 @@ impl Router {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Replaces every route with `routes` (pattern to provider id) in one swap; setting what is
+    /// already set swaps nothing. Routes are independent of claims: one may name a provider
+    /// that has not registered yet, which callers see as `RouteTargetMissing` until it does.
+    pub fn set_routes(&self, routes: BTreeMap<String, String>) {
+        let mut slot = self.table.write().expect("routing table lock");
+        if slot.routes_to == routes {
+            return;
+        }
+        *slot = Arc::new(Table {
+            routes: slot.routes.clone(),
+            providers: slot.providers.clone(),
+            routes_to: routes,
+        });
+    }
+
+    /// The routes in force, pattern to provider id.
+    pub fn routes(&self) -> BTreeMap<String, String> {
+        self.snapshot().routes_to.clone()
     }
 
     /// The NSIDs `provider_id` currently claims, in order.
@@ -349,7 +390,11 @@ impl Router {
             }
             providers.insert(provider_id.to_owned(), operations.into_keys().collect());
         }
-        *slot = Arc::new(Table { routes, providers });
+        *slot = Arc::new(Table {
+            routes,
+            providers,
+            routes_to: current.routes_to.clone(),
+        });
         Ok(())
     }
 
@@ -512,6 +557,97 @@ mod tests {
         router.register("p", ops(&["x.op"]), ready()).unwrap();
         router.unbind("q");
         assert_eq!(provider_of(&router, "x.op"), "p");
+    }
+
+    #[test]
+    fn a_route_settles_an_ambiguity_and_the_routed_provider_is_never_skipped() {
+        let router = Router::default();
+        router.register("p", ops(&["x.op"]), ready()).unwrap();
+        router.register("q", ops(&["x.op"]), ready()).unwrap();
+        router.set_routes([("x.op".to_owned(), "q".to_owned())].into());
+        assert_eq!(provider_of(&router, "x.op"), "q");
+        // No fall back to the other claimant while the routed one is not serving.
+        router
+            .register(
+                "q",
+                ops(&["x.op"]),
+                ProviderState::NotReady(Readiness::Disabled),
+            )
+            .unwrap();
+        assert_eq!(
+            router.resolve("x.op").unwrap().state,
+            ProviderState::NotReady(Readiness::Disabled)
+        );
+        router.set_routes(BTreeMap::new());
+        assert_eq!(
+            router.resolve("x.op").unwrap_err(),
+            DispatchError::NotReady {
+                reason: NotReadyReason::Ambiguous
+            }
+        );
+    }
+
+    #[test]
+    fn a_route_to_a_provider_that_does_not_claim_the_nsid_is_retryable_not_a_fallback() {
+        let router = Router::default();
+        router.register("p", ops(&["x.op"]), ready()).unwrap();
+        router.set_routes([("x.op".to_owned(), "q".to_owned())].into());
+        let missing = DispatchError::NotReady {
+            reason: NotReadyReason::RouteTargetMissing {
+                provider: "q".into(),
+            },
+        };
+        assert_eq!(router.resolve("x.op").unwrap_err(), missing);
+        router.register("q", ops(&["x.op"]), ready()).unwrap();
+        assert_eq!(provider_of(&router, "x.op"), "q");
+        router.unbind("q");
+        assert_eq!(router.resolve("x.op").unwrap_err(), missing);
+    }
+
+    #[test]
+    fn the_longest_matching_route_wins_and_prefixes_match_whole_segments() {
+        let router = Router::default();
+        for provider in ["a", "b", "c"] {
+            router
+                .register(
+                    provider,
+                    ops(&["org.x.list", "org.x.sub.get", "org.xy.get"]),
+                    ready(),
+                )
+                .unwrap();
+        }
+        router.set_routes(
+            [
+                ("org.x".to_owned(), "a".to_owned()),
+                ("org.x.sub".to_owned(), "b".to_owned()),
+                ("org.x.sub.get".to_owned(), "c".to_owned()),
+            ]
+            .into(),
+        );
+        assert_eq!(provider_of(&router, "org.x.list"), "a");
+        assert_eq!(provider_of(&router, "org.x.sub.get"), "c");
+        // `org.x` does not own `org.xy.get`: three claimants and no route is ambiguous.
+        assert_eq!(
+            router.resolve("org.xy.get").unwrap_err(),
+            DispatchError::NotReady {
+                reason: NotReadyReason::Ambiguous
+            }
+        );
+        router.set_routes([("org.x.sub".to_owned(), "b".to_owned())].into());
+        assert_eq!(provider_of(&router, "org.x.sub.get"), "b");
+    }
+
+    #[test]
+    fn routes_survive_registrations_and_setting_the_same_routes_swaps_nothing() {
+        let router = Router::default();
+        let routes: BTreeMap<String, String> = [("x.op".to_owned(), "p".to_owned())].into();
+        router.set_routes(routes.clone());
+        let before = router.snapshot();
+        router.set_routes(routes.clone());
+        assert!(Arc::ptr_eq(&before, &router.snapshot()));
+        router.register("p", ops(&["x.op"]), ready()).unwrap();
+        router.unbind("p");
+        assert_eq!(router.routes(), routes);
     }
 
     #[test]
