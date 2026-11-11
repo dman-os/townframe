@@ -59,7 +59,7 @@ Initial snapshots, envelope replacements and materialization-epoch changes scan 
 
 ### Two-phase write and the command ledger
 
-A write runs in two phases so that nothing is signed that cannot be committed. The write is first staged in a transaction with placeholder signatures and rolled back, so every refusal — schema validation, dmeta reconciliation, the base-authenticity gate — surfaces before anything is signed. Dmeta reconciliation covers only what the write changes: the written datums' metadata entries, the bindings the write relies on (its actor, its `docUuid`, the written datums' aliases) and `updatedAt`, each validated against its own member of the dmeta schema. Bindings are immutable, so one already stored is compared rather than rewritten. The rest of the stored dmeta is neither revalidated nor rewritten, which keeps a write's dmeta cost independent of how many datums the document holds. The claims derived from staging are then signed, the identical transaction is restaged with the real signatures, and the condition is rechecked under the same document lock as the commit. Every change DocsRepo makes on a document uses a per-document Automerge actor: the 32-byte node key followed by the first 16 bytes of `BLAKE3(document_id)`. Appending the document tag prevents `(actor, seq)` collisions when a branch and its origin are both written on the same node and later merged; a write at historical heads uses Automerge's derived concurrency actor, which still ends in those 48 base bytes. The gate recovers the claimed 32-byte node key from that identifier, though the identifier alone does not authenticate the change's node signer (§3).
+A write runs in two phases so that nothing is signed that cannot be committed. The write is first staged in a transaction with placeholder signatures and rolled back, so every refusal — schema validation, dmeta reconciliation, the base-authenticity gate — surfaces before anything is signed. Dmeta reconciliation covers only what the write changes: the written datums' metadata entries, the bindings the write relies on (its actor, its `docUuid`, the written datums' aliases), each validated against its own member of the dmeta schema. Bindings are immutable, so one already stored is compared rather than rewritten. The rest of the stored dmeta is neither revalidated nor rewritten, which keeps a write's dmeta cost independent of how many datums the document holds. The claims derived from staging are then signed, the identical transaction is restaged with the real signatures, and the condition is rechecked under the same document lock as the commit. Every change DocsRepo makes on a document uses a per-document Automerge actor: the 32-byte node key followed by the first 16 bytes of `BLAKE3(document_id)`. Appending the document tag prevents `(actor, seq)` collisions when a branch and its origin are both written on the same node and later merged; a write at historical heads uses Automerge's derived concurrency actor, which still ends in those 48 base bytes. The gate recovers the claimed 32-byte node key from that identifier, though the identifier alone does not authenticate the change's node signer (§3).
 
 Creates, branches, writes, and merges accept a caller-chosen `CommandId` (1–256 bytes; required on creates and branches, optional on writes and merges) as an idempotency key. The `big_cabinet_commands` SQLite table replaces the old outbox: a row is inserted **before** the command's first durable side effect (`kind IN ('create', 'write', 'branch', 'merge')`, with `detail_json` carrying branch origin/path/stealth or merge source heads) and advanced pending → committed → done, with `done` written only once everything the receipt asserts is durable. Each row stores a digest of its request, so a completed command replays its stored receipt, an in-flight one is refused (`CommandInFlight`), and an id reused for a different request is refused (`CommandReused`). A completed row answers replays for 7 days; a retry after that re-executes. Boot recovery settles what a crash left behind using facts that already live elsewhere: a create's or branch's BigRepo reservation and Keyhive document say which side of `commit_id` the crash fell on (and for a committed non-stealth branch, whether the origin already carries a backlink change whose commit message is the command id before placing the branch); a write's Automerge change carries its command id as its commit message, so whether it was committed is read off the document itself; and a merge adds no change of its own, so its pending row is settled as `done` if the target holds all of the recorded source heads and discarded otherwise.
 
@@ -155,31 +155,32 @@ The standards define the envelope and signature processing, not Daybook authorit
 ```text
 Dmeta {
   createdAt: Timestamp
-  updatedAt: [Timestamp]
   actors: Uuid7 -> { createdAt: [Timestamp], pubkey, actorUrl, delegation?: Bytes }
   docUuids: Uuid7 -> DocumentId
-  datumUuids: Uuid7 -> DatumKey
   datums: DatumKey -> {
+    uuids: Uuid7 -> true
     updatedAt: [Timestamp]
     deletedAt: [Timestamp]
-    signatures: [ {
-      actorUuid: Uuid7
-      docUuid: Uuid7
-      signature: SignatureBytes
-      message?: Bytes
-      inherited?: { originDoc, message: Bytes, value?: Bytes }
-    } ]
+    signatures: [ SignatureEntry ]
   }
 }
+
+SignatureEntry =
+    Bytes(97)   // 0x01 | actorUuid(16) | docUuid(16) | signature(64)
+  | {           // only when the entry carries message or inherited
+      signature: Bytes(97)   // the packed value above
+      message?: Bytes
+      inherited?: { originDoc, message: Bytes, value?: Bytes }
+    }
 ```
 
 The enclosing document's own ID is not a single top-level field of `Dmeta`: a single field inside the datum would be copied onto a branch and overwritten on merge. Instead, `docUuids` maps each document UUIDv7 alias to the `DocumentId` where signatures carrying that `docUuid` were introduced, while branch relationships are weak links recorded by `org.example.daybook.branch/<id>` with a concrete parent datum reference and fork heads (ADR 034).
 
-`datumUuids` is the only datum-alias index: each UUIDv7 maps directly to a complete datum key, tag and instance together. `docUuids` is the corresponding document-alias index for history-sharing documents: when a document writes, it reuses the lexicographically smallest `Uuid7` already bound to its `DocumentId` in `docUuids`, or binds a freshly minted `Uuid7` on the first write on that document (for a branch, the initial write of `org.example.daybook.branch/<branch-id>`). Like `actors` and `datumUuids`, bindings in `docUuids` are immutable once written. Actor, document, and datum UUID times replace separate per-binding creation-time fields, but do not establish a trusted order of events.
+A datum's aliases live under the datum itself: `datums[key].uuids` maps each UUIDv7 assigned to that slot to `true`, so finding a datum's aliases reads its own entry. There is no document-wide datum-alias index. `docUuids` is the corresponding document-alias index for history-sharing documents: when a document writes, it reuses the lexicographically smallest `Uuid7` already bound to its `DocumentId` in `docUuids`, or binds a freshly minted `Uuid7` on the first write on that document (for a branch, the initial write of `org.example.daybook.branch/<branch-id>`). Like `actors`, bindings in `docUuids` and the aliases in `uuids` are immutable once written. Actor, document, and datum UUID times replace separate per-binding creation-time fields, but do not establish a trusted order of events.
 
-For an ordinary Automerge write, a signature entry carries `actorUuid`, `docUuid`, and native signature bytes; the remaining claim context — including `origin_document`, looked up from `docUuids[docUuid]` at the introducing change — is reconstructed at its introduction change. Because a branch (`fork_at`) or merge (`merge`) carries the introducing Automerge changes themselves across documents, an ordinary signature entry reconstructs to the exact `origin_document` it was signed on whether it is read on the origin, on a branch, or after merging back, without needing an `inherited` witness. Actor keys and certificates are shared through `actors`. The optional `message` preserves a locally authored claim when that reconstruction will no longer be possible. `message` and `inherited` are alternative evidence carriers, not fields to populate together. Automerge applies a change only with its dependencies; a readable signature entry cannot be waiting for its introducing change or for other operations from that same change. A missing alias, unbound or conflicting `docUuid`, actor binding, required signature field, or attribution certificate at the entry's introduction is malformed evidence, never a sync-pending state. Omitting `message` is valid while the claim is reconstructible from retained history; a history-free export must carry its complete message. Unknown requested heads are a request error (`UnknownHeads`), not a datum verdict. A missing externally authenticated issuer proof is separate from these in-document structural failures.
+For an ordinary Automerge write, a signature entry is one packed 97-byte bytes value (format byte `0x01`, `actorUuid`, `docUuid`, then the 64 native signature bytes); the remaining claim context — including `origin_document`, looked up from `docUuids[docUuid]` at the introducing change — is reconstructed at its introduction change. Because a branch (`fork_at`) or merge (`merge`) carries the introducing Automerge changes themselves across documents, an ordinary signature entry reconstructs to the exact `origin_document` it was signed on whether it is read on the origin, on a branch, or after merging back, without needing an `inherited` witness. Actor keys and certificates are shared through `actors`. An entry that carries `message` or `inherited` is instead a map whose `signature` member is that packed value. The optional `message` preserves a locally authored claim when that reconstruction will no longer be possible. `message` and `inherited` are alternative evidence carriers, not fields to populate together. Automerge applies a change only with its dependencies; a readable signature entry cannot be waiting for its introducing change or for other operations from that same change. A missing alias, unbound or conflicting `docUuid`, actor binding, required signature field, or attribution certificate at the entry's introduction is malformed evidence, never a sync-pending state. Omitting `message` is valid while the claim is reconstructible from retained history; a history-free export must carry its complete message. Unknown requested heads are a request error (`UnknownHeads`), not a datum verdict. A missing externally authenticated issuer proof is separate from these in-document structural failures.
 
-`signatures`, document and datum `updatedAt`, and datum `deletedAt` are **current competing sets**, not append-only logs. Replacing a set removes only the entries observed at the supplied base heads; concurrent entries survive. Retained signature entries remain immutable, and newly inserted signatures get fresh objects rather than mutating old entries in place. Generic positional list reconciliation must not mix fields from concurrent signatures. Full-JSON reconciliation still traverses the value; preserving unchanged native objects and emitting only changed operations does not mean traversal is free.
+A datum's `signatures`, `updatedAt` and `deletedAt` are **current competing sets**, not append-only logs. Replacing a set removes only the entries observed at the supplied base heads; concurrent entries survive. Retained signature entries remain immutable, and newly inserted signatures get fresh objects rather than mutating old entries in place. Generic positional list reconciliation must not mix fields from concurrent signatures. Full-JSON reconciliation still traverses the value; preserving unchanged native objects and emitting only changed operations does not mean traversal is free.
 
 `deletedAt` is always present and initialized, empty for an authored non-tombstone. A removal records a deletion candidate; a later Set clears the candidates it observed. A concurrent Remove/Set merge can retain deletion candidates even when a value is visible. Timestamps are unsigned display metadata: neither a nonempty `deletedAt` nor the latest timestamp decides current tombstone status. The signed operation and its match to the current slot state do. Older entries may remain in Automerge history without being duplicated in current dmeta. Granting broader local access creates no entries in untouched documents.
 
@@ -205,15 +206,12 @@ single scalar, because each map adds operations a load rebuilds. So:
    map whose `signature` member is that same packed value; ordinary writes never produce one.
 3. **There is no document-level `updatedAt`.** When a document last changed is the latest of its
    datums' `updatedAt`, which is what every reader of the document-level set computed anyway.
-4. **The version tag is the datum's current signature set.** Every signed write, a Remove included,
-   inserts a new signature entry and replaces the ones it observed, so the set of current signature
-   IDs changes on every write and never otherwise; under concurrent writers it is the sorted set of
-   the competing entries, as heads are for a document. It costs no field and no bytes, it names the
-   signed claim rather than where an operation happened to land, it survives compaction and export
-   (an `inherited` witness keeps its signature), and it is already causal: a claim names its
-   predecessors by these IDs. A reader holding the IDs it saw compares them to know whether the datum
-   changed. An unsigned write has no version tag of this kind; unsigned writes exist only on the
-   unsigned branch kind of item 1, whose versions are document heads.
+4. **The version tag is the existing `DatumVersion`**: the introducing heads of the datum's
+   current signature entries plus their clock. Every signed write, a Remove included, inserts a new
+   signature entry and replaces the ones it observed, so the version changes on every signed write
+   and never otherwise. It costs no field, and it also serves as read coordinates: a caller reads the
+   datum at those heads. An unsigned write has no version tag of this kind; unsigned writes exist
+   only on the unsigned branch kind of item 1, whose versions are document heads.
 5. **Aliases live under their datum:** `datums[key].uuids: Uuid7 -> true`, and `datumUuids` is
    removed. ADR 015's reason for one index stands: there is still one copy of each binding. Concurrent
    creators of a datum each create `datums[key]`, so Automerge keeps several copies and shows one;
@@ -224,6 +222,8 @@ single scalar, because each map adds operations a load rebuilds. So:
    be a derived index in the repository, not a second copy in the document. Finding a datum's aliases
    is then a read of its own entry, not a scan of every binding the document has, which also lifts the
    per-frontier budget ceiling of about 500 datums the scan imposed.
+
+The carried map form of a signature entry is not yet storable through the codec, because its schema position is bytes-only; how that position widens is decided with compaction's design.
 
 With 2–5 an ordinary write makes four operations in dmeta instead of nine: the datum's `updatedAt` entry and its signature entry, each a delete and an insert. Bindings in `docUuids` and
 `actors`, and the reconstruction of claims at their introducing change (§4, §6), are unchanged.
