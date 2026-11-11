@@ -40,6 +40,7 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
 use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Route;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -260,6 +261,23 @@ pub fn dev_takeover_key(cartridge_id: &CartridgeId) -> DatumKey {
 pub fn route_key(pattern: &str) -> DatumKey {
     DatumKey::from_text(MethodRoute::ID, pattern)
         .expect("a validated route pattern is a valid datum key slot")
+}
+
+/// Why `pattern` cannot be a route pattern: dotted segments of letters, digits and hyphens, so
+/// it is an exact NSID or an authority prefix and never `*`.
+fn pattern_error(pattern: &str) -> Option<&'static str> {
+    (!pattern.split('.').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }))
+    .then_some("a pattern is dotted segments of letters, digits and hyphens")
+}
+
+/// Why `pattern` routed to `provider` is not a valid route.
+fn route_error(pattern: &str, provider: &str) -> Option<&'static str> {
+    pattern_error(pattern).or_else(|| provider.is_empty().then_some("the provider id is empty"))
 }
 
 /// The slot prefix that namespaces the [`Blob`] datums this projection owns inside the node config
@@ -1000,23 +1018,39 @@ impl NoduleConfig {
         }
     }
 
-    /// The routes in force, pattern to provider id. A route datum that does not decode is an
-    /// error rather than a skipped route: dropping it would silently send its calls to whichever
-    /// provider claims them. `set_route` with no provider clears it.
-    pub fn routes(&self) -> std::result::Result<BTreeMap<String, String>, InventoryError> {
-        self.routes
-            .iter()
-            .filter_map(|(pattern, slot)| match slot {
-                DatumSlot::Absent => None,
-                DatumSlot::Accepted { value, .. } => {
-                    Some(Ok((pattern.clone(), value.provider.clone())))
+    /// The routes in force, and what could not be read. The config document is written by any
+    /// client holding a capability on it, so its route datums are external input: one that does
+    /// not decode, or names an empty provider, becomes `Route::Invalid`, which refuses exactly the
+    /// calls and requests its pattern covers while every other route and nodule carries on. A
+    /// datum whose pattern is itself unusable (not an NSID prefix, or a key that is not UTF-8)
+    /// covers nothing knowable, so it is left out of the table and described in the second
+    /// element for the caller to report. `set_route` with no provider clears either kind.
+    pub fn routes(&self) -> (BTreeMap<String, Route>, Vec<String>) {
+        let mut table = BTreeMap::new();
+        let mut unreadable: Vec<String> = self
+            .carried_keys
+            .keys()
+            .filter(|key| key.tag().as_str() == MethodRoute::ID)
+            .map(|key| format!("route datum with a key that is not UTF-8: {key}"))
+            .collect();
+        for (pattern, slot) in &self.routes {
+            let route = match slot {
+                DatumSlot::Absent => continue,
+                DatumSlot::Accepted { value, .. } => match route_error(pattern, &value.provider) {
+                    None => Route::Provider(value.provider.clone()),
+                    Some(reason) => Route::Invalid(format!("route `{pattern}`: {reason}")),
+                },
+                DatumSlot::Invalid { reason, .. } => {
+                    Route::Invalid(format!("route `{pattern}` is damaged: {reason}"))
                 }
-                DatumSlot::Invalid { reason, .. } => Some(Err(InventoryError::InvalidRoute {
-                    pattern: pattern.clone(),
-                    reason: reason.clone(),
-                })),
-            })
-            .collect()
+            };
+            if let Some(reason) = pattern_error(pattern) {
+                unreadable.push(format!("route datum `{pattern}`: {reason}"));
+            } else {
+                table.insert(pattern.clone(), route);
+            }
+        }
+        (table, unreadable)
     }
 
     /// Sets or, with `provider` absent, clears the route of `pattern`: an exact NSID or an
@@ -1028,26 +1062,15 @@ impl NoduleConfig {
         pattern: &str,
         provider: Option<String>,
     ) -> std::result::Result<(), InventoryError> {
-        let invalid = |reason: &str| InventoryError::InvalidRoute {
-            pattern: pattern.to_owned(),
-            reason: reason.to_owned(),
-        };
         let Some(provider) = provider else {
             self.routes.remove(pattern);
             return Ok(());
         };
-        if !pattern.split('.').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        }) {
-            return Err(invalid(
-                "a pattern is dotted segments of letters, digits and hyphens",
-            ));
-        }
-        if provider.is_empty() {
-            return Err(invalid("the provider id is empty"));
+        if let Some(reason) = route_error(pattern, &provider) {
+            return Err(InventoryError::InvalidRoute {
+                pattern: pattern.to_owned(),
+                reason: reason.to_owned(),
+            });
         }
         let extra = match self.routes.get(pattern) {
             Some(DatumSlot::Accepted { value, .. }) => value.extra.clone(),
