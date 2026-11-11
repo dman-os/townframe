@@ -75,9 +75,13 @@ impl Dispatch {
     /// `content_width` is `contentBoxSize.inlineSize`.
     pub(crate) fn resized(&self, node: NodeKey, border_height: f64, content_width: f64) {
         let previous = self.host.record_size(node, border_height);
-        // A static view's rows are measured for the pointer's hit-testing only: nothing is
-        // reconciled against them.
-        let Some(managers) = &self.managers else {
+        // A static view's rows, and any view's hunk separators, are measured for geometry only:
+        // the port reads no separator height (its metrics carry the estimate) and nothing is
+        // reconciled against it, so telling the managers would only queue passes upstream never
+        // runs. The cache still feeds the hit-test and the tops the scroll fix reads, as
+        // `getBoundingClientRect` would upstream.
+        let is_separator = host_document(&self.host).has_attribute(node, "data-separator");
+        let Some(managers) = self.managers.as_ref().filter(|_| !is_separator) else {
             self.host.flush_frames();
             return;
         };

@@ -228,8 +228,7 @@ impl DioxusHost {
     /// Whether this host keeps row heights: a virtualized one always (the port reads them), a
     /// static one only while the pointer can drag over rows, which is the one thing that reads
     /// heights there (`element_from_point`). A static view's cost is then one `onresize` per
-    /// measured row (the rows `is_measured` lists, plus hunk separators, whose height no style
-    /// sets) and one `onmounted` on the `pre` and a content column: it is for short diffs, and
+    /// measured row (the rows `is_measured` lists) and one `onmounted` on the `pre` and a content column: it is for short diffs, and
     /// a long one is what the virtualized view is for.
     fn measures_rows(&self) -> bool {
         self.is_interactive() || self.pointer.acts_on_rows()
@@ -248,7 +247,10 @@ impl DioxusHost {
     /// the header above the lines): every one needs `onresize` to be answerable.
     ///
     /// A static host reads none of them, so it measures them only for the hit-test
-    /// (`measures_rows`), and adds the hunk separators the stacked rows pass through.
+    /// (`measures_rows`). Hunk separators are measured on every host, and only into the geometry
+    /// cache (`Dispatch::resized`): the port estimates a separator in its metrics but never reads
+    /// one from layout, and no style in the document sets its height, so the rows stacked below
+    /// one (hit-testing, the scroll fix's tops) are off by its height without a measurement.
     fn is_measured(&self, node: NodeKey) -> bool {
         self.measures_rows()
             && (node == self.container
@@ -260,7 +262,7 @@ impl DioxusHost {
                 ]
                 .iter()
                 .any(|name| self.document.has_attribute(node, name))
-                || (!self.is_interactive() && self.document.has_attribute(node, "data-separator")))
+                || self.document.has_attribute(node, "data-separator"))
     }
 
     /// The scroller's position; a static view has none, and its rows sit where the page puts

@@ -655,6 +655,118 @@ fn a_view_whose_pointer_has_no_rows_to_act_on_measures_none() {
     });
 }
 
+/// A collapsed hunk's separator sits between rows of the content column and is as tall as the
+/// stylesheet makes it, which no `style` in the document says. Every node that hears `onresize`
+/// reports its scripted height (a line 20, a separator 32), as the platform would.
+#[test]
+fn a_touch_drag_across_a_collapsed_hunk_separator_lands_on_the_row_below_it() {
+    for virtualized in [false, true] {
+        let mut rig = Rig::new(pair(30, &[3, 20]), virtualized, false, true);
+        let host = Rc::clone(&rig.view.host);
+        let dispatch = Rc::clone(&rig.view.dispatch);
+        // The virtualized view renders its window once the scroller reports its size; the nodes
+        // below are those of the settled render.
+        if let Some(scroller) = host.scroller() {
+            let (root, content, container) = (scroller.root, scroller.content, host.container());
+            let content_height = match &rig.view.engine {
+                Engine::Virtualized { instance, .. } => instance.get_virtualized_height(),
+                Engine::Static(_) => unreachable!("a virtualized view"),
+            };
+            rig.dom.in_scope(ScopeId::ROOT, || {
+                dispatch.mounted(root, MountedData::new(rect(100.0, 0.0, 800.0, 600.0)));
+                dispatch.resized(root, 600.0, 800.0);
+                dispatch.resized(content, content_height, 800.0);
+                dispatch.visible(container, true);
+            });
+            rig.settle();
+        }
+        let (pre, column) = (rig.pre(), rig.query("data-content", None)[0]);
+        let height_of = |document: &Document, node: NodeKey| {
+            if document.has_attribute(node, "data-separator") {
+                32.0
+            } else {
+                20.0
+            }
+        };
+        let rows: Vec<NodeKey> = rig
+            .document()
+            .child_nodes(column)
+            .into_iter()
+            .filter(|row| !rig.document().tag_name(*row).is_empty())
+            .collect();
+        let at_separator = rows
+            .iter()
+            .position(|row| rig.document().has_attribute(*row, "data-separator"))
+            .expect("a collapsed hunk renders a separator in the column");
+        let (above, separator, below) = (
+            rows[at_separator - 1],
+            rows[at_separator],
+            rows[at_separator + 1],
+        );
+        rig.dom.in_scope(ScopeId::ROOT, || {
+            let hears = |node| {
+                dispatch
+                    .listeners(node)
+                    .iter()
+                    .any(|attribute| attribute.name == "onresize")
+            };
+            dispatch.mounted(pre, MountedData::new(rect(100.0, 50.0, 800.0, 600.0)));
+            dispatch.mounted(column, MountedData::new(rect(140.0, 50.0, 760.0, 600.0)));
+            for row in &rows {
+                if hears(*row) {
+                    dispatch.resized(*row, height_of(rig.document(), *row), 760.0);
+                }
+            }
+        });
+        rig.settle();
+        let start = rig.number(1);
+        let touch = |x, y| Pointer {
+            kind: "touch",
+            buttons: 1,
+            ..Pointer::mouse(x, y)
+        };
+        rig.pointer(
+            start,
+            "pointerdown",
+            Pointer {
+                button: 0,
+                ..touch(120.0, 60.0)
+            },
+        );
+        // The client top of `below`: the first row at y 50, then each row's scripted height.
+        let top_of = |target: NodeKey| {
+            50.0 + rows
+                .iter()
+                .take_while(|row| **row != target)
+                .map(|row| height_of(rig.document(), *row))
+                .sum::<f64>()
+        };
+        let at = |node: NodeKey, offset: f64| {
+            pierre_diffs::managers::interaction_manager::InteractionHost::element_from_point(
+                &*rig.view.host,
+                500.0,
+                top_of(node) + offset,
+            )
+        };
+        use pierre_diffs::managers::interaction_manager::HitTest::Element;
+        assert_eq!(
+            at(above, 10.0),
+            Element(above),
+            "virtualized: {virtualized}"
+        );
+        assert_eq!(
+            at(separator, 16.0),
+            Element(separator),
+            "virtualized: {virtualized}"
+        );
+        assert_eq!(
+            at(below, 10.0),
+            Element(below),
+            "virtualized: {virtualized}"
+        );
+    }
+}
+
 #[test]
 fn a_drag_whose_button_came_up_outside_the_view_ends_on_the_next_move() {
     let mut rig = Rig::new(pair(5, &[3]), false, true, true);
