@@ -163,6 +163,8 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 
 - **F21 (2026-11-10, nodules lane) Cartridge sidecar, locations.** A nodule's datums lose their storage forms today (`big_nodule/state.rs` registers with no sidecar; Text, lists, float/counter and reference markers fall back to plain JSON). The nodules lane adds a `sidecar` member to the nodule description, carrying the cartridge's serialized `Universe`, checked like boot groups; they'll give the shape. Interim allowed: register intxt_core's group at boot, test-only, behind a dev feature kept out of the default build, deleted when the cartridge path works. `Location` gets its own storage form, `x-automerge: "location"` (stored like a reference, indexed by its datum part; `reference` still refuses fragments); `ActorUrl` gets text-form serde and isn't indexed; both land with their next push. A `refHeads` sibling pins every marked member of its object.
 
+- **F22 (2026-11-11, mothership debug, load ~6–9)** A 240 KB `note.content` (4,000 lines) through the docs client: boot 35.9 s, **create 27.5 s**, read 0.28 s, **one-line edit 30.6 s**, read 0.75 s (INSTR commit on feat/intxt-impl). Writes cost ~100 µs per character even without a diff base, so something besides Myers is linear in size; the nodules lane is profiling phase by phase in release and debug, and splice input is the likely edit fix. A 17 MiB value was reconciled before `ValueTooLarge` fired (stalled at 4.6 GiB RSS); being fixed to check the incoming JSON before staging. Keep D43's 256 KiB cutoff until the release numbers arrive.
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
