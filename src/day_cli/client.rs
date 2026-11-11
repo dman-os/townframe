@@ -77,7 +77,13 @@ impl Reply {
 }
 
 enum Transport {
-    Socket(service_client_native_rs::XrpcClient),
+    Socket {
+        http: service_client_native_rs::XrpcClient,
+        /// A connection to the holder's socket that sends nothing and lives as long as this
+        /// client. The holder counts it, so it stays up for this process's calls whatever the
+        /// HTTP client does with its own connections.
+        _presence: tokio::net::UnixStream,
+    },
     /// The booted node and the router that serves it. They are dropped together on stop: the
     /// router holds the dispatch client, which must not outlive the node it calls.
     Holder(Box<(Booted, axum::Router)>),
@@ -134,18 +140,18 @@ impl NodeClient {
                 Some(socket) => socket.clone(),
                 None => dir.socket_path()?,
             };
-            let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
-                .map_err(|error| eyre::eyre!("{error:?}"))?;
-            // The client connects on its first request, and a holder that has finished its own
-            // command exits once no connection is open. So the connection is opened now and
-            // kept: it is what keeps the holder up for this process's calls.
-            let url = http
-                .base_url()
-                .join(&format!("xrpc/{}", big_node::GET_NODE_INFO))?;
-            match http.http_client().get(url).send().await {
-                Ok(_) => {
+            // A holder that has finished its own command closes its socket and exits once the
+            // connections it accepted have ended, so this process connects before anything else
+            // and keeps that connection. A refusal means the holder is on its way out.
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(presence) => {
+                    let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
+                        .map_err(|error| eyre::eyre!("{error:?}"))?;
                     return Ok(Self {
-                        transport: Transport::Socket(http),
+                        transport: Transport::Socket {
+                            http,
+                            _presence: presence,
+                        },
                         mode: if held.role == Some(LockRole::Daemon) {
                             Mode::Daemon
                         } else {
@@ -154,8 +160,15 @@ impl NodeClient {
                         socket: SocketState::Live,
                     });
                 }
-                Err(error) if error.is_connect() => {}
-                Err(error) => return Err(error).wrap_err("reaching the node's holder"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) => {}
+                Err(error) => {
+                    return Err(error)
+                        .wrap_err_with(|| format!("connecting to {}", socket.display()));
+                }
             }
             // No socket: the holder is shutting down, or it was only a process probing the lock.
             // Either way the lock is the signal, so wait for it to be free and try again.
@@ -183,7 +196,7 @@ impl NodeClient {
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         ensure_nsid(nsid)?;
         match &self.transport {
-            Transport::Socket(client) => {
+            Transport::Socket { http: client, .. } => {
                 let url = client.base_url().join(&format!("xrpc/{nsid}"))?;
                 let request = match verb {
                     HttpMethod::Post => client.http_client().post(url).json(input),
@@ -225,19 +238,18 @@ impl NodeClient {
     /// another process's node has nothing to stop.
     pub async fn stop(self) -> Res<()> {
         match self.transport {
-            Transport::Socket(_) => Ok(()),
+            Transport::Socket { .. } => Ok(()),
             Transport::Holder(running) => {
                 let (booted, router) = *running;
                 drop(router);
-                let mut clients = booted
+                // No new client is accepted from here on; the ones already connected finish.
+                booted
                     .node
                     .unix_clients
-                    .clone()
-                    .expect("a holder boots with its socket attached");
-                clients
-                    .wait_for(|open| *open == 0)
-                    .await
-                    .wrap_err("the node's socket listener ended while clients were connected")?;
+                    .as_ref()
+                    .expect("a holder boots with its socket attached")
+                    .drain()
+                    .await?;
                 booted.stop().await
             }
         }
