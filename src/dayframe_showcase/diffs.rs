@@ -1,4 +1,4 @@
-//! The Diffs tab: `pierre_diffs_dioxus::FileDiffView` in two views, under one options bar that
+//! The Diffs tab: `pierre_diffs_dioxus::FileDiffView` in three views, under one options bar that
 //! drives every `FileDiffView` prop the port implements.
 //!
 //! - Specimens: two sample file pairs, and a generated three-thousand-line one that only renders
@@ -9,6 +9,9 @@
 //! - Mock review: `review_mock::MockReview`, the same component the lab micro renders, so a
 //!   difference between the two is the Clay runtime's. Selecting a line or clicking the gutter's
 //!   "+" drafts a comment.
+//! - PR #84: a real 599-file diff, one virtualized file at a time (see [`pr_diff`]).
+
+mod pr_diff;
 
 use crate::diff_fixtures;
 use dioxus::prelude::*;
@@ -37,15 +40,17 @@ pub struct Note {
 enum DiffsView {
     Specimens,
     MockReview,
+    Pr84,
 }
 
 impl DiffsView {
-    const ALL: [Self; 2] = [Self::Specimens, Self::MockReview];
+    const ALL: [Self; 3] = [Self::Specimens, Self::MockReview, Self::Pr84];
 
     fn label(self) -> &'static str {
         match self {
             Self::Specimens => "Specimens",
             Self::MockReview => "Mock review",
+            Self::Pr84 => "PR #84",
         }
     }
 }
@@ -57,7 +62,8 @@ pub fn DiffsFoundation() -> Element {
     let mut view = use_signal(
         || match std::env::var("DAYFRAME_LAB_DIFFS_VIEW").as_deref() {
             Ok("review") => DiffsView::MockReview,
-                _ => DiffsView::Specimens,
+            Ok("pr84") => DiffsView::Pr84,
+            _ => DiffsView::Specimens,
         },
     );
     // The options start where the specimens always ran: hover on both parts, selection and the
@@ -144,6 +150,7 @@ pub fn DiffsFoundation() -> Element {
                         close: move |()| view.set(DiffsView::Specimens),
                     }
                 },
+                DiffsView::Pr84 => rsx! { pr_diff::PrView { options: current, virtualized } },
             }
         }
     }
