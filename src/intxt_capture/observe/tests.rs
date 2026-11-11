@@ -2,71 +2,24 @@
 
 use super::*;
 use crate::git::GitMove;
+use crate::identity;
 use crate::snapshot::BlobReason;
 use crate::snapshot::ChangeKind;
 use crate::snapshot::Content;
+use crate::testing::Repo;
+use crate::testing::git_in;
 use intxt_core::work::FileStatus;
 use intxt_core::work::OpKind;
-use std::path::PathBuf;
-use std::process::Command;
 
-/// Run git in `dir` with nothing taken from the machine: no global or system config, and a fixed
-/// identity.
-fn git_in(dir: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "Ada")
-        .env("GIT_AUTHOR_EMAIL", "ada@example.com")
-        .env("GIT_COMMITTER_NAME", "Grace")
-        .env("GIT_COMMITTER_EMAIL", "grace@example.com")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
-}
-
-struct Repo {
-    /// Holds the directory; the repository is `root` inside it.
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-}
-
-impl Repo {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap().join("repo");
-        std::fs::create_dir(&root).unwrap();
-        git_in(&root, &["init", "-q", "-b", "main"]);
-        Self { _dir: dir, root }
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        git_in(&self.root, args)
-    }
-
-    fn write(&self, path: &str, content: impl AsRef<[u8]>) {
-        let file = self.root.join(path);
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(file, content).unwrap();
-    }
-
-    fn commit_all(&self, message: &str) -> String {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-        self.git(&["rev-parse", "HEAD"])
-    }
-
+trait Observe {
     /// Observe, carrying `state` forward.
+    fn observe(&self, state: &mut WorktreeState) -> Observation;
+}
+
+impl Observe for Repo {
     fn observe(&self, state: &mut WorktreeState) -> Observation {
-        let (observation, next) = observe(state, &self.root).unwrap().unwrap();
+        let identity = identity::resolve(&self.root).unwrap().unwrap();
+        let (observation, next) = observe(state, identity, None).unwrap();
         *state = next;
         observation
     }
@@ -471,7 +424,12 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
         linked_root.to_str().unwrap(),
     ]);
     let mut linked_state = WorktreeState::default();
-    let (linked, next) = observe(&linked_state, &linked_root).unwrap().unwrap();
+    let (linked, next) = observe(
+        &linked_state,
+        identity::resolve(&linked_root).unwrap().unwrap(),
+        None,
+    )
+    .unwrap();
     linked_state = next;
     assert_ne!(linked.identity.worktree_id, observed.identity.worktree_id);
     assert_eq!(linked.identity.clone_id, observed.identity.clone_id);
@@ -483,7 +441,12 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
     std::fs::write(linked_root.join("l.txt"), "l\n").unwrap();
     git_in(&linked_root, &["add", "-A"]);
     git_in(&linked_root, &["commit", "-q", "-m", "linked"]);
-    let (linked, _) = observe(&linked_state, &linked_root).unwrap().unwrap();
+    let (linked, _) = observe(
+        &linked_state,
+        identity::resolve(&linked_root).unwrap().unwrap(),
+        None,
+    )
+    .unwrap();
     assert_eq!(kinds(&linked.git.moves), [OpKind::Commit]);
     assert_eq!(repo.observe(&mut state).git.moves, []);
 }
