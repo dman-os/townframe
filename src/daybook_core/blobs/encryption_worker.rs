@@ -827,8 +827,8 @@ pub(crate) fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
         let Ok(url) = url_str.parse::<url::Url>() else {
             continue;
         };
-        if let Some(blob_id) = crate::blobs::blob_facet_url_digest(&url)
-            .and_then(digest_str_to_blob_id_lenient)
+        if let Some(blob_id) =
+            crate::blobs::blob_facet_url_digest(&url).and_then(digest_str_to_blob_id_lenient)
         {
             return Some(blob_id);
         }

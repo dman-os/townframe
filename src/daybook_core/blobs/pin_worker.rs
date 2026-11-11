@@ -1824,11 +1824,7 @@ mod tests {
                 "bundle1".into(),
                 Arc::new(WflowBundleManifest {
                     keys: vec!["wflow1".into()],
-                    component_urls: vec![
-                        crate::blobs::blob_url(&hash)
-                            .parse()
-                            .unwrap(),
-                    ],
+                    component_urls: vec![crate::blobs::blob_url(&hash).parse().unwrap()],
                 }),
             )]
             .into(),
@@ -2091,11 +2087,7 @@ mod tests {
                 "bundle1".into(),
                 Arc::new(WflowBundleManifest {
                     keys: vec!["wflow1".into()],
-                    component_urls: vec![
-                        crate::blobs::blob_url(&hash)
-                            .parse()
-                            .unwrap(),
-                    ],
+                    component_urls: vec![crate::blobs::blob_url(&hash).parse().unwrap()],
                 }),
             )]
             .into(),

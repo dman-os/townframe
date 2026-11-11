@@ -276,9 +276,7 @@ impl Activation {
         name: &str,
         render: Rc<dyn Fn() -> Element>,
     ) -> Result<(), Error> {
-        let (component, view) = self
-            .components
-            .publish(&self.instance, move || render())?;
+        let (component, view) = self.components.publish(&self.instance, move || render())?;
         self.views.borrow_mut().push(view);
         self.stage(self.capabilities.publish_component(name, component))
     }

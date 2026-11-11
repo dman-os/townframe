@@ -29,7 +29,7 @@ use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleMethodGrants;
 use service_utils_rs::ClientError;
 use service_utils_rs::TraceContext;
 use std::time::Duration;
@@ -193,15 +193,15 @@ pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> N
         .unwrap()
 }
 
-async fn set_operations(node: &BigNode, spec: &Spec, operations: DispatchScope) -> NoduleRecord {
+async fn set_operations(node: &BigNode, spec: &Spec, methods: DispatchScope) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
             Authorization::identity(node.authority.root).metadata(),
-            SetNoduleOperationGrants {
+            SetNoduleMethodGrants {
                 cartridge_id: spec.cartridge.clone(),
-                operations,
+                methods,
             },
         )
         .await
@@ -430,7 +430,7 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
         },
     )
     .await;
-    assert!(first.operations.as_ref().unwrap().granted);
+    assert!(first.methods.as_ref().unwrap().granted);
     let unrelated = own_capability(&node, &a)
         .await
         .expect("a granted nodule is told its capability");
@@ -512,7 +512,7 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     // Revoking by a config change takes effect: the handler is told no capability, and the one
     // it remembered is dead.
     let revoked = set_operations(&node, &a, DispatchScope::default()).await;
-    assert!(revoked.operations.is_none());
+    assert!(revoked.methods.is_none());
     assert_eq!(own_capability(&node, &a).await, None);
     let stale = relay(&node, &a, &target, Some(&granted), context.clone()).await;
     assert_eq!(stale["status"], 403, "{stale}");
@@ -535,10 +535,7 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     // Disabling revokes too.
     set_enabled(&node, &a, false).await;
     assert_eq!(
-        record(&node, &a)
-            .await
-            .operations
-            .map(|status| status.granted),
+        record(&node, &a).await.methods.map(|status| status.granted),
         Some(false)
     );
     shutdown(node, stop).await;
