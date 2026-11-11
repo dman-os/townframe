@@ -75,7 +75,11 @@ fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
         .expect("material-theme.json must match the Material theme schema");
     let mut mode = use_signal(|| ThemeMode::Dark);
-    let mut tab = use_signal(|| LabTab::Components);
+    // `DAYFRAME_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
+    let mut tab = use_signal(|| match std::env::var("DAYFRAME_LAB_TAB").as_deref() {
+        Ok("diffs") => LabTab::Diffs,
+        _ => LabTab::Components,
+    });
     let native_window: Option<Arc<dyn Window>> = use_hook(try_consume_context);
     #[cfg(feature = "desktop")]
     let desktop_window: Option<DesktopContext> = use_hook(try_consume_context);
@@ -195,7 +199,7 @@ fn App() -> Element {
                             FoundationSection {
                                 id: "diffs".to_string(),
                                 title: "Diff view".to_string(),
-                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port: a split Rust diff and a unified TypeScript diff with one line annotation whose content is ordinary Dioxus. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port: a split Rust diff and a unified TypeScript diff with one line annotation whose content is ordinary Dioxus, then a generated three-thousand-line diff that renders only the rows near the viewport of its own scroller (virtualized). Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
                                 diffs::DiffsFoundation {}
                             }
                         },

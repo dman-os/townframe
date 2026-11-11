@@ -204,6 +204,10 @@ impl FakeHost {
                 self.world.borrow_mut().heights.insert(key, value);
             }
             if let Some(lines) = &element.lines {
+                let shadow_root = self
+                    .doc
+                    .shadow_root(key)
+                    .unwrap_or_else(|| self.doc.attach_shadow(key));
                 let line_keys: Vec<NodeKey> = lines
                     .iter()
                     .map(|(line_index, doc_top)| {
@@ -217,7 +221,7 @@ impl FakeHost {
                         line
                     })
                     .collect();
-                self.doc.replace_children(key, &line_keys);
+                self.doc.replace_children(shadow_root, &line_keys);
             }
             if let Some(child) = &element.first_child {
                 let child = self.element(child);
