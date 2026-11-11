@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use service_core_rs::declare_service_protocol;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// The operations a minted dispatch handle may invoke: individual NSIDs, and authority
@@ -55,6 +56,18 @@ impl DispatchScope {
             || nsid
                 .strip_prefix(authority)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
+    /// The provider `nsid` is routed to, if any route covers it (ADR 045): `routes` maps an exact
+    /// NSID or an authority prefix (whole segments, as [`Self::authority_owns`] matches them) to a
+    /// provider id, and the longest matching pattern decides, so an exact NSID beats the prefix
+    /// over it. The router and whoever predicts what it will resolve share this one rule.
+    pub fn route_target<'a>(routes: &'a BTreeMap<String, String>, nsid: &str) -> Option<&'a str> {
+        routes
+            .iter()
+            .filter(|(pattern, _)| Self::authority_owns(pattern, nsid))
+            .max_by_key(|(pattern, _)| pattern.len())
+            .map(|(_, provider)| provider.as_str())
     }
 
     /// Whether this scope names `nsid`, ignoring privilege: what a nodule's grant is matched
@@ -188,12 +201,16 @@ pub struct InvokeOutput {
 /// Why an operation that is routed cannot be served right now. Provider readiness is the
 /// [`Readiness`]; `Ambiguous` is dispatch's own, for an NSID that more than
 /// one provider implements, which is never resolved by installation order (ADR 027 §5).
+/// `RouteTargetMissing` is also dispatch's own: an operator's route (ADR 045) names a provider
+/// that does not claim the operation, so the call is neither served by another claimant nor
+/// refused for good, and is retried once the target registers.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NotReadyReason {
     Provider(Readiness),
     Ambiguous,
+    RouteTargetMissing { provider: String },
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
