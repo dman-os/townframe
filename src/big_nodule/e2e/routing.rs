@@ -12,6 +12,7 @@ use super::init::init_cartridge;
 use super::init::necessity;
 use super::init::node_hosting;
 use super::init::with_requests;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::request::Necessity;
@@ -22,6 +23,9 @@ use big_dispatch::ProviderState;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
+use big_dispatch_core::Route;
+use big_nodule_core::config::MethodRoute;
+use big_nodule_core::config::route_key;
 use big_nodule_core::protocol::NodulesError;
 use big_nodule_core::protocol::SetMethodRoute;
 use big_nodule_core::providers::Unresolved;
@@ -244,12 +248,8 @@ async fn routes_persist_across_a_restart_and_a_malformed_pattern_is_refused() {
     node.route(BETA_PING, Some(GAMMA)).await.unwrap();
     node.restart_nodules().await.unwrap();
     assert_eq!(
-        node.dispatch
-            .router
-            .routes()
-            .get(BETA_PING)
-            .map(String::as_str),
-        Some(GAMMA)
+        node.dispatch.router.routes().get(BETA_PING),
+        Some(&Route::Provider(GAMMA.to_owned()))
     );
     assert_eq!(node.served_by(BETA_PING), GAMMA);
 
@@ -265,6 +265,60 @@ async fn routes_persist_across_a_restart_and_a_malformed_pattern_is_refused() {
     assert!(matches!(
         node.route(BETA_PING, Some("")).await,
         Err(NodulesError::Rejected(_))
+    ));
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_damaged_route_datum_refuses_only_what_its_pattern_covers() {
+    let node = ambiguous_node().await;
+    let delta = example_cartridge!("delta");
+    node.install(serving_cartridge(delta, "org.example.delta.ping"))
+        .await;
+    assert_eq!(node.record(delta).await.readiness, Readiness::Ready);
+
+    // Any client holding a capability on the config document can write a datum the service did
+    // not validate: here a route naming an empty provider, which the datum's schema admits.
+    let pattern = "org.example.beta";
+    let receipt = node
+        .write_config_datums(
+            [(
+                route_key(pattern),
+                serde_json::json!({ "$type": MethodRoute::ID, "provider": "" }),
+            )]
+            .into(),
+        )
+        .await;
+
+    // The request the pattern covers is refused with the reason, and calls to what it covers
+    // are refused rather than sent to whichever provider claims them.
+    let record = node.reconciled_at(&receipt, ALPHA).await;
+    assert_eq!(record.readiness, Readiness::ProviderMissing);
+    assert!(
+        matches!(
+            &record.requests[BETA_PING].unresolved,
+            Some(Unresolved::RouteInvalid { reason }) if reason.contains(pattern) && reason.contains("empty")
+        ),
+        "{record:?}"
+    );
+    assert!(matches!(
+        node.invoke(node.operator(), BETA_PING, serde_json::json!({}))
+            .await,
+        Err(DispatchError::NotReady {
+            reason: NotReadyReason::RouteInvalid { .. }
+        })
+    ));
+
+    // Everything else keeps reconciling.
+    let unrelated = node.reconciled_at(&receipt, delta).await;
+    assert_eq!(unrelated.readiness, Readiness::Ready);
+    assert_eq!(unrelated.error, None);
+
+    // Clearing the datum through the service repairs it.
+    node.route(pattern, None).await.unwrap();
+    assert!(matches!(
+        node.record(ALPHA).await.requests[BETA_PING].unresolved,
+        Some(Unresolved::Ambiguous { .. })
     ));
     node.shutdown().await;
 }
