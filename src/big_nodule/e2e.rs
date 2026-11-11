@@ -91,13 +91,13 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+mod dev_takeover;
 mod dispatch;
 mod executor;
 mod init;
 mod resolution;
 mod routing;
 mod schemas;
-mod substitution;
 
 const NODULES_PATH: &str = "nodules";
 const NOTE: &str = "org.example.note";
@@ -239,6 +239,7 @@ struct Node {
     dispatch_authority: CapId,
     nodules: Nodules,
     executor: Option<Arc<dyn NoduleExecutor>>,
+    allow_slot_takeover: bool,
     stop: Option<StopToken>,
 }
 
@@ -259,6 +260,14 @@ async fn node() -> Node {
 }
 
 async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
+    node_with_takeover(executor, false).await
+}
+
+/// [`node_with`] on a node whose `dev.allow_slot_takeover` is `allow_slot_takeover`.
+async fn node_with_takeover(
+    executor: Option<Arc<dyn NoduleExecutor>>,
+    allow_slot_takeover: bool,
+) -> Node {
     let keyring = keyring_core::mock::Store::new().expect("mock keyring")
         as Arc<keyring_core::CredentialStore>;
     let secrets = SecretStore::boot_with_store(keyring)
@@ -373,6 +382,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         &sql,
         &schemas,
         executor.clone(),
+        allow_slot_takeover,
     )
     .await
     .expect("nodule service boot");
@@ -397,6 +407,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         dispatch_authority,
         nodules,
         executor,
+        allow_slot_takeover,
         stop: Some(stop),
     }
 }
@@ -452,6 +463,7 @@ async fn boot_nodules(
     sql: &TestDb,
     schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
+    allow_slot_takeover: bool,
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
         .service
@@ -472,12 +484,19 @@ async fn boot_nodules(
         dispatch_authority,
         executor,
         schemas: Arc::clone(schemas),
+        allow_slot_takeover,
         sql: (**sql).clone(),
     })
     .await
 }
 
 impl Node {
+    /// [`Self::restart_nodules`] on a node whose `dev.allow_slot_takeover` is now `allow`.
+    async fn restart_with_takeover(&mut self, allow: bool) {
+        self.allow_slot_takeover = allow;
+        self.restart_nodules().await.unwrap();
+    }
+
     /// Stop the nodule service alone, the way a node restart retires it before the authority.
     async fn restart_nodules(&mut self) -> Result<(), NodulesError> {
         self.stop.take().expect("booted").stop().await;
@@ -491,6 +510,7 @@ impl Node {
             &self.sql,
             &self.schemas,
             self.executor.clone(),
+            self.allow_slot_takeover,
         )
         .await?;
         self.nodules = nodules;
@@ -794,7 +814,7 @@ async fn an_enabled_cartridge_holds_its_authority_against_equal_and_nested_prefi
             }));
         rival.authority = Some(authority.into());
         // Installing a rival is not holding: the prefix is refused at enablement, which is what
-        // lets a substitute for a cartridge be installed beside it.
+        // lets a dev build for a cartridge be installed beside it.
         let rival_id = rival.id.clone();
         node.admit(operator, rival).await.unwrap();
         let refused = node
