@@ -130,22 +130,32 @@ impl NodeClient {
             tokio::task::spawn_blocking(move || waiting.wait_until_serving())
                 .await
                 .expect(ERROR_TOKIO)?;
-            if dir.probe_socket().await? == SocketState::Live {
-                let socket = match held.socket {
-                    Some(socket) => socket,
-                    None => dir.socket_path()?,
-                };
-                let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
-                    .map_err(|error| eyre::eyre!("{error:?}"))?;
-                return Ok(Self {
-                    transport: Transport::Socket(http),
-                    mode: if held.role == Some(LockRole::Daemon) {
-                        Mode::Daemon
-                    } else {
-                        Mode::InProcess
-                    },
-                    socket: SocketState::Live,
-                });
+            let socket = match &held.socket {
+                Some(socket) => socket.clone(),
+                None => dir.socket_path()?,
+            };
+            let http = service_client_native_rs::XrpcClient::unix(socket, MAX_BODY_BYTES)
+                .map_err(|error| eyre::eyre!("{error:?}"))?;
+            // The client connects on its first request, and a holder that has finished its own
+            // command exits once no connection is open. So the connection is opened now and
+            // kept: it is what keeps the holder up for this process's calls.
+            let url = http
+                .base_url()
+                .join(&format!("xrpc/{}", big_node::GET_NODE_INFO))?;
+            match http.http_client().get(url).send().await {
+                Ok(_) => {
+                    return Ok(Self {
+                        transport: Transport::Socket(http),
+                        mode: if held.role == Some(LockRole::Daemon) {
+                            Mode::Daemon
+                        } else {
+                            Mode::InProcess
+                        },
+                        socket: SocketState::Live,
+                    });
+                }
+                Err(error) if error.is_connect() => {}
+                Err(error) => return Err(error).wrap_err("reaching the node's holder"),
             }
             // No socket: the holder is shutting down, or it was only a process probing the lock.
             // Either way the lock is the signal, so wait for it to be free and try again.
