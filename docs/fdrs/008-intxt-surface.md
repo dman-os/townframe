@@ -1,97 +1,147 @@
-# FDR 008: The intxt surface, nouns and verbs
+# FDR 008: The intxt surface
 
-**Status:** Proposed (2026-11-11). This covers how people and agents use intxt (FDR 006): the things they name and the actions they take. It also fixes the use cases delivered this week. FDR 007 describes the review loop these verbs serve. Datum shapes are in ADRs 036, 039 and 040; working notes are in `docs/scratch/intxt-ledger.md`.
+**Status:** Proposed (2026-11-12, second draft). How people and agents use intxt (FDR 006): which commands exist, what each one means, and how someone finds them. It is derived from the use cases in `docs/scratch/intxt-use-cases.md` (U1–U16), walked through as the operator and as an agent. This week covers agent work and git. Review (comments, threads, verdicts) and GitHub are next week's, so their commands are only outlined here. Datum shapes are in ADRs 036, 040 and 041; working notes are in `docs/scratch/intxt-ledger.md`.
 
-## One surface for people and agents
+## Two kinds of commands
 
-People and agents use the same commands. An agent is a reader and writer like the operator, not a special client with its own interface (ledger D23). Three rules follow:
+intxt has two kinds of commands, and they are designed differently.
 
-- **Every verb is a command.** It runs under `day x intxt <verb>` today, the same way from a shell, a hook, an agent's tool call or a script. The plugin, the CLI and the node layer on each other: a plugin's hooks call the CLI, and the CLI calls the node. Nothing reaches the node by a path the CLI doesn't have.
-- **The output reads well as text, and `--json` gives the same content as data.** The default is short, plain text with stable ids that an agent can paste back into the next command. Nothing ever needs scraping.
-- **Things are named the same way everywhere.** An id printed by one verb is accepted by every other verb, and the same goes for a `file:line` or a turn number.
+- **Recording** moves raw data into the node: harness hooks, the ACP proxy, importing git history. Nothing in it calls for judgement. It runs unattended, writes datums directly (cabinet writes through the client library), and is designed for correctness and cost, not for typing. A person meets it twice: when setting it up, and in `status`.
+- **Packaging** (and, next week, **reviewing**) is where a person or an agent decides something: what a package of work is, what belongs in it, what to say about it. These commands are designed for people at a shell and for agents with only a shell, and they are the subject of this FDR.
 
-Recording costs an agent nothing (FDR 007). Agents spend tokens only on the verbs they choose: leaving a mark, writing a guide, replying.
+## How things are named
 
-## This week's use cases
+People and agents name things the way they already know them, never by internal ids:
 
-These are the use cases we deliver this week, and they don't depend on work in other lanes. Phone review is the claytxt lane's work; these use cases supply the data it shows.
+- **Git's own names:** a branch (`feat/refs`), a range (`main..feat/refs`), a commit (`a1b2c3d`).
+- **Paths** in the worktree, with globs (`src/big_repo/**`).
+- **Sessions:** `current` is the session being recorded in this worktree right now, and `last` is the most recently ended one. Any session can also be named by its short id. If `current` is ambiguous (two agents running in one worktree), the command fails and lists the candidates with their short ids.
+- **Turns** within a session: `<session>:20-45`.
 
-1. **Session recording.** A session is recorded as it runs, whichever harness it uses:
-   - **Claude Code**, through hooks. This works today.
-   - **Any harness that speaks ACP** (Agent Client Protocol), through a recorder that sits between the client and the agent and records the session from the protocol itself. This covers every ACP agent at once, without one adapter per harness.
+Things intxt creates (intxts, the items in them) have **short ids, as in jj**. Each object has a stable random id, rendered in an alphabet that can't be mistaken for a git hash. A short id is the shortest prefix that is unique among what is currently visible: the live intxts, or the items of the intxt being shown. Short ids grow only as needed and are always printed with the rest of the id dimmed. The same scheme serves dpaths, so it lives in a shared crate.
 
-   Tool outputs are recorded in their own document, apart from the conversation (ledger D47).
-2. **Guided review.** The agent leaves a reading path through its work, and the operator follows it:
-   - The path is ordered sections. Each says what changed and why, and points at the files, line ranges, commits and session turns that make it up.
-   - The agent can leave cheap marks while it works ("turns 20–45 implemented X because of Y") and turn them into the guide at the end. Nothing has to be finished in one pass.
-   - The operator responds per section or per line. The agent finds the responses it hasn't seen, replies and resolves.
-3. **Association with git.** An intxt knows which branches and commits its work went through:
-   - Each time a branch moves (commit, amend, rebase), that position becomes a new revision. Earlier revisions stay.
-   - A reader lists the revisions, sees what changed between two of them, and sees the commits each one is made of, without git.
-   - Existing work can be included by naming a branch or a commit range, not only by recording it live.
+## Walkthroughs
+
+Each one names who acts, what they know at that moment, what they type, and what they see.
+
+### W1. Recording from the start (U1)
+
+**Operator, once per machine:** `day x intxt install` installs intxt in the node. Recording is then set up per harness: Claude Code's hooks call `day x intxt capture`, and ACP clients launch agents through `day x intxt record -- <agent>`. Install prints the exact hook configuration to paste in.
+
+**Agent:** types nothing. Its sessions, the edits it makes in its worktrees (by any means, including `sed` and formatters) and its commits and branch moves are recorded as they happen. Nothing is shared and no intxt exists yet; recording only fills the node's capture drawer.
+
+**Operator, any time, in a worktree:** `day x intxt status` answers "what has been recorded here, and what is packaged?":
+
+```
+worktree ~/repos/townframe (feat/refs, 3 revisions since main)
+sessions recorded here:
+  k7  claude-code  running   started 14:02   42 turns
+  q2  claude-code  ended     11:30           18 turns
+in intxts: none
+  package it:  day x intxt new "<title>" --branch feat/refs
+```
+
+### W2. Packaging a piece of work (U1, U11)
+
+The work is done, or done enough to look at. The packager knows the branch, and perhaps that this session did it.
+
+**Operator:**
+```
+$ day x intxt new "Datum refs move to dtxt" --branch feat/refs
+intxt m4 "Datum refs move to dtxt"
+  branch feat/refs   3 revisions, 7 commits since main, 23 files
+  sessions           k7, q2 (the sessions that changed files on feat/refs)
+  undo: day x intxt drop m4
+```
+
+**Agent, at the end of a task** (its skill asks it to): the same command, plus `--description` written by the agent. The agent knows its branch from git; it doesn't need its session id, because the sessions come with the branch.
+
+What `--branch` includes is decided by the command, not by the packager: the branch's revisions (each recorded position), the commits between its base and each revision, the files those commits and the uncommitted work touched, and the sessions whose edits landed on the branch. If the branch was never recorded live (W6), its history is imported first, which is recording, so it needs no confirmation.
+
+The intxt **follows its branch**: later moves of `feat/refs` (new commits, amends, rebases) become new revisions in it, and sessions that work on the branch join it. `--snapshot` makes an intxt that stops at the branch's current position.
+
+### W3. Adding something the defaults missed (U3)
+
+A session explored the design on `main` before the branch existed, so `--branch` didn't pick it up.
+
+```
+$ day x intxt add m4 --session q9
+added to m4: session q9 (claude-code, 11 turns, ended yesterday 18:40)
+  undo: day x intxt rm m4 q9
+```
+
+`add` takes exactly one kind of thing per flag: `--session`, `--branch`, `--commits <range>`. Each flag's help says what it brings with it (`--session` brings the session; `--commits` brings those commits and the files they touch). Adding something already in the intxt changes nothing and says so.
+
+`rm m4 <item>` removes an item by the short id `show` printed. It stops further sharing; copies already synced to others stay with them (FDR 007).
+
+### W4. Carving a large change (U4)
+
+A 30,000-line change on one branch is really four changes. The operator, or an agent asked to do it, makes four intxts from the one:
+
+```
+$ day x intxt new "big_repo snapshot loading" --from m4 --paths 'src/big_repo/**'
+intxt r8 "big_repo snapshot loading"
+  from m4: 2 revisions, 4 commits, 9 files under src/big_repo, sessions k7 (turns 3-19)
+  undo: day x intxt drop r8
+$ day x intxt link r8 --stacks-on m4
+```
+
+`--from` with `--paths`, `--commits` or `--turns` selects part of an existing intxt. Nothing is copied or rewritten: the new intxt references the same recorded work, so comments on either land on the same code. The source intxt stays as it was, and dropping it afterwards is a separate decision.
+
+Relations between intxts are `link` with one of `--stacks-on`, `--follows-up`, `--supersedes`. An intxt never contains another.
+
+### W5. Handing off to a fresh agent (U14)
+
+A new session, or a teammate's agent, has to pick up m4.
+
+```
+$ day x intxt show m4
+m4 "Datum refs move to dtxt"   follows feat/refs   stacks on: none
+  description …
+items (by time):
+  q9  session    claude-code   yesterday 18:40   11 turns   "explore dtxt refs"
+  k7  session    claude-code   today 14:02       42 turns   running
+  v1  revision   feat/refs @ 3f2a9c1   today 15:10   4 commits
+  v2  revision   feat/refs @ 8be01d4   today 16:44   amend of v1
+  …
+```
+
+`show` sorts items by time by default; `--by file`, `--by kind` and `--by session` sort differently. An item that came from another intxt shows where it came from. To go deeper: `day x intxt read <item>` prints a session as turns (`--turns 20-45`), a revision as its commits and diff, a file at a revision. `--json` on any of these gives the same content as data.
+
+### W6. A branch that wasn't recorded (U11)
+
+Work done before intxt was installed, or on another machine. `--branch` and `--commits` import the git history they need (commits, the branch's current position, file contents) as recording does. There are no sessions, since none were recorded, and `show` says so. Live branch moves after that are recorded as usual.
+
+## Finding commands and flags
+
+- `day x intxt --help` groups commands as **Packaging** (`new`, `add`, `rm`, `drop`, `link`, `show`, `read`, `status`, `list`), **Review** (next week) and **Recording, run by hooks** (`install`, `capture`, `record`). Recording comes last, so it doesn't crowd what people type.
+- Every command's help ends with two or three real examples.
+- Completion covers short ids, branch names and session names.
+- `status` and every error suggest the next command, with the arguments filled in where they are known.
+- Every command that changes something prints the change and the command that undoes it.
 
 ## Nouns
 
-| Noun | What it is |
+| Noun | Meaning |
 | --- | --- |
-| **intxt** | A package of development context with a title and a description (FDR 006). |
-| **part** | Something an intxt includes: a session, a worktree or a repository. One part can be in several intxts. |
-| **session** | An agent session as a readable record: turns, messages, tool calls and plans. Subagents are sessions of their own. |
-| **turn** | One prompt and everything the agent did in answer to it. Numbered within its session. |
-| **tool call** | One action an agent took, with its kind, its status and where it acted. |
-| **tool output** | What a tool call brought back from the environment, kept in a separate document (D47). |
-| **worktree** | A checkout the work happened in, with every change to its files. |
-| **repo** | A git repository, identified by its root commit, wherever it is cloned. |
-| **file** | A file in a worktree at some point in time: text that merges line by line, or a blob. |
-| **commit** / **branch** | Git's own commits and refs, as observed. jj changes are recorded alongside. |
-| **revision** | One position of a branch the intxt follows, with the commits on it and the files as they stood. |
-| **mark** | A short note on a stretch of work, left while working: a run of turns, an edit, a commit. |
-| **guide** | An ordered set of sections forming the reading path through an intxt. |
-| **section** | One step of a guide: a title, why it matters, and what it points at. |
-| **comment** | A note about anything an intxt holds, at a specific version. Replies form a **thread**, which can be resolved. |
-| **seen** | What one reader has already seen, so "new to me" is answerable. |
+| **intxt** | A package of work, with a title and description. It follows a branch unless made with `--snapshot`. |
+| **item** | One thing an intxt includes: a session, a revision, commits, files. Items come from recording and are shared, not copied. |
+| **session** | An agent session as recorded: turns, messages, tool calls, plans. |
+| **revision** | One recorded position of a branch: its commits since the base, and the files as they stood. |
+| **link** | A relation from one intxt to another: stacks on, follows up, supersedes. |
 
-Every noun that can be pointed at can be the target of a comment or a section: a line range, a file, a commit, a turn, a stretch of turns, a tool call, a section, another comment.
-
-## Verbs
-
-### Recording
-- `capture`: what a harness hook calls with its event. It records the session and the worktrees it touches. It runs in the hook and never in the agent's context.
-- `record -- <agent command>`: runs an ACP agent behind the recorder. The ACP client launches this in place of the agent.
-- `import <branch | range>`: records existing git history as a worktree's revisions, for work that wasn't captured live.
-
-### Making an intxt
-- `new <title> [--description]`: creates an intxt and prints its id.
-- `add <intxt> <part>` and `remove <intxt> <part>`: include or drop a session, a worktree or a repo. Removing stops further sharing but can't recall copies already pulled (FDR 007).
-- `list` and `show <intxt>`: what exists, and what one intxt holds.
-
-### Guiding
-- `mark <target> <text>`: leaves a mark on a stretch of turns, an edit or a commit. It's meant to cost one short tool call.
-- `guide <intxt>`: prints the guide. With `--edit` it reads a guide in plain text (sections, each with a title, a why and its targets) and writes it. A guide can be revised any number of times; earlier comments stay attached to the sections they were made on.
-
-### Reviewing
-- `revisions <intxt>`: lists the revisions, with their commits.
-- `diff <intxt> [<rev> [<rev>]]`: what changed in a revision, or between two.
-- `read <target>`: a file at a revision, a turn, a tool call, a section.
-- `comment <target> <text>` and `reply <comment> <text>`: start a thread or answer one.
-- `resolve <comment>` and `reopen <comment>`: close or reopen a thread.
-- `inbox <intxt>`: the comments this reader hasn't seen, each with what it points at. Reading it marks them seen. `--wait` blocks until something new arrives, which is how an agent waits for feedback without being interrupted.
+Items are sorted, not authored into an order. There is no story or guide layer: reading order is a choice of sort.
 
 ## Behaviour that must hold
 
-- An agent can do everything in this FDR with shell commands alone.
-- Every target an output prints can be passed back unchanged as the target of another verb.
-- `inbox` never loses a comment: one written while a reader was reading appears on that reader's next call.
-- The ACP recorder is transparent. The client and the agent behave the same with or without it, and if recording fails the session continues, with the failure reported.
-
-## Not this week
-
-- Phone and desktop UI (claytxt).
-- Approve / request changes, GitHub publishing, and check results (FDR 007's exclusions).
-- `why <file:line>` (U8). It needs an index from code to edits, which is a later ADR.
-- Pairing the plugin with the node as its own identity. The node lane is designing that (ledger D49), and capture keeps its current identity until it lands.
+- A person can package work with one command they can guess from `status`.
+- No command needs an internal id. Short ids are only for things intxt itself prints.
+- Every change can be undone with the command it prints.
+- Including work in an intxt shares only the documents that work lives in, not the rest of the node's recordings. This constrains document granularity (ADR 040 amendment, to come): a long-lived document that every intxt would reference, such as one holding a project's whole commit history or a file's every edit, is not allowed.
 
 ## Open questions
 
-1. **What does `--wait` wait on?** A reader needs to know when a document it can read changes. If the cabinet can't report that yet, `--wait` polls the intxt's heads at a modest interval until it can, and the verb's behaviour doesn't change.
-2. **Who writes the guide by default?** The agent, prompted by a skill when it finishes a piece of work, or the operator asking for one? Both use the same verb; the question is what the plugin nudges.
+1. **Following:** should following its branch be the default for an intxt (proposed), with `--snapshot` the exception?
+2. **Which sessions a branch brings:** the sessions whose edits landed on the branch (proposed), or also sessions that only read it?
+3. **Carving by turns:** when `--from … --turns` takes part of a session, does the new intxt reference the whole session document (simple, more shared), or does that need a finer document layout (see the granularity constraint)?
+4. **The noun:** is it "item", or another word?
