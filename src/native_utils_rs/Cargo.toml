@@ -10,7 +10,12 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 utils_rs.workspace = true
+
+#
+# misc
 futures.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }

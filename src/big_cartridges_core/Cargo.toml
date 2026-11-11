@@ -17,15 +17,20 @@ schemars = ["dep:schemars", "big_cabinet_core/schemars", "method_core/schemars"]
 test-support = []
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 big_blobs_core.workspace = true
 big_cabinet_core.workspace = true
 macros.workspace = true
 service_core_rs.workspace = true
+utils_rs = { workspace = true, features = ["hash"] }
+
+#
+# misc
 # `declare_service_protocol!` expands to `irpc` derives that name both crates directly.
 irpc.workspace = true
 tracing.workspace = true
-utils_rs = { workspace = true, features = ["hash"] }
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true

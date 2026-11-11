@@ -11,10 +11,15 @@ name = "pauperfuse"
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 utils_rs = { workspace = true, default-features = false }
+sqlite_rs.workspace = true
+
+#
+# misc
 async-trait.workspace = true
 blake3.workspace = true
-sqlite_rs.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 
 [dev-dependencies]
