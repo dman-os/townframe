@@ -856,6 +856,11 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
     - *daybook_*/plug_*:* still needed for the workflow engine (`rt.rs` plus `wflow*`), the plug routines (plabels, dayledger), daybook's blob pin/encryption pipeline (to compare against big_blobs before deleting), sync bootstrap/clone/tickets, tables/progress/index and the facet cache, image tools and embeddings, and `daybook_ffi` for the Kotlin app. `daybook_types` is still used by clay/dayframe crates.
       - Proposed order: move clay/dayframe off `daybook_types`; decide workflows (cartridge feature or wflow); port or drop the plug routines; drop `daybook_ffi` with `daybook_compose`; then delete the rest.
       - Open for the operator: is the Kotlin app dropped outright or replaced by dayframe?
+  - **Operator answers (2026-11-12):**
+    - Dayframe replaces the Kotlin app. daybook_ffi and daybook_compose go together once Dayframe covers it, and the daybook_*/plug_* removal order above stands.
+    - Crate naming: the `_rs` suffix means the crate is one language's implementation of something we expect to write in other languages too. TypeScript mirrors of our scripts and service crates are coming soon. Any rename of the method/service crates must keep `_rs` on crates that will have mirrors (the service protocol and client crates, probably `method_core` too) and drop it only on Rust-only internals. No rename yet: the manager proposes one with that rule.
+    - big_repo outside the cabinet: services other than the cabinet should use the docs service, not big_repo. The gap the operator saw is big_blobs reading documents through big_repo's Automerge frontier worker (`big_blobs/workers.rs:332,435`). Groups A–D above are the work list. The docs-service materialization watch (B) closes the gap named.
+    - The `-next` PR stack (8 layers: docs; cabinet leftovers; blobs over the wire; a1 + watch + typed errors; nodule methods + privileged; ADR 045 routes; `day` reshape; holder serves) is approved.
 
 ## Deferred
 
