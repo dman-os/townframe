@@ -76,6 +76,18 @@ use wasmtime_wasi::WasiView;
 #[error("guest presentation call suspended on its first poll")]
 pub(crate) struct Suspended;
 
+/// Why a guest entry failed, for the fault the supervisor reports. Wasmtime's error is a chain:
+/// the outermost link is only the context `error while executing at wasm backtrace:` (whose
+/// text holds the guest frames) and the root cause is the trap itself (`all fuel consumed by
+/// WebAssembly`, `wasm trap: unreachable`, or a host error the guest called into). `{:#}` of
+/// the error prints just the outermost link, which is how a trap used to read as no reason at
+/// all, so the chain is walked here, root cause first.
+pub(crate) fn trap_reason(error: &wasmtime::Error) -> String {
+    let mut links = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+    links.reverse();
+    links.join("; ")
+}
+
 /// Test probe: how many presentation calls hit [`Suspended`] (i.e. returned `Pending`)
 /// rather than completing or failing on the first poll. The W2 spike asserts a guest that
 /// blocks inside `dispatch` fails with the engine's `CannotBlock` (`Ready(Err)`) and never
@@ -278,7 +290,8 @@ impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
             }
             Err(trap) => {
                 drop(reply.send(Err(CallError::Provider(format!(
-                    "guest trapped during call: {trap:#}"
+                    "guest trapped during call: {}",
+                    trap_reason(&trap)
                 )))));
                 Err(trap)
             }
@@ -842,12 +855,17 @@ impl WasmIncarnation {
             })
             .await
             .and_then(|trapped| trapped)
-            .map_err(|trap| format!("guest trapped while closing: {trap:#}"));
+            .map_err(|trap| format!("guest trapped while closing: {}", trap_reason(&trap)));
         self.refuel();
         let dropped = root
             .resource_drop_async(&mut self.store)
             .await
-            .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
+            .map_err(|trap| {
+                format!(
+                    "guest trapped dropping its instance root: {}",
+                    trap_reason(&trap)
+                )
+            });
         self.publications.clear();
         closed??;
         dropped
@@ -940,13 +958,17 @@ impl WasmRuntime {
                             let Some(active) = guard.as_mut() else {
                                 return;
                             };
-                            let trapped = active.tick().await.is_err();
-                            if trapped {
+                            let trapped = active.tick().await.err();
+                            if trapped.is_some() {
                                 guard.take();
                             }
                             trapped
                         };
-                        if trapped {
+                        if let Some(trap) = trapped {
+                            pump_host.record_fault(
+                                &pump_instance,
+                                format!("guest trapped in its event loop: {}", trap_reason(&trap)),
+                            );
                             if pump_host.check(&pump_instance).is_ok() {
                                 pump_host.close_instance(&pump_instance).unwrap();
                             }
@@ -1068,8 +1090,12 @@ impl WasmRuntime {
                         prevent_default: response.prevent_default,
                         stop_propagation: response.stop_propagation,
                     },
-                    Err(_trap) => {
+                    Err(trap) => {
                         dispatch_writer.withdraw();
+                        dispatch_host.record_fault(
+                            &dispatch_instance,
+                            format!("guest trapped during dispatch: {}", trap_reason(&trap)),
+                        );
                         dispatch_host.close_instance(&dispatch_instance).unwrap();
                         EventResponse::default()
                     }
@@ -1095,23 +1121,27 @@ impl WasmRuntime {
                     } else {
                         Ok(())
                     };
-                    if outcome.is_err() {
+                    if let Err(trap) = outcome {
                         guard.take();
-                        true
+                        Some(format!(
+                            "guest trapped during unmount: {}",
+                            trap_reason(&trap)
+                        ))
                     } else {
                         wit_presentation::HostSurface::drop(
                             active.store.data_mut(),
                             Resource::new_own(surface_rep),
                         )
                         .expect("mounted surface must remain in the host resource table");
-                        false
+                        None
                     }
                 } else {
-                    false
+                    None
                 };
                 drop(guard);
                 drop_writer.withdraw();
-                if trapped {
+                if let Some(cause) = trapped {
+                    drop_host.record_fault(&drop_instance, cause);
                     drop_host.close_instance(&drop_instance).unwrap();
                 }
             },
@@ -1193,10 +1223,14 @@ impl WasmRuntime {
                     }
                 })
             }
-            Err(_trap) => {
+            Err(trap) => {
                 guard.take();
                 drop(guard);
                 writer.withdraw();
+                self.host.record_fault(
+                    instance,
+                    format!("guest trapped during mount: {}", trap_reason(&trap)),
+                );
                 self.host.close_instance(instance).unwrap();
                 Err(PresentationError::Revoked)
             }
