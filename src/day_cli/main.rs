@@ -346,7 +346,13 @@ mod tests {
                     command: cmds::intxt::IntxtCommands::Install { handler },
                 }),
             ..
-        } = parse(&["x", "intxt", "install", "--handler", "intxt_nodule_guest.wasm"])
+        } = parse(&[
+            "x",
+            "intxt",
+            "install",
+            "--handler",
+            "intxt_nodule_guest.wasm",
+        ])
         else {
             panic!("`day x intxt install` is the intxt command");
         };

@@ -200,9 +200,7 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
     )
     .await?;
 
-    let cartridge = intxt_core::cartridge::cartridge(
-        intxt_core::cartridge::handler_artifact(wasm),
-    );
+    let cartridge = intxt_core::cartridge::cartridge(intxt_core::cartridge::handler_artifact(wasm));
     let cartridge_id = cartridge.id.clone();
     call(
         client,
@@ -217,7 +215,9 @@ pub(crate) async fn install(client: &NodeClient, wasm: &[u8]) -> Res<NoduleRecor
         SetNoduleMethodGrants {
             cartridge_id: cartridge_id.clone(),
             methods: DispatchScope {
-                operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+                operations: intxt_core::methods::REQUIRED_OPERATIONS
+                    .map(str::to_owned)
+                    .into(),
                 ..DispatchScope::default()
             },
         },

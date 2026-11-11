@@ -49,14 +49,14 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 /// A node that admitted intxt's cartridge, serving its handler natively, with the methods the
 /// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
-    let cartridge = intxt_core::cartridge::cartridge(
-        intxt_core::cartridge::handler_artifact(
-            b"placeholder: the native test harness never reads the handler bytes",
-        ),
-    );
+    let cartridge = intxt_core::cartridge::cartridge(intxt_core::cartridge::handler_artifact(
+        b"placeholder: the native test harness never reads the handler bytes",
+    ));
     let id = cartridge.id.clone();
     let methods = DispatchScope {
-        operations: intxt_core::methods::REQUIRED_OPERATIONS.map(str::to_owned).into(),
+        operations: intxt_core::methods::REQUIRED_OPERATIONS
+            .map(str::to_owned)
+            .into(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()

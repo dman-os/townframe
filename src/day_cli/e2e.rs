@@ -488,16 +488,18 @@ mod library {
             })
     }
 
-    /// An initialized node whose `node.json` lets nodules be granted what intxt's handler calls
-    /// (the operator's to configure before the node boots), with the real handler component
-    /// installed the way `day x intxt install --handler` does and loaded by the node's wasm
-    /// executor.
+    /// Runs `body` against an initialized node with the real handler component installed the way
+    /// `day x intxt install --handler` does and loaded by the node's wasm executor, then stops the
+    /// node on every exit path. A failed assertion in `body` (or in the install) still stops the
+    /// node before the panic resumes, so its owner tasks shut down in order and the first failure
+    /// is the only one reported.
     ///
     /// Needs the component, built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml
     /// -p intxt_nodule_guest --target wasm32-wasip3 --release`.
-    pub(super) async fn intxt_node() -> (tempfile::TempDir, NodeClient) {
+    pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &NodeClient)) {
         use crate::cmds::intxt;
         use big_dispatch_core::Readiness;
+        use utils_rs::prelude::FutureExt;
 
         let (tmp, dir) = new_node();
 
@@ -509,10 +511,18 @@ mod library {
             )
         });
         let client = NodeClient::connect(&dir).await.unwrap();
-        let record = intxt::install(&client, &wasm).await.unwrap();
-        assert_eq!(record.readiness, Readiness::Ready);
-        assert!(record.methods.unwrap().granted);
-        (tmp, client)
+        let outcome = std::panic::AssertUnwindSafe(async {
+            let record = intxt::install(&client, &wasm).await.unwrap();
+            assert_eq!(record.readiness, Readiness::Ready);
+            assert!(record.methods.unwrap().granted);
+            body(&tmp, &client).await;
+        })
+        .catch_unwind()
+        .await;
+        client.stop().await.unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     /// A document capability the operator mints for `scope`.
@@ -599,33 +609,34 @@ mod library {
     async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
         use big_cabinet_core::drawer::protocol::DrawerId;
 
-        let (_tmp, client) = intxt_node().await;
-        let created = day_x(
-            &client,
-            "org.example.intxt.createIntxt",
-            json!({"title": "Datum references move to dtxt:"}),
-        )
+        with_intxt_node(async |_tmp, client| {
+            let created = day_x(
+                &client,
+                "org.example.intxt.createIntxt",
+                json!({"title": "Datum references move to dtxt:"}),
+            )
+            .await;
+            let drawer: DrawerId = created["drawerId"].as_str().unwrap().parse().unwrap();
+            let accepted = |key: &str| {
+                let client = &client;
+                let drawer = &drawer;
+                let key = key.parse().unwrap();
+                async move { read_at(client, drawer, &key).await.unwrap().1 }
+            };
+            assert_eq!(
+                accepted("org.example.intxt/main").await,
+                json!({"empty": true})
+            );
+            assert_eq!(
+                accepted("org.example.intxt.title/main").await,
+                json!({"title": "Datum references move to dtxt:"})
+            );
+            assert_eq!(
+                accepted("org.example.intxt.body/main").await,
+                json!({"order": []})
+            );
+        })
         .await;
-        let drawer: DrawerId = created["drawerId"].as_str().unwrap().parse().unwrap();
-        let accepted = |key: &str| {
-            let client = &client;
-            let drawer = &drawer;
-            let key = key.parse().unwrap();
-            async move { read_at(client, drawer, &key).await.unwrap().1 }
-        };
-        assert_eq!(
-            accepted("org.example.intxt/main").await,
-            json!({"empty": true})
-        );
-        assert_eq!(
-            accepted("org.example.intxt.title/main").await,
-            json!({"title": "Datum references move to dtxt:"})
-        );
-        assert_eq!(
-            accepted("org.example.intxt.body/main").await,
-            json!({"order": []})
-        );
-        client.stop().await.unwrap();
     }
 
     /// Runs `git` in `dir` with nothing taken from the machine.
@@ -665,184 +676,185 @@ mod library {
         use intxt_core::work;
         use std::io::Write;
 
-        let (tmp, client) = intxt_node().await;
-        let node_root = tmp.path().join("node");
-        let base = tmp.path().canonicalize().unwrap();
-        let repo = base.join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
-        git(&repo, &["add", "-A"]);
-        git(&repo, &["commit", "-q", "-m", "first"]);
-        let transcript = base.join("claude/s1.jsonl");
-        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        let mut file = std::fs::File::create(&transcript).unwrap();
-        for record in [
-            json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "2026-11-10T10:00:00Z",
-                   "cwd": repo, "sessionId": "s1", "message": {"role": "user", "content": "make files"}}),
-            json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": "2026-11-10T10:00:01Z",
-                   "cwd": repo, "sessionId": "s1",
-                   "message": {"id": "m-t1", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
-                               "input": {"command": "make files"}}]}}),
-        ] {
-            writeln!(file, "{record}").unwrap();
-        }
-        let hook = |event: &str, tool: bool| {
-            let mut input = json!({
-                "session_id": "s1",
-                "transcript_path": transcript,
-                "cwd": repo,
-                "hook_event_name": event,
-            });
-            if tool {
-                input["tool_name"] = json!("Bash");
-                input["tool_use_id"] = json!("t1");
-                input["tool_input"] = json!({"command": "make files"});
+        with_intxt_node(async |tmp, client| {
+            let node_root = tmp.path().join("node");
+            let base = tmp.path().canonicalize().unwrap();
+            let repo = base.join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", "first"]);
+            let transcript = base.join("claude/s1.jsonl");
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            let mut file = std::fs::File::create(&transcript).unwrap();
+            for record in [
+                json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "2026-11-10T10:00:00Z",
+                       "cwd": repo, "sessionId": "s1", "message": {"role": "user", "content": "make files"}}),
+                json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": "2026-11-10T10:00:01Z",
+                       "cwd": repo, "sessionId": "s1",
+                       "message": {"id": "m-t1", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                   "input": {"command": "make files"}}]}}),
+            ] {
+                writeln!(file, "{record}").unwrap();
             }
-            input.to_string().into_bytes()
-        };
+            let hook = |event: &str, tool: bool| {
+                let mut input = json!({
+                    "session_id": "s1",
+                    "transcript_path": transcript,
+                    "cwd": repo,
+                    "hook_event_name": event,
+                });
+                if tool {
+                    input["tool_name"] = json!("Bash");
+                    input["tool_use_id"] = json!("t1");
+                    input["tool_input"] = json!({"command": "make files"});
+                }
+                input.to_string().into_bytes()
+            };
 
-        let started = capture::run(&client, &node_root, &hook("SessionStart", false))
-            .await
-            .unwrap();
-        assert!(started.recorded.is_some());
-        capture::run(&client, &node_root, &hook("PreToolUse", true))
-            .await
-            .unwrap();
-        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
-        let binary = [0u8, 159, 146, 150, 1, 2];
-        std::fs::write(repo.join("pic.png"), binary).unwrap();
-        let edited = capture::run(&client, &node_root, &hook("PostToolUse", true))
-            .await
-            .unwrap();
-        assert_eq!(edited.blobs_put, 1);
-        assert_eq!(edited.uncaused_tool_calls, 0);
-        assert!(edited.stale_blobs.is_empty() && edited.oversize_blobs.is_empty());
-        let recorded = edited.recorded.unwrap();
-        let root = repo.display().to_string();
-        let docs = &recorded.worktrees[&root].docs;
+            let started = capture::run(&client, &node_root, &hook("SessionStart", false))
+                .await
+                .unwrap();
+            assert!(started.recorded.is_some());
+            capture::run(&client, &node_root, &hook("PreToolUse", true))
+                .await
+                .unwrap();
+            std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+            let binary = [0u8, 159, 146, 150, 1, 2];
+            std::fs::write(repo.join("pic.png"), binary).unwrap();
+            let edited = capture::run(&client, &node_root, &hook("PostToolUse", true))
+                .await
+                .unwrap();
+            assert_eq!(edited.blobs_put, 1);
+            assert_eq!(edited.uncaused_tool_calls, 0);
+            assert!(edited.stale_blobs.is_empty() && edited.oversize_blobs.is_empty());
+            let recorded = edited.recorded.unwrap();
+            let root = repo.display().to_string();
+            let docs = &recorded.worktrees[&root].docs;
 
-        // The worktree's first op is the edit this call made, caused by the call.
-        let worktree: work::Worktree = serde_json::from_value(
-            read_at(
+            // The worktree's first op is the edit this call made, caused by the call.
+            let worktree: work::Worktree = serde_json::from_value(
+                read_at(
+                    &client,
+                    &docs.worktree.as_ref().unwrap().parse::<DocId>().unwrap(),
+                    &format!("{}/main", work::Worktree::ID).parse().unwrap(),
+                )
+                .await
+                .unwrap()
+                .1,
+            )
+            .unwrap();
+            let log: DocId = worktree.op_logs[0].doc.parse().unwrap();
+            let op = read_at(
                 &client,
-                &docs.worktree.as_ref().unwrap().parse::<DocId>().unwrap(),
-                &format!("{}/main", work::Worktree::ID).parse().unwrap(),
+                &log,
+                &format!("{}/0", work::WorktreeOp::ID).parse().unwrap(),
             )
             .await
             .unwrap()
-            .1,
-        )
-        .unwrap();
-        let log: DocId = worktree.op_logs[0].doc.parse().unwrap();
-        let op = read_at(
-            &client,
-            &log,
-            &format!("{}/0", work::WorktreeOp::ID).parse().unwrap(),
-        )
-        .await
-        .unwrap()
-        .1;
-        assert_eq!(op["kind"], "edit");
-        assert!(
-            op["cause"].as_str().unwrap().contains("promptTurn/u1"),
-            "{op}"
-        );
-        assert!(op["files"].as_object().unwrap().contains_key("pic.png"));
-        assert!(op["files"].as_object().unwrap().contains_key("a.txt"));
+            .1;
+            assert_eq!(op["kind"], "edit");
+            assert!(
+                op["cause"].as_str().unwrap().contains("promptTurn/u1"),
+                "{op}"
+            );
+            assert!(op["files"].as_object().unwrap().contains_key("pic.png"));
+            assert!(op["files"].as_object().unwrap().contains_key("a.txt"));
 
-        // The binary file's document holds the blob datum, and its `File` points at it.
-        let picture: DocId = worktree.files["pic.png"].parse().unwrap();
-        let blob = read_at(
-            &client,
-            &picture,
-            &"org.example.daybook.blob/main".parse().unwrap(),
-        )
-        .await
-        .unwrap()
-        .1;
-        assert_eq!(blob["mime"], "image/png");
-        assert_eq!(blob["lengthOctets"], binary.len());
-        assert!(blob["digest"].as_str().unwrap().starts_with('z'));
-        let file = read_at(
-            &client,
-            &picture,
-            &format!("{}/main", work::File::ID).parse().unwrap(),
-        )
-        .await
-        .unwrap()
-        .1;
-        assert_eq!(
-            file["blob"],
-            "dtxt:datum:self/org.example.daybook.blob/main"
-        );
+            // The binary file's document holds the blob datum, and its `File` points at it.
+            let picture: DocId = worktree.files["pic.png"].parse().unwrap();
+            let blob = read_at(
+                &client,
+                &picture,
+                &"org.example.daybook.blob/main".parse().unwrap(),
+            )
+            .await
+            .unwrap()
+            .1;
+            assert_eq!(blob["mime"], "image/png");
+            assert_eq!(blob["lengthOctets"], binary.len());
+            assert!(blob["digest"].as_str().unwrap().starts_with('z'));
+            let file = read_at(
+                &client,
+                &picture,
+                &format!("{}/main", work::File::ID).parse().unwrap(),
+            )
+            .await
+            .unwrap()
+            .1;
+            assert_eq!(
+                file["blob"],
+                "dtxt:datum:self/org.example.daybook.blob/main"
+            );
 
-        // The text file is a note.
-        let text: DocId = worktree.files["a.txt"].parse().unwrap();
-        let note = read_at(
-            &client,
-            &text,
-            &format!("{}/main", intxt_core::generic::Note::ID)
-                .parse()
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-        .1;
-        assert_eq!(note["content"], "one\ntwo\n");
+            // The text file is a note.
+            let text: DocId = worktree.files["a.txt"].parse().unwrap();
+            let note = read_at(
+                &client,
+                &text,
+                &format!("{}/main", intxt_core::generic::Note::ID)
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .1;
+            assert_eq!(note["content"], "one\ntwo\n");
 
-        // A hook with nothing new records nothing; the machine and the capture drawer are the
-        // node's, remembered for the next hook.
-        let stopped = capture::run(&client, &node_root, &hook("Stop", false))
+            // A hook with nothing new records nothing; the machine and the capture drawer are the
+            // node's, remembered for the next hook.
+            let stopped = capture::run(&client, &node_root, &hook("Stop", false))
+                .await
+                .unwrap();
+            assert!(stopped.recorded.is_none(), "{stopped:?}");
+            let stored: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(node_root.join("intxt/capture.json")).unwrap())
+                    .unwrap();
+            assert!(
+                stored["machine"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("dtxt:actor:")
+            );
+            let drawer: DrawerId = stored["drawer"].as_str().unwrap().parse().unwrap();
+            let listing = crate::cmds::intxt::call(
+                &client,
+                MintDrawerCapability {
+                    scope: big_cabinet_core::drawer::protocol::DrawerScope {
+                        drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
+                        create: false,
+                    },
+                    rights: big_cabinet_core::authority::Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap()
+            .capability_id;
+            let listed = crate::cmds::intxt::call(
+                &client,
+                ListDocs {
+                    capability: listing,
+                    drawer_id: drawer,
+                    offset: 0,
+                    limit: None,
+                },
+            )
             .await
             .unwrap();
-        assert!(stopped.recorded.is_none(), "{stopped:?}");
-        let stored: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(node_root.join("intxt/capture.json")).unwrap())
-                .unwrap();
-        assert!(
-            stored["machine"]
-                .as_str()
-                .unwrap()
-                .starts_with("dtxt:actor:")
-        );
-        let drawer: DrawerId = stored["drawer"].as_str().unwrap().parse().unwrap();
-        let listing = crate::cmds::intxt::call(
-            &client,
-            MintDrawerCapability {
-                scope: big_cabinet_core::drawer::protocol::DrawerScope {
-                    drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
-                    create: false,
-                },
-                rights: big_cabinet_core::authority::Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap()
-        .capability_id;
-        let listed = crate::cmds::intxt::call(
-            &client,
-            ListDocs {
-                capability: listing,
-                drawer_id: drawer,
-                offset: 0,
-                limit: None,
-            },
-        )
-        .await
-        .unwrap();
-        for doc in [
-            docs.worktree.as_ref().unwrap(),
-            recorded.session.as_ref().unwrap(),
-        ] {
-            let doc: DocId = doc.parse().unwrap();
-            assert!(
-                listed.docs.iter().any(|listed| listed.doc_id == doc),
-                "{doc} is not in the capture drawer: {listed:?}"
-            );
-        }
-        client.stop().await.unwrap();
+            for doc in [
+                docs.worktree.as_ref().unwrap(),
+                recorded.session.as_ref().unwrap(),
+            ] {
+                let doc: DocId = doc.parse().unwrap();
+                assert!(
+                    listed.docs.iter().any(|listed| listed.doc_id == doc),
+                    "{doc} is not in the capture drawer: {listed:?}"
+                );
+            }
+        })
+        .await;
     }
 
     /// `capture` is for the daemon: with none serving, its entry point refuses, naming the command
@@ -873,161 +885,162 @@ mod library {
         use big_cabinet_core::drawer::protocol::MintDrawerCapability;
         use big_cabinet_core::reference::DatumReference;
 
-        let (_tmp, client) = intxt_node().await;
-        let create = |title: &'static str| {
-            let client = &client;
-            async move {
-                let created = day_x(
-                    client,
-                    "org.example.intxt.createIntxt",
-                    json!({ "title": title }),
-                )
-                .await;
-                created["drawerId"]
-                    .as_str()
-                    .unwrap()
-                    .parse::<DrawerId>()
-                    .unwrap()
-            }
-        };
-        let captures = create("captures").await;
-        let review = create("review").await;
-        let capture = |tag: &str, value: serde_json::Value| {
-            let client = &client;
-            let captures = &captures;
-            let tag = tag.to_owned();
-            async move {
-                let placement = format!("drawer {captures}");
-                let capability = doc_capability(
-                    client,
-                    DocScope {
-                        create: [placement.clone()].into(),
-                        ..DocScope::default()
-                    },
-                )
-                .await
-                .unwrap();
-                let doc: DocId = intxt::call(
-                    client,
-                    CreateDoc {
-                        capability,
-                        command: command("capture"),
-                        placement,
-                        datums: [(format!("{tag}/main").parse().unwrap(), value)].into(),
-                    },
-                )
-                .await
-                .unwrap()
-                .doc_id;
-                format!("dtxt:datum:{doc}/{tag}/main")
-                    .parse::<DatumReference>()
-                    .unwrap()
-            }
-        };
-        let worktree = capture(
-            "org.example.intxt.work.worktree",
-            json!({
-                "clone": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitClone/0193c",
-                "id": "0193a",
-                "path": "/work/townframe",
-                "files": {},
-                "opLogs": []
-            }),
-        )
-        .await;
-        let session = capture(
-            "org.example.intxt.work.agentSession",
-            json!({"harness": "claude-code", "sessionId": "eb26ecaa", "cwd": "/work/townframe"}),
-        )
-        .await;
-
-        let add = |part: &DatumReference| {
-            let client = &client;
-            let review = &review;
-            let part = part.to_string();
-            async move {
-                let added = day_x(
-                    client,
-                    "org.example.intxt.addToIntxt",
-                    json!({"intxt": review, "part": part}),
-                )
-                .await;
-                added["entry"].as_str().unwrap().to_owned()
-            }
-        };
-        let added = [
-            add(&worktree).await,
-            add(&session).await,
-            add(&worktree).await,
-        ];
-        assert_eq!(
-            added,
-            [
-                format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
-                format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
-                format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
-            ]
-        );
-        let (_, entry) = read_at(
-            &client,
-            &review,
-            &"org.example.intxt.work.worktreeEntry/0193a"
-                .parse()
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(entry, json!({"worktree": worktree.to_string()}));
-        let (_, body) = read_at(
-            &client,
-            &review,
-            &"org.example.intxt.body/main".parse().unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            body,
-            json!({"order": [
-                "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
-                "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
-            ]})
-        );
-
-        let listing = intxt::call(
-            &client,
-            MintDrawerCapability {
-                scope: big_cabinet_core::drawer::protocol::DrawerScope {
-                    drawers: [(review.clone(), DrawerAccess::Read)].into(),
-                    create: false,
-                },
-                rights: big_cabinet_core::authority::Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap()
-        .capability_id;
-        let listed = intxt::call(
-            &client,
-            ListDocs {
-                capability: listing,
-                drawer_id: review.clone(),
-                offset: 0,
-                limit: None,
-            },
-        )
-        .await
-        .unwrap();
-        for part in [&worktree, &session] {
-            let big_cabinet_core::reference::ReferenceDocId::Concrete(doc) = part.document() else {
-                unreachable!()
+        with_intxt_node(async |_tmp, client| {
+            let create = |title: &'static str| {
+                let client = &client;
+                async move {
+                    let created = day_x(
+                        client,
+                        "org.example.intxt.createIntxt",
+                        json!({ "title": title }),
+                    )
+                    .await;
+                    created["drawerId"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<DrawerId>()
+                        .unwrap()
+                }
             };
-            assert!(
-                listed.docs.iter().any(|listed| &listed.doc_id == doc),
-                "{doc} is not in the intxt's drawer: {listed:?}"
+            let captures = create("captures").await;
+            let review = create("review").await;
+            let capture = |tag: &str, value: serde_json::Value| {
+                let client = &client;
+                let captures = &captures;
+                let tag = tag.to_owned();
+                async move {
+                    let placement = format!("drawer {captures}");
+                    let capability = doc_capability(
+                        client,
+                        DocScope {
+                            create: [placement.clone()].into(),
+                            ..DocScope::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let doc: DocId = intxt::call(
+                        client,
+                        CreateDoc {
+                            capability,
+                            command: command("capture"),
+                            placement,
+                            datums: [(format!("{tag}/main").parse().unwrap(), value)].into(),
+                        },
+                    )
+                    .await
+                    .unwrap()
+                    .doc_id;
+                    format!("dtxt:datum:{doc}/{tag}/main")
+                        .parse::<DatumReference>()
+                        .unwrap()
+                }
+            };
+            let worktree = capture(
+                "org.example.intxt.work.worktree",
+                json!({
+                    "clone": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitClone/0193c",
+                    "id": "0193a",
+                    "path": "/work/townframe",
+                    "files": {},
+                    "opLogs": []
+                }),
+            )
+            .await;
+            let session = capture(
+                "org.example.intxt.work.agentSession",
+                json!({"harness": "claude-code", "sessionId": "eb26ecaa", "cwd": "/work/townframe"}),
+            )
+            .await;
+
+            let add = |part: &DatumReference| {
+                let client = &client;
+                let review = &review;
+                let part = part.to_string();
+                async move {
+                    let added = day_x(
+                        client,
+                        "org.example.intxt.addToIntxt",
+                        json!({"intxt": review, "part": part}),
+                    )
+                    .await;
+                    added["entry"].as_str().unwrap().to_owned()
+                }
+            };
+            let added = [
+                add(&worktree).await,
+                add(&session).await,
+                add(&worktree).await,
+            ];
+            assert_eq!(
+                added,
+                [
+                    format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+                    format!("dtxt:datum:{review}/org.example.intxt.work.sessionEntry/eb26ecaa"),
+                    format!("dtxt:datum:{review}/org.example.intxt.work.worktreeEntry/0193a"),
+                ]
             );
-        }
-        client.stop().await.unwrap();
+            let (_, entry) = read_at(
+                &client,
+                &review,
+                &"org.example.intxt.work.worktreeEntry/0193a"
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(entry, json!({"worktree": worktree.to_string()}));
+            let (_, body) = read_at(
+                &client,
+                &review,
+                &"org.example.intxt.body/main".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                body,
+                json!({"order": [
+                    "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
+                    "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
+                ]})
+            );
+
+            let listing = intxt::call(
+                &client,
+                MintDrawerCapability {
+                    scope: big_cabinet_core::drawer::protocol::DrawerScope {
+                        drawers: [(review.clone(), DrawerAccess::Read)].into(),
+                        create: false,
+                    },
+                    rights: big_cabinet_core::authority::Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .unwrap()
+            .capability_id;
+            let listed = intxt::call(
+                &client,
+                ListDocs {
+                    capability: listing,
+                    drawer_id: review.clone(),
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .unwrap();
+            for part in [&worktree, &session] {
+                let big_cabinet_core::reference::ReferenceDocId::Concrete(doc) = part.document() else {
+                    unreachable!()
+                };
+                assert!(
+                    listed.docs.iter().any(|listed| &listed.doc_id == doc),
+                    "{doc} is not in the intxt's drawer: {listed:?}"
+                );
+            }
+        })
+        .await;
     }
 }
 
