@@ -262,3 +262,35 @@ pub fn rust_pair() -> (Box<FileContents>, Box<FileContents>) {
 pub fn ts_pair() -> (Box<FileContents>, Box<FileContents>) {
     pair("review/annotations.ts", TS_BEFORE, TS_EDITS)
 }
+
+/// A generated Rust file of `blocks` six-line functions, and the same file after a scattering of
+/// edits: every 23rd body changes, every 47th block gains a line, every 61st is removed. At 500
+/// blocks that is about three thousand lines, the size virtualization exists for, without
+/// checking megabytes into the repository.
+pub fn large_pair(blocks: usize) -> (Box<FileContents>, Box<FileContents>) {
+    let block = |index: usize, after: bool| {
+        let edited = after && index.is_multiple_of(23);
+        let scaled = if edited {
+            format!("input * {index} + 1")
+        } else {
+            format!("input * {index}")
+        };
+        let trace = if after && index.is_multiple_of(47) {
+            format!("    tracing::trace!(\"handler_{index} ran\");\n")
+        } else {
+            String::new()
+        };
+        format!(
+            "/// Handler {index}: clamps its input to the limit.\npub fn handler_{index}(input: u32, limit_{index}: u32) -> u32 {{\n{trace}    let scaled = {scaled};\n    scaled.min(limit_{index})\n}}\n\n"
+        )
+    };
+    let before: String = (0..blocks).map(|index| block(index, false)).collect();
+    let after: String = (0..blocks)
+        .filter(|index| index % 61 != 60)
+        .map(|index| block(index, true))
+        .collect();
+    (
+        file("src/handlers.rs", before),
+        file("src/handlers.rs", after),
+    )
+}

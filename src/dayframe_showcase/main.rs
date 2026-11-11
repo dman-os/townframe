@@ -195,7 +195,7 @@ fn App() -> Element {
                             FoundationSection {
                                 id: "diffs".to_string(),
                                 title: "Diff view".to_string(),
-                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port: a split Rust diff and a unified TypeScript diff with one line annotation whose content is ordinary Dioxus. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port: a split Rust diff and a unified TypeScript diff with one line annotation whose content is ordinary Dioxus, then a generated three-thousand-line diff that renders only the rows near the viewport of its own scroller (virtualized). Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
                                 diffs::DiffsFoundation {}
                             }
                         },
