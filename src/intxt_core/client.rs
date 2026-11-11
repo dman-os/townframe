@@ -24,7 +24,6 @@ use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
-use method_core::Method;
 use method_core::Unary;
 use serde::Serialize;
 use serde_json::Value;
