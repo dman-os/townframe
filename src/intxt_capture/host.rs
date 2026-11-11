@@ -343,10 +343,10 @@ fn observe_worktrees(
 ) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
     let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
     for candidate in candidates {
-        if let Some(found) = identity::resolve(candidate)? {
-            if !stored.contains(candidate) || found.root == *candidate {
-                identities.insert(found.root.clone(), found);
-            }
+        if let Some(found) = identity::resolve(candidate)?
+            && (!stored.contains(candidate) || found.root == *candidate)
+        {
+            identities.insert(found.root.clone(), found);
         }
     }
     let mut worktrees = Vec::new();

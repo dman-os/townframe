@@ -99,7 +99,7 @@ struct Rpc {
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
-enum Update {
+enum SessionUpdate {
     UserMessageChunk,
     AgentMessageChunk {
         content: Block,
@@ -569,7 +569,7 @@ impl Recorder {
         ) {
             return Ok(());
         }
-        let update: Update = serde_json::from_value(
+        let update: SessionUpdate = serde_json::from_value(
             params
                 .get("update")
                 .cloned()
@@ -581,8 +581,8 @@ impl Recorder {
             .get_mut(session_id)
             .ok_or_else(|| Error::Acp(format!("an update for unknown session {session_id}")))?;
         match update {
-            Update::UserMessageChunk | Update::Other => Ok(()),
-            Update::SessionInfoUpdate { title } => {
+            SessionUpdate::UserMessageChunk | SessionUpdate::Other => Ok(()),
+            SessionUpdate::SessionInfoUpdate { title } => {
                 if let Some(title) =
                     title.filter(|title| session.datum.title.as_ref() != Some(title))
                 {
@@ -591,25 +591,27 @@ impl Recorder {
                 }
                 Ok(())
             }
-            Update::Plan { entries } => {
+            SessionUpdate::Plan { entries } => {
                 session.plan = Some(Plan {
                     entries,
                     extra: Extra::default(),
                 });
                 Ok(())
             }
-            Update::AgentMessageChunk {
+            SessionUpdate::AgentMessageChunk {
                 content,
                 message_id,
             } => Self::chunk(session, at, MessageKind::AgentMessage, &content, message_id),
-            Update::AgentThoughtChunk {
+            SessionUpdate::AgentThoughtChunk {
                 content,
                 message_id,
             } if self.record_thinking => {
                 Self::chunk(session, at, MessageKind::AgentThought, &content, message_id)
             }
-            Update::AgentThoughtChunk { .. } => Ok(()),
-            Update::ToolCall(call) | Update::ToolCallUpdate(call) => Self::tool_call(session, call),
+            SessionUpdate::AgentThoughtChunk { .. } => Ok(()),
+            SessionUpdate::ToolCall(call) | SessionUpdate::ToolCallUpdate(call) => {
+                Self::tool_call(session, call)
+            }
         }
     }
 

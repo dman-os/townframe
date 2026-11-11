@@ -33,6 +33,16 @@
 //! command needs the node's daemon (`day daemon start`) and fails fast without one: booting the
 //! node in each hook's process would take seconds, and parallel tool calls run parallel hooks.
 
+//! # ACP agents
+//!
+//! `day x intxt record -- <agent command>` records an ACP agent for the client that launches it:
+//! point the editor's agent command at it (`day x intxt record -- claude-code-acp`). It forwards
+//! the connection unchanged and records session starts and prompt turns (see `record.rs`).
+//!
+//! `claude-code-acp`, `gemini --experimental-acp` and `codex-acp` are the agents it is meant for;
+//! none was run against it here (the tests use a scripted agent), so check the first recording
+//! of each.
+
 pub(crate) mod capture;
 mod record;
 
