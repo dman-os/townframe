@@ -350,19 +350,20 @@ pub(crate) async fn read_at(
     }
 }
 
-/// `value` at its record's `main` slot, tagged with the record's `$type`.
+/// `value` at its record's `main` slot; the key names the type, so the value carries no tag.
 fn datum<T: DatumMember + Serialize>(value: &T) -> Res<(DatumKey, serde_json::Value)> {
     datum_at("main", value)
 }
 
-/// `value` at `slot` of its record, tagged with the record's `$type`.
+/// `value` at `slot` of its record; the key names the type, so the value carries no tag.
 fn datum_at<T: DatumMember + Serialize>(
     slot: &str,
     value: &T,
 ) -> Res<(DatumKey, serde_json::Value)> {
-    let mut json = serde_json::to_value(value)?;
-    json["$type"] = T::ID.into();
-    Ok((DatumKey::new(T::ID, slot.as_bytes())?, json))
+    Ok((
+        DatumKey::new(T::ID, slot.as_bytes())?,
+        serde_json::to_value(value)?,
+    ))
 }
 
 /// A command id no earlier write used: the node deduplicates writes by command id.

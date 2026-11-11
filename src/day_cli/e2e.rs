@@ -524,17 +524,14 @@ mod library {
             DatumRead::Accepted { value, .. } => value.clone(),
             other => panic!("{key} was not accepted: {other:?}"),
         };
-        assert_eq!(
-            accepted("org.example.intxt/main"),
-            json!({"$type": "org.example.intxt", "empty": true})
-        );
+        assert_eq!(accepted("org.example.intxt/main"), json!({"empty": true}));
         assert_eq!(
             accepted("org.example.intxt.title/main"),
-            json!({"$type": "org.example.intxt.title", "title": "Datum references move to dtxt:"})
+            json!({"title": "Datum references move to dtxt:"})
         );
         assert_eq!(
             accepted("org.example.intxt.body/main"),
-            json!({"$type": "org.example.intxt.body", "order": []})
+            json!({"order": []})
         );
         client.stop().await.unwrap();
     }
@@ -575,8 +572,6 @@ mod library {
                 )
                 .await
                 .unwrap();
-                let mut value = value;
-                value["$type"] = tag.clone().into();
                 let doc: DocId = intxt::call(
                     client,
                     CreateDoc {
@@ -639,10 +634,7 @@ mod library {
         )
         .await
         .unwrap();
-        assert_eq!(
-            entry,
-            json!({"$type": "org.example.intxt.work.worktreeEntry", "worktree": worktree.to_string()})
-        );
+        assert_eq!(entry, json!({"worktree": worktree.to_string()}));
         let (_, body) = intxt::read_at(
             &client,
             &review,
@@ -652,7 +644,7 @@ mod library {
         .unwrap();
         assert_eq!(
             body,
-            json!({"$type": "org.example.intxt.body", "order": [
+            json!({"order": [
                 "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
                 "dtxt:datum:self/org.example.intxt.work.sessionEntry/eb26ecaa",
             ]})

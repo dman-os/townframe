@@ -51,10 +51,8 @@ fn key<T: DatumMember>(slot: &str) -> DatumKey {
     format!("{}/{slot}", T::ID).parse().unwrap()
 }
 
-/// A `T` datum at `slot` holding `value`, tagged with its record's `$type` as every record value
-/// is.
-fn datum<T: DatumMember>(slot: &str, mut value: Value) -> (DatumKey, Value) {
-    value["$type"] = T::ID.into();
+/// A `T` datum at `slot` holding `value`: the key names the type, so the value carries no tag.
+fn datum<T: DatumMember>(slot: &str, value: Value) -> (DatumKey, Value) {
     (key::<T>(slot), value)
 }
 
@@ -224,7 +222,7 @@ async fn concurrent_line_edits_to_a_note_both_land() {
 }
 
 /// `createIntxt`, called as the operator, creates the drawer and writes the three descriptor
-/// datums of ADR 036 §2 on its descriptor document, each tagged with its `$type`.
+/// datums of ADR 036 §2 on its descriptor document.
 #[tokio::test]
 async fn create_intxt_writes_the_descriptor_datums() {
     let node = boot().await;
