@@ -20,6 +20,7 @@ use crate::DatumPin;
 use crate::DatumReference;
 use crate::Location;
 use crate::datum::input::DEF;
+use crate::datum::value::valid_format;
 use crate::reference::DATUM_LOCATION;
 use crate::reference::DATUM_PIN;
 use crate::reference::DATUM_REF;
@@ -72,10 +73,28 @@ impl ReferenceForm {
             stated: value.to_string(),
             reason,
         };
+        // The reference defs state `format: "uri"`, which the compiler leaves out of the carried
+        // constraint (see its handling of `DEF`) so that it is checked here: the parsers below
+        // accept text a URI may not hold (an unencoded `{` or `"` in a fragment), and checking
+        // the format in the carried constraint would refuse such a value as a bare format
+        // violation, or as an ambiguity under a nullable union, instead of naming the form.
+        let uri = |text: &str| {
+            if valid_format("uri", text) {
+                Ok(())
+            } else {
+                Err(refused(
+                    "it is not a valid URI: characters a URI cannot hold (a space, `{`, `\"`, \
+                     `<`, ...) must be percent-encoded"
+                        .to_owned(),
+                ))
+            }
+        };
         let stated = || {
-            value
+            let text = value
                 .as_str()
-                .ok_or_else(|| refused("it is a `dtxt:datum:` address string".to_owned()))
+                .ok_or_else(|| refused("it is a `dtxt:datum:` address string".to_owned()))?;
+            uri(text)?;
+            Ok::<_, CodecError>(text)
         };
         let (reference, heads) = match self {
             Self::Datum => (
@@ -90,6 +109,10 @@ impl ReferenceForm {
                 Vec::new(),
             ),
             Self::Pin => {
+                // The pin's `ref` position is not walked into, so its format is checked here.
+                if let Some(location) = value.get("ref").and_then(Value::as_str) {
+                    uri(location)?;
+                }
                 let pinned = serde_json::from_value::<DatumPin>(value.clone())
                     .map_err(|error| refused(error.to_string()))?
                     .into_location()
@@ -409,5 +432,86 @@ mod tests {
         let mut paths: Vec<_> = found.iter().map(|edge| edge.path.as_str()).collect();
         paths.sort_unstable();
         assert_eq!(paths, ["/nested/inner", "/odd~1key~0"]);
+    }
+
+    /// A reference position whose value does not parse is refused as a reference, naming its path
+    /// and the parse failure, required or optional: the optional field is a nullable union, whose
+    /// branch resolution must not answer first with an ambiguity or a bare format violation.
+    #[test]
+    fn an_unparseable_reference_is_refused_as_one_at_its_path() {
+        #[macros::datum(authority = "org.example", name = "refused")]
+        #[derive(Debug, Serialize, Deserialize, JsonSchema)]
+        struct Refused {
+            at: Location,
+            link: DatumReference,
+            pinned: DatumPin,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            maybe_at: Option<Location>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            maybe_link: Option<DatumReference>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            maybe_pinned: Option<DatumPin>,
+            #[serde(flatten)]
+            extra: crate::datum::Extra,
+        }
+        let universe = crate::datum::Universe::collect(vec![
+            crate::datum::Declaration::of::<Refused>().unwrap(),
+        ]);
+        let bundle = crate::datum::Bundle::new(&universe, Vec::new());
+        let lexicons = bundle.lexicons().unwrap();
+        let defs = crate::reference::defs_lexicon();
+        let id = universe.datums[0].id.clone();
+        let schema = bundle
+            .validate_lexicon(&id, &lexicons[0].file, &[&defs])
+            .unwrap();
+
+        let good = reference("main");
+        let raw_fragment = format!(r#"{good}#toolCalls/{{"id":"toolu_01"}}"#);
+        let fragment = format!("{good}#text/@3");
+        let complete = |member: &str, value: Value| {
+            let mut whole = json!({
+                "$type": id,
+                "at": good,
+                "link": good,
+                "pinned": {"ref": good},
+            });
+            whole[member] = value;
+            whole
+        };
+        const URI: &str = "not a valid URI";
+        const NO_FRAGMENT: &str = "cannot have a fragment";
+        let cases = [
+            ("at", json!(raw_fragment), "$.at", URI),
+            ("maybe_at", json!(raw_fragment), "$.maybe_at", URI),
+            // a whole-datum position takes no fragment at all, however well formed
+            ("link", json!(fragment), "$.link", NO_FRAGMENT),
+            ("maybe_link", json!(fragment), "$.maybe_link", NO_FRAGMENT),
+            ("link", json!(raw_fragment), "$.link", URI),
+            ("pinned", json!({"ref": raw_fragment}), "$.pinned", URI),
+            (
+                "maybe_pinned",
+                json!({"ref": raw_fragment}),
+                "$.maybe_pinned",
+                URI,
+            ),
+        ];
+        for (member, value, path, reason) in cases {
+            let error = crate::datum::Stored::check(&schema, complete(member, value.clone()))
+                .expect_err("an unparseable reference is refused");
+            let message = error.to_string();
+            let crate::datum::CodecError::At { path: at, source } = &error else {
+                panic!("{member} {value}: not refused at a path: {message}");
+            };
+            assert_eq!(at, path, "{message}");
+            assert!(
+                matches!(
+                    **source,
+                    crate::datum::CodecError::NotADatumReference { .. }
+                ),
+                "{member} {value}: {message}"
+            );
+            assert!(message.contains(path), "{message}");
+            assert!(message.contains(reason), "{message}");
+        }
     }
 }

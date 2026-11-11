@@ -302,6 +302,19 @@ impl Compiler<'_> {
             }
             let mut compiled = self.position(&id, definition, &format!("{id}#{name}"), 0)?;
             compiled[DEF] = Value::from(identity(&id, &name));
+            if matches!(
+                compiled[DEF].as_str(),
+                Some(crate::reference::DATUM_REF | crate::reference::DATUM_LOCATION)
+            ) && let Some(constraints) = compiled.get_mut(KEYWORD).and_then(Value::as_object_mut)
+            {
+                // The carried string constraint would otherwise refuse a malformed address as a
+                // bare `format: "uri"` violation (or, under a nullable union, as no branch
+                // accepting it, which surfaces as an ambiguity) before the write walk reads it as
+                // the reference form its def states. `ReferenceForm::read` is stricter than the
+                // format and is the authority at these positions: it refuses the value, naming
+                // the path and why the address does not parse.
+                constraints.remove("format");
+            }
             self.definitions.insert(key.clone(), compiled.clone());
             if definition["type"] == "object" {
                 let mut tagged = compiled;
