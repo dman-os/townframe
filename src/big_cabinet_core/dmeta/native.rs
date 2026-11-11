@@ -153,6 +153,51 @@ impl NativeReadBudget {
         Ok(())
     }
 
+    /// Charge an incoming JSON value the way [`NativeValue::read_at`] will charge the stored one,
+    /// so a write can refuse a value the read-back would refuse before any of it is reconciled
+    /// into a document (reconciling a text is per character: minutes and gigabytes for a value
+    /// the read then rejects). A string costs one node and its UTF-8 bytes, which is what a `Str`
+    /// or a `Text` costs; the `{"$bytes": ...}` object costs one node and its decoded length, as
+    /// the `Bytes` it is stored as; any other object or array costs one node, and an object also
+    /// charges its keys' bytes. Members are visited in key order, which is the read's order, so
+    /// the refusal names the same step and the same observed amount whichever side fires. A
+    /// storage form can still change what is stored (an instant string is a timestamp that costs
+    /// no bytes), so the post-reconcile read keeps its own check; this one only has to be cheap
+    /// and never refuse what the read would accept by more than that.
+    ///
+    /// Recursion is bounded by `max_depth`: a value deeper than that is refused before it
+    /// descends further.
+    pub fn charge_json(&mut self, value: &serde_json::Value) -> Result<(), NativeReadError> {
+        self.charge_json_at(value, 0)
+    }
+
+    fn charge_json_at(
+        &mut self,
+        value: &serde_json::Value,
+        depth: usize,
+    ) -> Result<(), NativeReadError> {
+        use serde_json::Value as Json;
+        self.visit(depth)?;
+        match value {
+            Json::String(text) => self.consume_bytes(text.len()),
+            Json::Object(members) => {
+                if let (1, Some(Json::String(encoded))) = (members.len(), members.get("$bytes")) {
+                    // Padded or not, base64 carries three bytes per four significant characters.
+                    return self.consume_bytes(encoded.trim_end_matches('=').len() * 3 / 4);
+                }
+                for (key, member) in members {
+                    self.consume_bytes(key.len())?;
+                    self.charge_json_at(member, depth + 1)?;
+                }
+                Ok(())
+            }
+            Json::Array(items) => items
+                .iter()
+                .try_for_each(|item| self.charge_json_at(item, depth + 1)),
+            Json::Null | Json::Bool(_) | Json::Number(_) => Ok(()),
+        }
+    }
+
     fn consume_bytes(&mut self, count: usize) -> Result<(), NativeReadError> {
         self.bytes = self
             .bytes

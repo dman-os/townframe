@@ -131,6 +131,13 @@ impl DocsService {
                     .map_err(|_| DocsError::UnknownSchema {
                         datum_tag: key.tag().to_string(),
                     })?;
+                // The write reads each value back under the default budget after reconciling it,
+                // and reconciling a text costs per character. Refusing here, before the command
+                // row is begun or any transaction opened, charges the incoming JSON the same
+                // budget so an oversized value is refused with the same error in microseconds.
+                NativeReadBudget::default()
+                    .charge_json(&value)
+                    .map_err(|error| native_read_refusal(&key, error))?;
                 Ok((key, (schema, value)))
             })
             .collect()
