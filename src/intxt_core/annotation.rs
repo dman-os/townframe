@@ -6,10 +6,10 @@
 //! MIGRATE BEFORE BETA, with the generic datums (see `generic`): intxt owns these under its own
 //! authority only until a shared vocabulary exists (ledger D39).
 
-use automerge::ChangeHash;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::Location;
 use big_cabinet_core::datum::Extra;
+use big_cabinet_core::reference::DatumPin;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -31,25 +31,19 @@ pub struct Comment {
     pub extra: Extra,
 }
 
-/// What a comment or structure is about. `ref` is the datum, and optionally a position inside it
-/// in the fragment (an Automerge cursor range for text). A target with `to` is a span of datums
-/// from `ref` to `to`, such as a run of prompt turns; `refHeads` pins both.
+/// What a comment or structure is about. `source` is a [`DatumPin`] (ADR 035 §2.8): the datum,
+/// optionally a position inside it in the fragment (an Automerge cursor range for text), and the
+/// heads it was read at. A target with `to` is a span of datums from `source` to `to`, such as a
+/// run of prompt turns; `to` is in the same document and is read at `source`'s heads, so a span has
+/// one pin.
 #[macros::datum]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Target {
-    #[serde(rename = "ref")]
-    pub reference: Location,
-    /// The heads `ref` is pinned at, exactly as some op or observation recorded them, so a viewer
-    /// can tell by equality which side of a diff the target is on (ADR 041 §2).
-    /// Empty follows the target's current version.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        with = "big_cabinet_core::reference::head_list"
-    )]
-    #[schemars(with = "Vec<String>")]
-    pub ref_heads: Vec<ChangeHash>,
+    /// The pinned heads are exactly as some op or observation recorded them, so a viewer can tell
+    /// by equality which side of a diff the target is on (ADR 041 §2). No heads follows the
+    /// target's current version.
+    pub source: DatumPin,
     /// The hand-writable text position: 1-based lines at the pinned heads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
@@ -58,7 +52,7 @@ pub struct Target {
     pub quote: Option<TextQuote>,
     /// The last datum of a span.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<DatumReference>,
+    pub to: Option<Location>,
     #[serde(flatten)]
     pub extra: Extra,
 }
