@@ -24,6 +24,4 @@ pub use reference::ReferenceError;
 pub use reference::SELF_DOC;
 
 #[cfg(test)]
-mod panproto_schema_store_poc;
-#[cfg(test)]
 mod protocol_wire;
