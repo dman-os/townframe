@@ -205,6 +205,7 @@ fn the_adr_examples_are_valid_datums() {
         json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}),
     );
     codec_round_trip::<work::GitCommit>(json!({
+        "raw": {"$bytes": "dHJlZSA0YjgyNWRjNjQyY2I2ZWI5YTA2MGU1NGJmOGQ2OTI4OGZiZWU0OTA0Cg=="},
         "parents": ["9a0e"],
         "changeId": "kxqoltvm",
         "author": {"name": "dman-os", "email": "dman-os@example.org", "at": "2026-11-10T21:04:11Z"},

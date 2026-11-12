@@ -281,16 +281,16 @@ fn sha(text: &str) -> Option<String> {
 /// The commit `sha` as a datum: author and committer, message, and the paths it changed against
 /// its first parent, with renames detected.
 fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
-    let raw = git.run(&[
+    let shown = git.run(&[
         "show",
         "-s",
         "--format=%P%x00%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%B",
         sha,
     ])?;
-    let raw = String::from_utf8_lossy(&raw);
-    let fields: Vec<&str> = raw.splitn(8, '\0').collect();
+    let shown = String::from_utf8_lossy(&shown);
+    let fields: Vec<&str> = shown.splitn(8, '\0').collect();
     let [parents, an, ae, at, cn, ce, ct, message] = fields[..] else {
-        return Err(Error::Format(format!("git show {sha}: {raw:?}")));
+        return Err(Error::Format(format!("git show {sha}: {shown:?}")));
     };
     let parents: Vec<String> = parents.split_whitespace().map(str::to_owned).collect();
     let ident = |name: &str, email: &str, seconds: &str| -> Result<GitIdent, Error> {
@@ -342,6 +342,7 @@ fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
         });
     }
     Ok(GitCommit {
+        raw: git.run(&["cat-file", "commit", sha])?.into(),
         parents,
         change_id: None,
         author: ident(an, ae, at)?,

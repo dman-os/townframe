@@ -5,6 +5,7 @@
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::Location;
+use big_cabinet_core::datum::Bytes;
 use big_cabinet_core::datum::Extra;
 use jiff::Timestamp;
 use schemars::JsonSchema;
@@ -200,6 +201,10 @@ pub struct File {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCommit {
+    /// The commit object as git stores it (`git cat-file commit <sha>`), signature and encoding
+    /// headers included. The slot is git's object id over it, so the datum is content-addressed
+    /// and checkable against its key; the fields below are read from it for convenience.
+    pub raw: Bytes,
     pub parents: Vec<String>,
     /// The jj change id, when the commit is known to jj.
     #[serde(default, skip_serializing_if = "Option::is_none")]
