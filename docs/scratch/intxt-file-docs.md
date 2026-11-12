@@ -73,9 +73,11 @@ Measured: the size of each intxt (B against C), how many documents it shares, ho
 | Comments carried across a real rebase (1130 with ground truth) | 2 on the wrong line, confidently | all correct, with quote plus git's diff mapping |
 | Rebuilding commits from the intxt alone | not applicable | 31/31 reproduce their sha, given the original committer and date |
 | Size for a rebased branch (both revisions) | 341 KB plus 186 KB metadata | 1.28 MB packed, or 194 KB of gzipped patches per revision |
-| Size for two days of capture | 2.65 MB, base content repeated per worktree | 6.3 MB of blobs, of which 98% are already in git; the uncommitted states add about 97 KB |
+| Size for two days of capture (every HEAD move in 5 worktrees, including rebases and merges that bring in other lanes' work) | 2.65 MB, since Automerge stores each change as a diff; base content is repeated per worktree | 6.3 MB delta-packed, because the prototype stored a **whole file** per version as git does (Cargo.lock: 22 versions, 2.5 MB; the ledger: 57 versions, 1.4 MB). 98% of those blobs are already in git; our own uncommitted states add about 97 KB. Our tool edits alone: 275 KB |
 | Packaging work from a long-lived worktree ("rename") | 96% of the shared history is unrelated to the intxt | only the intxt's own ops and blobs |
 | Build and resolve time | seconds | milliseconds |
+
+Size is not where C wins. C has two separable parts: the **identity** of each version, a content hash recorded per op, which gives dedup, verification and the link to git; and its **content**, which need not be a whole file. Storing each op's content as the patch from the previous version, with a whole file only the first time a path is seen (usually already in git), should cost about the size of the diffs, comparable to B. Not measured yet. C wins on anchors, commit fidelity and not carrying unrelated history.
 
 Two other findings shape the design whichever option wins:
 - **Most edits bypass the tools.** 455 Bash calls wrote files, against 53 Edit/Write calls. 32% of tool-touched paths reached their commit with content the tool reports don't explain. Capture has to observe the filesystem around every tool call (F7), not trust tool reports.
@@ -85,7 +87,7 @@ Two other findings shape the design whichever option wins:
 
 C, for filesystem worktrees:
 - **The worktree op log stays** (ADR 040 §3), with one op per observed tool-call window, recording per changed path the content hash after the op.
-- **Content is git blobs.** Most are already in git, and uncommitted states are a small addition.
+- **Content is addressed by git blob id, stored as patches.** Each op stores the patch from the previous version; a whole file is stored only on first sight, when git doesn't already have it.
 - **Commits are git's own objects,** carried by the intxt (D58).
 - **Comments anchor to (commit or op, path, line range, quote)** and carry across revisions with git's diff mapping.
 - **File documents only for collaborative worktrees,** later, with dpaths.
