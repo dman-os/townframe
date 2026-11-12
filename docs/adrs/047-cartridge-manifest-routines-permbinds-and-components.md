@@ -1,6 +1,6 @@
 # ADR 047: The cartridge manifest: routines, permbinds and components
 
-**Status:** Proposed (manager, 2026-11-13, from the operator's review of the cartridge and nodule manifests). Nothing here is implemented.
+**Status:** Accepted (2026-11-13, when the operator started implementation; proposed by the manager from the operator's review of the cartridge and nodule manifests). Implementation is in progress: the typed `Nsid` (§8) has landed and docs capabilities limited to datum kinds (§6) are in review.
 
 **Related:**
 - [ADR 027: cartridges, nodules and operation contracts](027-cartridges-nodules-and-operation-contracts.md) §2 (the nodule description whose serialized shape this replaces; its responsibilities stay)
@@ -37,7 +37,7 @@ The registry document (ADR 028 §1) already holds a cartridge as datums: its ide
 
 The envelope names the other datums of its version by `#datumPin` (ADR 035): the document and heads it was published at. Heads are hashes of the document's history, so the publisher's signature over the envelope covers every pinned datum, and no separate digest list is needed. A Lexicon from *another* cartridge is never referenced by URL: a cartridge carries its own copy (028 §4), and the NSID is the reference. Cartridge identity is the DID-based id, never a keyhive document, and delivering a cartridge some other way (OCI, ADR 028 §2) is a later field of the envelope.
 
-In atproto, `$type` names the Lexicon definition an object follows: a record carries its own, and an object in a field that can hold different kinds carries the one it is (a routine's implementation, a permbind, a component). A field that always holds one kind has none.
+In atproto, `$type` names the Lexicon definition an object follows: a record carries its own, and an object in a field that can hold different kinds carries the one it is (a routine's implementation, a permbind, a component). A field that always holds one kind has none. A member's `$type` is `<lexicon nsid>#<def>`: the permbind kinds and the routine implementation are defs of `org.example.daybook.cartridge` (`org.example.daybook.cartridge#datum`, `#method`, `#drawers`, `#componentExport`), and a component's kind is a def of `org.example.daybook.cartridge.component` (`org.example.daybook.cartridge.component#wasm`). The examples below abbreviate the NSID as `…`.
 
 ### 2. What belongs to the cartridge, and what to a contribution
 
@@ -51,6 +51,7 @@ A cartridge has **at most one nodule**: nothing separates two nodules of one car
   "authority": "org.example.photos",
   "dependencies": { "did:plc:…/blobs": "^1" },          // delivery hints (028 §4)
   "lexicons":   { "org.example.photos.album": { /* #datumPin */ }, … },
+  "sidecars":   { "org.example.photos.album": { /* #datumPin */ } },     // §1, same keys as lexicons
   "components": { "main": { /* #datumPin */ }, "ui": { /* #datumPin */ } },
 
   "permbinds": {
@@ -94,7 +95,7 @@ A cartridge has **at most one nodule**: nothing separates two nodules of one car
 
 - A routine has an `impl`, a `$type` union whose only member today is `#componentExport`: a component and an export of it. Durable execution stays the wflow service, not a routine kind (ADR 027 §2); another runtime's code is a new member when one exists.
 - A routine `implements` one operation NSID. Commands, processors and initialization name that **operation**, never the routine (ADR 027 §2), so a consumer keeps working when another provider serves the operation.
-- **`uses` is the routine's ACL**: a map from permbind key to the part of the permbind the routine takes. `reindex` takes `albums` read-only, so it cannot write an album though the cartridge may. A routine reaches nothing it does not list, and never more of a permbind than the permbind declares. ADR 027 §2's "private state requirements and requested host facilities" are these entries.
+- **`uses` is the routine's ACL**: a map from permbind key to the part of the permbind the routine takes (`read`, `write`, `create`, `delete`; an empty object for a method). Its keys are one namespace with the nodule's local state and revisioned stores, so those keys must not collide with permbind keys, and admission refuses a `uses` key that names nothing or asks for more than its permbind declares. `reindex` takes `albums` read-only, so it cannot write an album though the cartridge may. A routine reaches nothing it does not list, and never more of a permbind than the permbind declares. ADR 027 §2's "private state requirements and requested host facilities" are these entries.
 
 ### 4. Components
 
@@ -102,11 +103,11 @@ The chain is routine → component → bytes. A component datum states the kind 
 
 ### 5. Permbinds
 
-A permbind is ADR 028 §4's request, keyed by its name (the request's `binding`) and split by kind, so each kind states only the fields it has. It keeps the request's rules: it names a contract by NSID, never a provider; `necessity` (or per-access `required`/`optional`) and `resolution` (`configured`, or `atRuntime` through a picker) mean what they mean there; `minRevision` is the Lexicon revision it needs. Every permbind carries a `description`, shown when it is granted. The kind decides how it is satisfied:
+A permbind is ADR 028 §4's request, keyed by its name (the request's `binding`) and split by kind, so each kind states only the fields it has. It keeps the request's rules: it names a contract by NSID, never a provider; `necessity` (or per-access `required`/`optional`) and `resolution` (`configured`, or `atRuntime` through a picker) mean what they mean there; `minRevision` is the Lexicon revision it needs. Every permbind carries a `description`, shown when it is granted. `#datum` and `#drawers` state each access (`read`, `write`, `create`, `delete`) as `required` or `optional`, and an access left out is not requested; a set of drawers is required when any of its accesses is. `#method` states `necessity`. Only `#drawers` has a `resolution`: a method's provider is chosen by routes and the lock (§7), and a datum kind leaves nothing to pick. The kind decides how it is satisfied:
 
 - `#datum { nsid, read, write, create, delete }`: a datum kind, as `RoutineFacetAccess` had. The routine depends on its shape, so nothing substitutes it; a grant only gives or withholds the access.
 - `#method { nsid, necessity, minRevision? }`: an operation. Any enabled provider serves it, chosen among several by a route (ADR 045); this is where substitution happens.
-- `#drawers { read, write, …, resolution }`: a **set** of drawers filled by grants, configured or picked at runtime. The set changes over time; a routine sees it as it is at the call. "Every drawer the cartridge was granted" is this permbind with no narrowing, and one drawer is the set's one-member case.
+- `#drawers { read, write, create, delete, resolution }`: a **set** of drawers filled by grants, configured or picked at runtime. The set changes over time; a routine sees it as it is at the call. "Every drawer the cartridge was granted" is this permbind with no narrowing, and one drawer is the set's one-member case.
 
 Local state and revisioned stores are reached through `uses` like a permbind, when they are implemented.
 
@@ -116,13 +117,13 @@ Local state and revisioned stores are reached through `uses` like a permbind, wh
 
 ### 6. Each call carries only its routine's access
 
-When dispatch invokes a routine, it mints a capability for that call covering the routine's `uses`, intersected with what was granted, and the capability ends with the call. A write the routine did not declare is refused at the docs service, a call to an operation it did not bind is refused at dispatch, and a response that does not match the operation's output Lexicon is a failed call. This needs the docs capability scope to name datum kinds per document beside today's per-document read and write (`DocScope`); ADR 044 §6 (a nodule writes its settings, not its grants) becomes one case of it.
+Each routine holds a capability covering its `uses`, intersected with what was granted. The runtime mints it when the cartridge starts, and retracts and re-mints it whenever a grant the routine uses changes; dispatch hands the routine's capability to each call of that routine. One capability per routine rather than per call (manager, 2026-11-13, on the operator's go-ahead): minting is a ledger write, and per-call minting would put one on every invoke for no added guarantee, since the routine's reach and the revocation point are the same either way. A write the routine did not declare is refused at the docs service, a call to an operation it did not bind is refused at dispatch, and a response that does not match the operation's output Lexicon is a failed call. This needs the docs capability scope to name datum kinds per document beside today's per-document read and write (`DocScope`); ADR 044 §6 (a nodule writes its settings, not its grants) becomes one case of it.
 
 "This routine reads the sensitive kind and binds no outbound operation" is then stated in the manifest and holds on every call. The limit is stated: two calls served concurrently by one component instance could exchange handles inside it, so against a hostile component the wall is the union of the routines' access, enforced per cartridge. Per routine, the partition holds against bugs and makes each routine's reach auditable.
 
 Also settled with the prior art (snapd, Fuchsia, Sandstorm, Android):
 - **Confused deputy.** A routine calling another cartridge's operation passes none of its own access; the callee acts with its own. Authority moves only when handed over explicitly, as a datum reference or a capability in the call.
-- **Revocation** takes effect at the next call, since each call's capability is minted afresh.
+- **Revocation** takes effect at the next call: a changed grant retracts the routine's capability before it is re-minted.
 - **Upgrades** that widen required access leave the cartridge not startable until granted (028 §3).
 
 ### 7. The lockfile and substitution
