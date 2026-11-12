@@ -628,6 +628,7 @@ impl VirtualizerHost for DioxusHost {
     }
 
     fn element_scroll_to(&self, element: &NodeKey, top: f64, behavior: PierreScrollBehavior) {
+        eprintln!("INSTR-SCROLL trigger=scroll_to top={top}");
         let left = self.geometry.borrow().scroll(*element).left;
         self.geometry.borrow_mut().set_scroll_top(*element, top);
         self.spawn_scroll(
@@ -642,6 +643,9 @@ impl VirtualizerHost for DioxusHost {
     /// and move the cached position by the delta at once so reads before the task finishes
     /// already see where the scroller is going.
     fn element_scroll_by(&self, element: &NodeKey, scroll_offset: f64) {
+        thread_local!(static N: Cell<usize> = const { Cell::new(0) });
+        let n = N.with(|n| { n.set(n.get() + 1); n.get() });
+        eprintln!("INSTR-SCROLL #{n} trigger=scroll_fix delta={scroll_offset}");
         let top = self.geometry.borrow().scroll(*element).top;
         self.geometry
             .borrow_mut()

@@ -330,6 +330,47 @@ fn events_in_flight_for_rows_a_scroll_freed_are_dropped() {
     );
 }
 
+impl Rig {
+    /// The rendered rows the document holds, as the engine would lay them out and report them
+    /// (`onresize` once per new row).
+    fn measure_new_rows(&mut self, height: f64, measured: &mut std::collections::HashSet<NodeKey>) {
+        let document = super::host_document(&self.view.host);
+        let shadow = document
+            .shadow_root(self.view.host.container())
+            .expect("a rendered diff");
+        let rows: Vec<NodeKey> = document
+            .query_by_attribute(shadow, "data-line-index", None)
+            .into_iter()
+            .filter(|row| measured.insert(*row))
+            .collect();
+        self.deliver(|rig| {
+            for row in rows {
+                rig.dispatch().resized(row, height, 760.0);
+            }
+        });
+    }
+}
+
+/// A fling is a run of scroll events while nothing above the viewport changes height. Upstream
+/// writes no scroll position then (the fix is `if (top !== fileOffset)`), so the engine's
+/// momentum is never cancelled by a programmatic scroll.
+#[test]
+fn a_fling_with_no_height_changes_issues_no_programmatic_scroll() {
+    let mut rig = Rig::new(3000);
+    rig.boot();
+    let mut measured = std::collections::HashSet::new();
+    rig.measure_new_rows(20.0, &mut measured);
+    for step in 1..=60 {
+        rig.scroll_to(f64::from(step) * 700.0);
+        rig.measure_new_rows(20.0, &mut measured);
+    }
+    assert_eq!(
+        *rig.root.log.borrow(),
+        Vec::<String>::new(),
+        "a fling wrote the scroll position"
+    );
+}
+
 #[test]
 fn only_the_window_around_the_viewport_is_rendered_and_it_follows_scrolling() {
     let mut rig = Rig::new(3000);
