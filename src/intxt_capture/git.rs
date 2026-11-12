@@ -30,12 +30,13 @@ use std::process::Stdio;
 
 /// A `git` runner in one directory. Optional locks are off, so observing never makes git rewrite
 /// the index under a running agent.
-pub(crate) struct Git {
+pub struct Git {
     dir: PathBuf,
 }
 
 impl Git {
-    pub(crate) fn new(dir: &Path) -> Self {
+    /// Run git commands in `dir`.
+    pub fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_owned(),
         }
