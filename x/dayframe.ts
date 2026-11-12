@@ -70,14 +70,20 @@ switch (command) {
       flag("--build") ? ["--build"] : []
     }`;
     break;
-  case "showcase":
+  case "showcase": {
+    const labDiff = Deno.env.get("DAYFRAME_LAB_DIFF");
+    const showcaseEnv = {
+      ...(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {}),
+      ...(labDiff ? { DAYFRAME_LAB_DIFF: labDiff } : {}),
+    };
     await dx(
       "-p",
       "dayframe_showcase",
       "--renderer",
       flag("--native") ? "native" : "webview",
-    ).env(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {});
+    ).env(showcaseEnv);
     break;
+  }
   case "packages":
     await prepareDayframePackages({ testFixtures: true });
     break;

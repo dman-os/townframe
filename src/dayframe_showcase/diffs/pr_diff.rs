@@ -21,12 +21,12 @@ use std::time::Instant;
 use super::Segmented;
 use review_mock::DiffOptions;
 
-/// Where the diff comes from unless `DAYFRAME_LAB_DIFF` says otherwise.
-const DEFAULT_PATH: &str = "/tmp/pr84.diff";
+/// The diff path is supplied by the showcase launcher.
+const DIFF_ENV: &str = "DAYFRAME_LAB_DIFF";
 
 /// How to produce the file when it is missing.
 const HOW_TO_PRODUCE: &str =
-    "git diff origin/feat/datum-core...origin/feat/big-node > /tmp/pr84.diff";
+    "git diff origin/feat/datum-core...origin/feat/big-node > ./pr84.diff, then set DAYFRAME_LAB_DIFF to that file";
 
 /// One file of the diff: its path, its size, and where its patch lies in the text.
 struct PrFile {
@@ -67,7 +67,7 @@ impl PrDiff {
 static PR_DIFF: OnceLock<Result<PrDiff, String>> = OnceLock::new();
 
 fn load() -> Result<PrDiff, String> {
-    let path = std::env::var("DAYFRAME_LAB_DIFF").unwrap_or_else(|_| DEFAULT_PATH.to_owned());
+    let path = std::env::var(DIFF_ENV).map_err(|_| format!("{DIFF_ENV} is unset. Produce it with `{HOW_TO_PRODUCE}`, then set {DIFF_ENV} to that file."))?;
     let started = Instant::now();
     let text = std::fs::read_to_string(&path).map_err(|error| {
         format!("Could not read {path}: {error}. Produce it with `{HOW_TO_PRODUCE}`, or point DAYFRAME_LAB_DIFF at another unified git diff.")
