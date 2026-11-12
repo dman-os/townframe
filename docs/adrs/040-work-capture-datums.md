@@ -1,6 +1,8 @@
 # ADR 040: Work capture datums: repositories, worktrees, git, jj, agent sessions
 
-**Changed 2026-11-12:** §4 states which datums are content-identified and which are location state (ledger D54), and when a file document may span machines (D55). Document granularity is under proposal in `docs/scratch/intxt-granularity.md`; this ADR is not yet changed for it.
+**Changed 2026-11-12:** §4 states which datums are content-identified and which are location state (ledger D54), and when a file document may span machines (D55).
+
+**Changed 2026-11-12 (later):** filesystem worktrees are recorded without file documents (ledger D59, `docs/scratch/intxt-file-docs.md`, F25–F27). Ops record git object ids (§3), content is git's own objects (§4), commit diffs are git's (§5), and file documents remain only for collaborative worktrees, later. This supersedes the file-document design of §4 and the granularity proposal (`docs/scratch/intxt-granularity.md`).
 
 **Status:** Proposed. Supersedes the code, history and session sections of the earlier ADR 036 ("intxt datums for the review loop"), including D26's ref-driven file documents (ledger D29).
 
@@ -13,14 +15,14 @@ Datum tags use the placeholder authority `org.example.intxt.work`.
 Agent work happens in directories on machines. Git and jj describe some of those directories, but they are views over the same files, not the place work happens: one agent session can edit three checkouts of two repositories, a jj workspace and a git worktree can be the same directory, and nothing about a session is contained in one branch's linear history. So the capture vocabulary is arranged by where change physically happens, and version control is layered over it:
 
 ```text
-agent session ──tool calls──▶ worktree op log ──pins──▶ file docs
+agent session ──tool calls──▶ worktree op log ──object ids──▶ git objects
                                    │
                git / jj layers ◀───┘  (commits, refs, jj operations and changes,
                                        observed in a worktree, keyed by their own ids)
 ```
 
 - A **worktree** is one checkout directory on one machine. Exactly one recorder (the one on that machine) writes its datums, so its history is single-writer and linear.
-- **Git and jj objects** are keyed by their own identifiers and are the same datums whichever worktree observed them. What links them to content is the worktree op that observed them, which pins that worktree's file docs.
+- **Git and jj objects** are keyed by their own identifiers and are the same datums whichever worktree observed them. What links them to a session is the worktree op that observed them; their content is git's own objects (§4).
 - **Agent sessions** reference the worktree ops their tool calls caused. A session belongs to no worktree.
 
 This is a data arrangement, not a product decision: an intxt picks which of these parts it includes through entry datums (`repoEntry`, `worktreeEntry`, `sessionEntry`; ADR 036 §2), and a review of "one branch" is one reading of them.
@@ -48,7 +50,6 @@ Paths are recorded (`path`, the current absolute path) but are not identity: wor
 
 // org.example.intxt.work.worktree/main         (one per worktree document)
 { "clone": "dtxt:datum:zRepo/org.example.intxt.work.gitClone/<uuid>", "id": "<uuid>", "path": "/run/media/…/townframe-p3N-3",
-  "files": { "src/big_cabinet_core/reference.rs": "zFileA" },    // path → file doc, for every path an op touched
   "opLogs": [ { "doc": "zOps0", "from": 0 }, { "doc": "zOps1", "from": 256 } ] }   // op-log documents in sequence order
 ```
 
@@ -61,38 +62,34 @@ Two machines with checkouts of one project are two clones, each with its worktre
 { "at": "2026-11-10T21:04:11Z",
   "kind": "edit",                         // open: edit | checkout | reset | commit | amend | rebase | merge | cherryPick | revert | refMove | jjSnapshot
   "cause": "dtxt:datum:zSess/org.example.intxt.work.promptTurn/<id>#toolCalls/%7B%22id%22:%22toolu_01…%22%7D",   // when known
-  "files": { "src/big_cabinet_core/reference.rs": ["zbd7…"] },   // path → file doc heads after this op
+  "files": { "src/big_cabinet_core/reference.rs": "e69d…" },     // path → git blob id after this op, for every path it changed
   "deleted": [ "src/old.rs" ],                                    // paths this op deleted
-  "renames": { "src/url.rs": "src/uri.rs" },                      // new path → old path, continued in the old path's doc
   "git": { "head": "4c1f…", "ref": "refs/heads/feat/intxt", "from": "77b2…", "to": "4c1f…",
            "reflog": "commit (amend): …" },                       // HEAD after the op; for ref moves, the move and git's reflog message
   "jj": { "operation": "e1f0…", "change": "kxqoltvm…" } }         // when the op came from jj
 ```
 
 - **Single writer, sequential keys.** The slot is the sequence number, so the log is linear by construction and readers page it by key. It is the worktree's equivalent of jj's operation log, at the granularity the recorder observes.
-- **Every observed change is an op.** An edit by a tool call, a formatter run inside a Bash call (filesystem-observed, F7), a commit, an amend, a rebase, a `git checkout` or `reset`. Checkout and reset need no revert semantics: file docs follow the working tree, so a checkout is one op after which the touched files hold the checked-out content, and the earlier content stays readable at earlier pins.
+- **Every observed change is an op**, one per observed tool-call window: the recorder compares the working tree before and after each tool call, so edits a tool doesn't report (a formatter or `sed` inside a Bash call, F7) are recorded too. Tool reports alone miss most of them: in our own sessions 455 Bash calls wrote files against 53 Edit/Write calls, and 32% of tool-touched paths reached their commit with content the reports don't explain (F26). Commits, amends, rebases, `git checkout` and `reset` are ops too. A checkout needs no revert semantics: it is one op listing the paths it changed with their new blob ids, and earlier content stays readable through earlier ops.
+- **Content at an op.** A path's content at op N is the blob of the latest op at or before N that lists it; a path no op has listed has its content in the tree of the worktree's HEAD at the first op. The first op of a worktree records HEAD and the blob ids of the paths already differing from it. Renames are not recorded: a reader pairs deletions and additions with git's rename detection (`git diff -M`), as git and GitHub do.
 - **`cause`** points at the tool call that made the change when the recorder knows it (tool-reported edits, a Bash call's window). A change with no known cause is an `edit` with no `cause`; a background process writing during a Bash call is attributed to that call (F7's limit). Which turn produced which commit is then a reading of these links by the viewer (D30), not a stored field.
 
-## 4. File documents
+## 4. Content
 
-One document per worktree per path that some op touched: the generic `path` and `note` datums (ADR 036 §5) plus provenance.
+Content is git's own objects: blobs, trees and commits, named by their git ids. Committed content is already in the clone's object store. An uncommitted state is a blob too: the recorder writes it with `git hash-object -w` and records its id on the op (§3). Nothing here is a CRDT, because nothing has two writers.
 
-File documents are **location state**: they hold one working copy's edits, which only that worktree's recorder observes, so they have one writer and stay per worktree (ledger D29, D32). Content-identified datums (commits, trees, file contents at a commit) are different: they are the same wherever they are observed, so any recorder writes the same value and they can be shared across machines (D54). The same path edited in worktrees on two machines therefore has two file documents. They share ground only through commit content, and a comment made on one reaches the other by quote matching, not by a CRDT cursor.
+What is content-identified and what is location state (D54):
+- **Content-identified:** commits, trees and blobs are the same wherever they are observed, so any recorder writes the same value and they can be shared across machines.
+- **Location state:** ref positions, the worktree op log and jj op logs belong to one clone or worktree and have one writer, its recorder.
 
-A file document spans machines only when both edit the same document through an editor that writes it directly, as the filesystem will once dpaths lands. The other machine's working copy must then come from that document, never from `git checkout`, or the two would diverge as separate writers (D55).
+The same path edited in worktrees on two machines therefore has two op logs that share ground only through git objects. A comment made in one reaches the other by git's diff mapping and quote matching (ADR 041 §2).
 
-```jsonc
-// file doc
-{ "org.example.intxt.path/main": { "path": "src/big_cabinet_core/reference.rs" },
-  "org.example.intxt.note/main": { "mime": "text/x-rust", "content": "…" },          // Automerge Text
-  "org.example.intxt.work.file/main": { "worktree": "dtxt:datum:zWt/org.example.intxt.work.worktree/main" } }
-```
+**An intxt carries objects as a pack.** It holds the objects its commits and ops need, as a thin pack (deltas against a base commit the recipient already has, as `git push`, a bundle with prerequisites and `format-patch` assume) or as a full pack when the recipient has no base. On our lane's work, a thin pack is 53–82 KB for 5–12 commits, against 0.6–0.9 MB full (F27). A commit carried this way rebuilds with its original sha (31 of 31, F25), so `git am` from an intxt alone reproduces it.
 
-- **Single writer.** Only the worktree's recorder writes it, so the multi-writer machinery the ref-driven design needed (reading only at pins, repairing concurrent splices, divergent refs) is gone. Content is still always read at a pin: an op's or a commit observation's.
-- **Line-level splices** (F1: Automerge's character-level `update_text` is 25× slower). The first content of a path is written in one change.
-- **Text or blob.** A file is kept as collaborative text (`note`) only when line-level merging pays for itself. Binary files (not UTF-8), files over 256 KiB, and generated files (marked `linguist-generated` or `-diff` in `.gitattributes`, and well-known lockfiles such as `Cargo.lock`, `package-lock.json`, `pnpm-lock.yaml`, `flake.lock`) carry a `blob` reference to a `Blob` datum instead (ADR 026) and are shown as changed, not diffed (ledger D43). The reason is cost, not the cabinet's ceilings (16 MiB per value): a Text keeps one op per character, and every write diffs the whole text (F18), so a 300 KB lockfile adds ~300K ops on first capture and re-diffs 300 KB on each later write. A file that crosses the cutoff switches representation at that op; the earlier text stays at earlier pins. A deleted file keeps its doc; the deleting op lists the path in `deleted` (Lexicon has no nullable map values).
-- **A rename continues the document.** When the changes of one op include a deletion and an addition that git's rename detection pairs (`git diff -M` over the op's before and after), the recorder writes the new path's content into the old path's document, updates its `path` datum, and moves the `worktree.files` entry. So a comment on the old path still targets the same document, its cursors carry, and a diff shows the file as renamed. An unpaired delete and add (rewritten past the similarity threshold) are two documents, and comments on the old one fall back to quote matching or show as outdated.
-- Per-file documents keep loads small (F1: 404 files in one doc load at ~514 MB, as per-file docs at ~75 MB).
+- **Large files:** a file over 8 MiB is recorded by its blob id and size and not packed (D45).
+- **Secrets:** an object that captured a secret is left out of the pack. Ops still name its id, and a reader shows that content as unavailable.
+
+**File documents** (`path`, `note`, provenance; ADR 036 §5) are only for **collaborative worktrees**, which don't exist yet (dpaths). A collaborative worktree is created from a commit, and every edit happens in its documents, whoever makes it; checking out another commit makes a new worktree, not a CRDT operation. A file document spans machines only when both edit it through an editor that writes it directly. The other machine's working copy must then come from that document, never from `git checkout`, or the two would diverge as separate writers (D55).
 
 ## 5. Git and jj layers
 
@@ -109,9 +106,9 @@ A file document spans machines only when both edit the same document through an 
 ```
 
 - **Commits are written once.** Every recorder that sees a commit writes the same value to the same slot, so concurrent creation converges. A recorder never rewrites an existing commit datum: a recorder that lacks a field another wrote (a jj `changeId`) would remove it (whole-value writes, ADR 036 §1). A later fact about a commit goes into its own datum.
-- **Commits hold no pins.** A commit is content-addressed and the same in every worktree; which file doc states it corresponds to depends on where it was observed. The `commit` op in a worktree log carries the sha and the pins (§3), so the diff of a commit is the Automerge diff between the file doc pins at the op that observed its first parent and the op that observed it. A commit observed in two worktrees has two such pairs, both valid.
+- **A commit's diff is git's:** its tree against its first parent's tree. The `commit` op in a worktree log carries the sha and links the commit to the session window that made it (§3); a commit observed in two worktrees has two such ops, both valid.
 - **Refs belong to a clone**, since two clones' `refs/heads/main` are different refs; the slot is keyed by clone. Ref moves are worktree ops (`refMove` with `kind`: commit, amend, rebase, reset), so a ref's revision history is a filter over its clone's worktree logs, and the `gitRef` datum's own Automerge history keeps past targets too (D17). A `gitRef` has one writer, its clone's recorder.
-- **A revision** is still a ref position: the commits reachable from `target` back to `base`. "What changed between revision 1 and 2" is, per file, the diff between the pins at the two `refMove` ops.
+- **A revision** is still a ref position: the commits reachable from `target` back to `base`. "What changed between revision 1 and 2" is git's diff between the two targets' trees, which git computes across a rebase too (`git range-diff` for commit by commit).
 
 **jj is first class**, as its own layer over the same worktree log rather than translated into git terms:
 
@@ -165,25 +162,27 @@ How the datums above split into documents. Each split has a reason: one writer p
 |---|---|---|---|
 | Repo | `gitRepo/<root sha>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
 | Clone | `gitClone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
-| Worktree | `worktree/main` (lists op-log and file docs) | that worktree's recorder | one per worktree |
+| Worktree | `worktree/main` (lists op-log docs) | that worktree's recorder | one per worktree |
 | Op log | `worktreeOp/<seq>` for one seq range | that worktree's recorder | one per ~256 ops; the worktree datum lists them |
-| File | `path`, `note`, `file` provenance | that worktree's recorder | one per path an op touched |
 | Session | `agentSession/main`, `promptTurn/<id>`, `plan/main` | the recorder of that harness | one per session, subagent and continuation |
+| Pack | a `Blob` (ADR 026) holding a git pack (§4) | the command that includes commits or ops in an intxt | one per inclusion |
 
-For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 40 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log, 30 file and 6 session documents, plus the intxt's descriptor and a shared notes document (ADR 041).
+For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 10 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log and 6 session documents, plus the intxt's descriptor, a shared notes document (ADR 041) and the pack (§4).
 
-**Readers must expect gaps.** An intxt spread over many documents, some in other drawers, is never guaranteed to arrive whole or at once: a file doc may be missing, a session may be private, a pin may name heads not yet synced. Readers render what resolves and mark the rest, as a browser renders a page with a broken image (ADR 036 §1, ADR 035 §2.1).
+**Readers must expect gaps.** An intxt spread over many documents, some in other drawers, is never guaranteed to arrive whole or at once: an object may be missing from the pack, a session may be private, a pin may name heads not yet synced. Readers render what resolves and mark the rest, as a browser renders a page with a broken image (ADR 036 §1, ADR 035 §2.1).
 
-**Removing a document.** One document per file means a file doc that captured a secret can be removed from the drawer's roster. Relays and honest peers then stop holding and serving it, and the recorder writes a replacement doc from the cleaned state. Removal does not retract what peers already synced (ADR 019: a stable id is not a promise that an audience change erases earlier disclosure).
+**Removing content.** A secret is removed by leaving its object out of the pack (§4), or, once shared, by replacing the pack and removing the old one from the drawer's roster. Relays and honest peers then stop holding and serving it. Removal does not retract what peers already synced (ADR 019: a stable id is not a promise that an audience change erases earlier disclosure).
 
 ## 8. Settled (operator, 2026-11-10)
 
-- **What ships:** the worktree's documents themselves, at per-document granularity; unwanted documents are removed and replaced, not filtered (§7).
-- **Granularity:** per observed change. The single writer per file doc puts this back in scope (D26's commit-only rule existed because ref-driven docs had several writers). Interactive editing over an intxt would edit a fork (ADR 007) live and fold back into the worktree's docs after a debounce, writing one op. The per-write dmeta and signature overhead for such fine-grained writes is not yet measured; the node lane is asked for a measurement and for whether intermediate changes can skip signing (ledger).
+- **What ships:** the worktree's documents themselves, at per-document granularity; unwanted documents are removed and replaced, not filtered (§7). Since D59, content ships as packed git objects, and unwanted objects are left out (§4).
+- **Granularity:** per observed change, now one op per tool-call window (D59). The single writer per file doc put this back in scope (D26's commit-only rule existed because ref-driven docs had several writers). Interactive editing over an intxt would edit a fork (ADR 007) live and fold back into the worktree's docs after a debounce, writing one op. The per-write dmeta and signature overhead for such fine-grained writes is not yet measured; the node lane is asked for a measurement and for whether intermediate changes can skip signing (ledger).
 - **Repository matching:** shared root commits only *suggest* that two clones are one project; they never merge repos automatically: two clones' repo documents stay separate even though their `gitRepo` datums share a key, and an intxt's `repoEntry` is keyed by the repo document, not the root. Forks and clones of a starter repo share roots and aren't the same project.
 - **Directories outside any checkout:** an opt-in layer later (a worktree without a clone); nothing here blocks it.
 - **jj:** record jj operations' and changes' identities and structure (ids, parents, descriptions, which changes and bookmarks moved), not the full content of jj's op store. A jj backend on top of intxt is a future VCS conversation.
 
 ## 9. Open questions
 
-1. **Op cost.** Every observed change is an op datum plus file-doc writes. Op-log chunking keeps documents under the limit, but the per-write dmeta cost (§8) decides whether per-change granularity is affordable on large sessions.
+1. **Op cost.** Every observed change is an op datum carrying object ids; the content stays in git. Op-log chunking keeps documents under the limit, but the per-write dmeta cost (§8) decides whether per-change granularity is affordable on large sessions.
+2. **Keeping uncommitted objects.** `git hash-object -w` writes loose objects that nothing references, and `git gc` prunes those after two weeks (`gc.pruneExpire`). Proposed: the recorder keeps them reachable under a ref of its own, as jj does with `refs/jj/keep/*`, until an intxt has packed them or the operator drops the capture.
+3. **Reading capture from another machine before packaging.** Ops name objects that only the recording machine's clone holds, so a live view from another device (an agent on a VM watched from a laptop) shows ids without content. Proposed: the recorder adds a thin pack per op-log document, against the HEAD at that document's first op, when the capture drawer is synced off the machine.

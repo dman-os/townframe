@@ -1,5 +1,7 @@
 # ADR 036: intxt core
 
+**Changed 2026-11-12:** recorded worktrees have no file documents (ledger D59, ADR 040 §4); the file document of §5 is now only a collaborative worktree's.
+
 **Status:** Proposed.
 
 **Depends on:** ADR 019 (drawers), ADR 020 (documents and datum writes), ADR 021 (datum schemas and codecs), ADR 025 (predicates and polling), ADR 031 (manifest-declared collections), ADR 035 (references and URLs). **Vocabularies built on it:** ADR 040 (work capture: repos, worktrees, git, jj, agent sessions), ADR 041 (annotations: comments, threads, structure, seen state). Functional requirements: FDR 006 (intxt), FDR 007 (the review loop). Decisions: `docs/scratch/intxt-ledger.md` (D-numbers below).
@@ -92,7 +94,7 @@ An intxt uses generic datums wherever one exists, so that micros built for other
 { "mime": "text/x-rust", "content": "…" }   // content is Automerge Text when a vocabulary edits it in place
 ```
 
-A document holding a `path` and a `note` is a file; a document holding a `title` and a `note` is a note. ADR 040's file documents are exactly that plus one provenance datum, so any note viewer or editor opens them. Comments are ADR 041's, which follows the W3C Web Annotation model.
+A document holding a `path` and a `note` is a file; a document holding a `title` and a `note` is a note. A collaborative worktree's file documents (ADR 040 §4) are exactly that plus one provenance datum, so any note viewer or editor opens them. Comments are ADR 041's, which follows the W3C Web Annotation model.
 
 ## 6. What needs a nodule
 
