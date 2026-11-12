@@ -9,6 +9,10 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+# `NodeDir::with_socket_dir`, so a test places the socket outside the real runtime directory.
+test-support = []
+
 [dependencies]
 #
 # internal

@@ -49,6 +49,7 @@ libc = "0.2"
 #
 # internal
 secrets_rs = { workspace = true, features = ["test-support"] }
+big_node_holder = { workspace = true, features = ["test-support"] }
 
 #
 # misc

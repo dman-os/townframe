@@ -195,11 +195,14 @@ impl NodeDir {
         }
     }
 
-    /// Resolves the node directory a host uses. Precedence: `node_flag` (a CLI's `--node`, which
-    /// folds in `DAY_NODE`), then the platform data directory.
+    /// Resolves the node directory a host uses. Precedence: `node_flag` (a CLI's `--node`), then
+    /// the `DAY_NODE` environment variable, then the platform data directory.
     pub fn resolve(node_flag: Option<&Path>) -> Res<Self> {
-        let root = match node_flag {
-            Some(path) => std::path::absolute(std::env::current_dir()?.join(path))
+        let from_env = std::env::var_os("DAY_NODE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let root = match node_flag.map(Path::to_path_buf).or(from_env) {
+            Some(path) => std::path::absolute(std::env::current_dir()?.join(&path))
                 .wrap_err_with(|| format!("error absolutizing node path {path:?}"))?,
             None => directories::ProjectDirs::from("org", "townframe", "day")
                 .ok_or_eyre("failed to get xdg directories")?
@@ -211,6 +214,7 @@ impl NodeDir {
 
     /// A node directory whose socket lives in `socket_dir`, so a test does not touch the real
     /// runtime directory.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_socket_dir(root: PathBuf, socket_dir: PathBuf) -> Self {
         Self { root, socket_dir }
     }
