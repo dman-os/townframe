@@ -47,6 +47,17 @@ use crate::host::DioxusHost;
 pub(crate) struct Dispatch {
     pub(crate) host: Rc<DioxusHost>,
     pub(crate) managers: Option<ObservingManagers>,
+    /// The resize and visibility entries of the frame in progress, waiting for their drain.
+    pub(crate) batch: RefCell<Batch>,
+}
+
+/// What `Dispatch::drain` delivers: the entries of one frame.
+#[derive(Default)]
+pub(crate) struct Batch {
+    resizes: Vec<(NodeKey, f64, f64)>,
+    visibles: Vec<IntersectionEntry<NodeKey>>,
+    height_changed: bool,
+    scheduled: bool,
 }
 
 /// The managers a virtualized view's resize, visibility and scroll events are delivered to.
@@ -71,9 +82,21 @@ impl Dispatch {
         self.host.flush_frames();
     }
 
-    /// `ResizeObserver`'s callback: `border_height` is `borderBoxSize.blockSize` and
-    /// `content_width` is `contentBoxSize.inlineSize`.
-    pub(crate) fn resized(&self, node: NodeKey, border_height: f64, content_width: f64) {
+    /// `ResizeObserver`'s callback for one element: `border_height` is
+    /// `borderBoxSize.blockSize` and `content_width` is `contentBoxSize.inlineSize`.
+    ///
+    /// The cache takes the size at once (the synchronous reads of whoever runs before the drain
+    /// already see it), but the managers hear of it in the frame's one batch (`drain`): upstream's
+    /// observers deliver every entry of a frame in one callback, so a window of 200 new rows is one
+    /// reconcile pass, not 200.
+    pub(crate) fn resized(self: &Rc<Self>, node: NodeKey, border_height: f64, content_width: f64) {
+        // Upstream's ResizeObserver stops reporting a row the moment the row is removed. A Dioxus
+        // `onresize` already in flight can still arrive after the render that freed the row (a
+        // fast scroll swaps rows out every frame), so an event for a node the document no longer
+        // holds is dropped before anything reads it.
+        if !host_document(&self.host).exists(node) {
+            return;
+        }
         let previous = self.host.record_size(node, border_height);
         // A static view's rows, and any view's hunk separators, are measured for geometry only:
         // the port reads no separator height (its metrics carry the estimate) and nothing is
@@ -81,40 +104,97 @@ impl Dispatch {
         // runs. The cache still feeds the hit-test and the tops the scroll fix reads, as
         // `getBoundingClientRect` would upstream.
         let is_separator = host_document(&self.host).has_attribute(node, "data-separator");
-        let Some(managers) = self.managers.as_ref().filter(|_| !is_separator) else {
+        if self.managers.is_none() || is_separator {
             self.host.flush_frames();
             return;
-        };
-        managers
-            .hub
-            .handle_shared_resize_entries(&[ResizeObserverEntry {
-                target: node,
-                border_box_block_size: border_height,
-                content_box_inline_size: content_width,
-            }]);
-        managers.virtualizer.handle_container_resize(&[ResizeEntry {
-            target: node,
-            block_size: border_height,
-        }]);
-        // Upstream sees a row's height change at the next pass its own render triggers. Here
-        // the layout that changed it arrives after that pass, so a row that grew or first
-        // appeared asks for the pass that reads it (a no-op unless it has something to reconcile).
-        if previous != Some(border_height) && node != self.host.container() {
-            managers
-                .virtualizer
-                .request_height_reconcile(&managers.instance);
         }
-        self.host.flush_frames();
+        {
+            let mut batch = self.batch.borrow_mut();
+            batch.resizes.push((node, border_height, content_width));
+            // Upstream sees a row's height change at the next pass its own render triggers. Here
+            // the layout that changed it arrives after that pass, so a row that grew or first
+            // appeared asks for the pass that reads it (a no-op unless it has something to
+            // reconcile).
+            batch.height_changed |=
+                previous != Some(border_height) && node != self.host.container();
+        }
+        self.schedule_drain();
     }
 
-    /// `IntersectionObserver`'s callback.
-    pub(crate) fn visible(&self, node: NodeKey, is_intersecting: bool) {
-        self.managers()
-            .virtualizer
-            .handle_intersection_change(&[IntersectionEntry {
-                target: node,
-                is_intersecting,
-            }]);
+    /// `IntersectionObserver`'s callback for one element, batched like `resized`.
+    pub(crate) fn visible(self: &Rc<Self>, node: NodeKey, is_intersecting: bool) {
+        // As in `resized`: upstream's IntersectionObserver stops reporting a removed row, while
+        // an `onvisible` in flight can outlive the render that freed it.
+        if !host_document(&self.host).exists(node) {
+            return;
+        }
+        self.batch.borrow_mut().visibles.push(IntersectionEntry {
+            target: node,
+            is_intersecting,
+        });
+        self.schedule_drain();
+    }
+
+    /// One executor tick for the events of every handler that ran before it: the task is the
+    /// engine's "once per frame" callback delivery.
+    fn schedule_drain(self: &Rc<Self>) {
+        if std::mem::replace(&mut self.batch.borrow_mut().scheduled, true) {
+            return;
+        }
+        let dispatch = Rc::clone(self);
+        spawn(async move { dispatch.drain() });
+    }
+
+    /// One callback of each observer with every entry the frame queued, in arrival order, then
+    /// one reconcile request and one flush. Resize observations are delivered before
+    /// intersection observations, as the rendering update orders them.
+    fn drain(&self) {
+        let Batch {
+            resizes,
+            visibles,
+            height_changed,
+            scheduled: _,
+        } = std::mem::take(&mut *self.batch.borrow_mut());
+        let document = host_document(&self.host);
+        let managers = self.managers();
+        // A row freed by a render between its event and this tick is dropped here too.
+        let resizes: Vec<_> = resizes
+            .into_iter()
+            .filter(|(node, ..)| document.exists(*node))
+            .collect();
+        let visibles: Vec<_> = visibles
+            .into_iter()
+            .filter(|entry| document.exists(entry.target))
+            .collect();
+        if !resizes.is_empty() {
+            managers.hub.handle_shared_resize_entries(
+                &resizes
+                    .iter()
+                    .map(|(node, height, width)| ResizeObserverEntry {
+                        target: *node,
+                        border_box_block_size: *height,
+                        content_box_inline_size: *width,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            managers.virtualizer.handle_container_resize(
+                &resizes
+                    .iter()
+                    .map(|(node, height, _)| ResizeEntry {
+                        target: *node,
+                        block_size: *height,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if height_changed {
+                managers
+                    .virtualizer
+                    .request_height_reconcile(&managers.instance);
+            }
+        }
+        if !visibles.is_empty() {
+            managers.virtualizer.handle_intersection_change(&visibles);
+        }
         self.host.flush_frames();
     }
 
