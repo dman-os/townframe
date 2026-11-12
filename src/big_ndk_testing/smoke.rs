@@ -520,7 +520,15 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     assert_eq!(own["status"], 200, "{own}");
 
     // Revoking takes effect: the handler is told no capability and the one it remembered is dead.
-    node.grant(&a.cartridge, DispatchScope::default()).await;
+    node.revoke(
+        &a.cartridge,
+        DispatchScope {
+            operations: [b.relay()].into(),
+            authorities: [b.authority.to_owned()].into(),
+            ..Default::default()
+        },
+    )
+    .await;
     assert_eq!(own_capability(&node, &a).await, None);
     let stale = relay(&node, &a, &target, Some(&granted), context).await;
     assert_eq!(stale["status"], 403, "{stale}");
