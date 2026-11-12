@@ -771,6 +771,32 @@ mod library {
         );
     }
 
+    /// A repository at `<base>/repo` with `main` holding `files` in one commit, and `feat/x`
+    /// switched to.
+    fn init_repo(base: &std::path::Path, files: &[(&str, &str)]) -> PathBuf {
+        let repo = base.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        for (path, content) in files {
+            std::fs::write(repo.join(path), content).unwrap();
+        }
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        git(&repo, &["switch", "-q", "-c", "feat/x"]);
+        repo
+    }
+
+    /// The commit `spec` names in `repo`.
+    fn rev(repo: &std::path::Path, spec: &str) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["rev-parse", spec])
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
     /// A scripted Claude Code session through `capture`: the hooks' JSON in, the real handler's
     /// documents out. A tool call writes a text file and a binary one; the binary file's bytes go
     /// to the blob store and its file document carries the blob datum, which `file.blob`
@@ -951,13 +977,7 @@ mod library {
         with_intxt_node(async |tmp, client| {
             let node_root = tmp.path().join("node");
             let base = tmp.path().canonicalize().unwrap();
-            let repo = base.join("repo");
-            std::fs::create_dir(&repo).unwrap();
-            git(&repo, &["init", "-q", "-b", "main"]);
-            std::fs::write(repo.join("a.txt"), "one\n").unwrap();
-            git(&repo, &["add", "-A"]);
-            git(&repo, &["commit", "-q", "-m", "first"]);
-            git(&repo, &["switch", "-q", "-c", "feat/x"]);
+            let repo = init_repo(&base, &[("a.txt", "one\n")]);
 
             let transcript = base.join("claude/s1.jsonl");
             std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
@@ -1049,16 +1069,7 @@ mod library {
                 listed_before_add.contains("commits: 0, refs: 0, sessions: 0"),
                 "{listed_before_add}"
             );
-            let rev = |spec: &str| {
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(["rev-parse", spec])
-                    .output()
-                    .unwrap();
-                String::from_utf8(output.stdout).unwrap().trim().to_owned()
-            };
-            let (tip, merge_base) = (rev("feat/x"), rev("main"));
+            let (tip, merge_base) = (rev(&repo, "feat/x"), rev(&repo, "main"));
             let range = format!("{}..{}", &merge_base[..7], &tip[..7]);
 
             let added = add(&short).await;
@@ -1176,13 +1187,7 @@ mod library {
         with_intxt_node(async |tmp, client| {
             let node_root = tmp.path().join("node");
             let base = tmp.path().canonicalize().unwrap();
-            let repo = base.join("repo");
-            std::fs::create_dir(&repo).unwrap();
-            git(&repo, &["init", "-q", "-b", "main"]);
-            std::fs::write(repo.join("a.txt"), "one\n").unwrap();
-            git(&repo, &["add", "-A"]);
-            git(&repo, &["commit", "-q", "-m", "first"]);
-            git(&repo, &["switch", "-q", "-c", "feat/x"]);
+            let repo = init_repo(&base, &[("a.txt", "one\n")]);
             for path in ["b.txt", "c.txt"] {
                 std::fs::write(repo.join(path), format!("{path}\n")).unwrap();
                 git(&repo, &["add", "-A"]);
@@ -1280,6 +1285,235 @@ mod library {
                 .unwrap();
             assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
             assert_eq!(commits().await, 3);
+        })
+        .await;
+    }
+
+    /// Review through `comment`, `reply` and `inbox`, between two actors of one node (the
+    /// operator and an `agent` it opens): a comment on a commit's lines, the other side's inbox
+    /// and reply, a rebase that inserts lines above the target (the comment follows to its new
+    /// lines), an edit of the targeted text (outdated), and resolving, after which the thread
+    /// leaves the inbox.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn intxt_review_comments_follow_a_rebase_and_resolve() {
+        use crate::cmds::intxt::package::Named;
+        use crate::cmds::intxt::package::Packaging;
+        use crate::cmds::intxt::review::Side;
+        use big_cabinet_core::authority::OpenActor;
+        use big_cabinet_core::authority::Rights;
+        use intxt_core::annotation::Motivation;
+
+        with_intxt_node(async |tmp, client| {
+            let node_root = tmp.path().join("node");
+            let base = tmp.path().canonicalize().unwrap();
+            let numbered =
+                |prefix: &str| -> String { (1..=10).map(|n| format!("{prefix}{n}\n")).collect() };
+            let repo = init_repo(&base, &[("b.rs", &numbered("b"))]);
+            // The first commit rewrites line 8; the second adds a file.
+            std::fs::write(
+                repo.join("b.rs"),
+                numbered("b").replace("b8\n", "b8 edited\n"),
+            )
+            .unwrap();
+            git(&repo, &["commit", "-q", "-am", "edit b8"]);
+            std::fs::write(repo.join("c.rs"), "c\n").unwrap();
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", "add c"]);
+            let (first, second) = (rev(&repo, "feat/x~1"), rev(&repo, "feat/x"));
+
+            let operator = Packaging::new(client, &repo, &node_root);
+            let agent_actor = crate::cmds::intxt::call(
+                client,
+                OpenActor {
+                    parent: client.booted_node().authority.root,
+                    path: "agent".into(),
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .unwrap()
+            .actor
+            .actor_id;
+            let agent = Packaging::new(client, &repo, &node_root).acting_as(agent_actor);
+
+            let mut created = Vec::new();
+            let drawer = operator
+                .create(&mut created, "Review me", None)
+                .await
+                .unwrap();
+            let intxt = short_ids::ShortIds::new([drawer.to_string()])
+                .render(&drawer.to_string())
+                .unique;
+            let add = async || {
+                operator
+                    .add(
+                        &mut Vec::new(),
+                        &intxt,
+                        Named::Branch("feat/x".to_owned()),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+            };
+            add().await;
+
+            let comment = async |who: &Packaging<'_>, target: &str, text: &str, side: Side| {
+                let mut out = Vec::new();
+                let result = who
+                    .comment(&mut out, &intxt, target, text, side, Motivation::Commenting)
+                    .await;
+                (result, String::from_utf8(out).unwrap())
+            };
+            let inbox = async |who: &Packaging<'_>| {
+                let mut out = Vec::new();
+                who.inbox(&mut out, &intxt).await.unwrap();
+                String::from_utf8(out).unwrap()
+            };
+            let reply = async |who: &Packaging<'_>,
+                               to: &str,
+                               text: Option<&str>,
+                               resolved: Option<bool>| {
+                let mut out = Vec::new();
+                who.reply(&mut out, to, text, resolved).await.unwrap();
+                String::from_utf8(out).unwrap()
+            };
+
+            // 1. A comment on a range of the first commit.
+            let target = format!("{}:b.rs:7-9", &first[..7]);
+            let (commented, out) = comment(&operator, &target, "Why edit b8?", Side::New).await;
+            commented.unwrap();
+            let root = out
+                .strip_prefix("comment ")
+                .and_then(|rest| rest.split(' ').next())
+                .unwrap_or_else(|| panic!("{out}"))
+                .to_owned();
+            assert!(
+                out.contains(&format!("on {} b.rs:7-9", &first[..7])),
+                "{out}"
+            );
+            assert!(
+                out.contains(&format!("undo: day x intxt rm {intxt} {root}")),
+                "{out}"
+            );
+
+            // A commit the intxt does not hold, and the old side of a commit whose parent it
+            // does not hold, are refused, saying what it holds.
+            let (refused, _) = comment(
+                &operator,
+                &format!("{}:b.rs:7", &rev(&repo, "main")[..7]),
+                "no",
+                Side::New,
+            )
+            .await;
+            let refused = format!("{:#}", refused.unwrap_err());
+            assert!(
+                refused.contains("is not a commit the intxt") && refused.contains("holds"),
+                "{refused}"
+            );
+            let (refused, _) = comment(&operator, &target, "no", Side::Old).await;
+            assert!(format!("{:#}", refused.unwrap_err()).contains("parent"));
+            // The old side of the second commit is the first, which is held.
+            let (old_side, out) = comment(
+                &operator,
+                &format!("{}:b.rs:8", &second[..7]),
+                "was b8 edited?",
+                Side::Old,
+            )
+            .await;
+            old_side.unwrap();
+            assert!(out.contains(&format!("on {} b.rs:8", &first[..7])), "{out}");
+            // `rm` is the undo of a comment.
+            let removed_short = out
+                .split("rm ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().nth(1))
+                .unwrap()
+                .to_owned();
+            let mut rm_out = Vec::new();
+            operator
+                .rm(&mut rm_out, &intxt, &[removed_short])
+                .await
+                .unwrap();
+
+            // 3. The other side sees the thread, placed on the branch's current tip.
+            let seen_by_agent = inbox(&agent).await;
+            assert!(seen_by_agent.contains("1 thread(s)"), "{seen_by_agent}");
+            assert!(
+                seen_by_agent.contains(&format!("b.rs:7-9 @ {}", &second[..7])),
+                "{seen_by_agent}"
+            );
+            assert!(seen_by_agent.contains("waiting on you"), "{seen_by_agent}");
+            assert!(
+                seen_by_agent.contains("them: Why edit b8?"),
+                "{seen_by_agent}"
+            );
+            // The author's own inbox has nothing: it wrote last.
+            let own = inbox(&operator).await;
+            assert!(own.contains("nothing waiting"), "{own}");
+
+            // 2. The reply. The thread is then waiting on the author, and the replier, who has
+            // seen everything, has nothing left.
+            let replied = reply(&agent, &root, Some("Fixes the off-by-one."), None).await;
+            assert!(replied.starts_with("reply "), "{replied}");
+            assert!(inbox(&agent).await.contains("nothing waiting"));
+            let waiting = inbox(&operator).await;
+            assert!(waiting.contains("them: Fixes the off-by-one."), "{waiting}");
+            assert!(waiting.contains("you: Why edit b8?"), "{waiting}");
+            // Seen, but still waiting on the author until they answer.
+            assert!(inbox(&operator).await.contains("waiting on you"));
+
+            // 4. A rebase onto a main that inserted three lines at the top of `b.rs`: the
+            // comment's lines are three lower on the rebased commit.
+            git(&repo, &["switch", "-q", "main"]);
+            std::fs::write(repo.join("b.rs"), format!("n1\nn2\nn3\n{}", numbered("b"))).unwrap();
+            git(&repo, &["commit", "-q", "-am", "insert above"]);
+            git(&repo, &["switch", "-q", "feat/x"]);
+            git(&repo, &["rebase", "-q", "main"]);
+            let rebased = rev(&repo, "feat/x");
+            assert_ne!(rebased, second);
+            add().await;
+            let shifted = inbox(&operator).await;
+            assert!(
+                shifted.contains(&format!("b.rs:10-12 @ {}", &rebased[..7])),
+                "{shifted}"
+            );
+            // The old commits are still held: the comment is still on the first.
+            assert!(!shifted.contains("outdated"), "{shifted}");
+
+            // 5. An edit of the commented text.
+            std::fs::write(
+                repo.join("b.rs"),
+                std::fs::read_to_string(repo.join("b.rs"))
+                    .unwrap()
+                    .replace("b8 edited", "b8 rewritten"),
+            )
+            .unwrap();
+            git(&repo, &["commit", "-q", "-am", "rewrite b8"]);
+            let edited = rev(&repo, "feat/x");
+            add().await;
+            let outdated = inbox(&operator).await;
+            assert!(
+                outdated.contains(&format!("b.rs (outdated at {}", &edited[..7])),
+                "{outdated}"
+            );
+            assert!(
+                outdated.contains(&format!("was {}:7-9", &first[..7])),
+                "{outdated}"
+            );
+
+            // 6. Resolved, the thread is gone, from both sides' inboxes.
+            let resolved = reply(&operator, &root, None, Some(true)).await;
+            assert!(resolved.contains("resolved"), "{resolved}");
+            assert!(
+                resolved.contains(&format!("undo: day x intxt reply {root} --reopen")),
+                "{resolved}"
+            );
+            assert!(inbox(&operator).await.contains("nothing waiting"));
+            assert!(inbox(&agent).await.contains("nothing waiting"));
+            // Reopened, it is waiting on the author again: the agent wrote last.
+            reply(&operator, &root, None, Some(false)).await;
+            let reopened = inbox(&operator).await;
+            assert!(reopened.contains("1 thread(s)"), "{reopened}");
         })
         .await;
     }

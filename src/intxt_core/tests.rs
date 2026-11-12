@@ -5,6 +5,7 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::Stored;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::datum::reconcile_json_atomic;
+use big_cabinet_core::dmeta::Uuid7;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -339,4 +340,120 @@ fn note_content_is_stored_as_text() {
         matches!(content, automerge::Value::Object(automerge::ObjType::Text)),
         "content is {content:?}"
     );
+}
+
+fn posted(
+    slot: &str,
+    reply_to: Option<&str>,
+    authors: &[Uuid7],
+    heads: &[&str],
+) -> annotation::Posted {
+    let target = |slot: &str| {
+        format!("dtxt:datum:z11111111111111111111111111111111/org.example.intxt.comment/{slot}")
+    };
+    annotation::Posted {
+        key: format!("org.example.intxt.comment/{slot}").parse().unwrap(),
+        comment: serde_json::from_value(json!({
+            "targets": [],
+            "body": {"mime": "text/markdown", "content": slot},
+            "motivation": if reply_to.is_some() { "replying" } else { "commenting" },
+            "replyTo": reply_to.map(target),
+        }))
+        .unwrap(),
+        heads: heads.iter().map(|head| (*head).to_owned()).collect(),
+        authors: authors.to_vec(),
+    }
+}
+
+#[test]
+fn threads_group_replies_under_their_first_comment_in_time_order() {
+    let (ada, grace) = (Uuid7::new(), Uuid7::new());
+    // Comment slots are time-ordered; given in a different order, replies of replies included,
+    // and one reply whose parent was removed.
+    let threads = annotation::Thread::group(vec![
+        posted("0193-d", Some("0193-c"), &[ada], &["h"]),
+        posted("0193-c", Some("0193-a"), &[grace], &["h"]),
+        posted("0193-b", None, &[grace], &["h"]),
+        posted("0193-a", None, &[ada], &["h"]),
+        posted("0193-e", Some("0193-gone"), &[grace], &["h"]),
+    ]);
+    let slots: Vec<Vec<String>> = threads
+        .iter()
+        .map(|thread| {
+            thread
+                .comments
+                .iter()
+                .map(|post| post.comment.body.content.clone())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        slots,
+        [
+            vec!["0193-a", "0193-c", "0193-d"],
+            vec!["0193-b"],
+            vec!["0193-e"]
+        ]
+    );
+    assert_eq!(
+        threads[0].root.to_string(),
+        "org.example.intxt.comment/0193-a"
+    );
+    // The orphan's thread is named by the comment it answered.
+    assert_eq!(
+        threads[2].root.to_string(),
+        "org.example.intxt.comment/0193-gone"
+    );
+}
+
+#[test]
+fn a_reply_loop_ends_instead_of_hanging() {
+    let ada = Uuid7::new();
+    let threads = annotation::Thread::group(vec![
+        posted("0193-a", Some("0193-b"), &[ada], &["h"]),
+        posted("0193-b", Some("0193-a"), &[ada], &["h"]),
+    ]);
+    assert_eq!(
+        threads
+            .iter()
+            .map(|thread| thread.comments.len())
+            .sum::<usize>(),
+        2
+    );
+}
+
+#[test]
+fn a_thread_waits_on_whoever_did_not_write_last_and_is_unseen_until_recorded() {
+    let (ada, grace) = (Uuid7::new(), Uuid7::new());
+    let thread = annotation::Thread::group(vec![
+        posted("0193-a", None, &[ada], &["h1"]),
+        posted("0193-b", Some("0193-a"), &[grace], &["h2"]),
+    ])
+    .remove(0);
+    assert!(thread.waiting_on(&ada));
+    assert!(!thread.waiting_on(&grace));
+
+    let mut seen = std::collections::BTreeMap::new();
+    // Ada wrote the first comment, so only the reply can be new to her; Grace is the reverse.
+    assert!(thread.unseen_by(&ada, &seen));
+    assert!(thread.unseen_by(&grace, &seen));
+    seen.insert(
+        "org.example.intxt.comment/0193-b".to_owned(),
+        vec!["h2".to_owned()],
+    );
+    assert!(!thread.unseen_by(&ada, &seen));
+    seen.insert(
+        "org.example.intxt.comment/0193-a".to_owned(),
+        vec!["h1".to_owned()],
+    );
+    assert!(!thread.unseen_by(&grace, &seen));
+    // An edit makes a new version, which is unseen again.
+    seen.insert(
+        "org.example.intxt.comment/0193-b".to_owned(),
+        vec!["old".to_owned()],
+    );
+    assert!(thread.unseen_by(&ada, &seen));
+    // A version no verified author wrote is someone else's.
+    let anonymous = annotation::Thread::group(vec![posted("0193-c", None, &[], &["h"])]).remove(0);
+    assert!(anonymous.waiting_on(&ada));
 }

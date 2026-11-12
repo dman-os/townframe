@@ -21,10 +21,16 @@ pub enum intxt_core::work::StopReason { # [serde (rename = "end_turn")] EndTurn,
 pub enum intxt_core::work::ToolKind { # [serde (rename = "read")] Read, # [serde (rename = "edit")] Edit, # [serde (rename = "delete")] Delete, # [serde (rename = "move")] Move, # [serde (rename = "search")] Search, # [serde (rename = "execute")] Execute, # [serde (rename = "think")] Think, # [serde (rename = "fetch")] Fetch, # [serde (rename = "switch_mode")] SwitchMode, # [serde (rename = "other")] Other, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::ToolStatus { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [serde (rename = "failed")] Failed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::Vcs { # [serde (rename = "git")] Git, # [serde (rename = "jj")] Jj, # [datum (other)] Unknown (String) }
+pub impl intxt_core::annotation::Thread::fn group (posted : Vec < Posted >) -> Vec < Thread >
+pub impl intxt_core::annotation::Thread::fn last (& self) -> & Posted
+pub impl intxt_core::annotation::Thread::fn unseen_by (& self , reader : & Uuid7 , seen : & BTreeMap < String , Vec < String > >) -> bool
+pub impl intxt_core::annotation::Thread::fn waiting_on (& self , reader : & Uuid7) -> bool
 pub impl intxt_core::capture::Batch::fn is_empty (& self) -> bool
 pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
+pub impl intxt_core::client::Caller < H >::async fn actor (& self) -> Result < Uuid7 , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn add_part (& self , intxt : & DrawerId , part : & DatumReference ,) -> Result < Included , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn datum_keys (& self , doc : & DocId) -> Result < BTreeSet < DatumKey > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn doc_capability (& self , scope : DocScope) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn include (& self , intxt : & DrawerId , mut set : BTreeMap < DatumKey , Value > , entries : & [DatumKey] ,) -> Result < Vec < Included > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Value) , IntxtError >
@@ -33,6 +39,8 @@ pub impl intxt_core::client::Caller < H >::async fn record_observations (& self 
 pub impl intxt_core::client::Caller < H >::async fn remove_entries (& self , intxt : & DrawerId , entries : & BTreeSet < DatumKey > , also : & BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn write_datums (& self , doc : & DocId , set : BTreeMap < DatumKey , Value > , remove : BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
+pub impl intxt_core::client::Caller < H >::fn acting_as (mut self , actor : Uuid7) -> Self
 pub impl intxt_core::client::Caller < H >::fn command (& self , step : & str , content : & impl Serialize) -> Result < CommandId , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn new (transport : H , context : RequestContext , capability : Option < & str > , command_base : String ,) -> Self
 pub intxt_core::cartridge::fn cartridge (handler : Artifact) -> Cartridge
@@ -52,10 +60,12 @@ pub struct intxt_core::annotation::AnnotationsEntry  { empty: Option < bool >, e
 pub struct intxt_core::annotation::Comment  { targets: Vec < Target >, body: Content, motivation: Motivation, reply_to: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::annotation::Content  { mime: String, content: String, extra: Extra }
 pub struct intxt_core::annotation::LineRange  { start: u32, end: u32, extra: Extra }
+pub struct intxt_core::annotation::Posted  { key: DatumKey, comment: Comment, heads: Vec < String >, authors: Vec < Uuid7 > }
 pub struct intxt_core::annotation::Seen  { datums: BTreeMap < String , Vec < String > >, reviewed: BTreeMap < String , String >, extra: Extra }
 pub struct intxt_core::annotation::Structure  { kind: StructureKind, title: String, body: Option < Content >, status: Option < Progress >, targets: Vec < Target >, parent: Option < DatumReference >, order: Option < String >, extra: Extra }
 pub struct intxt_core::annotation::Target  { source: DatumPin, path: Option < String >, lines: Option < LineRange >, quote: Option < TextQuote >, to: Option < Location >, extra: Extra }
 pub struct intxt_core::annotation::TextQuote  { exact: String, prefix: Option < String >, suffix: Option < String >, extra: Extra }
+pub struct intxt_core::annotation::Thread  { root: DatumKey, comments: Vec < Posted > }
 pub struct intxt_core::annotation::ThreadState  { resolved: bool, extra: Extra }
 pub struct intxt_core::capture::Batch  { session: SessionBatch, worktrees: Vec < WorktreeBatch >, uncaused_tool_calls: u64, extra: Extra }
 pub struct intxt_core::capture::Cause  { agent_id: Option < String >, turn: Option < String >, tool_use_id: String, extra: Extra }

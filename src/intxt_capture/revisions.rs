@@ -35,8 +35,8 @@ fn revision(reason: impl Into<String>) -> Error {
     Error::Revision(reason.into())
 }
 
-/// The commit `name` names, or an error saying so.
-fn commit_of(git: &Git, name: &str) -> Result<String, Error> {
+/// The commit `name` names, as its full id, or an error saying so.
+pub fn commit_of(git: &Git, name: &str) -> Result<String, Error> {
     git.ask(&[
         "rev-parse",
         "--verify",
