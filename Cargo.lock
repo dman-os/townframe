@@ -2814,6 +2814,7 @@ name = "clay_rt_wasmtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "ciborium",
  "clay_collection",
  "clay_docs",
@@ -2821,11 +2822,14 @@ dependencies = [
  "clay_host",
  "clay_surface",
  "futures",
+ "http",
+ "http-body-util",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "wash-runtime",
  "wasmtime-wasi",
+ "wasmtime-wasi-http",
  "wat",
 ]
 

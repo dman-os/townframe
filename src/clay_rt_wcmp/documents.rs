@@ -4,11 +4,11 @@ use super::WcmpStoreState;
 use super::bindings::exports::townframe::dayframe::micro_lifecycle as lifecycle_wit;
 pub use super::bindings::townframe::dayframe::documents as wit;
 use super::first_poll;
-use clay_docs::DocumentSnapshot;
 use clay_docs::DatumMutation;
 use clay_docs::DatumRoute;
 use clay_docs::DatumSelection;
 use clay_docs::DatumValue;
+use clay_docs::DocumentSnapshot;
 use clay_docs::OperationError;
 use clay_docs::OperationReceipt;
 use clay_docs::OperationStatus;
@@ -84,6 +84,10 @@ pub(super) async fn initialize(
         publications: declared,
         micro,
         activator,
+        // This runtime does not host `wasi:http/client` yet (see `wasi/mod.rs`), so there is
+        // nothing to hand the egress to: a component that imports the client fails to
+        // instantiate, naming the missing import, and one that does not never needs it.
+        egress: _,
     } = context;
     if let Some(activator) = activator {
         active.store.data().capabilities.attach_activator(activator);

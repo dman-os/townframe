@@ -433,8 +433,8 @@ pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
 pub use manifest::ConfigurationRequest;
 pub use manifest::ContributionDeclaration;
-pub use manifest::Entrypoints;
 pub use manifest::DatumAccess;
+pub use manifest::Entrypoints;
 pub use manifest::InterfaceRef;
 pub use manifest::LOCAL_NAMESPACE;
 pub use manifest::MANIFEST_NSID;
@@ -457,7 +457,9 @@ pub use component::ComponentRef;
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../clay_guest_session/wit",
-        world: "micro-client",
+        world: "micro-guest",
+        // `wasi:http/client` comes from another package; its types are generated here, once.
+        generate_all,
         pub_export_macro: true,
     });
 }
@@ -551,11 +553,11 @@ pub use context::Config;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
-pub use context::Error;
-#[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Datum;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::DatumSnapshot;
+#[cfg(any(feature = "in_process", feature = "guest"))]
+pub use context::Error;
 #[cfg(feature = "in_process")]
 pub use context::Instance;
 #[cfg(any(feature = "in_process", feature = "guest"))]

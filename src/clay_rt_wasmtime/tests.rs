@@ -1231,7 +1231,8 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
 }
 
 /// The guest `WasiCtx` grants nothing (`WasmStoreState::new`), although the linker offers all of
-/// WASI p3 including sockets and filesystem. The `egress` fixture tries TCP, UDP, name lookup,
+/// WASI p3 including sockets and filesystem; the one network a guest has is `wasi:http` to
+/// `dispatch.local` (see the dispatch tests below), never a socket. The `egress` fixture tries TCP, UDP, name lookup,
 /// directory listing, absolute and relative file opens when it mounts and renders what each
 /// returned; every channel must fail and the environment must be empty. Adding
 /// `inherit_network()`, `allow_*`, a preopen, or an env var to the context breaks this test.
@@ -1298,6 +1299,159 @@ async fn guest_wasi_context_grants_no_network_filesystem_or_environment() {
     drop(session);
     drop(driver);
     host.close();
+}
+
+/// Records every call dispatch receives with the identity it was made as, and answers the way a
+/// node would for the two test methods: `test.echo` returns its input, `test.ping` a fixed
+/// body.
+#[derive(Default)]
+struct FakeDispatch {
+    calls: Mutex<Vec<(clay_host::MicroId, clay_host::DispatchCall)>>,
+}
+
+impl clay_host::MicroDispatch for FakeDispatch {
+    fn call(
+        &self,
+        micro: &clay_host::MicroId,
+        call: clay_host::DispatchCall,
+    ) -> futures::future::BoxFuture<'static, clay_host::DispatchAnswer> {
+        let body = match call.nsid.as_str() {
+            "test.echo" => call.body.clone(),
+            "test.ping" => b"{\"pong\":true}".to_vec(),
+            other => panic!("the fake node has no method {other}"),
+        };
+        self.calls.lock().unwrap().push((micro.clone(), call));
+        Box::pin(async move {
+            clay_host::DispatchAnswer {
+                status: 200,
+                headers: vec![("content-type".to_owned(), b"application/json".to_vec())],
+                body,
+            }
+        })
+    }
+}
+
+/// Mount the `dispatch` fixture with `egress` and read its report: one `name=outcome` line per
+/// attempt it made while initializing.
+async fn dispatch_report(
+    egress: Option<clay_host::MicroEgress>,
+) -> std::collections::BTreeMap<String, String> {
+    let host = Host::new();
+    let owner = host.start("dispatch");
+    let package = WasmPackage::from_env("dispatch")
+        .await
+        .expect("prepared dispatch component is valid");
+    let (runtime, driver) = WasmRuntime::initialize(
+        &host,
+        owner.clone(),
+        &package,
+        InitialContext {
+            egress,
+            ..InitialContext::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|error| panic!("the fixture initializes: {error}"));
+    let sink = Arc::new(RecordingSink::new());
+    let session = runtime
+        .mount("view", Arc::clone(&sink) as _)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the probe mounts: {error:?}, fault {:?}",
+                host.fault(&owner)
+            )
+        });
+    let report = sink.tree(SurfaceTree::text_content);
+    drop(session);
+    drop(driver);
+    host.close();
+    report
+        .lines()
+        .map(|line| {
+            let (name, outcome) = line.split_once('=').expect("name=outcome");
+            (name.to_owned(), outcome.to_owned())
+        })
+        .collect()
+}
+
+/// A micro calls the node through `wasi:http/client` to `dispatch.local`, and the host routes the
+/// call into dispatch as the micro the incarnation belongs to: the identity comes from the
+/// egress the host built, never from the request. The fixture sends forged `x-micro-id` and
+/// `authorization` headers on its echo call; they arrive as plain headers and the call is still
+/// made as the real micro. Every other origin, scheme, verb and path is refused, and none of
+/// those refusals reaches dispatch.
+#[tokio::test]
+async fn a_guest_calls_dispatch_as_its_own_micro_and_nothing_else_is_reachable() {
+    let dispatch = Arc::new(FakeDispatch::default());
+    let micro = clay_host::MicroId::new("did:example:alice/dispatch");
+    let report = dispatch_report(Some(clay_host::MicroEgress::new(
+        micro.clone(),
+        dispatch.clone(),
+    )))
+    .await;
+
+    assert_eq!(report["echo"], "200:{\"n\":1}", "{report:?}");
+    assert_eq!(report["ping"], "200:{\"pong\":true}", "{report:?}");
+    for (name, status) in [
+        ("delete", "405"),
+        ("put", "405"),
+        ("other_path", "404"),
+        ("get_with_body", "400"),
+    ] {
+        assert!(
+            report[name].starts_with(&format!("{status}:{{\"error\":")),
+            "{name}: {report:?}"
+        );
+    }
+    for name in ["other_host", "https", "port", "suffix"] {
+        assert!(
+            report[name].starts_with("err("),
+            "{name} must be refused: {report:?}"
+        );
+    }
+
+    let calls = dispatch.calls.lock().unwrap();
+    let [(echo_micro, echo), (ping_micro, ping)] = calls.as_slice() else {
+        panic!("only the two admitted calls reach dispatch, got {calls:?}");
+    };
+    assert_eq!(echo_micro, &micro);
+    assert_eq!(ping_micro, &micro);
+    assert_eq!(echo.method, clay_host::DispatchMethod::Post);
+    assert_eq!(echo.nsid, "test.echo");
+    assert_eq!(echo.body, b"{\"n\":1}");
+    let header = |name: &str| {
+        echo.headers
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value.as_slice())
+    };
+    assert_eq!(
+        header("x-micro-id"),
+        Some(b"did:example:mallory/other".as_slice())
+    );
+    assert_eq!(header("authorization"), Some(b"Bearer stolen".as_slice()));
+    assert!(
+        header("host").is_none(),
+        "the host adds no `host` on the guest's behalf"
+    );
+    assert_eq!(ping.method, clay_host::DispatchMethod::Get);
+    assert_eq!(ping.nsid, "test.ping");
+    assert_eq!(ping.query, "x=1&y=%20");
+    assert!(ping.body.is_empty());
+}
+
+/// An incarnation with no dispatch wired (no node) has no network at all: even
+/// `http://dispatch.local` is refused, as `wasi:http` did not exist before this egress.
+#[tokio::test]
+async fn a_guest_without_dispatch_can_reach_nothing() {
+    let report = dispatch_report(None).await;
+    assert_eq!(report.len(), 10, "{report:?}");
+    for (name, outcome) in &report {
+        assert!(
+            outcome.starts_with("err("),
+            "{name} must be refused: {report:?}"
+        );
+    }
 }
 
 /// A guest whose `dispatch` commits a batch over the surface mutation budget faults only its own
@@ -1380,9 +1534,9 @@ fn first_poll_maps_pending_to_suspended_and_ready_to_output() {
 
 #[tokio::test]
 async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
+    use clay_docs::DatumRoute;
     use clay_docs::DocumentGrant;
     use clay_docs::DocumentService;
-    use clay_docs::DatumRoute;
     use std::future::Future;
     use std::task::Context;
     use std::task::Waker;

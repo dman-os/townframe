@@ -8,11 +8,11 @@ use super::bindings::townframe::dayframe::documents as wit;
 use super::first_poll;
 use super::trap_reason;
 use super::wasmtime;
-use clay_docs::DocumentSnapshot;
 use clay_docs::DatumMutation;
 use clay_docs::DatumRoute;
 use clay_docs::DatumSelection;
 use clay_docs::DatumValue;
+use clay_docs::DocumentSnapshot;
 use clay_docs::OperationError;
 use clay_docs::OperationReceipt;
 use clay_docs::OperationStatus;
@@ -94,7 +94,9 @@ pub(super) async fn initialize(
         publications: declared,
         micro,
         activator,
+        egress,
     } = context;
+    active.store.data_mut().egress.install(egress);
     if let Some(activator) = activator {
         active.store.data().capabilities.attach_activator(activator);
     }

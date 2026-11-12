@@ -168,6 +168,10 @@ impl<E: Engine> Factory<CapabilityPublication> for GuestFactory<E> {
                 registrations,
                 requirements,
                 publications: declared,
+                egress: resources
+                    .dispatch
+                    .clone()
+                    .map(|dispatch| clay_host::MicroEgress::new(micro.clone(), dispatch)),
                 micro: Some(micro),
                 activator: Some(activator),
                 ..InitialContext::default()

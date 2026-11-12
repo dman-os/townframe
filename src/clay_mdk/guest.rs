@@ -22,8 +22,8 @@ use crate::Access;
 use crate::Capability;
 use crate::Config;
 use crate::Context;
-use crate::Error;
 use crate::DatumSnapshot;
+use crate::Error;
 use crate::MicroManifest;
 use crate::OperationError;
 use crate::OperationReceipt;
@@ -39,8 +39,8 @@ use crate::context::RawHandler;
 use crate::context::Shared;
 use crate::documents;
 use crate::micro_lifecycle;
-use crate::mirror::DocumentMirror;
 use crate::mirror::Datum;
+use crate::mirror::DocumentMirror;
 use crate::mirror::MirrorStatus;
 use crate::presentation;
 use crate::presentation_events;
@@ -67,6 +67,8 @@ use std::rc::Rc;
 use std::task::Poll;
 use std::task::Waker;
 
+#[cfg(all(target_os = "wasi", target_env = "p3"))]
+pub mod dispatch;
 mod dom;
 
 /// One row value as a guest's page carries it: its body and the references the host minted for

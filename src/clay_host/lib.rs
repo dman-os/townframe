@@ -6,6 +6,7 @@
 //! (ADR 015 §3, §6).
 
 mod collections;
+mod dispatch;
 mod instance;
 mod supervisor;
 
@@ -14,6 +15,15 @@ pub use collections::CollectionRegistry;
 pub use collections::DeclareError;
 pub use collections::Grant;
 pub use collections::GrantError;
+pub use dispatch::DISPATCH_AUTHORITY;
+pub use dispatch::Denied;
+pub use dispatch::DispatchAnswer;
+pub use dispatch::DispatchCall;
+pub use dispatch::DispatchMethod;
+pub use dispatch::MAX_BODY_BYTES;
+pub use dispatch::MicroDispatch;
+pub use dispatch::MicroEgress;
+pub use dispatch::Outgoing;
 pub use instance::AccessError;
 pub use instance::Binding;
 pub use instance::CloseReason;

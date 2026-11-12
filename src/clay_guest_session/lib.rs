@@ -1,10 +1,10 @@
+use clay_docs::DatumMutation;
+use clay_docs::DatumRoute;
 use clay_docs::DocumentAccess;
 use clay_docs::DocumentError;
 use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::DocumentWatch;
-use clay_docs::DatumMutation;
-use clay_docs::DatumRoute;
 use clay_docs::Operation as DataOperation;
 use clay_docs::OperationReceipt;
 use clay_docs::WatchSelection;
@@ -62,6 +62,11 @@ pub struct InitialContext {
     /// stored endpoints (see [`capabilities::CapabilitySession::mint_lazy`]). `None` where no
     /// supervisor runs (engine tests); minting a lazy reference then crashes.
     pub activator: Option<clay_host::Activator<capabilities::CapabilityPublication>>,
+    /// The guest's `wasi:http/client`: its only network, `http://dispatch.local`, answered by
+    /// the host's dispatch as this incarnation's micro. The identity is built into the egress
+    /// from the host's own table, so nothing the guest sends can change who calls. `None`
+    /// where no node is wired (engine tests): the client then denies every request.
+    pub egress: Option<clay_host::MicroEgress>,
 }
 
 /// A guest's own refusal to initialize, as opposed to a trap.

@@ -93,6 +93,9 @@ pub struct Resources {
     pub components: NativeComponents,
     pub documents: DocumentService,
     pub collections: CollectionRegistry<BytesRegistrations>,
+    /// Where a wasm micro's `http://dispatch.local` calls go. `None` until the composition
+    /// root wires a node: guests then have no network at all. See [`Self::with_dispatch`].
+    pub dispatch: Option<Arc<dyn clay_host::MicroDispatch>>,
 }
 
 impl Resources {
@@ -105,7 +108,14 @@ impl Resources {
             components,
             documents,
             collections,
+            dispatch: None,
         }
+    }
+
+    /// Answer every wasm micro's `dispatch.local` calls with `dispatch`, as that micro.
+    pub fn with_dispatch(mut self, dispatch: Arc<dyn clay_host::MicroDispatch>) -> Self {
+        self.dispatch = Some(dispatch);
+        self
     }
 }
 
@@ -713,9 +723,7 @@ pub(crate) fn declared_publications(
         .collect()
 }
 
-pub(crate) fn routine_datums(
-    datums: &[DatumAccess],
-) -> Vec<clay_docs::DatumAccess> {
+pub(crate) fn routine_datums(datums: &[DatumAccess]) -> Vec<clay_docs::DatumAccess> {
     datums
         .iter()
         .map(|datum| clay_docs::DatumAccess {

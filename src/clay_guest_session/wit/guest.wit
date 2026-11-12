@@ -1,0 +1,14 @@
+package townframe:dayframe@0.4.0;
+
+/// What a wasm micro component is built against: the host-facing `micro-client` world plus the
+/// one network interface a micro may use. `wasi:http/client` reaches only `http://dispatch.local`
+/// (`GET`/`POST /xrpc/<nsid>`); every runtime's egress refuses anything else and hands what it
+/// admits to the host's `MicroDispatch`, acting as the micro's own identity.
+///
+/// Hosts keep linking `micro-client`: `wasi:*` imports reach a runtime through its WASI
+/// implementation, not through the host bindings, and a component whose code never calls the
+/// client does not import it.
+world micro-guest {
+  include micro-client;
+  import wasi:http/client@0.3.0;
+}

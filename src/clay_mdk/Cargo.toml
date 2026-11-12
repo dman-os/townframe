@@ -26,6 +26,12 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [[example]]
+name = "dispatch"
+path = "dispatch_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
 name = "trapper"
 path = "trapper_fixture.rs"
 crate-type = ["cdylib"]
