@@ -517,13 +517,13 @@ mod transitions {
 
     #[test]
     fn dragging_past_an_end_pulls_and_inside_the_index_does_not() {
-        let spacing = spacing(HEIGHT, COUNT);
-        let top = top_inset(spacing, COUNT, HEIGHT);
+        // A drag is laid out with the engaged (wider) spacing.
+        let Metrics { spacing, top, .. } = Metrics::of(VIEW, COUNT, 1.0);
         let inside = run(
             &pressed_at(4),
             &[ArcEvent::Drag {
                 x: 1000.0,
-                y: y_of(10),
+                y: top + 10.0 * spacing,
             }],
         )
         .0;
