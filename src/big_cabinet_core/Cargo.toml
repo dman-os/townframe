@@ -55,10 +55,5 @@ ciborium = "0.2.2"
 # The `datum` macro joins a member's const authority to its name in a const.
 
 [dev-dependencies]
-panproto-lens = "=0.74.4"
-panproto-mig = "=0.74.4"
-panproto-protocols = "=0.74.4"
-panproto-schema = "=0.74.4"
-panproto-vcs = "=0.74.4"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
