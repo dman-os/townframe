@@ -41,7 +41,7 @@ In atproto, `$type` names the Lexicon definition an object follows: a record car
 
 ### 2. What belongs to the cartridge, and what to a contribution
 
-A cartridge has **at most one nodule and at most one micro** (ADR 028's open question settled): nothing separates two nodules of one cartridge, since they would share its permbinds and settings. The contributions are two optional fields of the envelope, not a list; a later kind is another optional field.
+A cartridge has **at most one nodule**: nothing separates two nodules of one cartridge, since they would share its permbinds and settings. Contributions are optional fields of the envelope, not a list; the nodule is one, a micro is another, and a later kind is another.
 
 ```jsonc
 {
@@ -80,11 +80,6 @@ A cartridge has **at most one nodule and at most one micro** (ADR 028's open que
     "revisionedStores": { /* ADR 027 §7, unchanged in meaning */ },
     "localState": { /* ADR 027 §6, the plug manifest's local_states */ },
     "initialization": { "seed": { "target": "org.example.photos.reindex", "mode": "once" } }
-  },
-
-  "micro": {
-    "components": ["ui"],
-    "uses": { "albums": { "read": true, "write": true }, "workDrawers": { "read": true } }
   }
 }
 ```
@@ -93,7 +88,7 @@ A cartridge has **at most one nodule and at most one micro** (ADR 028's open que
 
 **The nodule's:** routines, revisioned stores, local state and initialization.
 
-**The micro's:** the components it runs and one `uses`. A micro is a UI: one long-lived instance per cartridge, not a call per request, so it has no routines, and its capability lasts for the instance's life. It may run several components (how they compose into one instance is Clay's runtime's). Its `uses` narrows the permbinds as a routine's does, so the UI can be kept from what only the nodule should touch.
+**The micro's:** designed by Clay's lane, not here. This ADR fixes only what a micro builds on: the cartridge's Lexicons, components, permbinds and settings are cartridge-level, so a micro reaches what it reaches through the same permbinds and is granted through them.
 
 ### 3. Routines
 
@@ -145,14 +140,14 @@ Every keyed section is a map. NSIDs are a typed `Nsid` parsed on deserialize (on
 
 - ADR 027 §2's serialized description: `handler` + `implements` become routines; `requires` becomes cartridge-level permbinds; `private_state` is renamed `localState`; Lexicons and sidecars move to the cartridge (§1). Revisioned stores, initialization and the wflow boundary are unchanged.
 - ADR 028 §4's request shape becomes `permbinds` split by kind, with `description` added; its rules are unchanged.
-- ADR 028's open question (more than one micro) is settled: at most one nodule and one micro.
+- A cartridge carries at most one nodule. Whether it may carry more than one micro (ADR 028's open question) is left to Clay's lane.
 - ADR 044's grant datums are keyed by permbind.
 - Commands, views and processors stay targets of operation NSIDs (027 §2) but become typed sections when something implements them, instead of opaque carried maps.
 
 ## Consequences
 
 - `big_cartridges_core::Cartridge`, `Request`, `Artifact` and `big_nodule_core::Nodule` are replaced, with admission and the registry projection. No migration: pre-release, and no shipped node holds cartridges.
-- Clay's micro contribution uses the cartridge's Lexicons and permbinds, so claytxt's manifest changes with it.
+- Clay's micro contribution moves its Lexicons to the cartridge and reaches resources through the cartridge's permbinds; the rest of its shape is Clay's lane's to design (next week).
 - The docs capability scope gains per-document datum kinds (§6).
 
 ### 10. The name, and who grants
