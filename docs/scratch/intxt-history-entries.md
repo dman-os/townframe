@@ -15,13 +15,13 @@ One datum per included thing, on the intxt's descriptor, keyed by the thing's ow
 
 ```jsonc
 // commits named: everything reachable from tip and not from base
-"org.example.intxt.work.gitCommitEntry/<tip sha>": { "tip": <ref gitCommit/<tip>>, "base": <ref gitCommit/<base>> }
+"org.example.intxt.work.gitCommitEntry/<tip sha>": { "tip": <keyRef gitCommit/<tip>>, "base": <keyRef gitCommit/<base>> }
 
 // a jj change, followed through its rewrites by change id
 "org.example.intxt.work.jjChangeEntry/<change id>": { }
 
 // a ref tracked as one clone saw it
-"org.example.intxt.work.gitRefEntry/<clone uuid>/<ref name>": { "ref": <ref gitRef/<clone>/<ref name>>, "base": <ref gitCommit/<base>> }
+"org.example.intxt.work.gitRefEntry/<clone uuid>/<ref name>": { "ref": <ref gitRef/<clone>/<ref name>>, "base": <keyRef gitCommit/<base>> }
 ```
 
 Why one datum per item rather than a list (ledger thread of 2026-11-12):
@@ -45,7 +45,7 @@ Details:
 
 ## A dependency on the cabinet
 
-A reference points into a document, but a content-addressed datum (`gitCommit/<sha>`) can sit in several documents with identical content. A rule is needed: a datum whose key is its content resolves by key, and any document holding that key is equivalent. That belongs in the reference ADR (035), in the nodules lane.
+A reference points into a document, but a content-addressed datum (`gitCommit/<sha>`) can sit in several documents with identical content. Resolved 2026-11-12: entries reference commits with a `#keyRef` (ADR 035 §2.9), resolved by key and verified against the hash; the resolver is the nodules lane's.
 
 ## Open
 
