@@ -1422,6 +1422,7 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "irpc",
+ "method_core",
  "proptest",
  "rand 0.9.5",
  "serde",
@@ -1586,9 +1587,11 @@ name = "big_dispatch"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "big_cabinet",
  "big_cabinet_core",
  "big_dispatch_core",
+ "bytes",
  "futures",
  "http",
  "irpc",
@@ -1603,6 +1606,7 @@ dependencies = [
  "sqlite_rs",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -1783,6 +1787,7 @@ dependencies = [
  "bytes",
  "http-body-util",
  "hyper",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -4163,6 +4168,7 @@ dependencies = [
  "clap_complete",
  "data-encoding",
  "directories",
+ "futures",
  "http",
  "libc",
  "method_core",
@@ -4176,6 +4182,7 @@ dependencies = [
  "sqlite_rs",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "trycmd",
@@ -9488,6 +9495,7 @@ dependencies = [
 name = "method_core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "schemars 1.2.3",
  "serde",
