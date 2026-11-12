@@ -385,11 +385,12 @@ impl DocAccess for DrawerAccess {
                 return Ok(vec![self.core.namespace.capability]);
             }
             let mut dependencies = Vec::new();
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             for (doc, needed) in scope
                 .read
-                .difference(&scope.write)
+                .difference(&write_docs)
                 .map(|doc| (doc, Access::Read))
-                .chain(scope.write.iter().map(|doc| (doc, Access::Write)))
+                .chain(scope.write.keys().map(|doc| (doc, Access::Write)))
             {
                 let (held, proof) = self
                     .core

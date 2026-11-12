@@ -531,7 +531,10 @@ impl Cluster {
         let capability = capability(
             node,
             DocScope {
-                write: BTreeSet::from([doc.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )
@@ -571,7 +574,10 @@ impl Cluster {
             DocScope {
                 read: BTreeSet::from([doc.clone()]),
                 // A branch is announced on its origin, so it takes write access there too.
-                write: BTreeSet::from([doc.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    doc.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 create: BTreeSet::from([placement.clone()]),
                 ..DocScope::default()
             },
@@ -603,7 +609,10 @@ impl Cluster {
             node,
             DocScope {
                 read: BTreeSet::from([source.clone()]),
-                write: BTreeSet::from([target.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    target.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
         )

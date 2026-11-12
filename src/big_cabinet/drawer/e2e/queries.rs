@@ -176,7 +176,10 @@ impl Containment {
                             .mint_doc(
                                 &alice,
                                 DocScope {
-                                    write: [origin.clone()].into(),
+                                    write: std::collections::BTreeMap::from([(
+                                        origin.clone(),
+                                        big_cabinet_core::doc::DatumKinds::All,
+                                    )]),
                                     ..Default::default()
                                 },
                             )
@@ -1124,7 +1127,10 @@ async fn move_in_delivers_older_rows_move_out_leaves_and_resume_does_not_redeliv
                     .mint_doc(
                         &alice,
                         DocScope {
-                            write: [moving.clone()].into(),
+                            write: std::collections::BTreeMap::from([(
+                                moving.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             ..Default::default()
                         },
                     )

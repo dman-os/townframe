@@ -107,7 +107,10 @@ async fn write_version_datum(node: &BigNode, doc_id: &DocId, envelope: &Cartridg
                 capability: capability(
                     node,
                     DocScope {
-                        write: BTreeSet::from([doc_id.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            doc_id.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..DocScope::default()
                     },
                 )
@@ -1442,7 +1445,10 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
                     capability: capability(
                         &node,
                         DocScope {
-                            write: BTreeSet::from([doc.clone()]),
+                            write: std::collections::BTreeMap::from([(
+                                doc.clone(),
+                                big_cabinet_core::doc::DatumKinds::All,
+                            )]),
                             ..DocScope::default()
                         },
                     )
@@ -1611,7 +1617,10 @@ async fn an_installed_cartridge_is_ready_after_a_restart_with_its_settings_intac
                 capability: capability(
                     &node,
                     DocScope {
-                        write: BTreeSet::from([doc.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            doc.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..DocScope::default()
                     },
                 )
