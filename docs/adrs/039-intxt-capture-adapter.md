@@ -2,6 +2,8 @@
 
 **Status:** Proposed. Rewritten 2026-11-10 for worktrees as the capture unit (ledger D29); the earlier ref-driven design (D26) is superseded. §4 revised 2026-11-11 for D41 (observe on the host, record in the nodule).
 
+**Changed 2026-11-12:** filesystem worktrees have no file documents (ledger D59, D60; ADR 040 §3–§4). Capture writes changed content into the clone's git object store with `git hash-object -w`, keeps it reachable under `refs/intxt/keep/<worktree uuid>`, and records blob ids on ops; it no longer uploads blob bytes or writes file documents.
+
 **Depends on:** ADR 040 (the datums it writes), ADR 036 (intxt entries and `body`), ADR 019 (drawers), ADR 037 (acting as a descendant actor, its open question 2). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F10 and F12 (document limits, write cost); decisions D29–D35.
 
 ## 1. Context
@@ -24,7 +26,7 @@ A prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import`, ledger F7) re
 
 **Removing and redacting.** Removing a document from an intxt's roster stops relays and honest peers from holding and serving it; it does not recall copies already pulled (ADR 019). For a secret, that is the best available, so capture makes it cheap:
 
-- a file doc that captured a secret is removed, and a replacement doc is written from the cleaned state;
+- a git object that captured a secret is left out of the intxt's pack (ADR 040 §4);
 - a session doc whose tool output or diffs carry the secret is replaced by a redacted copy, a new document with the offending content removed;
 - the references are re-pointed: the intxt's entry datum and any comment targeting the old documents are rewritten to the new ids. Because every link is a declared reference (ADR 035 §2.6), the reference index lists exactly what to rewrite.
 
@@ -33,7 +35,7 @@ A prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import`, ledger F7) re
 | Record | Source | Goes to (ADR 040) |
 |---|---|---|
 | Worktree, clone and repository identity | `git rev-parse` at first sight; UUIDs stored in the git dir | `worktree`, `clone`, `gitRepo` |
-| File changes | Snapshots of changed files around each shell call, and at every hook | `worktreeOp` (`kind: edit`) and file docs |
+| File changes | Snapshots of changed files around each shell call, and at every hook | `worktreeOp` (`kind: edit`) with the changed paths' blob ids; the content in the clone's object store, under the keep ref |
 | What caused a change | The tool call whose window the change fell in, when the harness reports one | `worktreeOp.cause` |
 | HEAD and ref moves, commits | `HEAD`, the clone's refs and the reflog, read at every hook | `worktreeOp` (`commit`, `refMove`, `checkout`, `reset`), `gitCommit`, `gitRef` |
 | jj operations and changes | `jj op log` / `jj evolog` ids and structure, when the clone is a jj repo | `jjOperation`, `jjChange`, the `jj` field of ops |
@@ -62,11 +64,11 @@ Every invocation first imports the transcript from its stored offset, so any hoo
 
 - **Where to write:** the capture drawer, and the document ids it already has for the worktree, clone, repository and session (§5). Missing ones are created and returned, and the host stores them.
 - **The next op sequence number** (§5). The operation writes `worktreeOp/<seq>` from it and opens a new op-log document every 256 ops (ADR 040 §3).
-- **What was observed, already shaped as ADR 040 values:** the identity (worktree and clone UUIDs, path, remotes, root commits); the ops in order, each with its kind, `cause`, git observation, a reflog-gap flag, and its changed paths (added, modified, deleted, or renamed from another path), each path carrying text or a blob reference; the new `gitCommit` and `gitRef` values; and the session's changed `agentSession`, `promptTurn` and `plan` values from the transcript import.
+- **What was observed, already shaped as ADR 040 values:** the identity (worktree and clone UUIDs, path, remotes, root commits); the ops in order, each with its kind, `cause`, git observation, a reflog-gap flag, and its changed paths (added, modified or deleted), each carrying its git blob id; the new `gitCommit` and `gitRef` values; and the session's changed `agentSession`, `promptTurn` and `plan` values from the transcript import.
 
-Blob bytes never go through the operation: the host uploads them to the blob service first, and the batch carries the `Blob` references (D43). A batch stays under ~3 MiB of JSON, below the 4 MiB a nodule request may carry; a larger observation is split into consecutive calls, each starting where the previous one ended. Every write uses command ids derived from the call's idempotency key, which the host derives from the worktree id and the op sequence numbers the batch covers, so a retried hook rewrites nothing.
+File content never goes through the call: it stays in the clone's object store, written with `git hash-object -w` and kept reachable from `refs/intxt/keep/<worktree uuid>` (a chain of commits whose trees list the new blobs), because `git gc` prunes unreachable loose objects after two weeks (D60). An intxt carries what it needs as a pack (ADR 040 §4). A batch stays under ~3 MiB of JSON, below the 4 MiB a nodule request may carry; a larger observation is split into consecutive calls, each starting where the previous one ended. Every write uses command ids derived from the call's idempotency key, which the host derives from the worktree id and the op sequence numbers the batch covers, so a retried hook rewrites nothing.
 
-The operation answers the document ids it created and the next sequence number. File documents are found through the worktree datum's `files` map (path → document), which the operation updates in the same write as the ops that touched them.
+The operation answers the document ids it created and the next sequence number.
 
 **Errors.** Capture never blocks or feeds the agent. A failure exits non-zero with a message (Claude Code shows it to the operator, not the model), and the next hook retries from the stored state. Exit code 2, which Claude Code feeds back to the model, is never used.
 

@@ -140,10 +140,10 @@ Items are sorted, not authored into an order. There is no story or guide layer: 
 - A person can package work with one command they can guess from `status`.
 - No command needs an internal id. Short ids are only for things intxt itself prints.
 - Every change can be undone with the command it prints.
-- Including work in an intxt shares only the documents that work lives in, not the rest of the node's recordings. This constrains document granularity (ADR 040 amendment, to come): a long-lived document that every intxt would reference, such as one holding a project's whole commit history or a file's every edit, is not allowed.
+- Including work in an intxt shares only the documents that work lives in, not the rest of the node's recordings. Content is carried as git objects in a pack (ADR 040 §4, D59), so an intxt holds only the objects its work needs.
 
 ## Open questions
 
-1. **Which sessions a branch brings:** the sessions whose edits landed on the branch (proposed), or also sessions that only read it?
+1. ~~**Which sessions a branch brings**~~ Settled 2026-11-12 (ledger D61): the sessions whose observed ops produced content in the branch's commits.
 2. **Carving by turns:** when `--from … --turns` takes part of a session, does the new intxt reference the whole session document (simple, more shared), or does that need a finer document layout (see the granularity constraint)?
 3. **The noun:** is it "item", or another word?
