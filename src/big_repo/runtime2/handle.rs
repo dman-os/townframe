@@ -81,6 +81,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         doc_id: DocumentId,
     ) -> Res<crate::interest::PendingDocLease> {
+        instr_doc_id(&doc_id); // INSTR
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::AcquireDocInterest { doc_id, resp })
@@ -164,6 +165,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         doc_id: DocumentId,
     ) -> eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>
     {
+        instr_doc_id(&doc_id); // INSTR
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle {
@@ -188,6 +190,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         doc_id: DocumentId,
     ) -> eyre::Result<crate::runtime2::types::DocLookup<crate::runtime2::types::LiveDocHandle>>
     {
+        instr_doc_id(&doc_id); // INSTR
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::GetDocHandle {
@@ -791,5 +794,17 @@ impl Drop for KeyhiveSyncWaiterGuard {
                 waiter_id: self.waiter_id,
             }));
         }
+    }
+}
+
+// INSTR: a doc id that is not 32 bytes kills the hub loop when its worker spawns, and the
+// hub's own backtrace stops at the command channel. Log the sender's stack here instead.
+fn instr_doc_id(doc_id: &DocumentId) {
+    if doc_id.as_bytes().len() != 32 {
+        eprintln!(
+            "INSTR doc id {doc_id:?} of {} bytes sent to the hub\n{}",
+            doc_id.as_bytes().len(),
+            std::backtrace::Backtrace::force_capture()
+        );
     }
 }
