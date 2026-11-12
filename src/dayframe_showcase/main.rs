@@ -199,7 +199,7 @@ fn App() -> Element {
                             FoundationSection {
                                 id: "diffs".to_string(),
                                 title: "Diff view".to_string(),
-                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port, in three views under one options bar: sample specimens (a split Rust diff, a unified TypeScript diff with a line annotation, a virtualized three-thousand-line diff), the mock review the lab micro also renders (select a line or click the gutter + to draft a comment), and a real 599-file PR diff. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port, in two views under one options bar: sample specimens (a split Rust diff, a unified TypeScript diff with a line annotation, a virtualized three-thousand-line diff) and a real 599-file PR diff. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
                                 diffs::DiffsFoundation {}
                             }
                         },
