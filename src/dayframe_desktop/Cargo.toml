@@ -60,12 +60,17 @@ blitz = [
 ]
 
 [dev-dependencies]
-ciborium.workspace = true
+#
+# internal
 micro_layout_manifest = { workspace = true }
 micro_lab_manifest = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_surface = { workspace = true }
 clay_rt_wcmp = { workspace = true }
+
+#
+# misc
+ciborium.workspace = true
 wcmp = { workspace = true }
 wcmp-wasm-core-wasmi = { workspace = true }
 blitz-dom.workspace = true

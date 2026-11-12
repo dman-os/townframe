@@ -20,8 +20,13 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 [dev-dependencies]
+#
+# internal
 # `host::declared_rows` checks the declared rows in tests; the contract itself stays backend-free
 # so any micro, native or Wasm, can contribute panels without linking the in-process backend.
 clay_mdk = { workspace = true, features = ["in_process"] }
+
+#
+# misc
 ciborium.workspace = true
 insta.workspace = true
