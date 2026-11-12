@@ -11,15 +11,17 @@
 //! ```
 //!
 //! says the slot is the lowercase hex SHA-1 of `"commit <len>\0"` followed by the bytes of the
-//! value's `raw` member (a `{ "$bytes": … }` object), which is how git names the object. The value
+//! value's `raw` member (a `{ "$bytes": … }` object), which is how git names the object. The hash
+//! runs with git's collision detection, and bytes it flags are refused. The value
 //! must carry the object's bytes, because a hash can only be checked against the content it was
 //! computed from.
 
 use super::value::decode_base64;
 use crate::DatumKey;
 use serde_json::Value;
-use sha1::Digest;
-use sha1::Sha1;
+use sha1_checked::CollisionResult;
+use sha1_checked::Digest;
+use sha1_checked::Sha1;
 use thiserror::Error;
 
 /// The sidecar keyword that declares a kind's slot a content hash.
@@ -34,6 +36,11 @@ pub enum ContentHashError {
     Declaration { reason: String },
     #[error("the value's `{member}` member is not a `$bytes` object, so there is nothing to hash")]
     Content { member: String },
+    #[error(
+        "the value's bytes are one half of a SHA-1 collision pair (git refuses these too), so \
+         they are not content a hash can name"
+    )]
+    Collision,
     #[error("the slot `{slot}` is not the hash of the value, which hashes to `{actual}`")]
     Mismatch { slot: String, actual: String },
 }
@@ -98,10 +105,18 @@ impl ContentHash {
                     .ok_or_else(|| ContentHashError::Content {
                         member: content.clone(),
                     })?;
-                let mut hasher = Sha1::new();
+                // The collision detection git itself runs (sha1dc): a value built as half of a
+                // SHAttered-style pair is refused rather than hashed to the id of its twin.
+                // `safe_hash` is off, as in git, so a hash that is returned is the true SHA-1.
+                let mut hasher = Sha1::builder().safe_hash(false).build();
                 hasher.update(format!("{object_type} {}\0", bytes.len()));
                 hasher.update(&bytes);
-                Ok(data_encoding::HEXLOWER.encode(&hasher.finalize()))
+                match hasher.try_finalize() {
+                    CollisionResult::Ok(hash) => Ok(data_encoding::HEXLOWER.encode(&hash)),
+                    CollisionResult::Mitigated(_) | CollisionResult::Collision(_) => {
+                        Err(ContentHashError::Collision)
+                    }
+                }
             }
         }
     }
