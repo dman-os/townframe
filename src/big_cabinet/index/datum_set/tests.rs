@@ -64,8 +64,10 @@ fn edge(origin: &DatumRoute, target: &DatumRoute) -> DatumRefEdge {
     DatumRefEdge {
         origin: origin.clone(),
         path: "/link".to_owned(),
-        target: target.clone(),
-        ref_heads: vec![ChangeHash([7; 32])],
+        target: DatumRefTarget::Route {
+            route: target.clone(),
+            heads: vec![ChangeHash([7; 32])],
+        },
     }
 }
 
@@ -73,6 +75,7 @@ fn edge(origin: &DatumRoute, target: &DatumRoute) -> DatumRefEdge {
 /// edges a previous projection wrote, however they got there.
 async fn seed_edges(sql: &Database, edges: &[DatumRefEdge]) {
     for edge in edges {
+        let (target_doc, target_datum, ref_heads) = edge.target.columns().unwrap();
         Sql::new(
             r#"INSERT INTO big_cabinet_datum_ref_edges (
                    origin_doc
@@ -87,9 +90,9 @@ async fn seed_edges(sql: &Database, edges: &[DatumRefEdge]) {
             edge.origin.doc_id.to_string().into_value(),
             edge.origin.datum_key.to_string().into_value(),
             edge.path.clone().into_value(),
-            edge.target.doc_id.to_string().into_value(),
-            edge.target.datum_key.to_string().into_value(),
-            serde_json::to_vec(&edge.ref_heads).unwrap().into_value(),
+            target_doc.into_value(),
+            target_datum.into_value(),
+            ref_heads.into_value(),
         ])
         .execute(sql)
         .await

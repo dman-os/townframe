@@ -145,9 +145,47 @@ impl DocsService {
                 NativeReadBudget::default()
                     .charge_json(&value)
                     .map_err(|error| native_read_refusal(&key, error))?;
+                self.admit_content_addressing(&key, &schema, &value)?;
                 Ok((key, (schema, value)))
             })
             .collect()
+    }
+
+    /// The two refusals content addressing adds to a write (ADR 035 §2.9). A kind whose sidecar
+    /// declares its slot a content hash is written only under a key its value hashes to: the
+    /// key is what a `#keyRef` trusts, and every holder of the key must hold the same content.
+    /// A `#keyRef` is written only to a registered kind that declares such a slot, because no
+    /// other kind's key says anything about its value.
+    fn admit_content_addressing(
+        &self,
+        key: &DatumKey,
+        schema: &SchemaHandle,
+        value: &Json,
+    ) -> Result<(), DocsError> {
+        let compiled = schema.compiled();
+        if let Some(hash) = compiled.content_hash() {
+            hash.verify(key, value)
+                .map_err(|error| DocsError::ContentHashMismatch {
+                    datum_key: key.clone(),
+                    reason: error.to_string(),
+                })?;
+        }
+        if !compiled.declares_references() {
+            return Ok(());
+        }
+        for found in declared_references(compiled, value) {
+            let ReferenceTarget::Key(target) = found.target else {
+                continue;
+            };
+            let declared = self
+                .schema_repo
+                .resolve_for_read(target.tag().as_str())
+                .is_some_and(|target_schema| target_schema.compiled().content_hash().is_some());
+            if !declared {
+                return Err(DocsError::NotContentAddressed { datum_key: target });
+            }
+        }
+        Ok(())
     }
 
     /// Apply a plan to a transaction and derive the claim each touched datum's signature covers.
