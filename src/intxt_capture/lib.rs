@@ -14,6 +14,7 @@
 //! - Tags: only branches (`refs/heads`) are observed as refs.
 
 pub mod acp;
+pub mod anchor;
 pub mod git;
 pub mod hook;
 pub mod host;
