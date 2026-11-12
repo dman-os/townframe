@@ -32,6 +32,7 @@ fn cartridge() -> Cartridge {
     cartridge
         .contributions
         .push(Contribution::Micro(MicroContribution {
+            component: "routines".into(),
             schema: "org.example.clay.micro".into(),
             description: [("entry".to_owned(), json!("gallery.js"))]
                 .into_iter()
@@ -290,6 +291,40 @@ fn validation_owns_distribution_not_contribution_content() {
     nonsense_description.validate().unwrap();
 }
 
+#[test]
+fn a_micro_names_an_existing_component_artifact() {
+    let mut missing = cartridge();
+    let Contribution::Micro(micro) = &mut missing.contributions[1] else {
+        unreachable!()
+    };
+    micro.component = "absent".into();
+    let error = missing.validate().unwrap_err().to_string();
+    assert!(error.contains("contributions[1].component"), "{error}");
+
+    let mut empty = cartridge();
+    let Contribution::Micro(micro) = &mut empty.contributions[1] else {
+        unreachable!()
+    };
+    micro.component = String::new();
+    let error = empty.validate().unwrap_err().to_string();
+    assert!(error.contains("contributions[1].component"), "{error}");
+}
+
+#[test]
+fn a_micro_carries_unknown_members_and_its_open_description() {
+    let mut value = serde_json::to_value(cartridge()).unwrap();
+    value["contributions"][1]["futureMember"] = json!({"k": [1, 2]});
+    value["contributions"][1]["description"]["entrypoints"] = json!({"x": 1});
+    let decoded: Cartridge = serde_json::from_value(value.clone()).unwrap();
+    decoded.validate().unwrap();
+    let Contribution::Micro(micro) = &decoded.contributions[1] else {
+        unreachable!()
+    };
+    assert_eq!(micro.component, "routines");
+    assert_eq!(micro.description["entrypoints"], json!({"x": 1}));
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), value);
+}
+
 #[cfg(feature = "schemars")]
 mod declaration {
     use super::*;
@@ -334,6 +369,11 @@ mod declaration {
         assert_eq!(
             nodule["defs"]["main"]["properties"]["description"]["type"], "unknown",
             "{nodule}"
+        );
+        let micro = &lexicons[2].file;
+        assert_eq!(
+            micro["defs"]["main"]["properties"]["component"]["type"], "string",
+            "{micro}"
         );
         for (index, lexicon) in lexicons.iter().enumerate() {
             let carried: Vec<&serde_json::Value> = lexicons
