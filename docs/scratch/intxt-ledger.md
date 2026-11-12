@@ -198,6 +198,18 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 
 - **F24 (2026-11-11, nodules lane)** My slow edit (F22) was the shortening, not `AtHeads`: writes staged in `transaction_at(base)`, and Automerge 0.11 answers a clock-scoped seek with a linear walk per deleted character (`seek_ops_by_index_slow`): a 36-char cut on 216 KB cost 3.5–5 s release. Fix (landing on -next): a base equal to the current heads uses a plain transaction, the dry pass's claim is reused, and a create's dry pass commits on a scratch doc. 216 KB Text after: create 0.8 s release (6.1 debug), AtHeads shorten 0.096 s (1.1–1.4 debug), grow 0.092 s. **Still slow:** an edit at a genuinely historical base on a large Text (deletions O(text) per character, logged upstream). Comments and agent edits are not Text edits of the file doc, so capture is unaffected; a future "edit the file from an old read" feature would pay it.
 
+- **F25 (2026-11-12) B against C on a real rebase.** The sample is feat/intxt-impl's rebase onto -next on 2026-11-11 (rev 1 3d835530 on 7f25ab99, rev 2 578474f0 on d2c1eb03; 31 commits each, about 58 files, +11k lines). Prototype `/run/media/asdf/p3N/tmp/intxt-proto/git-record-bc`; single runs on a loaded mothership.
+  - **Size, both revisions together:**
+    - B: Automerge file docs 341 KB, plus 186 KB of commit metadata. That includes the base content of touched files.
+    - C: git objects 8.5 MB raw (whole blobs, plus 142 trees per revision); 1.28 MB as a delta pack; format-patch 0.78 MB per revision, 194 KB gzipped. C excludes base blobs, so the recipient needs the base.
+  - **Patch fidelity, C:** 31/31 commits per revision reproduce the original sha, with `commit-tree` or with `git am` given the original committer and date. Plain `git am` reproduces the trees but not the shas.
+  - **Anchors:** 1141 four-line windows on rev 1's added lines, carried to rev 2.
+    - Against a `git blame` oracle (1130 with ground truth), C (quote plus git diff mapping) landed all 1130 correctly. B (cursor plus quote) landed 2 at the wrong position with matching text, confident and unflagged.
+    - A cursor alone, without the quote check, resolved 38 to different text.
+    - Neither model produced a wrong-by-text resolution that went unflagged.
+    - Resolve time: C 8 ms after a 1.2 s diff/blame preparation; B 4.9 s.
+  - **Build time:** B 2.6–4.7 s per revision; C under 0.2 s.
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
