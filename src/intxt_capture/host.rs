@@ -458,6 +458,14 @@ pub fn sessions_in(sessions_dir: &Path, root: &Path) -> Result<Vec<RecordedSessi
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
+        // ACP sessions' state files (`acp.<id>.json`, [`acp_state_path`]) share the directory
+        // but hold an ACP resume point, not a hook session, and record no worktrees.
+        if path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("acp."))
+        {
+            continue;
+        }
         let host: SessionHost = load(&path)?;
         if !host.worktrees.contains(root) {
             continue;
