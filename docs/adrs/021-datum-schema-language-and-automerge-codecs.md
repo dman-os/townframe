@@ -844,3 +844,4 @@ order (ADR 020 §2).
 
 Panproto integration is deferred. The existing proof of concept remains unchanged and is not the
 validation, schema-store, or transformation engine for this PR.
+The proof of concept was deleted on 2026-11-12 (operator); panproto is not a dependency.
