@@ -3,7 +3,7 @@
 //!
 //! [`node`] starts a builder; each registered nodule is a cartridge manifest and the Rust value that
 //! serves it. [`TestNodeBuilder::boot`] boots a real in-memory `BigNode`, hosting the nodules
-//! with an executor that serves them in-process in place of the wasm component, and admits their
+//! with an executor that serves them in-process in place of the wasm component, and installs their
 //! cartridges. Everything else is the production path: enabling, grants, dispatch authorization and
 //! the nodule's own outgoing calls (see [`executor`]). It is for tests only (cartridge authoring
 //! principle 6): no node outside a test is built with it.
@@ -20,7 +20,10 @@
 //! ```
 //!
 //! The cartridge needs a `handler` artifact entry for the node to host the nodule, but the harness
-//! never reads its bytes, so a placeholder digest is fine.
+//! never reads its bytes, so a placeholder digest is fine. For the same reason the cartridge does not
+//! go through the registry service, which would insist on the bytes: the harness writes it as the
+//! version datum of a registry document itself, signing it as the example namespace when it is
+//! unsigned (`example_cartridge!` ids), and installs the pin of that datum.
 
 #![recursion_limit = "256"]
 
@@ -30,9 +33,24 @@ mod executor;
 mod smoke;
 
 use big_cabinet::SchemaRepo;
+use big_cabinet_core::DatumPin;
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::MintDocCapability;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::registry::version_key;
+use big_cartridges_core::registry::version_pin;
+use big_cartridges_core::test_support::sign_as_example;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -41,11 +59,9 @@ use big_node::BigNode;
 use big_node::Config;
 use big_node::StopToken;
 use big_nodule::executor::NoduleExecutor;
-use big_nodule_core::protocol::AdmitNodule;
+use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesProtocol;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
 use executor::Hosting;
 use executor::NativeExecutor;
 use executor::Registered;
@@ -87,8 +103,8 @@ impl TestNodeBuilder {
         self
     }
 
-    /// Boots the node and admits every registered cartridge. The nodules are not enabled: grants are
-    /// set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
+    /// Boots the node and installs every registered cartridge. The nodules are not enabled: grants
+    /// are set and [`TestNode::enable`] called by the test, in whatever order it is exercising.
     pub async fn boot(self) -> TestNode {
         let Self { nodules } = self;
         let mut cartridges = Vec::new();
@@ -130,11 +146,13 @@ impl TestNodeBuilder {
             _runtime: runtime,
         };
         for cartridge in cartridges {
-            node.nodules(AdmitNodule {
-                cartridge,
-                drawers: None,
-            })
-            .await;
+            let cartridge = if cartridge.signature.is_some() {
+                cartridge
+            } else {
+                sign_as_example(cartridge)
+            };
+            let pin = node.register_version(&cartridge).await;
+            node.nodules(InstallCartridge { cartridge: pin }).await;
         }
         node
     }
@@ -223,22 +241,104 @@ impl TestNode {
     }
 
     pub async fn set_enabled(&self, cartridge_id: &CartridgeId, enabled: bool) -> NoduleRecord {
-        self.nodules(SetNoduleEnabled {
+        self.nodules(SetCartridgeEnabled {
             cartridge_id: cartridge_id.clone(),
+            component: Component::Nodule,
             enabled,
+        })
+        .await;
+        self.record(cartridge_id).await
+    }
+
+    /// Grants the nodule of `cartridge_id` the methods in `methods`, each as a grant datum of its
+    /// own in the cartridge's config document, so it holds them as a dispatch capability minted
+    /// from them. Grants already made stay. The grant is bounded by what the nodule's cartridge
+    /// requested and by the nodule service's own dispatch authority, and the record says whether
+    /// it was applied.
+    pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
+        let grants = methods
+            .operations
+            .into_iter()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+        for grant in grants {
+            self.nodules(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                component: Component::Nodule,
+                grant,
+                value: Some(GrantBody::method(methods.privileged)),
+            })
+            .await;
+        }
+        self.record(cartridge_id).await
+    }
+
+    /// Clears the grant datums for `methods` from the config document of the nodule of
+    /// `cartridge_id`, which revokes them: the nodule is re-minted a capability without them.
+    pub async fn revoke(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
+        let grants = methods
+            .operations
+            .into_iter()
+            .map(GrantKey::Method)
+            .chain(methods.authorities.into_iter().map(GrantKey::Authority));
+        for grant in grants {
+            self.nodules(SetCartridgeGrant {
+                cartridge_id: cartridge_id.clone(),
+                component: Component::Nodule,
+                grant,
+                value: None,
+            })
+            .await;
+        }
+        self.record(cartridge_id).await
+    }
+
+    async fn record(&self, cartridge_id: &CartridgeId) -> NoduleRecord {
+        self.nodules(GetNodule {
+            cartridge_id: cartridge_id.clone(),
         })
         .await
     }
 
-    /// Sets the methods the nodule of `cartridge_id` may invoke, which it holds as a dispatch
-    /// capability minted from them. The grant is bounded by what the nodule's cartridge requested and
-    /// by the nodule service's own dispatch authority, and the record says whether it was applied.
-    pub async fn grant(&self, cartridge_id: &CartridgeId, methods: DispatchScope) -> NoduleRecord {
-        self.nodules(SetNoduleMethodGrants {
-            cartridge_id: cartridge_id.clone(),
-            methods,
-        })
-        .await
+    /// Writes `cartridge` as the version datum of a new document in the node's registry drawer
+    /// and returns the pin of it at the heads it was written at.
+    async fn register_version(&self, cartridge: &Cartridge) -> DatumPin {
+        let docs = &self.node.docs.client;
+        let operator = Authorization::identity(self.node.authority.root);
+        let placement = format!("drawer {}", self.node.registry_drawer);
+        let capability = docs
+            .call_with(
+                RequestContext::root(),
+                operator.metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        create: [placement.clone()].into(),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .expect("a capability to create registry documents")
+            .capability_id;
+        let receipt = docs
+            .call(
+                RequestContext::root(),
+                CreateDoc {
+                    capability,
+                    command: CommandId::try_from(format!("test version {}", cartridge.id))
+                        .expect("a command id within bounds"),
+                    placement,
+                    datums: BTreeMap::from([(
+                        version_key(&cartridge.version),
+                        serde_json::to_value(cartridge).expect("an envelope serializes"),
+                    )]),
+                },
+            )
+            .await
+            .expect("a registry document for the version");
+        version_pin(receipt.doc_id, &cartridge.version, receipt.heads)
     }
 
     /// Stops the node: the nodules, then the services behind them.

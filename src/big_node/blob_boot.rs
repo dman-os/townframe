@@ -112,7 +112,14 @@ async fn ensure_registry_drawer(
         sql,
     })
     .await?;
-    grant_drawer_admin(drawers, drawers_actor, cartridges_actor, &drawer).await?;
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        cartridges_actor,
+        &drawer,
+        Access::Admin,
+    )
+    .await?;
     Ok(drawer)
 }
 

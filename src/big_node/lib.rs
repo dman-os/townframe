@@ -307,7 +307,6 @@ impl BigNode {
                 open_actor(&authority, "cartridges").await?;
             let (dispatch_actor, dispatch_namespace) = open_actor(&authority, "dispatch").await?;
             let (blobs_actor, blobs_namespace) = open_actor(&authority, "blobs").await?;
-
             let repo = boot_repo(config.repo, &mut stop).await?;
             let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
                 storage: config.blob_storage,
@@ -401,6 +400,7 @@ impl BigNode {
                 host,
                 &blobs,
                 &cartridges,
+                &drawer_access,
                 schemas,
                 config.allow_slot_takeover,
                 config.sql,
@@ -742,6 +742,7 @@ async fn boot_nodules<Host, Hosting>(
     host: Host,
     blobs: &big_blobs::Blobs,
     cartridges: &Cartridges,
+    drawer_access: &DrawerAccess,
     schemas: Arc<SchemaRepo>,
     allow_slot_takeover: bool,
     sql: Database,
@@ -765,12 +766,41 @@ where
         host(ExecutorDeps::of(&blobs.service, &dispatch.client)).await?;
     stop.stages.push(Stage::Service(executor_stop));
     let config_drawer = drawers.local().config_id.clone();
-    grant_drawer_admin(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        nodules_actor,
+        &config_drawer,
+        EntryAccess::Admin,
+    )
+    .await?;
+    // Installs pin versions in the registry's documents, which the nodule service reads at the
+    // pinned heads and never writes.
+    grant_drawer(
+        drawers,
+        drawers_actor,
+        nodules_actor,
+        &cartridges.registry_drawer,
+        EntryAccess::Read,
+    )
+    .await?;
+    // The cartridge config documents live in a drawer of their own that the nodule service
+    // creates, and so administers (ADR 044 §1).
+    let shared_config_drawer =
+        big_nodule::ensure_shared_config_drawer(big_nodule::SharedConfigDrawerConfig {
+            drawers,
+            actor: nodules_actor,
+            access: drawer_access,
+            sql: sql.clone(),
+        })
+        .await?;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
         drawers: drawers.client.clone(),
         config_drawer,
+        registry_drawer: cartridges.registry_drawer.clone(),
+        shared_config_drawer,
         actor: nodules_actor.clone(),
         actor_path: "nodules".into(),
         namespace,
@@ -853,14 +883,16 @@ async fn boot_dispatch(
     Ok((dispatch, capability))
 }
 
-/// Mints the drawers actor's admin capability over `drawer` and grants admin to `subject`, which
-/// is how a service's actor becomes able to write a drawer the drawers actor owns: the nodule
-/// service over the node's config drawer, the cartridge registry over its registry drawer.
-async fn grant_drawer_admin(
+/// Mints the drawers actor's admin capability over `drawer` and grants `access` to `subject`, which
+/// is how a service's actor becomes able to use a drawer the drawers actor owns: the nodule
+/// service over the node's config drawer (Admin) and the registry drawer (Read, to read the
+/// versions its installs pin), the cartridge registry over its registry drawer (Admin).
+async fn grant_drawer(
     drawers: &Drawers,
     issuer: &OpenedActor,
     subject: &OpenedActor,
     drawer: &DrawerId,
+    access: EntryAccess,
 ) -> Res<()> {
     let cap = drawers
         .client
@@ -885,7 +917,7 @@ async fn grant_drawer_admin(
                 capability: cap.capability_id,
                 drawer_id: drawer.clone(),
                 subject_id: subject.actor.actor_id,
-                access: EntryAccess::Admin,
+                access,
             },
         )
         .await?;

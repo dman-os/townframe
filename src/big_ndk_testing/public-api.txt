@@ -9,6 +9,7 @@ pub impl big_ndk_testing::TestNode::async fn call < M : Unary > (& self , input 
 pub impl big_ndk_testing::TestNode::async fn enable (& self , cartridge_id : & CartridgeId) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn grant (& self , cartridge_id : & CartridgeId , methods : DispatchScope) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn invoke (& self , operation : & str , input : Value , context : InvocationContext , request : RequestContext ,) -> Result < Value , DispatchError >
+pub impl big_ndk_testing::TestNode::async fn revoke (& self , cartridge_id : & CartridgeId , methods : DispatchScope) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn set_enabled (& self , cartridge_id : & CartridgeId , enabled : bool) -> NoduleRecord
 pub impl big_ndk_testing::TestNode::async fn stop (self)
 pub impl big_ndk_testing::TestNode::fn big_node (& self) -> & BigNode

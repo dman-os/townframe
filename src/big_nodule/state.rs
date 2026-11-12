@@ -7,15 +7,19 @@
 //! `parent_path`, and applies or revokes service-owned local drawer grants within the nodules
 //! actor's delegated authority.
 
+use crate::cartridge_docs::CartridgeDocs;
+use crate::cartridge_docs::PinError;
 use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
 use crate::store;
+use big_cabinet::DatumStore;
 use big_cabinet::DatumStoreHandle;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::SchemaRepo;
+use big_cabinet_core::DatumPin;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
@@ -26,8 +30,10 @@ use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
+use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::doc::StoreSnapshot;
 use big_cabinet_core::drawer::DrawerAccess;
@@ -37,9 +43,12 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_dispatch::Caller;
 use big_dispatch::LexiconSource;
 use big_dispatch::Operation;
@@ -57,6 +66,7 @@ use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::Readiness;
 use big_nodule_core::RunMode;
 use big_nodule_core::config::AdmissionCache;
+use big_nodule_core::config::CartridgeConfig;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
 use big_nodule_core::inventory::ArtifactState;
@@ -85,8 +95,10 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use utils_rs::expect_tags::ERROR_ACTOR;
 use utils_rs::expect_tags::ERROR_CHANNEL;
 
@@ -98,6 +110,11 @@ pub(crate) struct Stores {
     pub(crate) authority: Client<AuthorityProtocol>,
     pub(crate) drawers: Client<DrawersProtocol>,
     pub(crate) datum_store: DatumStoreHandle<NoduleConfig>,
+    /// The docs service and the handle the service reads the registry with and reads, writes and
+    /// creates cartridge config documents in the shared config drawer with.
+    pub(crate) docs: Client<DocsProtocol>,
+    pub(crate) docs_capability: CapId,
+    pub(crate) shared_config_drawer: DrawerId,
     pub(crate) parent: OpenedActor,
     pub(crate) parent_path: String,
     pub(crate) dispatch: Arc<Router>,
@@ -130,35 +147,32 @@ impl Stores {
 const NATIVE_SCHEMAS: &str = "native";
 
 pub(crate) enum Command {
-    Admit {
+    Install {
         context: RequestContext,
-        cartridge: Box<Cartridge>,
-        drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
-        reply: Reply<NoduleRecord>,
-    },
-    Configure {
-        context: RequestContext,
-        cartridge_id: CartridgeId,
-        settings: IndexMap<String, Value>,
-        reply: Reply<NoduleRecord>,
+        /// What the caller may install: `None` for the operator.
+        scope: Option<NoduleScope>,
+        pin: DatumPin,
+        reply: Reply<CartridgeInstallRecord>,
     },
     SetEnabled {
         context: RequestContext,
         cartridge_id: CartridgeId,
+        component: Component,
         enabled: bool,
-        reply: Reply<NoduleRecord>,
+        reply: Reply<CartridgeInstallRecord>,
     },
-    SetDrawerGrants {
+    SetGrant {
         context: RequestContext,
         cartridge_id: CartridgeId,
-        drawers: BTreeMap<DrawerId, DrawerAccess>,
-        reply: Reply<NoduleRecord>,
+        component: Component,
+        grant: GrantKey,
+        value: Option<GrantBody>,
+        reply: Reply<()>,
     },
-    SetMethodGrants {
+    ClearConfig {
         context: RequestContext,
         cartridge_id: CartridgeId,
-        methods: DispatchScope,
-        reply: Reply<NoduleRecord>,
+        reply: Reply<()>,
     },
     ConfirmResolution {
         context: RequestContext,
@@ -192,6 +206,10 @@ pub(crate) enum Command {
         context: RequestContext,
         scope: Option<NoduleScope>,
         reply: Reply<Vec<NoduleRecord>>,
+    },
+    ListInstalls {
+        context: RequestContext,
+        reply: Reply<Vec<CartridgeInstallRecord>>,
     },
 }
 
@@ -307,6 +325,9 @@ struct InitFinished {
 #[derive(Clone)]
 pub(crate) struct Handle {
     commands: mpsc::Sender<Command>,
+    /// The install rows as the last reconcile left them, for [`crate::NoduleService`]'s
+    /// subscription to follow.
+    pub(crate) installs: watch::Receiver<Vec<CartridgeInstallRecord>>,
 }
 
 impl Handle {
@@ -352,6 +373,12 @@ pub(crate) struct State {
     /// Where initializer invocations run, and where their results come back to.
     tasks: Spawner,
     init_results: mpsc::Sender<InitFinished>,
+    /// The registry documents installs pin and the cartridge config documents they name.
+    docs: CartridgeDocs,
+    /// Rung when a loaded cartridge config document changes.
+    docs_changed: Arc<Notify>,
+    /// The install rows of the last reconcile.
+    installs: watch::Sender<Vec<CartridgeInstallRecord>>,
 }
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
@@ -360,6 +387,33 @@ fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
         url: actor.actor.url.clone(),
         public_key: actor.actor.public_key.clone(),
     }
+}
+
+/// Edits `handle`'s document with `edit`, whose domain refusal comes back as itself and not as the
+/// store's invalid-edit error it travels through.
+async fn mutate_domain<S: DatumStore>(
+    handle: &DatumStoreHandle<S>,
+    context: &RequestContext,
+    edit: impl FnOnce(&mut S) -> Result<(), InventoryError> + Send + 'static,
+) -> Res<()> {
+    let domain_error: Arc<Mutex<Option<NodulesError>>> = Arc::new(Mutex::new(None));
+    let captured = Arc::clone(&domain_error);
+    let result = handle
+        .mutate(context, None, move |config| {
+            edit(config).map_err(|err| {
+                let message = err.to_string();
+                *captured.lock().expect("domain error lock") = Some(err.into());
+                StoreError::InvalidEdit(message)
+            })
+        })
+        .await;
+    if let Err(err) = result {
+        if let Some(domain) = domain_error.lock().expect("domain error lock").take() {
+            return Err(domain);
+        }
+        return Err(crate::store_error(err));
+    }
+    Ok(())
 }
 
 async fn answer<T>(mut reply: oneshot::Sender<T>, operation: impl Future<Output = T>) {
@@ -391,9 +445,7 @@ impl State {
             .into_iter()
             .map(|row| (row.cartridge_id, (row.scope, row.capability_id)))
             .collect();
-
         let init_done = store::init_done(&stores.sql).await?;
-
         let locks = store::resolution_locks(&stores.sql).await?;
 
         let mut watch = stores
@@ -401,12 +453,22 @@ impl State {
             .watch()
             .await
             .map_err(crate::store_error)?;
-        let initial = stores.config().await?;
 
         let (commands, mut inbox) = mpsc::channel(64);
         let (init_results, mut finished_inits) = mpsc::channel(16);
         let (stop, tasks) = StopToken::new();
         let cancellation = tasks.clone();
+        let docs_changed = Arc::new(Notify::new());
+        let docs = CartridgeDocs::new(
+            stores.docs.clone(),
+            stores.docs_capability,
+            stores.shared_config_drawer.clone(),
+            stores.sql.clone(),
+            Arc::clone(&docs_changed),
+            tasks.clone(),
+        )
+        .await?;
+        let (installs, installs_rx) = watch::channel(Vec::new());
 
         let mut state = Self {
             stores,
@@ -428,21 +490,25 @@ impl State {
             next_epoch: 0,
             tasks: tasks.clone(),
             init_results,
+            docs,
+            docs_changed,
+            installs,
         };
         let context = RequestContext::root();
-        for (cartridge_id, expected_actor_id) in state.persisted_actors.clone() {
-            let actor = state.stores.open_actor(&context, &cartridge_id).await?;
-            if actor.actor.actor_id != expected_actor_id {
-                return Err(NodulesError::Storage(format!(
-                    "installed nodule `{cartridge_id}` was given actor {expected_actor_id} but its path now opens {}",
-                    actor.actor.actor_id
-                )));
-            }
-            state.actors.insert(cartridge_id, actor);
+        // The boot reconcile may already have started initializers, and the config documents it
+        // loads run tasks; a failure here must not leave them running behind a service that
+        // never came up.
+        let booted = async {
+            let initial = state.config().await?;
+            state.actors = state
+                .stores
+                .reopen_actors(&context, &state.persisted_actors)
+                .await?;
+            state.reconcile(&context, initial, Trigger::Boot).await
         }
-        // The boot reconcile may already have started initializers; a failure here must not
-        // leave them running behind a service that never came up.
-        if let Err(err) = state.reconcile(&context, initial, Trigger::Boot).await {
+        .await;
+        if let Err(err) = booted {
+            state.docs.stop_all().await;
             stop.stop().await;
             return Err(err);
         }
@@ -464,8 +530,7 @@ impl State {
                         if cartridges.iter().any(|cartridge_id| {
                             state.hosted.contains_key(cartridge_id) || state.inits.contains_key(cartridge_id)
                         }) {
-                            let snapshot = state
-                                .stores.config().await?;
+                            let snapshot = state.config().await?;
                             drop(
                                 state
                                     .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
@@ -482,31 +547,23 @@ impl State {
                         None => break,
                     },
                     changed = watch.changed() => {
-                        // The watch only says the config moved. Read the current snapshot here: one
+                        // The watch only says the node config moved. Read the current snapshot here: one
                         // taken when the event was produced can predate the change a command of this
                         // actor made while the actor was blocked (an enable waiting on its workload),
                         // and reconciling to it would withdraw what that command just served.
                         // Shutdown stops this task before the datum store it watches, so a closed
                         // watch while we are still running is a lifecycle break.
                         changed.expect("nodule config watch closed while the state actor was running");
-                        // Revoke failures come back as a map of per-cartridge outcomes that
-                        // `reconcile` already folded into the refused records, so only
-                        // an `Err` (storage, actor or capability failure) is fatal.
-                        // A change this actor made itself (`mutate_config` reconciles it before
-                        // its own watch event arrives) is already applied at these heads; only
-                        // a change from elsewhere, such as a synced config edit, has others.
-                        let snapshot = state
-                            .stores.config().await?;
-                        if snapshot.heads != state.observed_heads {
-                            drop(
-                                state
-                                    .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
-                                    .await?,
-                            );
-                        }
+                        state.reconcile_if_moved().await?;
+                    },
+                    // A cartridge config document moved: a grant written elsewhere, or by this
+                    // actor (which already reconciled it, so the heads below say nothing moved).
+                    () = state.docs_changed.notified() => {
+                        state.reconcile_if_moved().await?;
                     },
                 }
             }
+            state.docs.stop_all().await;
             // Dispatch outlives this service and its router keeps every provider registered, but
             // an executor's provider reaches back into dispatch (a Wasm guest's outgoing calls
             // go through dispatch's client), which would make dispatch own itself through the
@@ -520,53 +577,99 @@ impl State {
         tasks
             .spawn(async move { run.await.expect("nodule state actor failed") })
             .expect("nodule state task starts before shutdown");
-        Ok((Handle { commands }, stop))
+        Ok((
+            Handle {
+                commands,
+                installs: installs_rx,
+            },
+            stop,
+        ))
+    }
+
+    /// The configuration as it is now: the node's config document, and the cartridge config
+    /// documents its installs name, which are loaded here the first time an install names them.
+    /// The heads are the node document's followed by each cartridge document's in cartridge
+    /// order, so they move exactly when any of the documents does. Every install's pinned version
+    /// is read into the admission cache, which is what a reconcile resolves against.
+    async fn config(&mut self) -> Res<StoreSnapshot<NoduleConfig>> {
+        let mut snapshot = self
+            .stores
+            .datum_store
+            .snapshot()
+            .await
+            .map_err(crate::store_error)?;
+        if !self.stores.allow_slot_takeover {
+            // A takeover datum that reaches the document by any other path (a sync, a hand
+            // edit) must not run another cartridge as a slot on a node that did not opt in.
+            snapshot.value.refuse_dev_takeover();
+        }
+        self.docs.sync(&snapshot.value.config_docs()).await?;
+        let (heads, docs) = self.docs.snapshots().await?;
+        snapshot.heads.extend(heads);
+        snapshot.value.attach_cartridge_docs(docs);
+        self.docs
+            .read_pins(&snapshot.value, &self.admission_cache)
+            .await?;
+        Ok(snapshot)
+    }
+
+    /// Reconciles when any config document is past the heads the last reconcile saw. The watches
+    /// only say a document moved; a change this actor made itself (`mutate_config` reconciles it
+    /// before the watch event arrives) is already applied at these heads, and only a change from
+    /// elsewhere, such as a synced config edit, has others. Revoke failures come back as a map of
+    /// per-cartridge outcomes that `reconcile` already folded into the refused records, so only an
+    /// `Err` (storage, actor or capability failure) is fatal.
+    async fn reconcile_if_moved(&mut self) -> Res<()> {
+        let snapshot = self.config().await?;
+        if snapshot.heads != self.observed_heads {
+            drop(
+                self.reconcile(&RequestContext::root(), snapshot, Trigger::Change)
+                    .await?,
+            );
+        }
+        Ok(())
     }
 
     async fn run(&mut self, command: Command) {
         match command {
-            Command::Admit {
+            Command::Install {
                 context,
-                cartridge,
-                drawers,
+                scope,
+                pin,
                 reply,
-            } => answer(reply, self.admit(&context, *cartridge, drawers)).await,
-            Command::Configure {
-                context,
-                cartridge_id,
-                settings,
-                reply,
-            } => answer(reply, self.configure(&context, &cartridge_id, settings)).await,
+            } => answer(reply, self.install(&context, scope, pin)).await,
             Command::SetEnabled {
                 context,
                 cartridge_id,
+                component,
                 enabled,
                 reply,
-            } => answer(reply, self.set_enabled(&context, &cartridge_id, enabled)).await,
-            Command::SetDrawerGrants {
+            } => {
+                answer(
+                    reply,
+                    self.set_enabled(&context, &cartridge_id, component, enabled),
+                )
+                .await
+            }
+            Command::SetGrant {
                 context,
                 cartridge_id,
-                drawers,
+                component,
+                grant,
+                value,
                 reply,
             } => {
                 answer(
                     reply,
-                    self.set_drawer_grants(&context, &cartridge_id, drawers),
+                    self.set_grant(&context, &cartridge_id, component, grant, value),
                 )
                 .await
             }
-            Command::SetMethodGrants {
+            Command::ClearConfig {
                 context,
                 cartridge_id,
-                methods,
                 reply,
-            } => {
-                answer(
-                    reply,
-                    self.set_method_grants(&context, &cartridge_id, methods),
-                )
-                .await
-            }
+            } => answer(reply, self.clear_config(&context, &cartridge_id)).await,
             Command::ConfirmResolution {
                 context,
                 cartridge_id,
@@ -606,6 +709,13 @@ impl State {
                 scope,
                 reply,
             } => answer(reply, self.list(&context, scope)).await,
+            Command::ListInstalls { context, reply } => {
+                answer(reply, async {
+                    self.refresh_if_needed(&context).await?;
+                    Ok(self.installs.borrow().clone())
+                })
+                .await
+            }
         }
     }
 
@@ -614,81 +724,166 @@ impl State {
         context: &RequestContext,
         edit: impl FnOnce(&mut NoduleConfig) -> Result<(), InventoryError> + Send + 'static,
     ) -> Res<()> {
-        let domain_error: Arc<Mutex<Option<NodulesError>>> = Arc::new(Mutex::new(None));
-        let captured = Arc::clone(&domain_error);
-        let result = self
-            .stores
-            .datum_store
-            .mutate(context, None, move |config| {
-                edit(config).map_err(|err| {
-                    let message = err.to_string();
-                    *captured.lock().expect("domain error lock") = Some(err.into());
-                    StoreError::InvalidEdit(message)
-                })
-            })
-            .await;
-        if let Err(err) = result {
-            if let Some(domain) = domain_error.lock().expect("domain error lock").take() {
-                return Err(domain);
-            }
-            return Err(crate::store_error(err));
-        }
-        let snapshot = self.stores.config().await?;
+        mutate_domain(&self.stores.datum_store, context, edit).await?;
+        let snapshot = self.config().await?;
         drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         Ok(())
     }
 
-    async fn admit(
-        &mut self,
-        context: &RequestContext,
-        cartridge: Cartridge,
-        drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
-    ) -> Res<NoduleRecord> {
-        let cartridge_id = cartridge.id.clone();
-        let cache = Arc::clone(&self.admission_cache);
-        self.mutate_config(context, move |config| {
-            config.admit(&cache, &cartridge, drawers).map(|_| ())
-        })
-        .await?;
-        self.records
-            .get(&cartridge_id)
-            .cloned()
-            .ok_or(NodulesError::UnknownCartridge(cartridge_id))
-    }
-
-    async fn configure(
-        &mut self,
-        context: &RequestContext,
-        cartridge_id: &CartridgeId,
-        settings: IndexMap<String, Value>,
-    ) -> Res<NoduleRecord> {
-        let target = cartridge_id.clone();
-        self.mutate_config(context, move |config| {
-            config.configure(&target, settings).map(|_| ())
-        })
-        .await?;
-        self.records
-            .get(cartridge_id)
+    /// The install row of `cartridge_id` as the last reconcile left it.
+    fn install_record(&self, cartridge_id: &CartridgeId) -> Res<CartridgeInstallRecord> {
+        self.installs
+            .borrow()
+            .iter()
+            .find(|record| &record.cartridge_id == cartridge_id)
             .cloned()
             .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
+    }
+
+    /// Installs the version `pin` names: reads and verifies it, finds or creates the cartridge's
+    /// config document, and records the install in the node's config document. Admission (the
+    /// nodule's Lexicons, requests and artifact references), Lexicon registration, resolution,
+    /// the actor and the hosted workload are the reconcile's, as for any config change.
+    async fn install(
+        &mut self,
+        context: &RequestContext,
+        scope: Option<NoduleScope>,
+        pin: DatumPin,
+    ) -> Res<CartridgeInstallRecord> {
+        let cartridge = match self.docs.read_pin(&pin).await {
+            Ok(cartridge) => cartridge,
+            Err(PinError::Unavailable(reason)) => {
+                return Err(NodulesError::Rejected(format!(
+                    "the pinned version is not available on this node: {reason}"
+                )));
+            }
+            Err(PinError::Invalid(reason)) => return Err(NodulesError::Rejected(reason)),
+            Err(PinError::Fatal(error)) => return Err(error),
+        };
+        if let Some(scope) = &scope
+            && !(scope.admit && scope.cartridges.contains(&cartridge.id))
+        {
+            return Err(NodulesError::Denied);
+        }
+        let cartridge_id = cartridge.id.clone();
+        let doc = match self.config_doc(&cartridge_id).await? {
+            Some(doc) => doc,
+            None => self.docs.create(&cartridge_id).await?,
+        };
+        // The document is loaded before the install names it, so the reconcile that records the
+        // install already sees its grants.
+        self.docs
+            .handle(&cartridge_id, &doc)
+            .await
+            .map_err(crate::store_error)?;
+        let cache = Arc::clone(&self.admission_cache);
+        self.mutate_config(context, move |config| {
+            config.install(&cache, &cartridge, pin, doc)
+        })
+        .await?;
+        self.install_record(&cartridge_id)
+    }
+
+    /// The config document of `cartridge_id`: the one its install names, else the one an earlier
+    /// install left in the shared config drawer.
+    async fn config_doc(&mut self, cartridge_id: &CartridgeId) -> Res<Option<DocId>> {
+        let installed = self
+            .stores
+            .datum_store
+            .snapshot()
+            .await
+            .map_err(crate::store_error)?
+            .value
+            .config_docs()
+            .remove(cartridge_id);
+        match installed {
+            Some(doc) => Ok(Some(doc)),
+            None => self.docs.find(cartridge_id).await,
+        }
     }
 
     async fn set_enabled(
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
+        component: Component,
         enabled: bool,
-    ) -> Res<NoduleRecord> {
+    ) -> Res<CartridgeInstallRecord> {
         let target = cartridge_id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.set_enabled(&cache, &target, enabled).map(|_| ())
+            config.set_enabled(&cache, &target, component, enabled)
         })
         .await?;
-        self.records
-            .get(cartridge_id)
-            .cloned()
-            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
+        self.install_record(cartridge_id)
+    }
+
+    /// Sets or revokes one grant datum in the cartridge's config document.
+    async fn set_grant(
+        &mut self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+        component: Component,
+        grant: GrantKey,
+        value: Option<GrantBody>,
+    ) -> Res<()> {
+        // A grant is of a component the cartridge contributes: one it does not would be a datum
+        // nothing reads.
+        if self
+            .install_record(cartridge_id)?
+            .install
+            .component(component)
+            .is_none()
+        {
+            return Err(InventoryError::NoComponent {
+                id: cartridge_id.clone(),
+                component,
+                action: "grant",
+            }
+            .into());
+        }
+        self.edit_cartridge_config(context, cartridge_id, move |config| {
+            config.set_grant(component, grant, value)
+        })
+        .await
+    }
+
+    /// Deletes the settings and every grant of the cartridge, installed or not: the config
+    /// document outlives the install.
+    async fn clear_config(
+        &mut self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+    ) -> Res<()> {
+        self.edit_cartridge_config(context, cartridge_id, |config| {
+            config.clear();
+            Ok(())
+        })
+        .await
+    }
+
+    /// Edits `cartridge_id`'s config document, the one its install names or else the one an
+    /// earlier install left, and reconciles. A write there is not the node document's, so it
+    /// reconciles here the way the node's own mutations do.
+    async fn edit_cartridge_config(
+        &mut self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+        edit: impl FnOnce(&mut CartridgeConfig) -> Result<(), InventoryError> + Send + 'static,
+    ) -> Res<()> {
+        let doc = self
+            .config_doc(cartridge_id)
+            .await?
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))?;
+        let handle = self
+            .docs
+            .handle(cartridge_id, &doc)
+            .await
+            .map_err(crate::store_error)?;
+        mutate_domain(&handle, context, edit).await?;
+        let snapshot = self.config().await?;
+        drop(self.reconcile(context, snapshot, Trigger::Change).await?);
+        Ok(())
     }
 
     async fn set_dev_takeover(
@@ -725,40 +920,6 @@ impl State {
             .await
     }
 
-    async fn set_drawer_grants(
-        &mut self,
-        context: &RequestContext,
-        cartridge_id: &CartridgeId,
-        drawers: BTreeMap<DrawerId, DrawerAccess>,
-    ) -> Res<NoduleRecord> {
-        let target = cartridge_id.clone();
-        self.mutate_config(context, move |config| {
-            config.set_drawer_grants(&target, drawers).map(|_| ())
-        })
-        .await?;
-        self.records
-            .get(cartridge_id)
-            .cloned()
-            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
-    }
-
-    async fn set_method_grants(
-        &mut self,
-        context: &RequestContext,
-        cartridge_id: &CartridgeId,
-        methods: DispatchScope,
-    ) -> Res<NoduleRecord> {
-        let target = cartridge_id.clone();
-        self.mutate_config(context, move |config| {
-            config.set_method_grants(&target, methods).map(|_| ())
-        })
-        .await?;
-        self.records
-            .get(cartridge_id)
-            .cloned()
-            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
-    }
-
     /// Re-pins `binding` of `cartridge_id` to the cartridge that provides its contract now, which the
     /// operator has seen reported as [`Unresolved::ProviderChanged`] and accepts (ADR 028 §3).
     /// Refused when the request is not held at that state, so a confirmation never takes effect
@@ -778,14 +939,14 @@ impl State {
             contract,
             unresolved: Some(Unresolved::ProviderChanged { .. }),
             ..
-        }) = record.requests.get(binding)
+        }) = record.requests.get(binding).cloned()
         else {
             return Err(NodulesError::Rejected(format!(
                 "request `{binding}` of `{cartridge_id}` is not awaiting confirmation of a changed \
                  provider"
             )));
         };
-        let snapshot = self.stores.config().await?;
+        let snapshot = self.config().await?;
         // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
         // change is still what the offers say, and the one offer is the cartridge to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
@@ -800,9 +961,9 @@ impl State {
             .find(|request| request.binding == binding)
             .expect("the record reports a status for each request of its nodule");
         let offers = index.offers(
-            contract,
+            &contract,
             self.stores
-                .native_offers(contract, request.is_operation_call()),
+                .native_offers(&contract, request.is_operation_call()),
         );
         let [offer] = offers.as_slice() else {
             unreachable!("a provider change is held only while exactly one provider offers it")
@@ -858,7 +1019,7 @@ impl State {
             }
             return Err(crate::store_error(err));
         }
-        let snapshot = self.stores.config().await?;
+        let snapshot = self.config().await?;
         let revoke_errors = self.reconcile(context, snapshot, Trigger::Change).await?;
         if let Some(err) = revoke_errors.get(cartridge_id) {
             return Err(err.clone());
@@ -867,7 +1028,7 @@ impl State {
     }
 
     async fn refresh_if_needed(&mut self, context: &RequestContext) -> Res<()> {
-        let snapshot = self.stores.config().await?;
+        let snapshot = self.config().await?;
         let has_unapplied = self
             .records
             .values()
@@ -1013,7 +1174,6 @@ impl State {
                     version,
                     revision,
                     enabled,
-                    config,
                     reason,
                 } => {
                     self.withdraw(&cartridge_id).await;
@@ -1031,7 +1191,6 @@ impl State {
                             filled_by: None,
                             enabled,
                             readiness: Readiness::Refused,
-                            config,
                             artifacts: BTreeMap::new(),
                             drawers: BTreeMap::new(),
                             methods: None,
@@ -1064,6 +1223,13 @@ impl State {
             }
         }
 
+        self.installs.send_if_modified(|rows| {
+            let installs = snapshot.value.installs();
+            (*rows != installs) && {
+                *rows = installs;
+                true
+            }
+        });
         self.observed_heads = snapshot.heads;
         self.records = new_records;
         Ok(revoke_errors)
@@ -1154,7 +1320,6 @@ impl State {
                         version: Some(installed.version),
                         revision: Some(installed.revision),
                         enabled: installed.enabled,
-                        config: installed.config,
                         reason: format!("schema registration refused: {error}"),
                     }
                 }
@@ -1649,7 +1814,7 @@ impl State {
                 run.error = Some(error);
             }
         }
-        let snapshot = self.stores.config().await?;
+        let snapshot = self.config().await?;
         drop(
             self.reconcile(&RequestContext::root(), snapshot, Trigger::InitResult)
                 .await?,
@@ -1897,7 +2062,6 @@ impl State {
             filled_by: installed.filled_by.clone(),
             enabled: installed.enabled,
             readiness,
-            config: installed.config.clone(),
             artifacts: installed.artifact_states(),
             drawers: drawer_statuses,
             methods: (!desired_operations.is_empty()).then(|| NoduleMethodGrantStatus {
@@ -2028,19 +2192,26 @@ impl State {
 }
 
 impl Stores {
-    /// The nodule config as it is now: what every reconcile starts from.
-    async fn config(&self) -> Res<StoreSnapshot<NoduleConfig>> {
-        let mut snapshot = self
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
-        if !self.allow_slot_takeover {
-            // A takeover datum that reaches the document by any other path (a sync, a hand
-            // edit) must not run another cartridge as a slot on a node that did not opt in.
-            snapshot.value.refuse_dev_takeover();
+    /// Opens the actor of each persisted nodule, which must still be the one it was given: its
+    /// path derives from its cartridge id and a different actor under it means the identity
+    /// tree changed beneath the install.
+    async fn reopen_actors(
+        &self,
+        context: &RequestContext,
+        persisted: &BTreeMap<CartridgeId, Uuid7>,
+    ) -> Res<BTreeMap<CartridgeId, OpenedActor>> {
+        let mut actors = BTreeMap::new();
+        for (cartridge_id, expected_actor_id) in persisted {
+            let actor = self.open_actor(context, cartridge_id).await?;
+            if actor.actor.actor_id != *expected_actor_id {
+                return Err(NodulesError::Storage(format!(
+                    "installed nodule `{cartridge_id}` was given actor {expected_actor_id} but its path now opens {}",
+                    actor.actor.actor_id
+                )));
+            }
+            actors.insert(cartridge_id.clone(), actor);
         }
-        Ok(snapshot)
+        Ok(actors)
     }
 
     async fn open_actor(
