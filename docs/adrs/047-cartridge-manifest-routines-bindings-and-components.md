@@ -1,63 +1,66 @@
 # ADR 047: The cartridge manifest: routines, bindings and components
 
-**Status:** Proposed (manager, 2026-11-12, from the operator's review of the cartridge and nodule manifests). Nothing here is implemented.
+**Status:** Proposed (manager, 2026-11-13, from the operator's review of the cartridge and nodule manifests). Nothing here is implemented.
 
 **Related:**
-- [ADR 027: cartridges, nodules and operation contracts](027-cartridges-nodules-and-operation-contracts.md) (the nodule description this replaces)
-- [ADR 028: cartridge identity, naming and dependencies](028-cartridge-identity-naming-and-dependencies.md) §1 (registry layout), §2 (identity, kept), §4 (the request shape this replaces)
-- [ADR 042: byte bodies and local-only methods](042-byte-bodies-and-local-only-methods.md) (method declarations)
+- [ADR 027: cartridges, nodules and operation contracts](027-cartridges-nodules-and-operation-contracts.md) §2 (the nodule description whose serialized shape this replaces; its responsibilities stay)
+- [ADR 028: cartridge identity, naming, dependencies and malleability](028-cartridge-identity-naming-and-dependencies.md) (identity, upgrades, the request shape, the lockfile; all kept except where §9 says)
+- [ADR 035: references and URLs](035-references-and-urls.md) (`#datumPin`)
 - [ADR 044: cartridge configuration documents](044-cartridge-configuration-documents.md) (installs, grants, settings)
-- The daybook plug manifest in `src/daybook_types/manifest.rs` (`RoutineManifest`, `RoutineFacetAccess`, `RoutineLocalStateAccess`, `LocalStateManifest`, `WflowBundleManifest`), which this ADR follows wherever the two differ.
+- [ADR 045: method routes and the dev takeover](045-method-routes-and-dev-takeover.md) (substitution)
+- The daybook plug manifest in `src/daybook_types/manifest.rs` (`RoutineManifest`, `RoutineFacetAccess`, `RoutineLocalStateAccess`, `LocalStateManifest`), whose per-routine access this restores.
 
 ## Context
 
-The cartridge envelope (`big_cartridges_core::Cartridge`) and the nodule description (`big_nodule_core::Nodule`) drifted away from the plug manifest daybook had, and lost things the operator relied on:
+ADR 027 §2 keeps the word **routine** for "an executable implementation inside a nodule", identifying "the operation NSID it implements, artifact/export references, private state requirements, and requested host facilities", and ADR 028 §1 states the goal that it be "statically answerable whether a cartridge can ever reach a given resource". The serialized description never carried that. It has one `handler` (an artifact key) serving a bare `implements` list, and one `requires` list for the whole nodule, so what any one method may touch cannot be read off the manifest. The daybook plug manifest could: each routine had its own ACL per datum kind (`RoutineFacetAccess`) and per local state (`RoutineLocalStateAccess`).
 
-- **No routines.** A nodule has one `handler` (an artifact key) and a bare `implements` list of method NSIDs. Nothing declares a method on its own, so nothing can say what one method may touch, which runtime runs it, or let a command or an initializer point at it. The plug manifest had `routines`, each with its implementation (`RoutineImpl::Wflow { bundle, key }`) and its own ACL, and commands and inits named a routine.
-- **Access is declared per nodule, and only loosely.** `requires: Vec<Request>` mixes "call this operation" (where `access` must be absent) and "use this datum kind" (where `access` is a free string) in one struct. It cannot say which method of which dependency, cannot name local state, and confers nothing (ADR 028 §4: "a manifest describes needs, not granted authority"). The plug manifest said, per routine and per tag, read/write/create/delete (`RoutineFacetAccess`), and which local states it reached (`RoutineLocalStateAccess`).
-- **Not a Lexicon.** The cartridge is meant to be published over atproto and stored as datums, but it is a Rust struct with a hand-rolled open union (`Contribution` tagged by a `schema` string instead of `$type`).
-- **Lexicons and sidecars are inside the nodule**, although a micro uses the same Lexicons. The sidecars sit in a map parallel to the Lexicons they annotate.
-- **"Artifacts" say nothing about the code.** An `Artifact` is a key, a digest, a size and a media type; that it is a wasm component, and what it exports, is implied by whoever reads it.
-- **Unused declarations.** `revisionedStores` and `privateState` are validated at admission and read by nothing else. `privateState` also has the wrong name: the plug manifest called it *local state*, which says what matters (it is not synced to other nodes) without claiming it is private (it can be offered to other cartridges).
-- **Opaque `bindings` sections** (commands, views, processors) are carried and never validated.
-- **Keyed lists and plain strings.** Most sections are lists of objects with a `key`, so uniqueness is checked by hand, and every NSID is a `String` checked by `is_nsid` at 16 call sites.
+The rest of what this ADR changes is shape, not meaning:
+- the cartridge is not a Lexicon record, though it is published over atproto and stored as datums: `Contribution` is an open union tagged by a `schema` string instead of `$type`;
+- Lexicons and sidecars sit inside the nodule, though a micro uses the same Lexicons, and the sidecars are a map parallel to the Lexicons they annotate;
+- an `Artifact` is a key, digest, size and media type, and what kind of code it is is implied by whoever reads it;
+- keyed sections are lists with a `key` member, and NSIDs are `String`s checked by `is_nsid` at 16 call sites;
+- the request shape (ADR 028 §4) is one struct for an operation call and a datum access, told apart by whether `access` is set.
+
+**What stays.** Everything ADR 027, 028, 044 and 045 decided that this ADR does not name in §9. In particular: the cartridge id `<namespace DID>/<name>` (028 §2); upgrades, forks and "grants never widen silently" (028 §3); dependencies name NSIDs, not providers, and cartridge-to-cartridge dependencies are delivery hints only (028 §4); a cartridge carries copies of the Lexicons it depends on (028 §4); the resolution lockfile (028 §4); routes and the dev takeover (045); installs and settings (044); commands, processors and initialization target operation NSIDs, never a provider's private routine names (027 §2), so a consumer survives substitution.
 
 ## Decision
 
-### 1. A cartridge version is a set of datums in its registry document
+### 1. A cartridge version is a set of datums in its registry document, pinned by its envelope
 
-The registry document (ADR 028 §1) already holds one cartridge as datums: the identity, one envelope per version, and one `org.example.daybook.blob` datum per artifact so big_blobs retains the bytes. This ADR keeps that and splits the envelope's contents into datums of their own, each one a record of a real Lexicon:
+The registry document (ADR 028 §1) already holds a cartridge as datums: its identity, one envelope per version, and a `Blob` datum per artifact. This keeps that and moves the envelope's large parts into datums of their own, each a record of a real Lexicon:
 
-- `org.example.daybook.cartridge/<version>`: the envelope (§2), and the digest of every other datum of this version (below), so the publisher's signature over the envelope covers them.
-- `com.atproto.lexicon.schema/<version>/<nsid>`: one per Lexicon the cartridge publishes, as the record atproto itself publishes Lexicons with. They are cartridge-level: the nodule, the micro and every routine refer to them by NSID.
-- `org.example.daybook.cartridge.component/<version>/<key>`: one per component (§3).
+- `org.example.daybook.cartridge/<version>`: the envelope (§2).
+- `com.atproto.lexicon.schema/<version>/<nsid>`: each Lexicon the cartridge carries, its own and the copies it depends on (028 §4), as atproto itself publishes Lexicons.
+- `org.example.daybook.lexicon.sidecar/<version>/<nsid>`: the sidecar of a record it holds (028 §4), at the same slot as its Lexicon, so a Lexicon's sidecar is always found next to it and the Lexicon record stays a plain Lexicon.
+- `org.example.daybook.cartridge.component/<version>/<key>`: each component (§3).
 - `org.example.daybook.blob/cartridge.artifact/<version>/<key>`: the bytes, as today.
 
-Every record is an atproto record. In atproto, `$type` names the Lexicon definition an object conforms to: a record carries its own (`org.example.daybook.cartridge` for the envelope), and an object in a field that can hold different kinds carries the one it is (a routine's `impl`, a binding, a component). It is needed only there; a field that always holds one kind has none. `Contribution`'s `schema` string goes.
+The envelope names the other datums of its version by `#datumPin` (ADR 035): the document and heads it was published at. Heads are hashes of the document's history, so the publisher's signature over the envelope covers every pinned datum, and no separate digest list is needed. A Lexicon from *another* cartridge is never referenced by URL: a cartridge carries its own copy (028 §4), and the NSID is the reference. Cartridge identity is the DID-based id, never a keyhive document, and delivering a cartridge some other way (OCI, ADR 028 §2) is a later field of the envelope.
+
+In atproto, `$type` names the Lexicon definition an object follows: a record carries its own, and an object in a field that can hold different kinds carries the one it is (a routine's implementation, a binding, a component). A field that always holds one kind has none.
 
 ### 2. What belongs to the cartridge, and what to a contribution
 
-A cartridge has **at most one nodule and at most one micro**. Nothing separates two nodules of one cartridge (they would share its bindings, grants and settings), so a second one buys no boundary; a routine in one nodule or another is the same to the node. So the contributions are two optional fields of the envelope, not a list, and a later kind of contribution is another optional field (a reader that does not know it carries it, as atproto records carry unknown members).
-
-What the cartridge's parts share is the cartridge's; what runs is the contribution's:
+A cartridge has **at most one nodule and at most one micro** (ADR 028's open question settled): nothing separates two nodules of one cartridge, since they would share its bindings and settings. The contributions are two optional fields of the envelope, not a list; a later kind is another optional field.
 
 ```jsonc
 {
   "$type": "org.example.daybook.cartridge",
-  "id": "did:plc:…/photos",             // ADR 028 §2, unchanged
+  "id": "did:plc:…/photos",
   "version": "1.2.0",
   "authority": "org.example.photos",
-  "dependencies": { "did:plc:…/blobs": "^1" },
+  "dependencies": { "did:plc:…/blobs": "^1" },          // delivery hints (028 §4)
+  "lexicons":   { "org.example.photos.album": { /* #datumPin */ }, … },
+  "components": { "main": { /* #datumPin */ }, "ui": { /* #datumPin */ } },
 
-  // cartridge-level: shared by the nodule and the micro
   "bindings": {
     "albums":      { "$type": "…#datum", "nsid": "org.example.photos.album",
                      "description": "Your albums",
                      "read": "required", "write": "required", "create": "required" },
     "blobsPut":    { "$type": "…#method", "nsid": "org.example.daybook.blobs.put",
-                     "description": "Store photo bytes", "necessity": "required" },
+                     "description": "Store photo bytes", "necessity": "required", "minRevision": 2 },
     "workDrawers": { "$type": "…#drawers", "description": "Drawers to import photos from",
-                     "read": "required", "write": "optional" }
+                     "resolution": "atRuntime", "read": "required", "write": "optional" }
   },
   "settings": ["org.example.photos.settings"],
 
@@ -70,92 +73,89 @@ What the cartridge's parts share is the cartridge's; what runs is the contributi
       },
       "reindex": {
         "impl": { "$type": "…#componentExport", "component": "main", "export": "reindex" },
+        "implements": "org.example.photos.reindex",
         "uses": { "albums": { "read": true } }
       }
     },
-    "initialization": { "seed": { "routine": "reindex", "mode": "once" } }
+    "revisionedStores": { /* ADR 027 §7, unchanged in meaning */ },
+    "localState": { /* ADR 027 §6, the plug manifest's local_states */ },
+    "initialization": { "seed": { "target": "org.example.photos.reindex", "mode": "once" } }
   },
 
   "micro": {
     "components": ["ui"],
     "uses": { "albums": { "read": true, "write": true }, "workDrawers": { "read": true } }
-  },
-
-  "contents": { /* digest of each Lexicon, sidecar and component datum of this version (§1) */ }
+  }
 }
 ```
 
-**The cartridge's:** identity, version, authority, dependencies, **bindings** (what the cartridge reaches is one list, whichever part reaches it, so it is granted once), **settings** (ADR 044 already makes them the cartridge's, shared by its nodule and micro), and through §1 its Lexicons and components.
+**The cartridge's:** identity, version, authority, dependencies, Lexicons, components, **bindings** (one list of what the cartridge reaches, whichever part reaches it, which is what an audit and a grant read) and **settings** (ADR 044 already makes them shared by the nodule and the micro).
 
-**The nodule's:** its routines and its initialization.
+**The nodule's:** routines, revisioned stores, local state and initialization.
 
-**The micro's:** the components it runs and one `uses`. A micro is a UI: one long-lived instance per cartridge, not a call per request, so it has no routines and its access is minted for the instance's life rather than per call. It may run several components (they are composed into the one instance). Its `uses` narrows the cartridge's bindings exactly as a routine's does, so the UI can be kept from what only the nodule should touch.
+**The micro's:** the components it runs and one `uses`. A micro is a UI: one long-lived instance per cartridge, not a call per request, so it has no routines, and its capability lasts for the instance's life. It may run several components (how they compose into one instance is Clay's runtime's). Its `uses` narrows the bindings as a routine's does, so the UI can be kept from what only the nodule should touch.
 
-- **`routines`**, keyed by name. A routine has an `impl`, a `$type` union whose only member today is `#componentExport` (a component and an export of it; the place a wflow or another runtime's member goes later, as `RoutineImpl::Wflow` did). It `implements` at most one method NSID: a routine with none is reachable only from the manifest (an initializer).
-- **`uses` is the routine's ACL**: a map from binding key to the part of that binding's access the routine takes. `reindex` above takes `albums` read-only, so the routine that rebuilds the index cannot write an album even though the cartridge may. A routine reaches nothing it does not list, and never more of a binding than the binding declares.
-- **`initialization`**, keyed by name, names a routine instead of a method.
-- **Local state is deferred.** When it comes, it is the plug manifest's `local_states`: a named SQLite database in the nodule's address space, because table semantics are wanted there directly, not through a method. Nothing declares or binds one until a nodule needs it.
-- **Removed:** `handler`, `implements`, `requires`, `revisionedStores`, `privateState`, the opaque `bindings` sections, and the nodule's `lexicons` and `sidecar` (moved to §1). Commands, views and processors return as typed sections that name routines when something implements them; until then a manifest that carries one is refused, not silently passed through.
+### 3. Routines
 
-### 3. Components
+- A routine has an `impl`, a `$type` union whose only member today is `#componentExport`: a component and an export of it. Durable execution stays the wflow service, not a routine kind (ADR 027 §2); another runtime's code is a new member when one exists.
+- A routine `implements` one operation NSID. Commands, processors and initialization name that **operation**, never the routine (ADR 027 §2), so a consumer keeps working when another provider serves the operation.
+- **`uses` is the routine's ACL**: a map from binding key to the part of the binding the routine takes. `reindex` takes `albums` read-only, so it cannot write an album though the cartridge may. A routine reaches nothing it does not list, and never more of a binding than the binding declares. ADR 027 §2's "private state requirements and requested host facilities" are these entries.
 
-The chain is routine → component → bytes, with nothing in between. A component datum describes one unit of code and points at its bytes; a routine's `impl` points at a component and an export of it. There is no grouping layer (the plug manifest's `wflow_bundles` said which keys a component served; here each routine says it). A component's kind is its `$type`, so each kind states its own fields, and its bytes are a blob datum (§1) described the way OCI describes a layer, by digest, size and media type:
+### 4. Components
 
-```jsonc
-{ "$type": "org.example.daybook.cartridge.component#wasm",
-  "blob": "cartridge.artifact/1.2.0/main",
-  "digest": "z…", "size": 812345, "mediaType": "application/wasm" }
-```
+The chain is routine → component → bytes. A component datum states the kind of code by `$type` and pins its bytes, described as OCI describes a layer (digest, size, media type). `#wasm` (a WASI component) is the only kind today.
 
-`#wasm` (a WASI component) is the only kind today. Another runtime's code is a new member when a runtime for it exists.
+### 5. Bindings
 
-### 4. Bindings: one way to reach anything, whoever provides it
+A binding is ADR 028 §4's request, keyed by its `binding` name and split by kind, so each kind states only the fields it has. It keeps the request's rules: it names a contract by NSID, never a provider; `necessity` (or per-access `required`/`optional`) and `resolution` (`configured`, or `atRuntime` through a picker) mean what they mean there; `minRevision` is the Lexicon revision it needs. Every binding carries a `description`, shown when it is granted. The kind decides how it is satisfied:
 
-A binding names what it reaches by contract, never by provider (ADR 028 §4 keeps that rule), so a node-native service and another cartridge's nodule are reached and granted the same way. **The binding's kind decides how it is resolved**, and that is the whole difference between them:
+- `#datum { nsid, read, write, create, delete }`: a datum kind, as `RoutineFacetAccess` had. The routine depends on its shape, so nothing substitutes it; a grant only gives or withholds the access.
+- `#method { nsid, necessity, minRevision? }`: an operation. Any enabled provider serves it, chosen among several by a route (ADR 045); this is where substitution happens.
+- `#drawers { read, write, …, resolution }`: a **set** of drawers filled by grants, configured or picked at runtime. The set changes over time; a routine sees it as it is at the call. "Every drawer the cartridge was granted" is this binding with no narrowing, and one drawer is the set's one-member case.
 
-- `#datum { nsid, read, write, create, delete }`: one datum kind, as `RoutineFacetAccess` had. **Fixed by the manifest**: the routine depends on that shape, so nothing substitutes it. The grant only says whether the access is given.
-- `#method { nsid, from? }`: one method. **Resolved to a provider**: any enabled provider of the NSID serves, which is where substitution happens (another cartridge, or the node's own service, behind the same contract). `from` pins it to one dependency when the author needs that one.
-- `#drawers { read, write, … }`: **a set filled by grants.** The manifest says "the drawers I work on, with this access"; the user adds or removes drawers over time, and a routine that uses the binding sees the set as it is at the call. "Every drawer this cartridge has been granted" is this binding with no further narrowing. A single drawer is the set's one-member case, not another kind.
+Local state and revisioned stores are reached through `uses` like a binding, when they are implemented.
 
-Every binding, whatever its kind, carries a `description` (why the cartridge needs it, shown when it is granted) and says what is required. A datum or drawer binding marks each access `required` or `optional`; a method binding has one `necessity`.
+**Required and optional** keep ADR 028 §3's rule: a cartridge whose required access is not all granted (a required set with no member, a required method with no provider) stays **enabled but not startable** until configured, Clay's `needs configuration` state, and nothing is disabled behind the user's back. Optional access may be granted later or never, and a routine sees at the call whether it has it. The prior art agrees: Fuchsia's `use` has `availability: required | optional`, Android's `uses-feature` has `required="false"`, and a snap app checks whether an optional plug is connected.
 
-**Required gates enablement; optional is checked at the call.** A cartridge is enabled only while every required access is granted, a required set binding has at least one member, and a required method has an enabled provider. When one stops holding (a grant revoked, the last drawer removed, the provider disabled), the cartridge is disabled with that as its reason, exactly as it already is when a dependency is disabled: enablement is already conditional, and this adds conditions of the same kind instead of a second failure mode. An optional access may be granted later or never, and the routine sees at the call whether it has it (the `workDrawers` above may be read-only, and import then only reads). So "I cannot run without a drawer" is a required set binding, and "I can run without write" is an optional access, and neither is a runtime failure.
+**Grants stay each runtime's** (ADR 028 §1, ADR 044): `nodule.grant/<binding>` and `micro.grant/<binding>` (and `…/<binding>/<drawer id>` for a set's members). A grant is keyed by the binding it satisfies, so granting reasons about the cartridge's one list of bindings.
 
-Bindings are declared up front, because they are what the user grants and what a validator reads: a binding added later is a new cartridge version, and its new required access must be granted before that version is enabled (an upgrade shows the difference). What grows at runtime is the *contents* of a set binding, never the list of bindings.
+### 6. Each call carries only its routine's access
 
-Grants are to the **cartridge**, keyed by binding: ADR 044's per-subsystem grant datums (`nodule.grant/…`, `micro.grant/…`) become one `cartridge.grant/<binding key>` (and for the members of a set binding, `cartridge.grant/<binding key>/<drawer id>`). Granting reasons about one list, the cartridge's bindings. The nodule and the micro still run as different actors (ADR 044); each actor's capability covers only what its own `uses` names, so how the cartridge's access is split between its routines and its UI is the author's partition (§5).
+When dispatch invokes a routine, it mints a capability for that call covering the routine's `uses`, intersected with what was granted, and the capability ends with the call. A write the routine did not declare is refused at the docs service, a call to an operation it did not bind is refused at dispatch, and a response that does not match the operation's output Lexicon is a failed call. This needs the docs capability scope to name datum kinds per document beside today's per-document read and write (`DocScope`); ADR 044 §6 (a nodule writes its settings, not its grants) becomes one case of it.
 
-### 5. Each call carries only its routine's access
+"This routine reads the sensitive kind and binds no outbound operation" is then stated in the manifest and holds on every call. The limit is stated: two calls served concurrently by one component instance could exchange handles inside it, so against a hostile component the wall is the union of the routines' access, enforced per cartridge. Per routine, the partition holds against bugs and makes each routine's reach auditable.
 
-How the access is partitioned among routines is the author's, and it is enforced. When dispatch invokes a routine, it mints a capability for that call covering the routine's `uses`, intersected with what the cartridge was granted, and the capability ends with the call. A write the routine did not declare is refused at the docs service; a call to a method it did not bind is refused at dispatch; a response that does not match the method's output Lexicon is a failed call.
+Also settled with the prior art (snapd, Fuchsia, Sandstorm, Android):
+- **Confused deputy.** A routine calling another cartridge's operation passes none of its own access; the callee acts with its own. Authority moves only when handed over explicitly, as a datum reference or a capability in the call.
+- **Revocation** takes effect at the next call, since each call's capability is minted afresh.
+- **Upgrades** that widen required access leave the cartridge not startable until granted (028 §3).
 
-So "this routine reads the sensitive kind and binds no outbound method" is stated in the manifest and holds on every call, and a validator can check a cartridge for a routine that holds both. The limit is stated rather than hidden: two calls served concurrently by one component instance could exchange handles inside it, so against a deliberately hostile component the wall is the union of the routines' access, enforced per cartridge. Per routine, the partition holds against bugs and makes each routine's reach auditable, as the plug manifest's per-routine ACLs did.
+### 7. The lockfile and substitution
 
-### 6. Typed keys and maps
+Unchanged, named here because the manifest is only half of it:
+- **The lockfile** is ADR 028 §4's resolution record: when a cartridge is enabled, each method binding is pinned to the provider cartridge id, version and schema revision that serves it, in node-local SQLite (`big_nodule::store`, `resolution_locks`). It is per node, not synced. A change of provider is a change of grant and is re-consented (`ProviderChanged`).
+- **Substitution** is a route (ADR 045): the operator maps an NSID or authority prefix to a provider in the node config document, and every dependent's lock moves with it, as Cargo's `[patch]` does. Running as another cartridge is only the dev takeover.
+- **Which version runs** is the install's pin (ADR 044 §2): a `#datumPin` to the envelope in the registry document.
 
-Every keyed section is a map. NSIDs are a typed `Nsid` parsed on deserialize (one exists in `clay_collection::nsid`; it moves to `big_cabinet_core`), so a manifest with a bad NSID is refused at the edge and never constructed; the scattered `is_nsid` checks go.
+### 8. Typed keys and maps
+
+Every keyed section is a map. NSIDs are a typed `Nsid` parsed on deserialize (one exists in `clay_collection::nsid`; it moves to `big_cabinet_core`), so a manifest with a bad NSID is refused at the edge and never constructed.
+
+### 9. What this changes in earlier ADRs
+
+- ADR 027 §2's serialized description: `handler` + `implements` become routines; `requires` becomes cartridge-level bindings; `private_state` is renamed `localState`; Lexicons and sidecars move to the cartridge (§1). Revisioned stores, initialization and the wflow boundary are unchanged.
+- ADR 028 §4's request shape becomes `bindings` split by kind, with `description` added; its rules are unchanged.
+- ADR 028's open question (more than one micro) is settled: at most one nodule and one micro.
+- ADR 044's grant datums are keyed by binding.
+- Commands, views and processors stay targets of operation NSIDs (027 §2) but become typed sections when something implements them, instead of opaque carried maps.
 
 ## Consequences
 
-- `big_cartridges_core::Cartridge`, `Request`, `Artifact` and `big_nodule_core::Nodule` are replaced, along with admission and the registry projection. There is no migration: pre-release, and no shipped node holds cartridges.
-- ADR 044's grant datums are keyed by binding (§4).
-- Dispatch mints a per-call capability (§5), and the docs service checks datum-kind access: a capability's scope gains datum kinds per document, beside today's per-document read and write (`DocScope`). ADR 044 §6 (a nodule writes its settings, not its grants) becomes one case of it.
-- Clay's micro contribution uses the cartridge-level Lexicons and the same bindings, so claytxt's manifest changes with it.
-
-### 7. Sidecars sit next to their Lexicon
-
-A sidecar is its own datum at the same slot as the Lexicon it annotates: `org.example.daybook.lexicon.sidecar/<version>/<nsid>` beside `com.atproto.lexicon.schema/<version>/<nsid>`. The slot ties the two, so a Lexicon's sidecar is always found next to it, and the Lexicon record stays a plain atproto Lexicon.
-
-### 8. What the prior art has that this must not miss
-
-The design follows snapd's plugs (package-level declarations, each app inside listing the ones it uses), Fuchsia's component `use` declarations (whose `availability: optional` is the precedent for optional access), Sandstorm's powerbox (a grant chosen by the user, kept as a durable reference) and Cloudflare Workers bindings (named, typed handles the deployment fills). Each of them also settles something this ADR has to:
-
-- **Confused deputy.** When routine A calls another cartridge's method, the callee acts with *its own* bindings, never with A's, and A's capability is not forwarded. A callee that should act on the caller's data takes it as a datum reference or a capability passed explicitly, so authority moves only by being handed over (ocap; Sandstorm's rule).
-- **Revocation.** Removing a grant takes effect at the next call, since every call's capability is minted afresh and ends with the call (§5). A long-running call keeps what it started with until it ends.
-- **Upgrades.** A new version whose required access exceeds what was granted is not enabled until that difference is granted (snapd and Android ask again on upgrade; §4).
-- **Which grants need a person.** A `#datum` binding to the cartridge's own authority and a `#method` binding to a declared dependency can be granted at install without asking (snapd's auto-connection); a `#drawers` binding always names drawers someone chose. The policy itself is the install flow's, not this ADR's.
+- `big_cartridges_core::Cartridge`, `Request`, `Artifact` and `big_nodule_core::Nodule` are replaced, with admission and the registry projection. No migration: pre-release, and no shipped node holds cartridges.
+- Clay's micro contribution uses the cartridge's Lexicons and bindings, so claytxt's manifest changes with it.
+- The docs capability scope gains per-document datum kinds (§6).
 
 ## Open questions
 
-1. **How a micro composes several components** into its one instance: Clay's runtime decides, and the manifest only lists them.
-2. **Who may grant**: whether the install flow's auto-grant policy (§8) is fixed by the node or configurable per user.
+1. **The name of the concept.** In capability-security terms a binding is a named hole in a program's authority, filled by an *endowment* (authority given at creation: our install and configure grants) or an *introduction* (authority passed later: ADR 028's at-runtime picker, and the word `MintDocCapability` already uses). Whether `bindings` keeps its name or the manifest says `endowments` is the operator's call.
+2. **Who may grant without asking**: whether a binding to the cartridge's own authority, or to an operation of a declared dependency, may be granted at install without a person (snapd's auto-connection), and whether that policy is the node's or the user's.
