@@ -585,7 +585,10 @@ pub fn ArcIndex(
                 let delta = event.data().delta().strip_units();
                 let travel = if delta.y.abs() > delta.x.abs() { delta.y } else { delta.x };
                 if travel != 0.0 {
-                    commit.call(*focus.peek() + travel / spacing);
+                    // Read first: a `peek` guard in the argument would live until the end of
+                    // the statement, and `commit` writes `focus` while it is still borrowed.
+                    let current = *focus.peek();
+                    commit.call(current + travel / spacing);
                 }
             },
 

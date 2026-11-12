@@ -481,4 +481,43 @@ mod rendered {
             );
         });
     }
+
+    /// A wheel over the index steps the strip without panicking: the handler reads the focus
+    /// before committing the next one, which writes it.
+    #[test]
+    fn a_wheel_over_the_index_steps_without_a_double_borrow() {
+        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
+        let mut dom = VirtualDom::new(app);
+        let first = dom.rebuild_to_vec();
+        let targets: Vec<_> = first
+            .edits
+            .iter()
+            .filter_map(|edit| match edit {
+                dioxus_core::Mutation::SetId { id } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert!(!targets.is_empty(), "{first:?}");
+        let wheel: dioxus_html::SerializedWheelData = serde_json::from_value(serde_json::json!({
+            "delta_mode": 0, "delta_x": 0.0, "delta_y": 120.0, "delta_z": 0.0,
+            "alt_key": false, "button": 0, "buttons": 0,
+            "client_x": 1050.0, "client_y": 400.0, "ctrl_key": false,
+            "meta_key": false, "offset_x": 0.0, "offset_y": 0.0,
+            "page_x": 1050.0, "page_y": 400.0, "screen_x": 1050.0,
+            "screen_y": 400.0, "shift_key": false,
+        }))
+        .expect("wheel data");
+        for target in targets {
+            dom.runtime().handle_event_for_target(
+                dioxus_core::RenderTargetId::ROOT,
+                "wheel",
+                dioxus_core::Event::new(
+                    dioxus_html::EventData::Wheel(wheel.clone()).into_any(),
+                    true,
+                ),
+                target,
+            );
+        }
+        dom.render_immediate_to_vec();
+    }
 }
