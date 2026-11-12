@@ -1,4 +1,4 @@
-//! The node directory and everything the CLI keeps in it, plus the booted in-process node.
+//! The node directory and everything a holder keeps in it: settings, the locks and the socket.
 //!
 //! Layout of a node directory (ADR 033 section 1: the node owns its data, the CLI only knows
 //! where it is):
@@ -17,10 +17,6 @@
 
 use crate::interlude::*;
 
-use big_node::BigNode;
-use big_node::Listeners;
-use secrets_rs::SecretStore;
-use sqlite_rs::SqliteRuntime;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
@@ -51,21 +47,6 @@ pub(crate) fn socket_dir_in(runtime_dir: Option<&Path>, uid: u32) -> PathBuf {
     match runtime_dir {
         Some(runtime) => runtime.join("day"),
         None => PathBuf::from(format!("/tmp/day-{uid}")),
-    }
-}
-
-pub struct Config {
-    pub cli_config: Arc<crate::config::CliConfig>,
-    pub node_dir: NodeDir,
-}
-
-impl Config {
-    pub fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
-        let node_dir = NodeDir::new(cli_config.node_path.clone());
-        Ok(Self {
-            cli_config,
-            node_dir,
-        })
     }
 }
 
@@ -159,7 +140,7 @@ impl PeerSettings {
 
     /// The peers config the daemon boots with: dial the bootstrap list under the default
     /// mirroring policy, or under the relay policy when the node is a relay.
-    fn peers_config(&self, relay: bool) -> Res<big_node::peers::PeersConfig> {
+    pub(crate) fn peers_config(&self, relay: bool) -> Res<big_node::peers::PeersConfig> {
         let dial = self
             .bootstrap
             .iter()
@@ -214,9 +195,26 @@ impl NodeDir {
         }
     }
 
+    /// Resolves the node directory a host uses. Precedence: `node_flag` (a CLI's `--node`), then
+    /// the `DAY_NODE` environment variable, then the platform data directory.
+    pub fn resolve(node_flag: Option<&Path>) -> Res<Self> {
+        let from_env = std::env::var_os("DAY_NODE")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let root = match node_flag.map(Path::to_path_buf).or(from_env) {
+            Some(path) => std::path::absolute(std::env::current_dir()?.join(&path))
+                .wrap_err_with(|| format!("error absolutizing node path {path:?}"))?,
+            None => directories::ProjectDirs::from("org", "townframe", "day")
+                .ok_or_eyre("failed to get xdg directories")?
+                .data_dir()
+                .into(),
+        };
+        Ok(Self::new(root))
+    }
+
     /// A node directory whose socket lives in `socket_dir`, so a test does not touch the real
     /// runtime directory.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_socket_dir(root: PathBuf, socket_dir: PathBuf) -> Self {
         Self { root, socket_dir }
     }
@@ -559,80 +557,80 @@ impl std::fmt::Display for LockHeld {
     }
 }
 
-/// A node booted in this process, with everything it must stop in order.
-pub struct Booted {
-    pub node: BigNode,
-    stop: big_node::StopToken,
-    secrets: Arc<SecretStore>,
-    // Held to the end: the node's storage is this process's alone while it is booted.
-    _lock: NodeLock,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl Booted {
-    /// Boots the node in `dir` on the lock the caller holds, serving its socket. `role` is how
-    /// it attaches to the network: a daemon attaches the peers service when `node.json` has a
-    /// `peers` section; a command's own node attaches none, since it lives for one command and
-    /// must not dial or hold the node's endpoint. The lock announces it is serving once the
-    /// socket accepts connections.
-    pub async fn boot(dir: &NodeDir, mut lock: NodeLock, role: LockRole) -> Res<Self> {
-        let settings = dir.settings()?;
-        let listeners = Listeners {
-            unix_socket: Some(dir.socket_path()?),
-            ..default()
-        };
-        let peers = match role {
-            LockRole::Daemon => settings
-                .peers
-                .as_ref()
-                .map(|peers| peers.peers_config(settings.relay))
-                .transpose()?,
-            LockRole::Command => None,
-        };
-        let runtime = Arc::new(SqliteRuntime::new(default()));
-        let bindings = big_node::Bindings::in_directory(&runtime, dir.root(), None).await?;
-        let secrets = Arc::new(SecretStore::boot().await?);
-        let config = big_node::Config {
-            repo: big_repo::Config {
-                node_identity_seed: settings.seed(),
-                storage: bindings.repo,
-                scope_key: "day".into(),
-                hidden_parts: default(),
-                automerge_frontier_group_scope: default(),
-                causal_checkpoint_group_scope: default(),
-                group_part_group_scope: default(),
-            },
-            sql: bindings.sql,
-            schemas: Arc::new(big_cabinet::SchemaRepo::open(std::iter::empty())?),
-            secrets: Arc::clone(&secrets),
-            index_concurrency: std::num::NonZeroUsize::new(2).expect("two is not zero"),
-            blob_storage: bindings.blobs,
-            listeners,
-            peers,
-            allow_slot_takeover: settings.dev.allow_slot_takeover,
-        };
-        let (node, stop) = BigNode::boot(config).await?;
-        lock.serving()?;
-        Ok(Self {
-            node,
-            stop,
-            secrets,
-            _lock: lock,
-        })
+    /// A directory under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id
+    /// has ~35 bytes of directory to spare in `sun_path` on macOS, and `$TMPDIR` can be longer.
+    fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("d")
+            .tempdir_in("/tmp")
+            .unwrap()
     }
 
-    pub async fn stop(self) -> Res<()> {
-        let Self {
-            node,
-            stop,
-            secrets,
-            _lock,
-        } = self;
-        drop(node);
-        stop.stop().await?;
-        // The node's config held the other reference and went with the boot.
-        Arc::try_unwrap(secrets)
-            .unwrap_or_else(|_| panic!("the stopped node still holds the secret store"))
-            .stop()
-            .await
+    /// An initialized node whose socket directory is `<sandbox>/run`, so no test touches the
+    /// real runtime directory.
+    fn new_node() -> (tempfile::TempDir, NodeDir) {
+        let tmp = short_tempdir();
+        let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
+        dir.init().unwrap();
+        (tmp, dir)
+    }
+
+    #[test]
+    fn a_socket_path_too_long_for_sun_path_is_refused() {
+        let (tmp, _) = new_node();
+        let long = NodeDir::with_socket_dir(
+            tmp.path().join("node"),
+            std::path::PathBuf::from("/tmp").join("x".repeat(120)),
+        );
+        let error = long.socket_path().unwrap_err();
+        assert!(format!("{error:#}").contains("longer than a Unix socket path"));
+    }
+
+    #[test]
+    fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
+        let (tmp, dir) = new_node();
+        assert_eq!(
+            dir.socket_path().unwrap(),
+            tmp.path()
+                .join("run")
+                .join(format!("{}.sock", dir.settings().unwrap().node_id()))
+        );
+        // The node directory is not where the socket goes, so a long node path is fine.
+        let far =
+            NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
+        far.init().unwrap();
+        far.socket_path().unwrap();
+    }
+
+    #[test]
+    fn the_default_socket_directory_is_the_runtime_directory_or_a_private_one_in_tmp() {
+        assert_eq!(
+            super::socket_dir_in(Some(std::path::Path::new("/run/user/1000")), 1000),
+            std::path::Path::new("/run/user/1000/day")
+        );
+        assert_eq!(
+            super::socket_dir_in(None, 1000),
+            std::path::Path::new("/tmp/day-1000")
+        );
+    }
+
+    /// A directory that is not the user's own is refused as a socket directory, whoever made
+    /// it: here, one other users can enter.
+    #[test]
+    fn a_socket_directory_other_users_can_enter_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, dir) = new_node();
+        let run = tmp.path().join("run");
+        std::fs::create_dir(&run).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = dir.ensure_run_dir().unwrap_err();
+        assert!(
+            format!("{error:#}").contains("accessible to other users"),
+            "{error:#}"
+        );
     }
 }

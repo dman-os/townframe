@@ -5,9 +5,8 @@ use std::sync::OnceLock;
 
 use crate::interlude::*;
 
-use crate::client::NodeClient;
-use crate::config::CliConfig;
-use crate::context::Config;
+use big_node_holder::NodeClient;
+use big_node_holder::NodeDir;
 
 static RT: OnceLock<Res<Arc<tokio::runtime::Runtime>>> = OnceLock::new();
 
@@ -71,30 +70,18 @@ pub fn set_node_flag(node: Option<PathBuf>) {
     );
 }
 
-pub async fn cli_config() -> Res<Arc<CliConfig>> {
-    static CONFIG: tokio::sync::OnceCell<Arc<CliConfig>> = tokio::sync::OnceCell::const_new();
-    CONFIG
-        .get_or_try_init(|| async {
-            let node_flag = NODE_FLAG
-                .get()
-                .expect("argv is parsed before config is read");
-            let conf = CliConfig::source(node_flag.as_deref())?;
-            debug!(?conf, "config sourced");
-            eyre::Ok(Arc::new(conf))
-        })
-        .await
-        .map(Arc::clone)
-}
-
-pub async fn config() -> Res<Arc<Config>> {
-    static CONFIG: tokio::sync::OnceCell<Arc<Config>> = tokio::sync::OnceCell::const_new();
-    CONFIG
-        .get_or_try_init(|| async {
-            let cli_config = cli_config().await?;
-            eyre::Ok(Arc::new(Config::new(cli_config)?))
-        })
-        .await
-        .map(Arc::clone)
+pub async fn node_dir() -> Res<Arc<NodeDir>> {
+    static DIR: tokio::sync::OnceCell<Arc<NodeDir>> = tokio::sync::OnceCell::const_new();
+    DIR.get_or_try_init(|| async {
+        let node_flag = NODE_FLAG
+            .get()
+            .expect("argv is parsed before the node directory is read");
+        let dir = NodeDir::resolve(node_flag.as_deref())?;
+        debug!(root = ?dir.root(), "node directory resolved");
+        eyre::Ok(Arc::new(dir))
+    })
+    .await
+    .map(Arc::clone)
 }
 
 /// The client for the node: the process holding it if there is one, otherwise a node booted in
@@ -105,10 +92,9 @@ pub async fn node() -> Res<Arc<NodeClient>> {
         tokio::sync::OnceCell::const_new();
     let owner = NODE
         .get_or_try_init(|| async {
-            let conf = config().await?;
-            let client = Arc::new(
-                NodeClient::connect(&conf.node_dir, crate::client::CONNECT_DEADLINE).await?,
-            );
+            let dir = node_dir().await?;
+            let client =
+                Arc::new(NodeClient::connect(&dir, big_node_holder::CONNECT_DEADLINE).await?);
             let weak = Arc::downgrade(&client);
             register_shutdown(move || async move {
                 Arc::try_unwrap(client)

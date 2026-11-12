@@ -138,7 +138,7 @@ async fn ls(as_json: bool) -> Res<ExitCode> {
 /// Parses the drawer and peer arguments, and mints an admin handle on the drawer for the one
 /// call that follows.
 async fn admin_handle(
-    client: &crate::client::NodeClient,
+    client: &big_node_holder::NodeClient,
     drawer: &str,
     peer: &str,
 ) -> Res<(DocId, GroupKey, big_cabinet_core::authority::CapId)> {
