@@ -1,0 +1,11 @@
+version = 1
+role = "foundation"
+dependency_reason = "pure port of @pierre/diffs and the jsdiff subset it uses: no engine, UI or I/O dependencies, so it links into native, browser host and wasip3 guest builds alike"
+allowed_dependencies = []
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[builds.wasm32-wasip3]

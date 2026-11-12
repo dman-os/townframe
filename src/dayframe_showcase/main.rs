@@ -1,3 +1,5 @@
+mod diff_fixtures;
+mod diffs;
 mod kit;
 
 #[cfg(feature = "desktop")]
@@ -73,7 +75,11 @@ fn App() -> Element {
     let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
         .expect("material-theme.json must match the Material theme schema");
     let mut mode = use_signal(|| ThemeMode::Dark);
-    let mut tab = use_signal(|| LabTab::Components);
+    // `DAYFRAME_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
+    let mut tab = use_signal(|| match std::env::var("DAYFRAME_LAB_TAB").as_deref() {
+        Ok("diffs") => LabTab::Diffs,
+        _ => LabTab::Components,
+    });
     let native_window: Option<Arc<dyn Window>> = use_hook(try_consume_context);
     #[cfg(feature = "desktop")]
     let desktop_window: Option<DesktopContext> = use_hook(try_consume_context);
@@ -189,6 +195,14 @@ fn App() -> Element {
                                 TileGrammarFoundation { available_width: available_width() }
                             }
                         },
+                        LabTab::Diffs => rsx! {
+                            FoundationSection {
+                                id: "diffs".to_string(),
+                                title: "Diff view".to_string(),
+                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port: a split Rust diff and a unified TypeScript diff with one line annotation whose content is ordinary Dioxus, then a generated three-thousand-line diff that renders only the rows near the viewport of its own scroller (virtualized). Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                                diffs::DiffsFoundation {}
+                            }
+                        },
                     }
                 }
                 }
@@ -205,14 +219,16 @@ enum LabTab {
     Tokens,
     Colors,
     Tiles,
+    Diffs,
 }
 
 impl LabTab {
-    const ALL: [LabTab; 4] = [
+    const ALL: [LabTab; 5] = [
         LabTab::Components,
         LabTab::Tokens,
         LabTab::Colors,
         LabTab::Tiles,
+        LabTab::Diffs,
     ];
 
     fn label(self) -> &'static str {
@@ -221,6 +237,7 @@ impl LabTab {
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
             LabTab::Tiles => "Tiles",
+            LabTab::Diffs => "Diffs",
         }
     }
 
@@ -230,6 +247,7 @@ impl LabTab {
             LabTab::Tokens => "lab-tab-tokens",
             LabTab::Colors => "lab-tab-colors",
             LabTab::Tiles => "lab-tab-tiles",
+            LabTab::Diffs => "lab-tab-diffs",
         }
     }
 
@@ -245,6 +263,7 @@ impl LabTab {
             ],
             LabTab::Colors => &[("colors", "Existing colors")],
             LabTab::Tiles => &[("tile-grammar", "Tile grammar")],
+            LabTab::Diffs => &[("diffs", "Diff view")],
         }
     }
 }

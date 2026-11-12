@@ -1,0 +1,20 @@
+version = 1
+role = "interface"
+dependency_reason = "thin Dioxus web layer over the pure pierre_diffs port: DOM event, observer and measurement wiring for the Virtualizer; plain Dioxus, no Clay or micro dependency"
+allowed_dependencies = [
+    "pierre_diffs",
+]
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/pierre_diffs_dioxus/host.rs"
+symbol = "module::DioxusHost"
+ceiling = 63
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "the port's FileDiffHost is the conjunction of six platform traits (53 contract methods) that must all be one type behind one Rc<Host>, because the managers, hub and render queue share it; the host's own methods are the registrations and cache writes the handlers need"
+reference = "docs/scratch/agent-guardrails-open-items.md"

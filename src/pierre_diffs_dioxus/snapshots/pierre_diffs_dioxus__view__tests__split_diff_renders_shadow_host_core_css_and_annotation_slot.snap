@@ -1,0 +1,120 @@
+---
+source: src/pierre_diffs_dioxus/view.rs
+expression: outline(&dom)
+---
+<diffs-container data-dioxus-shadow="">
+<style>
+<core css>
+</style>
+<div data-change-type="change" data-diffs-header="default">
+<div data-header-content="">
+<slot name="header-prefix">
+</slot>
+<svg data-change-icon="change" height="16" viewBox="0 0 16 16" width="16">
+<use href="#diffs-icon-symbol-modified">
+</use>
+</svg>
+<div data-title="">
+<bdi>a.rs</bdi>
+</div>
+<slot name="header-filename-suffix">
+</slot>
+</div>
+<div data-metadata="">
+<span data-deletions-count="">-1</span>
+<span data-additions-count="">+1</span>
+<slot name="header-metadata">
+</slot>
+</div>
+</div>
+<svg sprite>
+</svg>
+<pre data-background="" data-diff="" data-diff-type="split" data-indicators="bars" data-overflow="scroll" style="--diffs-min-number-column-width-default:1ch;">
+<code data-code="" data-container-size="" data-deletions="">
+<div data-gutter="" style="grid-row: span 5">
+<div data-column-number="1" data-line-index="0,0" data-line-type="context">
+<span data-line-number-content="">1</span>
+</div>
+<div data-column-number="2" data-line-index="1,1" data-line-type="change-deletion">
+<span data-line-number-content="">2</span>
+</div>
+<div data-buffer-size="1" data-gutter-buffer="annotation" style="grid-row: span 1;">
+</div>
+<div data-column-number="3" data-line-index="3,2" data-line-type="context">
+<span data-line-number-content="">3</span>
+</div>
+<div data-column-number="4" data-line-index="4,3" data-line-type="context">
+<span data-line-number-content="">4</span>
+</div>
+</div>
+<div data-content="" style="grid-row: span 5">
+<div data-alt-line="1" data-line="1" data-line-index="0,0" data-line-type="context">
+<span>fn main() {</span>
+</div>
+<div data-line="2" data-line-index="1,1" data-line-type="change-deletion">
+<span>    let x = </span>
+<span data-diff-span="">
+<span>1;</span>
+</span>
+</div>
+<div data-line-annotation="0,1" style="--diffs-annotation-min-height:0px;">
+<div data-annotation-content="">
+</div>
+</div>
+<div data-alt-line="3" data-line="3" data-line-index="3,2" data-line-type="context">
+<span>    println!(&#34;{x}&#34;);</span>
+</div>
+<div data-alt-line="4" data-line="4" data-line-index="4,3" data-line-type="context">
+<span>}</span>
+</div>
+</div>
+</code>
+<code data-additions="" data-code="" data-container-size="">
+<div data-gutter="" style="grid-row: span 5">
+<div data-column-number="1" data-line-index="0,0" data-line-type="context">
+<span data-line-number-content="">1</span>
+</div>
+<div data-column-number="2" data-line-index="2,1" data-line-type="change-addition">
+<span data-line-number-content="">2</span>
+</div>
+<div data-buffer-size="1" data-gutter-buffer="annotation" style="grid-row: span 1;">
+</div>
+<div data-column-number="3" data-line-index="3,2" data-line-type="context">
+<span data-line-number-content="">3</span>
+</div>
+<div data-column-number="4" data-line-index="4,3" data-line-type="context">
+<span data-line-number-content="">4</span>
+</div>
+</div>
+<div data-content="" style="grid-row: span 5">
+<div data-alt-line="1" data-line="1" data-line-index="0,0" data-line-type="context">
+<span>fn main() {</span>
+</div>
+<div data-line="2" data-line-index="2,1" data-line-type="change-addition">
+<span>    let x = </span>
+<span data-diff-span="">
+<span>2;</span>
+</span>
+</div>
+<div data-line-annotation="0,1" style="--diffs-annotation-min-height:0px;">
+<div data-annotation-content="">
+<slot name="annotation-additions-2">
+<div data-annotation-slot="" slot="annotation-additions-2" style="white-space:normal;">
+<aside class="note">annotation: Some(&#34;looks right&#34;)</aside>
+</div>
+</slot>
+</div>
+</div>
+<div data-alt-line="3" data-line="3" data-line-index="3,2" data-line-type="context">
+<span>    println!(&#34;{x}&#34;);</span>
+</div>
+<div data-alt-line="4" data-line="4" data-line-index="4,3" data-line-type="context">
+<span>}</span>
+</div>
+</div>
+</code>
+</pre>
+<style data-theme-css="">
+<theme css>
+</style>
+</diffs-container>
