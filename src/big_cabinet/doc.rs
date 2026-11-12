@@ -40,6 +40,7 @@ mod observe;
 pub(crate) mod pipeline;
 mod query;
 mod read;
+mod resolve;
 #[cfg_attr(
     not(test),
     expect(
@@ -108,6 +109,8 @@ use big_cabinet_core::authority::Rights;
 use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::datum::ReferenceTarget;
+use big_cabinet_core::datum::declared_references;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::datum::reconcile_json_atomic;
 use big_cabinet_core::dmeta::ActorMetadata;
@@ -159,6 +162,7 @@ use big_cabinet_core::doc::QueriedDatumRef;
 use big_cabinet_core::doc::QueriedDatumRefs;
 use big_cabinet_core::doc::QueryDatumRefs;
 use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::ResolveKeyRef;
 use big_cabinet_core::doc::SignatureEvidence;
 use big_cabinet_core::doc::Unaccepted;
 use big_cabinet_core::doc::UnsafeDatumInspection;
@@ -501,6 +505,7 @@ service_utils_rs::bind_service_protocol! {
             ListDatums(ListDatums),
             PollDatums(PollDatums),
             QueryDatumRefs(QueryDatumRefs),
+            ResolveKeyRef(ResolveKeyRef),
             UnsafeInspectDatum(UnsafeInspectDatum),
             InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)
