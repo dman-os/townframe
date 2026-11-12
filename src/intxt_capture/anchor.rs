@@ -17,9 +17,12 @@
 
 use crate::Error;
 use crate::git::Git;
+use crate::revisions;
 use big_cabinet_core::datum::Extra;
 use intxt_core::annotation::LineRange;
 use intxt_core::annotation::TextQuote;
+use intxt_core::work::WorktreeOp;
+use std::collections::BTreeMap;
 
 /// How much text a quote keeps on each side of the quoted lines, as the W3C selector's context.
 const CONTEXT_CHARS: usize = 32;
@@ -115,6 +118,67 @@ pub fn commit_blob(git: &Git, commit: &str, path: &str) -> Result<Option<String>
         "--quiet",
         &format!("{commit}:{path}"),
     ])
+}
+
+/// The first parent of `commit`, none for a root commit.
+pub fn first_parent(git: &Git, commit: &str) -> Result<Option<String>, Error> {
+    git.ask(&["rev-parse", "--verify", "--quiet", &format!("{commit}^")])
+}
+
+/// Where `commit`'s work is now: of `tips`, the revisions an intxt's tracked refs have reached,
+/// the one `commit` is an ancestor of (or is), so a comment follows its branch forward; when
+/// `commit` is no ancestor of any, because the branch was rewritten, the only tip there is; else
+/// `commit` itself, which no other revision is known to supersede.
+pub fn current_commit(git: &Git, commit: &str, tips: &[String]) -> Result<String, Error> {
+    let mut ahead = Vec::new();
+    for tip in tips {
+        if revisions::is_ancestor(git, commit, tip)? {
+            ahead.push(tip);
+        }
+    }
+    let mut newest = None;
+    for tip in &ahead {
+        let mut is_newest = true;
+        for other in &ahead {
+            is_newest &= revisions::is_ancestor(git, other, tip)?;
+        }
+        if is_newest {
+            newest = Some((*tip).clone());
+        }
+    }
+    Ok(match (newest, ahead.is_empty(), tips) {
+        (Some(tip), _, _) => tip,
+        (None, true, [only]) => only.clone(),
+        _ => commit.to_owned(),
+    })
+}
+
+/// The blob id of `path` at op `at` of a worktree whose ops are `ops` (ADR 040 §3, content at an
+/// op): the blob of the latest op at or before `at` that lists the path, none if that op deleted
+/// it, and, when no such op mentions the path, the path in the tree of the `HEAD` the worktree's
+/// first op observed (none when it observed none).
+pub fn blob_at_op(
+    git: &Git,
+    ops: &BTreeMap<u64, WorktreeOp>,
+    at: u64,
+    path: &str,
+) -> Result<Option<String>, Error> {
+    for op in ops.range(..=at).rev().map(|(_, op)| op) {
+        if let Some(blob) = op.files.get(path) {
+            return Ok(Some(blob.clone()));
+        }
+        if op.deleted.iter().any(|deleted| deleted == path) {
+            return Ok(None);
+        }
+    }
+    let head = ops
+        .values()
+        .next()
+        .and_then(|first| first.git.as_ref()?.head.as_deref());
+    match head {
+        Some(head) => commit_blob(git, head, path),
+        None => Ok(None),
+    }
 }
 
 /// What a blob holds. Binary content is an error: it has no lines to comment on.

@@ -22,13 +22,16 @@ use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
@@ -63,6 +66,9 @@ pub struct Caller<H> {
     /// The idempotency key, or the request id when the caller sent none (nothing to dedupe
     /// against, so every call is its own).
     command_base: String,
+    /// The descendant actor the capabilities it mints are bound to, so its writes are attributed
+    /// to that actor; none acts as the actor of the presented authority.
+    subject: Option<Uuid7>,
 }
 
 impl<H: HttpTransport> Caller<H> {
@@ -81,7 +87,28 @@ impl<H: HttpTransport> Caller<H> {
             context,
             capability: capability.map(str::to_owned),
             command_base,
+            subject: None,
         }
+    }
+
+    /// The same caller acting as `actor`, a descendant of the presented authority's actor: every
+    /// document capability it mints is bound to `actor` (an introduction, `MintCapability`), so
+    /// what it writes is attributed to `actor` and what it reads is read as it.
+    pub fn acting_as(mut self, actor: Uuid7) -> Self {
+        self.subject = Some(actor);
+        self
+    }
+
+    /// The actor this caller writes as: the subject its document capabilities are bound to.
+    pub async fn actor(&self) -> Result<Uuid7, IntxtError> {
+        let capability = self.doc_capability(DocScope::default()).await?;
+        self.call(ResolveAuthority { capability })
+            .await?
+            .capability
+            .subject
+            .ok_or_else(|| {
+                IntxtError::Invalid("a document capability is bound to no actor".to_owned())
+            })
     }
 
     /// Records what a capture hook observed in `drawer`, the node's capture drawer, as the
@@ -133,7 +160,7 @@ impl<H: HttpTransport> Caller<H> {
             .call(MintDocCapability {
                 scope,
                 rights: Rights::USE,
-                subject: None,
+                subject: self.subject,
             })
             .await?
             .capability_id)
@@ -162,6 +189,27 @@ impl<H: HttpTransport> Caller<H> {
             })
             .await?;
         Ok((read.heads, read.datums))
+    }
+
+    /// The keys of every datum `doc` holds at its current heads, without their values.
+    pub async fn datum_keys(&self, doc: &DocId) -> Result<BTreeSet<DatumKey>, IntxtError> {
+        let capability = self
+            .doc_capability(DocScope {
+                read: [doc.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        Ok(self
+            .call(ListDatums {
+                capability,
+                doc_id: doc.clone(),
+                at: At::Current,
+                with_authors: false,
+            })
+            .await?
+            .datums
+            .into_keys()
+            .collect())
     }
 
     /// The document's heads and the accepted value of `key` in it at those heads; none when the
@@ -193,6 +241,33 @@ impl<H: HttpTransport> Caller<H> {
                 "{key} in {doc} is not readable: absent"
             ))),
         }
+    }
+
+    /// Writes `set` into and removes `remove` from `doc`, on its current heads. For documents
+    /// whose slots have one writer each or merge by themselves, such as a notes document's
+    /// comments (one new key each) and seen records (one per actor).
+    pub async fn write_datums(
+        &self,
+        doc: &DocId,
+        set: BTreeMap<DatumKey, Value>,
+        remove: BTreeSet<DatumKey>,
+    ) -> Result<(), IntxtError> {
+        let capability = self
+            .doc_capability(DocScope {
+                write: [doc.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        self.call(WriteDatums {
+            capability,
+            command: Some(self.command("write-datums", &(&set, &remove))?),
+            doc_id: doc.clone(),
+            mode: WriteMode::AtCurrent,
+            set,
+            remove,
+        })
+        .await?;
+        Ok(())
     }
 
     /// Writes `set` into the intxt's descriptor document and appends `entries`, which `set`

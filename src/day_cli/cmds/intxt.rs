@@ -46,6 +46,7 @@
 pub(crate) mod capture;
 pub(crate) mod package;
 mod record;
+pub(crate) mod review;
 
 use crate::client::NodeClient;
 use crate::interlude::*;
@@ -122,10 +123,10 @@ pub enum IntxtCommands {
         #[arg(long)]
         description: Option<String>,
     },
-    /// Remove entries from an intxt, by the short ids `show` prints
+    /// Remove entries and comments from an intxt, by the short ids `show` and `comment` print
     ///
     /// Deletes the entries (commits, jj changes, tracked refs, sessions) and the packs only they
-    /// carried. The documents already shared with the intxt stay shared, and copies synced to
+    /// carried, and comments (a thread's first comment takes its replies with it). The documents already shared with the intxt stay shared, and copies synced to
     /// others stay with them.
     #[command(after_long_help = "Examples:\n  day x intxt rm qx kq vx")]
     Rm {
@@ -154,6 +155,66 @@ pub enum IntxtCommands {
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
     #[command(after_long_help = "Examples:\n  day x intxt show qx")]
     Show {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+    },
+    /// Comment on lines of a commit or an op the intxt holds
+    ///
+    /// The target is `<commit>:<path>:<lines>` (a commit the intxt holds, `4c1f9a0` or any name
+    /// git resolves) or `op<seq>:<path>:<lines>` (an uncommitted state of this worktree); lines
+    /// are `a-b` or `a`, 1-based in the path's content at that commit or op. Run it in the
+    /// worktree whose repository has the commit. The comment records the quoted text, so it
+    /// can be found again after a rebase.
+    #[command(
+        after_long_help = "Examples:\n  day x intxt comment qx 4c1f9a0:src/lib.rs:120-124 -m \"Why not reuse the fragment here?\"\n  day x intxt comment qx 4c1f9a0:src/lib.rs:12 --side old -m \"This line was fine.\""
+    )]
+    Comment {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+        /// What to comment on: `<commit>:<path>:<lines>` or `op<seq>:<path>:<lines>`
+        target: String,
+        /// The comment, in Markdown
+        #[arg(short, long)]
+        message: String,
+        /// Count the lines in the commit's parent, as the old side of its diff
+        #[arg(long, value_enum, default_value = "new")]
+        side: review::Side,
+        /// Why: one of W3C Web Annotation's motivations
+        #[arg(long, default_value = "commenting", value_parser = clap::builder::PossibleValuesParser::new([
+            "assessing", "bookmarking", "classifying", "commenting", "describing", "editing",
+            "highlighting", "identifying", "linking", "moderating", "questioning", "tagging",
+        ]))]
+        motivation: String,
+    },
+    /// Reply to a comment, and resolve or reopen its thread
+    ///
+    /// Names the comment by the short id `comment` and `inbox` print. With `--resolve` or
+    /// `--reopen` and no message, only the thread's state changes.
+    #[command(
+        after_long_help = "Examples:\n  day x intxt reply kz -m \"Done in 77b2\" --resolve\n  day x intxt reply kz --reopen"
+    )]
+    Reply {
+        /// The comment to answer
+        comment: String,
+        /// The reply, in Markdown
+        #[arg(short, long, required_unless_present_any = ["resolve", "reopen"])]
+        message: Option<String>,
+        /// Mark the thread resolved
+        #[arg(long, conflicts_with = "reopen")]
+        resolve: bool,
+        /// Mark the thread unresolved
+        #[arg(long)]
+        reopen: bool,
+    },
+    /// List the threads waiting for you and where their comments are on the current revision
+    ///
+    /// A thread is listed when it is unresolved and you have not seen its latest comments, or
+    /// someone else wrote last. Each comment is carried to the newest revision the intxt holds
+    /// (same path only): its placed lines, `(context changed)` when the text is there but its
+    /// surroundings changed, or `outdated`. Run it in the worktree whose repository has the
+    /// commits. Listing marks the threads seen.
+    #[command(after_long_help = "Examples:\n  day x intxt inbox qx")]
+    Inbox {
         /// The intxt: its short id, or its full drawer id
         intxt: String,
     },
@@ -230,6 +291,55 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
                 packaging.rm(&mut std::io::stdout(), &intxt, &items).await
             })
             .await
+        }
+        IntxtCommands::Comment {
+            intxt,
+            target,
+            message,
+            side,
+            motivation,
+        } => {
+            let motivation = serde_json::from_value(serde_json::Value::String(motivation))?;
+            with_packaging(async |packaging| {
+                packaging
+                    .comment(
+                        &mut std::io::stdout(),
+                        &intxt,
+                        &target,
+                        &message,
+                        side,
+                        motivation,
+                    )
+                    .await
+            })
+            .await
+        }
+        IntxtCommands::Reply {
+            comment,
+            message,
+            resolve,
+            reopen,
+        } => {
+            let resolved = match (resolve, reopen) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            with_packaging(async |packaging| {
+                packaging
+                    .reply(
+                        &mut std::io::stdout(),
+                        &comment,
+                        message.as_deref(),
+                        resolved,
+                    )
+                    .await
+            })
+            .await
+        }
+        IntxtCommands::Inbox { intxt } => {
+            with_packaging(async |packaging| packaging.inbox(&mut std::io::stdout(), &intxt).await)
+                .await
         }
         IntxtCommands::Show { intxt } => {
             with_packaging(async |packaging| packaging.show(&mut std::io::stdout(), &intxt).await)

@@ -167,40 +167,40 @@ struct Plan {
 
 /// A node, and the worktree and node directory a verb works against.
 pub(crate) struct Packaging<'a> {
-    client: &'a NodeClient,
-    caller: Caller<&'a NodeClient>,
-    cwd: &'a Path,
-    node_dir: &'a Path,
+    pub(super) client: &'a NodeClient,
+    pub(super) caller: Caller<&'a NodeClient>,
+    pub(super) cwd: &'a Path,
+    pub(super) node_dir: &'a Path,
 }
 
 /// An intxt as `show` and `add` read it: its title and its entries in body order.
-struct View {
-    title: generic::Title,
-    entries: Vec<(DatumKey, Value)>,
+pub(super) struct View {
+    pub(super) title: generic::Title,
+    pub(super) entries: Vec<(DatumKey, Value)>,
 }
 
 impl View {
-    fn has(&self, entry: &DatumKey) -> bool {
+    pub(super) fn has(&self, entry: &DatumKey) -> bool {
         self.entries.iter().any(|(key, _)| key == entry)
     }
 }
 
 /// The key an entry names a commit by, until the cabinet resolves `#keyRef` (ADR 035 §2.9).
-fn commit_key(sha: &str) -> String {
+pub(super) fn commit_key(sha: &str) -> String {
     format!("{}/{sha}", work::GitCommit::ID)
 }
 
 /// The sha a commit key names.
-fn sha_of(commit_key: &str) -> &str {
+pub(super) fn sha_of(commit_key: &str) -> &str {
     commit_key.rsplit('/').next().unwrap_or(commit_key)
 }
 
-fn short_sha(sha: &str) -> &str {
+pub(super) fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
 /// The shortest unique prefix of `id` among `ids`, with its remainder dimmed on a terminal.
-fn shown(ids: &ShortIds<String>, id: &str) -> String {
+pub(super) fn shown(ids: &ShortIds<String>, id: &str) -> String {
     let rendered = ids.render(&id.to_owned());
     if std::io::stdout().is_terminal() && !rendered.rest.is_empty() {
         format!("{}\x1b[2m{}\x1b[22m", rendered.unique, rendered.rest)
@@ -256,7 +256,15 @@ impl<'a> Packaging<'a> {
         }
     }
 
-    fn identity(&self) -> Res<Identity> {
+    /// The same verbs run as `actor`, a descendant of the operator: what they write is attributed
+    /// to it, which is how a second side of a review exists on one node.
+    #[cfg(test)]
+    pub(crate) fn acting_as(mut self, actor: big_cabinet_core::dmeta::Uuid7) -> Self {
+        self.caller = self.caller.acting_as(actor);
+        self
+    }
+
+    pub(super) fn identity(&self) -> Res<Identity> {
         identity::resolve(self.cwd)?.ok_or_else(|| {
             eyre::eyre!(
                 "{} is not in a git worktree; run this in the worktree that holds the work",
@@ -266,13 +274,29 @@ impl<'a> Packaging<'a> {
     }
 
     /// A capability on the node's known-drawers list, which lists and remembers drawers.
-    async fn known_drawers(&self) -> Res<CapId> {
+    pub(super) async fn known_drawers(&self) -> Res<CapId> {
         let info = crate::cmds::status::node_info(self.client).await?;
         Ok(self
             .caller
             .call(MintDrawerCapability {
                 scope: DrawerScope {
                     drawers: [(info.known_drawers_id, DrawerAccess::Admin)].into(),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            })
+            .await?
+            .capability_id)
+    }
+
+    /// A capability on `drawer` at Admin, which creates its meta documents and describes it.
+    pub(super) async fn drawer_capability(&self, drawer: &DrawerId) -> Res<CapId> {
+        Ok(self
+            .caller
+            .call(MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
                     create: false,
                 },
                 rights: Rights::USE,
@@ -292,7 +316,7 @@ impl<'a> Packaging<'a> {
     }
 
     /// The intxts the node knows: its known drawers whose descriptor carries the intxt marker.
-    async fn live_intxts(&self) -> Res<Vec<DrawerId>> {
+    pub(super) async fn live_intxts(&self) -> Res<Vec<DrawerId>> {
         let listed: KnownDrawers = self
             .caller
             .call(ListKnownDrawers {
@@ -325,7 +349,7 @@ impl<'a> Packaging<'a> {
     /// `new` remembers the drawers it creates, and a full drawer id that is an intxt is
     /// remembered when it is named, so an intxt made by `createIntxt` directly becomes
     /// addressable by short id the first time it is named in full.
-    async fn resolve(&self, name: &str) -> Res<(DrawerId, ShortIds<String>)> {
+    pub(super) async fn resolve(&self, name: &str) -> Res<(DrawerId, ShortIds<String>)> {
         let live = self.live_intxts().await?;
         let mut ids: Vec<String> = live.iter().map(ToString::to_string).collect();
         if let Ok(drawer) = name.parse::<DrawerId>() {
@@ -439,18 +463,7 @@ impl<'a> Packaging<'a> {
     /// packs it holds (ledger D45). The root is `sensitive`: a pack is the operator's work. The
     /// command id is fixed per drawer, so creating it again answers the first creation.
     async fn ensure_inventory(&self, drawer: &DrawerId) -> Res<()> {
-        let capability = self
-            .caller
-            .call(MintDrawerCapability {
-                scope: DrawerScope {
-                    drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
-                    create: false,
-                },
-                rights: Rights::USE,
-                subject: None,
-            })
-            .await?
-            .capability_id;
+        let capability = self.drawer_capability(drawer).await?;
         self.caller
             .call(CreateMetaDoc {
                 capability,
@@ -464,22 +477,31 @@ impl<'a> Packaging<'a> {
         Ok(())
     }
 
-    /// `day x intxt rm`: removes the entries named by their short ids, and the packs only they
-    /// referenced. The documents lent to the intxt stay lent: whether another entry still needs
-    /// one is not derivable from the entries alone.
+    /// `day x intxt rm`: removes the entries and comments named by their short ids, and the packs
+    /// only the entries referenced. The documents lent to the intxt stay lent: whether another
+    /// entry still needs one is not derivable from the entries alone. Removing a thread's first
+    /// comment removes its replies and its state with it.
     pub(crate) async fn rm(&self, out: &mut impl Write, intxt: &str, items: &[String]) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
         let view = self.load(&drawer).await?;
+        let comments = self.comment_keys(&drawer).await?;
         let ids = ShortIds::new(
             view.entries
                 .iter()
-                .map(|(key, _)| key.to_string())
+                .map(|(key, _)| key)
+                .chain(&comments)
+                .map(ToString::to_string)
                 .collect::<Vec<_>>(),
         );
         let mut removed = BTreeSet::new();
+        let mut removed_comments = BTreeSet::new();
         for item in items {
-            let found = ids.resolve(item)?;
-            removed.insert(found.parse::<DatumKey>()?);
+            let found = ids.resolve(item)?.parse::<DatumKey>()?;
+            if comments.contains(&found) {
+                removed_comments.insert(found);
+            } else {
+                removed.insert(found);
+            }
         }
         let pack_of = |value: &Value| -> Option<DatumKey> {
             let pack: DatumReference = value.get("pack")?.as_str()?.parse().ok()?;
@@ -498,22 +520,25 @@ impl<'a> Packaging<'a> {
             .filter_map(|(_, value)| pack_of(value))
             .filter(|pack| !kept.contains(pack))
             .collect();
-        self.caller
-            .remove_entries(&drawer, &removed, &packs)
-            .await?;
+        if !removed.is_empty() {
+            self.caller
+                .remove_entries(&drawer, &removed, &packs)
+                .await?;
+        }
+        let removed_comments = self.remove_comments(&drawer, removed_comments).await?;
         writeln!(
             out,
             "removed from {} \"{}\"",
             shown(&intxts, &drawer.to_string()),
             view.title.title
         )?;
-        for entry in &removed {
+        for entry in removed.iter().chain(&removed_comments) {
             writeln!(out, "  {entry}")?;
         }
         Ok(())
     }
 
-    async fn load(&self, drawer: &DrawerId) -> Res<View> {
+    pub(super) async fn load(&self, drawer: &DrawerId) -> Res<View> {
         let (_, mut datums) = self.caller.read_datums(drawer, None).await?;
         let mut accepted = |key: &DatumKey| match datums.remove(key) {
             Some(DatumRead::Accepted { value, .. }) => Ok(value),
@@ -601,20 +626,21 @@ impl<'a> Packaging<'a> {
         Ok(resolved.tips.contains(&stored.target))
     }
 
-    /// The ops of the worktree's op logs, which are in the capture drawer's documents.
-    async fn worktree_ops(&self, recorded: &host::RecordedWorktree) -> Res<Vec<work::WorktreeOp>> {
-        let Some(doc) = &recorded.docs.worktree else {
-            return Ok(Vec::new());
-        };
-        let doc: DocId = doc.parse()?;
+    /// The ops of the worktree whose document is `doc`, by sequence number, each with the op-log
+    /// document that holds it: they are in the capture drawer's documents.
+    pub(super) async fn worktree_ops(
+        &self,
+        doc: &DocId,
+    ) -> Res<BTreeMap<u64, (DocId, work::WorktreeOp)>> {
         let (_, worktree) = self
             .caller
-            .read(&doc, &key(work::Worktree::ID, "main")?)
+            .read(doc, &key(work::Worktree::ID, "main")?)
             .await?;
         let worktree: work::Worktree = serde_json::from_value(worktree)?;
-        let mut ops = Vec::new();
+        let mut ops = BTreeMap::new();
         for log in &worktree.op_logs {
-            let (_, datums) = self.caller.read_datums(&log.doc.parse()?, None).await?;
+            let log_doc: DocId = log.doc.parse()?;
+            let (_, datums) = self.caller.read_datums(&log_doc, None).await?;
             for (key, datum) in datums {
                 if key.tag().as_str() != work::WorktreeOp::ID {
                     continue;
@@ -622,7 +648,8 @@ impl<'a> Packaging<'a> {
                 let DatumRead::Accepted { value, .. } = datum else {
                     eyre::bail!("{key} in op log {} is not readable: {datum:?}", log.doc);
                 };
-                ops.push(serde_json::from_value(value)?);
+                let seq = String::from_utf8_lossy(key.slot_bytes()).parse::<u64>()?;
+                ops.insert(seq, (log_doc.clone(), serde_json::from_value(value)?));
             }
         }
         Ok(ops)
@@ -784,7 +811,15 @@ impl<'a> Packaging<'a> {
         recorded: &host::RecordedWorktree,
     ) -> Res<(Vec<(DatumReference, String)>, Vec<String>)> {
         let wrote = revisions::written_files(&Git::new(&resolved.git_dir), &resolved.commits)?;
-        let ops = self.worktree_ops(recorded).await?;
+        let ops: Vec<work::WorktreeOp> = match &recorded.docs.worktree {
+            Some(doc) => self
+                .worktree_ops(&doc.parse()?)
+                .await?
+                .into_values()
+                .map(|(_, op)| op)
+                .collect(),
+            None => Vec::new(),
+        };
         let part_key = key(work::AgentSession::ID, "main")?;
         let mut to_add = Vec::new();
         let mut present = Vec::new();

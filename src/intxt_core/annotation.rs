@@ -6,9 +6,11 @@
 //! MIGRATE BEFORE BETA, with the generic datums (see `generic`): intxt owns these under its own
 //! authority only until a shared vocabulary exists (ledger D39).
 
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::Location;
 use big_cabinet_core::datum::Extra;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::reference::DatumPin;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -221,4 +223,80 @@ pub struct AnnotationsEntry {
     pub empty: Option<bool>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+/// A comment as read from a notes document: its key, its value, the heads of the version read and
+/// the actors the cabinet attests wrote that version (ADR 041 §2: authorship is not a field).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Posted {
+    pub key: DatumKey,
+    pub comment: Comment,
+    /// The version's heads, sorted, as hex: what a [`Seen`] records for the key.
+    pub heads: Vec<String>,
+    pub authors: Vec<Uuid7>,
+}
+
+/// A comment and the replies under it, however deep, oldest first. Comment slots are UUIDv7, so
+/// key order is time order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Thread {
+    /// The root comment's key, which names the thread's [`ThreadState`] slot. The comment itself
+    /// is absent from `comments` when it was removed and replies to it remain.
+    pub root: DatumKey,
+    /// Never empty.
+    pub comments: Vec<Posted>,
+}
+
+impl Thread {
+    /// Groups `posted` into threads by following each `replyTo` to its root, ordered by their
+    /// first comment. A `replyTo` chain that loops (a peer's data, not a writer of ours) ends
+    /// where it closes.
+    pub fn group(posted: Vec<Posted>) -> Vec<Thread> {
+        let parents: BTreeMap<&DatumKey, &DatumKey> = posted
+            .iter()
+            .filter_map(|post| Some((&post.key, post.comment.reply_to.as_ref()?.key())))
+            .collect();
+        let root_of = |start: &DatumKey| -> DatumKey {
+            let mut at = start;
+            for _ in 0..=parents.len() {
+                match parents.get(at) {
+                    Some(parent) => at = parent,
+                    None => return at.clone(),
+                }
+            }
+            at.clone()
+        };
+        let roots: Vec<DatumKey> = posted.iter().map(|post| root_of(&post.key)).collect();
+        let mut threads: BTreeMap<DatumKey, Vec<Posted>> = BTreeMap::new();
+        for (post, root) in posted.into_iter().zip(roots) {
+            threads.entry(root).or_default().push(post);
+        }
+        let mut threads: Vec<Thread> = threads
+            .into_iter()
+            .map(|(root, mut comments)| {
+                comments.sort_by(|left, right| left.key.cmp(&right.key));
+                Thread { root, comments }
+            })
+            .collect();
+        threads.sort_by(|left, right| left.comments[0].key.cmp(&right.comments[0].key));
+        threads
+    }
+
+    pub fn last(&self) -> &Posted {
+        self.comments.last().expect("a thread has a comment")
+    }
+
+    /// Whether `reader` wrote nothing last: someone else is waiting for an answer (ADR 041 §5).
+    /// A version no verified author wrote counts as someone else's.
+    pub fn waiting_on(&self, reader: &Uuid7) -> bool {
+        !self.last().authors.contains(reader)
+    }
+
+    /// Whether a comment of the thread that `reader` did not write has a version other than the
+    /// one `seen` records for it (`Seen.datums`, ADR 041 §5).
+    pub fn unseen_by(&self, reader: &Uuid7, seen: &BTreeMap<String, Vec<String>>) -> bool {
+        self.comments.iter().any(|post| {
+            !post.authors.contains(reader) && seen.get(&post.key.to_string()) != Some(&post.heads)
+        })
+    }
 }

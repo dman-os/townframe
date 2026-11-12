@@ -450,3 +450,111 @@ fn a_rebase_replay_places_every_comment() {
         assert_eq!(super::quote(&text, &placed).unwrap().exact, quote.exact);
     }
 }
+
+fn op(files: &[(&str, &str)], deleted: &[&str], head: Option<&str>) -> WorktreeOp {
+    serde_json::from_value(serde_json::json!({
+        "at": "2026-11-10T10:00:00Z",
+        "kind": "edit",
+        "files": files.iter().copied().collect::<BTreeMap<_, _>>(),
+        "deleted": deleted,
+        "git": head.map(|head| serde_json::json!({"head": head})),
+    }))
+    .unwrap()
+}
+
+#[test]
+fn content_at_an_op_is_the_latest_listing_at_or_before_it() {
+    let repo = Repo::new();
+    repo.write("a.txt", "committed\n");
+    repo.write("b.txt", "kept\n");
+    let head = repo.commit_all("one");
+    let committed = blob(&repo, &head, "a.txt");
+    let ops: BTreeMap<u64, WorktreeOp> = [
+        (0, op(&[], &[], Some(&head))),
+        (1, op(&[("a.txt", "blob1")], &[], None)),
+        (3, op(&[("a.txt", "blob3")], &[], None)),
+        (4, op(&[], &["a.txt"], None)),
+        (5, op(&[("a.txt", "blob5")], &[], None)),
+    ]
+    .into();
+    let at = |seq, path| blob_at_op(&git(&repo), &ops, seq, path).unwrap();
+    // No op lists the path yet: the tree of the HEAD the first op observed.
+    assert_eq!(at(0, "a.txt"), Some(committed));
+    assert_eq!(at(1, "a.txt").as_deref(), Some("blob1"));
+    // Between listings, the earlier one still holds.
+    assert_eq!(at(2, "a.txt").as_deref(), Some("blob1"));
+    assert_eq!(at(3, "a.txt").as_deref(), Some("blob3"));
+    // A deletion ends the path until an op lists it again.
+    assert_eq!(at(4, "a.txt"), None);
+    assert_eq!(at(5, "a.txt").as_deref(), Some("blob5"));
+    // A path no op touched is the committed one at every op.
+    assert_eq!(at(5, "b.txt"), Some(blob(&repo, &head, "b.txt")));
+    assert_eq!(at(5, "missing.txt"), None);
+}
+
+#[test]
+fn content_at_an_op_with_no_observed_head_is_only_what_ops_list() {
+    let repo = Repo::new();
+    repo.write("a.txt", "x\n");
+    repo.commit_all("one");
+    let ops: BTreeMap<u64, WorktreeOp> = [(0, op(&[("b.txt", "blob0")], &[], None))].into();
+    assert_eq!(blob_at_op(&git(&repo), &ops, 0, "a.txt").unwrap(), None);
+    assert_eq!(
+        blob_at_op(&git(&repo), &ops, 0, "b.txt")
+            .unwrap()
+            .as_deref(),
+        Some("blob0")
+    );
+}
+
+#[test]
+fn a_comment_follows_its_branch_to_the_tip_it_is_an_ancestor_of() {
+    let repo = Repo::new();
+    repo.write("f.txt", "a\n");
+    let base = repo.commit_all("base");
+    repo.git(&["switch", "-q", "-c", "feat"]);
+    repo.write("f.txt", "a\nb\n");
+    let one = repo.commit_all("one");
+    repo.write("f.txt", "a\nb\nc\n");
+    let two = repo.commit_all("two");
+    let git = git(&repo);
+    // Forward on the same history, from any commit up to the tip, and the tip itself.
+    assert_eq!(
+        current_commit(&git, &one, std::slice::from_ref(&two)).unwrap(),
+        two
+    );
+    assert_eq!(
+        current_commit(&git, &two, std::slice::from_ref(&two)).unwrap(),
+        two
+    );
+    // With nothing tracked, the commit has no known successor.
+    assert_eq!(current_commit(&git, &one, &[]).unwrap(), one);
+    // Of two tips on one history, the newer.
+    assert_eq!(
+        current_commit(&git, &one, &[one.clone(), two.clone()]).unwrap(),
+        two
+    );
+    // A branch rewritten onto a moved main: the old commit is no ancestor of the new tip, and
+    // the one tip there is stands in for it.
+    repo.git(&["switch", "-q", "main"]);
+    repo.write("g.txt", "g\n");
+    repo.commit_all("main moves");
+    repo.git(&["switch", "-q", "feat"]);
+    repo.git(&["rebase", "-q", "main"]);
+    let rebased = repo.git(&["rev-parse", "HEAD"]);
+    assert_ne!(rebased, two);
+    assert_eq!(
+        current_commit(&git, &one, std::slice::from_ref(&rebased)).unwrap(),
+        rebased
+    );
+    // Two unrelated tips and no ancestry: nothing to prefer, so the commit stays.
+    assert_eq!(
+        current_commit(&git, &one, &[rebased, base.clone()]).unwrap(),
+        one
+    );
+    assert_eq!(first_parent(&git, &one).unwrap(), Some(base));
+    assert_eq!(
+        first_parent(&git, &repo.git(&["rev-list", "--max-parents=0", "HEAD"])).unwrap(),
+        None
+    );
+}

@@ -29,9 +29,12 @@ pub impl intxt_capture::transcript::TranscriptImporter::fn import_file (& mut se
 pub impl intxt_capture::transcript::TranscriptImporter::fn new (parent : Option < DatumReference >) -> Self
 pub impl intxt_capture::transcript::TranscriptImporter::fn offset (& self) -> u64
 pub impl intxt_capture::transcript::TranscriptImporter::fn recording_thinking (mut self) -> Self
+pub intxt_capture::anchor::fn blob_at_op (git : & Git , ops : & BTreeMap < u64 , WorktreeOp > , at : u64 , path : & str ,) -> Result < Option < String > , Error >
 pub intxt_capture::anchor::fn blob_text (git : & Git , blob : & str) -> Result < String , Error >
 pub intxt_capture::anchor::fn carry (git : & Git , old_blob : & str , new_blob : & str , lines : & LineRange , quote : & TextQuote ,) -> Result < Placement , Error >
 pub intxt_capture::anchor::fn commit_blob (git : & Git , commit : & str , path : & str) -> Result < Option < String > , Error >
+pub intxt_capture::anchor::fn current_commit (git : & Git , commit : & str , tips : & [String]) -> Result < String , Error >
+pub intxt_capture::anchor::fn first_parent (git : & Git , commit : & str) -> Result < Option < String > , Error >
 pub intxt_capture::anchor::fn quote (content : & str , lines : & LineRange) -> Result < TextQuote , Error >
 pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_dir : & Path , state : & GitState , import : & [String] ,) -> Result < (GitObserved , GitState) , Error >
 pub intxt_capture::host::fn prepare (hook : & Hook , session_path : & Path) -> Result < Prepared , Error >
@@ -42,6 +45,7 @@ pub intxt_capture::host::fn sessions_in (sessions_dir : & Path , root : & Path) 
 pub intxt_capture::identity::fn resolve (path : & Path) -> Result < Option < Identity > , Error >
 pub intxt_capture::observe::fn observe (state : & WorktreeState , identity : Identity , boundaries : & [& Snapshot] , import : & [String] ,) -> Result < (Observation , WorktreeState) , Error >
 pub intxt_capture::pack::fn build (git : & Git , request : & PackRequest) -> Result < Pack , Error >
+pub intxt_capture::revisions::fn commit_of (git : & Git , name : & str) -> Result < String , Error >
 pub intxt_capture::revisions::fn commits_of (git : & Git , revisions : & Revisions) -> Result < Vec < String > , Error >
 pub intxt_capture::revisions::fn head_branch (git : & Git) -> Result < Option < String > , Error >
 pub intxt_capture::revisions::fn is_ancestor (git : & Git , commit : & str , of : & str) -> Result < bool , Error >
