@@ -48,21 +48,24 @@ async fn wait_for_datum_set(node: &Node, actor: &OpenedActor, doc_id: &DocId) {
 /// settle in the same datum-set transaction as the entries, so its settle counter wakes the check.
 async fn wait_for_datum_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
     let note_key = note("").0;
-    let expected: BTreeSet<(String, DatumRoute)> = targets
+    let expected: BTreeSet<(String, DatumRefTarget)> = targets
         .iter()
         .map(|target| {
             (
                 "/link".to_owned(),
-                DatumRoute {
-                    doc_id: (*target).clone(),
-                    datum_key: note_key.clone(),
+                DatumRefTarget::Route {
+                    route: DatumRoute {
+                        doc_id: (*target).clone(),
+                        datum_key: note_key.clone(),
+                    },
+                    heads: Vec::new(),
                 },
             )
         })
         .collect();
     let mut settled = node.datum_set.subscribe_settled();
     loop {
-        let edges: BTreeSet<(String, DatumRoute)> = node
+        let edges: BTreeSet<(String, DatumRefTarget)> = node
             .datum_ref
             .query(DatumRefQuery::OriginDoc(doc_id.clone()))
             .await
@@ -293,7 +296,7 @@ impl Containment {
             origin_doc_id: origin.clone(),
             origin_datum_key: self.note_key.clone(),
             path: "/link".to_owned(),
-            target_doc_id: target.clone(),
+            target_doc_id: Some(target.clone()),
             target_datum_key: self.note_key.clone(),
             ref_heads: Vec::new(),
         }
@@ -1059,8 +1062,17 @@ async fn roster_write_polled_on_the_drawer_doc_delivers_only_the_changed_entry_r
     );
 
     let added = node.create_doc(&alice, &drawer, "d").await.unwrap();
-    let delta = drain(&mut poll).await;
     let entry_slot = added.to_string();
+    // The entry row reaches the frontier asynchronously, and `drain` stops at the first 200 ms of
+    // silence: under load it returned before the row landed and saw an empty delta. Waiting for
+    // the row makes the drain's quiet window only about the rows that follow it.
+    node.wait_indexed(DrawerDocEntry::ID, |route, membership| {
+        route.doc_id == drawer
+            && std::str::from_utf8(route.datum_key.slot_bytes()).unwrap() == entry_slot
+            && matches!(membership, DatumMembership::Present { .. })
+    })
+    .await;
+    let delta = drain(&mut poll).await;
     let named: Vec<_> = delta
         .iter()
         .map(|event| match event {
