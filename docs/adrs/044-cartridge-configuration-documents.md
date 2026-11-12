@@ -1,6 +1,6 @@
 # ADR 044: Cartridge configuration documents
 
-**Status:** Proposed (manager, 2026-11-11). It implements the operator's ledger decision D42 ("Config datums"). The shape of the datums and documents is the manager's proposal, to review with the operator.
+**Status:** Accepted (operator, 2026-11-12; questions settled in §7). Proposed by the manager 2026-11-11. It implements the operator's ledger decision D42 ("Config datums"). The shape of the datums and documents is the manager's proposal, to review with the operator.
 
 **Related:**
 - [ADR 027: cartridges, nodules and operation contracts](027-cartridges-nodules-and-operation-contracts.md) §4, §6 (today's config datums)
@@ -75,6 +75,12 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 
 `nodule.substitution` is replaced by the routing/dev-hook split decided in D42, in its own change. Until then it stays in the node config document unchanged.
 
+### 7. Settled with the operator (2026-11-12)
+
+- **Settings datums are always optional; nothing auto-populates them.** An absent datum means the nodule's own default, which lives in the nodule's code. That matches daybook's config, whose store held only the user's overrides and whose reads fell back to the plug's declared defaults (`daybook_core/config.rs`, `get_facet_display_hint` then `plug_repo.get_display_hint`). A nodule that wants a datum present from the start writes it from an init routine (D7: `Initializer { key, target, mode: Once }`, run once per node per revision). A generic editor may show a Lexicon's `default` as a placeholder, but showing it doesn't write it.
+- **Uninstall keeps the cartridge config document**, so a reinstall, or the same cartridge on a sister node, finds its settings and grants. Clearing it is an explicit act: a privileged "clear a cartridge's config" operation (`clearCartridgeConfig`) that deletes the settings and grant datums, offered in the config UX.
+- **The shared config drawer is ADR 038's synced configuration drawer**, the same one that will hold orientations and preferences.
+
 ## Consequences
 
 - `big_nodule_core::config` breaks: `NoduleSettings.values`, `NoduleGrants` as one datum, and `NoduleInstall.envelope`/`revision` go. There's no migration: pre-release, and no node with nodules has shipped.
@@ -84,7 +90,4 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 
 ## Open questions
 
-1. Settled 2026-11-12: yes, the nodule writes its own settings (§6).
-2. Default values: are settings with no datum the Lexicon's defaults, as with atproto's `default`, or does admission write an initial datum?
-3. Uninstall: does deleting the node's `install` leave the cartridge config document (so reinstalling or a sister keeps the settings), with deletion as a separate, explicit act? The proposal is yes.
-4. The shared config drawer's name and its relation to ADR 038's "synced configuration drawer" for orientations and preferences. Probably the same drawer.
+None. Claytxt's micro install records and grants join the same documents, beside the nodule ones, before implementation.
