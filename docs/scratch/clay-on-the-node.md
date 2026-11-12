@@ -127,6 +127,32 @@ nodules and micros, but not the partial-sync collection machinery.**
   typed `MicroContribution` (its `component` artifact, `feat/cart-micros`) to load the component.
   This replaces the sidecar package directory.
 
+## 6. Desktop host shape (open: operator decides; data in)
+
+Dioxus desktop runs the Rust UI in the native process and the page in WebKitGTK's web process:
+every DOM event and every batch of edits crosses IPC (as in Tauri, whose Wry it uses). Dioxus web
+runs the same Rust as wasm inside the page with no IPC; dioxus-native (Blitz, Android) has no IPC
+either. Measured 2026-11-12 on the Pierre diff port's 3000-line specimen (blank frame = an
+uncovered viewport hole > 12 px; scripts in `/run/media/asdf/p3N/pierre-baseline` and the
+showcase web bench):
+
+| Build | Engine | Linear 2000 px/frame | Jump 1/3 → 2/3 |
+|---|---|---|---|
+| Upstream `@pierre/diffs` | Firefox, WebKit, Chromium | 1 blank frame | 1 blank frame (16–66 ms) |
+| Our port, web build (wasm in page) | Firefox | 1 blank frame | 0 blank frames |
+| Our port, web build (wasm in page) | WebKit | 0 blank frames | 0 blank frames |
+| Our port, desktop build (Dioxus desktop, Wry) | WebKitGTK | gaps of over 1 s (operator, by hand) | gaps of over 1 s |
+
+So the engine and the port are fine; the out-of-process IPC is the cost (a jump fans out into ~200
+per-row `onresize` round trips; coalescing them per frame is in progress and helps, but cannot
+remove the round trips).
+
+Option: **the desktop daytxt host is a Wry window running the web build of the shell**, talking to
+the in-process node through Wry's custom protocol or localhost — exactly as the web host talks to
+its node (§1, §3). One UI build for desktop and web; native code only in the node; UI work never
+crosses IPC. Cost: window-level conveniences (native menus, window events, file pickers) go
+through a small host bridge. Android stays on Blitz (no IPC). Not decided; for the operator.
+
 ## Work, once accepted
 
 Lanes that can run in parallel (files don't collide):
