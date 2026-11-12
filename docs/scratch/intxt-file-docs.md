@@ -77,7 +77,7 @@ Measured: the size of each intxt (B against C), how many documents it shares, ho
 | Packaging work from a long-lived worktree ("rename") | 96% of the shared history is unrelated to the intxt | only the intxt's own ops and blobs |
 | Build and resolve time | seconds | milliseconds |
 
-Size is not where C wins. C has two separable parts: the **identity** of each version, a content hash recorded per op, which gives dedup, verification and the link to git; and its **content**, which need not be a whole file. Storing each op's content as the patch from the previous version, with a whole file only the first time a path is seen (usually already in git), should cost about the size of the diffs, comparable to B. Not measured yet. C wins on anchors, commit fidelity and not carrying unrelated history.
+**C's content is git's own objects, and git sizes them (ledger F27).** The 6.3 MB above packed whole first versions of every touched file, across history that merges brought in from other lanes. An intxt carries a **thin pack**: git objects stored as deltas against a base commit the recipient already has, as `git push`, a git bundle with prerequisites and `format-patch` all assume. Measured on our lane's work: "rename" (6 commits) is 71 KB, "D50" (5) is 53 KB, "ACP" (12) is 82 KB; a full pack, which brings every touched file's first version whole, is 0.6–0.9 MB for each. An intxt for a recipient without the base (no shared repository) carries the full pack. Uncommitted states are `git hash-object` blobs, packed the same way.
 
 Two other findings shape the design whichever option wins:
 - **Most edits bypass the tools.** 455 Bash calls wrote files, against 53 Edit/Write calls. 32% of tool-touched paths reached their commit with content the tool reports don't explain. Capture has to observe the filesystem around every tool call (F7), not trust tool reports.
@@ -87,7 +87,7 @@ Two other findings shape the design whichever option wins:
 
 C, for filesystem worktrees:
 - **The worktree op log stays** (ADR 040 §3), with one op per observed tool-call window, recording per changed path the content hash after the op.
-- **Content is addressed by git blob id, stored as patches.** Each op stores the patch from the previous version; a whole file is stored only on first sight, when git doesn't already have it.
+- **Content is git objects** (blobs, trees, commits; uncommitted states via `git hash-object`), carried as a thin pack against the intxt's base commit, or a full pack when the recipient has no base.
 - **Commits are git's own objects,** carried by the intxt (D58).
 - **Comments anchor to (commit or op, path, line range, quote)** and carry across revisions with git's diff mapping.
 - **File documents only for collaborative worktrees,** later, with dpaths.

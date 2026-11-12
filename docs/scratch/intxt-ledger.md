@@ -220,6 +220,14 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
     - "rename" (6 commits in the long-lived impl worktree): under B, its 31 file docs carry 96% unrelated history by change count and by inserted bytes. Under C it needs 30 blobs and its own 6 ops.
     - D50 and ACP were made in fresh worktrees, so neither model has unrelated history there.
 
+- **F27 (2026-11-12) git packs for intxts.** F26's 6.3 MB was whole first versions of every touched file, across history merged in from other lanes. Stripping paths from `pack-objects` input made no difference (8.73 MB against 8.67 MB for 330 commits since 11-10). For our lane's own sets, a full pack against a thin pack (deltas against the base the recipient has):
+  - rename (6 commits): 889 KB full, 71 KB thin;
+  - D50 (5): 843 KB, 53 KB;
+  - ACP (12): 638 KB, 82 KB;
+  - all 75 lane commits on feat/intxt-impl: 1.45 MB, 712 KB.
+
+  The full-pack cost is the first whole copy of large touched files (Cargo.lock about 100 KB, the ledgers 40–70 KB).
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
