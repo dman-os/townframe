@@ -21,7 +21,7 @@ big_ndk.workspace = true
 big_node.workspace = true
 big_nodule.workspace = true
 big_nodule_core.workspace = true
-big_cartridges_core.workspace = true
+big_cartridges_core = { workspace = true, features = ["test-support"] }
 big_repo.workspace = true
 method_core.workspace = true
 secrets_rs.workspace = true
