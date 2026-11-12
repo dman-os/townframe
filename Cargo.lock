@@ -1724,6 +1724,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_node_holder"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_dispatch",
+ "big_node",
+ "big_repo",
+ "data-encoding",
+ "directories",
+ "http",
+ "libc",
+ "method_core",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "secrets_rs",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
+ "tower",
+ "utils_rs",
+]
+
+[[package]]
 name = "big_nodule"
 version = "0.1.0"
 dependencies = [
@@ -4165,31 +4193,21 @@ dependencies = [
 name = "day_cli"
 version = "0.1.0"
 dependencies = [
- "axum",
- "big_cabinet",
  "big_cabinet_core",
- "big_dispatch",
  "big_node",
+ "big_node_holder",
  "big_nodule_core",
- "big_repo",
  "clap",
  "clap_complete",
  "data-encoding",
- "directories",
- "http",
  "libc",
  "method_core",
- "rand 0.9.5",
- "reqwest 0.12.28",
  "secrets_rs",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "service_utils_rs",
- "sqlite_rs",
  "tempfile",
  "tokio",
- "tower",
  "tracing",
  "trycmd",
  "utils_rs",

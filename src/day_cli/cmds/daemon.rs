@@ -6,11 +6,11 @@
 //! is a leftover of a daemon that died without cleaning up. Nothing here sleeps or polls:
 //! `start` waits for the daemon's readiness line, `stop` blocks on the lock.
 
-use crate::context::Booted;
-use crate::context::LockRole;
-use crate::context::NodeDir;
-use crate::context::SocketState;
 use crate::interlude::*;
+use big_node_holder::Booted;
+use big_node_holder::LockRole;
+use big_node_holder::NodeDir;
+use big_node_holder::SocketState;
 
 use std::future::Future;
 use std::io::Write;
@@ -30,8 +30,7 @@ pub enum DaemonCommands {
 const READY_PREFIX: &str = "listening on ";
 
 pub async fn run(command: DaemonCommands) -> Res<ExitCode> {
-    let conf = lazy::config().await?;
-    let dir = &conf.node_dir;
+    let dir = &*lazy::node_dir().await?;
     match command {
         DaemonCommands::Run => run_foreground(dir).await,
         DaemonCommands::Start => start(dir).await,

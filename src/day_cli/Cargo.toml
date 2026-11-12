@@ -15,14 +15,11 @@ path = "main.rs"
 # internal
 method_core.workspace = true
 utils_rs.workspace = true
-sqlite_rs.workspace = true
 secrets_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
-big_dispatch.workspace = true
+big_node_holder.workspace = true
 big_nodule_core.workspace = true
-big_repo.workspace = true
-big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 
 #
@@ -35,14 +32,6 @@ clap_complete.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync", "signal", "net", "process", "io-util"] }
 
 #
-# http, to serve the router in process without a socket
-axum = { workspace = true }
-http.workspace = true
-reqwest.workspace = true
-serde_urlencoded = "0.7"
-tower = { workspace = true, features = ["util"] }
-
-#
 # error
 tracing.workspace = true
 
@@ -53,12 +42,7 @@ serde_json.workspace = true
 data-encoding.workspace = true
 
 #
-# crypto
-rand.workspace = true
-
-#
 # fs and os
-directories.workspace = true
 libc = "0.2"
 
 [dev-dependencies]

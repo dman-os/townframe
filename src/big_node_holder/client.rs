@@ -16,10 +16,10 @@
 //! Commands see only [`NodeClient::call`]; the mode is a fact they can report, not a branch they
 //! take.
 
-use crate::context::Booted;
-use crate::context::LockRole;
-use crate::context::NodeDir;
-use crate::context::SocketState;
+use crate::booted::Booted;
+use crate::dir::LockRole;
+use crate::dir::NodeDir;
+use crate::dir::SocketState;
 use crate::interlude::*;
 
 use big_cabinet_core::authority::Authorization;

@@ -7,14 +7,11 @@ compile_error!(
 
 mod interlude {
     pub use utils_rs::prelude::Arc;
-    pub use utils_rs::prelude::Deserialize;
     pub use utils_rs::prelude::ERROR_MUTEX;
     pub use utils_rs::prelude::ERROR_TOKIO;
     pub use utils_rs::prelude::EyreOptExt;
-    pub use utils_rs::prelude::Path;
     pub use utils_rs::prelude::PathBuf;
     pub use utils_rs::prelude::Res;
-    pub use utils_rs::prelude::Serialize;
     pub use utils_rs::prelude::WrapErr;
     pub use utils_rs::prelude::debug;
     pub use utils_rs::prelude::default;
@@ -33,10 +30,7 @@ use crate::interlude::*;
 use clap::builder::styling::AnsiColor;
 use clap::*;
 
-mod client;
 mod cmds;
-mod config;
-mod context;
 mod e2e;
 mod lazy;
 
@@ -160,10 +154,10 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         return cmds::init::run(dir.clone(), *relay).await;
     }
 
-    let conf = lazy::config().await?;
-    if !conf.node_dir.is_initialized() {
+    let node_dir = lazy::node_dir().await?;
+    if !node_dir.is_initialized() {
         error!(
-            path = ?conf.cli_config.node_path,
+            path = ?node_dir.root(),
             "node not initialized at resolved path; run `day node init`",
         );
         return Ok(ExitCode::FAILURE);

@@ -1,5 +1,5 @@
-use crate::client::NodeClient;
 use crate::interlude::*;
+use big_node_holder::NodeClient;
 use method_core::HttpMethod;
 
 use big_nodule_core::protocol::ListNodules;
@@ -13,7 +13,7 @@ use method_core::Method;
 /// operations are not exposed by any dispatch operation (the router's table is reachable only in
 /// the process that booted it), so they are reported as not exposed.
 pub async fn run(as_json: bool) -> Res<ExitCode> {
-    let conf = lazy::config().await?;
+    let dir = lazy::node_dir().await?;
     let client = lazy::node().await?;
     let info = node_info(&client).await?;
 
@@ -30,9 +30,9 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
         .as_array()
         .ok_or_eyre("listNodules did not answer a `nodules` list")?;
 
-    let socket_path = conf.node_dir.socket_path()?;
+    let socket_path = dir.socket_path()?;
     // Any exit but 0 means "no daemon serving", the convention `systemctl status` follows.
-    let exit = if client.mode() == crate::client::Mode::Daemon {
+    let exit = if client.mode() == big_node_holder::Mode::Daemon {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(3)
@@ -40,19 +40,19 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
     if as_json {
         let status = json!({
             "nodeId": info.node_id,
-            "path": conf.node_dir.root(),
+            "path": dir.root(),
             "mode": client.mode(),
             "socket": { "path": socket_path, "state": client.socket_state() },
             "nodules": nodules,
             "services": null,
             "peers": info.peers,
-            "relay": conf.node_dir.settings()?.relay,
+            "relay": dir.settings()?.relay,
         });
         println!("{}", serde_json::to_string_pretty(&status)?);
         return Ok(exit);
     }
     println!("node      {}", info.node_id);
-    println!("path      {}", conf.node_dir.root().display());
+    println!("path      {}", dir.root().display());
     println!("mode      {}", client.mode().as_str());
     println!(
         "socket    {} ({})",
@@ -78,7 +78,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             nodule["readiness"],
         );
     }
-    if conf.node_dir.settings()?.relay {
+    if dir.settings()?.relay {
         println!("relay     yes");
     }
     println!("services  not exposed by the node");

@@ -9,10 +9,8 @@ use crate::interlude::*;
 /// understand) is an error, and is not touched either.
 pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
     let node_dir = match dir {
-        Some(dir) => {
-            crate::context::NodeDir::new(crate::config::CliConfig::source(Some(&dir))?.node_path)
-        }
-        None => lazy::config().await?.node_dir.clone(),
+        Some(dir) => big_node_holder::NodeDir::resolve(Some(&dir))?,
+        None => lazy::node_dir().await?.as_ref().clone(),
     };
     if node_dir.is_initialized() {
         // `settings` is the validity check: it parses the file and its version.

@@ -1,5 +1,5 @@
-use crate::context::SocketState;
 use crate::interlude::*;
+use big_node_holder::SocketState;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PeersCommands {
@@ -24,8 +24,7 @@ pub async fn run(command: PeersCommands) -> Res<ExitCode> {
 /// the new peer. Adding the first peer also creates the `peers` section, which is what makes the
 /// daemon attach the network endpoint at all.
 async fn add(ticket: &str) -> Res<ExitCode> {
-    let conf = lazy::config().await?;
-    let dir = &conf.node_dir;
+    let dir = &*lazy::node_dir().await?;
     let changed = dir.update_settings(|settings| {
         settings
             .peers
@@ -47,8 +46,7 @@ async fn add(ticket: &str) -> Res<ExitCode> {
 }
 
 async fn ls() -> Res<ExitCode> {
-    let conf = lazy::config().await?;
-    let settings = conf.node_dir.settings()?;
+    let settings = lazy::node_dir().await?.settings()?;
     let bootstrap = settings
         .peers
         .as_ref()

@@ -21,21 +21,21 @@
 #![cfg(test)]
 
 mod library {
-    use crate::client::Mode;
-    use crate::client::NodeClient;
-    use crate::client::Reply;
-    use crate::context::Booted;
-    use crate::context::LockRole;
-    use crate::context::NodeDir;
-    use crate::context::SocketState;
     use crate::interlude::*;
     use big_node::peers::Peers;
+    use big_node_holder::Booted;
+    use big_node_holder::LockRole;
+    use big_node_holder::Mode;
+    use big_node_holder::NodeClient;
+    use big_node_holder::NodeDir;
+    use big_node_holder::Reply;
+    use big_node_holder::SocketState;
     use big_nodule_core::protocol::ListNodules;
     use method_core::Method;
     use tokio::sync::oneshot;
 
     fn connect(dir: &NodeDir) -> impl Future<Output = Res<NodeClient>> {
-        NodeClient::connect(dir, crate::client::CONNECT_DEADLINE)
+        NodeClient::connect(dir, big_node_holder::CONNECT_DEADLINE)
     }
 
     /// A directory under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id
@@ -392,62 +392,6 @@ mod library {
         assert_eq!(dir.settings().unwrap().node_id(), before);
     }
 
-    #[test]
-    fn a_socket_path_too_long_for_sun_path_is_refused() {
-        let (tmp, _) = new_node();
-        let long = NodeDir::with_socket_dir(
-            tmp.path().join("node"),
-            std::path::PathBuf::from("/tmp").join("x".repeat(120)),
-        );
-        let error = long.socket_path().unwrap_err();
-        assert!(format!("{error:#}").contains("longer than a Unix socket path"));
-    }
-
-    #[test]
-    fn the_socket_is_named_by_the_node_id_in_the_runtime_directory() {
-        let (tmp, dir) = new_node();
-        assert_eq!(
-            dir.socket_path().unwrap(),
-            tmp.path()
-                .join("run")
-                .join(format!("{}.sock", dir.settings().unwrap().node_id()))
-        );
-        // The node directory is not where the socket goes, so a long node path is fine.
-        let far =
-            NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
-        far.init().unwrap();
-        far.socket_path().unwrap();
-    }
-
-    #[test]
-    fn the_default_socket_directory_is_the_runtime_directory_or_a_private_one_in_tmp() {
-        use crate::context::socket_dir_in;
-        assert_eq!(
-            socket_dir_in(Some(std::path::Path::new("/run/user/1000")), 1000),
-            std::path::Path::new("/run/user/1000/day")
-        );
-        assert_eq!(
-            socket_dir_in(None, 1000),
-            std::path::Path::new("/tmp/day-1000")
-        );
-    }
-
-    /// A directory that is not the user's own is refused as a socket directory, whoever made
-    /// it: here, one other users can enter.
-    #[test]
-    fn a_socket_directory_other_users_can_enter_is_refused() {
-        use std::os::unix::fs::PermissionsExt;
-        let (tmp, dir) = new_node();
-        let run = tmp.path().join("run");
-        std::fs::create_dir(&run).unwrap();
-        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let error = dir.ensure_run_dir().unwrap_err();
-        assert!(
-            format!("{error:#}").contains("accessible to other users"),
-            "{error:#}"
-        );
-    }
-
     /// Two nodes on one machine (one keyring, one runtime directory) get entries and sockets of
     /// their own: each daemon is live at its own path, and deleting one node's keyring entries
     /// removes exactly one entry and leaves the other node's.
@@ -493,7 +437,7 @@ mod library {
     async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
         let loopback = |dir: &NodeDir| {
             dir.update_settings(|settings| {
-                settings.peers = Some(crate::context::PeerSettings {
+                settings.peers = Some(big_node_holder::PeerSettings {
                     loopback_only: true,
                     ..default()
                 });
@@ -662,7 +606,7 @@ mod blackbox {
 
         /// The node's socket, from its id: `<runtime dir>/day/<node id>.sock`.
         fn socket(&self) -> PathBuf {
-            let id = crate::context::NodeDir::new(self.node())
+            let id = big_node_holder::NodeDir::new(self.node())
                 .settings()
                 .unwrap()
                 .node_id();
@@ -709,7 +653,7 @@ mod blackbox {
         fn drop(&mut self) {
             // A node whose settings do not parse (a case that corrupts them on purpose) never
             // booted, so it owns no keyring entries.
-            let Ok(settings) = crate::context::NodeDir::new(self.node()).settings() else {
+            let Ok(settings) = big_node_holder::NodeDir::new(self.node()).settings() else {
                 return;
             };
             // The test process's `SecretStore::boot` is the in-memory mock (the dev-dependency

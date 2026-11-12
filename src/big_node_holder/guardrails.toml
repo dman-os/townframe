@@ -1,0 +1,17 @@
+version = 1
+role = "application"
+dependency_reason = "A host reaches a node either through its holder's socket or by booting big_node in process, and serves the node's dispatch router to itself in the second case."
+allowed_dependencies = [
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_dispatch",
+    "big_node",
+    "big_repo",
+    "method_core",
+    "secrets_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[builds.native]

@@ -22,6 +22,7 @@ members = [
   "./src/big_repo/",
   "./src/big_node/",
   "./src/day_cli",
+  "./src/big_node_holder",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -145,6 +146,7 @@ test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
+big_node_holder = { path = "./src/big_node_holder/" }
 clay_collection = { path = "./src/clay_collection" }
 clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
