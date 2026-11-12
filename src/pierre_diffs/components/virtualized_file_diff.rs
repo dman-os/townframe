@@ -4,8 +4,10 @@
 //! `getLinePosition`, `computeRenderRangeFromWindow`) and the instance's
 //! measurement and bookkeeping (`instance`: `reconcileHeights`, `onRender`,
 //! `setVisibility`, `updatePendingRender`, `updateCodeViewLayout`). The
-//! integration with `FileDiff` (S12b-3) is not ported yet.
+//! integration with `FileDiff` (S12b-3) is `overrides`, and C1 is the advanced
+//! (CodeView) mode (`advanced`: the `Virtualizer | CodeView` union).
 
+pub mod advanced;
 pub mod instance;
 pub mod layout;
 pub mod overrides;

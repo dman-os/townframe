@@ -15,9 +15,9 @@
 //   accessors. The instance is an `Rc` (the virtualizer holds it as an
 //   `InstanceRef`, a `SubscribedInstance`, and the hooks call back into it).
 //   The layout state is `DiffLayout` (see `layout.rs`) behind a `RefCell`; the
-//   virtualizer is `Virtualizer<Host>` (an `Rc`), `getSimpleVirtualizer()` is
-//   always that virtualizer (the advanced mode is dropped, so `isSimpleMode()`
-//   is true and `isAdvancedMode()` false everywhere).
+//   virtualizer is a `VirtualizerKind` (`Virtualizer | CodeView`, see
+//   `advanced.rs`), `isSimpleMode()` and `isAdvancedMode()` are its variants and
+//   `getSimpleVirtualizer()` is `VirtualizerKind::simple`.
 // * The overrides (`render`, `rerender`, `setOptions`, `setThemeType`,
 //   `setLineAnnotations`, `cleanUp`, `expandHunk`, `finalizeRender`,
 //   `handleFilesLoaded`, `onRender`, `setVisibility`) are in `overrides.rs`.
@@ -34,19 +34,25 @@
 //   is an `HTMLElement` (`instanceof HTMLElement` checks are always true).
 //   `FILE_ANNOTATION_DOM_KEY` is built once per measurement.
 // * `updateCodeViewLayout` keeps its upstream name (the DOM-free way to put a
-//   diff into the instance); it drops CodeView's channels: the `reset`
-//   argument (`PendingCodeViewLayoutReset`), and the `pendingHydratedDiff` and
-//   `pendingExpansions` arms, whose fields upstream writes only in the advanced
-//   mode (`handleFilesLoaded` and `expandHunk` stage them for CodeView's layout
-//   pass), so they are never set in the mode that remains. `updateInputDiff`
-//   and `getRenderedDiff` take and return `Rc`s (`FileDiff`'s identity model);
-//   `Object.assign` on the incoming diff goes with the hydration arm.
+//   diff into the instance). `updateInputDiff` and `getRenderedDiff` take and
+//   return `Rc`s (`FileDiff`'s identity model). Its `pendingHydratedDiff` arm
+//   ends in `Object.assign(fileDiff, nextDiff)`, which turns the caller's diff
+//   object into the hydrated one in place; a diff here is an immutable `Rc`, so
+//   the hydrated `Rc` replaces the staged one wherever the instance holds it
+//   (as `handleFilesLoaded` does in the simple mode) and the caller gets it back
+//   as `CodeViewLayoutUpdate::hydrated_diff`, to keep in place of the diff it
+//   passed (divergences.psv). `installHydratedSessionDiff` is the edit session's
+//   and is dropped. `PendingCodeViewLayoutReset::metrics` is the full
+//   `VirtualFileMetrics` (as in `types/layout.rs`), widened to a partial for
+//   `computeVirtualFileMetrics`. `pendingExpansions` hold the `expandHunk`
+//   arguments as `expandHunk` converts them (a `usize` hunk index, an infinite
+//   count is `usize::MAX`).
 // * Ghost text rows and the editor are dropped (dropped.psv): `reconcileHeights`
 //   starts with `hasHeightChange = false` where upstream folds in
 //   `applyGhostTextRows`, so the placeholder branch's recompute and
 //   `setPlaceholderHeight` are unreachable and its `if (hasHeightChange)` is
 //   omitted; the per-row ghost terms are zero. `isResizeDebuggingEnabled()` is
-//   `virtualizer.config.resize_debugging`.
+//   the simple virtualizer's `config.resize_debugging` (false under CodeView).
 // * `getDiffForNextRender` is the identity here (see file_diff.rs), so
 //   `updatePendingRender`'s `pendingRenderDiff` is the working diff.
 // * Layout methods that upstream pairs with `this.renderRange = undefined`
@@ -57,6 +63,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::rc::Weak;
 
+use super::advanced::VirtualizerKind;
 use super::layout::DiffLayout;
 use super::layout::LayoutContext;
 use super::layout::LayoutOptions;
@@ -70,21 +77,26 @@ use crate::components::file_diff::LineAnnotations;
 use crate::components::file_diff::RenderedContent;
 use crate::components::file_diff::VirtualizedFileDiffHost;
 use crate::components::virtualizer::InstanceRef;
-use crate::components::virtualizer::Virtualizer;
 use crate::components::virtualizer::VirtualizerHost;
 use crate::document::Document;
 use crate::document::NodeKey;
 use crate::highlighter_types::DiffsHighlighter;
 use crate::managers::resize_manager::ResizeObserverHub;
 use crate::managers::universal_rendering_manager::UniversalRenderingManager;
+use crate::types::layout::PendingCodeViewLayoutReset;
 use crate::types::layout::RenderRange;
 use crate::types::layout::RenderWindow;
+use crate::types::layout::StickySpecs;
 use crate::types::lines::ExpandedHunks;
+use crate::types::lines::ExpansionDirections;
 use crate::types::options::DiffStyle;
 use crate::types::options::Overflow;
+use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::FileDiffMetadata;
+use crate::types::view::NumericScrollLineAnchor;
 use crate::types::view::SelectionSide;
 use crate::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
+use crate::utils::compute_virtual_file_metrics::compute_virtual_file_metrics;
 use crate::utils::predicates::are_diff_targets_equal::are_diff_targets_equal;
 use crate::utils::render::includes_file_annotations::file_annotation_dom_key;
 use crate::utils::render::includes_file_annotations::should_render_file_annotations;
@@ -98,11 +110,36 @@ struct PendingRender {
     diff: Rc<FileDiffMetadata>,
 }
 
+/// `PendingLoadedDiff`: a hydrated clone staged for CodeView's next layout pass.
+pub(super) struct PendingLoadedDiff {
+    pub(super) expected_diff: Rc<FileDiffMetadata>,
+    pub(super) next_diff: Rc<FileDiffMetadata>,
+    pub(super) files: FileDiffLoadedFiles,
+}
+
+/// `PendingExpansion`: an `expandHunk` call staged for CodeView's next layout pass.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct PendingExpansion {
+    pub(super) hunk_index: usize,
+    pub(super) direction: ExpansionDirections,
+    pub(super) expansion_line_count_override: Option<usize>,
+}
+
+/// What `updateCodeViewLayout` returns: its height, and the hydrated diff that
+/// replaced the one passed in when a staged hydration was consumed.
+#[derive(Debug, Clone)]
+pub struct CodeViewLayoutUpdate {
+    pub height: f64,
+    pub hydrated_diff: Option<Rc<FileDiffMetadata>>,
+}
+
 /// The fields of the class that are not the layout.
 struct InstanceState {
     layout: DiffLayout,
     is_visible: bool,
     current_collapsed: Option<bool>,
+    pending_hydrated_diff: Option<PendingLoadedDiff>,
+    pending_expansions: Option<Vec<PendingExpansion>>,
     pending_render: Option<PendingRender>,
     is_setup: bool,
 }
@@ -122,7 +159,7 @@ pub struct VirtualizedFileDiff<
 > {
     weak_self: Weak<Self>,
     file_diff: Rc<FileDiff<Host, Rendered, LAnnotation>>,
-    virtualizer: Rc<Virtualizer<Host>>,
+    virtualizer: VirtualizerKind<Host>,
     host: Rc<Host>,
     state: RefCell<InstanceState>,
 }
@@ -146,7 +183,7 @@ where
         render_queue: UniversalRenderingManager<Host>,
         highlighter: Rc<dyn DiffsHighlighter>,
         options: FileDiffOptions<NodeKey, Rendered, LAnnotation>,
-        virtualizer: Rc<Virtualizer<Host>>,
+        virtualizer: VirtualizerKind<Host>,
         metrics: PartialVirtualFileMetrics,
         request_owner_render: Option<Rc<dyn Fn()>>,
     ) -> Rc<Self> {
@@ -171,6 +208,8 @@ where
                     layout: DiffLayout::new(metrics),
                     is_visible: false,
                     current_collapsed: None,
+                    pending_hydrated_diff: None,
+                    pending_expansions: None,
                     pending_render: None,
                     is_setup: false,
                 }),
@@ -190,8 +229,71 @@ where
         &self.file_diff
     }
 
-    pub(super) fn virtualizer(&self) -> &Rc<Virtualizer<Host>> {
+    pub(super) fn virtualizer(&self) -> &VirtualizerKind<Host> {
         &self.virtualizer
+    }
+
+    /// `this.isResizeDebuggingEnabled()`
+    fn is_resize_debugging_enabled(&self) -> bool {
+        self.virtualizer
+            .simple()
+            .is_some_and(|virtualizer| virtualizer.config.resize_debugging)
+    }
+
+    /// `this.pendingExpansions ??= []; this.pendingExpansions.push(...)`
+    pub(super) fn stage_expansion(&self, expansion: PendingExpansion) {
+        self.state
+            .borrow_mut()
+            .pending_expansions
+            .get_or_insert_default()
+            .push(expansion);
+    }
+
+    /// `this.pendingHydratedDiff = { expectedDiff, nextDiff, files }`
+    pub(super) fn stage_hydrated_diff(&self, pending: PendingLoadedDiff) {
+        self.state.borrow_mut().pending_hydrated_diff = Some(pending);
+    }
+
+    /// `this.pendingExpansions = undefined; this.pendingHydratedDiff = undefined`
+    pub(super) fn clear_staged(&self) {
+        let mut state = self.state.borrow_mut();
+        state.pending_expansions = None;
+        state.pending_hydrated_diff = None;
+    }
+
+    /// `this.pendingExpansions`, copied (the elements are small).
+    pub(super) fn staged_expansions(&self) -> Vec<PendingExpansion> {
+        self.state
+            .borrow()
+            .pending_expansions
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// `loadFilesIfNecessary`'s override: a staged hydration for the current
+    /// input already has its files, a stale one is forgotten; then the base
+    /// class's body.
+    pub(super) fn load_files_if_necessary(&self) {
+        let staged_for_input = {
+            let mut state = self.state.borrow_mut();
+            match state.pending_hydrated_diff.as_ref() {
+                None => None,
+                Some(pending) => {
+                    let is_input = self
+                        .file_diff
+                        .get_input_diff()
+                        .is_some_and(|input| Rc::ptr_eq(&pending.expected_diff, &input));
+                    if !is_input {
+                        state.pending_hydrated_diff = None;
+                    }
+                    Some(is_input)
+                }
+            }
+        };
+        if staged_for_input == Some(true) {
+            return;
+        }
+        self.file_diff.loading().load_files_if_necessary_base();
     }
 
     pub fn is_setup(&self) -> bool {
@@ -296,7 +398,7 @@ where
             options,
             expanded_hunks: &expanded_hunks,
             layout_diff,
-            resize_debugging: self.virtualizer.config.resize_debugging,
+            resize_debugging: self.is_resize_debugging_enabled(),
         };
         body(&mut self.state.borrow_mut().layout, &ctx)
     }
@@ -341,11 +443,20 @@ where
     }
 
     fn get_virtualized_top(&self) -> f64 {
-        match self.file_diff.virtualized().file_container() {
-            Some(file_container) => self
+        match &self.virtualizer {
+            VirtualizerKind::Advanced(_) => self
                 .virtualizer
-                .get_offset_in_scroll_container(&file_container),
-            None => 0.0,
+                .advanced()
+                .expect("advanced")
+                .get_local_top_for_instance(&self.instance_ref()),
+            VirtualizerKind::Simple(virtualizer) => {
+                match self.file_diff.virtualized().file_container() {
+                    Some(file_container) => {
+                        virtualizer.get_offset_in_scroll_container(&file_container)
+                    }
+                    None => 0.0,
+                }
+            }
         }
     }
 
@@ -356,6 +467,12 @@ where
 
     /// `resetLayoutCache`
     pub fn reset_layout_cache(&self, options: ResetLayoutCacheOptions) {
+        // NOTE(amadeus): In CodeView we intentionally batch computes to all happen
+        // at the same time, so we shouldn't trigger this there.
+        let options = ResetLayoutCacheOptions {
+            force_simple_recompute: options.force_simple_recompute && self.virtualizer.is_simple(),
+            ..options
+        };
         let layout_diff = self.get_layout_diff();
         let clear = self.with_layout(layout_diff.as_deref(), |layout, ctx| {
             layout.reset_layout_cache(options, ctx)
@@ -453,30 +570,82 @@ where
             .map(|pending| Rc::clone(&pending.diff))
     }
 
-    /// `updateCodeViewLayout(fileDiff, top, undefined, lineAnnotations)`, see the header.
+    /// `updateCodeViewLayout(fileDiff, top, reset, lineAnnotations)`, see the header.
     pub fn update_code_view_layout(
         &self,
         file_diff: &Rc<FileDiffMetadata>,
         top: f64,
+        reset: Option<PendingCodeViewLayoutReset>,
         line_annotations: Option<&LineAnnotations<LAnnotation>>,
-    ) -> f64 {
-        let collapsed = LayoutOptions::of(&self.file_diff.options()).collapsed;
+    ) -> CodeViewLayoutUpdate {
         let mut reset_layout_cache = false;
+        let mut reset_estimated_heights = false;
+        let collapsed = LayoutOptions::of(&self.file_diff.options()).collapsed;
+        let (pending_expansions, pending_hydrated_diff) = {
+            let mut state = self.state.borrow_mut();
+            (
+                state.pending_expansions.take(),
+                state.pending_hydrated_diff.take(),
+            )
+        };
+        let mut file_diff = Rc::clone(file_diff);
+        let mut hydrated_diff = None;
+
+        // Hydrate the `isPartial: true` diff if we have a pending hydration
+        if let Some(pending) = pending_hydrated_diff
+            && Rc::ptr_eq(&pending.expected_diff, &file_diff)
+        {
+            // Upstream keeps diff equality referential and treats this as a
+            // mutation (`Object.assign`); see the header.
+            self.file_diff.loading().install_hydrated_diff(
+                &pending.expected_diff,
+                &pending.next_diff,
+                &pending.files,
+            );
+            self.swap_pending_render_diff(&pending.expected_diff, &pending.next_diff);
+            file_diff = Rc::clone(&pending.next_diff);
+            hydrated_diff = Some(pending.next_diff);
+            self.file_diff.virtualized().force_render_override();
+            reset_layout_cache = true;
+            reset_estimated_heights = true;
+        }
+
+        // Go ahead and apply any queued expansion changes
+        for expansion in pending_expansions.into_iter().flatten() {
+            self.file_diff.virtualized().expand_renderer_hunk(
+                expansion.hunk_index,
+                expansion.direction,
+                expansion.expansion_line_count_override,
+            );
+            self.file_diff.virtualized().force_render_override();
+            reset_estimated_heights = true;
+        }
 
         let diff_changed = self
             .file_diff
             .virtualized()
-            .update_input_diff(Rc::clone(file_diff), line_annotations.map(Rc::clone));
-        let update = self.update_pending_render(file_diff, line_annotations);
+            .update_input_diff(Rc::clone(&file_diff), line_annotations.map(Rc::clone));
+        let update = self.update_pending_render(&file_diff, line_annotations);
         // `!this.forceRenderOverride && (...)`: setting it again is a no-op.
         if diff_changed || update.rendered_diff_changed || update.annotations_changed {
             self.file_diff.virtualized().force_render_override();
         }
 
-        if update.layout_diff_changed {
+        let reset_diff_layout_cache = reset.is_some_and(|reset| reset.reset_diff_layout_cache);
+        if reset_diff_layout_cache || update.layout_diff_changed {
             reset_layout_cache = true;
         }
-        let reset_estimated_heights = update.layout_diff_changed;
+        if update.layout_diff_changed
+            || (reset_diff_layout_cache
+                && reset.is_some_and(|reset| reset.include_estimated_diff_heights))
+        {
+            reset_estimated_heights = true;
+        }
+        if let Some(metrics) = reset.and_then(|reset| reset.metrics) {
+            self.state.borrow_mut().layout.metrics = compute_virtual_file_metrics(metrics.into());
+            reset_layout_cache = true;
+            reset_estimated_heights = true;
+        }
         if self.state.borrow().current_collapsed != Some(collapsed) {
             self.state.borrow_mut().current_collapsed = Some(collapsed);
             reset_layout_cache = true;
@@ -492,7 +661,10 @@ where
 
         self.state.borrow_mut().layout.top = Some(top);
         self.compute_approximate_size(false, Some(&update.pending_render_diff));
-        self.get_virtualized_height()
+        CodeViewLayoutUpdate {
+            height: self.get_virtualized_height(),
+            hydrated_diff,
+        }
     }
 
     /// `getLinePosition`
@@ -527,6 +699,71 @@ where
         })
     }
 
+    /// `getNumericScrollAnchor`
+    pub fn get_numeric_scroll_anchor(
+        &self,
+        local_viewport_top: f64,
+    ) -> Option<NumericScrollLineAnchor> {
+        let layout_diff = self.get_layout_diff();
+        self.with_layout(layout_diff.as_deref(), |layout, ctx| {
+            layout.get_numeric_scroll_anchor(local_viewport_top, ctx)
+        })
+    }
+
+    /// `getAdvancedStickySpecs`
+    pub fn get_advanced_sticky_specs(
+        &self,
+        window_specs: Option<RenderWindow>,
+    ) -> Option<StickySpecs> {
+        let file_diff = self.get_layout_diff()?;
+        let top = self.top()?;
+        let height = self.get_virtualized_height();
+        if self.file_diff.options().base.base.collapsed == Some(true) {
+            return Some(StickySpecs {
+                top_offset: top,
+                height,
+            });
+        }
+        let render_range = match window_specs {
+            Some(window_specs) => {
+                self.compute_render_range_from_window(&file_diff, top, window_specs)
+            }
+            None => self.file_diff.virtualized().render_range()?,
+        };
+        let RenderRange {
+            buffer_before,
+            buffer_after,
+            total_lines,
+            ..
+        } = render_range;
+        // Rendered items flow contiguously in the sticky container with no buffer
+        // spacers, so a header-only item (totalLines === 0, none of its rows fall
+        // inside the window) must report where its header actually sits in that
+        // flow, which depends on which side of the window its content is on:
+        //  - content ABOVE the window (item starts above window.top): the header
+        //    sits at the item's bottom so the following item connects, so offset by
+        //    bufferAfter.
+        //  - content BELOW the window (item starts at/after window.top, e.g. a
+        //    trailing header peeking in at the bottom): the header renders at the
+        //    item's top with nothing after it, so no offset. Always adding
+        //    bufferAfter here made getStickyBounds over-measure the sticky
+        //    container for that trailing case.
+        let mut header_only_offset = 0.0;
+        if total_lines == 0.0 {
+            let active_window_top = window_specs.map_or_else(
+                || self.virtualizer.get_window_specs().top,
+                |window_specs| window_specs.top,
+            );
+            if top < active_window_top {
+                header_only_offset = buffer_after;
+            }
+        }
+        Some(StickySpecs {
+            top_offset: top + buffer_before + header_only_offset,
+            height: height - (buffer_before + buffer_after),
+        })
+    }
+
     /// `reconcileHeights`: fold the heights the DOM reports for the rendered rows
     /// into the layout cache; `true` if any height changed.
     pub fn reconcile_heights(&self) -> bool {
@@ -557,7 +794,7 @@ where
         self.sync_virtualized_top();
         let measure_all_rows = overflow != Overflow::Scroll
             || !self.file_diff.line_annotations().is_empty()
-            || self.virtualizer.config.resize_debugging;
+            || self.is_resize_debugging_enabled();
         // After the last annotation is removed, keep measuring rendered rows
         // until their previously cached heights have been corrected.
         {
@@ -601,7 +838,7 @@ where
                 self.reconcile_code_group(code_group, diff_style, measure_all_rows);
         }
 
-        if has_height_change || self.virtualizer.config.resize_debugging {
+        if has_height_change || self.is_resize_debugging_enabled() {
             self.compute_approximate_size(true, None);
         }
         has_height_change

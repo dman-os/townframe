@@ -17,6 +17,7 @@
 
 use std::rc::Rc;
 
+use super::advanced::VirtualizerKind;
 use super::instance::VirtualizedFileDiff;
 use super::layout::VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL;
 use super::layout_upstream_tests::METRICS;
@@ -72,7 +73,7 @@ pub(super) fn world(options: Options, metrics: PartialVirtualFileMetrics) -> Wor
         UniversalRenderingManager::new(Rc::clone(&dom)),
         Rc::new(PlainTextHighlighter),
         options,
-        virtualizer,
+        VirtualizerKind::Simple(virtualizer),
         metrics,
         None,
     );
@@ -103,7 +104,7 @@ impl World {
         annotations: Option<&LineAnnotations<u8>>,
     ) {
         self.instance
-            .update_code_view_layout(file_diff, 0.0, annotations);
+            .update_code_view_layout(file_diff, 0.0, None, annotations);
     }
 
     pub(super) fn height(&self) -> f64 {

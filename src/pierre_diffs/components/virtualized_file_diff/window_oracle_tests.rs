@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
+use super::advanced::VirtualizerKind;
 use super::instance::VirtualizedFileDiff;
 use super::layout::ResetLayoutCacheOptions;
 use super::layout::has_diff_estimate_option_changed;
@@ -231,7 +232,7 @@ impl Replay {
             UniversalRenderingManager::new(Rc::clone(&dom)),
             Rc::new(PlainTextHighlighter),
             options,
-            virtualizer,
+            VirtualizerKind::Simple(virtualizer),
             scenario.metrics.map(Into::into).unwrap_or_default(),
             None,
         );
@@ -467,11 +468,16 @@ impl Replay {
                 diff,
                 top,
                 annotations,
-            } => json!(self.instance.update_code_view_layout(
-                &self.diffs[diff],
-                *top,
-                self.list(annotations.as_ref()).as_ref()
-            )),
+            } => json!(
+                self.instance
+                    .update_code_view_layout(
+                        &self.diffs[diff],
+                        *top,
+                        None,
+                        self.list(annotations.as_ref()).as_ref()
+                    )
+                    .height
+            ),
             Step::PendingRender { diff, annotations } => {
                 let update = self.instance.update_pending_render(
                     &self.diffs[diff],

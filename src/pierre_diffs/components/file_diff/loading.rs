@@ -52,7 +52,14 @@ where
         self.state.borrow().pending_files.clone()
     }
 
+    /// `this.loadFilesIfNecessary()`: resolves the method at call time, as
+    /// upstream does (`VirtualizedFileDiff` overrides it).
     pub fn load_files_if_necessary(&self) {
+        self.hooks.load_files_if_necessary(self.0);
+    }
+
+    /// `FileDiff.loadFilesIfNecessary`, the body (`super.loadFilesIfNecessary()`).
+    pub fn load_files_if_necessary_base(&self) {
         let Some(file_diff) = self.get_input_diff() else {
             return;
         };
@@ -123,6 +130,18 @@ where
         expected_diff: &Rc<FileDiffMetadata>,
         files: &FileDiffLoadedFiles,
     ) -> Rc<FileDiffMetadata> {
+        let hydrated = self.hydrate_loaded_diff(expected_diff, files);
+        self.install_hydrated_diff(expected_diff, &hydrated, files);
+        hydrated
+    }
+
+    /// `hydratePartialDiff('clone', expectedDiff, files, parseDiffOptions)`: the
+    /// hydrated copy, the instance untouched.
+    pub fn hydrate_loaded_diff(
+        &self,
+        expected_diff: &Rc<FileDiffMetadata>,
+        files: &FileDiffLoadedFiles,
+    ) -> Rc<FileDiffMetadata> {
         let parse_diff_options: ParseDiffOptions = self
             .options
             .borrow()
@@ -130,39 +149,45 @@ where
             .parse_diff_options
             .clone()
             .unwrap_or_default();
-        let hydrated = Rc::new(hydrate_partial_diff_clone(
+        Rc::new(hydrate_partial_diff_clone(
             expected_diff,
             files,
             &parse_diff_options,
-        ));
-        {
-            let mut state = self.state.borrow_mut();
-            let swap = |slot: &mut Rc<FileDiffMetadata>| {
-                if Rc::ptr_eq(slot, expected_diff) {
-                    *slot = Rc::clone(&hydrated);
-                }
-            };
-            if let Some(file_diff) = state.file_diff.as_mut() {
-                swap(file_diff);
+        ))
+    }
+
+    /// The hydrated diff takes the place of `expected_diff` (see the header) and
+    /// `setHydratedState(files)`: `clearRenderCache` has no cache to clear.
+    pub fn install_hydrated_diff(
+        &self,
+        expected_diff: &Rc<FileDiffMetadata>,
+        hydrated: &Rc<FileDiffMetadata>,
+        files: &FileDiffLoadedFiles,
+    ) {
+        let mut state = self.state.borrow_mut();
+        let swap = |slot: &mut Rc<FileDiffMetadata>| {
+            if Rc::ptr_eq(slot, expected_diff) {
+                *slot = Rc::clone(hydrated);
             }
-            if let Some(rendered) = state.rendered_data.as_mut() {
-                swap(&mut rendered.file_diff);
+        };
+        if let Some(file_diff) = state.file_diff.as_mut() {
+            swap(file_diff);
+        }
+        if let Some(rendered) = state.rendered_data.as_mut() {
+            swap(&mut rendered.file_diff);
+        }
+        if let Some(pending) = state.pending_data.as_mut() {
+            swap(&mut pending.file_diff);
+        }
+        match files {
+            FileDiffLoadedFiles::Changed { old_file, new_file } => {
+                state.deletion_file = Some(old_file.clone());
+                state.addition_file = Some(new_file.clone());
             }
-            if let Some(pending) = state.pending_data.as_mut() {
-                swap(&mut pending.file_diff);
-            }
-            // `setHydratedState(files)`: `clearRenderCache` has no cache to clear.
-            match files {
-                FileDiffLoadedFiles::Changed { old_file, new_file } => {
-                    state.deletion_file = Some(old_file.clone());
-                    state.addition_file = Some(new_file.clone());
-                }
-                FileDiffLoadedFiles::PureRenamed { new_file } => {
-                    state.deletion_file = None;
-                    state.addition_file = Some(new_file.clone());
-                }
+            FileDiffLoadedFiles::PureRenamed { new_file } => {
+                state.deletion_file = None;
+                state.addition_file = Some(new_file.clone());
             }
         }
-        hydrated
     }
 }

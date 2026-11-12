@@ -36,6 +36,7 @@ use pierre_diffs::components::file_diff::DefaultFileDiffHooks;
 use pierre_diffs::components::file_diff::FileDiff;
 use pierre_diffs::components::file_diff::FileDiffOptions;
 use pierre_diffs::components::file_diff::FileDiffRenderProps;
+use pierre_diffs::components::virtualized_file_diff::advanced::VirtualizerKind;
 use pierre_diffs::components::virtualized_file_diff::instance::VirtualizedFileDiff;
 use pierre_diffs::components::virtualizer::InstanceRef;
 use pierre_diffs::components::virtualizer::Root;
@@ -440,7 +441,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             queue,
             highlighter,
             options,
-            Rc::clone(&virtualizer),
+            VirtualizerKind::Simple(Rc::clone(&virtualizer)),
             metrics,
             None,
         );
