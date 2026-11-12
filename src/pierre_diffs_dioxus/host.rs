@@ -238,18 +238,6 @@ impl DioxusHost {
         self.registrations.borrow().visible.contains(&node)
     }
 
-    #[cfg(test)]
-    pub(crate) fn geometry_total_for_probe(&self) -> f64 {
-        let geometry = self.geometry.borrow();
-        let document = &self.document;
-        let shadow = document.shadow_root(self.container).unwrap();
-        document
-            .child_nodes(shadow)
-            .into_iter()
-            .map(|child| geometry.height(document, child))
-            .sum()
-    }
-
     pub(crate) fn wants_scroll(&self, node: NodeKey) -> bool {
         self.registrations.borrow().scroll.contains_key(&node)
     }
@@ -399,7 +387,6 @@ impl DioxusHost {
         left: Option<f64>,
         behavior: dioxus::html::ScrollBehavior,
     ) {
-        instr(&format!("SPAWN_SCROLL vertical={} left={left:?}", match vertical { Vertical::Keep => "keep".to_owned(), Vertical::By(d) => format!("by {d}"), Vertical::To(t) => format!("to {t}") }));
         let mounted = self.mounted_of(node);
         let host = self
             .weak_self
@@ -641,7 +628,6 @@ impl VirtualizerHost for DioxusHost {
     }
 
     fn element_scroll_to(&self, element: &NodeKey, top: f64, behavior: PierreScrollBehavior) {
-        instr(&format!("SCROLL trigger=scroll_to top={top}"));
         let left = self.geometry.borrow().scroll(*element).left;
         self.geometry.borrow_mut().set_scroll_top(*element, top);
         self.spawn_scroll(
@@ -656,9 +642,6 @@ impl VirtualizerHost for DioxusHost {
     /// and move the cached position by the delta at once so reads before the task finishes
     /// already see where the scroller is going.
     fn element_scroll_by(&self, element: &NodeKey, scroll_offset: f64) {
-        thread_local!(static N: Cell<usize> = const { Cell::new(0) });
-        let n = N.with(|n| { n.set(n.get() + 1); n.get() });
-        instr(&format!("SCROLL #{n} trigger=scroll_fix delta={scroll_offset}"));
         let top = self.geometry.borrow().scroll(*element).top;
         self.geometry
             .borrow_mut()
@@ -733,14 +716,4 @@ impl ScrollbarGutterHost for DioxusHost {
     fn measure_probe(&self, _probe: &hast::Element) -> f64 {
         unreachable!("an unconnected host is never measured")
     }
-}
-
-pub(crate) fn instr(line: &str) {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/diffhost-instr.log")
-        .unwrap();
-    writeln!(file, "{line}").unwrap();
 }
