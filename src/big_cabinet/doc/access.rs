@@ -260,6 +260,9 @@ impl DocsService {
         if !caller.rights.contains(Rights::NARROW) || !request.rights.is_subset_of(caller.rights) {
             return Err(DocsError::Denied);
         }
+        // The scope is client-supplied and the Identity path hands it to the access policy
+        // without a per-document `authorize`, so its ids are checked once here.
+        request.scope.ensure_doc_ids()?;
         let dependencies = match &caller.authority {
             DomainAuthority::Identity(actor) => self
                 .access

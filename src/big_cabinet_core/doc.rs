@@ -254,6 +254,12 @@ pub enum DocsError {
     },
     #[error("a command id is 1..=256 bytes")]
     InvalidCommand,
+    /// A document id arrived in a request that is not the 32 bytes every document id is. Ids are
+    /// variable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so
+    /// only a 32-byte one can name a document; refusing here keeps the width from ever reaching
+    /// the repository, where it is an invariant.
+    #[error("{doc_id} is not a document id: a document id is 32 bytes wide")]
+    InvalidDocId { doc_id: DocId },
     #[error("command {command} is still in flight; retry once it resolves")]
     CommandInFlight { command: CommandId },
     #[error("command {command} was already used for a different request")]
@@ -309,6 +315,19 @@ pub enum DocsError {
     UnrelatedHistory,
 }
 
+impl DocsError {
+    /// Refuse `doc_id` unless it is the 32 bytes a document id is. Call this where an id enters
+    /// from a request, before it reaches anything that derives the document's key from it.
+    pub fn ensure_doc_id(doc_id: &DocId) -> Result<(), Self> {
+        doc_id
+            .to_bytes32()
+            .map(drop)
+            .map_err(|_| Self::InvalidDocId {
+                doc_id: doc_id.clone(),
+            })
+    }
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -317,6 +336,17 @@ pub struct DocScope {
     pub write: BTreeSet<DocId>,
     pub create: BTreeSet<String>,
     pub drawers: BTreeMap<DocId, DrawerAccess>,
+}
+
+impl DocScope {
+    /// Refuse a scope that names a document or drawer whose id is not a document id.
+    pub fn ensure_doc_ids(&self) -> Result<(), DocsError> {
+        self.read
+            .iter()
+            .chain(&self.write)
+            .chain(self.drawers.keys())
+            .try_for_each(DocsError::ensure_doc_id)
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
