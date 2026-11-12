@@ -29,6 +29,8 @@ For token or Tailwind work, also inspect:
 
 For native build or visual verification, also read `.agents/skills/dayframe-native-dev-loop/SKILL.md`.
 
+For any component that holds state, handles gestures, or writes signals from a task, also read `.agents/skills/dayframe-signal-idioms/SKILL.md`: Dioxus signals are borrowed at run time, and that skill is how the resulting crashes are made structurally impossible.
+
 ## Source-of-truth rules
 
 - Authored token JSON is canonical. Generated CSS and bundled Tailwind output are derived artifacts and MUST NOT be hand-edited.
