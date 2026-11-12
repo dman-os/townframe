@@ -4,6 +4,7 @@
 # exposed_external_crates: []
 
 impl Default for intxt_core::generic::Intxt
+impl From < Included > for intxt_core::client::AddedToIntxt
 pub const intxt_core::cartridge::AUTHORITY: & str
 pub const intxt_core::cartridge::HANDLER_ARTIFACT: & str
 pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 8]
@@ -22,14 +23,20 @@ pub enum intxt_core::work::ToolStatus { # [serde (rename = "pending")] Pending, 
 pub enum intxt_core::work::Vcs { # [serde (rename = "git")] Git, # [serde (rename = "jj")] Jj, # [datum (other)] Unknown (String) }
 pub impl intxt_core::capture::Batch::fn is_empty (& self) -> bool
 pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
+pub impl intxt_core::client::Caller < H >::async fn add_part (& self , intxt : & DrawerId , part : & DatumReference ,) -> Result < Included , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn doc_capability (& self , scope : DocScope) -> Result < CapId , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn include (& self , intxt : & DrawerId , mut set : BTreeMap < DatumKey , Value > , entries : & [DatumKey] ,) -> Result < Vec < Included > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Value) , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn read_datums (& self , doc : & DocId , keys : Option < BTreeSet < DatumKey > > ,) -> Result < (Vec < ChangeHash > , BTreeMap < DatumKey , DatumRead >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn record_observations (& self , drawer : & DrawerId , machine : & ActorUrl , batch : & Batch ,) -> Result < RecordedIds , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId) -> Result < () , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn command (& self , step : & str , content : & impl Serialize) -> Result < CommandId , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn new (transport : H , context : RequestContext , capability : Option < & str > , command_base : String ,) -> Self
 pub intxt_core::cartridge::fn cartridge (handler : Artifact) -> Cartridge
 pub intxt_core::cartridge::fn handler_artifact (wasm : & [u8]) -> Artifact
+pub intxt_core::client::fn key (tag : & str , slot : & str) -> Result < DatumKey , IntxtError >
 pub intxt_core::client::fn to_value (value : & impl Serialize) -> Value
 pub intxt_core::fn declarations () -> Universe
 pub mod intxt_core::annotation
@@ -62,6 +69,7 @@ pub struct intxt_core::capture::WorktreeBatch  { identity: WorktreeIdentity, doc
 pub struct intxt_core::capture::WorktreeDocs  { worktree: Option < String >, clone: Option < String >, repo: Option < String >, extra: Extra }
 pub struct intxt_core::capture::WorktreeIdentity  { root: String, clone_path: String, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String >, extra: Extra }
 pub struct intxt_core::client::Caller< H >  {  }
+pub struct intxt_core::client::Included  { entry: DatumReference, added: bool }
 pub struct intxt_core::generic::Body  { order: Vec < DatumReference >, extra: Extra }
 pub struct intxt_core::generic::Intxt  { empty: Option < bool >, extra: Extra }
 pub struct intxt_core::generic::Note  { mime: String, content: String, extra: Extra }
@@ -76,11 +84,14 @@ pub struct intxt_core::work::CommitFile  { path: String, status: FileStatus, old
 pub struct intxt_core::work::File  { worktree: DatumReference, blob: Option < DatumReference >, extra: Extra }
 pub struct intxt_core::work::GitClone  { repo: Option < DatumReference >, machine: ActorUrl, path: String, vcs: Vec < Vcs >, extra: Extra }
 pub struct intxt_core::work::GitCommit  { parents: Vec < String >, change_id: Option < String >, author: GitIdent, committer: GitIdent, message: String, files: Vec < CommitFile >, extra: Extra }
+pub struct intxt_core::work::GitCommitEntry  { tip: String, base: Option < String >, pack: DatumReference, extra: Extra }
 pub struct intxt_core::work::GitIdent  { name: String, email: String, at: Timestamp, extra: Extra }
 pub struct intxt_core::work::GitObservation  { head: Option < String >, reference: Option < String >, from: Option < String >, to: Option < String >, reflog: Option < String >, extra: Extra }
 pub struct intxt_core::work::GitRef  { target: String, base: Option < String >, extra: Extra }
+pub struct intxt_core::work::GitRefEntry  { reference: DatumReference, base: Option < String >, extra: Extra }
 pub struct intxt_core::work::GitRepo  { roots: Vec < String >, remotes: Vec < String >, extra: Extra }
 pub struct intxt_core::work::JjChange  { commits: Vec < String >, extra: Extra }
+pub struct intxt_core::work::JjChangeEntry  { pack: DatumReference, extra: Extra }
 pub struct intxt_core::work::JjObservation  { operation: String, change: Option < String >, extra: Extra }
 pub struct intxt_core::work::JjOperation  { parents: Vec < String >, description: String, at: Timestamp, heads: Vec < String >, bookmarks: BTreeMap < String , String >, extra: Extra }
 pub struct intxt_core::work::Message  { id: String, seq: u64, at: Timestamp, kind: MessageKind, text: String, extra: Extra }

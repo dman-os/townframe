@@ -29,6 +29,7 @@ big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
 intxt_capture.workspace = true
 intxt_core = { workspace = true, features = ["cartridge", "client"] }
+short_ids.workspace = true
 
 #
 # cli

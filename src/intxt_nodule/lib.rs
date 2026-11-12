@@ -22,15 +22,10 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
-use big_cabinet_core::drawer::DrawerAccess;
-use big_cabinet_core::drawer::protocol::AddDoc;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::DrawerScope;
-use big_cabinet_core::drawer::protocol::ListDocDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
-use big_cabinet_core::reference::DatumReference;
-use big_cabinet_core::reference::ReferenceDocId;
 use intxt_core::client::Caller;
 use intxt_core::client::to_value;
 use intxt_core::generic;
@@ -39,7 +34,6 @@ use intxt_core::methods::AddedToIntxt;
 use intxt_core::methods::CreateIntxt;
 use intxt_core::methods::IntxtCreated;
 use intxt_core::methods::IntxtError;
-use intxt_core::work;
 use method_core::ContextError;
 use method_core::Method;
 use serde_json::Value;
@@ -161,134 +155,11 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
 }
 
 impl big_ndk::Handler<AddToIntxt> for Intxt {
-    /// Writes the entry for the part and appends it to the body in one write, based on the heads
-    /// the body was read at, so two writers adding different parts both land in the body's list;
-    /// then enters the part's document in the intxt's drawer at Read. The entry's slot is the
-    /// part's own identity (ADR 040: the worktree's UUID, the repository datum's slot, the
-    /// harness's session id), so two writers adding the same part write one entry.
-    ///
-    /// The drawer the part's document is lent from is the first, ordered by drawer id, that the
-    /// caller reaches it through at Read or above, other than the intxt's own: the drawers
-    /// protocol does not say which of them are the node's local ones, so none is preferred.
+    /// `Caller::add_part`: writes the entry for the part and appends it to the body in one write,
+    /// then enters the part's document in the intxt's drawer at Read.
     async fn call(&self, cx: &big_ndk::Cx, input: AddToIntxt) -> Result<AddedToIntxt, IntxtError> {
-        let caller = caller(cx)?;
         let AddToIntxt { intxt, part } = input;
-        let ReferenceDocId::Concrete(part_doc) = part.document() else {
-            return Err(IntxtError::Invalid(
-                "a part is named by its document id, not `self`".to_owned(),
-            ));
-        };
-        let (_, part_value) = caller.read(part_doc, part.key()).await?;
-        let tag = part.key().tag().to_string();
-        let malformed = |error: serde_json::Error| {
-            IntxtError::Invalid(format!("{part} is not a valid `{tag}`: {error}"))
-        };
-        let (entry_key, entry) = if tag == work::Worktree::ID {
-            let worktree: work::Worktree = serde_json::from_value(part_value).map_err(malformed)?;
-            datum(
-                to_value(&work::WorktreeEntry {
-                    worktree: part.clone(),
-                    extra: Default::default(),
-                }),
-                work::WorktreeEntry::ID,
-                &worktree.id,
-            )
-        } else if tag == work::GitRepo::ID {
-            datum(
-                to_value(&work::RepoEntry {
-                    repo: part.clone(),
-                    extra: Default::default(),
-                }),
-                work::RepoEntry::ID,
-                // A fork and its upstream share a root commit, so the entry is keyed by the
-                // repository's document, not by the `gitRepo` slot (ADR 040 §8).
-                &part_doc.to_string(),
-            )
-        } else if tag == work::AgentSession::ID {
-            let session: work::AgentSession =
-                serde_json::from_value(part_value).map_err(malformed)?;
-            datum(
-                to_value(&work::SessionEntry {
-                    session: part.clone(),
-                    extra: Default::default(),
-                }),
-                work::SessionEntry::ID,
-                &session.session_id,
-            )
-        } else {
-            return Err(IntxtError::Invalid(format!(
-                "`{tag}` is not a part an intxt includes: name a worktree, gitRepo or agentSession datum"
-            )));
-        };
-
-        let body_key = DatumKey::new(generic::Body::ID, b"main").expect("`main` is a valid slot");
-        let (body_heads, body_value) = caller.read(&intxt, &body_key).await?;
-        let mut body: generic::Body = serde_json::from_value(body_value)
-            .map_err(|error| IntxtError::Invalid(format!("{intxt} has no valid body: {error}")))?;
-        let entry_ref = DatumReference::new(ReferenceDocId::SelfDoc, entry_key.clone());
-        if !body.order.contains(&entry_ref) {
-            body.order.push(entry_ref.clone());
-        }
-        let descriptor = caller
-            .doc_capability(DocScope {
-                write: [intxt.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
-        let set: BTreeMap<DatumKey, Value> = [
-            (entry_key, entry),
-            datum(to_value(&body), generic::Body::ID, "main"),
-        ]
-        .into();
-        caller
-            .call(WriteDatums {
-                capability: descriptor,
-                command: Some(caller.command("write-entry", &(&set, &body_heads))?),
-                doc_id: intxt.clone(),
-                mode: WriteMode::AtHeads { heads: body_heads },
-                set,
-                remove: Default::default(),
-            })
-            .await?;
-
-        let from = caller
-            .call(ListDocDrawers {
-                doc_id: part_doc.clone(),
-            })
-            .await?
-            .drawers
-            .into_iter()
-            .find(|drawer| drawer.access >= DrawerAccess::Read && drawer.drawer_id != intxt)
-            .ok_or_else(|| IntxtError::NotReachable(part_doc.clone()))?
-            .drawer_id;
-        let drawers = caller
-            .call(MintDrawerCapability {
-                scope: DrawerScope {
-                    drawers: [
-                        (intxt.clone(), DrawerAccess::Write),
-                        (from, DrawerAccess::Read),
-                    ]
-                    .into(),
-                    create: false,
-                },
-                rights: Rights::USE,
-                subject: None,
-            })
-            .await?
-            .capability_id;
-        caller
-            .call(AddDoc {
-                capability: drawers,
-                reach: drawers,
-                command: caller.command("add-doc", &(&intxt, part_doc))?,
-                drawer_id: intxt.clone(),
-                doc_id: part_doc.clone(),
-                access: DrawerAccess::Read,
-            })
-            .await?;
-        Ok(AddedToIntxt {
-            entry: DatumReference::new(ReferenceDocId::Concrete(intxt), entry_ref.key().clone()),
-        })
+        Ok(caller(cx)?.add_part(&intxt, &part).await?.into())
     }
 }
 

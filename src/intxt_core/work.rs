@@ -551,3 +551,58 @@ pub struct SessionEntry {
     #[serde(flatten)]
     pub extra: Extra,
 }
+
+/// An intxt names commits (`gitCommitEntry/<tip sha>`): everything reachable from `tip` and not
+/// from `base`, resolved when it was named and never re-evaluated (a range read later would
+/// answer differently). Adding the same tip again is the same entry.
+///
+/// The objects the commits need travel in `pack` (ADR 040 §4): a thin pack against `base` when
+/// there is one, a full pack otherwise.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitCommitEntry {
+    /// The commit key `org.example.intxt.work.gitCommit/<sha>` of the newest commit named.
+    /// A plain string until the cabinet resolves `#keyRef` (ADR 035 §2.9), when it becomes one:
+    /// resolved by key and verified against the sha.
+    pub tip: String,
+    /// The commit key of the commit the recipient is assumed to hold: the merge base of the
+    /// range. None when the range reaches the root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    /// The pack's `org.example.daybook.blob` datum in the intxt's own descriptor document.
+    pub pack: DatumReference,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// An intxt names a jj change (`jjChangeEntry/<change id>`) and follows it through its rewrites:
+/// every commit the change has had is in the intxt, the latest is its current form. The pack
+/// holds every commit of the change's evolution.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct JjChangeEntry {
+    /// The pack's `org.example.daybook.blob` datum in the intxt's own descriptor document.
+    pub pack: DatumReference,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// An intxt tracks a ref as one clone saw it (`gitRefEntry/<clone uuid>/<ref name>`, keyed like
+/// the `gitRef` it follows). Tracking the same name on a second machine is a second entry:
+/// clones are never merged (ADR 040 §8).
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GitRefEntry {
+    /// The clone's `gitRef` datum.
+    #[serde(rename = "ref")]
+    pub reference: DatumReference,
+    /// The commit key of what a review of the ref compares against; as `GitCommitEntry::base`,
+    /// a plain string until `#keyRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}

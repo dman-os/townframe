@@ -381,6 +381,68 @@ fn observe_worktrees(
     Ok((worktrees, batches, uncaused_tool_calls))
 }
 
+/// What capture holds for one worktree on this machine: the documents it recorded the worktree
+/// in and how many ops it has recorded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordedWorktree {
+    pub docs: WorktreeDocs,
+    /// The sequence number of the next op, which is the number of ops recorded.
+    pub ops: u64,
+}
+
+/// What capture recorded for the worktree `identity` names, from its stored state; empty for a
+/// worktree no hook has observed. The state is written atomically, so no lock is taken.
+pub fn recorded_worktree(identity: &Identity) -> Result<RecordedWorktree, Error> {
+    let host: WorktreeHost = load(&identity.git_dir.join("intxt/state.json"))?;
+    Ok(RecordedWorktree {
+        docs: host.docs,
+        ops: host.next_seq,
+    })
+}
+
+/// A session capture holds state for, as `sessions_in` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedSession {
+    /// The harness's session id: the state file's name.
+    pub session_id: String,
+    /// The session's document, once the recorder created it.
+    pub doc: Option<String>,
+    /// When the session's state last changed, which is when a hook last recorded for it.
+    pub modified: std::time::SystemTime,
+}
+
+/// The sessions in `sessions_dir` (`<node dir>/intxt/sessions`) that touched the worktree rooted
+/// at `root`, the most recently recorded first.
+pub fn sessions_in(sessions_dir: &Path, root: &Path) -> Result<Vec<RecordedSession>, Error> {
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let host: SessionHost = load(&path)?;
+        if !host.worktrees.contains(root) {
+            continue;
+        }
+        sessions.push(RecordedSession {
+            session_id: path
+                .file_stem()
+                .expect("a path with an extension has a stem")
+                .to_string_lossy()
+                .into_owned(),
+            doc: host.doc,
+            modified: std::fs::metadata(&path)?.modified()?,
+        });
+    }
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.modified));
+    Ok(sessions)
+}
+
 /// Observe for `hook`. `session_path` is the session's state file; its lock is `<path>.lock`.
 pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
     let mut lock_path: OsString = session_path.as_os_str().to_owned();
