@@ -30,6 +30,7 @@ use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleMethodGrants;
+use method_core::Method;
 use service_utils_rs::ClientError;
 use service_utils_rs::TraceContext;
 use std::time::Duration;
@@ -108,8 +109,10 @@ fn procedure(nsid: &str) -> Value {
 /// relays to). The requests are optional: the nodule runs before its grant, and the tests
 /// exercise what the grant then permits.
 pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> Cartridge {
-    let mut nodule = Nodule {
-        requires: calls
+    cartridge_requiring(
+        spec,
+        bytes,
+        calls
             .iter()
             .map(|nsid| {
                 let mut request = Request::new(nsid, nsid);
@@ -117,6 +120,14 @@ pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> Cartridg
                 request
             })
             .collect(),
+    )
+}
+
+/// [`cartridge`] with the nodule's `requires` given as they are, so a test can make a request
+/// required.
+fn cartridge_requiring(spec: &Spec, bytes: &[u8], requires: Vec<Request>) -> Cartridge {
+    let mut nodule = Nodule {
+        requires,
         ..Default::default()
     };
     let operations = [spec.echo(), spec.relay(), spec.absent()];
@@ -684,4 +695,67 @@ async fn a_cartridge_published_on_one_node_is_installed_and_invoked_on_another()
 async fn a_cartridge_published_on_one_node_is_installed_by_an_admin_member_of_its_drawer() {
     install_a_cartridge_published_on_another_node(big_cabinet_core::drawer::DrawerAccess::Admin)
         .await;
+}
+
+/// A nodule whose required requests are built-in docs and drawers methods is `Ready` again after
+/// a restart, and serves. The Boot reconcile of the nodule service resolves requests against the
+/// router's claims, so the node's own providers must be registered before it runs.
+#[tokio::test]
+async fn a_nodule_requiring_built_in_methods_is_ready_after_a_restart() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let boot = async || {
+        let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+        let bindings = Bindings::in_directory(&runtime, directory.path(), None)
+            .await
+            .unwrap();
+        let mut cfg = config(Arc::clone(&secrets), bindings.sql, bindings.repo);
+        cfg.blob_storage = bindings.blobs;
+        BigNode::boot(cfg).await.unwrap()
+    };
+    let spec = caller();
+    let required = [
+        CreateDoc::XRPC.nsid,
+        big_cabinet_core::drawer::protocol::CreateDrawer::XRPC.nsid,
+    ];
+
+    let (node, stop) = boot().await;
+    put(&node, &bytes).await;
+    admit(
+        &node,
+        cartridge_requiring(
+            &spec,
+            &bytes,
+            required
+                .iter()
+                .map(|nsid| Request::new(*nsid, *nsid))
+                .collect(),
+        ),
+    )
+    .await;
+    set_operations(
+        &node,
+        &spec,
+        DispatchScope {
+            operations: required.iter().map(|nsid| (*nsid).to_owned()).collect(),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        set_enabled(&node, &spec, true).await.readiness,
+        Readiness::Ready
+    );
+    shutdown(node, stop).await;
+
+    let (node, stop) = boot().await;
+    assert_eq!(record(&node, &spec).await.readiness, Readiness::Ready);
+    assert_eq!(
+        invoke(&node, &spec.echo(), json!({ "n": 1 }), Default::default())
+            .await
+            .unwrap()["input"],
+        json!({ "n": 1 })
+    );
+    shutdown(node, stop).await;
 }
