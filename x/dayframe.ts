@@ -17,6 +17,13 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
   web         build and serve dayframe_web (--build: build only)
   showcase    run the design showcase (dayframe_showcase) in a webview (Wry)
                 --native         the Blitz renderer instead
+  showcase-web  serve the design showcase for the browser (Dioxus web, wasm-release) on
+                127.0.0.1:PORT, to compare its diff code in Firefox against Wry
+                --port <n>       default 8765
+                the lab's PR #84 view fetches pr84.diff from beside the page: it is copied
+                from DAYFRAME_LAB_DIFF or /tmp/pr84.diff into the gitignored
+                src/dayframe_showcase/public/ at serve time. Start choices are URL
+                parameters: ?tab=diffs&diffs_view=pr84, ?kit=nav
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
   test        x/check-dayframe.ts, then the dayframe_web Playwright e2e
                 --no-e2e         skip the browser part
@@ -78,6 +85,29 @@ switch (command) {
       flag("--native") ? "native" : "webview",
     ).env(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {});
     break;
+  case "showcase-web": {
+    const portFlag = rest.indexOf("--port");
+    const port = portFlag >= 0 ? rest[portFlag + 1] : "8765";
+    if (!port) throw new Error("--port needs a number");
+    const diff = $.path(Deno.env.get("DAYFRAME_LAB_DIFF") ?? "/tmp/pr84.diff");
+    const served = root.join("src/dayframe_showcase/public");
+    await Deno.mkdir(served.toString(), { recursive: true });
+    if (await diff.exists()) {
+      await diff.copyFile(served.join("pr84.diff"));
+    } else {
+      console.warn(
+        `${diff} is missing: the PR #84 view will say how to produce it`,
+      );
+    }
+    // Isolated feature resolution: workspace unification would pull the desktop renderer into
+    // the wasm32 build (CONTRIBUTING.md, `resolver.feature-unification`).
+    await $`deno run --allow-all ${
+      root.join("x/dx.ts")
+    } serve --web -p dayframe_showcase --no-default-features --features web --profile wasm-release --addr 127.0.0.1 --port ${port} --open false --interactive false --hot-reload false`
+      .cwd(root)
+      .env({ CARGO_RESOLVER_FEATURE_UNIFICATION: "selected" });
+    break;
+  }
   case "packages":
     await prepareDayframePackages({ testFixtures: true });
     break;

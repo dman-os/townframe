@@ -4342,15 +4342,22 @@ dependencies = [
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
  "clay_dioxus_kit",
+ "console_error_panic_hook",
  "dioxus",
  "dioxus-native",
  "dioxus-ssr",
+ "gloo-timers 0.3.0",
+ "js-sys",
  "pierre_diffs_dioxus",
  "review_mock",
  "serde",
  "serde_json",
  "tokio",
  "ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
-//! The "PR #84" view: a real, 599-file, 78k-line unified git diff. It is read from disk once for
-//! the process (not per render, not per mount), split into per-file patches by their
+//! The "PR #84" view: a real, 599-file, 78k-line unified git diff. It is read once for the
+//! process (not per render, not per mount; from disk on desktop, fetched as a static asset next
+//! to the page in the browser, which cannot read `/tmp`), split into per-file patches by their
 //! `diff --git` boundaries, and listed by path and size. Only the selected file is parsed and
 //! rendered, through the virtualized `FileDiffView`: the port exposes the parse of a single
 //! patch (`DiffInput::from_patch`), so the multi-file text is split here and each file parsed
@@ -16,13 +17,19 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::OnceLock;
 use std::time::Duration;
-use std::time::Instant;
 
 use super::Segmented;
 use review_mock::DiffOptions;
+use web_time::Instant;
 
 /// Where the diff comes from unless `DAYFRAME_LAB_DIFF` says otherwise.
+#[cfg(not(target_arch = "wasm32"))]
 const DEFAULT_PATH: &str = "/tmp/pr84.diff";
+
+/// Where the page fetches the diff from: `x/dayframe.ts showcase-web` copies it beside the page at
+/// serve time, so it is never in git (3.6 MB).
+#[cfg(target_arch = "wasm32")]
+const FETCH_URL: &str = "pr84.diff";
 
 /// How to produce the file when it is missing.
 const HOW_TO_PRODUCE: &str =
@@ -63,18 +70,55 @@ impl PrDiff {
 }
 
 /// The diff, loaded on first use: `Err` is the message for the operator, because a missing file
-/// is an input the lab's user controls.
+/// is an input the lab's user controls. Set once (the load is awaited, so no `get_or_init`).
 static PR_DIFF: OnceLock<Result<PrDiff, String>> = OnceLock::new();
 
-fn load() -> Result<PrDiff, String> {
+/// The diff text and where it was read from.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_text() -> Result<(String, String), String> {
     let path = std::env::var("DAYFRAME_LAB_DIFF").unwrap_or_else(|_| DEFAULT_PATH.to_owned());
-    let started = Instant::now();
     let text = std::fs::read_to_string(&path).map_err(|error| {
         format!("Could not read {path}: {error}. Produce it with `{HOW_TO_PRODUCE}`, or point DAYFRAME_LAB_DIFF at another unified git diff.")
     })?;
+    Ok((path, text))
+}
+
+/// The diff text and where it was fetched from.
+#[cfg(target_arch = "wasm32")]
+async fn read_text() -> Result<(String, String), String> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_futures::JsFuture;
+
+    let unavailable = |why: String| {
+        format!("Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/dayframe.ts showcase-web`, which copies it beside the page.")
+    };
+    let window = web_sys::window().expect("the lab runs in a window");
+    let response = JsFuture::from(window.fetch_with_str(FETCH_URL))
+        .await
+        .map_err(|error| unavailable(format!("{error:?}")))?
+        .dyn_into::<web_sys::Response>()
+        .expect("fetch resolves to a Response");
+    if !response.ok() {
+        return Err(unavailable(format!("HTTP {}", response.status())));
+    }
+    let text = JsFuture::from(
+        response
+            .text()
+            .map_err(|error| unavailable(format!("{error:?}")))?,
+    )
+    .await
+    .map_err(|error| unavailable(format!("{error:?}")))?
+    .as_string()
+    .expect("a response's text is a string");
+    Ok((FETCH_URL.to_owned(), text))
+}
+
+async fn load() -> Result<PrDiff, String> {
+    let started = Instant::now();
+    let (source, text) = read_text().await?;
     let files = split_files(&text);
     if files.is_empty() {
-        return Err(format!("{path} holds no `diff --git` file diffs."));
+        return Err(format!("{source} holds no `diff --git` file diffs."));
     }
     Ok(PrDiff {
         text,
@@ -151,9 +195,15 @@ fn parsed(diff: &PrDiff, index: usize) -> (Result<DiffInput, String>, Duration) 
 pub fn PrView(options: DiffOptions, virtualized: Virtualization) -> Element {
     // Loaded off the render path, once for the process; the resource resolves immediately on a
     // later mount.
-    let loaded = use_resource(|| async { PR_DIFF.get_or_init(load) });
+    let loaded = use_resource(|| async {
+        if let Some(diff) = PR_DIFF.get() {
+            return diff;
+        }
+        let diff = load().await;
+        PR_DIFF.get_or_init(|| diff)
+    });
     let Some(diff) = *loaded.read() else {
-        return rsx! { p { class: "text-sm text-text-muted", "Reading the diff..." } };
+        return rsx! { p { class: "text-sm text-text-muted", "Loading the diff..." } };
     };
     match diff {
         Ok(diff) => rsx! { PrFiles { diff, options, virtualized } },
@@ -195,7 +245,7 @@ fn PrFiles(diff: &'static PrDiff, options: DiffOptions, virtualized: Virtualizat
     rsx! {
         div { class: "flex flex-col gap-3",
             p { class: "text-sm text-text-muted",
-                "{diff.files.len()} files, +{total_added} -{total_removed}. Read and split in {diff.load.as_secs_f64() * 1000.0:.0} ms. {file.path} parsed in {parse.as_secs_f64() * 1000.0:.1} ms (0 when cached)."
+                "{diff.files.len()} files, +{total_added} -{total_removed}. Loaded and split in {diff.load.as_secs_f64() * 1000.0:.0} ms. {file.path} parsed in {parse.as_secs_f64() * 1000.0:.1} ms (0 when cached)."
             }
             div { class: "flex flex-wrap items-center gap-3",
                 button {

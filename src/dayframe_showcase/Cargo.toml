@@ -11,22 +11,45 @@ pierre_diffs_dioxus = { workspace = true }
 review_mock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# `Instant` on both targets: `std::time::Instant::now` panics on wasm32-unknown-unknown.
+web-time = "1.1.0"
+
+# Blitz and its renderer stack are the desktop binary's: the browser build has no native window.
+dioxus-native = { workspace = true, optional = true }
+anyrender = { version = "0.13.0", optional = true }
+anyrender_vello = { version = "0.14.0", optional = true }
+anyrender_vello_cpu = { version = "0.17.0", optional = true }
+anyrender_vello_hybrid = { version = "0.10.0", optional = true }
+
 # The virtualized diff's timers: `FileDiffView` takes a sleep function, and desktop's runtime has
 # a time driver.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["time"] }
 
-dioxus-native.workspace = true
-anyrender = { version = "0.13.0" }
-anyrender_vello = { version = "0.14.0" }
-anyrender_vello_cpu = { version = "0.17.0" }
-anyrender_vello_hybrid = { version = "0.10.0" }
+# The browser's: its timer is `setTimeout`, the PR diff is a `fetch`, the window's width and the
+# lab's start-up choices come from `window`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["Window", "Response", "Location", "UrlSearchParams", "Event", "EventTarget"] }
+console_error_panic_hook = "0.1.7"
 
 [dev-dependencies]
 dioxus-ssr = { workspace = true }
 
 [features]
 default = ["desktop"]
-desktop = ["dioxus/desktop"]
+desktop = [
+    "dioxus/desktop",
+    "dep:dioxus-native",
+    "dep:anyrender",
+    "dep:anyrender_vello",
+    "dep:anyrender_vello_cpu",
+    "dep:anyrender_vello_hybrid",
+]
+web = ["dioxus/web"]
 
 [[bin]]
 name = "dayframe_showcase"

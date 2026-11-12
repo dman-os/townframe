@@ -53,12 +53,12 @@ impl DiffsView {
 /// (`pr84`) opens that view, so a screenshot run needs no click.
 #[component]
 pub fn DiffsFoundation() -> Element {
-    let mut view = use_signal(
-        || match std::env::var("DAYFRAME_LAB_DIFFS_VIEW").as_deref() {
-            Ok("pr84") => DiffsView::Pr84,
+    let mut view = use_signal(|| {
+        match crate::lab_setting("DAYFRAME_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
+            Some("pr84") => DiffsView::Pr84,
             _ => DiffsView::Specimens,
-        },
-    );
+        }
+    });
     // The options start where the specimens always ran: hover on both parts, selection and the
     // gutter utility on, unchanged lines expanded.
     let mut options = use_signal(|| DiffOptions {
@@ -72,6 +72,12 @@ pub fn DiffsFoundation() -> Element {
     // render would re-render (and remount) a virtualized diff each time.
     let virtualized = use_hook(|| Virtualization {
         height: "32rem".to_owned(),
+        // The page has no tokio runtime: its timer is `setTimeout`.
+        #[cfg(target_arch = "wasm32")]
+        sleep: PtrEq::new(Rc::new(|duration| {
+            Box::pin(gloo_timers::future::sleep(duration))
+        })),
+        #[cfg(not(target_arch = "wasm32"))]
         sleep: PtrEq::new(Rc::new(|duration| Box::pin(tokio::time::sleep(duration)))),
     });
     let current = options();
