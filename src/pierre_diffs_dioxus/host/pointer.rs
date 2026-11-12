@@ -164,6 +164,11 @@ fn measure_frame(host: &Rc<DioxusHost>) {
                 // A renderer without client rects has no hit-test, which the manager is built to
                 // handle.
                 Err(MountedError::NotSupported) => return,
+                // An element that went away while the rects were in flight (a row re-rendered
+                // between its `onmounted` and this drag) answers `OperationFailed`, as Dioxus
+                // does for a detached node, and a micro's host answers it for an element it no
+                // longer holds. That race is ordinary; the drag follows the event path.
+                Err(MountedError::OperationFailed(_)) => return,
                 Err(error) => panic!("the platform measures a mounted element: {error}"),
             };
             if *node == pre {

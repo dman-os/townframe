@@ -1006,6 +1006,59 @@ fn sdk_colliding_element_ids_dispatch_only_to_the_selected_target_scope() {
     dom.unmount_target(2);
 }
 
+/// P8 evidence: moving a node to another parent (what the diff view's gutter utility does when
+/// the hovered row changes) crosses the guest wire as a `Remove` of the old element and a
+/// `CreateElement` of a new one, never as a move. Dioxus has no cross-parent move, so this is the
+/// same in the theme lab; what differs in a micro is that the host renderer sees two element
+/// lifetimes (see the `clay_surface` tree test on a node moved across parents). A move within one
+/// batch keeps the remove and the create together, so the host never presents the gap between
+/// them.
+#[test]
+fn sdk_moving_a_node_to_another_parent_is_one_batch_of_remove_and_create() {
+    use crate::presentation::Mutation as Wire;
+    use dioxus::prelude::*;
+
+    fn app() -> Element {
+        let mut hovered = use_signal(|| 0_usize);
+        rsx! {
+            button { onclick: move |_| hovered.set((hovered() + 1) % 3), "next" }
+            for row in 0..3_usize {
+                div { key: "{row}",
+                    span { "number" }
+                    if hovered() == row {
+                        i { class: "utility" }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut dom = crate::GuestDom::new(app);
+    let target = dom.mount_target(1);
+    dom.render().unwrap();
+    let initial = dom.edits.get_mut(&target).unwrap().take();
+    let creates = |batch: &[Wire]| {
+        batch
+            .iter()
+            .filter(|edit| matches!(edit, Wire::CreateElement((tag, _)) if tag == "i"))
+            .count()
+    };
+    assert_eq!(creates(&initial), 1);
+    sdk_click(&mut dom, target);
+    let moved = dom.edits.get_mut(&target).unwrap().take();
+    // One batch holds both halves of the move: the utility leaves row 0 and a new one is created
+    // in row 1.
+    assert_eq!(creates(&moved), 1, "{moved:?}");
+    assert_eq!(
+        moved
+            .iter()
+            .filter(|edit| matches!(edit, Wire::Remove))
+            .count(),
+        1,
+        "{moved:?}"
+    );
+}
+
 #[test]
 fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     use dioxus::prelude::*;

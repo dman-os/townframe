@@ -99,7 +99,8 @@ interface presentation {
 
     resource surface {
         apply: func(edits: list<mutation>) -> result<u64, presentation-error>;
-        /// Send `command` to `element`, which must have announced `mounted` on this surface.
+        /// Send `command` to `element`. An element that has not announced `mounted` on this surface
+        /// (or no longer holds) is answered with an error `element-reply`, not a refusal.
         element-command: func(element: node-id, command: element-command) -> result<_, presentation-error>;
         retain: func() -> result<surface, presentation-error>;
         identity: func() -> u64;

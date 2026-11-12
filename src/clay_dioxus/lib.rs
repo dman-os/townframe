@@ -36,7 +36,11 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
-type CommandReceiver = mpsc::UnboundedReceiver<(NodeId, ElementCommand)>;
+/// One queued element command: its target, the command, and whether the target was announced
+/// mounted when the guest sent it. A command for an element that was not is answered with an error
+/// reply by the drain, in order with the others, instead of being run.
+type QueuedCommand = (NodeId, ElementCommand, bool);
+type CommandReceiver = mpsc::UnboundedReceiver<QueuedCommand>;
 
 /// Handle through which a mounted surface commits wire batches into its retained [`SurfaceTree`].
 ///
@@ -54,7 +58,7 @@ pub struct SurfaceWriter {
     revisions: watch::Sender<u64>,
     /// Element commands the guest sent, drained by the mounted surface on the renderer's thread
     /// (the host handles they act on are not `Send`).
-    commands: mpsc::UnboundedSender<(NodeId, ElementCommand)>,
+    commands: mpsc::UnboundedSender<QueuedCommand>,
     command_receiver: Arc<Mutex<Option<CommandReceiver>>>,
     /// Guest element ids whose `mounted` event the renderer has delivered: the only elements a
     /// command may address. Entries leave when the tree retires the element (see
@@ -170,15 +174,14 @@ impl clay_surface::SurfaceSink<ComponentRef> for SurfaceWriter {
         if !self.is_live() {
             return Err(PresentationError::Revoked);
         }
-        if !self.mounted.lock().unwrap().contains(&element) {
-            return Err(PresentationError::InvalidBatch(format!(
-                "element {element} has not announced mounted"
-            )));
-        }
+        // An element that has not announced `mounted` (yet, or any more: a row re-rendered
+        // between its `onmounted` and a later read) is an ordinary race on the guest's side, not
+        // a malformed batch. The command is still queued so its error reply arrives in order.
+        let announced = self.mounted.lock().unwrap().contains(&element);
         // The channel is the ordering mechanism: commands are drained in send order by one task
         // (see `MountedSurface`), which is what makes them apply in issue order.
         self.commands
-            .send((element, command))
+            .send((element, command, announced))
             .map_err(|_| PresentationError::Revoked)
     }
 }
@@ -550,9 +553,13 @@ fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) 
                 .take()
                 .expect("one command drain per surface writer");
             let dispatch = session.handler();
-            while let Some((element, command)) = commands.recv().await {
-                // A command can race the removal of its element, which dropped the handle.
-                let outcome = match handles.get(element) {
+            while let Some((element, command, announced)) = commands.recv().await {
+                // A command can race the removal of its element, which dropped the handle, or
+                // address one that never announced `mounted`: an error reply, not a fault. The
+                // handle is not consulted for an unannounced id, which Dioxus may since have
+                // recycled for another element.
+                let handle = announced.then(|| handles.get(element)).flatten();
+                let outcome = match handle {
                     Some(mounted) => run_element_action(&mounted, command.action).await,
                     None => Err("element is not mounted".to_owned()),
                 };

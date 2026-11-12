@@ -723,18 +723,18 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
     );
     let mut host_tree = SurfaceTree::new();
     dom.rebuild(&mut host_tree);
-    // A command for an element that has not announced `mounted` is refused at the boundary.
+    // A command for an element that has not announced `mounted` is accepted and answered with an
+    // error reply below (request 1), not refused as a malformed batch.
     let writer = slot.borrow().clone().unwrap();
-    assert!(matches!(
-        writer.element_command(
+    writer
+        .element_command(
             1,
             ElementCommand {
                 request: 1,
                 action: ElementAction::SetFocus(true),
-            }
-        ),
-        Err(PresentationError::InvalidBatch(_))
-    ));
+            },
+        )
+        .unwrap();
     let element = host_tree.listener_id("div", "mounted").unwrap();
     dom.runtime().handle_event_for_target(
         RenderTargetId::ROOT,
@@ -747,7 +747,7 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
         ),
         element,
     );
-    while replies.borrow().len() < 4 {
+    while replies.borrow().len() < 5 {
         dom.wait_for_work().await;
         dom.render_immediate(&mut host_tree);
     }
@@ -756,6 +756,12 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
         &["scroll(0, 40)", "get_scroll_offset", "set_focus(true)"]
     );
     let replies = replies.borrow();
+    // The unannounced element's command was queued first and answered first, with an error.
+    assert_eq!(
+        replies[0],
+        serde_json::json!({"request": 1, "error": "element is not mounted"})
+    );
+    let replies = &replies[1..];
     // Every command is answered, in order: the ones that answer nothing with `null`.
     assert_eq!(replies[0], serde_json::json!({"request": 6, "value": null}));
     assert_eq!(
@@ -848,38 +854,27 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
         writer
             .apply(&[Mutation::PushId(row), Mutation::Remove])
             .unwrap();
-        // The tree retired the element: the mounted set is empty at once, and a command for the
-        // removed id is refused at the boundary.
+        // The tree retired the element: the mounted set is empty at once.
         assert!(writer.mounted.lock().unwrap().is_empty());
-        assert!(matches!(
-            writer.element_command(
-                row,
-                ElementCommand {
-                    request: 1,
-                    action: ElementAction::SetFocus(true)
-                }
-            ),
-            Err(PresentationError::InvalidBatch(_))
-        ));
         while host_tree.listener_id("div", "mounted").is_some() {
             dom.wait_for_work().await;
             dom.render_immediate(&mut host_tree);
         }
     }
-    // The host handles went with them: a command that raced the removals past the boundary
-    // finds no handle for any row and is answered with an error, not run on a detached node and
-    // not a panic.
+    // The host handles went with them: a command for a removed row is accepted by the sink (not a
+    // fault: the guest raced the removal) and answered with an error, not run on a detached node
+    // and not a panic. One that was queued as announced before the removal finds no handle and is
+    // answered the same way.
     for row in 1..=ROWS {
-        writer
-            .commands
-            .send((
-                row,
-                ElementCommand {
-                    request: row.into(),
-                    action: ElementAction::Read(ElementRead::ScrollOffset),
-                },
-            ))
-            .unwrap();
+        let command = ElementCommand {
+            request: row.into(),
+            action: ElementAction::Read(ElementRead::ScrollOffset),
+        };
+        if row % 2 == 0 {
+            writer.element_command(row, command).unwrap();
+        } else {
+            writer.commands.send((row, command, true)).unwrap();
+        }
     }
     while replies.borrow().len() < ROWS as usize {
         dom.wait_for_work().await;

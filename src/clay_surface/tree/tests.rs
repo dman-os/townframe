@@ -8,6 +8,53 @@ use std::rc::Rc;
 type SurfaceTree = super::SurfaceTree<()>;
 type Mutation = super::Mutation<()>;
 
+/// P8 evidence: Dioxus moves a node to another parent as `Remove` plus a new `CreateElement`,
+/// usually reusing the freed element id. The tree must treat the new element as a new node, never
+/// the old one under the same id: the renderer keys every host element by the node's generation, so a
+/// recycled id that kept its node would leave a detached element answering for the new one. The
+/// consequence for a moved gutter utility is a new host element in the new parent, which the host
+/// renderer creates fresh (it has no move across parents either).
+#[test]
+fn a_node_moved_across_parents_is_a_new_node_even_when_its_element_id_is_recycled() {
+    let mut tree = SurfaceTree::new();
+    tree.apply(&[
+        Mutation::PushId(0),
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetId(1),
+        Mutation::CreateElement(("div".into(), None)),
+        Mutation::SetId(2),
+        Mutation::AppendChildren(2),
+        Mutation::Pop,
+        Mutation::PushId(1),
+        Mutation::CreateElement(("i".into(), None)),
+        Mutation::SetId(3),
+        Mutation::AppendChildren(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.outline(), "(div(i),div)");
+    let utility = |tree: &SurfaceTree, row: usize| {
+        let rows = &tree.node(SurfaceNodeId::ROOT).children;
+        tree.node(rows[row]).children.first().copied()
+    };
+    let before = utility(&tree, 0).unwrap();
+    // One batch, as the guest sends it: remove from row 0, create under row 1 with id 3 again.
+    tree.apply(&[
+        Mutation::PushId(3),
+        Mutation::Remove,
+        Mutation::PushId(2),
+        Mutation::CreateElement(("i".into(), None)),
+        Mutation::SetId(3),
+        Mutation::AppendChildren(1),
+        Mutation::Pop,
+    ])
+    .unwrap();
+    assert_eq!(tree.outline(), "(div,div(i))");
+    let after = utility(&tree, 1).unwrap();
+    assert_ne!(before, after);
+    assert_ne!(before.1, after.1, "the render key is the generation");
+}
+
 #[test]
 fn component_slots_are_opaque_leaf_nodes_and_plain_replay_rejects_them_atomically() {
     use super::Mutation as SlotMutation;
