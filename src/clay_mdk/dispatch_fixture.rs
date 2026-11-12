@@ -151,6 +151,9 @@ impl presentation_events::Guest for Caller {
         edits.push_id(ElementId::ROOT);
         edits.create_element("section", None);
         edits.create_text(REPORT.get().expect("initialize ran before mount"));
+        // The text joins the section, the section joins the root, and the root is released:
+        // the tree this renders into checks the stack ends empty.
+        edits.append_children(1);
         edits.append_children(1);
         edits.pop();
         surface.apply(&edits.take())?;
