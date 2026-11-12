@@ -15,6 +15,7 @@
 //! The worktree lock is what makes op sequence numbers single-writer across sessions.
 
 use crate::Error;
+use crate::acp::Resume;
 use crate::acp::Window;
 use crate::git::Git;
 use crate::hook::Event;
@@ -154,8 +155,10 @@ struct PendingWorktree {
 #[must_use = "dropping a Prepared persists nothing"]
 pub struct Prepared {
     pub batch: Batch,
-    /// A hook's session state; none for an ACP session, whose recorder keeps its own in memory.
+    /// A hook's session state; none for an ACP window.
     session: Option<StoredSession>,
+    /// An ACP session's [`Resume`], for the windows that record session content.
+    acp: Option<StoredAcp>,
     worktrees: Vec<PendingWorktree>,
     /// The post hook's call, whose `tool_turns` entry goes with the commit.
     finished_tool: Option<String>,
@@ -165,6 +168,34 @@ struct StoredSession {
     path: PathBuf,
     host: SessionHost,
     _lock: File,
+}
+
+struct StoredAcp {
+    path: PathBuf,
+    resume: Resume,
+    _lock: File,
+}
+
+/// The state file of ACP session `session_id` in `sessions_dir`, the directory of the hook
+/// sessions' state files (`<hook session id>.json`). The name is `acp.` and the id with every
+/// byte but ASCII alphanumerics, `-` and `_` escaped as `%xx`: ACP ids are arbitrary strings, and
+/// a hook's id (checked to be those bytes only) has no `.`, so the two kinds never collide.
+pub(crate) fn acp_state_path(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    let mut name = String::from("acp.");
+    for byte in session_id.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_' {
+            name.push(byte as char);
+        } else {
+            name.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    name.push_str(".json");
+    sessions_dir.join(name)
+}
+
+/// What the host holds of ACP session `session_id`, if an earlier recording committed it.
+pub(crate) fn acp_resume(sessions_dir: &Path, session_id: &str) -> Result<Option<Resume>, Error> {
+    load(&acp_state_path(sessions_dir, session_id))
 }
 
 /// The subagent transcripts live beside the session's, in
@@ -508,6 +539,7 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
             host: session,
             _lock: session_lock,
         }),
+        acp: None,
         worktrees,
         finished_tool: cause.map(|cause| cause.tool_use_id),
     })
@@ -519,19 +551,38 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
 /// session's tool calls (or the window's) name and `known`, the roots earlier windows of the
 /// connection found ([`Prepared::worktree_roots`]).
 ///
-/// There is no hook and no state file for the session: an ACP recording lives as long as its
-/// connection. The worktrees' own state and locks are the same as a hook's, so a session
-/// recorded through both agrees on sequence numbers, and the window's calls take the hook path's
-/// shape: `Open` is a `PreToolUse` (the pre-snapshot goes in the worktree's state, keyed by the
+/// The session has a state file of its own in `sessions_dir` (see [`acp_state_path`]), a
+/// [`Resume`] that outlives the connection: the windows that record session content (`Boundary`)
+/// hold its lock, fold the batch into it and commit it with the recorder's answer, so a later
+/// connection loading the session continues it. The worktrees' own state and locks are the same
+/// as a hook's, so a session recorded through both agrees on sequence numbers, and the window's
+/// calls take the hook path's shape: `Open` is a `PreToolUse` (the pre-snapshot goes in the worktree's state, keyed by the
 /// call's id, and nothing is batched), `Close` a `PostToolUse` whose ops are caused by the call.
 /// A `Boundary` is a `Stop`: no tool is in flight, so it drops the pre-snapshots of calls that
 /// never closed.
 pub fn prepare_acp(
     session: SessionBatch,
+    sessions_dir: &Path,
     cwd: &Path,
     known: &BTreeSet<PathBuf>,
     window: &Window,
 ) -> Result<Prepared, Error> {
+    // The session's lock before the worktrees', as for a hook.
+    let acp = if matches!(window, Window::Boundary) {
+        let path = acp_state_path(sessions_dir, &session.session_id);
+        let mut lock_path: OsString = path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let session_lock = lock(Path::new(&lock_path))?;
+        let mut resume: Resume = load::<Option<Resume>>(&path)?.unwrap_or_default();
+        resume.absorb(&session);
+        Some(StoredAcp {
+            path,
+            resume,
+            _lock: session_lock,
+        })
+    } else {
+        None
+    };
     let mut candidates = known.clone();
     candidates.insert(cwd.to_owned());
     candidates.extend(
@@ -573,6 +624,7 @@ pub fn prepare_acp(
             extra: Default::default(),
         },
         session: None,
+        acp,
         worktrees,
         finished_tool: None,
     })
@@ -591,8 +643,8 @@ impl Prepared {
     /// absorb.
     pub fn commit(mut self, recorded: RecordedIds) -> Result<(), Error> {
         if let Some(stored) = &mut self.session {
-            if let Some(doc) = recorded.session {
-                stored.host.doc = Some(doc);
+            if let Some(doc) = &recorded.session {
+                stored.host.doc = Some(doc.clone());
             }
             for (agent_id, doc) in recorded.subagents {
                 stored
@@ -628,6 +680,12 @@ impl Prepared {
                 stored.host.tool_turns.remove(tool_use_id);
             }
             save(&stored.path, &stored.host)?;
+        }
+        if let Some(mut stored) = self.acp.take() {
+            if let Some(doc) = &recorded.session {
+                stored.resume.doc = Some(doc.clone());
+            }
+            save(&stored.path, &stored.resume)?;
         }
         Ok(())
     }

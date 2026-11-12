@@ -101,12 +101,12 @@ async fn pump(
 }
 
 /// Run `agent` with `input` as its stdin and its stdout copied to `output`, recording the
-/// exchange: `record` is called for each [`Emit`] and answers the session's document id once the
-/// node holds one. `stopped` is told why when recording stops, which never stops the session.
+/// exchange with `recorder`, or not at all when there is none: `record` is called for each
+/// [`Emit`] and answers the session's document id once the node holds one. `stopped` is told why when recording stops, which never stops the session.
 /// `tee_chunks` bounds the chunks pending for the recorder. Returns the agent's exit status.
 async fn proxy(
     agent: &[String],
-    thinking: bool,
+    recorder: Option<Recorder>,
     input: impl AsyncRead + Unpin,
     output: impl AsyncWrite + Unpin,
     tee_chunks: usize,
@@ -125,21 +125,11 @@ async fn proxy(
     let child_out = child.stdout.take().expect("the agent's stdout is piped");
 
     let (tee, mut teed) = channel(tee_chunks);
+    // Without a recorder nothing is teed.
+    let tee = recorder.is_some().then_some(tee);
     let overflow = Notify::new();
-    let to_agent = pump(
-        input,
-        child_in,
-        Direction::ToAgent,
-        Some(tee.clone()),
-        &overflow,
-    );
-    let from_agent = pump(
-        child_out,
-        output,
-        Direction::FromAgent,
-        Some(tee),
-        &overflow,
-    );
+    let to_agent = pump(input, child_in, Direction::ToAgent, tee.clone(), &overflow);
+    let from_agent = pump(child_out, output, Direction::FromAgent, tee, &overflow);
     let pumping = async {
         let mut to_agent = pin!(to_agent);
         let mut from_agent = pin!(from_agent);
@@ -154,10 +144,9 @@ async fn proxy(
         }
     };
     let recording = async {
-        let mut recorder = Recorder::new();
-        if thinking {
-            recorder = recorder.recording_thinking();
-        }
+        let Some(mut recorder) = recorder else {
+            return;
+        };
         let mut record_all = async |recorder: &mut Recorder, emits: Vec<Emit>| -> Res<()> {
             for emit in emits {
                 let session_id = emit.session.session_id.clone();
@@ -197,6 +186,7 @@ async fn proxy(
 struct Recording {
     client: Arc<NodeClient>,
     node_dir: PathBuf,
+    sessions_dir: PathBuf,
     known: BTreeSet<PathBuf>,
 }
 
@@ -206,6 +196,7 @@ impl Recording {
         super::require_daemon(&node_dir).await?;
         Ok(Self {
             client: lazy::node().await?,
+            sessions_dir: capture::sessions_dir(node_dir.root()),
             node_dir: node_dir.root().to_owned(),
             known: BTreeSet::new(),
         })
@@ -220,9 +211,10 @@ impl Recording {
             window,
         } = emit;
         let known = self.known.clone();
+        let sessions_dir = self.sessions_dir.clone();
         // Locks and git: blocking work, off the runtime's threads (see `capture::run`).
         let prepared = tokio::task::spawn_blocking(move || {
-            intxt_capture::host::prepare_acp(session, &cwd, &known, &window)
+            intxt_capture::host::prepare_acp(session, &sessions_dir, &cwd, &known, &window)
         })
         .await??;
         self.known
@@ -246,6 +238,25 @@ pub(crate) async fn run(agent: Vec<String>, thinking: bool) -> Res<ExitCode> {
     // The node is reached when the first batch is ready, not before: the session must start even
     // when there is no daemon.
     let mut recording: Option<Recording> = None;
+    // Intxt never fails a session's start: without the node's directory there is no state to
+    // record into, so the session runs unrecorded, as when the daemon is absent.
+    let recorder = match lazy::config().await {
+        Ok(config) => {
+            let recorder = Recorder::new(capture::sessions_dir(config.node_dir.root()));
+            Some(if thinking {
+                recorder.recording_thinking()
+            } else {
+                recorder
+            })
+        }
+        Err(error) => {
+            eprintln!(
+                "intxt record: not recording, the session is not affected: {}",
+                format!("{error:#}").replace('\n', " ")
+            );
+            None
+        }
+    };
     // `tokio::io::stdin()` reads on a blocking-pool thread that stays parked when the agent exits
     // while the client keeps our stdin open, and dropping a runtime waits for such threads. This
     // does not hang `day`: its runtime lives in a static (`lazy::rt`) that is never dropped, so
@@ -254,7 +265,7 @@ pub(crate) async fn run(agent: Vec<String>, thinking: bool) -> Res<ExitCode> {
     // way: a runtime owned and dropped here would need `std::process::exit` instead.
     let status = proxy(
         &agent,
-        thinking,
+        recorder,
         tokio::io::stdin(),
         tokio::io::stdout(),
         TEE_CHUNKS,
