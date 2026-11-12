@@ -242,15 +242,15 @@ impl Attachments {
 }
 
 impl BigNode {
-    /// Starts the attachments the config asks for and registers the built-in providers. They come
-    /// last in boot, so they stop first: nothing is served or dialed from a node whose services
+    /// Starts the attachments the config asks for and registers the late built-in providers
+    /// ([`BigNode::register_late_built_ins`]). They come last in boot, so they stop first: nothing is served or dialed from a node whose services
     /// are coming down. Each is pushed as soon as it runs, so a later one failing to start still
     /// stops the earlier ones.
     async fn attach(&mut self, attachments: Attachments, stop: &mut StopToken) -> Res<()> {
-        // The peers service is attached before the built-ins are registered because the node
-        // info provider holds its handle. Stop order is the reverse of this: the listeners go
-        // first (nothing is served from a node coming down), then the built-ins are unbound
-        // (so no call reaches the peers handle), then the peers service.
+        // The peers service is attached before the late built-ins are registered because the
+        // node info provider holds its handle. Stop order is the reverse of this: the listeners
+        // go first (nothing is served from a node coming down), then the late built-ins are
+        // unbound (so no call reaches the peers handle), then the peers service.
         if let Some(config) = attachments.peers {
             self.peers = Some(
                 attach_peers(
@@ -263,7 +263,7 @@ impl BigNode {
                 .await?,
             );
         }
-        stop.stages.push(self.register_built_ins());
+        stop.stages.push(self.register_late_built_ins());
         (self.listeners, self.unix_clients) =
             attach_listeners(self, attachments.listeners, stop).await?;
         Ok(())
@@ -399,7 +399,8 @@ impl BigNode {
                 &dispatch,
                 nodule_dispatch_authority,
                 host,
-                &blobs.service,
+                &blobs,
+                &cartridges,
                 schemas,
                 config.allow_slot_takeover,
                 config.sql,
@@ -447,46 +448,22 @@ impl BigNode {
         }
     }
 
-    /// Registers the node's own services in dispatch's router as built-in providers, under the NSIDs
-    /// their operations declare. They are reached through the same clients the composition root wired
-    /// them with, and keep checking the `Authorization` in each request themselves: dispatch admits
-    /// the caller to the NSID, it does not vouch for the call.
+    /// Registers the built-in providers that cannot exist before the node is assembled: the
+    /// nodule service (whose client boots after dispatch and its consumers) and the node info
+    /// provider (which holds the peers handle, attached after the node is built). Everything else
+    /// is registered earlier by [`register_built_ins`], before the nodule service reconciles.
     ///
-    /// A provider holds its service's client and the nodule service holds the router, so the
-    /// registrations are unbound first on stop (the returned stage runs before any service stops) to
-    /// break that cycle and to stop routing to services about to go away.
-    fn register_built_ins(&self) -> Stage {
-        let built_ins = [
-            (
-                "builtin:authority",
-                ServiceProvider::default().serve(&self.authority.client),
-            ),
-            (
-                "builtin:docs",
-                ServiceProvider::default().serve(&self.docs.client),
-            ),
-            (
-                "builtin:drawers",
-                ServiceProvider::default().serve(&self.drawers.client),
-            ),
-            (
-                "builtin:blobs",
-                ServiceProvider::default().serve(&self.blobs.client),
-            ),
-            (
-                "builtin:cartridges",
-                ServiceProvider::default().serve(&self.cartridges.client),
-            ),
-            (
-                "builtin:nodules",
-                ServiceProvider::default().serve(&self.nodules.client),
-            ),
-        ];
-        let mut provider_ids = Vec::with_capacity(built_ins.len() + 1);
-        for (provider_id, provider) in built_ins {
-            provider.register(&self.dispatch.router, provider_id);
-            provider_ids.push(provider_id);
-        }
+    /// These two stay late on purpose: no nodule can require a nodules or node method today. If
+    /// one ever does, a nodule would be held at `ProviderMissing` at boot just as the early
+    /// built-ins once were, and the fix is a reconcile-on-claims-change trigger in the nodule
+    /// service, a separate design, not moving these earlier.
+    ///
+    /// Like the early ones, they are unbound first on stop (the returned stage runs before any
+    /// service stops) to break the router-to-client cycle and to stop routing to services about
+    /// to go away.
+    fn register_late_built_ins(&self) -> Stage {
+        let provider = ServiceProvider::default().serve(&self.nodules.client);
+        provider.register(&self.dispatch.router, "builtin:nodules");
         // The node's own facts are not a hosted service: there is no client behind them, only
         // the node id and the peers handle, so the provider is registered directly.
         info::register(
@@ -496,11 +473,61 @@ impl BigNode {
             self.drawers.local().known_drawers_id,
             self.peers.clone(),
         );
-        provider_ids.push("builtin:node");
         Stage::BuiltIns {
             router: Arc::clone(&self.dispatch.router),
-            provider_ids,
+            provider_ids: vec!["builtin:nodules", "builtin:node"],
         }
+    }
+}
+
+/// Registers the node's own services that exist before the nodule service boots in dispatch's
+/// router as built-in providers, under the NSIDs their operations declare. They are reached
+/// through the same clients the composition root wired them with, and keep checking the
+/// `Authorization` in each request themselves: dispatch admits the caller to the NSID, it does
+/// not vouch for the call.
+///
+/// A provider holds its service's client and the nodule service holds the router, so the
+/// registrations are unbound on stop (the returned stage) after the nodule service stops and
+/// before the services behind them stop, to break that cycle and to stop routing to services about
+/// to go away.
+fn register_built_ins(
+    dispatch: &Dispatch,
+    authority: &Authority,
+    docs: &DocsRepo,
+    drawers: &Drawers,
+    blobs: &big_blobs::Blobs,
+    cartridges: &Cartridges,
+) -> Stage {
+    let built_ins = [
+        (
+            "builtin:authority",
+            ServiceProvider::default().serve(&authority.client),
+        ),
+        (
+            "builtin:docs",
+            ServiceProvider::default().serve(&docs.client),
+        ),
+        (
+            "builtin:drawers",
+            ServiceProvider::default().serve(&drawers.client),
+        ),
+        (
+            "builtin:blobs",
+            ServiceProvider::default().serve(&blobs.client),
+        ),
+        (
+            "builtin:cartridges",
+            ServiceProvider::default().serve(&cartridges.client),
+        ),
+    ];
+    let mut provider_ids = Vec::with_capacity(built_ins.len());
+    for (provider_id, provider) in built_ins {
+        provider.register(&dispatch.router, provider_id);
+        provider_ids.push(provider_id);
+    }
+    Stage::BuiltIns {
+        router: Arc::clone(&dispatch.router),
+        provider_ids,
     }
 }
 
@@ -713,7 +740,8 @@ async fn boot_nodules<Host, Hosting>(
     dispatch: &Dispatch,
     dispatch_authority: CapId,
     host: Host,
-    blobs: &Arc<BlobService>,
+    blobs: &big_blobs::Blobs,
+    cartridges: &Cartridges,
     schemas: Arc<SchemaRepo>,
     allow_slot_takeover: bool,
     sql: Database,
@@ -723,7 +751,18 @@ where
     Host: FnOnce(ExecutorDeps) -> Hosting + Send,
     Hosting: Future<Output = Res<HostedExecutor>> + Send,
 {
-    let (executor, executor_stop) = host(ExecutorDeps::of(blobs, &dispatch.client)).await?;
+    // The node's own providers must be in the router before the nodule service boots: its Boot
+    // reconcile resolves every nodule's requests against what the router claims, and a nodule
+    // requiring a docs or drawers method would otherwise be held at `ProviderMissing` until
+    // something else reconciles it (nothing does when built-ins appear). Pushed before the
+    // executor and nodule stages, so shutdown unbinds them only after the nodule service (their
+    // consumer, which holds the router) has stopped, and before the services behind them and
+    // dispatch stop.
+    stop.stages.push(register_built_ins(
+        dispatch, authority, docs, drawers, blobs, cartridges,
+    ));
+    let (executor, executor_stop) =
+        host(ExecutorDeps::of(&blobs.service, &dispatch.client)).await?;
     stop.stages.push(Stage::Service(executor_stop));
     let config_drawer = drawers.local().config_id.clone();
     grant_drawer_admin(drawers, drawers_actor, nodules_actor, &config_drawer).await?;
