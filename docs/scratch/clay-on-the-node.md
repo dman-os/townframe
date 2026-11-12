@@ -54,8 +54,12 @@ host embeds a webnode (ADR 038).
   own incarnation table, never from anything the guest says, as `big_nodule` does with the
   workload table.
 - Durable access is grants on the micro's actor, recorded in the cartridge's configuration document
-  (ADR 044) beside its nodule's, and re-minted into live, holder-bound capabilities when the host
-  binds the micro (ADR 037 §5). A micro with no grants can call nothing.
+  (ADR 044 §8, accepted): one datum per grant, `micro.grant/drawer:<drawerId>` → `{ access }` and
+  `micro.grant/method:<nsid or authority>` → `{}`, beside the nodule's `nodule.grant/…`; privilege
+  is refused at mint. They are re-minted into live, holder-bound capabilities when the host binds
+  the micro (ADR 037 §5), and the micro presents only its own handles (ADR 037 a1). A micro with no
+  grants can call nothing. The cartridge's settings datums are shared by its micro and nodule; the
+  micro reads and writes them, never its grants.
 - Open (cartridge-authoring.md "next design topic"): whether a cartridge's micro and nodule should
   share a cartridge-level parent actor for consent. This draft keeps the two subsystems parallel;
   a later cartridge-consent ADR can add the parent without changing the call path.
@@ -111,11 +115,17 @@ nodules and micros, but not the partial-sync collection machinery.**
   `org.example.clay.micro.manifest`, the Clay manifest as its description, the component as the
   `"component"` artifact (as the importer already assumes). A cartridge has at most one micro; its
   micro id is the cartridge id.
-- Install state for micros lives in the cartridge configuration document (ADR 044), as nodules'
-  does, with the micro's grants (§2).
-- The host lists installed cartridges (`listCartridges`, `getCartridgeVersion`, `watchCartridges`
-  for changes), takes each one's micro contribution and component, and loads it. This replaces the
-  sidecar package directory.
+- Install state is one datum per cartridge in the node config document (ADR 044 §8):
+  `org.example.daybook.cartridges.install/<cartridgeId>` → `{ cartridge: #datumPin, configDoc,
+  nodule?: { enabled }, micro?: { enabled } }`, members present iff the envelope contributes that
+  component, each enabled independently. One pin means a cartridge's micro and nodule always run
+  the same revision.
+- Management is the cartridges service's (privileged): `install`, `setEnabled { component }`,
+  `uninstall` (keeps config), `setGrant { subsystem }`, `clearConfig`.
+- The host reconciles the `micro` part of every install: `cartridges.listInstalls` and the
+  `cartridges.observeInstalls` subscription for live enable/disable, then the pinned envelope's
+  typed `MicroContribution` (its `component` artifact, `feat/cart-micros`) to load the component.
+  This replaces the sidecar package directory.
 
 ## Work, once accepted
 
