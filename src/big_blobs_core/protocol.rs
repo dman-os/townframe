@@ -2,34 +2,22 @@ use crate::BlobId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::dmeta::Bytes;
 use big_cabinet_core::dmeta::Uuid7;
+use method_core::ByteBody;
 use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-pub const MAX_READ_BYTES: u32 = 1024 * 1024;
-/// The most one [`PutBlob`] carries, counted in decoded bytes. On the wire the payload is base64
-/// inside the `$bytes` object, so it is about a third larger than this and still fits the 16 MiB
-/// body a node listener accepts.
-pub const MAX_PUT_BYTES: usize = 8 * 1024 * 1024;
+/// The most one put reads, in octets. A put streams, so this is no memory bound; it is the node's
+/// bound on what one upload may cost its store. Going over it is [`BlobsError::TooLarge`].
+pub const MAX_PUT_OCTETS: u64 = 4 * 1024 * 1024 * 1024;
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlobInfo {
     pub blob_id: BlobId,
-    pub length_octets: u64,
-}
-
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BlobRange {
-    /// The datum model's bytes object, `{"$bytes": "<base64>"}`: a JSON array of numbers is
-    /// neither compact nor a Lexicon type.
-    pub bytes: Bytes,
     pub length_octets: u64,
 }
 
@@ -42,6 +30,16 @@ pub enum BlobsError {
     Denied,
     #[error("blob is not locally available")]
     NotFound,
+    /// The item is over the node's size limit for one put (ADR 042 §6). For a batch import this is
+    /// the refusal of that item alone.
+    #[error("the item is over the {limit_octets} octet limit")]
+    TooLarge { limit_octets: u64 },
+    /// The body of a put failed while the node read it: the upload was cut off.
+    #[error("the body could not be read: {reason}")]
+    Unreadable { reason: String },
+    /// A read asked for a range that selects no octet of the blob.
+    #[error("the range selects nothing of the blob's {total_octets} octets")]
+    RangeNotSatisfiable { total_octets: u64 },
     #[error("invalid blob request: {reason}")]
     InvalidInput { reason: String },
     #[error("blob storage failed: {reason}")]
@@ -53,8 +51,6 @@ pub enum BlobsError {
 #[serde(rename_all = "camelCase")]
 pub struct PutBlob {
     pub capability: CapId,
-    /// The datum model's bytes object, `{"$bytes": "<base64>"}`.
-    pub bytes: Bytes,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -63,8 +59,6 @@ pub struct PutBlob {
 pub struct ReadBlob {
     pub capability: CapId,
     pub blob_id: BlobId,
-    pub offset: u64,
-    pub length: u32,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -112,8 +106,13 @@ pub struct MintBlobsCapability {
 }
 
 service_core_rs::service_method!(MintBlobsCapability => Capability, BlobsError, procedure("org.example.daybook.blobs.mintCapability"));
-service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"));
-service_core_rs::service_method!(ReadBlob => BlobRange, BlobsError, procedure("org.example.daybook.blobs.read"));
+// The body of a put is the raw bytes, and the id it returns is the node's own: the node hashes what
+// it reads, so a client never asserts one, and putting what the node holds is a cheap no-op that
+// returns the same `BlobInfo` (ADR 042 §6). `capability` is a parameter, on the query string over
+// HTTP.
+service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"), bytes_input);
+// A read answers the blob's raw bytes; `Range` selects part of them (`206 Partial Content`).
+service_core_rs::service_method!(ReadBlob => ByteBody, BlobsError, query("org.example.daybook.blobs.read"), bytes_output);
 /// The result of [`StatBlob`]: `info` is absent when the blob is not held locally.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

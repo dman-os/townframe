@@ -17,6 +17,9 @@ const ECHO_METHOD: XrpcMethod = XrpcMethod {
     output_schema: "EchoOutput",
     long_poll: false,
     privileged: false,
+    input_encoding: method_core::Encoding::Json,
+    output_encoding: method_core::Encoding::Json,
+    local_only: false,
 };
 
 /// Answers every HTTP/1 exchange with its own JSON request body and counts

@@ -103,6 +103,9 @@ pub fn request_context(
         crate::HttpMetadata {
             authorization: header_string(headers, AUTHORIZATION_HEADER)?,
             idempotency_key: header_string(headers, IDEMPOTENCY_KEY_HEADER)?,
+            range: header_string(headers, "range")?
+                .as_deref()
+                .and_then(method_core::ByteRange::from_header),
         },
     ))
 }

@@ -26,6 +26,7 @@ big_repo.workspace = true
 big_nodule_core.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true
+method_core.workspace = true
 secrets_rs.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
@@ -49,7 +50,6 @@ tracing.workspace = true
 [dev-dependencies]
 #
 # internal
-method_core.workspace = true
 method_lexicon.workspace = true
 big_cartridges_core = { workspace = true, features = ["test-support"] }
 

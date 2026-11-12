@@ -177,15 +177,15 @@ async fn node_info_reports_the_id_the_address_and_the_connected_peers() {
             .call_with(
                 RequestContext::root(),
                 Authorization::identity(node.authority.root).metadata(),
-                big_dispatch_core::Invoke {
-                    operation: crate::GET_NODE_INFO.to_owned(),
-                    input: json!({}),
-                    context: Default::default(),
-                },
+                big_dispatch_core::Invoke::json(
+                    crate::GET_NODE_INFO,
+                    json!({}),
+                    Default::default(),
+                ),
             )
             .await
             .unwrap();
-        serde_json::from_value(output.output).unwrap()
+        serde_json::from_value(output.body.into_json()).unwrap()
     }
 
     let before = info(&dialer).await;

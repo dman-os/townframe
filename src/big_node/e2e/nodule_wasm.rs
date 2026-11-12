@@ -6,7 +6,6 @@
 //! `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release`.
 
 use super::*;
-use big_blobs_core::PutBlob;
 use big_cabinet_core::datum::DatumMember;
 use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
@@ -30,6 +29,7 @@ use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleMethodGrants;
+use method_core::ByteBody;
 use method_core::Method;
 use service_utils_rs::ClientError;
 use service_utils_rs::TraceContext;
@@ -162,13 +162,10 @@ fn cartridge_requiring(spec: &Spec, bytes: &[u8], requires: Vec<Request>) -> Car
 
 pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
     node.blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: blobs::put_cap(node).await,
-                bytes: bytes.to_vec().into(),
-            },
+            blobs::put_cap(node).await,
+            ByteBody::from_bytes(bytes.to_vec()),
         )
         .await
         .unwrap();
@@ -204,7 +201,11 @@ pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> N
         .unwrap()
 }
 
-async fn set_operations(node: &BigNode, spec: &Spec, methods: DispatchScope) -> NoduleRecord {
+pub(super) async fn set_operations(
+    node: &BigNode,
+    spec: &Spec,
+    methods: DispatchScope,
+) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
@@ -255,14 +256,10 @@ pub(super) async fn invoke_within(
         .call_with(
             request,
             Authorization::identity(node.authority.root).metadata(),
-            Invoke {
-                operation: operation.to_owned(),
-                input,
-                context,
-            },
+            Invoke::json(operation, input, context),
         )
         .await
-        .map(|output| output.output)
+        .map(|output| output.body.into_json())
         .map_err(|error| match error {
             ClientError::Method(error) => error,
             ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -393,7 +390,7 @@ async fn own_capability(node: &BigNode, spec: &Spec) -> Option<String> {
 /// What the caller's `relay` reports having received from calling `operation` through
 /// `dispatch.local`: the upstream status and body. `authority` overrides the capability the
 /// guest presents, which is otherwise the one it was told.
-async fn relay(
+pub(super) async fn relay(
     node: &BigNode,
     from: &Spec,
     operation: &str,
