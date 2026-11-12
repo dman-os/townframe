@@ -4338,9 +4338,6 @@ name = "dayframe_showcase"
 version = "0.1.0"
 dependencies = [
  "anyrender 0.13.0",
- "anyrender_vello",
- "anyrender_vello_cpu 0.17.0",
- "anyrender_vello_hybrid 0.10.0",
  "clay_dioxus_kit",
  "console_error_panic_hook",
  "dioxus",
