@@ -4,5 +4,10 @@ dependency_reason = "Service hosting and lifecycle management implement service-
 allowed_dependencies = ["method_core", "service_client_core_rs", "service_client_native_rs", "service_core_rs"]
 allow_external_api_types = false
 
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
 [builds.native]
 features = ["iroh-http"]

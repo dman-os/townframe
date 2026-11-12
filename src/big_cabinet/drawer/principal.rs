@@ -23,14 +23,12 @@ impl Core {
                 .ok_or(DrawersError::UnknownPeer(*peer)),
             Principal::Group { group_id: group } => {
                 ed25519_dalek::VerifyingKey::from_bytes(&group.0)
-                    .map_err(|_| keyhive_error(format!("{group} is not a valid Ed25519 point")))?;
+                    .map_err(|_| DrawersError::InvalidKey(group.to_string()))?;
                 self.big_repo
                     .get_group_by_id(group.0)
                     .await
                     .map(Into::into)
-                    .ok_or_else(|| {
-                        DrawersError::Keyhive(format!("group {group} is not in keyhive"))
-                    })
+                    .ok_or(DrawersError::UnknownPrincipal(*group))
             }
         }
     }

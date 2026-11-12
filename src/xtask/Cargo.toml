@@ -11,13 +11,16 @@ name = "xtask"
 path = "main.rs"
 
 [dependencies]
-blake3.workspace = true
-clap = { workspace = true, features = ["derive", "env"] }
-
-dotenv-flow.workspace = true
-
+#
+# internal
 utils_rs = { workspace = true, default-features = false }
 sqlite_rs.workspace = true
+
+#
+# misc
+blake3.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+dotenv-flow.workspace = true
 rusqlite = { version = "0.32", features = ["column_decltype"] }
 tempfile.workspace = true
 

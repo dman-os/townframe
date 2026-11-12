@@ -1,6 +1,6 @@
 # ADR 042: Byte bodies and local-only methods
 
-**Status:** Proposed (manager, 2026-11-11), from the operator's review of `org.example.daybook.blobs.*` relayed by intxt. To be reviewed with the operator and intxt.
+**Status:** Accepted (operator, 2026-11-12), except the upload hold's grace period, which the operator is holding. Proposed by the manager 2026-11-11 from the operator's review of `org.example.daybook.blobs.*`.
 
 **Related:**
 - [ADR 026: drawer-native blobs](026-drawer-native-blobs.md)
@@ -35,7 +35,7 @@ A method with a byte body still has JSON-shaped **parameters**: the Lexicon `par
 How each transport carries it:
 - **HTTP `/xrpc`:** the raw request or response body, with `Content-Type`. Reads honour `Range` (`206 Partial Content`).
   This includes the node's Unix socket that `day` uses: it serves the same `/xrpc` over HTTP (`service_utils_rs::xrpc::unix`; the client is `day_cli/client.rs`).
-- **In-process clients:** the same XRPC shape as HTTP, not a bespoke irpc streaming protocol (operator, 2026-11-11: align streaming with atproto's XRPC). A byte body is an `http_body` stream on an `http::Request`/`Response` routed through the same `/xrpc` handler, so in-process and socket callers share one code path. Bodies are never a `Vec`, so a blob larger than memory never exists as one buffer. Subscriptions keep atproto's model (an event stream; WebSocket on HTTP). How much of today's irpc in-process path this replaces is part of implementing this section.
+- **In-process clients:** the same semantics as HTTP, over irpc (operator, 2026-11-12, revising 2026-11-11). A byte body is a stream the receiver pulls chunks from, never a value that lands whole on its stack or heap. Over HTTP it's the request/response body; in process it's an irpc streaming channel of `Bytes` chunks, which keeps irpc's in-process efficiency (no serialization, no HTTP framing). Both sides see the same pull-based `Body::Bytes` stream from dispatch, so a provider can't tell which transport carried the call. Bodies are never a `Vec`, so a blob larger than memory never exists as one buffer. Subscriptions keep atproto's model (an event stream; WebSocket on HTTP).
 - **Wasm guests:** wasi:http body streams. This is what lifts the 4 MiB message cap for bodies; the cap stays for JSON messages. Until the guest side lands, a nodule reads blob ranges under 4 MiB.
 
 Ranged reads keep iroh-blobs' semantics: any byte range of a local blob, verified against its BLAKE3 tree where the reader asks for verification (remote readers). A local reader asking for plain bytes gets plain bytes.
@@ -96,7 +96,7 @@ The `{"$bytes"}` datum form stays for small byte values *inside datums*, where i
 
 - `big_dispatch_core::Invoke` and `InvokeOutput` break: `input: Value` becomes `body: Body`. Every provider, the router, the HTTP surface and the guest provider change with it. Per AGENTS.md this is a clean interface break, not a shim.
 - `method_core` gains body encodings and a local-only flag in `XrpcMethod`; `service_method!` grows a form for byte-bodied methods.
-- The XRPC HTTP surface (TCP and the Unix socket) needs streaming request and response bodies, and in-process callers move onto the same XRPC request/response shape instead of irpc streaming channels.
+- The XRPC HTTP surface (TCP and the Unix socket) and the irpc in-process path both carry the pull-based byte stream: hyper bodies on one, irpc streaming channels on the other.
 - The node serves a second Unix socket for descriptor calls, with the same lifecycle as the XRPC socket.
 - `InvocationContext` gains an origin set only by edge transports.
 - intxt's capture stops base64-encoding files and loses its 8 MiB skip.
@@ -110,5 +110,5 @@ Settled in review with intxt (2026-11-11):
 - No path import.
 
 Open for the operator:
-1. The upload hold's grace period. Capture is satisfied with hours, because it puts right before it records.
+1. The upload hold's grace period: held by the operator (2026-11-12, "hard to say"). Until it's decided, an unreferenced upload keeps its hold, as today; capture is satisfied with hours.
 2. Order of work: the dispatch `Body` change first (it has no users besides blobs at first), then the blob methods, then the guest streams.

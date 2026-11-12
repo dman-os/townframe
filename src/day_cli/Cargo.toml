@@ -11,9 +11,9 @@ name = "day"
 path = "main.rs"
 
 [dependencies]
-method_core.workspace = true
 #
 # internal
+method_core.workspace = true
 utils_rs.workspace = true
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
@@ -24,9 +24,9 @@ big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
 big_repo.workspace = true
-big_blobs_core = { path = "../big_blobs_core" }
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core" }
+big_blobs_core.workspace = true
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest"] }
 intxt_capture = { path = "../intxt_capture" }
 intxt_core = { path = "../intxt_core", features = ["cartridge", "client"] }
 
@@ -67,7 +67,12 @@ directories.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+#
+# internal
+secrets_rs = { workspace = true, features = ["test-support"] }
+
+#
+# misc
 trycmd = "1.2.1"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-secrets_rs = { workspace = true, features = ["test-support"] }

@@ -15,10 +15,13 @@ default = []
 iroh-http = ["dep:iroh", "service_client_native_rs/iroh-http"]
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
 service_core_rs.workspace = true
 service_client_core_rs.workspace = true
 service_client_native_rs.workspace = true
+
 #
 # async
 futures.workspace = true

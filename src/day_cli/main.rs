@@ -188,6 +188,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     match cli.command {
         StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Node { command } => cmds::node::run(command).await,
+        StaticCommands::Carts { command } => cmds::carts::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
         StaticCommands::Exec {
@@ -239,6 +240,12 @@ enum StaticCommands {
     Node {
         #[clap(subcommand)]
         command: cmds::node::NodeCommands,
+    },
+    /// Installed cartridges
+    #[clap(visible_alias = "cart")]
+    Carts {
+        #[clap(subcommand)]
+        command: cmds::carts::CartsCommands,
     },
     /// Manage the peers the node's daemon dials at start
     #[clap(visible_alias = "peer")]

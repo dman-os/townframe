@@ -15,9 +15,14 @@ crate-type = ["rlib"]
 schemars = ["dep:schemars", "big_cabinet_core/schemars", "method_core/schemars"]
 
 [dependencies]
+#
+# internal
 method_core.workspace = true
-big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
-service_core_rs = { path = "../service_core_rs" }
+big_cabinet_core.workspace = true
+service_core_rs.workspace = true
+
+#
+# misc
 # `declare_service_protocol!` expands to `irpc` derives that name both crates directly.
 irpc.workspace = true
 tracing.workspace = true

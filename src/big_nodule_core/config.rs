@@ -6,7 +6,7 @@
 //! - [`NoduleInstall`][]: `org.example.daybook.nodule.install/<cartridgeId>`
 //! - [`NoduleSettings`][]: `org.example.daybook.nodule.settings/<cartridgeId>`
 //! - [`NoduleGrants`][]: `org.example.daybook.nodule.grants/<cartridgeId>`
-//! - [`NoduleSubstitution`][]: `org.example.daybook.nodule.substitution/<cartridgeId>`, present only
+//! - [`NoduleDevTakeover`][]: `org.example.daybook.nodule.dev_takeover/<cartridgeId>`, present only
 //!   while another installed cartridge fills the slot
 //!
 //! Beside them, each installed nodule's handler artifact is referenced by a
@@ -40,6 +40,7 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
 use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Route;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -190,18 +191,35 @@ impl NoduleGrants {
     }
 }
 
-/// `org.example.daybook.nodule.substitution/<cartridgeId>`: the node-local substitution "references to
-/// this cartridge are satisfied by `by`" (ADR 028 §3), as Cargo's `[patch]` does it. `by`'s code and
-/// manifest are installed *as* this cartridge: every other slot state (actor, grants, operation caps,
-/// initializer done-ness, the resolution lockfile, dispatch registrations) stays keyed by this
-/// cartridge id. Absence means the slot runs its own install; deleting the datum reinstalls it.
-#[macros::datum(authority = Nodule::ID, name = "substitution")]
+/// `org.example.daybook.nodule.devTakeover/<cartridgeId>`: the dev hook that runs the installed
+/// cartridge `by` *as* this cartridge, to test a dev build against real data (ADR 045 §5). `by`'s
+/// code and manifest take the slot over, and every other slot state (actor, drawer grants, method
+/// grants narrowed by `substituted_grants`, operation caps, initializer done-ness, the resolution
+/// lockfile, dispatch registrations) stays keyed by this cartridge id, so the dev build holds the
+/// original's data and actor. Only `setNoduleDevTakeover` writes it, and that is refused unless
+/// the node's `node.json` sets `dev.allow_slot_takeover`. Absence means the slot runs its own
+/// install; deleting the datum reinstalls it.
+#[macros::datum(authority = Nodule::ID, name = "devTakeover")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NoduleSubstitution {
+pub struct NoduleDevTakeover {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub by: CartridgeId,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// `org.example.daybook.dispatch.route/<pattern>`: the node-local route of an exact NSID or an
+/// authority prefix to the provider `provider` (ADR 045). Dispatch's router applies it; the
+/// nodule service holds the datum only until the node has a per-node store of its own, so this
+/// datum is not keyed by a cartridge and has no slot in a [`NoduleEntry`].
+#[macros::datum(authority = "org.example.daybook.dispatch", name = "route")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MethodRoute {
+    pub provider: String,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -215,7 +233,8 @@ pub fn config_universe() -> big_cabinet_core::datum::Universe {
         Declaration::of::<NoduleInstall>().expect("NoduleInstall declaration is valid"),
         Declaration::of::<NoduleSettings>().expect("NoduleSettings declaration is valid"),
         Declaration::of::<NoduleGrants>().expect("NoduleGrants declaration is valid"),
-        Declaration::of::<NoduleSubstitution>().expect("NoduleSubstitution declaration is valid"),
+        Declaration::of::<NoduleDevTakeover>().expect("NoduleDevTakeover declaration is valid"),
+        Declaration::of::<MethodRoute>().expect("MethodRoute declaration is valid"),
     ])
 }
 
@@ -234,9 +253,31 @@ pub fn grants_key(cartridge_id: &CartridgeId) -> DatumKey {
         .expect("a CartridgeId is a valid datum key slot")
 }
 
-pub fn substitution_key(cartridge_id: &CartridgeId) -> DatumKey {
-    DatumKey::from_text(NoduleSubstitution::ID, cartridge_id.to_string())
+pub fn dev_takeover_key(cartridge_id: &CartridgeId) -> DatumKey {
+    DatumKey::from_text(NoduleDevTakeover::ID, cartridge_id.to_string())
         .expect("a CartridgeId is a valid datum key slot")
+}
+
+pub fn route_key(pattern: &str) -> DatumKey {
+    DatumKey::from_text(MethodRoute::ID, pattern)
+        .expect("a validated route pattern is a valid datum key slot")
+}
+
+/// Why `pattern` cannot be a route pattern: dotted segments of letters, digits and hyphens, so
+/// it is an exact NSID or an authority prefix and never `*`.
+fn pattern_error(pattern: &str) -> Option<&'static str> {
+    (!pattern.split('.').all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }))
+    .then_some("a pattern is dotted segments of letters, digits and hyphens")
+}
+
+/// Why `pattern` routed to `provider` is not a valid route.
+fn route_error(pattern: &str, provider: &str) -> Option<&'static str> {
+    pattern_error(pattern).or_else(|| provider.is_empty().then_some("the provider id is empty"))
 }
 
 /// The slot prefix that namespaces the [`Blob`] datums this projection owns inside the node config
@@ -339,7 +380,7 @@ pub struct NoduleEntry {
     pub install: DatumSlot<NoduleInstall>,
     pub settings: DatumSlot<NoduleSettings>,
     pub grants: DatumSlot<NoduleGrants>,
-    pub substitution: DatumSlot<NoduleSubstitution>,
+    pub dev_takeover: DatumSlot<NoduleDevTakeover>,
     pub artifacts: BTreeMap<String, DatumSlot<Blob>>,
 }
 
@@ -348,7 +389,7 @@ impl NoduleEntry {
         self.install.is_absent()
             && self.settings.is_absent()
             && self.grants.is_absent()
-            && self.substitution.is_absent()
+            && self.dev_takeover.is_absent()
             && self.artifacts.is_empty()
     }
 }
@@ -495,6 +536,8 @@ impl AdmissionCache {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NoduleConfig {
     entries: BTreeMap<CartridgeId, NoduleEntry>,
+    /// The route datums by pattern: node-wide, so they belong to no cartridge's entry.
+    routes: BTreeMap<String, DatumSlot<MethodRoute>>,
     carried_keys: BTreeMap<DatumKey, DatumRead>,
 }
 
@@ -507,9 +550,11 @@ impl From<InventoryError> for StoreError {
 impl DatumStore for NoduleConfig {
     fn owns(key: &DatumKey) -> bool {
         match key.tag().as_str() {
-            NoduleInstall::ID | NoduleSettings::ID | NoduleGrants::ID | NoduleSubstitution::ID => {
-                true
-            }
+            NoduleInstall::ID
+            | NoduleSettings::ID
+            | NoduleGrants::ID
+            | NoduleDevTakeover::ID
+            | MethodRoute::ID => true,
             Blob::ID => key
                 .slot_bytes()
                 .starts_with(ARTIFACT_SLOT_PREFIX.as_bytes()),
@@ -536,6 +581,19 @@ impl DatumStore for NoduleConfig {
                     .insert(artifact, DatumSlot::from_read(datum_read));
                 continue;
             }
+            if key.tag().as_str() == MethodRoute::ID {
+                match std::str::from_utf8(key.slot_bytes()) {
+                    Ok(pattern) => {
+                        config
+                            .routes
+                            .insert(pattern.to_owned(), DatumSlot::from_read(datum_read));
+                    }
+                    Err(_) => {
+                        config.carried_keys.insert(key.clone(), datum_read.clone());
+                    }
+                }
+                continue;
+            }
             let Some(cartridge_id) = std::str::from_utf8(key.slot_bytes())
                 .ok()
                 .and_then(|slot| slot.parse::<CartridgeId>().ok())
@@ -548,7 +606,7 @@ impl DatumStore for NoduleConfig {
                 NoduleInstall::ID => entry.install = DatumSlot::from_read(datum_read),
                 NoduleSettings::ID => entry.settings = DatumSlot::from_read(datum_read),
                 NoduleGrants::ID => entry.grants = DatumSlot::from_read(datum_read),
-                NoduleSubstitution::ID => entry.substitution = DatumSlot::from_read(datum_read),
+                NoduleDevTakeover::ID => entry.dev_takeover = DatumSlot::from_read(datum_read),
                 _ => unreachable!("checked by NoduleConfig::owns"),
             }
         }
@@ -583,9 +641,9 @@ impl DatumStore for NoduleConfig {
                 &mut patch,
             )?;
             diff_slot(
-                substitution_key(cartridge_id),
-                &prev.substitution,
-                &next.substitution,
+                dev_takeover_key(cartridge_id),
+                &prev.dev_takeover,
+                &next.dev_takeover,
                 &mut patch,
             )?;
             let absent = DatumSlot::Absent;
@@ -599,6 +657,16 @@ impl DatumStore for NoduleConfig {
                     &mut patch,
                 )?;
             }
+        }
+        let absent = DatumSlot::Absent;
+        let patterns: BTreeSet<&String> = before.routes.keys().chain(after.routes.keys()).collect();
+        for pattern in patterns {
+            diff_slot(
+                route_key(pattern),
+                before.routes.get(pattern).unwrap_or(&absent),
+                after.routes.get(pattern).unwrap_or(&absent),
+                &mut patch,
+            )?;
         }
         for key in before.carried_keys.keys() {
             if !after.carried_keys.contains_key(key) {
@@ -902,7 +970,7 @@ impl NoduleConfig {
         let (cartridge, nodule, admitted, artifacts, _, (config, configured)) =
             self.validate_installed(cartridge_id)?;
         if enabled && let Some(slot) = self.slot_filled_by(cartridge_id) {
-            return Err(InventoryError::InvalidSubstitution {
+            return Err(InventoryError::InvalidDevTakeover {
                 id: slot,
                 reason: format!(
                     "`{cartridge_id}` fills it, so it cannot also be enabled on its own"
@@ -935,37 +1003,122 @@ impl NoduleConfig {
         ))
     }
 
-    /// The slot `cartridge_id`'s code fills by substitution, if any.
+    /// Makes every stored dev takeover refuse its slot when the slot is resolved, as a datum that
+    /// does not decode does: a node that did not opt into takeovers (ADR 045 §5) must not run
+    /// another cartridge as a slot because a datum arrived in its config document some other way.
+    /// A view only: it never reaches `diff`, and `set_dev_takeover(.., None)` clears the datum.
+    pub fn refuse_dev_takeover(&mut self) {
+        for entry in self.entries.values_mut() {
+            if let DatumSlot::Accepted { raw, .. } = &entry.dev_takeover {
+                entry.dev_takeover = DatumSlot::Invalid {
+                    raw: raw.clone(),
+                    reason: "dev slot takeover is off on this node".to_owned(),
+                };
+            }
+        }
+    }
+
+    /// The routes in force, and what could not be read. The config document is written by any
+    /// client holding a capability on it, so its route datums are external input: one that does
+    /// not decode, or names an empty provider, becomes `Route::Invalid`, which refuses exactly the
+    /// calls and requests its pattern covers while every other route and nodule carries on. A
+    /// datum whose pattern is itself unusable (not an NSID prefix, or a key that is not UTF-8)
+    /// covers nothing knowable, so it is left out of the table and described in the second
+    /// element for the caller to report. `set_route` with no provider clears either kind.
+    pub fn routes(&self) -> (BTreeMap<String, Route>, Vec<String>) {
+        let mut table = BTreeMap::new();
+        let mut unreadable: Vec<String> = self
+            .carried_keys
+            .keys()
+            .filter(|key| key.tag().as_str() == MethodRoute::ID)
+            .map(|key| format!("route datum with a key that is not UTF-8: {key}"))
+            .collect();
+        for (pattern, slot) in &self.routes {
+            let route = match slot {
+                DatumSlot::Absent => continue,
+                DatumSlot::Accepted { value, .. } => match route_error(pattern, &value.provider) {
+                    None => Route::Provider(value.provider.clone()),
+                    Some(reason) => Route::Invalid(format!("route `{pattern}`: {reason}")),
+                },
+                DatumSlot::Invalid { reason, .. } => {
+                    Route::Invalid(format!("route `{pattern}` is damaged: {reason}"))
+                }
+            };
+            if let Some(reason) = pattern_error(pattern) {
+                unreadable.push(format!("route datum `{pattern}`: {reason}"));
+            } else {
+                table.insert(pattern.clone(), route);
+            }
+        }
+        (table, unreadable)
+    }
+
+    /// Sets or, with `provider` absent, clears the route of `pattern`: an exact NSID or an
+    /// authority prefix, dotted segments of letters, digits and hyphens. Whether the provider
+    /// exists is not checked: a route may be set before its target registers, and callers are
+    /// told `RouteTargetMissing` until it does.
+    pub fn set_route(
+        &mut self,
+        pattern: &str,
+        provider: Option<String>,
+    ) -> std::result::Result<(), InventoryError> {
+        let Some(provider) = provider else {
+            self.routes.remove(pattern);
+            return Ok(());
+        };
+        if let Some(reason) = route_error(pattern, &provider) {
+            return Err(InventoryError::InvalidRoute {
+                pattern: pattern.to_owned(),
+                reason: reason.to_owned(),
+            });
+        }
+        let extra = match self.routes.get(pattern) {
+            Some(DatumSlot::Accepted { value, .. }) => value.extra.clone(),
+            _ => Extra::default(),
+        };
+        self.routes.insert(
+            pattern.to_owned(),
+            DatumSlot::Accepted {
+                value: MethodRoute { provider, extra },
+                raw: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// The slot `cartridge_id`'s code fills under a dev takeover, if any.
     fn slot_filled_by(&self, cartridge_id: &CartridgeId) -> Option<CartridgeId> {
         self.entries.iter().find_map(|(slot, entry)| {
             entry
-                .substitution
+                .dev_takeover
                 .accepted()
-                .is_some_and(|substitution| &substitution.by == cartridge_id)
+                .is_some_and(|takeover| &takeover.by == cartridge_id)
                 .then(|| slot.clone())
         })
     }
 
-    /// Sets or, with `by` absent, clears the substitution of slot `cartridge_id`: from now on `by`'s
+    /// Sets or, with `by` absent, clears the dev takeover of slot `cartridge_id`: from now on `by`'s
     /// code and manifest run in the slot, which keeps everything else it has (actor, settings,
     /// grants, enablement, initializer done-ness, lockfile, dispatch registrations). Clearing
-    /// reinstalls the slot's own envelope, which was never touched.
+    /// reinstalls the slot's own envelope, which was never touched. Whether the node allows
+    /// takeovers is the caller's gate, not checked here.
     ///
-    /// Grants never widen silently (ADR 028 §3). A different publisher's manifest asks for a
-    /// different set of things, and a granted authority prefix would otherwise cover whatever it
-    /// newly asks for. So the slot's method grants are narrowed here, once, to exactly the
-    /// operations the filler requests *identically* (binding, contract and access) to a request
-    /// of the slot's own install: those keep their grants, and every other request the filler
-    /// makes is ungranted (a required one holds the nodule at `NeedsConfiguration`) until the
-    /// operator grants it. Clearing does not restore the wider grants; grants only ever narrow
-    /// here.
-    pub fn set_substitution(
+    /// Drawer grants are inherited in full, since testing a dev build against the real data is
+    /// the hook's purpose. Method grants never widen silently (ADR 028 §3): a different
+    /// publisher's manifest asks for a different set of things, and a granted authority prefix
+    /// would otherwise cover whatever it newly asks for. So what reaches the filler is narrowed
+    /// when the slot is resolved (`substituted_grants`) to exactly the operations it requests
+    /// *identically* (binding, contract and access) to a request of the slot's own install, and
+    /// every other request it makes is ungranted (a required one holds the nodule at
+    /// `NeedsConfiguration`) until the operator grants it. The stored grants are untouched, so
+    /// clearing the takeover restores exactly what was granted.
+    pub fn set_dev_takeover(
         &mut self,
         cache: &AdmissionCache,
         cartridge_id: &CartridgeId,
         by: Option<CartridgeId>,
     ) -> Result<(), InventoryError> {
-        let invalid = |reason: String| InventoryError::InvalidSubstitution {
+        let invalid = |reason: String| InventoryError::InvalidDevTakeover {
             id: cartridge_id.clone(),
             reason,
         };
@@ -974,11 +1127,11 @@ impl NoduleConfig {
             self.entries
                 .get_mut(cartridge_id)
                 .expect("verified installed")
-                .substitution = DatumSlot::Absent;
+                .dev_takeover = DatumSlot::Absent;
             return Ok(());
         };
         if &by == cartridge_id {
-            return Err(invalid("a cartridge cannot substitute for itself".into()));
+            return Err(invalid("a cartridge cannot take over itself".into()));
         }
         // Reuses `resolve`'s checks, so what is refused here is exactly what would be refused
         // when reconciling.
@@ -997,17 +1150,17 @@ impl NoduleConfig {
             )));
         }
         // The slot's stored grants are left as configured: what reaches the filler is narrowed
-        // when the slot is resolved (`resolve_entry`), so clearing the substitution restores them.
+        // when the slot is resolved (`resolve_entry`), so clearing the takeover restores them.
         let entry = self
             .entries
             .get_mut(cartridge_id)
             .expect("verified installed");
-        let extra = match &entry.substitution {
+        let extra = match &entry.dev_takeover {
             DatumSlot::Accepted { value, .. } => value.extra.clone(),
             _ => Extra::default(),
         };
-        entry.substitution = DatumSlot::Accepted {
-            value: NoduleSubstitution { by, extra },
+        entry.dev_takeover = DatumSlot::Accepted {
+            value: NoduleDevTakeover { by, extra },
             raw: None,
         };
         if self.entries[cartridge_id]
@@ -1264,8 +1417,8 @@ impl NoduleConfig {
 }
 
 /// The slots whose enabled authority equals or nests with another enabled slot's. The authority
-/// of a slot is the one its running code holds (a filler's, under a substitution), so a
-/// substitution is exempt from the rule exactly because the original install is not running.
+/// of a slot is the one its running code holds (a filler's, under a dev takeover), so a
+/// takeover is exempt from the rule exactly because the original install is not running.
 fn authority_conflicts(
     results: &BTreeMap<CartridgeId, NoduleResolution>,
 ) -> BTreeMap<CartridgeId, InventoryError> {
@@ -1401,10 +1554,10 @@ fn lexicon_conflicts(
     conflicts
 }
 
-/// The install whose code fills slot `cartridge_id` under a substitution by `by`, with its admission.
+/// The install whose code fills slot `cartridge_id` under a dev takeover by `by`, with its admission.
 ///
 /// The filler must be installed and admissible, and its NSID authority must be absent or equal
-/// to the authority the slot's own install holds: only a substitution may hold another cartridge's
+/// to the authority the slot's own install holds: only a takeover may hold another cartridge's
 /// prefix (ADR 028 §5), and a fork that renamed its prefix is a different slot, not a drop-in.
 fn filler<'a>(
     cartridge_id: &CartridgeId,
@@ -1414,7 +1567,7 @@ fn filler<'a>(
     cache: &AdmissionCache,
 ) -> Result<(&'a NoduleInstall, Arc<Admission>), String> {
     let Some(filler_install) = entries.get(by).and_then(|entry| entry.install.accepted()) else {
-        return Err(format!("substitute `{by}` is not installed"));
+        return Err(format!("dev build `{by}` is not installed"));
     };
     let admission = cache.admission(by, filler_install);
     let Admission::Admitted {
@@ -1422,7 +1575,7 @@ fn filler<'a>(
         ..
     } = &*admission
     else {
-        return Err(format!("substitute `{by}` is not admissible"));
+        return Err(format!("dev build `{by}` is not admissible"));
     };
     let Admission::Admitted {
         admitted: own_admitted,
@@ -1430,12 +1583,12 @@ fn filler<'a>(
     } = &*cache.admission(cartridge_id, install)
     else {
         return Err(format!(
-            "the slot's own install is not admissible, so substitute `{by}` cannot be checked against it"
+            "the slot's own install is not admissible, so dev build `{by}` cannot be checked against it"
         ));
     };
     if filler_admitted.authority.is_some() && filler_admitted.authority != own_admitted.authority {
         return Err(format!(
-            "substitute `{by}` holds authority `{}`, not this cartridge's ({}): a drop-in replacement \
+            "dev build `{by}` holds authority `{}`, not this cartridge's ({}): a takeover \
              holds the same prefix or none",
             filler_admitted.authority.as_deref().unwrap_or_default(),
             own_admitted
@@ -1447,13 +1600,13 @@ fn filler<'a>(
     Ok((filler_install, admission))
 }
 
-/// The method grants that reach the code filling a substituted slot. The slot's grants were
+/// The method grants that reach the code filling a slot under a dev takeover. The slot's grants were
 /// given for its own code's requests: a request the filler shares with that code (same binding,
 /// contract and access) keeps whatever grant covered it, while one the filler adds or widens is
 /// covered only by a grant naming that exact operation. A prefix grant is broad consent given for
 /// the slot's own code and never silently stretches to the filler's additions (ADR 028 §3), so
 /// granting one means naming it. This is computed, never written back: the stored grants are
-/// untouched, and clearing the substitution restores exactly what was granted.
+/// untouched, and clearing the takeover restores exactly what was granted.
 fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) -> DispatchScope {
     DispatchScope {
         operations: filler
@@ -1476,8 +1629,8 @@ fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) ->
     }
 }
 
-/// The install whose code runs in slot `cartridge_id`, its admission and, under a substitution, the
-/// cartridge filling it: the slot's own install unless its substitution datum names another.
+/// The install whose code runs in slot `cartridge_id`, its admission and, under a dev takeover, the
+/// cartridge filling it: the slot's own install unless its takeover datum names another.
 fn code_source<'a>(
     cartridge_id: &CartridgeId,
     entry: &'a NoduleEntry,
@@ -1485,9 +1638,9 @@ fn code_source<'a>(
     entries: &'a BTreeMap<CartridgeId, NoduleEntry>,
     cache: &AdmissionCache,
 ) -> Result<(&'a NoduleInstall, Arc<Admission>, Option<CartridgeId>), String> {
-    match &entry.substitution {
+    match &entry.dev_takeover {
         DatumSlot::Absent => Ok((install, cache.admission(cartridge_id, install), None)),
-        DatumSlot::Invalid { reason, .. } => Err(format!("invalid substitution datum: {reason}")),
+        DatumSlot::Invalid { reason, .. } => Err(format!("invalid devTakeover datum: {reason}")),
         DatumSlot::Accepted { value, .. } => {
             let (source, admission) = filler(cartridge_id, install, &value.by, entries, cache)?;
             Ok((source, admission, Some(value.by.clone())))
@@ -1530,7 +1683,7 @@ fn resolve_entry(
         }
     };
 
-    // The code that runs in this slot: its own install, or the filler's under a substitution.
+    // The code that runs in this slot: its own install, or the filler's under a dev takeover.
     // Everything else about the slot (settings, grants, enablement) is the slot's own.
     let (source, admission, filled_from) =
         match code_source(cartridge_id, entry, install, entries, cache) {
