@@ -81,6 +81,27 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 - **Uninstall keeps the cartridge config document**, so a reinstall, or the same cartridge on a sister node, finds its settings and grants. Clearing it is an explicit act: a privileged "clear a cartridge's config" operation (`clearCartridgeConfig`) that deletes the settings and grant datums, offered in the config UX.
 - **The shared config drawer is ADR 038's synced configuration drawer**, the same one that will hold orientations and preferences.
 
+### 8. Micros join the same documents (with the Clay lane, 2026-11-12)
+
+A cartridge can contribute a nodule, a micro, or both (`docs/scratch/clay-on-the-node.md`). The micro runs as its own actor under a `micros` subsystem actor, parallel to `nodules`.
+
+- **One install per cartridge, not one per component.** The nodule and micro ship in one envelope and must run the same revision, so there is one pin. The install datum replaces `nodule.install` (§2):
+  `org.example.daybook.cartridges.install/<cartridgeId>`: `{ cartridge: #datumPin, configDoc: docUrl, nodule?: { enabled }, micro?: { enabled } }`.
+  A component's member is present exactly when the pinned envelope contributes it, and each is enabled independently (the shell can disable a micro while its nodule runs). The nodule service reconciles the `nodule` part and the micro host reconciles the `micro` part, both from the same datum.
+- **Grants name their subsystem**, because the two run as different actors: `nodule.grant/<grant>` and `micro.grant/<grant>`, each with the §4 grant keys (`drawer:<drawerId>` → `{ access }`, `method:<nsid or authority>` → `{ privileged? }`, the bit refused at mint for both).
+- **Settings are the cartridge's**, shared by its nodule and its micro, and both may write them (§6/§7). The Clay manifest's settings sections declare the same settings NSIDs.
+- **Not in these documents:** per-device UI state stays in Clay's device-local documents, and manifest-declared collections (ADR 031) live in user drawers reached through drawer grants.
+
+**Methods.** These are one cartridge-level set, not a parallel set per subsystem (AGENTS.md: no symbol proliferation). They live on the cartridges service. The `*` ones are privileged:
+- `cartridges.install*` (pins a published version and creates or reuses its cartridge config document);
+- `cartridges.setEnabled* { cartridgeId, component: nodule|micro, enabled }`;
+- `cartridges.uninstall*` (removes the install, keeps the config, per §7);
+- `cartridges.setGrant* { cartridgeId, subsystem: nodule|micro, grant, access? }`, where `access` absent revokes;
+- `cartridges.clearConfig*` (deletes the settings and every grant datum, nodule and micro);
+- `cartridges.listInstalls` and `cartridges.observeInstalls`, a subscription with the same rows, so the shell reacts live to enable and disable.
+
+These replace the nodule service's `admitNodule`/`setNoduleEnabled`/`setNoduleDrawerGrants`/`setNoduleMethodGrants`/`uninstallNodule`. The nodule service keeps reconciling, resolution and its records (`listNodules`/`getNodule`, `confirmNoduleResolution`, `setNoduleDevTakeover`, `setMethodRoute`).
+
 ## Consequences
 
 - `big_nodule_core::config` breaks: `NoduleSettings.values`, `NoduleGrants` as one datum, and `NoduleInstall.envelope`/`revision` go. There's no migration: pre-release, and no node with nodules has shipped.
@@ -90,4 +111,4 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 
 ## Open questions
 
-None. Claytxt's micro install records and grants join the same documents, beside the nodule ones, before implementation.
+None. §8 records the micro side, agreed with the Clay lane.
