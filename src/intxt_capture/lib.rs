@@ -9,9 +9,6 @@
 //!
 //! Known gaps, deferred:
 //!
-//! - A file renamed and edited in one window is a deletion and an addition: detecting it needs
-//!   the old content, which a snapshot (hashes only) does not hold. The recorder may match it
-//!   against the previous file document's text.
 //! - The stored state holds the whole index listing, which is large for very large repositories.
 //! - jj: no `JjObservation`, `JjOperation` or `JjChange` is observed.
 //! - Tags: only branches (`refs/heads`) are observed as refs.

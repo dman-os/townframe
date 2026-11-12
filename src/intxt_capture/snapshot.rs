@@ -1,50 +1,33 @@
 //! What differs from the index, and what changed between two looks at it (ADR 039 §3).
 //!
 //! A snapshot is the files that differ from the git index (modified, deleted, and untracked but
-//! not ignored), each with the hash git would store for its content, plus the index listing.
-//! The difference of two snapshots is what happened in between to every path: whatever a tool
-//! call did, an edit tool's write, a formatter, a checkout, a `git add`. On a repository the
-//! size of this one a snapshot costs about 25 ms because only dirty files are hashed.
+//! not ignored), each with the id of the blob git stores for its content, plus the index listing.
+//! Taking one writes those blobs to the clone's object store (`git hash-object -w`), so the ids
+//! it holds always name content that exists; keeping them from `git gc` is the host's business
+//! ([`crate::git::Git::keep`]). The difference of two snapshots is what happened in between to
+//! every path: whatever a tool call did, an edit tool's write, a formatter, a checkout, a
+//! `git add`. On a repository the size of this one a snapshot costs about 25 ms because only
+//! dirty files are hashed.
 //!
-//! A path's content is its dirty hash when it has one, else its index entry. So a file that is
+//! A path's content is its dirty blob when it has one, else its index entry. So a file that is
 //! committed or staged after being edited, without changing again, is not a change: the commit
 //! is observed through the reflog instead (see [`crate::git`]).
 
 use crate::Error;
 use crate::git::Git;
-use intxt_core::capture::BlobReason;
 use intxt_core::capture::Change;
 use intxt_core::capture::ChangeKind;
-use intxt_core::capture::Content;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
-
-/// Files larger than this are kept as blobs, not collaborative text (ledger D43).
-const MAX_TEXT_BYTES: u64 = 256 * 1024;
-
-/// File names whose contents are generated and so never diffed, whatever `.gitattributes` says.
-const LOCKFILES: [&str; 9] = [
-    "Cargo.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "flake.lock",
-    "poetry.lock",
-    "uv.lock",
-    "Gemfile.lock",
-    "go.sum",
-];
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     /// Path → blob id, for every path in the index (merge conflicts excluded).
     index: BTreeMap<String, String>,
-    /// Path → content hash for every path that differs from the index; `None` is a path the
+    /// Path → blob id for every path that differs from the index; `None` is a path the
     /// index has and the worktree lacks.
     dirty: BTreeMap<String, Option<String>>,
 }
@@ -96,13 +79,37 @@ impl Snapshot {
         Ok(Self { index, dirty })
     }
 
-    /// The state of a worktree that matches its index exactly. The first observation diffs
-    /// against it, so files already dirty are reported as changes against the index.
-    pub(crate) fn clean(&self) -> Snapshot {
-        Snapshot {
-            index: self.index.clone(),
-            dirty: BTreeMap::new(),
+    /// The state of a worktree that matches the tree of `HEAD` exactly. The first observation of
+    /// a worktree diffs against it, so what already differs from `HEAD`, staged or not, is
+    /// reported as changes: a path's content at an op is then the latest op that lists it, else
+    /// `HEAD`'s (ADR 040 §3).
+    pub(crate) fn at_head(root: &Path) -> Result<Snapshot, Error> {
+        let git = Git::new(root);
+        let mut index = BTreeMap::new();
+        // An unborn branch has no tree: everything in the worktree is new.
+        if git
+            .ask(&["rev-parse", "--verify", "--quiet", "HEAD"])?
+            .is_some()
+        {
+            for entry in String::from_utf8_lossy(&git.run(&["ls-tree", "-r", "-z", "HEAD"])?)
+                .split('\0')
+                .filter(|e| !e.is_empty())
+            {
+                // `<mode> SP <type> SP <blob> TAB <path>`
+                let (meta, path) = entry
+                    .split_once('\t')
+                    .ok_or_else(|| Error::Format(format!("ls-tree entry {entry:?}")))?;
+                let blob = meta
+                    .rsplit(' ')
+                    .next()
+                    .ok_or_else(|| Error::Format(format!("ls-tree entry {entry:?}")))?;
+                index.insert(path.to_owned(), blob.to_owned());
+            }
         }
+        Ok(Snapshot {
+            index,
+            dirty: BTreeMap::new(),
+        })
     }
 
     /// A path's content hash, `None` when it does not exist.
@@ -113,9 +120,9 @@ impl Snapshot {
         }
     }
 
-    /// What changed from `self` to `after`, sorted by path, with each changed path's content
-    /// read from the worktree at `root` and classified.
-    pub fn diff(&self, after: &Snapshot, root: &Path) -> Result<Vec<Change>, Error> {
+    /// What changed from `self` to `after`, sorted by path. Renames are not paired here: a
+    /// reader pairs deletions and additions with `git diff -M` (ADR 040 §3).
+    pub fn diff(&self, after: &Snapshot) -> Vec<Change> {
         let mut candidates: BTreeSet<&String> =
             self.dirty.keys().chain(after.dirty.keys()).collect();
         for path in self.index.keys().chain(after.index.keys()) {
@@ -123,66 +130,20 @@ impl Snapshot {
                 candidates.insert(path);
             }
         }
-        let mut added: Vec<(&String, &String)> = Vec::new();
-        let mut deleted: Vec<(&String, &String)> = Vec::new();
-        let mut modified: Vec<(&String, &String)> = Vec::new();
-        for path in candidates {
-            match (self.hash(path), after.hash(path)) {
-                (before, now) if before == now => {}
-                (None, Some(now)) => added.push((path, now)),
-                (Some(before), None) => deleted.push((path, before)),
-                (Some(_), Some(now)) => modified.push((path, now)),
-                (None, None) => unreachable!("equal hashes were skipped"),
-            }
-        }
-
-        // A deletion and an addition with one content hash are a rename; each deletion pairs
-        // with at most one addition, in path order.
-        let mut changes: Vec<(String, ChangeKind, Option<&String>, Option<&String>)> = Vec::new();
-        let mut unpaired_deletions = Vec::new();
-        for (from, hash) in deleted {
-            match added.iter().position(|(_, added_hash)| *added_hash == hash) {
-                Some(at) => {
-                    let (to, hash) = added.remove(at);
-                    changes.push((to.clone(), ChangeKind::Renamed, Some(from), Some(hash)));
-                }
-                None => unpaired_deletions.push(from),
-            }
-        }
-        changes.extend(
-            added
-                .into_iter()
-                .map(|(path, hash)| (path.clone(), ChangeKind::Added, None, Some(hash))),
-        );
-        changes.extend(
-            modified
-                .into_iter()
-                .map(|(path, hash)| (path.clone(), ChangeKind::Modified, None, Some(hash))),
-        );
-        changes.extend(
-            unpaired_deletions
-                .into_iter()
-                .map(|path| (path.clone(), ChangeKind::Deleted, None, None)),
-        );
-        changes.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let live: Vec<&str> = changes
-            .iter()
-            .filter(|(_, _, _, hash)| hash.is_some())
-            .map(|(path, _, _, _)| path.as_str())
-            .collect();
-        let generated = generated_paths(&Git::new(root), &live)?;
-        changes
+        candidates
             .into_iter()
-            .map(|(path, kind, from, hash)| {
-                let content = hash
-                    .map(|hash| classify(root, &path, hash, generated.contains(path.as_str())))
-                    .transpose()?;
-                Ok(Change {
-                    path,
+            .filter_map(|path| {
+                let (kind, blob) = match (self.hash(path), after.hash(path)) {
+                    (before, now) if before == now => return None,
+                    (None, Some(now)) => (ChangeKind::Added, Some(now.clone())),
+                    (Some(_), Some(now)) => (ChangeKind::Modified, Some(now.clone())),
+                    (Some(_), None) => (ChangeKind::Deleted, None),
+                    (None, None) => unreachable!("equal hashes were skipped"),
+                };
+                Some(Change {
+                    path: path.clone(),
                     kind,
-                    from: from.cloned(),
-                    content,
+                    blob,
                     extra: Default::default(),
                 })
             })
@@ -204,8 +165,8 @@ fn nul_separated_paths(raw: &[u8]) -> Result<BTreeSet<String>, Error> {
         .collect()
 }
 
-/// The hash git would store for each file's content (clean filters applied, as the index's are),
-/// in order.
+/// The blob id git stores for each file's content (clean filters applied, as the index's are),
+/// in order, writing the objects to the store.
 fn hash_objects(git: &Git, paths: &[&str]) -> Result<Vec<String>, Error> {
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -218,100 +179,13 @@ fn hash_objects(git: &Git, paths: &[&str]) -> Result<Vec<String>, Error> {
         input.push_str(path);
         input.push('\n');
     }
-    let mut child = git
-        .command(&["hash-object", "--stdin-paths"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().expect("stdin was piped");
-    // Feed and drain concurrently: a large listing fills the pipe in both directions.
-    let output = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || stdin.write_all(input.as_bytes()));
-        let output = child.wait_with_output();
-        writer.join().expect("the writer does not panic")?;
-        output
-    })?;
-    if !output.status.success() {
-        return Err(Error::Git {
-            args: "hash-object --stdin-paths".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
+    let output = git.run_with_input(
+        &["hash-object", "-w", "--stdin-paths"],
+        &[],
+        input.as_bytes(),
+    )?;
+    Ok(String::from_utf8_lossy(&output)
         .lines()
         .map(str::to_owned)
         .collect())
-}
-
-/// Which of `paths` `.gitattributes` marks `linguist-generated` or `-diff`.
-fn generated_paths(git: &Git, paths: &[&str]) -> Result<BTreeSet<String>, Error> {
-    if paths.is_empty() {
-        return Ok(BTreeSet::new());
-    }
-    let mut input = Vec::new();
-    for path in paths {
-        input.extend_from_slice(path.as_bytes());
-        input.push(0);
-    }
-    let mut child = git
-        .command(&["check-attr", "-z", "--stdin", "linguist-generated", "diff"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let mut stdin = child.stdin.take().expect("stdin was piped");
-    let output = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || stdin.write_all(&input));
-        let output = child.wait_with_output();
-        writer.join().expect("the writer does not panic")?;
-        output
-    })?;
-    if !output.status.success() {
-        return Err(Error::Git {
-            args: "check-attr".to_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-    // `path NUL attribute NUL value NUL`, repeated.
-    let text = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<&str> = text.split('\0').collect();
-    Ok(fields
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .filter(|entry| match (entry[1], entry[2]) {
-            ("linguist-generated", value) => value == "set" || value == "true",
-            ("diff", value) => value == "unset",
-            _ => false,
-        })
-        .map(|entry| entry[0].to_owned())
-        .collect())
-}
-
-/// Decide Text or Blob for the file at `root/path`, reading it only when it could be Text.
-fn classify(
-    root: &Path,
-    path: &str,
-    hash: &str,
-    attributed_generated: bool,
-) -> Result<Content, Error> {
-    let file = root.join(path);
-    let size = std::fs::metadata(&file)?.len();
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let reason = if attributed_generated || LOCKFILES.contains(&name) {
-        Some(BlobReason::Generated)
-    } else if size > MAX_TEXT_BYTES {
-        Some(BlobReason::Large)
-    } else {
-        None
-    };
-    let blob = |reason| Content::blob(size, hash, reason);
-    if let Some(reason) = reason {
-        return Ok(blob(reason));
-    }
-    match String::from_utf8(std::fs::read(&file)?) {
-        Ok(text) if !text.contains('\0') => Ok(Content::text(text)),
-        _ => Ok(blob(BlobReason::Binary)),
-    }
 }

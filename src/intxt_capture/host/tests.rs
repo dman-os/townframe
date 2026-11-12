@@ -558,3 +558,64 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
     let idle = prepare_acp(acp_session("acp1"), &env.repo.root, &roots).unwrap();
     assert!(idle.batch.worktrees.is_empty());
 }
+
+/// The blob ids every op of `batch` names.
+fn blobs_of(batch: &Batch) -> BTreeSet<String> {
+    batch
+        .worktrees
+        .iter()
+        .flat_map(|worktree| &worktree.ops)
+        .flat_map(|op| &op.changes)
+        .filter_map(|change| change.blob.clone())
+        .collect()
+}
+
+#[test]
+fn recorded_blobs_stay_reachable_from_the_keep_ref_and_survive_gc() {
+    let env = Env::new();
+    env.append(&env.transcript, &[user("u1", None, "edit")]);
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let worktree_id = start.batch.worktrees[0].identity.worktree_id.clone();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let keep_ref = format!("refs/intxt/keep/{worktree_id}");
+    // Nothing observed, so no objects were written and there is no keep ref.
+    assert_eq!(env.repo.git(&["for-each-ref", "refs/intxt"]), "");
+
+    // Two observations that each write objects: the second keep commit chains on the first.
+    let mut recorded_blobs = BTreeSet::new();
+    let mut next_seq = 0;
+    for content in ["two\n", "three\nwith an untracked sibling\n"] {
+        env.repo.write("a.txt", content);
+        env.repo.write(
+            &format!("untracked-{next_seq}.txt"),
+            format!("sibling of {content}"),
+        );
+        let stop = prepare(&env.hook("Stop", json!({})), &env.session_state).unwrap();
+        let blobs = blobs_of(&stop.batch);
+        assert_eq!(blobs.len(), 2, "{blobs:?}");
+        recorded_blobs.extend(blobs);
+        next_seq += stop.batch.worktrees[0].ops.len() as u64;
+        let recorded = recorded_for(&stop, next_seq);
+        stop.commit(recorded).unwrap();
+    }
+    assert_eq!(recorded_blobs.len(), 4);
+    assert_eq!(
+        env.repo.git(&["rev-list", "--count", &keep_ref]),
+        "2",
+        "one keep commit per observation that wrote objects"
+    );
+    let reachable = env.repo.git(&["rev-list", "--objects", &keep_ref]);
+    for blob in &recorded_blobs {
+        assert!(
+            reachable.contains(blob.as_str()),
+            "{blob} is not under {keep_ref}"
+        );
+    }
+
+    // Unreachable loose objects are what gc prunes; these are reachable from the keep ref.
+    env.repo.git(&["gc", "--prune=now", "--quiet"]);
+    for blob in &recorded_blobs {
+        env.repo.git(&["cat-file", "-e", blob]);
+    }
+}

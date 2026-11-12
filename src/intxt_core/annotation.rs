@@ -44,7 +44,13 @@ pub struct Target {
     /// by equality which side of a diff the target is on (ADR 041 §2). No heads follows the
     /// target's current version.
     pub source: DatumPin,
-    /// The hand-writable text position: 1-based lines at the pinned heads.
+    /// For a comment on code: the worktree-relative path. The `source` is then a `gitCommit` or a
+    /// `worktreeOp` datum, and `lines` and `quote` count in this path's content at that commit or
+    /// op (ADR 041 §2), which is git's blob, not a document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The hand-writable text position: 1-based lines at the pinned heads (or, with `path`, in
+    /// the path's content).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
     /// Required on text targets: what re-attachment and every resolution check against.

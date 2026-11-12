@@ -47,22 +47,15 @@ pub fn observe(
 ) -> Result<(Observation, WorktreeState), Error> {
     let snapshot = Snapshot::take(&identity.root)?;
     let last = state.snapshot.as_ref();
-    // First sight: what already differs from the index is a change, so its file docs exist from
-    // the start.
-    let clean;
+    // First sight: what already differs from `HEAD` is a change, so every path an op does not
+    // list has its content in `HEAD`'s tree.
+    let head;
     let (earlier, changes) = match (last, pre) {
-        (Some(last), Some(pre)) => (
-            last.diff(pre, &identity.root)?,
-            pre.diff(&snapshot, &identity.root)?,
-        ),
-        (None, Some(pre)) => {
-            clean = pre.clean();
-            (Vec::new(), clean.diff(&snapshot, &identity.root)?)
-        }
-        (Some(last), None) => (Vec::new(), last.diff(&snapshot, &identity.root)?),
-        (None, None) => {
-            clean = snapshot.clean();
-            (Vec::new(), clean.diff(&snapshot, &identity.root)?)
+        (Some(last), Some(pre)) => (last.diff(pre), pre.diff(&snapshot)),
+        (Some(last), None) => (Vec::new(), last.diff(&snapshot)),
+        (None, _) => {
+            head = Snapshot::at_head(&identity.root)?;
+            (Vec::new(), head.diff(&snapshot))
         }
     };
     let (git, git_state) = git::observe(

@@ -220,10 +220,7 @@ impl Recording {
         .await??;
         self.known
             .extend(prepared.worktree_roots().map(Path::to_owned));
-        let mut summary = capture::Summary::default();
-        let recorded =
-            capture::record_prepared(&self.client, &self.node_dir, prepared, &mut summary).await?;
-        super::report(&summary, false);
+        let recorded = capture::record_prepared(&self.client, &self.node_dir, prepared).await?;
         Ok(recorded.and_then(|recorded| recorded.session))
     }
 }

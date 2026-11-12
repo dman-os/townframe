@@ -6,25 +6,25 @@
 //! a function of the batch and the documents it names, with `AtCurrent` writes, so a retried
 //! call under the same idempotency key replays the same commands. A retry after a complete
 //! earlier success is answered without writing: the worktree datum is written last, and the
-//! batch counts as recorded when that datum lists its last op and every path it changed.
+//! batch counts as recorded when that datum lists the op log holding its last op and the op is
+//! there.
 //!
-//! Order within a worktree: identity documents, file documents, git layer, op logs, the
-//! worktree datum. The session is recorded before the worktrees, since an op's `cause` names a
-//! turn of the session document.
+//! Nothing here writes file content: an op carries the git blob ids the host recorded (ADR 040
+//! §3, §4), and the objects stay in git.
+//!
+//! Order within a worktree: identity documents, git layer, op logs, the worktree datum. The
+//! session is recorded before the worktrees, since an op's `cause` names a turn of the session
+//! document.
 
 use super::Caller;
 use super::to_value;
 use crate::capture::Batch;
 use crate::capture::Cause;
-use crate::capture::ChangeKind;
-use crate::capture::Content;
-use crate::capture::ContentClass;
 use crate::capture::Imported;
 use crate::capture::RecordedIds;
 use crate::capture::RecordedWorktree;
 use crate::capture::WorktreeBatch;
 use crate::capture::WorktreeDocs;
-use crate::generic;
 use crate::methods::IntxtError;
 use crate::work;
 use big_cabinet_core::ActorUrl;
@@ -45,15 +45,10 @@ use big_cabinet_core::drawer::protocol::drawer_placement;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::Location;
 use big_cabinet_core::reference::ReferenceDocId;
-use big_cabinet_core::reference::head_text;
 use serde_json::Value;
-use serde_json::json;
 use service_client_core_rs::xrpc::HttpTransport;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-
-/// The tag of the blob datum a file document holds for a blob-classified file (ledger D45).
-const BLOB_TAG: &str = "org.example.daybook.blob";
 
 /// Ops per op-log document (ADR 040 §3).
 const OPS_PER_LOG: u64 = 256;
@@ -96,20 +91,6 @@ fn percent_encode(text: &str) -> String {
         .collect()
 }
 
-/// The media type a file document's `note` states, from the path's extension.
-fn mime_of(path: &str) -> &'static str {
-    match path.rsplit_once('.').map(|(_, extension)| extension) {
-        Some("rs") => "text/x-rust",
-        Some("md") => "text/markdown",
-        Some("toml") => "application/toml",
-        Some("json") => "application/json",
-        Some("ts") => "text/typescript",
-        Some("kt") => "text/x-kotlin",
-        Some("nix") => "text/x-nix",
-        _ => "text/plain",
-    }
-}
-
 /// The session documents a batch recorded, to name a cause's turn.
 struct SessionDocs {
     main: Option<DocId>,
@@ -136,15 +117,6 @@ impl SessionDocs {
             .map(Some)
             .map_err(|error| invalid(format!("the cause of {}: {error}", cause.tool_use_id)))
     }
-}
-
-/// A file document to write: its worktree path and the state to bring it to.
-struct PendingFile {
-    /// The document, when the path already has one (an edit, or a rename's old document).
-    doc: Option<DocId>,
-    /// Whether the path is new to the document: a rename moved it, or the document is new.
-    path_changed: bool,
-    content: Option<Content>,
 }
 
 struct Recorder<'a, H> {
@@ -177,17 +149,6 @@ impl<H: HttpTransport> Recorder<'_, H> {
         doc: &DocId,
         set: BTreeMap<DatumKey, Value>,
     ) -> Result<WriteReceipt, IntxtError> {
-        self.write_removing(step, doc, set, BTreeSet::new()).await
-    }
-
-    /// [`Self::write`], removing `remove` in the same write.
-    async fn write_removing(
-        &self,
-        step: &str,
-        doc: &DocId,
-        set: BTreeMap<DatumKey, Value>,
-        remove: BTreeSet<DatumKey>,
-    ) -> Result<WriteReceipt, IntxtError> {
         let capability = self
             .caller
             .doc_capability(DocScope {
@@ -198,11 +159,11 @@ impl<H: HttpTransport> Recorder<'_, H> {
         self.caller
             .call(WriteDatums {
                 capability,
-                command: Some(self.caller.command(step, &(&set, &remove))?),
+                command: Some(self.caller.command(step, &set)?),
                 doc_id: doc.clone(),
                 mode: WriteMode::AtCurrent,
                 set,
-                remove,
+                remove: BTreeSet::new(),
             })
             .await
     }
@@ -390,7 +351,6 @@ impl<H: HttpTransport> Recorder<'_, H> {
                     clone: reference(&clone, work::GitClone::ID, &identity.clone_id)?,
                     id: identity.worktree_id.clone(),
                     path: identity.root.clone(),
-                    files: BTreeMap::new(),
                     op_logs: Vec::new(),
                     extra: Default::default(),
                 };
@@ -409,8 +369,7 @@ impl<H: HttpTransport> Recorder<'_, H> {
     }
 
     /// Whether an earlier call already recorded this batch completely: the worktree datum, which
-    /// a call writes last, lists the op log holding the batch's last op, the op is there, and
-    /// every path the batch changed has a document.
+    /// a call writes last, lists the op log holding the batch's last op, and the op is there.
     async fn already_recorded(
         &self,
         worktree: &WorktreeBatch,
@@ -420,19 +379,7 @@ impl<H: HttpTransport> Recorder<'_, H> {
             return Ok(false);
         }
         let last = worktree.next_seq + worktree.ops.len() as u64 - 1;
-        let paths_have_docs = worktree
-            .ops
-            .iter()
-            .flat_map(|op| &op.changes)
-            .filter(|change| change.kind != ChangeKind::Deleted)
-            .all(|change| state.datum.files.contains_key(&change.path));
-        let Some(log) = state
-            .datum
-            .op_logs
-            .iter()
-            .rfind(|log| log.from <= last)
-            .filter(|_| paths_have_docs)
-        else {
+        let Some(log) = state.datum.op_logs.iter().rfind(|log| log.from <= last) else {
             return Ok(false);
         };
         let op = key(work::WorktreeOp::ID, &last.to_string())?;
@@ -440,179 +387,6 @@ impl<H: HttpTransport> Recorder<'_, H> {
             .read(&doc_id(&log.doc)?, std::slice::from_ref(&op))
             .await?
             .contains_key(&op))
-    }
-
-    /// Brings the file documents of the batch up to date and answers the heads each path's
-    /// document has afterwards. A path touched by several ops of the batch is written once, at
-    /// its last state, so its ops all name those heads.
-    async fn write_files(
-        &self,
-        worktree: &WorktreeBatch,
-        state: &mut WorktreeState,
-    ) -> Result<BTreeMap<String, Vec<String>>, IntxtError> {
-        let mut pending: BTreeMap<String, PendingFile> = BTreeMap::new();
-        for change in worktree.ops.iter().flat_map(|op| &op.changes) {
-            let path = &change.path;
-            match change.kind {
-                ChangeKind::Deleted => {
-                    pending.remove(path);
-                    continue;
-                }
-                ChangeKind::Renamed => {
-                    // The old path's document continues under the new path.
-                    let old = change.from.as_ref().and_then(|from| {
-                        pending.remove(from).and_then(|file| file.doc).or_else(|| {
-                            state
-                                .datum
-                                .files
-                                .remove(from)
-                                .and_then(|doc| doc.parse::<DocId>().ok())
-                        })
-                    });
-                    state.changed |= old.is_some();
-                    pending.insert(
-                        path.clone(),
-                        PendingFile {
-                            path_changed: true,
-                            doc: old,
-                            content: change.content.clone(),
-                        },
-                    );
-                    continue;
-                }
-                _ => {}
-            }
-            let doc = match pending.get(path).and_then(|file| file.doc.clone()) {
-                Some(doc) => Some(doc),
-                None => state
-                    .datum
-                    .files
-                    .get(path)
-                    .map(|doc| doc_id(doc))
-                    .transpose()?,
-            };
-            pending.insert(
-                path.clone(),
-                PendingFile {
-                    path_changed: doc.is_none(),
-                    doc,
-                    content: change.content.clone(),
-                },
-            );
-        }
-
-        let worktree_ref = reference(&state.doc, work::Worktree::ID, "main")?;
-        let mut heads = BTreeMap::new();
-        for (index, (path, file)) in pending.into_iter().enumerate() {
-            let step = format!("{}/file-{index}", worktree.identity.worktree_id);
-            let Some(receipt) = self.write_file(&step, &path, file, &worktree_ref).await? else {
-                continue;
-            };
-            state
-                .datum
-                .files
-                .insert(path.clone(), receipt.doc_id.to_string());
-            state.changed = true;
-            heads.insert(path, receipt.heads.iter().map(head_text).collect());
-        }
-        Ok(heads)
-    }
-
-    /// Writes one file document: created with its `path`, content and `file` provenance, or, for
-    /// an existing one, only what changed. Content is text (a `note`) or a blob (an
-    /// `org.example.daybook.blob` datum that `file.blob` references); when a path switches from
-    /// one to the other the old one is removed in the same write. A blob the host did not
-    /// upload writes no content. None when there is nothing to write.
-    async fn write_file(
-        &self,
-        step: &str,
-        path: &str,
-        file: PendingFile,
-        worktree_ref: &DatumReference,
-    ) -> Result<Option<WriteReceipt>, IntxtError> {
-        let note_key = key(generic::Note::ID, "main")?;
-        let blob_key = key(BLOB_TAG, "main")?;
-        let (had_note, had_blob) = match &file.doc {
-            Some(doc) => {
-                let present = self
-                    .read(doc, &[note_key.clone(), blob_key.clone()])
-                    .await?;
-                (
-                    present.contains_key(&note_key),
-                    present.contains_key(&blob_key),
-                )
-            }
-            None => (false, false),
-        };
-        let text = file.content.as_ref().and_then(text_of);
-        let blob = file
-            .content
-            .as_ref()
-            .filter(|content| content.class == ContentClass::Blob)
-            .and_then(|content| content.blob.as_ref());
-        let mut set = BTreeMap::new();
-        let mut remove = BTreeSet::new();
-        if file.path_changed {
-            set.extend([entry(
-                to_value(&generic::PathName {
-                    path: path.to_owned(),
-                    extra: Default::default(),
-                }),
-                generic::PathName::ID,
-                "main",
-            )?]);
-        }
-        let has_blob = match (&text, blob) {
-            (Some(text), _) => {
-                set.extend([entry(
-                    to_value(&generic::Note {
-                        mime: mime_of(path).to_owned(),
-                        content: text.clone(),
-                        extra: Default::default(),
-                    }),
-                    generic::Note::ID,
-                    "main",
-                )?]);
-                if had_blob {
-                    remove.insert(blob_key.clone());
-                }
-                false
-            }
-            (None, Some(blob)) => {
-                set.extend([(
-                    blob_key.clone(),
-                    json!({
-                        "mime": blob.mime,
-                        "digest": blob.digest,
-                        "lengthOctets": blob.length_octets,
-                    }),
-                )]);
-                if had_note {
-                    remove.insert(note_key.clone());
-                }
-                true
-            }
-            (None, None) => had_blob,
-        };
-        // `file` states whether the document has a blob: written new, and whenever that changes.
-        if file.doc.is_none() || has_blob != had_blob {
-            let blob_ref =
-                has_blob.then(|| DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone()));
-            set.extend([entry(
-                to_value(&work::File {
-                    worktree: worktree_ref.clone(),
-                    blob: blob_ref,
-                    extra: Default::default(),
-                }),
-                work::File::ID,
-                "main",
-            )?]);
-        }
-        match file.doc {
-            Some(_) if set.is_empty() && remove.is_empty() => Ok(None),
-            Some(doc) => Ok(Some(self.write_removing(step, &doc, set, remove).await?)),
-            None => Ok(Some(self.create(step, set).await?)),
-        }
     }
 
     /// The batch's commits into the repository document (a recorded commit is never rewritten)
@@ -680,7 +454,6 @@ impl<H: HttpTransport> Recorder<'_, H> {
         worktree: &WorktreeBatch,
         state: &mut WorktreeState,
         sessions: &SessionDocs,
-        heads: &BTreeMap<String, Vec<String>>,
     ) -> Result<(), IntxtError> {
         let mut by_log: BTreeMap<u64, BTreeMap<DatumKey, Value>> = BTreeMap::new();
         let mut first_seq: BTreeMap<u64, u64> = BTreeMap::new();
@@ -688,19 +461,12 @@ impl<H: HttpTransport> Recorder<'_, H> {
             let seq = worktree.next_seq + index as u64;
             let mut files = BTreeMap::new();
             let mut deleted = Vec::new();
-            let mut renames = BTreeMap::new();
             for change in &op.changes {
-                match change.kind {
-                    ChangeKind::Deleted => deleted.push(change.path.clone()),
-                    ChangeKind::Renamed => {
-                        if let Some(from) = &change.from {
-                            renames.insert(change.path.clone(), from.clone());
-                        }
+                match &change.blob {
+                    Some(blob) => {
+                        files.insert(change.path.clone(), blob.clone());
                     }
-                    _ => {}
-                }
-                if let Some(heads) = heads.get(&change.path) {
-                    files.insert(change.path.clone(), heads.clone());
+                    None => deleted.push(change.path.clone()),
                 }
             }
             let value = work::WorktreeOp {
@@ -714,7 +480,6 @@ impl<H: HttpTransport> Recorder<'_, H> {
                     .flatten(),
                 files,
                 deleted,
-                renames,
                 git: op.git.clone(),
                 jj: None,
                 extra: Default::default(),
@@ -775,10 +540,8 @@ impl<H: HttpTransport> Recorder<'_, H> {
         if self.already_recorded(worktree, &state).await? {
             return Ok(recorded);
         }
-        let heads = self.write_files(worktree, &mut state).await?;
         self.write_git(worktree, repo.as_ref(), &clone).await?;
-        self.write_ops(worktree, &mut state, sessions, &heads)
-            .await?;
+        self.write_ops(worktree, &mut state, sessions).await?;
         if state.changed {
             self.write(
                 &format!("{}/worktree", worktree.identity.worktree_id),
@@ -789,12 +552,6 @@ impl<H: HttpTransport> Recorder<'_, H> {
         }
         Ok(recorded)
     }
-}
-
-fn text_of(content: &Content) -> Option<String> {
-    (content.class == ContentClass::Text)
-        .then(|| content.text.clone())
-        .flatten()
 }
 
 /// [`Caller::record_observations`].

@@ -15,6 +15,7 @@
 //! The worktree lock is what makes op sequence numbers single-writer across sessions.
 
 use crate::Error;
+use crate::git::Git;
 use crate::hook::Event;
 use crate::hook::Hook;
 use crate::identity;
@@ -313,6 +314,14 @@ fn observe_worktree(
     } else {
         0
     };
+    // Every blob an op names stays reachable from the worktree's keep ref before the op is
+    // recorded, under the worktree lock the caller holds (`Git::keep`).
+    let blobs: BTreeSet<&str> = ops
+        .iter()
+        .flat_map(|op| &op.changes)
+        .filter_map(|change| change.blob.as_deref())
+        .collect();
+    Git::new(&observation.identity.root).keep(&observation.identity.worktree_id, &blobs)?;
     if ops.is_empty() && git.commits.is_empty() && git.refs.is_empty() {
         return Ok((None, uncaused));
     }

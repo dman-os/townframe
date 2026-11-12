@@ -5,19 +5,19 @@
 //! serves `createIntxt` for the capture drawer.
 
 use super::*;
-use big_blobs_core::BlobsScope;
-use big_blobs_core::MintBlobsCapability;
-use big_blobs_core::PutBlob;
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use intxt_capture::hook::Hook;
 use intxt_core::capture::Batch;
-use intxt_core::capture::BlobRef;
-use intxt_core::capture::Content;
 use intxt_core::capture::RecordedIds;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// The text of git blob `id` in the clone at `repo`, trimmed like every `git` output here.
+fn git_blob(repo: &Path, id: &str) -> String {
+    git(repo, &["cat-file", "blob", id])
+}
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -178,9 +178,9 @@ async fn value(node: &TestNode, doc: &str, tag: &str, slot: &str) -> Value {
         .unwrap_or_else(|| panic!("{tag}/{slot} is not in {doc}"))
 }
 
-/// A session that edits two files, renames one, and commits: the worktree's documents, ops, file
-/// documents, git layer and the session's turns are all where ADR 040 puts them, and a retried
-/// call changes nothing.
+/// A session that edits two files, renames one, and commits: the worktree's documents, ops (which
+/// carry git blob ids, not file documents), git layer and the session's turns are all where
+/// ADR 040 puts them, and a retried call changes nothing.
 #[tokio::test]
 async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
     let node = boot().await;
@@ -254,39 +254,24 @@ async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
             "dtxt:datum:{session_doc}/org.example.intxt.work.promptTurn/u1#toolCalls/%7B%22id%22:%22t1%22%7D"
         )
     );
-    let file_doc = worktree.files["a.txt"].clone();
-    assert_eq!(
-        value(&node, &file_doc, generic::Note::ID, "main").await,
-        json!({"mime": "text/plain", "content": "one\nTWO\n"})
-    );
-    assert_eq!(
-        value(&node, &file_doc, generic::PathName::ID, "main").await,
-        json!({"path": "a.txt"})
-    );
-    assert_eq!(
-        value(&node, &file_doc, work::File::ID, "main").await["worktree"],
-        format!("dtxt:datum:{worktree_doc}/org.example.intxt.work.worktree/main")
-    );
+    // Ops name git blobs: the clone's object store resolves each to what the call wrote, and the
+    // worktree datum holds no file documents.
+    let blob =
+        |op: &Value, path: &str| git_blob(&session.repo, op["files"][path].as_str().unwrap());
+    assert_eq!(blob(&first_op, "a.txt"), "one\nTWO");
+    assert_eq!(blob(&first_op, "b.txt"), "bee\nedited");
     assert_eq!(first_op["files"].as_object().unwrap().len(), 2);
-    let b_doc = worktree.files["b.txt"].clone();
 
-    // A file moved: its document continues under the new path.
+    // A file moved: git pairs a deletion and an addition, so the op records exactly that.
     std::fs::rename(session.repo.join("b.txt"), session.repo.join("c.txt")).unwrap();
     session
         .run(&node, session.hook("Stop", None), false)
         .await
         .expect("the move is an op");
-    let worktree: work::Worktree =
-        serde_json::from_value(value(&node, &worktree_doc, work::Worktree::ID, "main").await)
-            .unwrap();
-    assert_eq!(worktree.files.get("c.txt"), Some(&b_doc));
-    assert!(!worktree.files.contains_key("b.txt"));
-    assert_eq!(
-        value(&node, &b_doc, generic::PathName::ID, "main").await,
-        json!({"path": "c.txt"})
-    );
     let moved = value(&node, &log, work::WorktreeOp::ID, "1").await;
-    assert_eq!(moved["renames"], json!({"c.txt": "b.txt"}));
+    assert_eq!(moved["files"]["c.txt"], first_op["files"]["b.txt"]);
+    assert_eq!(moved["deleted"], json!(["b.txt"]));
+    assert!(moved.get("renames").is_none(), "{moved}");
     assert!(moved.get("cause").is_none(), "{moved}");
 
     // A commit: an op of its kind, the commit in the repository document, the ref in the clone's.
@@ -347,7 +332,7 @@ async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
 }
 
 /// A first attempt that did not finish leaves the same key behind: re-sending it with a batch
-/// whose content changed in the meantime is a new write, not a refusal, and records the change.
+/// whose blob changed in the meantime is a new write, not a refusal, and records the change.
 #[tokio::test]
 async fn a_changed_batch_under_the_same_key_records_the_change() {
     let node = boot().await;
@@ -371,7 +356,9 @@ async fn a_changed_batch_under_the_same_key_records_the_change() {
 
     let mut batch = prepared.batch.clone();
     let ops = &mut batch.worktrees[0].ops;
-    ops[0].changes[0].content = Some(Content::text("one\nCHANGED\n"));
+    std::fs::write(session.repo.join("a.txt"), "one\nCHANGED\n").unwrap();
+    let changed = git(&session.repo, &["hash-object", "-w", "a.txt"]);
+    ops[0].changes[0].blob = Some(changed.clone());
     let again = ops[0].clone();
     ops.push(again);
     let second = session.send(&node, &batch, "hook-1").await;
@@ -381,21 +368,12 @@ async fn a_changed_batch_under_the_same_key_records_the_change() {
     );
 
     let docs = &second.worktrees[&root].docs;
-    let worktree: work::Worktree = serde_json::from_value(
-        value(
-            &node,
-            docs.worktree.as_ref().unwrap(),
-            work::Worktree::ID,
-            "main",
-        )
-        .await,
-    )
-    .unwrap();
-    assert_eq!(
-        value(&node, &worktree.files["a.txt"], generic::Note::ID, "main").await["content"],
-        "one\nCHANGED\n"
-    );
+    let worktree = worktree_of(&node, docs).await;
     let log = &worktree.op_logs[0].doc;
+    assert_eq!(
+        value(&node, log, work::WorktreeOp::ID, "0").await["files"]["a.txt"],
+        changed
+    );
     value(&node, log, work::WorktreeOp::ID, "1").await;
     prepared.commit(second).unwrap();
     node.stop().await;
@@ -433,113 +411,6 @@ async fn is_absent(node: &TestNode, doc: &str, tag: &str, slot: &str) -> bool {
         read.datums.remove(&datum_key),
         Some(DatumRead::Absent { .. })
     )
-}
-
-/// A blob-classified file whose bytes the host put in the blob service is recorded as a
-/// `org.example.daybook.blob` datum in its file document, which `file.blob` references; when the
-/// path turns into text, the blob datum goes in the write that stores the note (ledger D45).
-#[tokio::test]
-async fn a_blob_file_is_a_blob_datum_until_it_becomes_text() {
-    let node = boot().await;
-    let drawer = node
-        .call(intxt_core::methods::CreateIntxt {
-            title: "capture".to_owned(),
-            description: None,
-        })
-        .await
-        .unwrap()
-        .drawer_id;
-    let session = Session::new(drawer);
-    let root = session.repo.display().to_string();
-    session.append(&[json!({"type": "user", "uuid": "u1", "parentUuid": null,
-        "timestamp": "2026-11-10T10:00:00Z", "cwd": session.repo, "sessionId": "s1",
-        "message": {"role": "user", "content": "edit it"}})]);
-    std::fs::write(session.repo.join("a.txt"), [0u8, 159, 146, 150]).unwrap();
-    let prepared =
-        intxt_capture::host::prepare(&session.hook("Stop", None), &session.state).unwrap();
-
-    // The host puts the bytes first, as the operator.
-    let blobs = &node.big_node().blobs.client;
-    let operator = Authorization::identity(node.big_node().authority.root).metadata();
-    let put = blobs
-        .call_with(
-            RequestContext::root(),
-            operator,
-            MintBlobsCapability {
-                scope: BlobsScope {
-                    put: true,
-                    ..Default::default()
-                },
-                rights: Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap()
-        .capability_id;
-    let info = blobs
-        .call(
-            RequestContext::root(),
-            PutBlob {
-                capability: put,
-                bytes: vec![0u8, 159, 146, 150].into(),
-            },
-        )
-        .await
-        .unwrap();
-    let digest = info.blob_id.digest_str();
-
-    let mut batch = prepared.batch.clone();
-    let content = &mut batch.worktrees[0].ops[0].changes[0].content;
-    assert_eq!(content.as_ref().unwrap().text, None, "a.txt is a blob");
-    content.as_mut().unwrap().blob = Some(BlobRef {
-        digest: digest.clone(),
-        length_octets: info.length_octets,
-        mime: "application/octet-stream".to_owned(),
-        extra: Default::default(),
-    });
-    let first = session.send(&node, &batch, "hook-1").await;
-    let recorded = &first.worktrees[&root];
-    let worktree: work::Worktree = serde_json::from_value(
-        value(
-            &node,
-            recorded.docs.worktree.as_ref().unwrap(),
-            work::Worktree::ID,
-            "main",
-        )
-        .await,
-    )
-    .unwrap();
-    let file_doc = worktree.files["a.txt"].clone();
-    assert_eq!(
-        value(&node, &file_doc, "org.example.daybook.blob", "main").await,
-        json!({"mime": "application/octet-stream", "digest": digest, "lengthOctets": 4})
-    );
-    assert_eq!(
-        value(&node, &file_doc, work::File::ID, "main").await["blob"],
-        "dtxt:datum:self/org.example.daybook.blob/main"
-    );
-    assert!(is_absent(&node, &file_doc, generic::Note::ID, "main").await);
-
-    // The next observation finds the path as text.
-    let mut batch = prepared.batch.clone();
-    batch.worktrees[0].docs = recorded.docs.clone();
-    batch.worktrees[0].next_seq = recorded.next_seq;
-    batch.worktrees[0].ops[0].changes[0].content = Some(Content::text("now text\n"));
-    session.send(&node, &batch, "hook-2").await;
-    assert_eq!(
-        value(&node, &file_doc, generic::Note::ID, "main").await["content"],
-        "now text\n"
-    );
-    assert!(is_absent(&node, &file_doc, "org.example.daybook.blob", "main").await);
-    assert!(
-        value(&node, &file_doc, work::File::ID, "main")
-            .await
-            .get("blob")
-            .is_none()
-    );
-    prepared.commit(first).unwrap();
-    node.stop().await;
 }
 
 /// The worktree datum of the worktree `recorded` names.
