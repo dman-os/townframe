@@ -41,6 +41,7 @@
 
 use crate::Error;
 use big_cabinet_core::datum::Extra;
+use intxt_core::capture::Cause;
 use intxt_core::capture::Imported;
 use intxt_core::capture::SessionBatch;
 use intxt_core::work::AgentSession;
@@ -81,6 +82,35 @@ pub struct Emit {
     /// The session's working directory, whose worktree the caller observes.
     pub cwd: PathBuf,
     pub session: SessionBatch,
+    pub window: Window,
+}
+
+/// What the caller does with the worktrees for an [`Emit`]. Emits come in the order the
+/// messages that made them passed, so recording them in order keeps a tool call's ops ahead of
+/// the turn-end ops that follow.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Window {
+    /// Observe the worktrees: whatever changed since the last observation has no tool call to
+    /// name. A session start, a turn end and the connection's end.
+    Boundary,
+    /// A tool call began: take the worktrees' pre-snapshot for it. `session` is empty.
+    Open(ToolWindow),
+    /// A tool call finished: observe the worktrees against its pre-snapshot, the ops caused by
+    /// the call. `session` is empty; the call itself is recorded with its turn.
+    ///
+    /// Calls that overlap each get the changes between their own open and close, so a change
+    /// made while two calls ran is attributed to every call that was open then, as the hook
+    /// path does for parallel `PreToolUse` and `PostToolUse`.
+    Close(ToolWindow),
+}
+
+/// The tool call of a window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolWindow {
+    /// Names the call: the agent's `toolCallId` and the turn holding it.
+    pub cause: Cause,
+    /// The files the call's locations name, whose worktrees join the observed ones.
+    pub paths: Vec<PathBuf>,
 }
 
 // ---- the protocol's messages ---------------------------------------------------------------
@@ -216,6 +246,8 @@ enum Request {
 #[derive(Default)]
 struct CallState {
     from_content: bool,
+    /// The call's window is open: a pre-snapshot was requested and no close was.
+    windowed: bool,
 }
 
 struct OpenTurn {
@@ -337,8 +369,7 @@ impl Recorder {
                 Ok(None)
             }
             (Direction::FromAgent, Some("session/update")) => {
-                self.update(message.params.unwrap_or_default(), at)?;
-                Ok(None)
+                self.update(message.params.unwrap_or_default(), at)
             }
             // The agent's own requests (`fs/*`, `terminal/*`, permission) and notifications.
             (Direction::FromAgent, Some(_)) => Ok(None),
@@ -556,10 +587,11 @@ impl Recorder {
                 subagents: Vec::new(),
                 extra: Extra::default(),
             },
+            window: Window::Boundary,
         }
     }
 
-    fn update(&mut self, params: Value, at: Timestamp) -> Result<(), Error> {
+    fn update(&mut self, params: Value, at: Timestamp) -> Result<Option<Emit>, Error> {
         let session_id = params
             .get("sessionId")
             .and_then(Value::as_str)
@@ -568,7 +600,7 @@ impl Recorder {
         if self.requests.values().any(
             |request| matches!(request, Request::Load { session_id: loading, .. } if loading == session_id),
         ) {
-            return Ok(());
+            return Ok(None);
         }
         let update: SessionUpdate = serde_json::from_value(
             params
@@ -582,7 +614,7 @@ impl Recorder {
             .get_mut(session_id)
             .ok_or_else(|| Error::Acp(format!("an update for unknown session {session_id}")))?;
         match update {
-            SessionUpdate::UserMessageChunk | SessionUpdate::Other => Ok(()),
+            SessionUpdate::UserMessageChunk | SessionUpdate::Other => Ok(None),
             SessionUpdate::SessionInfoUpdate { title } => {
                 if let Some(title) =
                     title.filter(|title| session.datum.title.as_ref() != Some(title))
@@ -590,28 +622,40 @@ impl Recorder {
                     session.datum.title = Some(title);
                     session.dirty = true;
                 }
-                Ok(())
+                Ok(None)
             }
             SessionUpdate::Plan { entries } => {
                 session.plan = Some(Plan {
                     entries,
                     extra: Extra::default(),
                 });
-                Ok(())
+                Ok(None)
             }
             SessionUpdate::AgentMessageChunk {
                 content,
                 message_id,
-            } => Self::chunk(session, at, MessageKind::AgentMessage, &content, message_id),
+            } => Self::chunk(session, at, MessageKind::AgentMessage, &content, message_id)
+                .map(|()| None),
             SessionUpdate::AgentThoughtChunk {
                 content,
                 message_id,
             } if self.record_thinking => {
                 Self::chunk(session, at, MessageKind::AgentThought, &content, message_id)
+                    .map(|()| None)
             }
-            SessionUpdate::AgentThoughtChunk { .. } => Ok(()),
+            SessionUpdate::AgentThoughtChunk { .. } => Ok(None),
             SessionUpdate::ToolCall(call) | SessionUpdate::ToolCallUpdate(call) => {
-                Self::tool_call(session, call)
+                Ok(Self::tool_call(session, call)?.map(|window| Emit {
+                    cwd: session.cwd.clone(),
+                    session: SessionBatch {
+                        session_id: session.datum.session_id.clone(),
+                        doc: session.doc.clone(),
+                        imported: Imported::default(),
+                        subagents: Vec::new(),
+                        extra: Extra::default(),
+                    },
+                    window,
+                }))
             }
         }
     }
@@ -661,9 +705,17 @@ impl Recorder {
         Ok(())
     }
 
-    fn tool_call(session: &mut Session, call: Call) -> Result<(), Error> {
+    /// Fold the report into the turn's call, and say whether it opens or closes the call's
+    /// window: the call's first report opens it, a terminal status closes it. A call first
+    /// reported already finished has no window: nothing was snapshotted before it ran, so its
+    /// changes stay with the turn-end observation.
+    fn tool_call(session: &mut Session, call: Call) -> Result<Option<Window>, Error> {
         let open = Self::open_turn(session)?;
         let turn = &mut open.turn;
+        let first = !turn
+            .tool_calls
+            .iter()
+            .any(|held| held.id == call.tool_call_id);
         let index = match turn
             .tool_calls
             .iter()
@@ -743,7 +795,29 @@ impl Recorder {
                 other => other.to_string(),
             });
         }
-        Ok(())
+        let finished = matches!(held.status, ToolStatus::Completed | ToolStatus::Failed);
+        let tool = || ToolWindow {
+            cause: Cause {
+                agent_id: None,
+                turn: Some(open.id.clone()),
+                tool_use_id: held.id.clone(),
+                extra: Extra::default(),
+            },
+            paths: held
+                .locations
+                .iter()
+                .map(|location| PathBuf::from(&location.path))
+                .collect(),
+        };
+        Ok(if first && !finished {
+            state.windowed = true;
+            Some(Window::Open(tool()))
+        } else if state.windowed && finished {
+            state.windowed = false;
+            Some(Window::Close(tool()))
+        } else {
+            None
+        })
     }
 }
 

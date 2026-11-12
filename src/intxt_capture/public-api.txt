@@ -7,6 +7,7 @@ impl Default for intxt_capture::acp::Recorder
 impl From < String > for intxt_capture::hook::Event
 pub enum intxt_capture::Error { # [error ("io: {0}")] Io (# [from] std :: io :: Error), # [error ("git {args}: {stderr}")] Git { args : String , stderr : String }, # [doc = " git printed something this crate cannot read: a path that is not UTF-8 or contains a"] # [doc = " newline, or a log line of an unknown shape."] # [error ("{0}")] Format (String), # [doc = " A hook's JSON input lacks a required field or is not JSON."] # [error ("hook input: {0}")] Hook (String), # [doc = " An ACP message a recording cannot follow: not JSON-RPC, a response to a request never"] # [doc = " seen, an update outside a prompt turn."] # [error ("acp: {0}")] Acp (String), # [error (transparent)] Transcript (# [from] crate :: transcript :: ImportError), # [doc = " A state file is not what this version wrote."] # [error ("state file {path}: {reason}")] State { path : String , reason : String } }
 pub enum intxt_capture::acp::Direction { # [doc = " Client to agent: the agent's stdin."] ToAgent, # [doc = " Agent to client: the agent's stdout."] FromAgent }
+pub enum intxt_capture::acp::Window { # [doc = " Observe the worktrees: whatever changed since the last observation has no tool call to"] # [doc = " name. A session start, a turn end and the connection's end."] Boundary, # [doc = " A tool call began: take the worktrees' pre-snapshot for it. `session` is empty."] Open (ToolWindow), # [doc = " A tool call finished: observe the worktrees against its pre-snapshot, the ops caused by"] # [doc = " the call. `session` is empty; the call itself is recorded with its turn."] # [doc = ""] # [doc = " Calls that overlap each get the changes between their own open and close, so a change"] # [doc = " made while two calls ran is attributed to every call that was open then, as the hook"] # [doc = " path does for parallel `PreToolUse` and `PostToolUse`."] Close (ToolWindow) }
 pub enum intxt_capture::hook::Event { SessionStart, PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStop, PreCompact, SessionEnd, Other (String) }
 pub enum intxt_capture::transcript::ImportError { # [error ("reading the transcript: {0}")] Io (# [from] std :: io :: Error), # [error ("the transcript is {len} bytes, shorter than the offset {offset} already imported")] Shrank { len : u64 , offset : u64 }, # [error ("transcript line at byte {at}: {reason}")] Line { at : u64 , reason : String }, # [error ("transcript record {uuid}: {reason}")] Record { uuid : String , reason : String } }
 pub impl intxt_capture::acp::Recorder::fn feed (& mut self , direction : Direction , at : Timestamp , bytes : & [u8] ,) -> Result < Vec < Emit > , Error >
@@ -28,7 +29,7 @@ pub impl intxt_capture::transcript::TranscriptImporter::fn offset (& self) -> u6
 pub impl intxt_capture::transcript::TranscriptImporter::fn recording_thinking (mut self) -> Self
 pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_dir : & Path , state : & GitState ,) -> Result < (GitObserved , GitState) , Error >
 pub intxt_capture::host::fn prepare (hook : & Hook , session_path : & Path) -> Result < Prepared , Error >
-pub intxt_capture::host::fn prepare_acp (session : SessionBatch , cwd : & Path , known : & BTreeSet < PathBuf > ,) -> Result < Prepared , Error >
+pub intxt_capture::host::fn prepare_acp (session : SessionBatch , cwd : & Path , known : & BTreeSet < PathBuf > , window : & Window ,) -> Result < Prepared , Error >
 pub intxt_capture::identity::fn resolve (path : & Path) -> Result < Option < Identity > , Error >
 pub intxt_capture::observe::fn observe (state : & WorktreeState , identity : Identity , pre : Option < & Snapshot > ,) -> Result < (Observation , WorktreeState) , Error >
 pub intxt_capture::pack::fn build (git : & Git , request : & PackRequest) -> Result < Pack , Error >
@@ -41,8 +42,9 @@ pub mod intxt_capture::observe
 pub mod intxt_capture::pack
 pub mod intxt_capture::snapshot
 pub mod intxt_capture::transcript
-pub struct intxt_capture::acp::Emit  { cwd: PathBuf, session: SessionBatch }
+pub struct intxt_capture::acp::Emit  { cwd: PathBuf, session: SessionBatch, window: Window }
 pub struct intxt_capture::acp::Recorder  {  }
+pub struct intxt_capture::acp::ToolWindow  { cause: Cause, paths: Vec < PathBuf > }
 pub struct intxt_capture::git::Git  {  }
 pub struct intxt_capture::git::GitMove  { at: Timestamp, kind: OpKind, observation: GitObservation }
 pub struct intxt_capture::git::GitObserved  { head: Head, moves: Vec < GitMove >, commits: BTreeMap < String , GitCommit >, refs: BTreeMap < String , GitRef >, reflog_gap: bool }

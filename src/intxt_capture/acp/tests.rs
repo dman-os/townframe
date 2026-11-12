@@ -33,6 +33,14 @@ fn play(recorder: &mut Recorder, trace: &str) -> Vec<Emit> {
         .collect()
 }
 
+/// The emits that end a window nothing caused: the session's start and its turns' ends.
+fn boundaries(emits: Vec<Emit>) -> Vec<Emit> {
+    emits
+        .into_iter()
+        .filter(|emit| emit.window == Window::Boundary)
+        .collect()
+}
+
 fn assert_round_trips<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(datum: &T) {
     let value = serde_json::to_value(datum).unwrap();
     let back: T = serde_json::from_value(value.clone()).unwrap();
@@ -49,7 +57,7 @@ fn assert_all_round_trip(emit: &Emit) {
 #[test]
 fn a_session_becomes_its_datum_then_one_batch_per_turn() {
     let mut recorder = Recorder::new();
-    let emits = play(&mut recorder, SESSION);
+    let emits = boundaries(play(&mut recorder, SESSION));
     emits.iter().for_each(assert_all_round_trip);
     assert_eq!(emits.len(), 3, "the session, then two turns");
     assert!(recorder.finish().is_empty());
@@ -138,6 +146,83 @@ fn a_session_becomes_its_datum_then_one_batch_per_turn() {
 }
 
 #[test]
+fn a_tool_calls_window_opens_at_its_first_report_and_closes_at_a_terminal_status() {
+    let mut recorder = Recorder::new();
+    let emits = play(&mut recorder, SESSION);
+    let windows: Vec<_> = emits
+        .iter()
+        .filter_map(|emit| match &emit.window {
+            Window::Boundary => None,
+            Window::Open(tool) => Some(("open", tool)),
+            Window::Close(tool) => Some(("close", tool)),
+        })
+        .map(|(what, tool)| (what, tool.cause.tool_use_id.as_str(), tool.paths.clone()))
+        .collect();
+    let config = vec![PathBuf::from("/work/repo/src/config.rs")];
+    assert_eq!(
+        windows,
+        [
+            ("open", "call_001", vec![]),
+            ("close", "call_001", config.clone()),
+            ("open", "call_002", config.clone()),
+            ("close", "call_002", config),
+            ("open", "call_003", vec![]),
+            ("close", "call_003", vec![]),
+        ]
+    );
+    // A window's emit carries no session content, and its cause names the turn that holds the
+    // call, which is the turn a later boundary emit records.
+    let recorded_turns: Vec<_> = emits
+        .iter()
+        .filter(|emit| emit.window == Window::Boundary)
+        .flat_map(|emit| emit.session.imported.turns.keys().cloned())
+        .collect();
+    let caused_in = |call: &str| -> String {
+        emits
+            .iter()
+            .find_map(|emit| match &emit.window {
+                Window::Close(tool) if tool.cause.tool_use_id == call => tool.cause.turn.clone(),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(
+        emits
+            .iter()
+            .filter(|emit| emit.window != Window::Boundary)
+            .all(|emit| emit.session.imported.is_empty())
+    );
+    assert_eq!(caused_in("call_001"), recorded_turns[0]);
+    assert_eq!(caused_in("call_002"), recorded_turns[0]);
+    assert_eq!(caused_in("call_003"), recorded_turns[1]);
+    // Emits follow the messages: a window's close precedes the turn end that holds its call.
+    let last_close = emits
+        .iter()
+        .position(|emit| matches!(&emit.window, Window::Close(tool) if tool.cause.tool_use_id == "call_002"))
+        .unwrap();
+    let turn_end = emits
+        .iter()
+        .position(|emit| emit.session.imported.turns.len() == 1)
+        .unwrap();
+    assert!(last_close < turn_end);
+}
+
+#[test]
+fn a_call_first_reported_finished_has_no_window() {
+    let mut recorder = Recorder::new();
+    let emits = play(
+        &mut recorder,
+        r#"> {"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/w","mcpServers":[]}}
+< {"jsonrpc":"2.0","id":1,"result":{"sessionId":"s"}}
+> {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call","toolCallId":"c","title":"t","status":"completed"}}}
+< {"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}
+"#,
+    );
+    assert!(emits.iter().all(|emit| emit.window == Window::Boundary));
+}
+
+#[test]
 fn chunking_the_bytes_changes_nothing() {
     let mut whole = Recorder::new();
     let expected = play(&mut whole, SESSION);
@@ -183,7 +268,7 @@ fn without_uuids(text: &str) -> String {
 #[test]
 fn thinking_is_recorded_only_when_asked() {
     let mut recorder = Recorder::new().recording_thinking();
-    let emits = play(&mut recorder, SESSION);
+    let emits = boundaries(play(&mut recorder, SESSION));
     let turn = emits[1].session.imported.turns.values().next().unwrap();
     let thoughts: Vec<_> = turn
         .messages

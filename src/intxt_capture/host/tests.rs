@@ -534,7 +534,13 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
     let env = Env::new();
     let none = BTreeSet::new();
     // The start of a session: first sight of the worktree, with what already differs.
-    let start = prepare_acp(acp_session("acp1"), &env.repo.root, &none).unwrap();
+    let start = prepare_acp(
+        acp_session("acp1"),
+        &env.repo.root,
+        &none,
+        &Window::Boundary,
+    )
+    .unwrap();
     assert!(start.batch.worktrees.is_empty() || start.batch.worktrees[0].ops.is_empty());
     let roots: BTreeSet<PathBuf> = start.worktree_roots().map(Path::to_owned).collect();
     assert_eq!(roots, BTreeSet::from([env.repo.root.clone()]));
@@ -543,7 +549,13 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
 
     // A turn's edits: one op without a cause, with its sequence continuing the stored one.
     env.repo.write("a.txt", "two\n");
-    let turn = prepare_acp(acp_session("acp1"), &env.repo.root, &roots).unwrap();
+    let turn = prepare_acp(
+        acp_session("acp1"),
+        &env.repo.root,
+        &roots,
+        &Window::Boundary,
+    )
+    .unwrap();
     let [worktree] = &turn.batch.worktrees[..] else {
         panic!("the edited worktree is batched");
     };
@@ -555,8 +567,119 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
     turn.commit(recorded).unwrap();
 
     // Nothing more happened: nothing to record.
-    let idle = prepare_acp(acp_session("acp1"), &env.repo.root, &roots).unwrap();
+    let idle = prepare_acp(
+        acp_session("acp1"),
+        &env.repo.root,
+        &roots,
+        &Window::Boundary,
+    )
+    .unwrap();
     assert!(idle.batch.worktrees.is_empty());
+}
+
+#[test]
+fn acp_tool_call_windows_give_one_caused_op_each_and_the_rest_goes_to_the_turn_end() {
+    use crate::acp::ToolWindow;
+    let env = Env::new();
+    let none = BTreeSet::new();
+    let start = prepare_acp(
+        acp_session("acp1"),
+        &env.repo.root,
+        &none,
+        &Window::Boundary,
+    )
+    .unwrap();
+    let roots: BTreeSet<PathBuf> = start.worktree_roots().map(Path::to_owned).collect();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+
+    let tool = |id: &str| ToolWindow {
+        cause: Cause {
+            agent_id: None,
+            turn: Some("turn-1".to_owned()),
+            tool_use_id: id.to_owned(),
+            extra: Default::default(),
+        },
+        paths: Vec::new(),
+    };
+    let mut next_seq = 0;
+    let mut window = |env: &Env, id: &str, file: &str, content: &str| -> Batch {
+        let open = prepare_acp(
+            acp_session("acp1"),
+            &env.repo.root,
+            &roots,
+            &Window::Open(tool(id)),
+        )
+        .unwrap();
+        assert!(open.batch.is_empty(), "opening a window records nothing");
+        open.commit(RecordedIds::default()).unwrap();
+        env.repo.write(file, content);
+        let close = prepare_acp(
+            acp_session("acp1"),
+            &env.repo.root,
+            &roots,
+            &Window::Close(tool(id)),
+        )
+        .unwrap();
+        let batch = close.batch.clone();
+        next_seq += batch.worktrees[0].ops.len() as u64;
+        let recorded = recorded_for(&close, next_seq);
+        close.commit(recorded).unwrap();
+        batch
+    };
+    let first = window(&env, "call_1", "one.txt", "first\n");
+    let second = window(&env, "call_2", "two.txt", "second\n");
+    for (batch, id, path, content) in [
+        (&first, "call_1", "one.txt", "first\n"),
+        (&second, "call_2", "two.txt", "second\n"),
+    ] {
+        let [worktree] = &batch.worktrees[..] else {
+            panic!("one worktree");
+        };
+        let [op] = &worktree.ops[..] else {
+            panic!("one op per window");
+        };
+        let cause = op.cause.as_ref().expect("the call caused the op");
+        assert_eq!(
+            (cause.tool_use_id.as_str(), cause.turn.as_deref()),
+            (id, Some("turn-1"))
+        );
+        let [change] = &op.changes[..] else {
+            panic!("only this call's file changed: {:?}", op.changes);
+        };
+        assert_eq!(change.path, path);
+        let blob = change.blob.as_deref().unwrap();
+        assert_eq!(
+            env.repo.git(&["cat-file", "blob", blob]),
+            content.trim_end()
+        );
+        assert_eq!(batch.uncaused_tool_calls, 0);
+    }
+    assert_eq!(
+        second.worktrees[0].next_seq, 1,
+        "sequence continues across windows"
+    );
+
+    // Outside any window: the turn-end observation records it, without a cause.
+    env.repo.write("between.txt", "x\n");
+    let end = prepare_acp(
+        acp_session("acp1"),
+        &env.repo.root,
+        &roots,
+        &Window::Boundary,
+    )
+    .unwrap();
+    let [op] = &end.batch.worktrees[0].ops[..] else {
+        panic!("one op");
+    };
+    assert_eq!(op.cause, None);
+    assert_eq!(
+        op.changes
+            .iter()
+            .map(|c| c.path.as_str())
+            .collect::<Vec<_>>(),
+        ["between.txt"]
+    );
 }
 
 /// The blob ids every op of `batch` names.

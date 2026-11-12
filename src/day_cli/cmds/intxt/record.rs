@@ -11,11 +11,14 @@
 //! broke the session it records would not be transparent. A closed tee is the signal that
 //! recording ended; it is not an error of the forwarding.
 //!
-//! The recorder emits a batch when a session starts and when a prompt turn ends. Each is recorded
-//! the way `day x intxt capture` records a hook's batch ([`capture::record_prepared`]), after
-//! observing the session's `cwd` worktree (and those its tool calls named), so the edits of a turn
-//! become ops as they do under hooks. The first observation of a worktree is the session's start,
-//! so the turn's ops are the turn's own.
+//! The recorder emits when a session starts, when a prompt turn ends, and when a tool call's
+//! window opens and closes. Each is recorded the way `day x intxt capture` records a hook's batch
+//! ([`capture::record_prepared`]), after observing the session's `cwd` worktree (and those its
+//! tool calls named), so the edits become ops as they do under hooks: one per tool call window,
+//! caused by the call, and the changes outside any window in the turn-end op. The first
+//! observation of a worktree is the session's start, so the turn's ops are the turn's own. The
+//! drain task records emits one at a time in the order they were teed, so a window's ops reach
+//! the node before the turn-end ops that follow it.
 
 use super::capture;
 use crate::client::NodeClient;
@@ -211,11 +214,15 @@ impl Recording {
     /// Observe the worktrees of `emit` and record it; the session's document id the node
     /// answered.
     async fn record(&mut self, emit: Emit) -> Res<Option<String>> {
-        let Emit { cwd, session } = emit;
+        let Emit {
+            cwd,
+            session,
+            window,
+        } = emit;
         let known = self.known.clone();
         // Locks and git: blocking work, off the runtime's threads (see `capture::run`).
         let prepared = tokio::task::spawn_blocking(move || {
-            intxt_capture::host::prepare_acp(session, &cwd, &known)
+            intxt_capture::host::prepare_acp(session, &cwd, &known, &window)
         })
         .await??;
         self.known

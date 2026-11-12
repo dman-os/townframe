@@ -15,6 +15,7 @@
 //! The worktree lock is what makes op sequence numbers single-writer across sessions.
 
 use crate::Error;
+use crate::acp::Window;
 use crate::git::Git;
 use crate::hook::Event;
 use crate::hook::Hook;
@@ -449,18 +450,24 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
     })
 }
 
-/// Observe the worktrees of an ACP session after one of its windows: a session start or the end
-/// of a prompt turn. `session` is what the ACP recorder made of the window; the worktrees are
-/// those holding `cwd`, those a tool call's locations name and `known`, the roots earlier windows
-/// of the connection found ([`Prepared::worktree_roots`]).
+/// Observe the worktrees of an ACP session for one [`Window`] of its recording: a session start
+/// or the end of a prompt turn (`Boundary`), or a tool call's opening or closing. `session` is
+/// what the ACP recorder made of the window; the worktrees are those holding `cwd`, those the
+/// session's tool calls (or the window's) name and `known`, the roots earlier windows of the
+/// connection found ([`Prepared::worktree_roots`]).
 ///
-/// There is no hook and no tool call to cause the ops, and no state file for the session: an ACP
-/// recording lives as long as its connection. The worktrees' own state and locks are the same as
-/// a hook's, so a session recorded through both agrees on sequence numbers.
+/// There is no hook and no state file for the session: an ACP recording lives as long as its
+/// connection. The worktrees' own state and locks are the same as a hook's, so a session
+/// recorded through both agrees on sequence numbers, and the window's calls take the hook path's
+/// shape: `Open` is a `PreToolUse` (the pre-snapshot goes in the worktree's state, keyed by the
+/// call's id, and nothing is batched), `Close` a `PostToolUse` whose ops are caused by the call.
+/// A `Boundary` is a `Stop`: no tool is in flight, so it drops the pre-snapshots of calls that
+/// never closed.
 pub fn prepare_acp(
     session: SessionBatch,
     cwd: &Path,
     known: &BTreeSet<PathBuf>,
+    window: &Window,
 ) -> Result<Prepared, Error> {
     let mut candidates = known.clone();
     candidates.insert(cwd.to_owned());
@@ -473,9 +480,24 @@ pub fn prepare_acp(
             .flat_map(|call| &call.locations)
             .map(|location| PathBuf::from(&location.path)),
     );
-    // A window's end is `Stop`'s: no tool is in flight, so no pre-snapshot is pending.
-    let (worktrees, batches, uncaused_tool_calls) =
-        observe_worktrees(&Event::Stop, None, None, &candidates, known)?;
+    let (event, cause) = match window {
+        Window::Boundary => (Event::Stop, None),
+        Window::Open(tool) => {
+            candidates.extend(tool.paths.iter().cloned());
+            (Event::PreToolUse, Some(&tool.cause))
+        }
+        Window::Close(tool) => {
+            candidates.extend(tool.paths.iter().cloned());
+            (Event::PostToolUse, Some(&tool.cause))
+        }
+    };
+    let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
+        &event,
+        cause.map(|cause| cause.tool_use_id.as_str()),
+        cause.filter(|_| matches!(window, Window::Close(_))),
+        &candidates,
+        known,
+    )?;
     Ok(Prepared {
         batch: Batch {
             session,
