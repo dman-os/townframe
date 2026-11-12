@@ -32,6 +32,7 @@ use big_cartridges_core::CartridgeId;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
@@ -50,6 +51,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use http_body_util::Limited;
+use method_core::ByteBody;
 use serde_json::Value;
 use serde_json::json;
 use service_client_native_rs::Client;
@@ -399,7 +401,13 @@ impl Provider for WasmProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
+        // Byte bodies reach a guest as wasi:http body streams, which this provider does not
+        // bridge yet (ADR 042 §2); until then a guest's methods are JSON.
+        if body.is_some() {
+            return Err(big_nodule::wire::byte_body_refused());
+        }
         // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
         let headers = delivery_headers(
             caller,
@@ -432,7 +440,7 @@ impl Provider for WasmProvider {
             .await
             .map_err(gateway_error)?
             .to_bytes();
-        provider_result(status, &body)
+        provider_result(status, &body).map(Body::Json)
     }
 }
 

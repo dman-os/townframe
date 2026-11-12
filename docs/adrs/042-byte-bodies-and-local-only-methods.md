@@ -112,3 +112,14 @@ Settled in review with intxt (2026-11-11):
 Open for the operator:
 1. Settled (manager, delegated by the operator 2026-11-12): **24 hours**. Capture claims its uploads within seconds, but a client that goes offline between put and record (a laptop closed mid-capture) should still find its uploads the next working day. Storage held for a day is cheap next to re-uploading. atproto likewise keeps unreferenced uploads temporarily and garbage-collects them later. Expiry runs in big_blobs' existing retention pass, not a new timer task; a re-put renews the hold.
 2. Order of work: the dispatch `Body` change first (it has no users besides blobs at first), then the blob methods, then the guest streams.
+
+## Implementation notes
+
+Where the code settled a detail the ADR left open (2026-11-12):
+
+- **The call carries `parameters` beside its `body`.** `Invoke { operation, parameters, body, context }`: for a JSON method the body is the JSON as before (a query's parameters, a procedure's input) and `parameters` is `null`; for a method whose body is bytes or descriptors, `parameters` is its Lexicon `parameters`, which the body cannot carry. Over HTTP the edge cannot know a procedure's encoding, so it hands dispatch the POST body as the stream it is with its `Content-Type`; dispatch reads it as JSON (bounded, `MAX_JSON_BODY_OCTETS`) or passes it on as bytes, by the method's declaration.
+- **Range is request metadata, not a parameter.** It rides in `InvocationContext::range` (service-level `HttpMetadata::range`); a method that serves ranges answers a body whose `span` places it in the whole, which the HTTP surface sends as `206`; any other answers all of it, which HTTP allows.
+- **Origin** is `Remote` (the default, and every nodule egress), `UnixPeer { uid }` or `Embedded`, set by the router's `Edge` and never serialized.
+- **In process, the stream is moved, not channelled.** `Transport::Direct` and a local irpc client hand the message over without serializing it, so a `ByteBody` is carried as the pull-based stream itself; a transport that would serialize (the typed XRPC client, a remote irpc client) refuses a byte-bodied method rather than dropping its body. An irpc streaming channel per method is only needed if dispatch is ever served over an irpc wire, which it is not today.
+- **Upload holds** carry the time they were taken; the retention pass (boot and every flush) releases the ones older than 24 hours (`UPLOAD_HOLD_GRACE_SECS`) that no document claim superseded. A re-put is a fresh hold.
+- **A put streams past any JSON limit** and is bounded only by `MAX_PUT_OCTETS`, counted as it streams, so a body of unknown length is refused as soon as it is over.

@@ -100,6 +100,7 @@ impl Retention {
                 })
             })
             .await?;
+        retention.expire_uploads().await?;
         Ok(retention)
     }
 
@@ -684,7 +685,17 @@ impl Retention {
         Ok(changed)
     }
 
+    /// Releases the upload holds that outlived their grace period without a document claiming
+    /// them (ADR 042 §6). It rides on the retention pass rather than a timer of its own: the pass
+    /// runs at boot and whenever retention changes, which is when a hold's expiry matters.
+    async fn expire_uploads(&self) -> Res<()> {
+        let before = crate::ownership::unix_now() - crate::ownership::UPLOAD_HOLD_GRACE_SECS;
+        self.service.ownership.expire_uploads(before).await?;
+        Ok(())
+    }
+
     pub async fn flush(&mut self) -> Res<BTreeSet<DocId>> {
+        self.expire_uploads().await?;
         let changed = self.flush_writers().await?;
         let effects = sqlite::queries::retention_effect_digests(&self.sql).await?;
         for digest in effects {

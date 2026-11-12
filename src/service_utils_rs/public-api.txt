@@ -12,6 +12,7 @@ impl Layer < H > for service_utils_rs::middleware::Stack < Inner , Outer >
 impl ServerBinding < Proto > for service_utils_rs::host::Host < H >
 pub enum service_utils_rs::host::Dispatch { Inline, Admitted { admission : Arc < Admission > , spawner : Spawner , } }
 pub enum service_utils_rs::sample::protocol::SampleError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("invalid value: {message}")] InvalidValue { message : String }, # [error ("subscription lagged by {skipped}; reread current service state")] SubscriptionLagged { skipped : u64 } }
+pub enum service_utils_rs::xrpc::XrpcFallbackResponse { Json (crate :: ResponseEnvelope < Value >), Bytes { metadata : crate :: ResponseMetadata , body : method_core :: ByteBody , } }
 pub enum service_utils_rs::xrpc::XrpcHandlerError { # [error ("invalid XRPC input: {0}")] InvalidInput (String), # [error ("operation failed with HTTP status {status}: {body:?}")] Domain { status : StatusCode , body : XrpcErrorEnvelope , }, # [error ("XRPC operation is unavailable: {0}")] Unavailable (String), # [error ("XRPC handler failed: {0}")] Internal (String) }
 pub impl service_utils_rs::admission::Admission::async fn acquire_unary (& self) -> tokio :: sync :: OwnedSemaphorePermit
 pub impl service_utils_rs::admission::Admission::fn activity (& self) -> Arc < TaskActivity >
@@ -81,6 +82,8 @@ pub struct service_utils_rs::sample::protocol::SampleEvent  { source_revision: u
 pub struct service_utils_rs::sample::protocol::StatePage  { snapshot: ValueSnapshot, reset_required: bool }
 pub struct service_utils_rs::sample::protocol::SubscribeEvents  { after_source_revision: u64 }
 pub struct service_utils_rs::sample::protocol::ValueSnapshot  { value: String, source_revision: u64, service_revision: u64 }
+pub struct service_utils_rs::xrpc::PeerCredentials  { uid: u32, gid: u32, pid: Option < i32 > }
+pub struct service_utils_rs::xrpc::XrpcFallbackRequest  { nsid: String, verb: method_core :: HttpMethod, context: RequestContext, metadata: HttpMetadata, raw_query: Option < String >, body: Option < method_core :: ByteBody >, transport: crate :: TransportContext, peer: Option < PeerCredentials > }
 pub struct service_utils_rs::xrpc::XrpcRequest  { nsid: String, verb: method_core :: HttpMethod, context: RequestContext, metadata: HttpMetadata, params: Value, raw_query: Option < String >, transport: crate :: TransportContext }
 pub trait service_utils_rs::host::Route< H > { fn route (host : Arc < Host < H > > , dispatch : Dispatch , message : Self :: Message ,) -> BoxFuture < 'static , () >; fn mount (router : & mut XrpcRouter , host : Arc < Host < H > >) -> Result < () , XrpcRegistrationError > }
 pub trait service_utils_rs::host::ServerBinding< Proto : Service > { fn route (self : Arc < Self > , dispatch : Dispatch , message : Proto :: Message ,) -> BoxFuture < 'static , () >; fn mount (router : & mut XrpcRouter , binding : Arc < Self >) -> Result < () , XrpcRegistrationError > }
@@ -164,6 +167,7 @@ pub use service_utils_rs::service_core_rs :: service_method
 pub use service_utils_rs::xrpc :: XrpcRouter
 pub use service_utils_rs::xrpc::iroh :: IrohXrpcProtocolHandler
 pub use service_utils_rs::xrpc::iroh :: iroh_protocol_handler
+pub use service_utils_rs::xrpc::router :: XrpcFallbackHandler
 pub use service_utils_rs::xrpc::router :: XrpcMethodHandler
 pub use service_utils_rs::xrpc::router :: XrpcRegistrationError
 pub use service_utils_rs::xrpc::router :: XrpcRouter
@@ -184,5 +188,4 @@ pub use service_utils_rs::xrpc::service_core_rs :: xrpc :: XrpcDomainDetailsErro
 pub use service_utils_rs::xrpc::service_core_rs :: xrpc :: XrpcErrorEnvelope
 pub use service_utils_rs::xrpc::service_core_rs :: xrpc :: domain_error_envelope
 pub use service_utils_rs::xrpc::service_core_rs :: xrpc :: error_name
-pub use service_utils_rs::xrpc::unix :: PeerCredentials
 pub use service_utils_rs::xrpc::unix :: UnixConnectionAcceptor

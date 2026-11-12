@@ -18,6 +18,7 @@ use big_cartridges_core::example_cartridge;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
@@ -27,6 +28,7 @@ use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::UninstallNodule;
+use method_core::ByteBody;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
@@ -51,7 +53,8 @@ impl Provider for Echo {
         _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        _body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
         if let Some(reason) = input.get("invalid") {
             return Err(ProviderError::InvalidInput(reason.to_string()));
         }
@@ -65,7 +68,7 @@ impl Provider for Echo {
             self.started.notify_one();
             self.release.notified().await;
         }
-        Ok(json!({
+        Ok(Body::Json(json!({
             "echo": input,
             "idempotencyKey": context.idempotency_key,
             "caller": {
@@ -73,7 +76,7 @@ impl Provider for Echo {
                 "actor": caller.actor,
                 "scope": caller.scope,
             },
-        }))
+        })))
     }
 }
 
@@ -149,14 +152,10 @@ impl Node {
             .call_with(
                 RequestContext::root(),
                 authorization.metadata(),
-                Invoke {
-                    operation: operation.to_owned(),
-                    input,
-                    context,
-                },
+                Invoke::json(operation, input, context),
             )
             .await
-            .map(|output| output.output)
+            .map(|output| output.body.into_json())
             .map_err(|error| match error {
                 ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
