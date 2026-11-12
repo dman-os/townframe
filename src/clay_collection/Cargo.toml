@@ -9,6 +9,7 @@ path = "lib.rs"
 
 [dependencies]
 clay_store.workspace = true
+datum_core = { workspace = true, default-features = false }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
