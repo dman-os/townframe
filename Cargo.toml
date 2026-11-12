@@ -4,6 +4,7 @@ members = [
   "./src/am_utils_rs",
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
+  "./src/datum_client",
   "./src/datum_core/",
   "./src/big_cartridges_core/",
   "./src/big_cartridges/",
@@ -130,6 +131,7 @@ big_cartridges_core = { path = "./src/big_cartridges_core/", default-features = 
 big_cabinet = { path = "./src/big_cabinet/" }
 # `default = ["manifest"]` is an empty marker feature; members that want it ask for it explicitly.
 big_cabinet_core = { path = "./src/big_cabinet_core/", default-features = false }
+datum_client = { path = "./src/datum_client", default-features = false }
 big_blobs = { path = "./src/big_blobs/" }
 big_blobs_core = { path = "./src/big_blobs_core/" }
 macros = { path = "./src/macros/" }

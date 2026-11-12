@@ -1,0 +1,25 @@
+[package]
+name = "datum_client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+big_cabinet_core = { workspace = true, default-features = false, features = ["manifest"] }
+service_client_core_rs.workspace = true
+service_core_rs.workspace = true
+
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

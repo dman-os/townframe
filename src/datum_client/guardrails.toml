@@ -1,0 +1,14 @@
+version = 1
+role = "interface"
+dependency_reason = "The shared typed datum client keeps document method requests, JSON datum encoding, and tag-scoped polling in one transport-neutral layer for nodule and micro guests."
+allowed_dependencies = ["big_cabinet_core", "service_client_core_rs", "service_core_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = false
+features = []
+
+[builds.native]
+
+[builds.wasm32-wasip3]
