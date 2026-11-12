@@ -170,15 +170,7 @@ fn photos() -> Nodule {
         "org.example.daybook.nodule.processors".into(),
         json!([{ "key": "thumbnails", "target": "org.example.tags.apply", "trigger": { "on": "documentWritten" } }]),
     );
-    nodule.config = Some(Config {
-        schema: "org.example.photos.settings".into(),
-        defaults: Some(
-            [("thumbnails".to_owned(), json!(true))]
-                .into_iter()
-                .collect(),
-        ),
-        extra: Default::default(),
-    });
+    nodule.settings = vec!["org.example.photos.settings".into()];
     nodule
 }
 
@@ -326,8 +318,8 @@ fn own_references_resolve_and_foreign_ones_pass() {
     refuse(missing_def, "declares no definition `moving`");
 
     let mut operation_as_schema = photos();
-    operation_as_schema.config.as_mut().unwrap().schema = "org.example.photos.list".into();
-    refuse(operation_as_schema, "is an operation, not a schema");
+    operation_as_schema.settings = vec!["org.example.photos.list".into()];
+    refuse(operation_as_schema, "is not a datum");
 
     let mut local_ref_in_contribution = photos();
     local_ref_in_contribution.revisioned_stores[0].selector = "#still".into();
@@ -554,77 +546,50 @@ fn initializer_keys_are_present_and_unique() {
 }
 
 #[test]
-fn config_schema_must_be_local_object_and_defaults_must_conform() {
-    let mut foreign_schema = photos();
-    foreign_schema.config.as_mut().unwrap().schema = "org.example.other.settings".into();
+fn settings_name_datums_this_nodule_holds_once_each() {
+    // A settings NSID under another authority is that cartridge's datum, not this nodule's.
+    let mut foreign = photos();
+    foreign.settings = vec!["org.example.other.settings".into()];
     refuse(
-        foreign_schema.clone(),
-        "config.schema`: `org.example.other.settings` is outside this cartridge's authority and is neither implemented nor requested",
+        foreign,
+        "settings[0]`: `org.example.other.settings` is not a Lexicon under this cartridge's authority",
     );
-    // Requesting it makes it another nodule's schema, which this nodule's settings cannot use.
-    foreign_schema
-        .requires
-        .push(data_request("other", "org.example.other.settings"));
+
+    // Declared in this authority is not enough: it must be declared.
+    let mut undeclared = photos();
+    undeclared.settings = vec!["org.example.photos.nowhere".into()];
     refuse(
-        foreign_schema,
+        undeclared,
         "is not a Lexicon under this cartridge's authority",
     );
 
-    let mut record_schema = photos();
-    record_schema.config.as_mut().unwrap().schema = "org.example.photos.photo".into();
-    refuse(record_schema, "must be an object schema");
-
-    let mut bad_property_schema = photos();
-    bad_property_schema.lexicons[5] = file(json!({
-        "lexicon": 1,
-        "id": "org.example.photos.settings",
-        "defs": {
-            "main": {
-                "type": "object",
-                "properties": { "thumbnails": { "type": "ref", "ref": "#missing" } }
-            }
-        }
-    }));
-    refuse(bad_property_schema, "declares no definition `missing`");
-
-    let mut wrong_default_type = photos();
-    wrong_default_type.config.as_mut().unwrap().defaults = Some(
-        [("thumbnails".to_owned(), json!("yes"))]
-            .into_iter()
-            .collect(),
-    );
-    refuse(wrong_default_type, "config.defaults");
-
-    let mut unknown_default_prop = photos();
-    unknown_default_prop.config.as_mut().unwrap().defaults = Some(
-        [
-            ("thumbnails".to_owned(), json!(true)),
-            ("undeclared".to_owned(), json!(1)),
-        ]
-        .into_iter()
-        .collect(),
-    );
-    refuse(unknown_default_prop, "unknown property `undeclared`");
-
-    let mut missing_required_default = photos();
-    missing_required_default.lexicons[5] = file(json!({
-        "lexicon": 1,
-        "id": "org.example.photos.settings",
-        "defs": {
-            "main": {
-                "type": "object",
-                "required": ["thumbnails", "maxCount"],
-                "properties": {
-                    "thumbnails": { "type": "boolean" },
-                    "maxCount": { "type": "integer", "minimum": 1 }
-                }
-            }
-        }
-    }));
+    let mut twice = photos();
+    twice.settings = vec![
+        "org.example.photos.settings".into(),
+        "org.example.photos.settings".into(),
+    ];
     refuse(
-        missing_required_default,
-        "missing required property `maxCount`",
+        twice,
+        "settings[1]`: `org.example.photos.settings` is listed twice",
     );
+
+    // A type library has no `main`, so there is no datum to write.
+    let mut library = photos();
+    library.lexicons.push(file(json!({
+        "lexicon": 1,
+        "id": "org.example.photos.shapes",
+        "defs": { "point": { "type": "object", "properties": {} } }
+    })));
+    library.settings = vec!["org.example.photos.shapes".into()];
+    refuse(library, "is not a datum");
+
+    // A record is a datum too, and a nodule may declare several.
+    let mut several = photos();
+    several.settings = vec![
+        "org.example.photos.settings".into(),
+        "org.example.photos.photo".into(),
+    ];
+    several.admit(Some(PHOTOS)).unwrap();
 }
 
 #[test]
@@ -770,26 +735,37 @@ mod admission_tests {
     use super::*;
     use crate::config::Admission;
     use crate::config::AdmissionCache;
+    use crate::config::CartridgeConfig;
     use crate::config::NoduleConfig;
-    use crate::config::NoduleInstall;
     use crate::config::NoduleResolution;
-    use crate::config::install_key;
     use crate::inventory::ArtifactState;
     use crate::inventory::InstalledNodule;
     use crate::inventory::InventoryError;
     use big_cabinet_core::DocId;
+    use big_cabinet_core::datum::DatumMember;
+    use big_cabinet_core::doc::ChangeHash;
     use big_cabinet_core::doc::DatumRead;
     use big_cabinet_core::doc::DatumStore;
     use big_cabinet_core::doc::DatumVersion;
     use big_cabinet_core::doc::DatumsRead;
     use big_cabinet_core::drawer::DrawerAccess;
+    use big_cabinet_core::drawer::EntryAccess;
     use big_cartridges_core::Artifact;
     use big_cartridges_core::Cartridge;
     use big_cartridges_core::CartridgeId;
     use big_cartridges_core::Contribution;
     use big_cartridges_core::Digest;
+    use big_cartridges_core::MicroContribution;
     use big_cartridges_core::NoduleContribution;
+    use big_cartridges_core::config::CartridgeInstall;
+    use big_cartridges_core::config::Component;
+    use big_cartridges_core::config::ComponentInstall;
+    use big_cartridges_core::config::GrantBody;
+    use big_cartridges_core::config::GrantKey;
+    use big_cartridges_core::config::install_key;
     use big_cartridges_core::example_cartridge;
+    use big_cartridges_core::registry::version_pin;
+    use big_dispatch_core::DispatchScope;
     use big_dispatch_core::Readiness;
     use std::sync::Arc;
 
@@ -817,10 +793,24 @@ mod admission_tests {
         cartridge
     }
 
-    fn settings(thumbnails: Value) -> IndexMap<String, Value> {
-        [("thumbnails".to_owned(), thumbnails)]
-            .into_iter()
-            .collect()
+    /// The pin of `cartridge` in a registry document of its own, at heads derived from its
+    /// revision, so a new revision is a new pin.
+    fn pin_of(cartridge: &Cartridge) -> big_cabinet_core::DatumPin {
+        version_pin(
+            DocId::random(),
+            &cartridge.version,
+            [ChangeHash(cartridge.revision().0)],
+        )
+    }
+
+    /// What the state actor does for an install: the node's config document records the pin of
+    /// the version it read, and enters its admission in the cache.
+    pub(super) fn install(
+        config: &mut NoduleConfig,
+        cache: &AdmissionCache,
+        cartridge: &Cartridge,
+    ) -> std::result::Result<(), InventoryError> {
+        config.install(cache, cartridge, pin_of(cartridge), DocId::random())
     }
 
     /// The installed nodule `config` currently resolves for `id`, as the runtime would see it.
@@ -836,13 +826,14 @@ mod admission_tests {
     }
 
     #[test]
-    fn admits_cartridge_tracks_readiness_and_configures_settings() {
+    fn installs_track_readiness_and_enablement() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
         let cartridge = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
         let id: CartridgeId = example_cartridge!("photos").parse().unwrap();
 
-        let installed = config.admit(&cache, &cartridge, None).unwrap();
+        install(&mut config, &cache, &cartridge).unwrap();
+        let installed = resolved(&config, &cache, &id);
         assert_eq!(installed.cartridge_id, id);
         assert_eq!(installed.version, "1.0.0".parse().unwrap());
         assert_eq!(installed.revision, cartridge.revision());
@@ -853,31 +844,30 @@ mod admission_tests {
             installed.artifacts.get("handler").map(|(_, s)| *s),
             Some(ArtifactState::Unavailable)
         );
-        assert_eq!(installed.config, Some(settings(json!(true))));
-        assert_eq!(resolved(&config, &cache, &id), installed);
 
-        let enabled = config.set_enabled(&cache, &id, true).unwrap();
+        config
+            .set_enabled(&cache, &id, Component::Nodule, true)
+            .unwrap();
+        let enabled = resolved(&config, &cache, &id);
         assert!(enabled.enabled);
         assert_eq!(enabled.readiness(), Readiness::ArtifactsUnavailable);
         assert!(!enabled.readiness().is_ready());
         assert!(Readiness::Ready.is_ready());
-
-        let updated = config.configure(&id, settings(json!(false))).unwrap();
-        assert_eq!(updated.config, Some(settings(json!(false))));
-        assert!(updated.is_configured());
-
-        let bad = config.configure(&id, settings(json!("invalid")));
-        assert!(matches!(bad, Err(InventoryError::Nodule(_))));
-        assert_eq!(
-            resolved(&config, &cache, &id).config,
-            Some(settings(json!(false))),
-            "a refused configure leaves the accepted settings in place"
-        );
         assert!(!Readiness::Refused.is_ready());
         assert!(!Readiness::ExecutorUnavailable.is_ready());
 
+        let rows = config.installs();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cartridge_id, id);
+        assert!(rows[0].install.nodule.as_ref().unwrap().enabled);
+        assert!(rows[0].install.micro.is_none());
+
         config.uninstall(&id).unwrap();
         assert!(config.resolve(&cache).is_empty());
+        assert!(matches!(
+            config.uninstall(&id),
+            Err(InventoryError::UnknownCartridge(_))
+        ));
     }
 
     #[test]
@@ -900,284 +890,314 @@ mod admission_tests {
         cartridge.authority = Some("org.example.schema".into());
         let id: CartridgeId = example_cartridge!("schema").parse().unwrap();
 
-        let installed = config.admit(&cache, &cartridge, None).unwrap();
+        install(&mut config, &cache, &cartridge).unwrap();
+        let installed = resolved(&config, &cache, &id);
         assert!(installed.artifacts.is_empty());
         assert_eq!(installed.readiness(), Readiness::Disabled);
 
-        let enabled = config.set_enabled(&cache, &id, true).unwrap();
-        assert_eq!(enabled.readiness(), Readiness::Ready);
-        assert!(matches!(
-            config.configure(&id, IndexMap::new()),
-            Err(InventoryError::NoConfigSchema(_))
-        ));
+        config
+            .set_enabled(&cache, &id, Component::Nodule, true)
+            .unwrap();
+        assert_eq!(resolved(&config, &cache, &id).readiness(), Readiness::Ready);
     }
 
     #[test]
-    fn upgrades_preserve_state_and_validate_configured_settings() {
+    fn upgrades_keep_enablement_and_unknown_members_and_never_reuse_a_version_label() {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
         let id: CartridgeId = example_cartridge!("photos").parse().unwrap();
         let v1 = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        config.admit(&cache, &v1, None).unwrap();
-        config.set_enabled(&cache, &id, true).unwrap();
+        install(&mut config, &cache, &v1).unwrap();
+        config
+            .set_enabled(&cache, &id, Component::Nodule, true)
+            .unwrap();
 
-        // Unconfigured upgrade adopts the new version's defaults and keeps `enabled`.
-        let mut nodule_v2 = photos();
-        nodule_v2.config.as_mut().unwrap().defaults = Some(settings(json!(false)));
-        let v2 = cartridge_with(example_cartridge!("photos"), "1.1.0", nodule_v2);
-        let upgraded = config.admit(&cache, &v2, None).unwrap();
+        // The upgrade moves the pin and keeps the component's enablement.
+        let v2 = cartridge_with(example_cartridge!("photos"), "1.1.0", photos());
+        install(&mut config, &cache, &v2).unwrap();
+        let upgraded = resolved(&config, &cache, &id);
         assert!(upgraded.enabled);
         assert_eq!(upgraded.version, "1.1.0".parse().unwrap());
-        assert_eq!(upgraded.config, Some(settings(json!(false))));
+        assert_eq!(upgraded.revision, v2.revision());
+        assert_eq!(config.config_docs().len(), 1);
 
-        // Explicit configuration is preserved across a compatible upgrade and rejected if the
-        // new version's schema breaks it.
-        config.configure(&id, settings(json!(true))).unwrap();
-        let v3 = cartridge_with(example_cartridge!("photos"), "1.2.0", photos());
-        let upgraded = config.admit(&cache, &v3, None).unwrap();
-        assert_eq!(upgraded.config, Some(settings(json!(true))));
-
-        let mut incompatible = photos();
-        incompatible.lexicons[5] = file(json!({
-            "lexicon": 1,
-            "id": "org.example.photos.settings",
-            "defs": {
-                "main": {
-                    "type": "object",
-                    "required": ["thumbnails", "endpoint"],
-                    "properties": {
-                        "thumbnails": { "type": "boolean" },
-                        "endpoint": { "type": "string" }
-                    }
-                }
-            }
-        }));
-        incompatible.config.as_mut().unwrap().defaults = Some(
-            [
-                ("thumbnails".to_owned(), json!(true)),
-                ("endpoint".to_owned(), json!("https://example.org")),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        let v4_bad = cartridge_with(example_cartridge!("photos"), "2.0.0", incompatible);
-        // The upgrade is admitted even though it invalidates the explicit settings; resolution
-        // refuses the nodule until the settings are rewritten (see the wedge test below).
-        config.admit(&cache, &v4_bad, None).unwrap();
+        // A version label means one revision: another envelope under the label is refused.
+        let mut forged = cartridge_with(example_cartridge!("photos"), "1.1.0", photos());
+        forged.title = Some("not what was installed".into());
         assert!(matches!(
-            config.resolve(&cache).get(&id),
-            Some(NoduleResolution::Refused { version: Some(v), .. }) if *v == "2.0.0".parse().unwrap()
+            install(&mut config, &cache, &forged),
+            Err(InventoryError::Cartridge(
+                big_cartridges_core::CartridgeError::Conflict { .. }
+            ))
+        ));
+        assert_eq!(resolved(&config, &cache, &id).revision, v2.revision());
+    }
+
+    #[test]
+    fn a_cartridge_has_a_member_per_component_it_contributes_enabled_independently() {
+        let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
+        let micro = |cartridge: &mut Cartridge| {
+            cartridge.artifacts.push(Artifact {
+                key: "micro".into(),
+                digest: Digest::of(b"micro-bytes"),
+                size: Some(11),
+                media_type: Some("application/wasm".into()),
+                extra: Default::default(),
+            });
+            cartridge
+                .contributions
+                .push(Contribution::Micro(MicroContribution {
+                    component: "micro".into(),
+                    schema: "org.example.clay.micro".into(),
+                    description: Default::default(),
+                    extra: Default::default(),
+                }));
+        };
+
+        // A micro-only cartridge installs, has no nodule, and is not resolved as one.
+        let mut only_micro = Cartridge::new(
+            example_cartridge!("panel").parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        micro(&mut only_micro);
+        install(&mut config, &cache, &only_micro).unwrap();
+        let panel: CartridgeId = example_cartridge!("panel").parse().unwrap();
+        let row = &config.installs()[0].install;
+        assert!(row.nodule.is_none());
+        assert_eq!(row.micro, Some(ComponentInstall::new(false)));
+        assert!(config.resolve(&cache).is_empty());
+        config
+            .set_enabled(&cache, &panel, Component::Micro, true)
+            .unwrap();
+        assert!(matches!(
+            config.set_enabled(&cache, &panel, Component::Nodule, true),
+            Err(InventoryError::NoComponent {
+                component: Component::Nodule,
+                ..
+            })
+        ));
+
+        // A cartridge with both runs one revision with each enabled on its own.
+        let mut both = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
+        micro(&mut both);
+        install(&mut config, &cache, &both).unwrap();
+        let id: CartridgeId = example_cartridge!("photos").parse().unwrap();
+        config
+            .set_enabled(&cache, &id, Component::Micro, true)
+            .unwrap();
+        assert!(
+            !resolved(&config, &cache, &id).enabled,
+            "the nodule stays disabled"
+        );
+        config
+            .set_enabled(&cache, &id, Component::Nodule, true)
+            .unwrap();
+        config
+            .set_enabled(&cache, &id, Component::Micro, false)
+            .unwrap();
+        let row = config.entry(&id).unwrap().install.accepted().unwrap();
+        assert_eq!(row.nodule, Some(ComponentInstall::new(true)));
+        assert_eq!(row.micro, Some(ComponentInstall::new(false)));
+        assert!(resolved(&config, &cache, &id).enabled);
+
+        // A cartridge that contributes neither has nothing to install.
+        let empty = Cartridge::new(
+            example_cartridge!("empty").parse().unwrap(),
+            "0.1.0".parse().unwrap(),
+        );
+        assert!(matches!(
+            install(&mut config, &cache, &empty),
+            Err(InventoryError::NothingToInstall(_))
         ));
     }
 
     #[test]
-    fn method_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
-        use big_dispatch_core::DispatchScope;
-        let mut config = NoduleConfig::new();
-        let cache = AdmissionCache::new();
-        let id: CartridgeId = example_cartridge!("photos").parse().unwrap();
+    fn each_grant_is_a_datum_of_its_own_and_revoking_one_leaves_the_rest() {
+        let mut docs = CartridgeConfig::default();
         let drawer = DocId::random();
-        config
-            .admit(
-                &cache,
-                &cartridge_with(example_cartridge!("photos"), "1.0.0", photos()),
-                Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
-            )
-            .unwrap();
-        let scope = DispatchScope {
-            operations: ["org.example.search.query".to_owned()].into(),
-            authorities: ["org.example.callee".to_owned()].into(),
+        let scope = |operations: &[&str], authorities: &[&str]| DispatchScope {
+            operations: operations.iter().map(|nsid| (*nsid).to_owned()).collect(),
+            authorities: authorities.iter().map(|nsid| (*nsid).to_owned()).collect(),
             privileged: false,
         };
-        config.set_method_grants(&id, scope.clone()).unwrap();
-        let resolved = |config: &NoduleConfig| {
-            let Some(NoduleResolution::Admitted {
-                desired_grants,
-                desired_operations,
-                ..
-            }) = config.resolve(&cache).remove(&id)
-            else {
-                panic!("the nodule is admitted");
-            };
-            (desired_grants, desired_operations)
-        };
+        let drawer_grant = GrantKey::Drawer(drawer.clone());
+        let method = GrantKey::Method("org.example.search.query".into());
+        let authority = GrantKey::Authority("org.example.callee".into());
+
+        // Two grants made separately both apply, and each wrote a datum of its own.
+        docs.set_grant(
+            Component::Nodule,
+            drawer_grant.clone(),
+            Some(GrantBody::drawer(EntryAccess::Read)),
+        )
+        .unwrap();
+        docs.set_grant(
+            Component::Nodule,
+            method.clone(),
+            Some(GrantBody::method(false)),
+        )
+        .unwrap();
+        docs.set_grant(
+            Component::Nodule,
+            authority.clone(),
+            Some(GrantBody::method(false)),
+        )
+        .unwrap();
+        let (drawers, methods) = docs.resolve_grants(Component::Nodule).unwrap();
         assert_eq!(
-            resolved(&config),
-            (
-                BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
-                scope
-            )
+            drawers,
+            BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])
         );
-
-        // Rewriting the drawer grants keeps the methods, and emptying the methods keeps the
-        // drawer grants; with nothing left the datum is absent.
-        config.set_drawer_grants(&id, BTreeMap::new()).unwrap();
-        assert_eq!(resolved(&config).1.authorities.len(), 1);
-        config
-            .set_drawer_grants(&id, BTreeMap::from([(drawer.clone(), DrawerAccess::Write)]))
-            .unwrap();
-        config
-            .set_method_grants(&id, DispatchScope::default())
-            .unwrap();
         assert_eq!(
-            resolved(&config),
-            (
-                BTreeMap::from([(drawer, DrawerAccess::Write)]),
-                DispatchScope::default()
-            )
+            methods,
+            scope(&["org.example.search.query"], &["org.example.callee"])
         );
-        config.set_drawer_grants(&id, BTreeMap::new()).unwrap();
-        assert!(config.entry(&id).unwrap().grants.is_absent());
-    }
-
-    #[test]
-    fn an_upgrade_that_invalidates_settings_is_admitted_refused_and_repaired_by_configure() {
-        let mut config = NoduleConfig::new();
-        let cache = AdmissionCache::new();
-        let id: CartridgeId = example_cartridge!("photos").parse().unwrap();
-        let drawer = DocId::random();
-        config
-            .admit(
-                &cache,
-                &cartridge_with(example_cartridge!("photos"), "1.0.0", photos()),
-                Some(BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])),
-            )
-            .unwrap();
-        config.set_enabled(&cache, &id, true).unwrap();
-        config.configure(&id, settings(json!(true))).unwrap();
-
-        // v2 requires a string `endpoint` the stored settings lack.
-        let mut v2_nodule = photos();
-        v2_nodule.lexicons[5] = file(json!({
-            "lexicon": 1,
-            "id": "org.example.photos.settings",
-            "defs": {
-                "main": {
-                    "type": "object",
-                    "required": ["thumbnails", "endpoint"],
-                    "properties": {
-                        "thumbnails": { "type": "boolean" },
-                        "endpoint": { "type": "string" }
-                    }
-                }
-            }
-        }));
-        v2_nodule.config.as_mut().unwrap().defaults = Some(
-            [
-                ("thumbnails".to_owned(), json!(true)),
-                ("endpoint".to_owned(), json!("https://example.org")),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        let before = config.clone();
-        config
-            .admit(
-                &cache,
-                &cartridge_with(example_cartridge!("photos"), "2.0.0", v2_nodule.clone()),
-                None,
-            )
-            .unwrap();
-
-        let Some(NoduleResolution::Refused {
-            version,
-            enabled,
-            config: kept_settings,
-            reason,
-            ..
-        }) = config.resolve(&cache).remove(&id)
-        else {
-            panic!("settings that no longer conform refuse the nodule");
-        };
-        assert_eq!(version, Some("2.0.0".parse().unwrap()));
-        assert!(enabled);
-        assert_eq!(kept_settings, Some(settings(json!(true))));
-        assert!(reason.contains("endpoint"), "{reason}");
-
-        // The stored settings and grants datums are not rewritten by the upgrade.
-        let patch = NoduleConfig::diff(&before, &config).unwrap();
-        assert_eq!(patch.set.keys().collect::<Vec<_>>(), [&install_key(&id)]);
+        let patch = CartridgeConfig::diff(&CartridgeConfig::default(), &docs).unwrap();
+        assert_eq!(patch.set.len(), 3);
         assert!(patch.remove.is_empty());
 
-        // Enabling and grants still work on the refused nodule, and `configure` validates against
-        // the newly installed revision: a bad rewrite is refused, a conforming one repairs it.
-        config.set_enabled(&cache, &id, false).unwrap();
-        config.set_enabled(&cache, &id, true).unwrap();
-        assert!(matches!(
-            config.configure(&id, settings(json!(true))),
-            Err(InventoryError::Nodule(_))
-        ));
-        let mut repaired = settings(json!(true));
-        repaired.insert("endpoint".into(), json!("https://example.org"));
-        config.configure(&id, repaired.clone()).unwrap();
-        let Some(NoduleResolution::Admitted {
-            installed,
-            desired_grants,
-            ..
-        }) = config.resolve(&cache).remove(&id)
-        else {
-            panic!("rewritten settings repair the nodule");
-        };
-        assert_eq!(installed.config, Some(repaired));
+        // The nodule's grants are not the micro's.
         assert_eq!(
-            desired_grants,
-            BTreeMap::from([(drawer, DrawerAccess::Read)]),
-            "desired grants survive the refusal"
+            docs.resolve_grants(Component::Micro).unwrap(),
+            (BTreeMap::new(), DispatchScope::default())
+        );
+        docs.set_grant(
+            Component::Micro,
+            method.clone(),
+            Some(GrantBody::method(true)),
+        )
+        .unwrap();
+        assert!(docs.resolve_grants(Component::Micro).unwrap().1.privileged);
+        assert!(!docs.resolve_grants(Component::Nodule).unwrap().1.privileged);
+
+        // Revoking one grant deletes its datum alone.
+        let before = docs.clone();
+        docs.set_grant(Component::Nodule, method, None).unwrap();
+        let patch = CartridgeConfig::diff(&before, &docs).unwrap();
+        assert!(patch.set.is_empty());
+        assert_eq!(
+            patch.remove,
+            BTreeSet::from([
+                GrantKey::Method("org.example.search.query".into()).datum_key(Component::Nodule)
+            ])
+        );
+        assert_eq!(
+            docs.resolve_grants(Component::Nodule).unwrap().1,
+            scope(&[], &["org.example.callee"])
         );
 
-        // An upgrade to a revision with no config schema at all is refused the same way. Settings
-        // can then no longer be rewritten, which `configure` reports as `NoConfigSchema`.
-        let schemaless = cartridge_with(example_cartridge!("photos"), "3.0.0", {
-            let mut nodule = photos();
-            nodule.config = None;
-            nodule.lexicons.truncate(5);
-            nodule
-        });
-        config.admit(&cache, &schemaless, None).unwrap();
-        let Some(NoduleResolution::Refused { reason, .. }) = config.resolve(&cache).remove(&id)
-        else {
-            panic!("settings without a schema refuse the nodule");
-        };
-        assert!(reason.contains("config schema"), "{reason}");
+        // A grant states what its kind takes.
         assert!(matches!(
-            config.configure(&id, settings(json!(true))),
-            Err(InventoryError::NoConfigSchema(_))
+            docs.set_grant(
+                Component::Nodule,
+                drawer_grant,
+                Some(GrantBody::method(false))
+            ),
+            Err(InventoryError::InvalidGrant { .. })
+        ));
+        assert!(matches!(
+            docs.set_grant(
+                Component::Nodule,
+                authority,
+                Some(GrantBody::drawer(EntryAccess::Read))
+            ),
+            Err(InventoryError::InvalidGrant { .. })
         ));
     }
 
     #[test]
-    fn unchanged_envelopes_are_admitted_once_and_changed_ones_again() {
+    fn a_pin_that_cannot_be_read_yet_refuses_the_nodule_and_is_read_again() {
+        let v1 = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
+        let id = v1.id.clone();
+
+        // An install that synced in names a version whose heads have not reached this node.
+        let mut elsewhere = NoduleConfig::new();
+        install(&mut elsewhere, &AdmissionCache::new(), &v1).unwrap();
+        let read = DatumsRead {
+            heads: Vec::new(),
+            datums: NoduleConfig::diff(&NoduleConfig::new(), &elsewhere)
+                .unwrap()
+                .set
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key,
+                        DatumRead::Accepted {
+                            value,
+                            version: DatumVersion::default(),
+                            authors: Vec::new(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let config = NoduleConfig::hydrate(&read);
+        let pin = config
+            .entry(&id)
+            .unwrap()
+            .install
+            .accepted()
+            .unwrap()
+            .cartridge
+            .clone();
+
+        // The nodule is refused, and the pin stays unsettled so the next reconcile reads it again.
+        let cache = AdmissionCache::new();
+        assert!(cache.needs_read(&id, &pin));
+        cache.insert(
+            &id,
+            pin.clone(),
+            Admission::Refused {
+                version: None,
+                revision: None,
+                reason: "the pinned version is not available yet".into(),
+            },
+            false,
+        );
+        assert!(cache.needs_read(&id, &pin));
+        let NoduleResolution::Refused { reason, .. } = &config.resolve(&cache)[&id] else {
+            panic!("the nodule is refused while its pin is unread");
+        };
+        assert!(reason.contains("not available yet"), "{reason}");
+
+        // Once read it is settled and the same pin resolves.
+        cache.insert(&id, pin.clone(), Admission::of(&v1), true);
+        assert!(!cache.needs_read(&id, &pin));
+        assert_eq!(resolved(&config, &cache, &id).revision, v1.revision());
+    }
+
+    #[test]
+    fn an_admission_is_kept_for_its_pin_and_dropped_for_another() {
         let cache = AdmissionCache::new();
         let id: CartridgeId = example_cartridge!("photos").parse().unwrap();
-        let v1 = NoduleInstall::from_cartridge(
-            &cartridge_with(example_cartridge!("photos"), "1.0.0", photos()),
-            false,
-        );
-        let first = cache.admission(&id, &v1);
+        let v1 = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
+        let pin = pin_of(&v1);
+        let install = |pin: &big_cabinet_core::DatumPin| CartridgeInstall {
+            cartridge: pin.clone(),
+            config_doc: DocId::random(),
+            nodule: Some(ComponentInstall::new(false)),
+            micro: None,
+            extra: Default::default(),
+        };
+        cache.insert(&id, pin.clone(), Admission::of(&v1), true);
+        let first = cache.admission(&id, &install(&pin));
         assert!(matches!(&*first, Admission::Admitted { .. }));
         assert!(
-            Arc::ptr_eq(&first, &cache.admission(&id, &v1)),
-            "the same envelope reuses the stored outcome"
+            Arc::ptr_eq(&first, &cache.admission(&id, &install(&pin))),
+            "the same pin reuses the stored outcome"
         );
-
-        // Toggling `enabled` leaves the envelope alone; a new revision does not.
-        let mut enabled = v1.clone();
-        enabled.enabled = true;
-        assert!(Arc::ptr_eq(&first, &cache.admission(&id, &enabled)));
-        let v2 = NoduleInstall::from_cartridge(
-            &cartridge_with(example_cartridge!("photos"), "1.1.0", photos()),
-            false,
-        );
-        assert!(!Arc::ptr_eq(&first, &cache.admission(&id, &v2)));
-
-        // A tampered envelope under an unchanged revision pin is not served from the cache and
-        // fails the revision check instead.
-        let mut tampered = v2.clone();
-        tampered.envelope.insert("version".into(), json!("9.9.9"));
-        let Admission::Refused { reason, .. } = &*cache.admission(&id, &tampered) else {
-            panic!("a tampered envelope is refused");
+        let mut other = install(&pin);
+        other.cartridge = pin_of(&cartridge_with(
+            example_cartridge!("photos"),
+            "1.1.0",
+            photos(),
+        ));
+        assert!(cache.needs_read(&id, &other.cartridge));
+        let Admission::Refused { reason, .. } = &*cache.admission(&id, &other) else {
+            panic!("a pin nothing was read for is refused");
         };
-        assert!(reason.contains("revision mismatch"), "{reason}");
+        assert!(reason.contains("has not been read"), "{reason}");
     }
 
     #[test]
@@ -1198,11 +1218,19 @@ mod admission_tests {
         ] {
             let mut cartridge = cartridge_with(cartridge_id, "1.0.0", Nodule::default());
             cartridge.authority = Some(authority.into());
+            let pin = pin_of(&cartridge);
+            cache.insert(&cartridge.id, pin.clone(), Admission::of(&cartridge), true);
             read.datums.insert(
                 install_key(&cartridge.id),
                 DatumRead::Accepted {
-                    value: serde_json::to_value(NoduleInstall::from_cartridge(&cartridge, true))
-                        .unwrap(),
+                    value: serde_json::to_value(CartridgeInstall {
+                        cartridge: pin,
+                        config_doc: DocId::random(),
+                        nodule: Some(ComponentInstall::new(true)),
+                        micro: None,
+                        extra: Default::default(),
+                    })
+                    .unwrap(),
                     version: DatumVersion::default(),
                     authors: Vec::new(),
                 },
@@ -1241,8 +1269,10 @@ mod admission_tests {
             let mut cartridge =
                 cartridge_with(&format!("did:key:z6MkTest/{name}"), "1.0.0", nodule);
             cartridge.authority = authority.map(str::to_owned);
-            config.admit(&cache, &cartridge, None).unwrap();
-            config.set_enabled(&cache, &cartridge.id, true).unwrap();
+            install(&mut config, &cache, &cartridge).unwrap();
+            config
+                .set_enabled(&cache, &cartridge.id, Component::Nodule, true)
+                .unwrap();
         }
         config
             .resolve(&cache)
@@ -1312,8 +1342,8 @@ mod admission_tests {
             "0.1.0".parse().unwrap(),
         );
         assert!(matches!(
-            config.admit(&cache, &empty, None),
-            Err(InventoryError::MissingContribution(_))
+            install(&mut config, &cache, &empty),
+            Err(InventoryError::NothingToInstall(_))
         ));
 
         let mut bad_schema = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
@@ -1321,7 +1351,7 @@ mod admission_tests {
             n.schema = "org.example.other.nodule".into();
         }
         assert!(matches!(
-            config.admit(&cache, &bad_schema, None),
+            install(&mut config, &cache, &bad_schema),
             Err(InventoryError::UnsupportedSchema { .. })
         ));
 
@@ -1330,46 +1360,48 @@ mod admission_tests {
             n.description.insert("lexicons".into(), json!(123));
         }
         assert!(matches!(
-            config.admit(&cache, &bad_payload, None),
+            install(&mut config, &cache, &bad_payload),
             Err(InventoryError::InvalidContribution { .. })
         ));
 
         let mut no_artifact = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
         no_artifact.artifacts.clear();
         assert!(matches!(
-            config.admit(&cache, &no_artifact, None),
+            install(&mut config, &cache, &no_artifact),
             Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "handler"
         ));
         let mut no_size = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
         no_size.artifacts[0].size = None;
         assert!(matches!(
-            config.admit(&cache, &no_size, None),
+            install(&mut config, &cache, &no_size),
             Err(InventoryError::ArtifactSizeRequired { artifact, .. }) if artifact == "handler"
         ));
         assert!(
             config.resolve(&cache).is_empty(),
-            "refused admissions install nothing"
+            "refused installs install nothing"
         );
 
         let valid = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        config.admit(&cache, &valid, None).unwrap();
-        config.set_enabled(&cache, &valid.id, true).unwrap();
+        install(&mut config, &cache, &valid).unwrap();
+        config
+            .set_enabled(&cache, &valid.id, Component::Nodule, true)
+            .unwrap();
 
         // Installing a rival holds nothing; enabling it is refused while `photos` holds the prefix.
         let duplicate_authority =
             cartridge_with(example_cartridge!("other-photos"), "1.0.0", photos());
-        config.admit(&cache, &duplicate_authority, None).unwrap();
+        install(&mut config, &cache, &duplicate_authority).unwrap();
         assert!(matches!(
-            config.set_enabled(&cache, &duplicate_authority.id, true),
+            config.set_enabled(&cache, &duplicate_authority.id, Component::Nodule, true),
             Err(InventoryError::AuthorityConflict { .. })
         ));
 
         let mut nested =
             cartridge_with(example_cartridge!("sub-photos"), "1.0.0", Nodule::default());
         nested.authority = Some("org.example.photos.sub".into());
-        config.admit(&cache, &nested, None).unwrap();
+        install(&mut config, &cache, &nested).unwrap();
         assert!(matches!(
-            config.set_enabled(&cache, &nested.id, true),
+            config.set_enabled(&cache, &nested.id, Component::Nodule, true),
             Err(InventoryError::AuthorityConflict { authority, .. }) if authority == "org.example.photos.sub"
         ));
         let mut sibling = cartridge_with(
@@ -1378,8 +1410,10 @@ mod admission_tests {
             Nodule::default(),
         );
         sibling.authority = Some("org.example.photosynthesis".into());
-        config.admit(&cache, &sibling, None).unwrap();
-        config.set_enabled(&cache, &sibling.id, true).unwrap();
+        install(&mut config, &cache, &sibling).unwrap();
+        config
+            .set_enabled(&cache, &sibling.id, Component::Nodule, true)
+            .unwrap();
     }
 }
 
@@ -1414,6 +1448,10 @@ mod declaration {
             main["properties"]["bindings"]["type"], "unknown",
             "{nodule}"
         );
+        assert_eq!(
+            main["properties"]["settings"]["items"]["type"], "string",
+            "{nodule}"
+        );
         let mode = &nodule["defs"]["RevisionedStore"]["properties"]["mode"];
         assert_eq!(mode["knownValues"], json!(["frontier", "log"]), "{nodule}");
         for (index, lexicon) in lexicons.iter().enumerate() {
@@ -1433,10 +1471,11 @@ mod declaration {
     fn the_config_datums_declare_publish_and_admit() {
         use crate::config::MethodRoute;
         use crate::config::NoduleDevTakeover;
-        use crate::config::NoduleGrants;
-        use crate::config::NoduleInstall;
-        use crate::config::NoduleSettings;
         use crate::config::config_universe;
+        use big_cartridges_core::config::CartridgeConfigIdentity;
+        use big_cartridges_core::config::CartridgeInstall;
+        use big_cartridges_core::config::MicroGrant;
+        use big_cartridges_core::config::NoduleGrant;
 
         let universe = config_universe();
         let ids: Vec<&str> = universe
@@ -1447,30 +1486,37 @@ mod declaration {
         assert_eq!(
             ids,
             [
-                NoduleInstall::ID,
-                NoduleSettings::ID,
-                NoduleGrants::ID,
+                CartridgeInstall::ID,
+                CartridgeConfigIdentity::ID,
+                NoduleGrant::ID,
+                MicroGrant::ID,
                 NoduleDevTakeover::ID,
                 MethodRoute::ID
             ]
         );
         let bundle = Bundle::new(&universe, Vec::new());
         let lexicons = bundle.lexicons().unwrap();
-        assert_eq!(lexicons.len(), 5);
+        assert_eq!(lexicons.len(), 6);
 
-        let grants_lex = lexicons
+        // The install pins its version by reference: a `#datumPin` position, which indexes find
+        // from the schema alone.
+        let install_lex = lexicons
             .iter()
-            .find(|lex| lex.id == NoduleGrants::ID)
+            .find(|lex| lex.id == CartridgeInstall::ID)
             .unwrap();
-        let drawers_prop = &grants_lex.file["defs"]["main"]["properties"]["drawers"];
-        assert_eq!(drawers_prop["type"], "unknown", "{}", grants_lex.file);
+        let pin = &install_lex.file["defs"]["main"]["properties"]["cartridge"];
+        assert_eq!(pin["type"], "ref", "{}", install_lex.file);
+        assert_eq!(pin["ref"], "org.example.daybook.defs#datumPin", "{pin}");
 
+        // The node's own type library, which the pin refers to, is carried by every registration.
+        let defs = big_cabinet_core::reference::defs_lexicon();
         for (index, lexicon) in lexicons.iter().enumerate() {
             let carried: Vec<&Value> = lexicons
                 .iter()
                 .enumerate()
                 .filter(|(other, _)| *other != index)
                 .map(|(_, other)| &other.file)
+                .chain(std::iter::once(&defs))
                 .collect();
             bundle
                 .validate_lexicon(&lexicon.id, &lexicon.file, &carried)
@@ -1480,20 +1526,17 @@ mod declaration {
 }
 
 mod config_tests {
+    use super::admission_tests::install;
     use super::*;
     use crate::config::AdmissionCache;
+    use crate::config::CartridgeConfig;
     use crate::config::DatumSlot;
     use crate::config::NoduleConfig;
-    use crate::config::NoduleGrants;
-    use crate::config::NoduleInstall;
     use crate::config::NoduleResolution;
-    use crate::config::NoduleSettings;
     use crate::config::artifact_key;
-    use crate::config::grants_key;
-    use crate::config::install_key;
-    use crate::config::settings_key;
     use big_cabinet_core::DatumKey;
     use big_cabinet_core::DocId;
+    use big_cabinet_core::datum::DatumMember;
     use big_cabinet_core::doc::DatumRead;
     use big_cabinet_core::doc::DatumStore;
     use big_cabinet_core::doc::DatumVersion;
@@ -1506,6 +1549,15 @@ mod config_tests {
     use big_cartridges_core::Contribution;
     use big_cartridges_core::Digest;
     use big_cartridges_core::NoduleContribution;
+    use big_cartridges_core::config::CartridgeConfigIdentity;
+    use big_cartridges_core::config::CartridgeInstall;
+    use big_cartridges_core::config::Component;
+    use big_cartridges_core::config::GrantBody;
+    use big_cartridges_core::config::GrantKey;
+    use big_cartridges_core::config::MicroGrant;
+    use big_cartridges_core::config::NoduleGrant;
+    use big_cartridges_core::config::config_identity_key;
+    use big_cartridges_core::config::install_key;
     use big_cartridges_core::example_cartridge;
 
     fn sample_cartridge(id: &str, version: &str) -> Cartridge {
@@ -1530,76 +1582,107 @@ mod config_tests {
         cartridge
     }
 
+    fn accepted(value: Value) -> DatumRead {
+        DatumRead::Accepted {
+            value,
+            version: DatumVersion::default(),
+            authors: Vec::new(),
+        }
+    }
+
+    /// The install datum of `cartridge` as the node document stores it.
+    fn stored_install(cartridge: &Cartridge, enabled: bool) -> Value {
+        let mut config = NoduleConfig::new();
+        let cache = AdmissionCache::new();
+        install(&mut config, &cache, cartridge).unwrap();
+        config
+            .set_enabled(&cache, &cartridge.id, Component::Nodule, enabled)
+            .unwrap();
+        let patch = NoduleConfig::diff(&NoduleConfig::new(), &config).unwrap();
+        patch.set[&install_key(&cartridge.id)].clone()
+    }
+
     #[test]
     fn config_datums_preserve_unknown_fields_and_vocabulary_on_round_trip() {
         let cartridge = sample_cartridge(example_cartridge!("photos"), "1.0.0");
         let cartridge_id = cartridge.id.clone();
 
-        let install = NoduleInstall::from_cartridge(&cartridge, true);
-        let mut install_json = serde_json::to_value(&install).unwrap();
+        // The install is a pin, with no copy of the envelope and no revision of its own.
+        let mut install_json = stored_install(&cartridge, true);
+        assert!(install_json.get("envelope").is_none() && install_json.get("revision").is_none());
+        assert!(install_json["cartridge"]["heads"].is_array());
+        assert_eq!(install_json["nodule"], json!({"enabled": true}));
         install_json["futureInstallField"] = json!("kept");
-        let decoded_install: NoduleInstall = serde_json::from_value(install_json.clone()).unwrap();
-        assert_eq!(decoded_install.decode_cartridge().unwrap(), cartridge);
-        assert!(decoded_install.enabled);
-        assert_eq!(
-            serde_json::to_value(&decoded_install).unwrap(),
-            install_json
-        );
+        install_json["nodule"]["futureMember"] = json!(1);
+        let decoded: CartridgeInstall = serde_json::from_value(install_json.clone()).unwrap();
+        assert!(decoded.nodule.as_ref().unwrap().enabled);
+        assert!(decoded.micro.is_none());
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), install_json);
 
-        let settings_json = json!({
-            "values": { "thumbnails": false },
-            "futureSettingsField": 42
-        });
-        let decoded_settings: NoduleSettings =
-            serde_json::from_value(settings_json.clone()).unwrap();
+        let grant_json = json!({ "access": "SuperAdmin", "futureGrantField": true });
+        let decoded: NoduleGrant = serde_json::from_value(grant_json.clone()).unwrap();
         assert_eq!(
-            serde_json::to_value(&decoded_settings).unwrap(),
-            settings_json
+            decoded.access,
+            Some(EntryAccess::Unknown("SuperAdmin".into()))
         );
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), grant_json);
+        let micro: MicroGrant = serde_json::from_value(json!({ "privileged": true })).unwrap();
+        assert!(micro.privileged && micro.access.is_none());
 
-        let drawer_a = DocId::random();
-        let drawer_b = DocId::random();
-        let grants_json = json!({
-            "drawers": {
-                drawer_a.to_string(): "Write",
-                drawer_b.to_string(): "SuperAdmin"
-            },
-            "futureGrantsField": true
-        });
-        let decoded_grants: NoduleGrants = serde_json::from_value(grants_json.clone()).unwrap();
-        assert_eq!(
-            decoded_grants.drawers.get(&drawer_a),
-            Some(&EntryAccess::Write)
-        );
-        assert_eq!(
-            decoded_grants.drawers.get(&drawer_b),
-            Some(&EntryAccess::Unknown("SuperAdmin".into()))
-        );
-        assert_eq!(serde_json::to_value(&decoded_grants).unwrap(), grants_json);
-
-        let ik = install_key(&cartridge_id);
-        let sk = settings_key(&cartridge_id);
-        let gk = grants_key(&cartridge_id);
-        assert!(NoduleConfig::owns(&ik));
-        assert!(NoduleConfig::owns(&sk));
-        assert!(NoduleConfig::owns(&gk));
+        assert!(NoduleConfig::owns(&install_key(&cartridge_id)));
+        // The grants and the settings are the cartridge document's, not the node's.
+        let grant = GrantKey::Method("org.example.x.y".into());
+        assert!(!NoduleConfig::owns(&grant.datum_key(Component::Nodule)));
+        assert!(CartridgeConfig::owns(&grant.datum_key(Component::Nodule)));
+        assert!(CartridgeConfig::owns(
+            &DatumKey::from_text("org.example.photos.settings", "main").unwrap()
+        ));
     }
 
     #[test]
-    fn datum_store_hydrates_diffs_and_isolates_invalid_or_orphan_entries() {
+    fn grant_keys_name_drawers_operations_and_authorities_and_nothing_else() {
+        let drawer = DocId::random();
+        for text in [
+            format!("drawer:{drawer}"),
+            "method:org.example.tags.apply".to_owned(),
+            "authority:org.example.tags".to_owned(),
+            "authority:*".to_owned(),
+        ] {
+            let key: GrantKey = text.parse().unwrap();
+            assert_eq!(key.to_string(), text);
+            assert_eq!(GrantKey::from_slot(text.as_bytes()), Some(key));
+        }
+        // An NSID-shaped name is an operation and an authority at once, so the kind is in the key.
+        assert_ne!(
+            "method:org.example.tags".parse::<GrantKey>().unwrap(),
+            "authority:org.example.tags".parse::<GrantKey>().unwrap()
+        );
+        for text in [
+            "",
+            "drawer",
+            "drawer:not-a-doc",
+            "method:org.example",
+            "method:*",
+            "authority:tags",
+            "weird:org.example.tags",
+        ] {
+            assert!(text.parse::<GrantKey>().is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn node_store_hydrates_diffs_and_isolates_invalid_or_orphan_entries() {
         let photos_cartridge = sample_cartridge(example_cartridge!("photos"), "1.0.0");
         let photos_id = photos_cartridge.id.clone();
 
         let broken_id: CartridgeId = example_cartridge!("broken").parse().unwrap();
         let orphan_id: CartridgeId = example_cartridge!("orphan").parse().unwrap();
-        let drawer = DocId::random();
 
         let unowned_key = DatumKey::from_text("org.example.daybook.drawer", "main").unwrap();
         let malformed_key =
-            DatumKey::from_text(NoduleInstall::ID, "invalid-cartridge-slot").unwrap();
+            DatumKey::from_text(CartridgeInstall::ID, "invalid-cartridge-slot").unwrap();
 
-        let mut install_val =
-            serde_json::to_value(NoduleInstall::from_cartridge(&photos_cartridge, false)).unwrap();
+        let mut install_val = stored_install(&photos_cartridge, false);
         install_val["extraInstall"] = json!(1);
 
         let mut read = DatumsRead {
@@ -1608,77 +1691,51 @@ mod config_tests {
         };
         read.datums.insert(
             unowned_key.clone(),
-            DatumRead::Accepted {
-                value: json!({"layout": {"$type": "org.example.daybook.drawer.selfDoc", "empty": true}}),
-                version: DatumVersion::default(),
-                authors: Vec::new(),
-            },
+            accepted(
+                json!({"layout": {"$type": "org.example.daybook.drawer.selfDoc", "empty": true}}),
+            ),
         );
-        read.datums.insert(
-            malformed_key.clone(),
-            DatumRead::Accepted {
-                value: json!({"unexpected": true}),
-                version: DatumVersion::default(),
-                authors: Vec::new(),
-            },
-        );
-        read.datums.insert(
-            install_key(&photos_id),
-            DatumRead::Accepted {
-                value: install_val,
-                version: DatumVersion::default(),
-                authors: Vec::new(),
-            },
-        );
+        read.datums
+            .insert(malformed_key.clone(), accepted(json!({"unexpected": true})));
+        read.datums
+            .insert(install_key(&photos_id), accepted(install_val));
         read.datums.insert(
             install_key(&broken_id),
-            DatumRead::Accepted {
-                value: json!({"envelope": {}, "revision": "bad", "enabled": true}),
-                version: DatumVersion::default(),
-                authors: Vec::new(),
-            },
+            accepted(json!({"cartridge": "nope", "configDoc": "bad", "nodule": {"enabled": true}})),
         );
+        // An artifact reference with no install is an orphan: it installs nothing.
         read.datums.insert(
-            settings_key(&broken_id),
-            DatumRead::Pending {
-                reason: "awaiting schema".into(),
-                version: DatumVersion::default(),
-                value: Some(json!({"values": {}})),
-            },
-        );
-        read.datums.insert(
-            grants_key(&broken_id),
-            DatumRead::Rejected {
-                reason: "unauthorized writer".into(),
-            },
-        );
-        read.datums.insert(
-            settings_key(&orphan_id),
-            DatumRead::Accepted {
-                value: json!({"values": {"thumbnails": false}}),
-                version: DatumVersion::default(),
-                authors: Vec::new(),
-            },
+            artifact_key(&orphan_id, "handler"),
+            accepted(json!({"mime": "application/wasm", "lengthOctets": 1, "digest": "zQm"})),
         );
 
         let before = NoduleConfig::hydrate(&read);
         assert!(before.carried_keys().contains_key(&malformed_key));
+        assert!(!before.carried_keys().contains_key(&unowned_key));
         assert!(matches!(
             before.entry(&broken_id).unwrap().install,
             DatumSlot::Invalid { .. }
         ));
-        assert!(matches!(
-            before.entry(&broken_id).unwrap().settings,
-            DatumSlot::Invalid { .. }
-        ));
-        assert!(matches!(
-            before.entry(&broken_id).unwrap().grants,
-            DatumSlot::Invalid { .. }
-        ));
         assert!(before.entry(&orphan_id).unwrap().install.is_absent());
 
-        // Resolve admits `example/photos`, refuses `example/broken`, and ignores `example/orphan`.
-        let resolved = before.resolve(&Default::default());
+        // The pinned version of `example/photos` is read; `example/broken` is refused for its
+        // install, and `example/orphan` is ignored.
+        let cache = AdmissionCache::new();
+        let pin = before
+            .entry(&photos_id)
+            .unwrap()
+            .install
+            .accepted()
+            .unwrap()
+            .cartridge
+            .clone();
+        cache.insert(
+            &photos_id,
+            pin,
+            crate::config::Admission::of(&photos_cartridge),
+            true,
+        );
+        let resolved = before.resolve(&cache);
         assert!(matches!(
             resolved.get(&photos_id),
             Some(NoduleResolution::Admitted { .. })
@@ -1692,52 +1749,29 @@ mod config_tests {
         // Mutating `example/photos` leaves broken, orphan, malformed, and unowned keys untouched.
         let mut after = before.clone();
         after
-            .set_enabled(&AdmissionCache::new(), &photos_id, true)
+            .set_enabled(&cache, &photos_id, Component::Nodule, true)
             .unwrap();
-        after
-            .configure(
-                &photos_id,
-                [("thumbnails".to_owned(), json!(false))]
-                    .into_iter()
-                    .collect(),
-            )
-            .unwrap();
-        after
-            .set_drawer_grants(
-                &photos_id,
-                BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
-            )
-            .unwrap();
-
         let patch = NoduleConfig::diff(&before, &after).unwrap();
         assert!(patch.remove.is_empty());
-        assert_eq!(patch.set.len(), 3);
-        assert_eq!(patch.set[&install_key(&photos_id)]["enabled"], json!(true));
+        assert_eq!(patch.set.len(), 1);
+        assert_eq!(
+            patch.set[&install_key(&photos_id)]["nodule"]["enabled"],
+            json!(true)
+        );
         assert_eq!(
             patch.set[&install_key(&photos_id)]["extraInstall"],
             json!(1)
         );
-        assert_eq!(
-            patch.set[&settings_key(&photos_id)]["values"]["thumbnails"],
-            json!(false)
-        );
-        assert_eq!(
-            patch.set[&grants_key(&photos_id)]["drawers"][&drawer.to_string()],
-            json!("Read")
-        );
 
-        // Uninstalling `example/photos` removes all three datums in one patch.
+        // Uninstalling `example/photos` removes the install in one patch; the cartridge's
+        // config document is not this document's to touch.
         let mut uninstalled = after.clone();
         uninstalled.uninstall(&photos_id).unwrap();
         let uninstall_patch = NoduleConfig::diff(&after, &uninstalled).unwrap();
         assert!(uninstall_patch.set.is_empty());
         assert_eq!(
             uninstall_patch.remove,
-            BTreeSet::from([
-                install_key(&photos_id),
-                settings_key(&photos_id),
-                grants_key(&photos_id),
-            ])
+            BTreeSet::from([install_key(&photos_id)])
         );
 
         // Removing a carried malformed key emits it in `patch.remove`.
@@ -1745,6 +1779,110 @@ mod config_tests {
         assert!(cleaned.remove_carried_key(&malformed_key));
         let clean_patch = NoduleConfig::diff(&before, &cleaned).unwrap();
         assert_eq!(clean_patch.remove, BTreeSet::from([malformed_key]));
+    }
+
+    #[test]
+    fn the_cartridge_store_carries_settings_and_unreadable_grants_and_clears_only_its_own() {
+        let drawer = DocId::random();
+        let identity = config_identity_key();
+        let settings = DatumKey::from_text("org.example.photos.settings", "main").unwrap();
+        let damaged = GrantKey::Method("org.example.damaged.op".into());
+        let kept = GrantKey::Drawer(drawer.clone());
+        let notes = DatumKey::from_text(NoduleGrant::ID, "free-form-note").unwrap();
+        let mut read = DatumsRead {
+            heads: Vec::new(),
+            datums: BTreeMap::new(),
+        };
+        read.datums.insert(
+            identity.clone(),
+            accepted(json!({ "cartridge": example_cartridge!("photos") })),
+        );
+        read.datums
+            .insert(settings.clone(), accepted(json!({ "thumbnails": false })));
+        read.datums.insert(
+            kept.datum_key(Component::Nodule),
+            accepted(json!({ "access": "Write", "futureField": 1 })),
+        );
+        read.datums.insert(
+            damaged.datum_key(Component::Nodule),
+            DatumRead::Rejected {
+                reason: "unauthorized writer".into(),
+            },
+        );
+        read.datums.insert(
+            kept.datum_key(Component::Micro),
+            accepted(json!({ "access": "Read" })),
+        );
+        // A grant-tagged datum whose slot names no grant is carried, like a setting.
+        read.datums
+            .insert(notes.clone(), accepted(json!({ "text": "hand written" })));
+        let stored = CartridgeConfig::hydrate(&read);
+
+        assert!(matches!(
+            stored.identity().accepted(),
+            Some(CartridgeConfigIdentity { cartridge, .. })
+                if cartridge.to_string() == example_cartridge!("photos")
+        ));
+        let nodule: Vec<_> = stored.grants(Component::Nodule).collect();
+        assert_eq!(nodule.len(), 2);
+        assert!(matches!(
+            stored.resolve_grants(Component::Nodule),
+            Err(reason) if reason.contains("org.example.damaged.op")
+        ));
+        let (micro_drawers, _) = stored.resolve_grants(Component::Micro).unwrap();
+        assert_eq!(
+            micro_drawers,
+            BTreeMap::from([(drawer.clone(), DrawerAccess::Read)])
+        );
+
+        // Rewriting a grant keeps the members of the stored datum this build does not know, and
+        // replaces the damaged one outright.
+        let mut after = stored.clone();
+        after
+            .set_grant(
+                Component::Nodule,
+                kept.clone(),
+                Some(GrantBody::drawer(EntryAccess::Admin)),
+            )
+            .unwrap();
+        after
+            .set_grant(
+                Component::Nodule,
+                damaged.clone(),
+                Some(GrantBody::method(false)),
+            )
+            .unwrap();
+        let patch = CartridgeConfig::diff(&stored, &after).unwrap();
+        assert!(patch.remove.is_empty());
+        assert_eq!(
+            patch.set[&kept.datum_key(Component::Nodule)],
+            json!({ "access": "Admin", "futureField": 1 })
+        );
+        assert_eq!(patch.set[&damaged.datum_key(Component::Nodule)], json!({}));
+        assert_eq!(
+            patch.set.len(),
+            2,
+            "the settings and the micro's grant are untouched"
+        );
+
+        // Clearing deletes the settings and every grant of both components, and keeps the
+        // identity that lets the document be found again.
+        let mut cleared = stored.clone();
+        cleared.clear();
+        let patch = CartridgeConfig::diff(&stored, &cleared).unwrap();
+        assert!(patch.set.is_empty());
+        assert_eq!(
+            patch.remove,
+            BTreeSet::from([
+                settings,
+                notes,
+                kept.datum_key(Component::Nodule),
+                damaged.datum_key(Component::Nodule),
+                kept.datum_key(Component::Micro),
+            ])
+        );
+        assert!(!patch.remove.contains(&identity));
+        assert_eq!(cleared.identity(), stored.identity());
     }
 
     /// The `Blob` datum stored for `cartridge`'s handler artifact, as the document holds it.
@@ -1755,14 +1893,6 @@ mod config_tests {
             "lengthOctets": artifact.size.unwrap(),
             "digest": artifact.digest.to_string(),
         })
-    }
-
-    fn accepted(value: Value) -> DatumRead {
-        DatumRead::Accepted {
-            value,
-            version: DatumVersion::default(),
-            authors: Vec::new(),
-        }
     }
 
     #[test]
@@ -1856,12 +1986,12 @@ mod config_tests {
         assert!(NoduleConfig::owns(&malformed));
         assert!(NoduleConfig::owns(&slot));
 
-        // Admitting writes the install and the reference in the same patch, and the reference
+        // Installing writes the install and the reference in the same patch, and the reference
         // is the datum wire form big_blobs reads (no `null` for the unset options).
         let v1 = sample_cartridge(example_cartridge!("photos"), "1.0.0");
         let cache = AdmissionCache::new();
         let mut config = NoduleConfig::new();
-        config.admit(&cache, &v1, None).unwrap();
+        install(&mut config, &cache, &v1).unwrap();
         let patch = NoduleConfig::diff(&NoduleConfig::new(), &config).unwrap();
         assert_eq!(
             patch.set.keys().cloned().collect::<BTreeSet<_>>(),
@@ -1894,10 +2024,20 @@ mod config_tests {
             DatumSlot::Accepted { .. }
         ));
 
-        // Re-admitting the same revision rewrites the install datum's slot only if it changed,
-        // and drops the reference no artifact of the revision names.
+        // Re-installing the same revision at the stored pin rewrites nothing and drops the
+        // reference no artifact of the revision names.
+        let pin = stored
+            .entry(&id)
+            .unwrap()
+            .install
+            .accepted()
+            .unwrap()
+            .cartridge
+            .clone();
+        let doc = stored.config_docs()[&id].clone();
+        cache.insert(&id, pin.clone(), crate::config::Admission::of(&v1), true);
         let mut again = stored.clone();
-        again.admit(&cache, &v1, None).unwrap();
+        again.install(&cache, &v1, pin, doc).unwrap();
         let patch = NoduleConfig::diff(&stored, &again).unwrap();
         assert!(patch.set.is_empty(), "{:?}", patch.set);
         assert_eq!(patch.remove, BTreeSet::from([stale.clone()]));
@@ -1907,7 +2047,7 @@ mod config_tests {
         v2.artifacts[0].digest = Digest::of(b"other-wasm-bytes");
         v2.artifacts[0].size = Some(16);
         let mut upgraded = stored.clone();
-        upgraded.admit(&cache, &v2, None).unwrap();
+        install(&mut upgraded, &cache, &v2).unwrap();
         let patch = NoduleConfig::diff(&stored, &upgraded).unwrap();
         assert_eq!(
             patch.set.keys().cloned().collect::<BTreeSet<_>>(),
@@ -1916,7 +2056,7 @@ mod config_tests {
         assert_eq!(patch.set[&slot], stored_artifact(&v2));
         assert_eq!(patch.remove, BTreeSet::from([stale.clone()]));
 
-        // A reference that no longer decodes is replaced by the admission, which repairs it.
+        // A reference that no longer decodes is replaced by the install, which repairs it.
         let mut damaged = read.clone();
         damaged
             .datums
@@ -1927,7 +2067,7 @@ mod config_tests {
             DatumSlot::Invalid { .. }
         ));
         let mut repaired = damaged.clone();
-        repaired.admit(&cache, &v1, None).unwrap();
+        install(&mut repaired, &cache, &v1).unwrap();
         let patch = NoduleConfig::diff(&damaged, &repaired).unwrap();
         assert_eq!(patch.set[&slot], stored_artifact(&v1));
 
