@@ -75,6 +75,10 @@ impl DocsService {
     ) -> Result<Vec<QueriedDatumRef>, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
         use big_cabinet_core::drawer::DrawerAccess;
+        if let Some(drawer_id) = &params.drawer_id {
+            DocsError::ensure_doc_id(drawer_id)?;
+        }
+        DocsError::ensure_doc_id(params.selector.doc_id())?;
         let drawer = if let Some(drawer_id) = &params.drawer_id {
             let DomainAuthority::Scoped(scope) = &caller.authority else {
                 return Err(DocsError::Denied);
