@@ -90,7 +90,7 @@ impl AdvancedVirtualizer for StubCodeView {
 }
 
 /// An instance under a `StubCodeView` (`createAdvancedVirtualizer()`).
-fn advanced_world(options: Options) -> (World, Rc<StubCodeView>) {
+pub(super) fn advanced_world(options: Options) -> (World, Rc<StubCodeView>) {
     let code_view = StubCodeView::new();
     let weak = Rc::downgrade(&code_view);
     let weak: Weak<dyn AdvancedVirtualizer> = weak;
