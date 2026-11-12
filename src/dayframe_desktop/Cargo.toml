@@ -8,7 +8,8 @@ name = "dayframe_desktop"
 path = "main.rs"
 
 [dependencies]
-dioxus = { workspace = true }
+#
+# internal
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
 clay_docs = { workspace = true }
@@ -26,9 +27,12 @@ micro_toolbar_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_counter_manifest = { workspace = true }
 daybook_types = { workspace = true }
+
+#
+# misc
+dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
 dioxus-native = { workspace = true, features = ["scrollbars"], optional = true }
 anyrender = { version = "0.13.0", optional = true }
 anyrender_vello = { version = "0.14.0", optional = true }

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-dioxus = { workspace = true }
+#
+# internal
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
 clay_dioxus = { workspace = true }
@@ -21,6 +22,10 @@ micro_toolbar_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_counter_manifest = { workspace = true }
 clay_docs = { workspace = true }
+
+#
+# misc
+dioxus = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 wasm-bindgen.workspace = true

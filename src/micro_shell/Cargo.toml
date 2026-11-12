@@ -10,8 +10,13 @@ path = "lib.rs"
 workspace = true
 
 [dependencies]
+#
+# internal
 clay_dioxus_kit = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 micro_shell_manifest = { workspace = true }
+
+#
+# misc
 dioxus.workspace = true
 tokio = { workspace = true, features = ["sync"] }

@@ -4,11 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dioxus = { workspace = true }
+#
+# internal
 ui = { workspace = true }
 clay_dioxus_kit = { workspace = true }
 pierre_diffs_dioxus = { workspace = true }
 review_mock = { workspace = true }
+
+#
+# misc
+dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The virtualized diff's timers: `FileDiffView` takes a sleep function, and desktop's runtime has
@@ -16,10 +21,6 @@ serde_json = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 
 dioxus-native.workspace = true
-anyrender = { version = "0.13.0" }
-anyrender_vello = { version = "0.14.0" }
-anyrender_vello_cpu = { version = "0.17.0" }
-anyrender_vello_hybrid = { version = "0.10.0" }
 
 [dev-dependencies]
 dioxus-ssr = { workspace = true }

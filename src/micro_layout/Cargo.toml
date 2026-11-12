@@ -9,16 +9,25 @@ path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+#
+# internal
 clay_dioxus_kit = { workspace = true }
 micro_layout_manifest = { workspace = true }
+
+#
+# misc
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 # One authored micro, two backends (isomorphic MDK): a wasm32-wasip3 build is the guest, every
 # other target links the in-process backend.
 [target.'cfg(target_os = "wasi")'.dependencies]
+#
+# internal
 clay_mdk = { workspace = true, features = ["guest"] }
 
 [target.'cfg(not(target_os = "wasi"))'.dependencies]
+#
+# internal
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 
 [dev-dependencies]

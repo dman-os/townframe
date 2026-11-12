@@ -10,7 +10,12 @@ path = "lib.rs"
 workspace = true
 
 [dependencies]
+#
+# internal
 clay_mdk = { workspace = true, features = ["contract"] }
+
+#
+# misc
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 

@@ -7,15 +7,25 @@ edition = "2024"
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 clay_dioxus_kit = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 micro_settings_manifest = { workspace = true }
 micro_shell_manifest = { workspace = true }
+
+#
+# misc
 dioxus.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+#
+# internal
 clay_dioxus = { workspace = true }
 clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
+
+#
+# misc
 tokio = { workspace = true, features = ["rt", "macros"] }
