@@ -1,6 +1,6 @@
 # Permission and access vocabulary
 
-Status: Proposal for the operator (manager, 2026-11-12). Owner: Townframe
+Status: Reference only (operator, 2026-11-12). Two corrections taken: UI copy says **cartridge**, not cart; **relay** is preferred over backup. External clients that authorize need their own noun ("Authorize new <noun>"), still to be chosen. The rest of the mapping is not adopted: the vocabulary will be designed incrementally in later sessions. The inventory below stays useful as the record of today's terms. Owner: Townframe
 maintainers Updated: 2026-11-12 Scope: One vocabulary for who can do what. It
 covers a cartridge's permissions, a client's identity, drawer sharing, and other
 nodes, with a user-facing register and a developer-facing register. Built from a
