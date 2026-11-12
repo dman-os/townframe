@@ -589,7 +589,7 @@ mod library {
 
     /// Where the handler component is built (see `intxt install --handler`): CI builds it before
     /// these tests, and `INTXT_GUEST_WASM` names it when it is elsewhere.
-    fn guest_path() -> PathBuf {
+    pub(super) fn guest_path() -> PathBuf {
         use std::path::Path;
         std::env::var_os("INTXT_GUEST_WASM")
             .map(PathBuf::from)
@@ -1300,6 +1300,60 @@ mod blackbox {
     #[test]
     fn daemon_cases() {
         run_cases("daemon");
+    }
+
+    /// An installed intxt handler remains callable from fresh CLI processes and after daemon restarts.
+    #[test]
+    fn installed_intxt_serves_calls_from_later_processes() {
+        let sandbox = Sandbox::new();
+        let text = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr)
+        };
+        let handler = super::library::guest_path();
+        let handler = handler.to_str().expect("the handler path is valid UTF-8");
+
+        let initialized = sandbox.day(&["node", "init"]);
+        assert!(initialized.status.success(), "{}", text(&initialized));
+
+        let installed = sandbox.day(&["x", "intxt", "install", "--handler", handler]);
+        assert!(installed.status.success(), "{}", text(&installed));
+
+        let create = |title: &str| {
+            let input = serde_json::to_string(&json!({"title": title})).unwrap();
+            let output = sandbox.day(&["x", "org.example.intxt.createIntxt", &input]);
+            assert!(output.status.success(), "{}", text(&output));
+            let answer: serde_json::Value =
+                serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                    panic!("invalid createIntxt output: {error}; {}", text(&output))
+                });
+            let drawer_id = answer
+                .get("drawerId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| {
+                    panic!("createIntxt did not print a drawer id: {}", text(&output))
+                });
+            assert!(
+                !drawer_id.is_empty(),
+                "createIntxt printed an empty drawer id"
+            );
+        };
+
+        create("fresh process");
+
+        let started = sandbox.day(&["node", "start"]);
+        assert!(started.status.success(), "{}", text(&started));
+        create("daemon process");
+
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
+
+        let restarted = sandbox.day(&["node", "start"]);
+        assert!(restarted.status.success(), "{}", text(&restarted));
+        create("restarted daemon process");
+
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
     }
 
     /// Parallel commands against one node (as a capture hook firing several times at once does)
