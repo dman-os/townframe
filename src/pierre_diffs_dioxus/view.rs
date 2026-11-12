@@ -393,6 +393,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         let dispatch = Rc::new(Dispatch {
             host: Rc::clone(&host),
             managers,
+            batch: RefCell::default(),
         });
         Self {
             host,

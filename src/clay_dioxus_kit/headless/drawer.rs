@@ -191,3 +191,29 @@ mod tests {
         assert_eq!(page.mount(dialog).get(), Some(true));
     }
 }
+
+/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
+/// any order of events is a bug, and a seed that found one stays here as a regression case.
+#[cfg(test)]
+mod storm {
+    use super::*;
+    use dioxus_storm::Storm;
+
+    fn owner() -> Element {
+        let mut open = use_signal(|| false);
+        rsx! {
+            button { onclick: move |_| open.toggle(), "Toggle" }
+            Drawer {
+                name: "Sidebar",
+                open: open(),
+                on_dismiss: move |()| open.set(false),
+                button { "Inside" }
+            }
+        }
+    }
+
+    #[test]
+    fn a_drawer_survives_any_order_of_events() {
+        Storm::of(owner).run_seeds(0..64);
+    }
+}

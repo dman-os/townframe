@@ -1,4 +1,4 @@
-//! The Diffs tab: `pierre_diffs_dioxus::FileDiffView` in three views, under one options bar that
+//! The Diffs tab: `pierre_diffs_dioxus::FileDiffView` in two views, under one options bar that
 //! drives every `FileDiffView` prop the port implements.
 //!
 //! - Specimens: two sample file pairs, and a generated three-thousand-line one that only renders
@@ -6,9 +6,6 @@
 //!   a click on a line number selects it, shift-click or a drag extends the range, the gutter
 //!   utility button follows the hovered line or the selection, and a collapsed hunk's separator
 //!   expands on click.
-//! - Mock review: `review_mock::MockReview`, the same component the lab micro renders, so a
-//!   difference between the two is the Clay runtime's. Selecting a line or clicking the gutter's
-//!   "+" drafts a comment.
 //! - PR #84: a real 599-file diff, one virtualized file at a time (see [`pr_diff`]).
 
 mod pr_diff;
@@ -26,7 +23,6 @@ use pierre_diffs_dioxus::PtrEq;
 use pierre_diffs_dioxus::SelectedLineRange;
 use pierre_diffs_dioxus::Virtualization;
 use review_mock::DiffOptions;
-use review_mock::MockReview;
 use std::rc::Rc;
 
 /// A reviewer's note: the shape of content an embedding plug puts under a diff line.
@@ -39,33 +35,30 @@ pub struct Note {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiffsView {
     Specimens,
-    MockReview,
     Pr84,
 }
 
 impl DiffsView {
-    const ALL: [Self; 3] = [Self::Specimens, Self::MockReview, Self::Pr84];
+    const ALL: [Self; 2] = [Self::Specimens, Self::Pr84];
 
     fn label(self) -> &'static str {
         match self {
             Self::Specimens => "Specimens",
-            Self::MockReview => "Mock review",
             Self::Pr84 => "PR #84",
         }
     }
 }
 
 /// The tab: a view choice and the options bar over the chosen view. `DAYFRAME_LAB_DIFFS_VIEW`
-/// (`review` or `pr84`) opens that view, so a screenshot run needs no click.
+/// (`pr84`) opens that view, so a screenshot run needs no click.
 #[component]
 pub fn DiffsFoundation() -> Element {
-    let mut view = use_signal(
-        || match std::env::var("DAYFRAME_LAB_DIFFS_VIEW").as_deref() {
-            Ok("review") => DiffsView::MockReview,
-            Ok("pr84") => DiffsView::Pr84,
+    let mut view = use_signal(|| {
+        match crate::lab_setting("DAYFRAME_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
+            Some("pr84") => DiffsView::Pr84,
             _ => DiffsView::Specimens,
-        },
-    );
+        }
+    });
     // The options start where the specimens always ran: hover on both parts, selection and the
     // gutter utility on, unchanged lines expanded.
     let mut options = use_signal(|| DiffOptions {
@@ -79,6 +72,12 @@ pub fn DiffsFoundation() -> Element {
     // render would re-render (and remount) a virtualized diff each time.
     let virtualized = use_hook(|| Virtualization {
         height: "32rem".to_owned(),
+        // The page has no tokio runtime: its timer is `setTimeout`.
+        #[cfg(target_arch = "wasm32")]
+        sleep: PtrEq::new(Rc::new(|duration| {
+            Box::pin(gloo_timers::future::sleep(duration))
+        })),
+        #[cfg(not(target_arch = "wasm32"))]
         sleep: PtrEq::new(Rc::new(|duration| Box::pin(tokio::time::sleep(duration)))),
     });
     let current = options();
@@ -93,8 +92,7 @@ pub fn DiffsFoundation() -> Element {
             div { class: "flex flex-wrap items-center gap-x-6 gap-y-3", role: "group", "aria-label": "Diff options",
                 Segmented {
                     label: "Layout",
-                    // The default is each view's own: the specimens' mix, the mock review's width
-                    // class, a unified diff for the PR.
+                    // The default is each view's own: the specimens' mix, a unified diff for the PR.
                     options: vec!["Default", "Split", "Unified"],
                     selected: match current.diff_style {
                         None => 0,
@@ -143,13 +141,6 @@ pub fn DiffsFoundation() -> Element {
             }
             match view() {
                 DiffsView::Specimens => rsx! { Specimens { options: current, expand_unchanged: expand_unchanged(), virtualized } },
-                DiffsView::MockReview => rsx! {
-                    MockReview {
-                        options: current,
-                        // "Back" at the review's root returns to the specimens.
-                        close: move |()| view.set(DiffsView::Specimens),
-                    }
-                },
                 DiffsView::Pr84 => rsx! { pr_diff::PrView { options: current, virtualized } },
             }
         }

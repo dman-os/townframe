@@ -101,3 +101,27 @@ mod tests {
         assert!(!page.has_role("button", "Back"));
     }
 }
+
+/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
+/// any order of events is a bug, and a seed that found one stays here as a regression case.
+#[cfg(test)]
+mod storm {
+    use super::*;
+    use dioxus_storm::Storm;
+
+    fn bar() -> Element {
+        let mut presses = use_signal(|| 0u32);
+        rsx! {
+            AppBar {
+                title: "Settings",
+                leading: Some(rsx! { button { onclick: move |_| presses += 1, "Menu {presses}" } }),
+                trailing: Some(rsx! { button { onclick: move |_| presses.set(0), "More" } }),
+            }
+        }
+    }
+
+    #[test]
+    fn an_app_bar_with_actions_survives_any_order_of_events() {
+        Storm::of(bar).run_seeds(0..16);
+    }
+}

@@ -9,4 +9,6 @@ allow_external_api_types = true
 
 [builds.native]
 
+[builds.wasm32-unknown-unknown]
+
 [builds.wasm32-wasip3]

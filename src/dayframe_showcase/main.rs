@@ -2,6 +2,9 @@ mod diff_fixtures;
 mod diffs;
 mod kit;
 
+#[cfg(not(any(feature = "desktop", target_arch = "wasm32")))]
+compile_error!("dayframe_showcase builds natively with the `desktop` feature and for the browser (wasm32) with the `web` feature");
+
 #[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::Event as DesktopEvent;
 #[cfg(feature = "desktop")]
@@ -11,11 +14,14 @@ use dioxus::desktop::use_wry_event_handler;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::DesktopContext;
 use dioxus::prelude::*;
+#[cfg(feature = "desktop")]
 use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
+#[cfg(feature = "desktop")]
 use dioxus_native::winit::window::Window;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+#[cfg(feature = "desktop")]
 use std::sync::Arc;
 use ui::ArcIndex;
 use ui::Button;
@@ -53,9 +59,9 @@ struct MaterialTheme {
 
 /// Wry unless `DAYFRAME_RENDERER=blitz`. `dioxus::launch` would pick Blitz whenever any crate in
 /// the build turns on `dioxus/native` (feature unification), so each renderer is named.
+#[cfg(feature = "desktop")]
 fn main() {
     match std::env::var("DAYFRAME_RENDERER").as_deref() {
-        #[cfg(feature = "desktop")]
         Err(std::env::VarError::NotPresent) | Ok("wry") => dioxus::LaunchBuilder::desktop()
             .with_cfg(
                 dioxus::desktop::Config::new()
@@ -63,46 +69,52 @@ fn main() {
                     .with_menu(None),
             )
             .launch(App),
-        #[cfg(not(feature = "desktop"))]
-        Err(std::env::VarError::NotPresent) => dioxus_native::launch(App),
         Ok("blitz") => dioxus_native::launch(App),
         other => panic!("DAYFRAME_RENDERER must be `wry` or `blitz`, got {other:?}"),
     }
 }
 
-#[component]
-fn App() -> Element {
-    let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
-        .expect("material-theme.json must match the Material theme schema");
-    let mut mode = use_signal(|| ThemeMode::Dark);
-    // `DAYFRAME_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
-    let mut tab = use_signal(|| match std::env::var("DAYFRAME_LAB_TAB").as_deref() {
-        Ok("diffs") => LabTab::Diffs,
-        _ => LabTab::Components,
-    });
+/// The browser's launch: the page's own DOM is the renderer, so there is nothing to choose.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    console_error_panic_hook::set_once();
+    dioxus::launch(App);
+}
+
+/// One of the lab's start-up choices: the environment variable `env` on desktop, so a screenshot
+/// run needs no click, and the `query` parameter of the page's URL in the browser (for example
+/// `?tab=diffs&diffs_view=pr84`), where a process has no environment.
+fn lab_setting(env: &str, query: &str) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = query;
+        std::env::var(env).ok()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = env;
+        let search = web_sys::window()
+            .expect("the lab runs in a window")
+            .location()
+            .search()
+            .expect("a window's location has a search string");
+        web_sys::UrlSearchParams::new_with_str(&search)
+            .expect("a location's search string is a valid query")
+            .get(query)
+    }
+}
+
+/// The width the lab's sections lay out in, kept current as the window resizes.
+#[cfg(feature = "desktop")]
+fn use_available_width() -> Signal<f64> {
     let native_window: Option<Arc<dyn Window>> = use_hook(try_consume_context);
-    #[cfg(feature = "desktop")]
     let desktop_window: Option<DesktopContext> = use_hook(try_consume_context);
-    #[cfg(feature = "desktop")]
     let initial_width = native_window
         .as_ref()
         .map(showcase_content_width)
         .or_else(|| desktop_window.as_ref().map(desktop_content_width))
         .expect("showcase must run with a native or desktop window context");
-    #[cfg(not(feature = "desktop"))]
-    let initial_width = native_window
-        .as_ref()
-        .map(showcase_content_width)
-        .expect("showcase must run with a native window context");
     let mut available_width = use_signal(|| initial_width);
-    let photo_preloads = use_memo(|| {
-        (0..36)
-            .map(|index| {
-                let period = if index < 20 { "recent" } else { "earlier" };
-                format!("https://picsum.photos/seed/townframe-{period}-{index}/320/320")
-            })
-            .collect::<Vec<_>>()
-    });
     if let Some(window) = native_window {
         dioxus_native::use_window_event(move |event, _| match event {
             NativeWindowEvent::SurfaceResized(_) | NativeWindowEvent::ScaleFactorChanged { .. } => {
@@ -111,7 +123,6 @@ fn App() -> Element {
             _ => {}
         });
     }
-    #[cfg(feature = "desktop")]
     if let Some(window) = desktop_window {
         use_wry_event_handler(move |event, _| {
             if matches!(
@@ -126,6 +137,69 @@ fn App() -> Element {
             }
         });
     }
+    available_width
+}
+
+/// The width the lab's sections lay out in, kept current as the window resizes.
+#[cfg(target_arch = "wasm32")]
+fn use_available_width() -> Signal<f64> {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    fn window_content_width() -> f64 {
+        content_width(
+            web_sys::window()
+                .expect("the lab runs in a window")
+                .inner_width()
+                .expect("a window has an inner width")
+                .as_f64()
+                .expect("a window's inner width is a number"),
+        )
+    }
+    let mut available_width = use_signal(window_content_width);
+    // Registered once and removed when the root unmounts: the closure lives exactly as long as
+    // its listener.
+    let listener = use_hook(|| {
+        let listener = Closure::<dyn FnMut()>::new(move || {
+            available_width.set(window_content_width());
+        });
+        web_sys::window()
+            .expect("the lab runs in a window")
+            .add_event_listener_with_callback("resize", listener.as_ref().unchecked_ref())
+            .expect("a window takes a resize listener");
+        Rc::new(listener)
+    });
+    use_drop(move || {
+        web_sys::window()
+            .expect("the lab runs in a window")
+            .remove_event_listener_with_callback(
+                "resize",
+                listener.as_ref().as_ref().unchecked_ref(),
+            )
+            .expect("a window drops a resize listener");
+    });
+    available_width
+}
+
+#[component]
+fn App() -> Element {
+    let theme: MaterialTheme = serde_json::from_str(MATERIAL_THEME_JSON)
+        .expect("material-theme.json must match the Material theme schema");
+    let mut mode = use_signal(|| ThemeMode::Dark);
+    // `DAYFRAME_LAB_TAB=diffs` opens that tab, so a screenshot run needs no click.
+    let mut tab = use_signal(|| match lab_setting("DAYFRAME_LAB_TAB", "tab").as_deref() {
+        Some("diffs") => LabTab::Diffs,
+        _ => LabTab::Components,
+    });
+    let available_width = use_available_width();
+    let photo_preloads = use_memo(|| {
+        (0..36)
+            .map(|index| {
+                let period = if index < 20 { "recent" } else { "earlier" };
+                format!("https://picsum.photos/seed/townframe-{period}-{index}/320/320")
+            })
+            .collect::<Vec<_>>()
+    });
     use_context_provider(|| Signal::new(BTreeMap::<String, Rc<MountedData>>::new()));
 
     rsx! {
@@ -160,7 +234,7 @@ fn App() -> Element {
                     "Toggle {mode:?} mode"
                 }
                 // A screenshot run names one kit specimen group; see `kit::KitSpecimens`.
-                if let Ok(group) = std::env::var("DAYFRAME_SHOWCASE_KIT") {
+                if let Some(group) = lab_setting("DAYFRAME_SHOWCASE_KIT", "kit") {
                     kit::KitSpecimens { only: Some(group) }
                 } else {
                 LabTabs { active: tab(), on_select: move |next| tab.set(next) }
@@ -199,7 +273,7 @@ fn App() -> Element {
                             FoundationSection {
                                 id: "diffs".to_string(),
                                 title: "Diff view".to_string(),
-                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port, in three views under one options bar: sample specimens (a split Rust diff, a unified TypeScript diff with a line annotation, a virtualized three-thousand-line diff), the mock review the lab micro also renders (select a line or click the gutter + to draft a comment), and a real 599-file PR diff. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
+                                description: "pierre_diffs_dioxus::FileDiffView, a plain Dioxus component over the Pierre port, in two views under one options bar: sample specimens (a split Rust diff, a unified TypeScript diff with a line annotation, a virtualized three-thousand-line diff) and a real 599-file PR diff. Syntax colours need the highlights lexer, which is not wired yet, so tokens render as plain text.".to_string(),
                                 diffs::DiffsFoundation {}
                             }
                         },
@@ -331,12 +405,14 @@ fn TokenFoundations() -> Element {
     }
 }
 
+#[cfg(feature = "desktop")]
 fn logical_size(window: &Arc<dyn Window>) -> (f64, f64) {
     let scale = window.scale_factor();
     let size = window.surface_size();
     (size.width as f64 / scale, size.height as f64 / scale)
 }
 
+#[cfg(feature = "desktop")]
 fn showcase_content_width(window: &Arc<dyn Window>) -> f64 {
     content_width(logical_size(window).0)
 }

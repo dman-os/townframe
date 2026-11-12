@@ -71,6 +71,7 @@ members = [
   "./src/review_mock",
   "./src/ui",
   "./src/clay_dioxus_kit",
+  "./src/dioxus_storm",
   "./src/dayframe_composition",
   "./src/dayframe_web",
   "./src/dayframe_desktop",
@@ -140,6 +141,7 @@ clay_dioxus = { path = "./src/clay_dioxus" }
 pierre_diffs = { path = "./src/pierre_diffs" }
 clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
 pierre_diffs_dioxus = { path = "./src/pierre_diffs_dioxus" }
+dioxus_storm = { path = "./src/dioxus_storm" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
