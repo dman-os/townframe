@@ -61,7 +61,7 @@ pub struct big_cartridges_core::Cartridge  { id: CartridgeId, version: Version, 
 pub struct big_cartridges_core::CartridgeId  { namespace: String, name: String }
 pub struct big_cartridges_core::Dependency  { id: CartridgeId, version: VersionReq, extra: Extra }
 pub struct big_cartridges_core::InvalidCartridgeId  { 0: String }
-pub struct big_cartridges_core::MicroContribution  { schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
+pub struct big_cartridges_core::MicroContribution  { component: String, schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
 pub struct big_cartridges_core::NoduleContribution  { schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
 pub struct big_cartridges_core::Version  { 0: semver :: Version }
 pub struct big_cartridges_core::VersionReq  { 0: semver :: VersionReq }
