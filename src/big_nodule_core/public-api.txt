@@ -36,7 +36,7 @@ pub impl big_nodule_core::Nodule::fn unmet_requests < 'a > (& 'a self , granted 
 pub impl big_nodule_core::config::Admission::fn of (cartridge : & Cartridge) -> Self
 pub impl big_nodule_core::config::Admission::fn revision (& self) -> Option < Revision >
 pub impl big_nodule_core::config::Admission::fn version (& self) -> Option < & Version >
-pub impl big_nodule_core::config::AdmissionCache::fn admission (& self , cartridge_id : & CartridgeId , install : & CartridgeInstall) -> Arc < Admission >
+pub impl big_nodule_core::config::AdmissionCache::fn admission (& self , cartridge_id : & CartridgeId , install : & CartridgeInstall ,) -> Arc < Admission >
 pub impl big_nodule_core::config::AdmissionCache::fn insert (& self , cartridge_id : & CartridgeId , pin : DatumPin , admission : Admission , settled : bool ,) -> Displaced
 pub impl big_nodule_core::config::AdmissionCache::fn needs_read (& self , cartridge_id : & CartridgeId , pin : & DatumPin) -> bool
 pub impl big_nodule_core::config::AdmissionCache::fn new () -> Self
