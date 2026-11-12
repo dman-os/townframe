@@ -19,6 +19,7 @@ pub mod hook;
 pub mod host;
 pub mod identity;
 pub mod observe;
+pub mod pack;
 pub mod snapshot;
 pub mod transcript;
 
