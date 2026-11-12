@@ -155,7 +155,8 @@ pub fn quote(content: &str, lines: &LineRange) -> Result<TextQuote, Error> {
 ///
 /// A range no hunk touches is shifted by the net size of the hunks above it. A range a hunk
 /// touches is searched for, as the quote's text, among the windows of the same number of lines
-/// inside the span of the touched hunks' new sides. Several windows with the text are narrowed
+/// inside where the diff puts the range: the touched hunks' new sides with the range's
+/// untouched lines beside them. Several windows with the text are narrowed
 /// to those whose prefix and suffix hold too, if any, then to the one closest to where the diff
 /// puts the range; two equally close ones are ambiguous and the comment is [`Placement::Outdated`]
 /// rather than placed on a guess.
@@ -198,8 +199,14 @@ pub fn carry(
 
     let first = touched[0];
     let last = touched[touched.len() - 1];
-    let region = first.new_first_line()..last.new_first_line() + last.new_len;
-    let expected = first.new_first_line() + start.saturating_sub(first.old_start);
+    // The range's own lines before the first touched hunk and after the last one are unchanged,
+    // so they sit beside those hunks' new sides: the region is where the diff puts the whole
+    // range. The range is expected at its first line's place, which inside a hunk is the same
+    // offset into the hunk's new side.
+    let head = first.old_first_line() - start.min(first.old_first_line());
+    let tail = (end + 1).saturating_sub(last.old_end_exclusive());
+    let region = first.new_first_line() - head..last.new_first_line() + last.new_len + tail;
+    let expected = region.start + start.saturating_sub(first.old_first_line());
     let mut found: Vec<(usize, bool)> = Vec::new();
     if region.len() >= count {
         for candidate in region.start..=region.end - count {
@@ -310,6 +317,15 @@ impl Hunk {
     /// The first old line after the hunk.
     fn old_end_exclusive(&self) -> usize {
         self.old_start + self.old_len.max(1)
+    }
+
+    /// The first old line the hunk changes, or for an insertion the line after it.
+    fn old_first_line(&self) -> usize {
+        if self.old_len == 0 {
+            self.old_start + 1
+        } else {
+            self.old_start
+        }
     }
 
     /// The 0-based first line of the hunk's new side.

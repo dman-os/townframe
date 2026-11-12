@@ -283,6 +283,28 @@ fn repeated_text_in_a_hunk_picks_the_closest_to_the_diff_position() {
 }
 
 #[test]
+fn a_range_reaching_past_its_hunk_is_searched_with_its_unchanged_lines() {
+    let repo = Repo::new();
+    repo.write("f.txt", "top\nb\nc\nd\nbottom\n");
+    let one = repo.commit_all("one");
+    // The hunk replaces old line 3 only. Old lines 2-3 (b and the hunk) sit at new lines 2-5;
+    // a quote of `b\nk` is found at 2-3, beside the hunk, as well as at 4-5 inside it, and the
+    // window that starts where the range starts wins.
+    repo.write("f.txt", "top\nb\nk\nb\nk\nd\nbottom\n");
+    let two = repo.commit_all("two");
+    let old = blob(&repo, &one, "f.txt");
+    let new = blob(&repo, &two, "f.txt");
+    let wanted = TextQuote {
+        exact: "b\nk".into(),
+        prefix: None,
+        suffix: None,
+        extra: Extra::default(),
+    };
+    let placed = carry(&git(&repo), &old, &new, &lr(2, 3), &wanted).unwrap();
+    assert_eq!(lines_of(placed), Some(lr(2, 3)));
+}
+
+#[test]
 fn equally_close_repeats_are_ambiguous() {
     let repo = Repo::new();
     repo.write("f.txt", "top\na\nb\nc\nbottom\n");
