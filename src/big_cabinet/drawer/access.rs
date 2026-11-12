@@ -213,6 +213,13 @@ impl Projection {
         actor: Uuid7,
         doc: &DocId,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
+        if doc.as_bytes().is_empty() {
+            // INSTR: an empty doc id reaching access checks ends in the hub dropping its loop.
+            eprintln!(
+                "INSTR reach of an empty doc id\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
         let mut bounds = self
             .state
             .ancestors(super::state::ScopeTarget::Doc(doc))
