@@ -420,6 +420,63 @@ fn a_jump_costs_a_handful_of_dispatch_rounds_not_one_per_row() {
     }
 }
 
+impl Rig {
+    /// The content height the engine would lay out for the document as it is now, rows at 20 px.
+    fn laid_out_height(&self) -> f64 {
+        let document = super::host_document(&self.view.host);
+        let shadow = document.shadow_root(self.view.host.container()).unwrap();
+        let rows = self.rendered_lines().len() as f64 * 20.0;
+        document
+            .child_nodes(shadow)
+            .into_iter()
+            .map(|child| match document.tag_name(&child).as_str() {
+                "pre" | "PRE" => rows,
+                _ => self.view.host.geometry_probe_height(child),
+            })
+            .sum()
+    }
+}
+
+#[test]
+fn zz_dip_probe() {
+    let mut rig = Rig::new(3000);
+    rig.boot();
+    let mut measured = std::collections::HashSet::new();
+    rig.measure_new_rows(20.0, &mut measured);
+    let est = rig.estimated_height();
+    let (root, ..) = rig.nodes();
+    for (from, to) in [
+        (0.0, 30_000.0),
+        (30_000.0, est - VIEWPORT),
+        (est - VIEWPORT, 20_000.0),
+    ] {
+        rig.scroll_to(from);
+        rig.measure_new_rows(20.0, &mut measured);
+        let before = rig.laid_out_height();
+        // The dispatch alone: what Dioxus would render first.
+        rig.root.offset.set((0.0, to));
+        rig.dom.in_scope(ScopeId::ROOT, || {
+            rig.dispatch().scrolled(
+                root,
+                ScrollSample {
+                    top: to,
+                    left: 0.0,
+                    scroll_height: est,
+                    client_height: VIEWPORT,
+                },
+            );
+        });
+        let first = rig.laid_out_height();
+        run_tasks(&mut rig.dom);
+        let settled = rig.laid_out_height();
+        eprintln!(
+            "DIP {from}->{to}: before={before} after_dispatch={first} settled={settled} est={est}"
+        );
+        rig.measure_new_rows(20.0, &mut measured);
+        eprintln!("DIP   after measuring: {}", rig.laid_out_height());
+    }
+}
+
 #[test]
 fn only_the_window_around_the_viewport_is_rendered_and_it_follows_scrolling() {
     let mut rig = Rig::new(3000);
