@@ -261,6 +261,22 @@ where
         state.pending_hydrated_diff = None;
     }
 
+    /// Test-only: `this.pendingHydratedDiff?.expectedDiff`.
+    #[cfg(test)]
+    pub(super) fn staged_hydration_expected(&self) -> Option<Rc<FileDiffMetadata>> {
+        self.state
+            .borrow()
+            .pending_hydrated_diff
+            .as_ref()
+            .map(|pending| Rc::clone(&pending.expected_diff))
+    }
+
+    /// Test-only: `this.currentCollapsed`.
+    #[cfg(test)]
+    pub(super) fn current_collapsed(&self) -> Option<bool> {
+        self.state.borrow().current_collapsed
+    }
+
     /// `this.pendingExpansions`, copied (the elements are small).
     pub(super) fn staged_expansions(&self) -> Vec<PendingExpansion> {
         self.state

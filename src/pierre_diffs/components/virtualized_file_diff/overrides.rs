@@ -387,7 +387,7 @@ where
             .instance_changed(&self.instance_ref(), true);
     }
 
-    fn handle_files_loaded(
+    pub(super) fn handle_files_loaded(
         &self,
         expected_diff: &Rc<FileDiffMetadata>,
         files: &FileDiffLoadedFiles,

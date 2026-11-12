@@ -251,6 +251,10 @@ pub struct Virtualizer<Host: VirtualizerHost> {
     scroll_height_dirty: Cell<bool>,
     rendered_observers: Cell<usize>,
     connect_queue: RefCell<InsertionMap<NodeKey, InstanceRef>>,
+    /// Test-only: the `layoutDirty` argument of every `instanceChanged` call (the
+    /// upstream tests stub the virtualizer to record them).
+    #[cfg(test)]
+    instance_changed_log: RefCell<Vec<bool>>,
 }
 
 impl<Host: VirtualizerHost> Virtualizer<Host> {
@@ -295,6 +299,8 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
                 scroll_height_dirty: Cell::new(true),
                 rendered_observers: Cell::new(0),
                 connect_queue: RefCell::default(),
+                #[cfg(test)]
+                instance_changed_log: RefCell::default(),
             }
         })
     }
@@ -333,6 +339,8 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
     }
 
     pub fn instance_changed(&self, instance: &InstanceRef, dom_dirty: bool) {
+        #[cfg(test)]
+        self.instance_changed_log.borrow_mut().push(dom_dirty);
         self.instances_changed
             .borrow_mut()
             .insert(instance_key(instance), Rc::clone(instance));
@@ -969,6 +977,12 @@ impl<Host: VirtualizerHost> Virtualizer<Host> {
             window.top,
             window.bottom,
         )
+    }
+
+    /// Test-only: the `layoutDirty` argument of every `instanceChanged` call so far.
+    #[cfg(test)]
+    pub fn instance_changed_calls(&self) -> Vec<bool> {
+        self.instance_changed_log.borrow().clone()
     }
 
     /// Test-only: whether the geometry flags `mark_dom_dirty` sets are all set.

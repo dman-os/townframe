@@ -14,6 +14,8 @@ pub mod overrides;
 pub mod window;
 
 #[cfg(test)]
+mod advanced_upstream_tests;
+#[cfg(test)]
 mod integration_upstream_tests;
 #[cfg(test)]
 mod layout_oracle_tests;

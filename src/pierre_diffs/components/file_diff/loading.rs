@@ -16,6 +16,14 @@
 //   data): what upstream observes as one object whose `isPartial` turned false is
 //   one `Rc` replaced everywhere in the instance. A host holding the old `Rc`
 //   sees it unchanged.
+// * `loadFilesIfNecessary` is called from `FileDiff`'s own methods and
+//   `VirtualizedFileDiff` overrides it (C1: a staged hydration), so the method
+//   is the call site (`load_files_if_necessary`, through
+//   `FileDiffHooks::load_files_if_necessary`) and the body is
+//   `load_files_if_necessary_base` (`super.loadFilesIfNecessary()`). The merge
+//   is split into `hydrate_loaded_diff` (`hydratePartialDiff('clone', ...)`,
+//   which the advanced mode stages) and `install_hydrated_diff` (the swap and
+//   `setHydratedState`, which the staged hydration applies at the next layout).
 // * `awaitWithTimeout(() => this.primeHighlightCache(...))` is dropped with the
 //   worker pool and the async highlight cache: rendering is synchronous. The
 //   `!this.enabled || getInputDiff() !== expectedDiff` re-check after it is

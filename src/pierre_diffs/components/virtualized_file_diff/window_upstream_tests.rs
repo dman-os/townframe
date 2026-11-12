@@ -11,9 +11,9 @@
 //! `expandHunk` are the instance's own (`overrides.rs`). The cases that need
 //! `cleanUp(true)`, `render` or `instanceChanged` are in
 //! `integration_upstream_tests.rs`. Not converted: `recomputeDiffHunks`
-//! (`render range clamp reaches additionLines.length after stale layout cache`),
-//! `getAdvancedStickySpecs` and `getNumericScrollAnchor` (dropped); see
-//! parity/rules.psv. Test-only.
+//! (`render range clamp reaches additionLines.length after stale layout cache`);
+//! see parity/rules.psv. `builds layout checkpoints lazily for deep render windows`
+//! is `getAdvancedStickySpecs` (C1). Test-only.
 
 use std::rc::Rc;
 
@@ -47,7 +47,7 @@ use crate::types::view::DiffLineAnnotation;
 use crate::types::view::SelectionSide;
 use crate::utils::compute_virtual_file_metrics::PartialVirtualFileMetrics;
 
-type Instance = VirtualizedFileDiff<FakeDom, u8, u8>;
+pub(super) type Instance = VirtualizedFileDiff<FakeDom, u8, u8>;
 pub(super) type Options = FileDiffOptions<NodeKey, u8, u8>;
 
 pub(super) const LINE_HEIGHT: f64 = 10.0;
@@ -61,19 +61,30 @@ pub(super) struct World {
 }
 
 pub(super) fn world(options: Options, metrics: PartialVirtualFileMetrics) -> World {
+    world_with(options, metrics, |dom| {
+        VirtualizerKind::Simple(Virtualizer::new(
+            Rc::clone(dom),
+            UniversalRenderingManager::new(Rc::clone(dom)),
+            VirtualizerConfig::default(),
+        ))
+    })
+}
+
+/// `world` over the virtualizer `virtualizer` builds (the advanced tests'
+/// stub, see `advanced_upstream_tests.rs`).
+pub(super) fn world_with(
+    options: Options,
+    metrics: PartialVirtualFileMetrics,
+    virtualizer: impl FnOnce(&Rc<FakeDom>) -> VirtualizerKind<FakeDom>,
+) -> World {
     let dom = Rc::new(FakeDom::default());
-    let virtualizer = Virtualizer::new(
-        Rc::clone(&dom),
-        UniversalRenderingManager::new(Rc::clone(&dom)),
-        VirtualizerConfig::default(),
-    );
     let instance = VirtualizedFileDiff::new(
         Rc::clone(&dom),
         ResizeObserverHub::new(Rc::clone(&dom)),
         UniversalRenderingManager::new(Rc::clone(&dom)),
         Rc::new(PlainTextHighlighter),
         options,
-        VirtualizerKind::Simple(virtualizer),
+        virtualizer(&dom),
         metrics,
         None,
     );
@@ -635,6 +646,43 @@ fn estimated_height_cache_builds_layout_checkpoints_lazily_for_deep_geometry_loo
     });
 
     assert!(world.position(10_000).is_some());
+
+    assert_eq!(world.height(), estimated_height);
+    world.cache(|cache| {
+        assert!(cache.total_lines > 10_000);
+        assert!(cache.checkpoints.len() > 1);
+    });
+}
+
+#[test]
+fn estimated_height_cache_builds_layout_checkpoints_lazily_for_deep_render_windows() {
+    let mut options = Options::default();
+    options.base.expand_unchanged = Some(true);
+    let world = world(options, METRICS);
+    let old_lines: Vec<String> = (1..=12_000).map(|index| index.to_string()).collect();
+    let mut new_lines = old_lines.clone();
+    new_lines[5_999] = "changed-6000".to_owned();
+    let file_diff = parse_files(
+        plain_file("large.ts", &format!("{}\n", old_lines.join("\n"))),
+        plain_file("large.ts", &format!("{}\n", new_lines.join("\n"))),
+    );
+    world.layout(&file_diff, None);
+    let estimated_height = world.height();
+
+    world.cache(|cache| {
+        assert_eq!(cache.total_lines, 0);
+        assert!(cache.checkpoints.is_empty());
+    });
+
+    assert!(
+        world
+            .instance
+            .get_advanced_sticky_specs(Some(RenderWindow {
+                top: 100_000.0,
+                bottom: 100_500.0,
+            }))
+            .is_some()
+    );
 
     assert_eq!(world.height(), estimated_height);
     world.cache(|cache| {

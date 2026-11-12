@@ -7,7 +7,14 @@
 //! `FakeDom` (its declared heights and scroll geometry), with the pieces S12b-3
 //! owns composed by the replay as the published class composes them: the layout
 //! half of `setOptions`, the simple-mode `expandHunk`, and `render`/`rerender`
-//! as recorded stubs. Test-only, original to this crate.
+//! as recorded stubs. The C1 scenarios (`advanced` set) run the instance over a
+//! `StubCodeView` (advanced mode, or the simple mode for the ones that compare
+//! the two) and replay the steps C1 added (`layout`'s `reset`, `expandHunkApi`,
+//! `filesLoaded`, `isLineRenderable`, `stickySpecs`, `numericAnchor`,
+//! `setThemeType`, `rerender`, `cleanUp`, `codeView`). Upstream's
+//! `Object.assign(fileDiff, nextDiff)` (hydration in place) is the replay's
+//! `rebind`: a name denotes the object, so when the instance replaces a diff
+//! `Rc` by its hydrated one the name follows. Test-only, original to this crate.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -17,7 +24,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
+use super::advanced::AdvancedVirtualizer;
 use super::advanced::VirtualizerKind;
+use super::advanced_upstream_tests::StubCodeView;
 use super::instance::VirtualizedFileDiff;
 use super::layout::ResetLayoutCacheOptions;
 use super::layout::has_diff_estimate_option_changed;
@@ -38,12 +47,18 @@ use crate::managers::resize_manager::ResizeObserverHub;
 use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::oracle_testing::assert_json_eq;
 use crate::oracle_testing::load_golden;
+use crate::types::layout::PendingCodeViewLayoutReset;
 use crate::types::layout::RenderRange;
 use crate::types::layout::RenderWindow;
+use crate::types::layout::VirtualWindowSpecs;
 use crate::types::lines::ExpansionDirections;
+use crate::types::options::ThemeTypes;
+use crate::types::patch::FileContents;
+use crate::types::patch::FileDiffLoadedFiles;
 use crate::types::patch::FileDiffMetadata;
 use crate::types::view::DiffLineAnnotation;
 use crate::types::view::SelectionSide;
+use crate::utils::compute_virtual_file_metrics::compute_virtual_file_metrics;
 use crate::utils::predicates::are_options_equal::are_options_equal;
 
 type Instance = VirtualizedFileDiff<FakeDom, u8, u8>;
@@ -69,8 +84,59 @@ struct Scenario {
     options: Spec,
     #[serde(default)]
     resize_debugging: bool,
+    /// C1 scenarios only: `Some(true)` runs over a stub CodeView.
+    advanced: Option<bool>,
+    #[serde(default)]
+    own_diffs: HashMap<String, FileDiffMetadata>,
+    #[serde(default)]
+    loaded: HashMap<String, LoadedSpec>,
     lists: HashMap<String, Vec<DiffLineAnnotation<u8>>>,
     steps: Vec<Step>,
+}
+
+/// What `loadDiffFiles` resolves to, two-sided.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadedSpec {
+    old_file: FileContents,
+    new_file: FileContents,
+}
+
+/// `PendingCodeViewLayoutReset` (`resetFileLayoutCache` is VirtualizedFile's).
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+struct ResetSpec {
+    metrics: Option<MetricsSpec>,
+    reset_diff_layout_cache: bool,
+    include_estimated_diff_heights: bool,
+}
+
+impl From<ResetSpec> for PendingCodeViewLayoutReset {
+    fn from(spec: ResetSpec) -> Self {
+        Self {
+            metrics: spec
+                .metrics
+                .map(|metrics| compute_virtual_file_metrics(metrics.into())),
+            reset_file_layout_cache: false,
+            reset_diff_layout_cache: spec.reset_diff_layout_cache,
+            include_estimated_diff_heights: spec.include_estimated_diff_heights,
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+struct WindowSpec {
+    top: f64,
+    bottom: f64,
+}
+
+#[derive(Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "camelCase")]
+struct CodeViewState {
+    window_top: Option<f64>,
+    window_bottom: Option<f64>,
+    local_top: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -151,6 +217,35 @@ enum Step {
         diff: String,
         top: f64,
         annotations: Option<String>,
+        reset: Option<ResetSpec>,
+    },
+    ExpandHunkApi {
+        hunk_index: i64,
+        direction: ExpansionDirections,
+        count: Option<f64>,
+    },
+    FilesLoaded {
+        diff: String,
+        loaded: String,
+    },
+    IsLineRenderable {
+        line: usize,
+    },
+    StickySpecs {
+        window: Option<WindowSpec>,
+    },
+    NumericAnchor {
+        top: f64,
+    },
+    SetThemeType {
+        theme_type: ThemeTypes,
+    },
+    Rerender,
+    CleanUp {
+        recycle: bool,
+    },
+    CodeView {
+        state: CodeViewState,
     },
     PendingRender {
         diff: String,
@@ -203,6 +298,10 @@ struct Replay {
     separator_functions: HashMap<String, SeparatorFn>,
     container: Option<NodeKey>,
     groups: HashMap<&'static str, GroupNodes>,
+    /// The stub CodeView of an advanced scenario.
+    code_view: Option<Rc<StubCodeView>>,
+    advanced: Option<bool>,
+    loaded: HashMap<String, FileDiffLoadedFiles>,
 }
 
 fn group_key(group: Group) -> &'static str {
@@ -218,21 +317,29 @@ impl Replay {
         let dom = Rc::new(FakeDom::default());
         let mut separator_functions = HashMap::new();
         let options = options_from_spec(&scenario.options, &mut separator_functions);
-        let virtualizer = Virtualizer::new(
-            Rc::clone(&dom),
-            UniversalRenderingManager::new(Rc::clone(&dom)),
-            VirtualizerConfig {
-                resize_debugging: scenario.resize_debugging,
-                ..VirtualizerConfig::default()
-            },
-        );
+        let code_view = (scenario.advanced == Some(true)).then(StubCodeView::new);
+        let virtualizer = match &code_view {
+            Some(code_view) => {
+                let weak = Rc::downgrade(code_view);
+                let weak: std::rc::Weak<dyn AdvancedVirtualizer> = weak;
+                VirtualizerKind::Advanced(weak)
+            }
+            None => VirtualizerKind::Simple(Virtualizer::new(
+                Rc::clone(&dom),
+                UniversalRenderingManager::new(Rc::clone(&dom)),
+                VirtualizerConfig {
+                    resize_debugging: scenario.resize_debugging,
+                    ..VirtualizerConfig::default()
+                },
+            )),
+        };
         let instance = VirtualizedFileDiff::new(
             Rc::clone(&dom),
             ResizeObserverHub::new(Rc::clone(&dom)),
             UniversalRenderingManager::new(Rc::clone(&dom)),
             Rc::new(PlainTextHighlighter),
             options,
-            VirtualizerKind::Simple(virtualizer),
+            virtualizer,
             scenario.metrics.map(Into::into).unwrap_or_default(),
             None,
         );
@@ -242,6 +349,7 @@ impl Replay {
             diffs: golden
                 .diffs
                 .iter()
+                .chain(scenario.own_diffs.iter())
                 .map(|(name, diff)| (name.clone(), Rc::new(diff.clone())))
                 .collect(),
             lists: scenario
@@ -252,7 +360,28 @@ impl Replay {
             separator_functions,
             container: None,
             groups: HashMap::new(),
+            code_view,
+            advanced: scenario.advanced,
+            loaded: scenario
+                .loaded
+                .iter()
+                .map(|(name, loaded)| {
+                    (
+                        name.clone(),
+                        FileDiffLoadedFiles::Changed {
+                            old_file: loaded.old_file.clone(),
+                            new_file: loaded.new_file.clone(),
+                        },
+                    )
+                })
+                .collect(),
         }
+    }
+
+    /// A name denotes an object upstream, which hydrates in place; here the
+    /// hydrated `Rc` takes the name of the one it replaced.
+    fn rebind(&mut self, name: &str, replacement: &Rc<FileDiffMetadata>) {
+        self.diffs.insert(name.to_owned(), Rc::clone(replacement));
     }
 
     fn diff_name(&self, diff: Option<&Rc<FileDiffMetadata>>) -> Value {
@@ -388,6 +517,11 @@ impl Replay {
     /// `VirtualizedFileDiff.setOptions` without the `instanceChanged` call.
     fn set_options(&mut self, spec: &Spec) {
         let next = options_from_spec(spec, &mut self.separator_functions);
+        if self.advanced == Some(true) {
+            // `VirtualizedFileDiff.setOptions`: it throws under CodeView.
+            self.instance.set_options(Some(next));
+            return;
+        }
         let file_diff = self.instance.file_diff();
         let previous = file_diff.options().clone();
         let options_changed = !are_options_equal(Some(&previous), Some(&next));
@@ -468,16 +602,19 @@ impl Replay {
                 diff,
                 top,
                 annotations,
-            } => json!(
-                self.instance
-                    .update_code_view_layout(
-                        &self.diffs[diff],
-                        *top,
-                        None,
-                        self.list(annotations.as_ref()).as_ref()
-                    )
-                    .height
-            ),
+                reset,
+            } => {
+                let update = self.instance.update_code_view_layout(
+                    &self.diffs[diff],
+                    *top,
+                    reset.map(Into::into),
+                    self.list(annotations.as_ref()).as_ref(),
+                );
+                if let Some(hydrated) = &update.hydrated_diff {
+                    self.rebind(diff, hydrated);
+                }
+                json!(update.height)
+            }
             Step::PendingRender { diff, annotations } => {
                 let update = self.instance.update_pending_render(
                     &self.diffs[diff],
@@ -526,6 +663,84 @@ impl Replay {
             Step::ContainerTop { top } => {
                 let container = self.container.expect("an installed container");
                 self.dom.world.borrow_mut().doc_tops.insert(container, *top);
+                Value::Null
+            }
+            other => self.advanced_step(other),
+        }
+    }
+
+    /// The steps C1 added.
+    fn advanced_step(&mut self, step: &Step) -> Value {
+        match step {
+            Step::ExpandHunkApi {
+                hunk_index,
+                direction,
+                count,
+            } => {
+                self.instance.expand_hunk(*hunk_index, *direction, *count);
+                Value::Null
+            }
+            Step::FilesLoaded { diff, loaded } => {
+                // `loadFilesForDiff`: the files arrive for a diff that is still the input.
+                let expected = Rc::clone(&self.diffs[diff]);
+                let is_input = self
+                    .instance
+                    .file_diff()
+                    .get_input_diff()
+                    .is_some_and(|input| Rc::ptr_eq(&input, &expected));
+                if is_input {
+                    self.instance
+                        .handle_files_loaded(&expected, &self.loaded[loaded]);
+                    let input = self
+                        .instance
+                        .file_diff()
+                        .get_input_diff()
+                        .expect("an input diff");
+                    if !Rc::ptr_eq(&input, &expected) {
+                        self.rebind(diff, &input);
+                    }
+                }
+                Value::Null
+            }
+            Step::IsLineRenderable { line } => json!(self.instance.is_line_renderable(*line)),
+            Step::StickySpecs { window } => self
+                .instance
+                .get_advanced_sticky_specs(window.map(|window| RenderWindow {
+                    top: window.top,
+                    bottom: window.bottom,
+                }))
+                .map_or(
+                    Value::Null,
+                    |specs| json!({ "topOffset": specs.top_offset, "height": specs.height }),
+                ),
+            Step::NumericAnchor { top } => self
+                .instance
+                .get_numeric_scroll_anchor(*top)
+                .map_or(Value::Null, |anchor| {
+                    serde_json::to_value(anchor).expect("an anchor")
+                }),
+            Step::SetThemeType { theme_type } => {
+                self.instance.set_theme_type(*theme_type);
+                Value::Null
+            }
+            Step::Rerender => {
+                self.instance.rerender();
+                Value::Null
+            }
+            Step::CleanUp { recycle } => {
+                self.instance.clean_up(*recycle);
+                Value::Null
+            }
+            Step::CodeView { state } => {
+                let code_view = self.code_view.as_ref().expect("a stub CodeView");
+                let window = code_view.window.get();
+                code_view.window.set(VirtualWindowSpecs {
+                    top: state.window_top.unwrap_or(window.top),
+                    bottom: state.window_bottom.unwrap_or(window.bottom),
+                });
+                if let Some(local_top) = state.local_top {
+                    code_view.local_top.set(local_top);
+                }
                 Value::Null
             }
             other => self.query_step(other),
@@ -596,7 +811,7 @@ impl Replay {
                 "diff": self.diff_name(Some(&diff)),
             })
         });
-        json!({
+        let mut snapshot = json!({
             "height": layout.height,
             "top": layout.top,
             "layoutDirty": layout.layout_dirty,
@@ -622,7 +837,48 @@ impl Replay {
                 .collect::<Vec<_>>(),
             "totalLines": cache.total_lines,
             "fileAnnotationHeight": cache.file_annotation_height,
-        })
+        });
+        if self.advanced.is_some() {
+            let calls = self
+                .code_view
+                .as_ref()
+                .map(|code_view| code_view.instance_changed_calls.borrow().clone())
+                .unwrap_or_default();
+            snapshot["advanced"] = json!({
+                "instanceChanged": calls,
+                "pendingExpansions": self.staged_expansions(),
+                "pendingHydratedDiff": self
+                    .instance
+                    .staged_hydration_expected()
+                    .map_or(Value::Null, |diff| self.diff_name(Some(&diff))),
+                "currentCollapsed": self.instance.current_collapsed(),
+                "pendingFile": file_diff
+                    .loading()
+                    .pending_files()
+                    .map_or(Value::Null, |diff| self.diff_name(Some(&diff))),
+                "isSetup": self.instance.is_setup(),
+                "isVisible": self.instance.is_visible(),
+            });
+        }
+        snapshot
+    }
+
+    /// `pendingExpansions` as the oracle records them (`null` when there are none).
+    fn staged_expansions(&self) -> Value {
+        let staged = self.instance.staged_expansions();
+        if staged.is_empty() {
+            return Value::Null;
+        }
+        json!(
+            staged
+                .iter()
+                .map(|expansion| json!([
+                    expansion.hunk_index,
+                    expansion.direction,
+                    expansion.expansion_line_count_override
+                ]))
+                .collect::<Vec<_>>()
+        )
     }
 }
 

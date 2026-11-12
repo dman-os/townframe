@@ -16,14 +16,14 @@
 // layout (`renderRange = undefined` in `invalidateDerivedLayoutCache`) are
 // returned as a flag the caller applies (`#[must_use]`): `reset_layout_cache`,
 // `invalidate_derived_layout_cache` and `set_metrics` return whether the render
-// range must be cleared. Not ported (see dropped.psv): the advanced (CodeView)
-// mode, so `isSimpleMode()` is always true and `forceSimpleRecompute` alone
-// decides the recompute in `resetLayoutCache`; the ghost text rows
-// (`cache.ghostTextRows*`, `applyGhostTextRows`) and `this.editor`;
-// `currentCollapsed` (read only by `updateCodeViewLayout`); `validateComputedHeight`
-// (a `console.log` of the container's measured height) so a resize-debugging run
-// recomputes as upstream does and logs nothing; `getNumericScrollAnchor` (read
-// only by `CodeView`, see dropped.psv). `measureFileAnnotationHeight` (a DOM read) is
+// range must be cleared. `isSimpleMode()` is not the layout's to know: the
+// instance passes `forceSimpleRecompute && isSimpleMode()` (`instance.rs`), and
+// `getNumericScrollAnchor` is in `advanced.rs`. Not ported (see dropped.psv):
+// the ghost text rows (`cache.ghostTextRows*`, `applyGhostTextRows`) and
+// `this.editor`; `validateComputedHeight` (a `console.log` of the container's
+// measured height) so a resize-debugging run recomputes as upstream does and
+// logs nothing. `currentCollapsed` (read only by `updateCodeViewLayout`) is the
+// instance's field. `measureFileAnnotationHeight` (a DOM read) is
 // `VirtualizedFileDiff::measure_file_annotation_height` (S12b-2, `instance.rs`). Line indexes are `i64`
 // (upstream's numbers: `startLineIndex` is computed by subtraction and unread
 // when its block is empty), row counts are `usize`. `processRows` is a closure
