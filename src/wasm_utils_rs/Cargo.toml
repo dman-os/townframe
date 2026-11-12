@@ -39,7 +39,6 @@ test_nodule_handlers = { path = "../test_nodule_handlers" }
 method_core = { path = "../method_core", default-features = false }
 service_core_rs = { path = "../service_core_rs", default-features = false }
 service_client_core_rs = { path = "../service_client_core_rs", default-features = false }
-datum_client = { path = "../datum_client", default-features = false }
 clay_rt_wcmp = { path = "../clay_rt_wcmp" }
 wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
 wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }

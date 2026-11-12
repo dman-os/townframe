@@ -11,6 +11,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
 # internal
 big_cabinet_core = { workspace = true, default-features = false, features = ["manifest"] }
 service_client_core_rs.workspace = true
