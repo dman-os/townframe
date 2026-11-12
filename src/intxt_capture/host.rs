@@ -287,6 +287,7 @@ fn observe_worktree(
     tool_use_id: Option<&str>,
     found: Identity,
     tool_cause: Option<&Cause>,
+    import: &[String],
     host: &mut WorktreeHost,
 ) -> Result<(Option<WorktreeBatch>, u64), Error> {
     if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
@@ -299,7 +300,7 @@ fn observe_worktree(
     }
     let pre = tool_use_id.and_then(|key| host.pre.remove(key));
     let cause = tool_cause.filter(|cause| cause.turn.is_some());
-    let (observation, next) = observe::observe(&host.observed, found, pre.as_ref())?;
+    let (observation, next) = observe::observe(&host.observed, found, pre.as_ref(), import)?;
     host.observed = next;
     let git = observation.git;
     let mut ops = Vec::new();
@@ -382,6 +383,7 @@ fn observe_worktrees(
     cause: Option<&Cause>,
     candidates: &BTreeSet<PathBuf>,
     stored: &BTreeSet<PathBuf>,
+    import: &[String],
 ) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
     let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
     for candidate in candidates {
@@ -399,7 +401,8 @@ fn observe_worktrees(
         let worktree_lock = lock(&found.git_dir.join("intxt/lock"))?;
         let state_path = found.git_dir.join("intxt/state.json");
         let mut host: WorktreeHost = load(&state_path)?;
-        let (batch, uncaused) = observe_worktree(event, tool_use_id, found, cause, &mut host)?;
+        let (batch, uncaused) =
+            observe_worktree(event, tool_use_id, found, cause, import, &mut host)?;
         uncaused_tool_calls += uncaused;
         let batched = batch.is_some();
         batches.extend(batch);
@@ -523,6 +526,7 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
         cause.as_ref(),
         &candidates,
         &session.worktrees,
+        &[],
     )?;
     session.worktrees = worktrees
         .iter()
@@ -623,6 +627,7 @@ pub fn prepare_acp(
         cause.filter(|_| matches!(window, Window::Close(_))),
         &candidates,
         known,
+        &[],
     )?;
     Ok(Prepared {
         batch: Batch {
@@ -633,6 +638,46 @@ pub fn prepare_acp(
         },
         session: None,
         acp,
+        worktrees,
+        finished_tool: None,
+    })
+}
+
+/// Observe the worktree `identity` names for an import of git history: the commits in `import`
+/// are recorded with the worktree's identity documents, as a hook's observation records the
+/// commits its moves made (FDR 008 W6; [`crate::git::observe`] says how). It is a full
+/// observation under the worktree's lock, so state and sequence numbers are the ones hooks
+/// continue from: what the observation reports (a first sight's baseline, the refs, moves since
+/// the last look) is what the next hook would have reported, and it will not report it twice.
+///
+/// There is no session, none having been recorded; the batch's session half is empty. The event
+/// is no hook's: it neither opens a pre-snapshot nor drops the ones other sessions' tool calls
+/// have in flight.
+pub fn prepare_import(identity: &Identity, import: &[String]) -> Result<Prepared, Error> {
+    let candidates = BTreeSet::from([identity.root.clone()]);
+    let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
+        &Event::Other("import".to_owned()),
+        None,
+        None,
+        &candidates,
+        &BTreeSet::new(),
+        import,
+    )?;
+    Ok(Prepared {
+        batch: Batch {
+            session: SessionBatch {
+                session_id: String::new(),
+                doc: None,
+                imported: intxt_core::capture::Imported::default(),
+                subagents: Vec::new(),
+                extra: Default::default(),
+            },
+            worktrees: batches,
+            uncaused_tool_calls,
+            extra: Default::default(),
+        },
+        session: None,
+        acp: None,
         worktrees,
         finished_tool: None,
     })

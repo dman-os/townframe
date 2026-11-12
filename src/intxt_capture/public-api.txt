@@ -26,13 +26,14 @@ pub impl intxt_capture::transcript::TranscriptImporter::fn import_file (& mut se
 pub impl intxt_capture::transcript::TranscriptImporter::fn new (parent : Option < DatumReference >) -> Self
 pub impl intxt_capture::transcript::TranscriptImporter::fn offset (& self) -> u64
 pub impl intxt_capture::transcript::TranscriptImporter::fn recording_thinking (mut self) -> Self
-pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_dir : & Path , state : & GitState ,) -> Result < (GitObserved , GitState) , Error >
+pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_dir : & Path , state : & GitState , import : & [String] ,) -> Result < (GitObserved , GitState) , Error >
 pub intxt_capture::host::fn prepare (hook : & Hook , session_path : & Path) -> Result < Prepared , Error >
 pub intxt_capture::host::fn prepare_acp (session : SessionBatch , sessions_dir : & Path , cwd : & Path , known : & BTreeSet < PathBuf > , window : & Window ,) -> Result < Prepared , Error >
+pub intxt_capture::host::fn prepare_import (identity : & Identity , import : & [String]) -> Result < Prepared , Error >
 pub intxt_capture::host::fn recorded_worktree (identity : & Identity) -> Result < RecordedWorktree , Error >
 pub intxt_capture::host::fn sessions_in (sessions_dir : & Path , root : & Path) -> Result < Vec < RecordedSession > , Error >
 pub intxt_capture::identity::fn resolve (path : & Path) -> Result < Option < Identity > , Error >
-pub intxt_capture::observe::fn observe (state : & WorktreeState , identity : Identity , pre : Option < & Snapshot > ,) -> Result < (Observation , WorktreeState) , Error >
+pub intxt_capture::observe::fn observe (state : & WorktreeState , identity : Identity , pre : Option < & Snapshot > , import : & [String] ,) -> Result < (Observation , WorktreeState) , Error >
 pub intxt_capture::pack::fn build (git : & Git , request : & PackRequest) -> Result < Pack , Error >
 pub intxt_capture::revisions::fn commits_of (git : & Git , revisions : & Revisions) -> Result < Vec < String > , Error >
 pub intxt_capture::revisions::fn head_branch (git : & Git) -> Result < Option < String > , Error >

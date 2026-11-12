@@ -40,10 +40,14 @@ pub struct Observation {
 /// `pre` is a snapshot taken when a window opened (before a tool call ran). With it, `changes`
 /// are the window's (`pre` to now) and `earlier` are what happened between the last observation
 /// and `pre`; without it all changes are in `changes`.
+///
+/// `import` are commits the git observation reports although no reflog move made them
+/// ([`git::observe`]).
 pub fn observe(
     state: &WorktreeState,
     identity: Identity,
     pre: Option<&Snapshot>,
+    import: &[String],
 ) -> Result<(Observation, WorktreeState), Error> {
     let snapshot = Snapshot::take(&identity.root)?;
     let last = state.snapshot.as_ref();
@@ -63,6 +67,7 @@ pub fn observe(
         &identity.git_dir,
         &identity.common_dir,
         &state.git,
+        import,
     )?;
     Ok((
         Observation {
