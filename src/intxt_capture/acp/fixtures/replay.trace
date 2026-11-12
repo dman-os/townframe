@@ -1,12 +1,12 @@
 # Loading a session this host has not recorded: the agent replays two exchanges (the first with a
-# prompt of two blocks, a tool call and its update; the second with a failing call) before it
+# prompt of two chunks, a tool call and its update; the second with a failing call) before it
 # answers `session/load`, and the replay is the session's history.
 > {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}
 < {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentInfo":{"name":"example-agent"},"agentCapabilities":{"loadSession":true}}}
 > {"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"sess_unseen","cwd":"/work/repo","mcpServers":[]}}
 < {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}}
 < {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Rename the loader"}}}}
-< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"user_message_chunk","content":{"type":"resource_link","name":"lib.rs","uri":"file:///work/repo/src/lib.rs"}}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":" in lib.rs"}}}}
 < {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Looking."}}}}
 < {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"tool_call","toolCallId":"call_a","title":"Read lib.rs","kind":"read","status":"in_progress","locations":[{"path":"/work/repo/src/lib.rs"}]}}}
 < {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_unseen","update":{"sessionUpdate":"tool_call_update","toolCallId":"call_a","status":"completed","content":[{"type":"content","content":{"type":"text","text":"fn load() {}"}}]}}}

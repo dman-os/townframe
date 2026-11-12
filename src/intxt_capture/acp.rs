@@ -44,11 +44,12 @@
 //!   come from the file.
 //! - There is none (the session was never recorded): the replay is the session's history and is
 //!   recorded with the load's answer, as one batch. The prompt requests are not there, so a turn
-//!   begins at each replayed `user_message_chunk` (consecutive ones are the blocks of one prompt
-//!   and join like a prompt's blocks do) and the turns carry no stop reason and the time the
+//!   begins at each replayed `user_message_chunk` (consecutive ones are pieces of one prompt
+//!   and concatenate, as agent chunks do) and the turns carry no stop reason and the time the
 //!   replayed update was seen. Tool calls in a replay have no worktree windows: whatever they
 //!   changed happened long ago. A replay the connection ends before the load is answered records
-//!   nothing, so the next load of the session replays again.
+//!   nothing, so the next load of the session replays again. A replayed turn's id is derived
+//!   from the session id and its index, so a replay recorded twice writes the same slots.
 //!
 //! In a live connection `user_message_chunk` is dropped: the prompt request is the turn's user
 //! message. `fs/*`, `terminal/*` and `session/request_permission` are not recorded; terminal
@@ -524,8 +525,26 @@ impl Recorder {
     }
 
     /// Open the session's next turn with `text` as its user message, if any.
+    ///
+    /// A live turn is named by a fresh UUIDv7. A replayed turn is named by a UUIDv8 made from
+    /// the ACP session id and the turn's index in the replay, so a replay recorded twice (a
+    /// record that reached the node but whose commit did not, then the next load) writes the same
+    /// `promptTurn` slots instead of duplicates, and the batch's idempotency key (which names its
+    /// last turn) and its commands' content digests come out the same as the first attempt's.
     fn begin_turn(session: &mut Session, at: Timestamp, text: String) {
-        let id = Uuid::now_v7().to_string();
+        let id = if session.replay.is_some() {
+            let mut name = blake3::Hasher::new();
+            name.update(session.datum.session_id.as_bytes());
+            name.update(&[0]);
+            name.update(&session.turns.to_le_bytes());
+            let digest = name.finalize();
+            let bytes: [u8; 16] = digest.as_bytes()[..16].try_into().expect("16 of 32 bytes");
+            uuid::Builder::from_custom_bytes(bytes)
+                .into_uuid()
+                .to_string()
+        } else {
+            Uuid::now_v7().to_string()
+        };
         let mut turn = PromptTurn {
             seq: session.turns,
             at,
@@ -554,8 +573,8 @@ impl Recorder {
         });
     }
 
-    /// A replayed `user_message_chunk`: another block of the open turn's prompt, or else the
-    /// prompt of a turn of its own.
+    /// A replayed `user_message_chunk`: a streamed piece of the open turn's prompt (concatenated,
+    /// as agent chunks are), or else the prompt of a turn of its own.
     fn replay_user(session: &mut Session, at: Timestamp, content: &Block) {
         let Some(text) = content.prompt_text() else {
             return;
@@ -565,7 +584,6 @@ impl Recorder {
             && let [only] = &mut open.turn.messages[..]
             && only.kind == MessageKind::UserMessage
         {
-            only.text.push('\n');
             only.text.push_str(text);
             return;
         }

@@ -8093,6 +8093,7 @@ name = "intxt_capture"
 version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
+ "blake3",
  "intxt_core",
  "jiff",
  "serde",

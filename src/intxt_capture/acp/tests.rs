@@ -357,10 +357,7 @@ fn the_replay_of_a_session_not_recorded_is_its_history() {
     assert_eq!(
         items(first),
         [
-            (
-                0,
-                "UserMessage Rename the loader\nfile:///work/repo/src/lib.rs".to_owned()
-            ),
+            (0, "UserMessage Rename the loader in lib.rs".to_owned()),
             (1, "AgentMessage Looking.".to_owned()),
             (2, "tool call_a Completed".to_owned()),
             (3, "AgentMessage Renamed.".to_owned()),
@@ -384,6 +381,14 @@ fn the_replay_of_a_session_not_recorded_is_its_history() {
         Some("Rename")
     );
     assert!(recorder.finish().is_empty());
+
+    // The same replay in another connection names its turns the same: recording it twice
+    // writes the same slots.
+    let again = play(&mut Recorder::new(sessions.path().to_owned()), REPLAY);
+    assert_eq!(
+        again[0].session.imported.turns.keys().collect::<Vec<_>>(),
+        batch.imported.turns.keys().collect::<Vec<_>>()
+    );
 
     // The host commits it: the next load of the session is a continuation.
     host_records(sessions.path(), &emits);

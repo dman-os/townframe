@@ -55,7 +55,7 @@ async fn drive(
     let (status, received) = tokio::join!(
         proxy(
             &agent,
-            Recorder::new(PathBuf::new()),
+            Some(Recorder::new(PathBuf::new())),
             agent_reads,
             agent_writes,
             TEE_CHUNKS,
@@ -143,7 +143,7 @@ async fn an_agent_that_is_not_acp_is_still_proxied() {
     let mut reasons: Vec<String> = Vec::new();
     let status = proxy(
         &agent,
-        Recorder::new(PathBuf::new()),
+        Some(Recorder::new(PathBuf::new())),
         &b""[..],
         &mut output,
         TEE_CHUNKS,
@@ -189,7 +189,7 @@ async fn a_recorder_that_never_drains_does_not_block_forwarding() {
     let (status, received) = tokio::join!(
         proxy(
             &agent,
-            Recorder::new(PathBuf::new()),
+            Some(Recorder::new(PathBuf::new())),
             agent_reads,
             agent_writes,
             4,
@@ -206,4 +206,27 @@ async fn a_recorder_that_never_drains_does_not_block_forwarding() {
         "{}",
         reasons[0]
     );
+}
+
+#[tokio::test]
+async fn without_a_recorder_the_session_is_proxied_unrecorded() {
+    let mut output = Vec::new();
+    let agent = vec![
+        "sh".to_owned(),
+        "-c".to_owned(),
+        "echo hi; exit 4".to_owned(),
+    ];
+    let status = proxy(
+        &agent,
+        None,
+        &b""[..],
+        &mut output,
+        TEE_CHUNKS,
+        async |_: Emit| panic!("nothing is recorded"),
+        |reason| panic!("recording stopped: {reason}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status.code(), Some(4));
+    assert_eq!(output, b"hi\n");
 }
