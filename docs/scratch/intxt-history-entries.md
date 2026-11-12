@@ -1,6 +1,6 @@
 # intxt: how an intxt includes commits and tracks refs (proposal for ADRs 036 and 040)
 
-Status: Proposal, for the operator's review (second draft: one datum per item, keyed by content)
+Status: Accepted 2026-11-12 with its proposed defaults (ledger D61)
 Owner: intxt lane
 Updated: 2026-11-12
 Scope: The datums behind ledger D53 (an intxt includes commits and tracks refs, separately), D54 (a ref versus a ref as seen on a clone), D57 (VCS-prefixed entries) and D59 (git objects as content). Behaviour is in FDR 008 (W2, W3, W6).
