@@ -172,6 +172,8 @@ fn PrFiles(diff: &'static PrDiff, options: DiffOptions, virtualized: Virtualizat
     let by_size = use_hook(|| diff.by_size());
     let mut order = use_signal(|| Order::Size);
     let mut filter = use_signal(String::new);
+    // The file selector (order, filter and list) can be put away so the diff takes the full width.
+    let mut show_files = use_signal(|| true);
     // The largest file opens first.
     let mut selected = use_signal(|| by_size[0]);
     let listed: Vec<usize> = {
@@ -196,38 +198,54 @@ fn PrFiles(diff: &'static PrDiff, options: DiffOptions, virtualized: Virtualizat
                 "{diff.files.len()} files, +{total_added} -{total_removed}. Read and split in {diff.load.as_secs_f64() * 1000.0:.0} ms. {file.path} parsed in {parse.as_secs_f64() * 1000.0:.1} ms (0 when cached)."
             }
             div { class: "flex flex-wrap items-center gap-3",
-                Segmented {
-                    label: "File order",
-                    options: vec!["Largest first", "Path"],
-                    selected: if order() == Order::Size { 0 } else { 1 },
-                    on_select: move |choice: usize| {
-                        order.set(if choice == 0 { Order::Size } else { Order::Path });
-                    },
+                button {
+                    class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus",
+                    "aria-expanded": show_files(),
+                    "aria-controls": "pr-file-list",
+                    onclick: move |_| show_files.toggle(),
+                    if show_files() {
+                        "Hide file list"
+                    } else {
+                        "Show file list"
+                    }
                 }
-                input {
-                    class: "min-h-12 flex-1 rounded-md border border-border bg-surface px-3 text-foreground focus-visible:outline-2 focus-visible:outline-focus",
-                    "aria-label": "Filter files",
-                    placeholder: "Filter files by path",
-                    oninput: move |event| filter.set(event.value()),
+                if show_files() {
+                    Segmented {
+                        label: "File order",
+                        options: vec!["Largest first", "Path"],
+                        selected: if order() == Order::Size { 0 } else { 1 },
+                        on_select: move |choice: usize| {
+                            order.set(if choice == 0 { Order::Size } else { Order::Path });
+                        },
+                    }
+                    input {
+                        class: "min-h-12 flex-1 rounded-md border border-border bg-surface px-3 text-foreground focus-visible:outline-2 focus-visible:outline-focus",
+                        "aria-label": "Filter files",
+                        placeholder: "Filter files by path",
+                        oninput: move |event| filter.set(event.value()),
+                    }
                 }
             }
             div { class: "flex flex-col gap-3 lg:flex-row",
-                ul {
-                    class: "flex min-w-0 flex-col gap-1 overflow-y-auto lg:w-96 lg:shrink-0",
-                    max_height: "32rem",
-                    "aria-label": "Files of the diff",
-                    for file_index in listed {
-                        {
-                            let file = &diff.files[file_index];
-                            rsx! {
-                                li { key: "{file_index}",
-                                    button {
-                                        class: "flex min-h-12 w-full cursor-pointer items-center justify-between gap-3 rounded-md border border-border bg-card px-3 text-left text-sm text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
-                                        "data-state": if file_index == index { "active" } else { "inactive" },
-                                        "aria-current": file_index == index,
-                                        onclick: move |_| selected.set(file_index),
-                                        span { class: "min-w-0 break-all", "{file.path}" }
-                                        span { class: "shrink-0", "+{file.added} -{file.removed}" }
+                if show_files() {
+                    ul {
+                        id: "pr-file-list",
+                        class: "flex min-w-0 flex-col gap-1 overflow-y-auto lg:w-96 lg:shrink-0",
+                        max_height: "32rem",
+                        "aria-label": "Files of the diff",
+                        for file_index in listed {
+                            {
+                                let file = &diff.files[file_index];
+                                rsx! {
+                                    li { key: "{file_index}",
+                                        button {
+                                            class: "flex min-h-12 w-full cursor-pointer items-center justify-between gap-3 rounded-md border border-border bg-card px-3 text-left text-sm text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus data-[state=active]:bg-selected data-[state=active]:text-on-selected",
+                                            "data-state": if file_index == index { "active" } else { "inactive" },
+                                            "aria-current": file_index == index,
+                                            onclick: move |_| selected.set(file_index),
+                                            span { class: "min-w-0 break-all", "{file.path}" }
+                                            span { class: "shrink-0", "+{file.added} -{file.removed}" }
+                                        }
                                     }
                                 }
                             }
