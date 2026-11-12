@@ -1,6 +1,6 @@
 # intxt: document granularity (proposal for an ADR 040 amendment)
 
-Status: Proposal, for the operator's review
+Status: Superseded 2026-11-12 by `intxt-file-docs.md` (ledger D59): with no file documents for filesystem worktrees, the per-line-of-work bound is moot. The D54 rubric (content-identified vs location state) stays.
 Owner: intxt lane
 Updated: 2026-11-12
 Scope: How the recorded work (ADR 040) is split into documents, so that what an intxt includes is only the work it is about. Decisions go to the ledger and then into ADR 040; nothing here is decided.
