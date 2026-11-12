@@ -558,6 +558,8 @@ impl DatumSetStore {
                     if self.extracts_references(key.tag().as_str()) {
                         queries::delete_edges(&transaction, doc_id.clone(), key.to_string())
                             .await?;
+                        queries::delete_key_edges(&transaction, doc_id.clone(), key.to_string())
+                            .await?;
                     }
                 }
             }
@@ -1282,18 +1284,36 @@ async fn write_edges(
 ) -> Res<()> {
     for (route, edges) in edges {
         queries::delete_edges(db, route.doc_id.to_string(), route.datum_key.to_string()).await?;
-        for edge in &edges {
-            let (target_doc, target_datum, ref_heads) = edge.target.columns()?;
-            queries::insert_edge(
-                db,
-                edge.origin.doc_id.to_string(),
-                edge.origin.datum_key.to_string(),
-                edge.path.clone(),
-                target_doc,
-                target_datum,
-                ref_heads,
-            )
+        queries::delete_key_edges(db, route.doc_id.to_string(), route.datum_key.to_string())
             .await?;
+        for edge in &edges {
+            match &edge.target {
+                DatumRefTarget::Route {
+                    route: target,
+                    heads,
+                } => {
+                    queries::insert_edge(
+                        db,
+                        edge.origin.doc_id.to_string(),
+                        edge.origin.datum_key.to_string(),
+                        edge.path.clone(),
+                        target.doc_id.to_string(),
+                        target.datum_key.to_string(),
+                        serde_json::to_vec(heads)?,
+                    )
+                    .await?;
+                }
+                DatumRefTarget::Key(key) => {
+                    queries::insert_key_edge(
+                        db,
+                        edge.origin.doc_id.to_string(),
+                        edge.origin.datum_key.to_string(),
+                        edge.path.clone(),
+                        key.to_string(),
+                    )
+                    .await?;
+                }
+            }
         }
     }
     Ok(())

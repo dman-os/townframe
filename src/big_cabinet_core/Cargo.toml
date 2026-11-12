@@ -31,8 +31,8 @@ macros.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 data-encoding.workspace = true
-# git's object id, which a content-addressed datum's slot is (ADR 035 §2.9).
-sha1 = "0.10"
+# git's object id: SHA-1 with the collision detection git itself uses (ADR 035 §2.9).
+sha1-checked = "0.10"
 json-canon = "0.1.3"
 # An instant is stored as milliseconds and written as RFC 3339, and jiff is what a schema in this tree
 # states one with.
