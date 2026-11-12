@@ -5,7 +5,7 @@
 //! serving them:
 //! - **services:** one XRPC [`Handler`] component and the operations it `implements`, plus the
 //!   foreign contracts the nodule `requires`, in the shared [`Request`] shape (ADR 028 §4);
-//! - **facilities:** private state, revisioned stores and a config schema;
+//! - **facilities:** private state, revisioned stores and the NSIDs of its settings datums;
 //! - **lifecycle:** initializers.
 //!
 //! Everything else (commands, views, processors, future sections) lives in
@@ -29,8 +29,6 @@ use big_cabinet_core::datum::is_nsid;
 use big_cabinet_core::datum::operation;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::parse_ref;
-use big_cabinet_core::datum::validate_object_schema;
-use big_cabinet_core::datum::validate_object_value;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::request::Request;
 use big_dispatch_core::DispatchScope;
@@ -93,8 +91,14 @@ pub struct Nodule {
     pub initialization: Vec<Initializer>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub private_state: Vec<PrivateState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub config: Option<Config>,
+    /// The NSIDs of the datums that are this cartridge's settings (ADR 044 §3): each is a record
+    /// the nodule declares under its own authority, written as an ordinary datum in the
+    /// cartridge's config document under its own NSID and slot, admitted against its Lexicon like
+    /// any datum. Settings are always optional: an absent datum means the nodule's own default,
+    /// which lives in its code, and nothing writes one on its behalf. A cartridge with no settings
+    /// declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<String>,
     /// Binding sections (commands, views, processors, ...) keyed by section tag, for example
     /// `org.example.daybook.nodule.commands`. The runtime carries them verbatim and never
     /// validates them: an unknown section or unknown content inside a known one does not refuse
@@ -205,20 +209,6 @@ pub enum StateKind {
     Kv,
     #[datum(other)]
     Unknown(String),
-}
-
-/// The schema of the nodule's mutable runtime settings and their defaults. Settings live in the
-/// runtime's configuration, validated against this; the description never carries a setting.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Config {
-    pub schema: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub defaults: Option<IndexMap<String, Value>>,
-    #[serde(flatten)]
-    pub extra: Extra,
 }
 
 /// What admission established about a description: the operations it serves, the authority it
@@ -429,35 +419,12 @@ impl Nodule {
         let (operations, artifacts) = admission.services()?;
         admission.stores()?;
         admission.initializers(&operations)?;
-        admission.config()?;
+        admission.settings()?;
         Ok(Admitted {
             operations,
             authority: authority.map(str::to_owned),
             artifacts,
         })
-    }
-
-    pub fn validate_config(&self, settings: &IndexMap<String, Value>, path: &str) -> Result<()> {
-        let Some(config) = &self.config else {
-            return Err(NoduleError::invalid(
-                path,
-                "nodule declares no config schema",
-            ));
-        };
-        let lexicons = self.lexicons()?;
-        let defs: BTreeMap<&str, &serde_json::Map<String, Value>> = lexicons
-            .iter()
-            .filter(|(_, lexicon)| lexicon.operation.is_none())
-            .map(|(&id, lexicon)| (id, lexicon.defs))
-            .collect();
-        let value = Value::Object(
-            settings
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-        validate_object_value(&defs, &config.schema, &value, path)?;
-        Ok(())
     }
 
     /// Reads every Lexicon file's frame and admits the operation ones, indexed by id.
@@ -768,42 +735,37 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// Config schema and defaults: the schema must be declared by this nodule (not a vendored
-    /// copy) as a valid datum `object` schema, and `defaults` (when present) must conform to it.
-    fn config(&self) -> Result<()> {
-        let Some(config) = &self.nodule.config else {
-            return Ok(());
-        };
-        self.resolve_ref(None, &config.schema, "config.schema")?;
-        let Some((Some(file), _)) = parse_ref(&config.schema) else {
-            unreachable!("resolve_ref verified a non-local Lexicon reference");
-        };
-        if !self.holds(file) {
-            return Err(NoduleError::invalid(
-                "config.schema",
-                format!("`{file}` is not a Lexicon under this cartridge's authority"),
-            ));
-        }
-        let defs = self.schema_defs();
-        validate_object_schema(&defs, &config.schema, "config.schema")?;
-        if let Some(defaults) = &config.defaults {
-            let value = Value::Object(
-                defaults
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            );
-            validate_object_value(&defs, &config.schema, &value, "config.defaults")?;
+    /// Settings: each listed NSID is a datum this nodule holds (declared in its Lexicons under its
+    /// own authority, whose `main` is a record or an object), named once. A vendored copy would
+    /// leave the settings to another cartridge's Lexicon, which this nodule could not register.
+    fn settings(&self) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for (index, nsid) in self.nodule.settings.iter().enumerate() {
+            let path = format!("settings[{index}]");
+            if !seen.insert(nsid.as_str()) {
+                return Err(NoduleError::invalid(
+                    path,
+                    format!("`{nsid}` is listed twice"),
+                ));
+            }
+            if !self.holds(nsid) {
+                return Err(NoduleError::invalid(
+                    path,
+                    format!("`{nsid}` is not a Lexicon under this cartridge's authority"),
+                ));
+            }
+            let lexicon = &self.lexicons[nsid.as_str()];
+            let main = lexicon.defs.get("main").and_then(|main| main.get("type"));
+            if lexicon.operation.is_some()
+                || !matches!(main.and_then(Value::as_str), Some("record" | "object"))
+            {
+                return Err(NoduleError::invalid(
+                    path,
+                    format!("`{nsid}` is not a datum: its `main` must be a record or an object"),
+                ));
+            }
         }
         Ok(())
-    }
-
-    fn schema_defs(&self) -> BTreeMap<&'a str, &'a serde_json::Map<String, Value>> {
-        self.lexicons
-            .iter()
-            .filter(|(_, lexicon)| lexicon.operation.is_none())
-            .map(|(&id, lexicon)| (id, lexicon.defs))
-            .collect()
     }
 
     /// A Lexicon reference from a contribution or from an operation's schema. A file this nodule

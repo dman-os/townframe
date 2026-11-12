@@ -386,3 +386,15 @@ declare_service_protocol! {
         stream {}
     }
 }
+
+mod installs;
+
+pub use installs::CartridgeInstallRecord;
+pub use installs::CartridgeInstalls;
+pub use installs::ClearCartridgeConfig;
+pub use installs::InstallCartridge;
+pub use installs::ListCartridgeInstalls;
+pub use installs::ObserveCartridgeInstalls;
+pub use installs::SetCartridgeEnabled;
+pub use installs::SetCartridgeGrant;
+pub use installs::UninstallCartridge;
