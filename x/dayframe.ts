@@ -103,7 +103,7 @@ switch (command) {
     // the wasm32 build (CONTRIBUTING.md, `resolver.feature-unification`).
     await $`deno run --allow-all ${
       root.join("x/dx.ts")
-    } serve --web -p dayframe_showcase --no-default-features --features web --profile wasm-release --addr 127.0.0.1 --port ${port} --open false --interactive false --hot-reload false`
+    } serve --web -p dayframe_showcase --no-default-features --features web --profile wasm-release --addr 127.0.0.1 --port ${port} --open false --interactive false --hot-reload false --hot-patch false`
       .cwd(root)
       .env({ CARGO_RESOLVER_FEATURE_UNIFICATION: "selected" });
     break;
