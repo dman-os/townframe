@@ -111,6 +111,30 @@ pub enum IntxtCommands {
         #[arg(long)]
         full: bool,
     },
+    /// Create an intxt and remember it, so it has a short id
+    ///
+    /// Prints the new intxt's short id, which names it in `add`, `show` and `rm`.
+    #[command(after_long_help = "Examples:\n  day x intxt new \"Datum refs move to dtxt\"")]
+    New {
+        /// The intxt's title
+        title: String,
+        /// The intxt's description, in Markdown
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Remove entries from an intxt, by the short ids `show` prints
+    ///
+    /// Deletes the entries (commits, jj changes, tracked refs, sessions) and the packs only they
+    /// carried. The documents already shared with the intxt stay shared, and copies synced to
+    /// others stay with them.
+    #[command(after_long_help = "Examples:\n  day x intxt rm m4 k7 v1")]
+    Rm {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+        /// The entries to remove, by short id
+        #[arg(required = true)]
+        items: Vec<String>,
+    },
     /// Show what an intxt holds: its commits, jj changes, tracked refs and sessions
     ///
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
@@ -175,6 +199,21 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
                 packaging
                     .add(&mut std::io::stdout(), &intxt, named, full)
                     .await
+            })
+            .await
+        }
+        IntxtCommands::New { title, description } => {
+            with_packaging(async |packaging| {
+                packaging
+                    .create(&mut std::io::stdout(), &title, description.as_deref())
+                    .await
+                    .map(|_| ())
+            })
+            .await
+        }
+        IntxtCommands::Rm { intxt, items } => {
+            with_packaging(async |packaging| {
+                packaging.rm(&mut std::io::stdout(), &intxt, &items).await
             })
             .await
         }

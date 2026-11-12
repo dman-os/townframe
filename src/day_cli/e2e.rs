@@ -946,7 +946,6 @@ mod library {
         use crate::cmds::intxt::capture;
         use crate::cmds::intxt::package::Named;
         use crate::cmds::intxt::package::Packaging;
-        use big_cabinet_core::drawer::protocol::DrawerId;
         use std::io::Write;
 
         with_intxt_node(async |tmp, client| {
@@ -1012,14 +1011,18 @@ mod library {
                 .await
                 .unwrap();
 
-            let created = day_x(
-                client,
-                "org.example.intxt.createIntxt",
-                json!({ "title": "Two files", "description": "b and c" }),
-            )
-            .await;
-            let drawer: DrawerId = created["drawerId"].as_str().unwrap().parse().unwrap();
             let packaging = Packaging::new(client, &repo, &node_root);
+            let mut created = Vec::new();
+            let drawer = packaging
+                .create(&mut created, "Two files", Some("b and c"))
+                .await
+                .unwrap();
+            let created = String::from_utf8(created).unwrap();
+            let short = short_ids::ShortIds::new([drawer.to_string()])
+                .render(&drawer.to_string())
+                .unique;
+            assert!(created.starts_with(&format!("intxt {short} \"Two files\"")), "{created}");
+            assert!(created.contains(&format!("undo: day x intxt drop {short}")), "{created}");
             let add = async |name: &str| {
                 let mut out = Vec::new();
                 packaging
@@ -1046,18 +1049,13 @@ mod library {
             let (tip, merge_base) = (rev("feat/x"), rev("main"));
             let range = format!("{}..{}", &merge_base[..7], &tip[..7]);
 
-            // The full drawer id the first time, which makes the intxt live; the short id over the
-            // live intxts after that.
-            let added = add(&drawer.to_string()).await;
+            let added = add(&short).await;
             assert!(added.starts_with("added to "), "{added}");
             assert!(added.contains(&format!("commits    feat/x: {range}, 2 commit(s) (thin pack")), "{added}");
             assert!(added.contains("ref        refs/heads/feat/x (tracked on this clone)"), "{added}");
             assert!(added.contains("session    claude-code"), "{added}");
             assert!(added.contains("undo: day x intxt rm"), "{added}");
 
-            let short = short_ids::ShortIds::new([drawer.to_string()])
-                .render(&drawer.to_string())
-                .unique;
             let shown = show(&short).await;
             assert!(shown.contains("\"Two files\""), "{shown}");
             assert!(shown.contains("b and c"), "{shown}");
@@ -1111,6 +1109,23 @@ mod library {
             );
             assert!(status.contains("tracks feat/x") || status.contains("tracks refs/heads/feat/x"), "{status}");
             assert!(status.contains("session s1"), "{status}");
+
+            // `rm` takes the ref entry out by its short id and leaves the rest.
+            let ref_line = shown
+                .lines()
+                .find(|line| line.contains("refs/heads/feat/x"))
+                .unwrap();
+            let ref_id = ref_line.split_whitespace().next().unwrap();
+            let mut out = Vec::new();
+            packaging
+                .rm(&mut out, &short, &[ref_id.to_owned()])
+                .await
+                .unwrap();
+            let removed = String::from_utf8(out).unwrap();
+            assert!(removed.contains("gitRefEntry/"), "{removed}");
+            let after = show(&short).await;
+            assert!(!after.contains("tracked refs"), "{after}");
+            assert!(after.contains("commits (1):") && after.contains("sessions (1):"), "{after}");
         })
         .await;
     }

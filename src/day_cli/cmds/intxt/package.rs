@@ -23,9 +23,12 @@ use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::listing::KnownDrawers;
+use big_cabinet_core::drawer::protocol::CreateMetaDoc;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
@@ -43,6 +46,8 @@ use intxt_capture::revisions;
 use intxt_core::client::Caller;
 use intxt_core::client::key;
 use intxt_core::generic;
+use intxt_core::methods::CreateIntxt;
+use intxt_core::methods::IntxtCreated;
 use intxt_core::work;
 use serde_json::Value;
 use service_utils_rs::RequestContext;
@@ -296,14 +301,23 @@ impl<'a> Packaging<'a> {
         Ok(live)
     }
 
+    /// Remembers `drawer` so the node lists it, which is what makes an intxt live.
+    async fn remember(&self, drawer: &DrawerId) -> Res<()> {
+        self.caller
+            .call(RememberDrawer {
+                capability: self.known_drawers().await?,
+                drawer_id: drawer.clone(),
+                mirror: false,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// The intxt `name` names, and the short ids of the live intxts. `name` is a short id over
-    /// the live intxts or a full drawer id.
-    ///
-    /// DECISION NEEDED: `createIntxt` does not remember the drawer it creates, so an intxt
-    /// is only "live" once something remembers it. A full drawer id that is an intxt is
-    /// remembered here, which is what makes it addressable by short id afterwards. The
-    /// alternative is `createIntxt` remembering its drawer, which needs the known-drawers
-    /// capability the nodule is not granted.
+    /// the live intxts or a full drawer id. An intxt is live once the node remembers its drawer:
+    /// `new` remembers the drawers it creates, and a full drawer id that is an intxt is
+    /// remembered when it is named, so an intxt made by `createIntxt` directly becomes
+    /// addressable by short id the first time it is named in full.
     async fn resolve(&self, name: &str) -> Res<(DrawerId, ShortIds<String>)> {
         let live = self.live_intxts().await?;
         let mut ids: Vec<String> = live.iter().map(ToString::to_string).collect();
@@ -313,13 +327,7 @@ impl<'a> Packaging<'a> {
                 "{drawer} is not an intxt: its descriptor has no intxt marker"
             );
             if !live.contains(&drawer) {
-                self.caller
-                    .call(RememberDrawer {
-                        capability: self.known_drawers().await?,
-                        drawer_id: drawer.clone(),
-                        mirror: false,
-                    })
-                    .await?;
+                self.remember(&drawer).await?;
                 ids.push(drawer.to_string());
             }
             return Ok((drawer, ShortIds::new(ids)));
@@ -338,6 +346,109 @@ impl<'a> Packaging<'a> {
             })?
             .parse()?;
         Ok((found, short))
+    }
+
+    /// `day x intxt new`: creates an intxt, remembers it, and says its short id. Answers its
+    /// drawer.
+    pub(crate) async fn create(
+        &self,
+        out: &mut impl Write,
+        title: &str,
+        description: Option<&str>,
+    ) -> Res<DrawerId> {
+        let IntxtCreated { drawer_id } = call(
+            self.client,
+            CreateIntxt {
+                title: title.to_owned(),
+                description: description.map(str::to_owned),
+            },
+        )
+        .await?;
+        self.remember(&drawer_id).await?;
+        let live = self.live_intxts().await?;
+        let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
+        let short = shown(&ids, &drawer_id.to_string());
+        writeln!(out, "intxt {short} \"{title}\"")?;
+        writeln!(out, "  undo: day x intxt drop {short}")?;
+        Ok(drawer_id)
+    }
+
+    /// Makes sure the intxt's drawer has a blob inventory, so the blob workers pin and sync the
+    /// packs it holds (ledger D45). The root is `sensitive`: a pack is the operator's work. The
+    /// command id is fixed per drawer, so creating it again answers the first creation.
+    async fn ensure_inventory(&self, drawer: &DrawerId) -> Res<()> {
+        let capability = self
+            .caller
+            .call(MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: [(drawer.clone(), DrawerAccess::Admin)].into(),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            })
+            .await?
+            .capability_id;
+        self.caller
+            .call(CreateMetaDoc {
+                capability,
+                command: CommandId::try_from(format!("intxt-inventory-{drawer}"))?,
+                drawer_id: drawer.clone(),
+                kind: "blobInventory".into(),
+                name: "intxt".into(),
+                root: MetaRoot::Sensitive,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// `day x intxt rm`: removes the entries named by their short ids, and the packs only they
+    /// referenced. The documents lent to the intxt stay lent: whether another entry still needs
+    /// one is not derivable from the entries alone.
+    pub(crate) async fn rm(&self, out: &mut impl Write, intxt: &str, items: &[String]) -> Res<()> {
+        let (drawer, intxts) = self.resolve(intxt).await?;
+        let view = self.load(&drawer).await?;
+        let ids = ShortIds::new(
+            view.entries
+                .iter()
+                .map(|(key, _)| key.to_string())
+                .collect::<Vec<_>>(),
+        );
+        let mut removed = BTreeSet::new();
+        for item in items {
+            let found = ids.resolve(item)?;
+            removed.insert(found.parse::<DatumKey>()?);
+        }
+        let pack_of = |value: &Value| -> Option<DatumKey> {
+            let pack: DatumReference = value.get("pack")?.as_str()?.parse().ok()?;
+            Some(pack.key().clone())
+        };
+        let kept: BTreeSet<DatumKey> = view
+            .entries
+            .iter()
+            .filter(|(key, _)| !removed.contains(key))
+            .filter_map(|(_, value)| pack_of(value))
+            .collect();
+        let packs: BTreeSet<DatumKey> = view
+            .entries
+            .iter()
+            .filter(|(key, _)| removed.contains(key))
+            .filter_map(|(_, value)| pack_of(value))
+            .filter(|pack| !kept.contains(pack))
+            .collect();
+        self.caller
+            .remove_entries(&drawer, &removed, &packs)
+            .await?;
+        writeln!(
+            out,
+            "removed from {} \"{}\"",
+            shown(&intxts, &drawer.to_string()),
+            view.title.title
+        )?;
+        for entry in &removed {
+            writeln!(out, "  {entry}")?;
+        }
+        Ok(())
     }
 
     async fn load(&self, drawer: &DrawerId) -> Res<View> {
@@ -429,6 +540,7 @@ impl<'a> Packaging<'a> {
     async fn plan_commits(
         &self,
         plan: &mut Plan,
+        drawer: &DrawerId,
         view: &View,
         resolved: &Resolved,
         recorded: &host::RecordedWorktree,
@@ -454,6 +566,7 @@ impl<'a> Packaging<'a> {
             .await??;
         let kind = if pack.thin { "thin" } else { "full" };
         let size = pack.bytes.len();
+        self.ensure_inventory(drawer).await?;
         let (blob_key, blob) = self.put_pack(pack.bytes).await?;
         let pack_ref = DatumReference::new(ReferenceDocId::SelfDoc, blob_key.clone());
         plan.set.insert(blob_key, blob);
@@ -586,7 +699,7 @@ impl<'a> Packaging<'a> {
 
         let mut plan = Plan::default();
         let new_commits = self
-            .plan_commits(&mut plan, &view, &resolved, &recorded, full)
+            .plan_commits(&mut plan, &drawer, &view, &resolved, &recorded, full)
             .await?;
         self.plan_ref(&mut plan, &view, &resolved, &identity, &recorded)
             .await?;

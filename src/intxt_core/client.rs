@@ -241,6 +241,41 @@ impl<H: HttpTransport> Caller<H> {
         Ok(included)
     }
 
+    /// Removes `entries` from the intxt's body and deletes their datums, with `also` (datums only
+    /// they referenced, such as a pack's blob datum), in one write based on the heads the body
+    /// was read at. Documents lent to the intxt stay lent.
+    pub async fn remove_entries(
+        &self,
+        intxt: &DrawerId,
+        entries: &BTreeSet<DatumKey>,
+        also: &BTreeSet<DatumKey>,
+    ) -> Result<(), IntxtError> {
+        let body_key = key(generic::Body::ID, "main")?;
+        let (body_heads, body_value) = self.read(intxt, &body_key).await?;
+        let mut body: generic::Body = serde_json::from_value(body_value)
+            .map_err(|error| IntxtError::Invalid(format!("{intxt} has no valid body: {error}")))?;
+        body.order
+            .retain(|reference| !entries.contains(reference.key()));
+        let set: BTreeMap<DatumKey, Value> = [(body_key, to_value(&body))].into();
+        let remove: BTreeSet<DatumKey> = entries.union(also).cloned().collect();
+        let descriptor = self
+            .doc_capability(DocScope {
+                write: [intxt.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        self.call(WriteDatums {
+            capability: descriptor,
+            command: Some(self.command("remove-entries", &(&set, &remove, &body_heads))?),
+            doc_id: intxt.clone(),
+            mode: WriteMode::AtHeads { heads: body_heads },
+            set,
+            remove,
+        })
+        .await?;
+        Ok(())
+    }
+
     /// Enters `doc` in the intxt's drawer at Read, so everyone the intxt is shared with can read
     /// it. The drawer it is lent from is the first, ordered by drawer id, that the caller reaches
     /// it through at Read or above, other than the intxt's own: the drawers protocol does not

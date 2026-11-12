@@ -30,6 +30,7 @@ pub impl intxt_core::client::Caller < H >::async fn include (& self , intxt : & 
 pub impl intxt_core::client::Caller < H >::async fn read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Value) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn read_datums (& self , doc : & DocId , keys : Option < BTreeSet < DatumKey > > ,) -> Result < (Vec < ChangeHash > , BTreeMap < DatumKey , DatumRead >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn record_observations (& self , drawer : & DrawerId , machine : & ActorUrl , batch : & Batch ,) -> Result < RecordedIds , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn remove_entries (& self , intxt : & DrawerId , entries : & BTreeSet < DatumKey > , also : & BTreeSet < DatumKey > ,) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn share (& self , intxt : & DrawerId , doc : & DocId) -> Result < () , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn try_read (& self , doc : & DocId , key : & DatumKey ,) -> Result < (Vec < ChangeHash > , Option < Value >) , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn command (& self , step : & str , content : & impl Serialize) -> Result < CommandId , IntxtError >
