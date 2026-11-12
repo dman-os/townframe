@@ -17,7 +17,7 @@ trait Observe {
 impl Observe for Repo {
     fn observe(&self, state: &mut WorktreeState) -> Observation {
         let identity = identity::resolve(&self.root).unwrap().unwrap();
-        let (observation, next) = observe(state, identity, None).unwrap();
+        let (observation, next) = observe(state, identity, None, &[]).unwrap();
         *state = next;
         observation
     }
@@ -446,6 +446,7 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
         &linked_state,
         identity::resolve(&linked_root).unwrap().unwrap(),
         None,
+        &[],
     )
     .unwrap();
     linked_state = next;
@@ -463,6 +464,7 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
         &linked_state,
         identity::resolve(&linked_root).unwrap().unwrap(),
         None,
+        &[],
     )
     .unwrap();
     assert_eq!(kinds(&linked.git.moves), [OpKind::Commit]);
@@ -541,4 +543,36 @@ fn merges_cherry_picks_reverts_and_fast_forwards_are_told_apart() {
             OpKind::Revert
         ]
     );
+}
+
+/// Imported commits (history the reflog never showed, FDR 008 W6) are reported as commit datums
+/// and nothing else: no move, and the state carried forward is the one an observation without
+/// the import carries, so the next hook neither repeats nor misses anything.
+#[test]
+fn imported_commits_are_reported_as_commits_and_leave_the_state_alone() {
+    let repo = Repo::new();
+    repo.write("a.txt", "one\n");
+    let first = repo.commit_all("first");
+    repo.write("b.txt", "two\n");
+    let second = repo.commit_all("second");
+    let state = WorktreeState::default();
+    let identity = || identity::resolve(&repo.root).unwrap().unwrap();
+
+    let (plain, plain_next) = observe(&state, identity(), None, &[]).unwrap();
+    assert_eq!(
+        plain.git.commits.keys().collect::<Vec<_>>(),
+        [&second],
+        "a baseline reports only the commit HEAD is at"
+    );
+
+    let (imported, imported_next) =
+        observe(&state, identity(), None, &[first.clone(), second.clone()]).unwrap();
+    let mut wanted = [first, second];
+    wanted.sort();
+    assert_eq!(
+        imported.git.commits.keys().cloned().collect::<Vec<_>>(),
+        wanted
+    );
+    assert!(imported.git.moves.is_empty());
+    assert_eq!(imported_next, plain_next);
 }

@@ -461,18 +461,19 @@ fn ref_moves(
 }
 
 /// The commits the moves made, and the one `HEAD` is at when it changed (or was first seen). A checkout or reset only arrives at its
-/// commit; the others made `to --not from`.
+/// commit; the others made `to --not from`. `import` are commits to report whatever the moves
+/// were: history the reflog never showed (see [`observe`]).
 fn made_commits(
     git: &Git,
     head: &Head,
     head_moved: bool,
     moves: &[GitMove],
+    import: &[String],
 ) -> Result<BTreeMap<String, GitCommit>, Error> {
-    let mut wanted: Vec<String> = if head_moved {
-        head.target.iter().cloned().collect()
-    } else {
-        Vec::new()
-    };
+    let mut wanted: Vec<String> = import.to_vec();
+    if head_moved {
+        wanted.extend(head.target.iter().cloned());
+    }
     let mut commits = BTreeMap::new();
     for mv in moves {
         let (Some(to), from) = (&mv.observation.to, &mv.observation.from) else {
@@ -511,11 +512,18 @@ fn checked_out_branches(git: &Git) -> Result<BTreeSet<String>, Error> {
 ///
 /// The first observation (no stored reflog position) is a baseline: it reports where `HEAD` and
 /// the refs are, and no moves.
+///
+/// `import` are commits to report as made although no move in the reflog made them: history that
+/// predates the first observation (work done before capture was installed, or on another
+/// machine) which an intxt now needs recorded (FDR 008 W6). They are reported exactly as a move's
+/// commits are, as datums in `commits` and nothing else: no op, no change to the stored state,
+/// so what the next observation reports is what it would have reported without the import.
 pub fn observe(
     root: &Path,
     git_dir: &Path,
     common_dir: &Path,
     state: &GitState,
+    import: &[String],
 ) -> Result<(GitObserved, GitState), Error> {
     let git = Git::new(root);
     let head = Head {
@@ -581,7 +589,7 @@ pub fn observe(
         .head
         .as_ref()
         .is_none_or(|seen| seen.target != head.target);
-    let commits = made_commits(&git, &head, head_moved, &moves)?;
+    let commits = made_commits(&git, &head, head_moved, &moves, import)?;
 
     let mut ref_datums = BTreeMap::new();
     for (name, target) in &refs {

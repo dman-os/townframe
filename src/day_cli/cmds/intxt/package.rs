@@ -467,6 +467,78 @@ impl<'a> Packaging<'a> {
         Ok(View { title, entries })
     }
 
+    /// What capture holds for the worktree `identity` names, after recording what `resolved`
+    /// names if it was never recorded (FDR 008 W6): the work was done before intxt was installed
+    /// or on another machine, so no hook saw its commits or its branch move.
+    ///
+    /// The import is recording, through the path a hook's batch takes: the host observes the
+    /// worktree under its lock with the range's commits named explicitly
+    /// ([`host::prepare_import`], since the reflog never showed them) and the recorder writes
+    /// the identity documents, the `gitCommit` datums and the `gitRef`. The host commits the
+    /// recorder's answer as its state, the state hooks continue from, so a hook after the
+    /// import reports only what moves later. No session is derived: none was recorded, and the
+    /// ops of the worktree hold none for these commits.
+    async fn recorded_after_import(
+        &self,
+        identity: &Identity,
+        resolved: &Resolved,
+    ) -> Res<host::RecordedWorktree> {
+        let recorded = host::recorded_worktree(identity)?;
+        // A jj change's commits live in jj's git directory, which the worktree's observation
+        // does not read; its sessions come from what capture saw of the worktree.
+        if resolved.git_dir != identity.root
+            || self.is_recorded(&recorded, identity, resolved).await?
+        {
+            return Ok(recorded);
+        }
+        let (observed, commits) = (identity.clone(), resolved.commits.clone());
+        let prepared =
+            tokio::task::spawn_blocking(move || host::prepare_import(&observed, &commits))
+                .await??;
+        super::capture::record_prepared(self.client, self.node_dir, prepared).await?;
+        host::recorded_worktree(identity).map_err(Into::into)
+    }
+
+    /// Whether the clone and repository documents hold every commit `resolved` names and, for a
+    /// branch, where it points now.
+    async fn is_recorded(
+        &self,
+        recorded: &host::RecordedWorktree,
+        identity: &Identity,
+        resolved: &Resolved,
+    ) -> Res<bool> {
+        let (Some(repo), Some(clone)) = (&recorded.docs.repo, &recorded.docs.clone) else {
+            return Ok(false);
+        };
+        let commits = resolved
+            .commits
+            .iter()
+            .map(|sha| key(work::GitCommit::ID, sha))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let (_, known) = self
+            .caller
+            .read_datums(&repo.parse()?, Some(commits))
+            .await?;
+        if !known
+            .values()
+            .all(|read| matches!(read, DatumRead::Accepted { .. }))
+        {
+            return Ok(false);
+        }
+        let Some((reference, _)) = &resolved.tracked else {
+            return Ok(true);
+        };
+        let ref_key = key(
+            work::GitRef::ID,
+            &format!("{}/{reference}", identity.clone_id),
+        )?;
+        let Some(stored) = self.caller.try_read(&clone.parse()?, &ref_key).await?.1 else {
+            return Ok(false);
+        };
+        let stored: work::GitRef = serde_json::from_value(stored)?;
+        Ok(resolved.tips.contains(&stored.target))
+    }
+
     /// The ops of the worktree's op logs, which are in the capture drawer's documents.
     async fn worktree_ops(&self, recorded: &host::RecordedWorktree) -> Res<Vec<work::WorktreeOp>> {
         let Some(doc) = &recorded.docs.worktree else {
@@ -606,16 +678,12 @@ impl<'a> Packaging<'a> {
                 .push(format!("  ref        {reference} (already tracked)"));
             return Ok(());
         }
+        // `recorded_after_import` recorded the clone and the branch's position if they were not.
         let clone_doc: DocId = recorded
             .docs
             .clone
             .as_deref()
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "no hook has recorded this clone yet, so there is nothing to track; run an \
-                     agent session here with capture on first"
-                )
-            })?
+            .ok_or_else(|| eyre::eyre!("importing {reference} left the clone unrecorded"))?
             .parse()?;
         let ref_key = key(work::GitRef::ID, &slot)?;
         eyre::ensure!(
@@ -624,8 +692,7 @@ impl<'a> Packaging<'a> {
                 .await?
                 .1
                 .is_some(),
-            "{reference} has not been recorded: capture saw no move of it. Importing history \
-             that was never recorded is not built yet"
+            "importing {reference} left it unrecorded"
         );
         plan.set.insert(
             entry.clone(),
@@ -694,8 +761,8 @@ impl<'a> Packaging<'a> {
         let (drawer, intxts) = self.resolve(intxt).await?;
         let view = self.load(&drawer).await?;
         let identity = self.identity()?;
-        let recorded = host::recorded_worktree(&identity)?;
         let resolved = Resolved::new(&named, &identity)?;
+        let recorded = self.recorded_after_import(&identity, &resolved).await?;
 
         let mut plan = Plan::default();
         let new_commits = self
@@ -728,6 +795,10 @@ impl<'a> Packaging<'a> {
         for described in &present {
             plan.lines
                 .push(format!("  session    {described} (already in)"));
+        }
+        if new_commits && sessions.is_empty() && present.is_empty() {
+            plan.lines
+                .push("  sessions   none recorded for these commits".to_owned());
         }
 
         let heading = format!(
@@ -848,6 +919,10 @@ impl<'a> Packaging<'a> {
                 others.push(format!("  {id}  {entry}"));
             }
         }
+        // Commits imported from git history (FDR 008 W6) come with no sessions, none having been
+        // recorded; an intxt with commits and no sessions says so rather than leaving the
+        // reader to wonder whether they were missed.
+        let no_sessions = !(commits.is_empty() && changes.is_empty()) && sessions.is_empty();
         for (heading, lines) in [
             ("commits", commits),
             ("jj changes", changes),
@@ -862,6 +937,9 @@ impl<'a> Packaging<'a> {
             for line in lines {
                 writeln!(out, "{line}")?;
             }
+        }
+        if no_sessions {
+            writeln!(out, "sessions: none recorded")?;
         }
         if view.entries.is_empty() {
             writeln!(out, "nothing in it yet")?;

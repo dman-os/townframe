@@ -1130,6 +1130,135 @@ mod library {
         .await;
     }
 
+    /// FDR 008 W6: a branch made with no capture at all. `add --branch` imports its commits, its
+    /// ref and the identity documents first (no sessions: none were recorded, and `show` says
+    /// so); a hook afterwards records only the live move, with no second baseline and no
+    /// commit twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn intxt_add_branch_imports_history_that_was_never_recorded() {
+        use crate::cmds::intxt::capture;
+        use crate::cmds::intxt::package::Named;
+        use crate::cmds::intxt::package::Packaging;
+        use big_cabinet_core::DocId;
+        use big_cabinet_core::datum::DatumMember;
+        use intxt_capture::host;
+        use intxt_capture::identity;
+        use intxt_core::client::Caller;
+        use intxt_core::work;
+        use service_utils_rs::RequestContext;
+        use std::io::Write;
+
+        with_intxt_node(async |tmp, client| {
+            let node_root = tmp.path().join("node");
+            let base = tmp.path().canonicalize().unwrap();
+            let repo = base.join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", "first"]);
+            git(&repo, &["switch", "-q", "-c", "feat/x"]);
+            for path in ["b.txt", "c.txt"] {
+                std::fs::write(repo.join(path), format!("{path}\n")).unwrap();
+                git(&repo, &["add", "-A"]);
+                git(&repo, &["commit", "-q", "-m", &format!("add {path}")]);
+            }
+            // Nothing has run in this clone: no state, no documents.
+            let worktree = identity::resolve(&repo).unwrap().unwrap();
+            assert_eq!(host::recorded_worktree(&worktree).unwrap().docs.repo, None);
+
+            let packaging = Packaging::new(client, &repo, &node_root);
+            let mut created = Vec::new();
+            let drawer = packaging
+                .create(&mut created, "Unrecorded", None)
+                .await
+                .unwrap();
+            let short = short_ids::ShortIds::new([drawer.to_string()])
+                .render(&drawer.to_string())
+                .unique;
+            let mut out = Vec::new();
+            packaging
+                .add(&mut out, &short, Named::Branch("feat/x".to_owned()), false)
+                .await
+                .unwrap();
+            let added = String::from_utf8(out).unwrap();
+            assert!(added.starts_with("added to "), "{added}");
+            assert!(added.contains("2 commit(s)"), "{added}");
+            assert!(added.contains("ref        refs/heads/feat/x (tracked on this clone)"), "{added}");
+            assert!(added.contains("sessions   none recorded"), "{added}");
+            let mut out = Vec::new();
+            packaging.show(&mut out, &short).await.unwrap();
+            let shown = String::from_utf8(out).unwrap();
+            assert!(shown.contains("commits (1):"), "{shown}");
+            assert!(shown.contains("tracked refs (1):"), "{shown}");
+            assert!(!shown.contains("sessions ("), "{shown}");
+            assert!(shown.contains("sessions: none recorded"), "{shown}");
+
+            // The import recorded the identity documents and exactly the range's commits. The
+            // worktree was clean, so it recorded no op.
+            let recorded = host::recorded_worktree(&worktree).unwrap();
+            assert_eq!(recorded.ops, 0);
+            let caller = Caller::new(client, RequestContext::root(), None, "test".to_owned());
+            let repo_doc: DocId = recorded.docs.repo.as_deref().unwrap().parse().unwrap();
+            let commits = async || {
+                let (_, datums) = caller.read_datums(&repo_doc, None).await.unwrap();
+                datums
+                    .into_keys()
+                    .filter(|key| key.tag().as_str() == work::GitCommit::ID)
+                    .count()
+            };
+            assert_eq!(commits().await, 2);
+
+            // A live move is recorded by capture as usual: one commit op, one more commit, and no
+            // second baseline of the ref.
+            let transcript = base.join("claude/s1.jsonl");
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            writeln!(
+                std::fs::File::create(&transcript).unwrap(),
+                "{}",
+                json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "2026-11-10T10:00:00Z",
+                       "cwd": repo, "sessionId": "s1", "message": {"role": "user", "content": "go on"}})
+            )
+            .unwrap();
+            let hook = |event: &str| {
+                json!({
+                    "session_id": "s1",
+                    "transcript_path": transcript,
+                    "cwd": repo,
+                    "hook_event_name": event,
+                })
+                .to_string()
+                .into_bytes()
+            };
+            capture::run(client, &node_root, &hook("SessionStart"))
+                .await
+                .unwrap();
+            assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 0);
+            assert_eq!(commits().await, 2);
+
+            std::fs::write(repo.join("d.txt"), "d\n").unwrap();
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", "add d.txt"]);
+            capture::run(client, &node_root, &hook("Stop")).await.unwrap();
+            assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
+            assert_eq!(commits().await, 3);
+
+            capture::run(client, &node_root, &hook("Stop")).await.unwrap();
+            assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
+            assert_eq!(commits().await, 3);
+
+            // Adding the branch again, now that it moved, imports nothing: capture has the move.
+            let mut out = Vec::new();
+            packaging
+                .add(&mut out, &short, Named::Branch("feat/x".to_owned()), false)
+                .await
+                .unwrap();
+            assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
+            assert_eq!(commits().await, 3);
+        })
+        .await;
+    }
+
     /// `capture` is for the daemon: with none serving, its entry point refuses, naming the command
     /// that starts one, without booting the node.
     #[tokio::test(flavor = "multi_thread")]
