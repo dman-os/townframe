@@ -1197,6 +1197,13 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     });
     // Trap-equivalent: default response, surface withdrawn, instance closed.
     assert_eq!(response, EventResponse::default());
+    let fault = host
+        .fault(&owner)
+        .expect("a trapped dispatch records its cause");
+    assert!(
+        fault.starts_with("guest trapped during dispatch: ") && fault.len() > 40,
+        "the fault must carry the trap's reason, got: {fault}"
+    );
     assert!(
         !writer.is_live(),
         "a blocked dispatch withdraws the surface"
@@ -1457,6 +1464,13 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     );
     assert_eq!(*ended.borrow(), Some(clay_host::CloseReason::Requested));
     assert_eq!(host.check(&owner), Err(clay_host::AccessError::Revoked));
+    assert!(
+        host.fault(&owner).is_some_and(|fault| fault
+            .contains("guest trapped in a document delivery")
+            && fault.contains("all fuel consumed")),
+        "an event-loop trap records its reason: {:?}",
+        host.fault(&owner)
+    );
     assert!(!writer.is_live());
     drop(surface);
     host.close();

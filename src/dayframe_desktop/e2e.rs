@@ -25,6 +25,7 @@ use dioxus_html::input_data::decode_mouse_button_set;
 use dioxus_html::input_data::MouseButton;
 use dioxus_html::EventData;
 use dioxus_html::Modifiers;
+use dioxus_html::SerializedFormData;
 use dioxus_html::SerializedHtmlEventConverter;
 use dioxus_html::SerializedMouseData;
 use dioxus_html::SerializedPointInteraction;
@@ -266,6 +267,29 @@ impl HeadlessDom {
             RenderTargetId::ROOT,
             name,
             dioxus_core::Event::new(EventData::Pointer(data).into_any(), true),
+            ElementId::from_raw(raw),
+        );
+    }
+
+    /// The user typing `text` into the textarea or input `selector` names: one `input` event
+    /// carrying the whole value, as a platform reports an edit (or an IME commit).
+    fn input(&mut self, selector: &str, text: &str) {
+        let target = self.one(selector);
+        let raw = self
+            .document
+            .get_node(target)
+            .expect("selected node exists")
+            .attr(LocalName::from("data-dioxus-id"))
+            .expect("an input target is a Dioxus element")
+            .parse()
+            .expect("valid host Dioxus id");
+        self.dom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            "input",
+            dioxus_core::Event::new(
+                EventData::Form(SerializedFormData::new(text.to_owned(), vec![])).into_any(),
+                true,
+            ),
             ElementId::from_raw(raw),
         );
     }

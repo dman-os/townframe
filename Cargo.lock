@@ -4298,6 +4298,7 @@ dependencies = [
  "dioxus-native",
  "dioxus-native-dom",
  "micro_counter_manifest",
+ "micro_lab_manifest",
  "micro_layout_manifest",
  "micro_sample",
  "micro_settings",
@@ -4336,19 +4337,23 @@ dependencies = [
 name = "dayframe_showcase"
 version = "0.1.0"
 dependencies = [
- "anyrender 0.13.0",
- "anyrender_vello",
- "anyrender_vello_cpu 0.17.0",
- "anyrender_vello_hybrid 0.10.0",
  "clay_dioxus_kit",
+ "console_error_panic_hook",
  "dioxus",
  "dioxus-native",
  "dioxus-ssr",
+ "gloo-timers 0.3.0",
+ "js-sys",
  "pierre_diffs_dioxus",
+ "review_mock",
  "serde",
  "serde_json",
  "tokio",
  "ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -9446,6 +9451,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_lab"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "dioxus-core",
+ "micro_lab_manifest",
+ "review_mock",
+]
+
+[[package]]
+name = "micro_lab_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "insta",
+ "micro_layout_manifest",
+ "serde_json",
+]
+
+[[package]]
 name = "micro_layout"
 version = "0.1.0"
 dependencies = [
@@ -13494,6 +13521,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
+]
+
+[[package]]
+name = "review_mock"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "dioxus",
+ "dioxus-ssr",
+ "pierre_diffs_dioxus",
 ]
 
 [[package]]

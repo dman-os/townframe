@@ -210,6 +210,9 @@
   }
 }
 @layer utilities {
+  .\@container {
+    container-type: inline-size;
+  }
   .arc-index-grab-band {
     position: fixed;
     top: 0;
@@ -218,6 +221,9 @@
     width: 32px;
     pointer-events: auto;
     touch-action: none;
+  }
+  .\!visible {
+    visibility: visible !important;
   }
   .collapse {
     visibility: collapse;
@@ -340,6 +346,9 @@
   }
   .mt-12 {
     margin-top: calc(var(--df-spacing) * 12);
+  }
+  .mr-2 {
+    margin-right: calc(var(--df-spacing) * 2);
   }
   .mb-2 {
     margin-bottom: calc(var(--df-spacing) * 2);
@@ -772,11 +781,17 @@
   .df-tile {
     min-width: 0px;
   }
+  .min-w-0 {
+    min-width: 0px;
+  }
   .strip-count {
     flex: none;
     color: var(--df-color-text-subtle);
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
+  }
+  .flex-1 {
+    flex: 1;
   }
   .flex-shrink {
     flex-shrink: 1;
@@ -874,8 +889,17 @@
   .gap-4 {
     gap: calc(var(--df-spacing) * 4);
   }
+  .gap-6 {
+    gap: calc(var(--df-spacing) * 6);
+  }
   .gap-8 {
     gap: calc(var(--df-spacing) * 8);
+  }
+  .gap-x-6 {
+    column-gap: calc(var(--df-spacing) * 6);
+  }
+  .gap-y-3 {
+    row-gap: calc(var(--df-spacing) * 3);
   }
   .df-tile-title {
     overflow: hidden;
@@ -889,6 +913,9 @@
   }
   .overflow-hidden {
     overflow: hidden;
+  }
+  .overflow-y-auto {
+    overflow-y: auto;
   }
   .tile-line-group {
     border-radius: var(--df-radius-xl);
@@ -953,6 +980,10 @@
   .border-thin {
     border-style: var(--tw-border-style);
     border-width: var(--df-border-width-thin);
+  }
+  .border-y {
+    border-block-style: var(--tw-border-style);
+    border-block-width: 1px;
   }
   .border-b-2 {
     border-bottom-style: var(--tw-border-style);
@@ -1198,6 +1229,9 @@
     --tw-tracking: var(--tracking-wide);
     letter-spacing: var(--tracking-wide);
   }
+  .break-all {
+    word-break: break-all;
+  }
   .df-tile-trailing {
     color: var(--df-color-text-muted);
   }
@@ -1225,9 +1259,18 @@
   .uppercase {
     text-transform: uppercase;
   }
+  .italic {
+    font-style: italic;
+  }
   .ordinal {
     --tw-ordinal: ordinal;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
+  }
+  .line-through {
+    text-decoration-line: line-through;
+  }
+  .underline {
+    text-decoration-line: underline;
   }
   .accent-foreground {
     accent-color: var(--df-color-text);
@@ -1322,8 +1365,17 @@
   .focus-visible\:outline-focus:focus-visible {
     outline-color: var(--df-color-focus);
   }
+  .disabled\:cursor-not-allowed:disabled {
+    cursor: not-allowed;
+  }
   .disabled\:opacity-50:disabled {
     opacity: 50%;
+  }
+  .data-\[state\=active\]\:bg-selected[data-state="active"] {
+    background-color: var(--df-color-selected);
+  }
+  .data-\[state\=active\]\:text-on-selected[data-state="active"] {
+    color: var(--df-color-on-selected);
   }
   .data-\[state\=bare\]\:pl-4[data-state="bare"] {
     padding-left: calc(var(--df-spacing) * 4);
@@ -1340,6 +1392,15 @@
     }
   }
   @media (width >= 64rem) {
+    .lg\:w-96 {
+      width: calc(var(--df-spacing) * 96);
+    }
+    .lg\:shrink-0 {
+      flex-shrink: 0;
+    }
+    .lg\:flex-row {
+      flex-direction: row;
+    }
     .lg\:p-12 {
       padding: calc(var(--df-spacing) * 12);
     }

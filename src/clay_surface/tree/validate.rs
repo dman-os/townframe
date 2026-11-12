@@ -304,9 +304,9 @@ impl<C: Clone> SurfaceTree<C> {
         }
         if !supported_tag(tag, ns) {
             if ns.is_some() || !is_custom_element_name(tag) {
-                return Err(PresentationError::Unsupported(
-                    "element tag or namespace".into(),
-                ));
+                return Err(PresentationError::Unsupported(format!(
+                    "element tag or namespace: <{tag}> in {ns:?}"
+                )));
             }
             // Same two-level bound as `data-*` names: the process-wide interner leaks each
             // distinct name, and the per-surface cap keeps one micro from spending its budget.
@@ -382,9 +382,9 @@ impl<C: Clone> SurfaceTree<C> {
                 }
             }
             Ok(None) => {
-                return Err(PresentationError::Unsupported(
-                    "attribute name or namespace".into(),
-                ));
+                return Err(PresentationError::Unsupported(format!(
+                    "attribute name or namespace: {name} in {ns:?}"
+                )));
             }
             Err(NamesExhausted) => {
                 return Err(PresentationError::InvalidBatch(
@@ -532,7 +532,7 @@ fn validate_element_attribute(
     match (tag, element_ns, name, ns) {
         ("style", None, "media", None) => Ok(()),
         ("style", None, "title", None) | (_, _, "media", _) => Err(PresentationError::Unsupported(
-            "attribute name or namespace".into(),
+            format!("attribute name or namespace: {name} on <{tag}>"),
         )),
         _ => Ok(()),
     }

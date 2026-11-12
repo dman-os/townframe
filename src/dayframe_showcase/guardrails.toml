@@ -4,6 +4,17 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "clay_dioxus_kit",
     "pierre_diffs_dioxus",
+    "review_mock",
     "ui",
 ]
 allow_external_api_types = false
+
+# The lab is the native desktop binary (Wry or Blitz) and, for comparing the same diff code in a
+# browser, a Dioxus web build. Neither renderer feature is meaningful alone on the other target.
+[builds.native]
+features = ["desktop"]
+required_features = ["desktop"]
+
+[builds.wasm32-unknown-unknown]
+features = ["web"]
+required_features = ["web"]

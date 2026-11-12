@@ -252,6 +252,8 @@ const WIRE_ATTRIBUTES: &[&str] = &[
     "points",
     "xmlns",
     "clip-path",
+    "clip-rule",
+    "slot",
 ];
 const WIRE_STYLE_PROPERTIES: &[&str] = &[
     "display",

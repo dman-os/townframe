@@ -6,6 +6,7 @@ use super::bindings::townframe::dayframe::collection_registration as registratio
 use super::bindings::townframe::dayframe::collections as collection_wit;
 use super::bindings::townframe::dayframe::documents as wit;
 use super::first_poll;
+use super::trap_reason;
 use super::wasmtime;
 use clay_docs::DocumentSnapshot;
 use clay_docs::FacetMutation;
@@ -64,7 +65,10 @@ pub(super) fn deliver(
     // callbacks are the same class of contract violation as a presentation call that fails.
     let cause = match trapped {
         Ok(Ok(())) => None,
-        Ok(Err(trap)) => Some(format!("guest trapped in a document delivery: {trap}")),
+        Ok(Err(trap)) => Some(format!(
+            "guest trapped in a document delivery: {}",
+            trap_reason(&trap)
+        )),
         Err(super::Suspended) => Some("a document delivery suspended on its first poll".to_owned()),
     };
     if let Some(cause) = cause {
@@ -181,7 +185,8 @@ pub(super) async fn initialize(
         .and_then(|trapped| trapped)
         .map_err(|trap| {
             ActivationError::Initialization(format!(
-                "guest trapped during initialization: {trap:#}"
+                "guest trapped during initialization: {}",
+                trap_reason(&trap)
             ))
         })?
         .map_err(|failure| {

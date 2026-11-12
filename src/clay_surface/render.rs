@@ -240,7 +240,8 @@ pub(crate) fn static_attribute(
             "viewBox", "preserveAspectRatio", "d", "fill", "fill-rule", "fill-opacity", "stroke",
             "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
             "stroke-dashoffset", "stroke-opacity", "opacity", "transform", "cx", "cy", "r",
-            "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "points", "xmlns", "clip-path"
+            "rx", "ry", "x", "y", "x1", "y1", "x2", "y2", "points", "xmlns", "clip-path", "clip-rule",
+            "slot"
         ],
         Some("style") => Some("style") => [
             "display", "position", "top", "right", "bottom", "left", "inset", "z-index",
@@ -626,16 +627,32 @@ macro_rules! surface_tags {
             attrs: Vec<dioxus_core::Attribute>,
             children: impl Iterator<Item = Element>,
         ) -> Element {
+            // The children are built here, before the match, so the recursion into
+            // `render_node` runs in this small frame. Each arm then builds its element in a
+            // function of its own: a debug build gives every `rsx!` expansion in one function
+            // its own stack slots, and with ~85 arms in this match the frame was ~145 KB, paid
+            // once per tree level of the guest's tree.
+            let children: Vec<Element> = children.collect();
             match (tag, namespace) {
-                $($((tag_name!($tag $(, $name)?), $namespace) => rsx! {
-                    $tag {
-                        key: "{key}",
-                        ..attrs,
-                        {children}
+                $($((tag_name!($tag $(, $name)?), $namespace) => {
+                    #[inline(never)]
+                    fn build(
+                        key: u64,
+                        attrs: Vec<dioxus_core::Attribute>,
+                        children: Vec<Element>,
+                    ) -> Element {
+                        rsx! {
+                            $tag {
+                                key: "{key}",
+                                ..attrs,
+                                {children.into_iter()}
+                            }
+                        }
                     }
+                    build(key, attrs, children)
                 },)*)*
                 (custom, None) if is_custom_element_name(custom) => {
-                    render_custom_element(custom, key, attrs, children)
+                    render_custom_element(custom, key, attrs, children.into_iter())
                 }
                 _ => unreachable!("validated surface element"),
             }
