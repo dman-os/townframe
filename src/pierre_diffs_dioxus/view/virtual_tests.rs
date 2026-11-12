@@ -372,6 +372,38 @@ fn a_fling_with_no_height_changes_issues_no_programmatic_scroll() {
 }
 
 #[test]
+fn jump_probe() {
+    let mut rig = Rig::new(3000);
+    rig.boot();
+    let mut measured = std::collections::HashSet::new();
+    rig.measure_new_rows(20.0, &mut measured);
+    for (from, to) in [(0.0, 20_000.0), (20_000.0, 40_000.0)] {
+        rig.scroll_to(from);
+        rig.measure_new_rows(20.0, &mut measured);
+        let (flush0, log0) = (rig.view.host.flush_count(), rig.root.log.borrow().len());
+        rig.scroll_to(to);
+        let lines = rig.rendered_lines();
+        let first_vis = (to / 20.0) as usize + 1;
+        let covers = lines.first().is_some_and(|f| *f <= first_vis)
+            && lines.last().is_some_and(|l| *l >= first_vis + 25);
+        eprintln!(
+            "JUMP {from}->{to}: flushes={} programmatic={} rows={} {:?}..{:?} covers_viewport_after_one_dispatch={covers}",
+            rig.view.host.flush_count() - flush0,
+            rig.root.log.borrow().len() - log0,
+            lines.len(),
+            lines.first(),
+            lines.last()
+        );
+        rig.measure_new_rows(20.0, &mut measured);
+        eprintln!(
+            "  after row measurements: flushes={} programmatic={}",
+            rig.view.host.flush_count() - flush0,
+            rig.root.log.borrow().len() - log0
+        );
+    }
+}
+
+#[test]
 fn drift_probe() {
     for height in [20.0, 20.5, 19.0] {
         let mut rig = Rig::new(3000);

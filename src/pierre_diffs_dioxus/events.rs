@@ -82,6 +82,9 @@ impl Dispatch {
             return;
         }
         let previous = self.host.record_size(node, border_height);
+        if previous.is_some_and(|p| p != border_height) {
+            crate::host::instr(&format!("RESIZE change {previous:?} -> {border_height}"));
+        }
         // A static view's rows, and any view's hunk separators, are measured for geometry only:
         // the port reads no separator height (its metrics carry the estimate) and nothing is
         // reconciled against it, so telling the managers would only queue passes upstream never
@@ -131,6 +134,11 @@ impl Dispatch {
     }
 
     pub(crate) fn scrolled(&self, node: NodeKey, sample: ScrollSample) {
+        crate::host::instr(&format!(
+            "SAMPLE t={:?} top={} sh={} ch={}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() % 100000,
+            sample.top, sample.scroll_height, sample.client_height
+        ));
         self.host.record_scroll(node, sample);
         match self.host.scroll_side(node) {
             Some(None) => self.managers().virtualizer.handle_element_scroll(),
