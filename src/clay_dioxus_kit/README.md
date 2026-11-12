@@ -206,7 +206,11 @@ named after it.
   find its target by role and name has found a missing role or name: fix the component.
 - **KIT-071** Tests are deterministic: no sleeps, no timeouts, no polling. A gesture is a
   sequence of dispatched events. Tests that need to promote the harness to other crates turn
-  `testing` into a `testing` cargo feature then, not earlier.
+  `testing` into a `testing` cargo feature then, not earlier. The one cross-crate harness that
+  exists is `dioxus_storm` (a dev-dependency, no retained DOM and no wire vocabulary check):
+  each headless module ends with a `storm` test that feeds every listener every event kind in
+  seeded random order under a real owner, with animation timers on a paused clock, so it is
+  still deterministic and sleep-free. A seed that finds a panic stays as a regression case.
 - **KIT-072** Every component has a headless test module; a styled part with logic of its own
   (width to placement) has a skin test.
 - **KIT-080** Every component has a specimen in `dayframe_showcase/kit.rs`, at a compact and an
