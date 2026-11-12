@@ -27,8 +27,11 @@ Arguments:
   [INPUT]  The operation's input as JSON (default: {})
 
 Options:
-      --get         Call a query: send the input, an object of primitives, as the query string of a GET instead of the JSON body of a POST
-      --node <DIR>  The node's directory [env: DAY_NODE=[..]/node]
-  -h, --help        Print help
+      --get            Call a query: send the input, an object of primitives, as the query string of a GET instead of the JSON body of a POST
+      --node <DIR>     The node's directory [env: DAY_NODE=[..]/node]
+      --body <FILE>    Stream this file as the raw request body of an operation whose input is bytes, such as org.example.daybook.blobs.put; the input is then its parameters, as a query string
+      --range <RANGE>  An HTTP Range, such as bytes=0-99, for an operation that answers part of its bytes
+      --output <FILE>  Write an answer that is bytes, such as org.example.daybook.blobs.read, to this file
+  -h, --help           Print help
 
 ```

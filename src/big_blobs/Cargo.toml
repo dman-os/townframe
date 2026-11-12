@@ -18,6 +18,7 @@ big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_repo.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true
+method_core.workspace = true
 service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true

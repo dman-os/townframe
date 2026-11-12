@@ -11,6 +11,8 @@ use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::header;
 use futures::future::BoxFuture;
+use method_core::ByteBody;
+use method_core::ByteSpan;
 use method_core::HttpInput;
 use method_core::HttpMethod;
 use method_core::MethodKind;
@@ -43,6 +45,9 @@ const QUERY_OPERATION: XrpcMethod = XrpcMethod {
     output_schema: "EchoOutput",
     long_poll: false,
     privileged: false,
+    input_encoding: method_core::Encoding::Json,
+    output_encoding: method_core::Encoding::Json,
+    local_only: false,
 };
 const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.write",
@@ -52,6 +57,9 @@ const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     output_schema: "WriteOutput",
     long_poll: false,
     privileged: false,
+    input_encoding: method_core::Encoding::Json,
+    output_encoding: method_core::Encoding::Json,
+    local_only: false,
 };
 const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.numeric",
@@ -61,6 +69,9 @@ const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     output_schema: "NumericOutput",
     long_poll: false,
     privileged: false,
+    input_encoding: method_core::Encoding::Json,
+    output_encoding: method_core::Encoding::Json,
+    local_only: false,
 };
 const LONG_POLL_OPERATION: XrpcMethod = XrpcMethod::query("org.example.test.poll").long_poll();
 
@@ -262,6 +273,7 @@ async fn loopback_query_and_procedure_map_http_and_context() {
     let metadata = HttpMetadata {
         authorization: Some("Capability test".to_owned()),
         idempotency_key: Some("command-1".to_owned()),
+        range: None,
     };
     let query: Output = client
         .execute::<EchoParams, Output, TestError>(
@@ -1815,6 +1827,9 @@ async fn unsupported_subscription_is_explicit() {
         output_schema: "Event",
         long_poll: false,
         privileged: false,
+        input_encoding: method_core::Encoding::Json,
+        output_encoding: method_core::Encoding::Json,
+        local_only: false,
     };
     let mut router = XrpcRouter::new(1024);
     assert_eq!(
@@ -1881,8 +1896,8 @@ async fn websocket_subscription_streams_hosted_events() {
 }
 
 /// A fallback serves every NSID nothing is registered for, and learns which from the request and
-/// with which verb (a GET hands over its raw query string, a POST its JSON body); a registered
-/// operation still wins and keeps its own verb; and a query cannot be a fallback.
+/// with which verb (a GET hands over its raw query string, a POST its body unread); a registered
+/// operation still wins and keeps its own verb.
 #[tokio::test]
 async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() {
     let mut router = XrpcRouter::new(1024);
@@ -1892,26 +1907,24 @@ async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() 
             |_context, _metadata, _params: Value| async move { Ok(json!("registered")) },
         ))
         .unwrap();
-    assert_eq!(
-        router
-            .register_fallback(XrpcMethodHandler::new(QUERY_OPERATION, |_| async {
-                Ok::<_, XrpcHandlerError>(json!(null))
-            }))
-            .unwrap_err(),
-        XrpcRegistrationError::FallbackNotProcedure
-    );
     let fallback = || {
-        XrpcMethodHandler::new(
-            XrpcMethod::procedure(""),
-            |request: XrpcRequest| async move {
-                Ok::<_, XrpcHandlerError>(json!({
+        XrpcFallbackHandler::new(|request: XrpcFallbackRequest| async move {
+            let input = match request.body {
+                Some(body) => {
+                    serde_json::from_slice::<Value>(&body.collect(1024).await.unwrap()).unwrap()
+                }
+                None => Value::Null,
+            };
+            Ok::<_, XrpcHandlerError>(XrpcFallbackResponse::Json(
+                json!({
                     "nsid": request.nsid,
                     "verb": format!("{:?}", request.verb),
-                    "input": request.params,
+                    "input": input,
                     "rawQuery": request.raw_query,
-                }))
-            },
-        )
+                })
+                .into(),
+            ))
+        })
     };
     router.register_fallback(fallback()).unwrap();
     assert_eq!(
@@ -1973,6 +1986,105 @@ async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() 
         .await
         .unwrap();
     assert_eq!(refused.status().as_u16(), 405);
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// A byte body crosses the HTTP surface as the raw request and response body (ADR 042 §2): the
+/// request's `Content-Type` and `Content-Length` reach the handler as the stream's mime and
+/// length, a byte answer is sent with its own, and a ranged answer is `206 Partial Content` with
+/// the `Content-Range` that places it in the whole; a request without a `Range` gets everything.
+#[tokio::test]
+async fn a_fallback_carries_byte_bodies_both_ways_and_answers_ranges() {
+    const WHOLE: u64 = 100;
+    let mut router = XrpcRouter::new(1024);
+    router
+        .register_fallback(XrpcFallbackHandler::new(
+            |request: XrpcFallbackRequest| async move {
+                let body = match request.body {
+                    // Echoes the upload, chunk by chunk, under the mime it arrived with.
+                    Some(body) => body,
+                    None => {
+                        let whole: Vec<u8> = (0..WHOLE as u8).collect();
+                        match request
+                            .metadata
+                            .range
+                            .and_then(|range| range.resolve(WHOLE))
+                        {
+                            Some((start, length)) => ByteBody::from_bytes(
+                                whole[start as usize..][..length as usize].to_vec(),
+                            )
+                            .with_span(ByteSpan {
+                                start,
+                                total: WHOLE,
+                            }),
+                            None => ByteBody::from_bytes(whole),
+                        }
+                        .with_mime("application/x-test")
+                    }
+                };
+                Ok::<_, XrpcHandlerError>(XrpcFallbackResponse::Bytes {
+                    metadata: Default::default(),
+                    body,
+                })
+            },
+        ))
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (task, shutdown) = serve(listener, router.into_router()).await.unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/xrpc/org.example.test.bytes");
+
+    // A body far past the router's own limit streams through, and comes back as it went.
+    let upload: Vec<u8> = (0..64 * 1024).map(|at| (at % 251) as u8).collect();
+    let echoed = client
+        .post(&url)
+        .header(header::CONTENT_TYPE, "image/png")
+        .body(upload.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(echoed.status().as_u16(), 200);
+    assert_eq!(echoed.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(echoed.bytes().await.unwrap(), upload);
+
+    let whole = client.get(&url).send().await.unwrap();
+    assert_eq!(whole.status().as_u16(), 200);
+    assert_eq!(whole.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(whole.headers()[header::CONTENT_TYPE], "application/x-test");
+    assert_eq!(whole.bytes().await.unwrap().len(), WHOLE as usize);
+
+    let ranged = client
+        .get(&url)
+        .header(header::RANGE, "bytes=10-19")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ranged.status().as_u16(), 206);
+    assert_eq!(ranged.headers()[header::CONTENT_RANGE], "bytes 10-19/100");
+    assert_eq!(ranged.headers()[header::CONTENT_LENGTH], "10");
+    assert_eq!(
+        ranged.bytes().await.unwrap().as_ref(),
+        (10..20).collect::<Vec<u8>>()
+    );
+
+    let tail = client
+        .get(&url)
+        .header(header::RANGE, "bytes=-5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tail.headers()[header::CONTENT_RANGE], "bytes 95-99/100");
+
+    // A `Range` the server cannot make sense of is ignored, as HTTP allows: the whole body.
+    let ignored = client
+        .get(&url)
+        .header(header::RANGE, "items=1-2")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ignored.status().as_u16(), 200);
     shutdown.send(()).unwrap();
     task.await.unwrap().unwrap();
 }
