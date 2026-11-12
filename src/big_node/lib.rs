@@ -263,7 +263,7 @@ impl BigNode {
                 .await?,
             );
         }
-        stop.stages.push(self.register_built_ins());
+        stop.stages.push(self.register_late_built_ins());
         (self.listeners, self.unix_clients) =
             attach_listeners(self, attachments.listeners, stop).await?;
         Ok(())

@@ -172,6 +172,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
     match cli.command {
         StaticCommands::Completions { .. } => unreachable!(),
         StaticCommands::Node { command } => cmds::node::run(command).await,
+        StaticCommands::Carts { command } => cmds::carts::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
         StaticCommands::Exec { nsid, input, get } => cmds::exec::run(nsid, input, get).await,

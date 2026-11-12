@@ -852,8 +852,11 @@ impl<F: FutureForm> DocWorker2<F> {
             blockers.extend(result.blockers);
         }
 
-        let (mut pending, blocked_refs, partially_decrypted) =
-            Self::claim_ordered_plaintexts(&refs, &mut plaintexts);
+        let ClaimedPlaintexts {
+            mut pending,
+            blocked_refs,
+        } = Self::claim_ordered_plaintexts(&refs, &mut plaintexts);
+        let partially_decrypted = !blocked_refs.is_empty();
 
         // Minimized fragments can hide loose ancestors that causal decryption
         // still returns. Include those dependencies in the same fixed-point
@@ -897,11 +900,7 @@ impl<F: FutureForm> DocWorker2<F> {
     fn claim_ordered_plaintexts(
         refs: &[(BigRepoCiphertextKind, CommitId)],
         plaintexts: &mut HashMap<Vec<u8>, Vec<u8>>,
-    ) -> (
-        Vec<(BigRepoCiphertextKind, CommitId, Vec<u8>)>,
-        Vec<(BigRepoCiphertextKind, CommitId)>,
-        bool,
-    ) {
+    ) -> ClaimedPlaintexts {
         let mut pending = Vec::new();
         let mut blocked_refs = Vec::new();
         for &(kind, head) in refs {
@@ -915,8 +914,10 @@ impl<F: FutureForm> DocWorker2<F> {
                 }
             }
         }
-        let partially_decrypted = !blocked_refs.is_empty();
-        (pending, blocked_refs, partially_decrypted)
+        ClaimedPlaintexts {
+            pending,
+            blocked_refs,
+        }
     }
 
     /// Open one blob with its cached application secret, if the recovered-key cache holds one.
