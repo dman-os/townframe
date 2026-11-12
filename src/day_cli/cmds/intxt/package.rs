@@ -328,7 +328,7 @@ impl<'a> Packaging<'a> {
     async fn resolve(&self, name: &str) -> Res<(DrawerId, ShortIds<String>)> {
         let live = self.live_intxts().await?;
         let mut ids: Vec<String> = live.iter().map(ToString::to_string).collect();
-        if let Ok(drawer) = name.parse::<DrawerId>() {
+        if let Some(drawer) = full_drawer_id(name) {
             eyre::ensure!(
                 self.is_intxt(&drawer).await?,
                 "{drawer} is not an intxt: its descriptor has no intxt marker"
@@ -1111,10 +1111,29 @@ impl<'a> Packaging<'a> {
     }
 }
 
+/// `name` as a full drawer id, when it is one. A drawer id's text is `z` and base58, and short ids
+/// are drawn from jj's `z`–`k` alphabet, which base58 accepts too, so a short id starting with `z`
+/// parses as a key of a few bytes (`z` alone as the empty key). Drawers are 32-byte keys and a short
+/// id is too short to spell one, so the width is what tells them apart.
+fn full_drawer_id(name: &str) -> Option<DrawerId> {
+    name.parse::<DrawerId>()
+        .ok()
+        .filter(|drawer| drawer.as_bytes().len() == 32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use big_cabinet_core::reference::Location;
+
+    #[test]
+    fn short_ids_starting_with_z_are_not_drawer_ids() {
+        let drawer = DrawerId::new([7; 32]);
+        assert_eq!(full_drawer_id(&drawer.to_string()), Some(drawer));
+        for short in ["z", "zq", "zyxwvutsrqponmk", "kz"] {
+            assert_eq!(full_drawer_id(short), None, "{short}");
+        }
+    }
 
     fn op(cause: Option<&str>, files: &[(&str, &str)]) -> work::WorktreeOp {
         serde_json::from_value(json!({
