@@ -102,6 +102,17 @@ A cartridge can contribute a nodule, a micro, or both (`docs/scratch/clay-on-the
 
 These replace the nodule service's `admitNodule`/`setNoduleEnabled`/`setNoduleDrawerGrants`/`setNoduleMethodGrants`/`uninstallNodule`. The nodule service keeps reconciling, resolution and its records (`listNodules`/`getNodule`, `confirmNoduleResolution`, `setNoduleDevTakeover`, `setMethodRoute`).
 
+## Implementation notes (2026-11-12)
+
+What building §1-§8 settled where the text left it open:
+
+- **Method names.** `cartridges.install` would be the NSID of the install datum too (`org.example.daybook.cartridges.install`), so the methods follow the registry service's own naming: `installCartridge`, `setCartridgeEnabled`, `uninstallCartridge`, `setCartridgeGrant`, `clearCartridgeConfig`, `listCartridgeInstalls`, `observeCartridgeInstalls`. They are declared in `big_cartridges_core::protocol` and fail with `CartridgesError`, but the nodule service hosts them: the node and cartridge documents they change are the ones its reconciler reads.
+- **Install takes a pin, not an id.** `installCartridge { cartridge: #datumPin }` names the version datum in the registry document, pinned at heads. The nodule service reads it at those heads (it holds Read on the registry drawer), checks the envelope and its signature as the registry would, and refuses an install whose heads are absent or unreadable. A pin whose heads have not synced yet is refused on the record and read again on the next reconcile.
+- **Grant slots.** `method:<nsid>` is one operation and `authority:<prefix>` (or `authority:*`) an NSID prefix. A name such as `org.example.tags` is both a valid NSID and a valid authority, and the two grant different things (a prefix never stretches to a dev build's additions, ADR 028 §3), so the kind is in the slot.
+- **The cartridge config document names its cartridge** with `org.example.daybook.cartridges.config/main`, which is how an install (here, or on a sister) finds the document an earlier install left, by scanning the shared config drawer.
+- **`NoduleSettings.values` and its schema go.** A nodule's manifest lists its settings NSIDs (`Nodule.settings`), each a datum it declares under its own authority. The old `config` schema and `configureNodule` are removed with it.
+- **Access to the cartridge config document.** A docs capability scopes to whole documents, never to datum tags or keys, so "the nodule reads and writes its settings datums but not its grant datums" (§6) cannot be minted today. See the report that came with this change for what was built in its place.
+
 ## Consequences
 
 - `big_nodule_core::config` breaks: `NoduleSettings.values`, `NoduleGrants` as one datum, and `NoduleInstall.envelope`/`revision` go. There's no migration: pre-release, and no node with nodules has shipped.

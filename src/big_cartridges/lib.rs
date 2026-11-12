@@ -578,6 +578,8 @@ pub struct Cartridges {
     pub client: Client<CartridgesProtocol>,
     /// The node's publisher DID, the namespace unsigned envelopes are signed for.
     pub publisher: String,
+    /// The drawer the registry's documents live in, which installs pin versions in.
+    pub registry_drawer: DrawerId,
 }
 
 /// Boot the registry on `config.registry_drawer`: scan the drawer into the served state, wait for
@@ -611,7 +613,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             &tasks,
             config.docs,
             capability,
-            config.registry_drawer,
+            config.registry_drawer.clone(),
             registry::DocImport {
                 authority: config.authority.clone(),
                 drawers: config.drawers,
@@ -654,6 +656,7 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             host,
             client,
             publisher,
+            registry_drawer: config.registry_drawer,
         },
         host_stop.then(follow_stop).then(domain_stop),
     ))

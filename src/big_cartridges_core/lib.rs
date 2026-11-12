@@ -25,6 +25,7 @@ use std::fmt;
 use std::str::FromStr;
 
 pub mod catalog;
+pub mod config;
 pub mod protocol;
 pub mod registry;
 pub mod request;
@@ -336,7 +337,7 @@ impl CartridgeError {
 /// is the publisher's DID, of any method, and the name is a lowercase segment. A DID is a
 /// valid datum key slot as it stands (`:` and `%` need no escaping there), and neither a DID nor a
 /// name contains `/`, so the first `/` always splits the text form back into its two parts. That
-/// text form is the one spelling used in datum key slots (`nodule.install/<cartridge>`,
+/// text form is the one spelling used in datum key slots (`cartridges.install/<cartridge>`,
 /// `nodule.artifact/<cartridge>/<key>`), persisted rows and workload ids; there is no second encoding.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CartridgeId {
