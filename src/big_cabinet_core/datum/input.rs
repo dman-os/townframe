@@ -1,6 +1,8 @@
 use super::Bundle;
 use super::CodecError;
 use super::CompiledSchema;
+use super::ContentHash;
+use super::content_hash::CONTENT_HASH_KEYWORD;
 use super::grammar::GrammarError;
 use super::grammar::check_position;
 use super::grammar::names;
@@ -136,6 +138,7 @@ pub fn admit_lexicon(
         ));
     }
     let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
+    let mut content_hash = None;
     if let Some(supplement) = supplement {
         bound(supplement)?;
         let source = supplement
@@ -157,13 +160,50 @@ pub fn admit_lexicon(
             paired: HashMap::new(),
         };
         overlay.apply(&mut document, supplement, "supplement", 0)?;
+        content_hash = declared_content_hash(supplement, source)?;
     }
     document
         .as_object_mut()
         .expect("compiled root")
         .insert("$defs".to_owned(), Value::Object(compiler.definitions));
     CompiledSchema::compile(document)
+        .map(|compiled| compiled.with_content_hash(content_hash))
         .map_err(|error| LexiconAdmissionError::Compilation(Box::new(error)))
+}
+
+/// The content-hash declaration on the datum's own definition: the sidecar's root `$ref` names it.
+/// The member it hashes must be one the datum declares, or no value could ever verify.
+fn declared_content_hash(
+    supplement: &Value,
+    definitions: &Map<String, Value>,
+) -> Result<Option<ContentHash>> {
+    let Some(root) = supplement
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .and_then(|name| definitions.get(name))
+    else {
+        return Ok(None);
+    };
+    let Some(declaration) = root.get(CONTENT_HASH_KEYWORD) else {
+        return Ok(None);
+    };
+    let hash = ContentHash::from_declaration(declaration)
+        .map_err(|error| invalid("supplement", error.to_string()))?;
+    let ContentHash::GitObject { content, .. } = &hash;
+    if root
+        .get("properties")
+        .and_then(|properties| properties.get(content))
+        .is_none()
+    {
+        return Err(invalid(
+            "supplement",
+            format!(
+                "`{CONTENT_HASH_KEYWORD}` hashes `{content}`, which the datum does not declare"
+            ),
+        ));
+    }
+    Ok(Some(hash))
 }
 
 fn bound(value: &Value) -> Result<()> {
@@ -552,7 +592,9 @@ fn check_keys(object: &Map<String, Value>, allowed: &[&str], path: &str) -> Resu
 /// The keywords a sidecar position may state. Beyond the JSON Schema structure the overlay reads,
 /// this is exactly what `schemars` emits for the datum macros' declarations: `default` is the
 /// `#[serde(default)]` spelling (an annotation, never validation), `x-lexicon-id` is the datum
-/// macro's record of the published id on its own definition, and `pattern` is the `Uuid7` key
+/// macro's record of the published id on its own definition, `x-content-hash` is a datum's
+/// declaration that its key slot is a hash of its value (ADR 035 §2.9; read from the datum's own
+/// definition, checked wherever it is stated), and `pattern` is the `Uuid7` key
 /// spelling — admitted only on the `format: "uuid"` string that carries it, never as a general
 /// constraint keyword.
 const SUPPLEMENT_KEYS: &[&str] = &[
@@ -571,6 +613,7 @@ const SUPPLEMENT_KEYS: &[&str] = &[
     "patternProperties",
     "x-automerge",
     "x-lexicon-id",
+    CONTENT_HASH_KEYWORD,
     "format",
     "contentEncoding",
     "default",
@@ -596,6 +639,10 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
         };
     }
     check_keys(object, SUPPLEMENT_KEYS, path)?;
+    if let Some(declaration) = object.get(CONTENT_HASH_KEYWORD) {
+        ContentHash::from_declaration(declaration)
+            .map_err(|error| invalid(path, error.to_string()))?;
+    }
     for key in ["$schema", "title", "description", "x-lexicon-id"] {
         if object.get(key).is_some_and(|value| !value.is_string()) {
             return Err(invalid(path, format!("`{key}` must be a string")));

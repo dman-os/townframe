@@ -8,6 +8,7 @@ use crate::doc::DocsRepo;
 use crate::index::DatumMembership;
 use crate::index::DatumRefQuery;
 use crate::index::DatumRefStore;
+use crate::index::DatumRefTarget;
 use crate::index::DatumRoute;
 use crate::index::DatumSetStore;
 use crate::schema::SchemaRepo;
@@ -107,6 +108,9 @@ struct Node {
     repo: SharedBigRepo,
     repo_stop: Option<BigRepoStopToken>,
     sql: Database,
+    /// The schemas the datum-set worker and DocsRepo share, so a test that registers a kind
+    /// registers it for both.
+    schemas: Arc<SchemaRepo>,
     datum_set: Arc<DatumSetStore>,
     datum_set_task: Option<tokio::task::JoinHandle<()>>,
     datum_ref: Arc<DatumRefStore>,
@@ -167,7 +171,12 @@ impl Node {
         .await
         .unwrap();
         let sql = runtime.ephemeral(&[]).unwrap();
-        let datum_set = Arc::new(DatumSetStore::new(sql.clone(), schemas()).await.unwrap());
+        let schemas = schemas();
+        let datum_set = Arc::new(
+            DatumSetStore::new(sql.clone(), Arc::clone(&schemas))
+                .await
+                .unwrap(),
+        );
         let datum_set_task = {
             let store = (*datum_set).clone();
             let repo = Arc::clone(&repo);
@@ -190,6 +199,7 @@ impl Node {
             repo,
             repo_stop: Some(repo_stop),
             sql,
+            schemas,
             datum_set,
             datum_set_task: Some(datum_set_task),
             datum_ref,
@@ -220,7 +230,7 @@ impl Node {
         self.drawer_policy_stop = Some(policy_stop);
         let prepared = crate::doc::prepare(DocsConfig {
             big_repo: Arc::clone(&self.repo),
-            schema_repo: schemas(),
+            schema_repo: Arc::clone(&self.schemas),
             authority: self.authority.client.clone(),
             issuer: self.docs_actor.capability,
             namespace: self.docs_namespace,
@@ -454,7 +464,18 @@ impl Node {
         drawer: &DrawerId,
         name: &str,
     ) -> Result<DocId, DocsError> {
-        let (key, value) = note(name);
+        self.create_doc_with(actor, drawer, name, [note(name)])
+            .await
+    }
+
+    /// A document in `drawer` holding exactly `datums`.
+    async fn create_doc_with(
+        &self,
+        actor: &OpenedActor,
+        drawer: &DrawerId,
+        name: &str,
+        datums: impl IntoIterator<Item = (DatumKey, Value)>,
+    ) -> Result<DocId, DocsError> {
         self.docs()
             .call(
                 RequestContext::root(),
@@ -470,7 +491,7 @@ impl Node {
                         .await?,
                     command: command(name),
                     placement: drawer_placement(drawer),
-                    datums: BTreeMap::from([(key, value)]),
+                    datums: datums.into_iter().collect(),
                 },
             )
             .await
@@ -931,6 +952,7 @@ fn groups_of(view: &DrawerView) -> (GroupKey, GroupKey, GroupKey) {
 }
 
 mod delegation;
+mod keyref;
 mod lifecycle;
 mod membership;
 mod model;

@@ -10,6 +10,7 @@ use super::CodecError;
 use super::KEYWORD;
 use super::declared_member;
 use super::keyed_map;
+use crate::datum::ContentHash;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +33,9 @@ pub struct CompiledSchema {
     branch_validators: Arc<BranchValidators>,
     /// Whether the value can hold a reference; see [`Self::declares_references`].
     declares_references: bool,
+    /// How the datum's key slot is computed from its value, when its sidecar declares the slot a
+    /// content hash; see [`Self::content_hash`].
+    content_hash: Option<ContentHash>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,7 +74,22 @@ impl CompiledSchema {
             validator: Arc::new(validator),
             branch_validators: Arc::new(branch_validators),
             declares_references,
+            content_hash: None,
         })
+    }
+
+    /// The same schema with the content-hash declaration its sidecar states. Only a datum's root
+    /// carries one, so admission sets it after compiling and a member compiled on its own has none.
+    pub(in crate::datum) fn with_content_hash(mut self, content_hash: Option<ContentHash>) -> Self {
+        self.content_hash = content_hash;
+        self
+    }
+
+    /// How this datum's key slot is computed from its value, when its sidecar declares the slot a
+    /// content hash (ADR 035 §2.9). Only such a kind can be key-referenced, and a write of one
+    /// must hash to its own key.
+    pub fn content_hash(&self) -> Option<&ContentHash> {
+        self.content_hash.as_ref()
     }
 
     /// The immutable carried schema document.
@@ -106,7 +125,7 @@ impl CompiledSchema {
     }
 
     /// Whether any position this document's value can reach refers to one of the reference defs
-    /// (`#datumRef`, `#datumLocation`, `#datumPin`). A consumer walks a value for its references
+    /// (`#datumRef`, `#datumLocation`, `#datumPin`, `#keyRef`). A consumer walks a value for its references
     /// only when this says there are any to find.
     ///
     /// Reachability is followed from the root through `$ref`: every carried Lexicon compiles into
