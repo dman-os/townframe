@@ -69,7 +69,7 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 ### 6. Writes
 
 - Writing `install` and grant datums is privileged (the existing nodule-managing methods: `admitNodule`, `setNoduleEnabled`, and the grant setters, which become per grant).
-- Settings writes are ordinary datum writes. Who may write a cartridge's settings is decided by the capability on its cartridge config document. Whether the nodule itself may write its own settings is open question 1.
+- Settings writes are ordinary datum writes, and the nodule may write its own settings (operator, 2026-11-12): it is the one that knows their shape. So a nodule gets read and write on its own cartridge config document's settings datums, but not on its grant datums, which stay privileged. Editors are the nodule's own micro (a settings panel), or generic editing UX over the declared settings Lexicons in the CLI or a GUI, the way VS Code edits extension settings from their declared schema. Either way the write goes through the same datum API.
 
 ### 7. Substitution is out of scope
 
@@ -84,7 +84,7 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 
 ## Open questions
 
-1. May a nodule write its own settings (an app saving its preferences), or only read them?
+1. Settled 2026-11-12: yes, the nodule writes its own settings (§6).
 2. Default values: are settings with no datum the Lexicon's defaults, as with atproto's `default`, or does admission write an initial datum?
 3. Uninstall: does deleting the node's `install` leave the cartridge config document (so reinstalling or a sister keeps the settings), with deletion as a separate, explicit act? The proposal is yes.
 4. The shared config drawer's name and its relation to ADR 038's "synced configuration drawer" for orientations and preferences. Probably the same drawer.

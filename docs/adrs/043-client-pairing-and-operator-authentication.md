@@ -41,6 +41,8 @@ In-process mode is consistent with this. A `day` that boots the node itself must
 
 Pending requests expire, and the node caps how many it holds, so anonymous callers can't fill the table.
 
+**Delegated approval (operator, 2026-11-12).** The operator isn't the only approver. A client that holds an approved identity can approve requests for subsystem identities under its own actor, the same way the keyring operator approves. For example, intxt's approved identity approves its Claude Code plugin as a subsystem of intxt. This is ADR 037 a0's introduction rule: a holder may introduce only live strict descendants of its own actor, needs `DELEGATE` to do so, and can grant only what it holds, narrowed. So approval authority is scoped by the actor tree. The operator approves top-level clients, and each approved client approves its own subsystems without asking the operator.
+
 Precedents: the OAuth device authorization grant (RFC 8628: request, show a code, approve elsewhere, poll); ssh `authorized_keys` (a key bound to an identity, no shared secret); Bluetooth pairing (a numeric comparison code); polkit `auth_admin_keep` (approve once, keep).
 
 ### 4. How a client proves its key on each request
@@ -74,7 +76,8 @@ The key binding says *who* is calling and nothing else. Every authority comes fr
 
 ## Open questions
 
-1. The parent's consent: does approving a plugin under intxt's actor need intxt's own agreement, or is the operator's approval enough, since the operator owns both?
+1. Settled 2026-11-12: the parent approves its own subsystems (delegated approval, §3). The operator's approval is needed only for identities directly under the operator.
+5. **Naming (operator, 2026-11-12: "pairing might be the wrong noun").** Pairing is two devices bonding as peers. This is a client asking an authority for an identity, which prior art calls **enrollment**: X.509 certificate signing requests and EST ("Enrollment over Secure Transport", RFC 7030), Kubernetes `CertificateSigningRequest` (approve/deny), SPIFFE/SPIRE registration and attestation, and MDM device enrollment. Proposed: `enrollment.request`, and `day enroll …` to request; `day enrollments ls|approve|deny|revoke` to decide. The ADR is renamed to match once the operator agrees.
 2. Approval UX on a headless node, such as a relay: `day pairing approve` only, or also approval from a sister node?
 3. Token lifetime and whether the token binds the method (`lxm`).
 4. Should anonymous callers see anything besides pairing and node status?
