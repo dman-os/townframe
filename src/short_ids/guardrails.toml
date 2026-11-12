@@ -1,0 +1,20 @@
+version = 1
+role = "foundation"
+dependency_reason = "Stable short identifiers are a portable, dependency-light foundation for CLI and path consumers."
+allowed_dependencies = []
+allow_external_api_types = true
+
+[builds.native]
+features = []
+required_features = []
+default_features = true
+
+[builds.wasm32-unknown-unknown]
+features = []
+required_features = []
+default_features = true
+
+[builds.wasm32-wasip3]
+features = []
+required_features = []
+default_features = true
