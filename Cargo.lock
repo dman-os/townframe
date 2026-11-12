@@ -2727,6 +2727,7 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "dioxus_storm",
  "serde_json",
 ]
 
@@ -5151,6 +5152,17 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
+]
+
+[[package]]
+name = "dioxus_storm"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -16573,6 +16585,7 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "dioxus_storm",
  "serde_json",
  "tokio",
 ]
