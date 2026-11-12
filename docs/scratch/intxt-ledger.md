@@ -210,6 +210,16 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
     - Resolve time: C 8 ms after a 1.2 s diff/blame preparation; B 4.9 s.
   - **Build time:** B 2.6–4.7 s per revision; C under 0.2 s.
 
+- **F26 (2026-11-12) Replaying our own sessions** (2026-11-10 13:41Z to 11-12 00:10Z: 2 main sessions, 11 subagents, 5 worktrees; prototype `/run/media/asdf/p3N/tmp/intxt-proto/worktree-replay-bc`; single run).
+  - **Edits mostly bypass the tools.** 53 Edit/Write calls against 455 Bash calls that write local files: 250 Python heredocs, 104 formatter runs, 91 git checkout/reset, 71 `sed -i`, and more. Of 40 tool-touched paths, 13 (32%) were committed with content that differs from the tool-only reconstruction. Filesystem observation per tool call (F7) is mandatory.
+  - **Size (all HEAD transitions):**
+    - B: 2.65 MB of Automerge docs across 378 (worktree, path) documents, with base content repeated per worktree (Cargo.lock about 108 KB in each of 4 worktrees).
+    - C: 6.3 MB delta-packed blobs. But 921 of 937 blobs are already in git, and the uncommitted states add only about 97 KB zlib.
+  - **Attributing commit hunks to sessions** (2569 hunks in 213 commits): 3.5% by an Edit/Write's text, 56% by a Bash command's text (loose), 30% by timestamp window, 10% not at all. Tool reports alone attribute 12%.
+  - **Packaging:**
+    - "rename" (6 commits in the long-lived impl worktree): under B, its 31 file docs carry 96% unrelated history by change count and by inserted bytes. Under C it needs 30 blobs and its own 6 ops.
+    - D50 and ACP were made in fresh worktrees, so neither model has unrelated history there.
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.

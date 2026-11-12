@@ -1,6 +1,6 @@
 # intxt: do filesystem worktrees need file documents?
 
-Status: Proposal, for the operator's review; to be tested by the replay experiment below
+Status: Proposal, for the operator's review; experiment done (ledger F25, F26), recommendation below
 Owner: intxt lane
 Updated: 2026-11-12
 Scope: What an intxt carries as code (ledger thread of 2026-11-12: options A and B), and whether capture of a git worktree on a filesystem should write Automerge file documents at all. Replaces the question in `intxt-granularity.md` if accepted.
@@ -65,6 +65,35 @@ For each use case, we write down what the operator or agent does, what is record
 7. **Handoff** (U14): what a fresh agent reads, and how long it takes.
 
 Measured: the size of each intxt (B against C), how many documents it shares, how many anchors survive (correct, recovered, ambiguous, lost), and patch fidelity.
+
+## Results (ledger F25, F26)
+
+| Question | B: file docs | C: content-addressed snapshots |
+| --- | --- | --- |
+| Comments carried across a real rebase (1130 with ground truth) | 2 on the wrong line, confidently | all correct, with quote plus git's diff mapping |
+| Rebuilding commits from the intxt alone | not applicable | 31/31 reproduce their sha, given the original committer and date |
+| Size for a rebased branch (both revisions) | 341 KB plus 186 KB metadata | 1.28 MB packed, or 194 KB of gzipped patches per revision |
+| Size for two days of capture | 2.65 MB, base content repeated per worktree | 6.3 MB of blobs, of which 98% are already in git; the uncommitted states add about 97 KB |
+| Packaging work from a long-lived worktree ("rename") | 96% of the shared history is unrelated to the intxt | only the intxt's own ops and blobs |
+| Build and resolve time | seconds | milliseconds |
+
+Two other findings shape the design whichever option wins:
+- **Most edits bypass the tools.** 455 Bash calls wrote files, against 53 Edit/Write calls. 32% of tool-touched paths reached their commit with content the tool reports don't explain. Capture has to observe the filesystem around every tool call (F7), not trust tool reports.
+- **Attribution leans on the window, not the tool.** Tool reports attribute 12% of commit hunks to a session. A per-tool-call observation window (which tool call was running when the file changed) is what makes attribution work.
+
+## Recommendation
+
+C, for filesystem worktrees:
+- **The worktree op log stays** (ADR 040 §3), with one op per observed tool-call window, recording per changed path the content hash after the op.
+- **Content is git blobs.** Most are already in git, and uncommitted states are a small addition.
+- **Commits are git's own objects,** carried by the intxt (D58).
+- **Comments anchor to (commit or op, path, line range, quote)** and carry across revisions with git's diff mapping.
+- **File documents only for collaborative worktrees,** later, with dpaths.
+
+What changes in code:
+- ADR 040 §4 (file documents) and the granularity proposal are superseded.
+- The recorder (`intxt_core::client::record`) writes blob ids instead of file-doc splices; it already writes blobs for large and binary files.
+- Annotations target commit or op content (ADR 041).
 
 ## Open
 
