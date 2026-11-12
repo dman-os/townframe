@@ -5,9 +5,8 @@
 //! batch is carried, not refused, so they are open objects and open string vocabularies like the
 //! datums are, and hold no nullable map values.
 //!
-//! A path's content in a [`Change`] is [`Content`]: collaborative text, or a blob. A blob carries
-//! no bytes and no reference yet: the host uploads blob bytes itself (ledger D45), and until that
-//! path lands a blob-classified change carries only its path, change kind, size and git hash.
+//! A path's content in a [`Change`] is a git blob id (ADR 040 §3, §4). No bytes travel: the host
+//! wrote the object to the clone's store and keeps it reachable under its own ref.
 
 use crate::work::AgentSession;
 use crate::work::GitCommit;
@@ -199,17 +198,15 @@ pub struct Change {
     /// The path after the change (the old path of a deletion), relative to the worktree root.
     pub path: String,
     pub kind: ChangeKind,
-    /// For a rename, the path the file had. A file that was also edited is not recognised as a
-    /// rename: it is a deletion and an addition.
+    /// The git blob id of the content after the change; none for a deletion. The host has
+    /// written the object to the clone's store and keeps it reachable (ADR 040 §4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-    /// The content after the change; none for a deletion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<Content>,
+    pub blob: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
 
+/// Renames are not a kind: a reader pairs deletions and additions with `git diff -M` (ADR 040 §3).
 #[macros::datum(open_string)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ChangeKind {
@@ -219,111 +216,6 @@ pub enum ChangeKind {
     Modified,
     #[serde(rename = "deleted")]
     Deleted,
-    /// A path that disappeared and another that appeared with identical content.
-    #[serde(rename = "renamed")]
-    Renamed,
-    #[datum(other)]
-    Unknown(String),
-}
-
-/// A path's content after a change (ledger D43): `class` says which of the members is present.
-#[macros::datum]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Content {
-    pub class: ContentClass,
-    /// `text`: valid UTF-8, at most 256 KiB, not generated; collaborative text.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// `blob`: the size of the file. No bytes travel here: a later layer uploads them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-    /// `blob`: what `git hash-object` gave when the file was observed, to check that the file is
-    /// still what was observed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<BlobReason>,
-    /// `blob`: where the host put the bytes (ledger D45). Absent when it did not: a file over
-    /// 8 MiB is recorded as changed, with its size and git hash only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blob: Option<BlobRef>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// A blob the host put in the node's blob service: the fields of the file document's
-/// `org.example.daybook.blob` datum.
-#[macros::datum]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct BlobRef {
-    /// The blob's digest as the blob service spells it (`BlobId::digest_str`: `z` and the
-    /// base58btc of the BLAKE3 multihash).
-    pub digest: String,
-    pub length_octets: u64,
-    pub mime: String,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-impl Content {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            class: ContentClass::Text,
-            text: Some(text.into()),
-            size: None,
-            hash: None,
-            reason: None,
-            blob: None,
-            extra: Extra::default(),
-        }
-    }
-
-    /// This blob content with the bytes' reference.
-    #[must_use]
-    pub fn with_blob(mut self, blob: BlobRef) -> Self {
-        self.blob = Some(blob);
-        self
-    }
-
-    pub fn blob(size: u64, hash: impl Into<String>, reason: BlobReason) -> Self {
-        Self {
-            class: ContentClass::Blob,
-            text: None,
-            size: Some(size),
-            hash: Some(hash.into()),
-            reason: Some(reason),
-            blob: None,
-            extra: Extra::default(),
-        }
-    }
-}
-
-#[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ContentClass {
-    #[serde(rename = "text")]
-    Text,
-    #[serde(rename = "blob")]
-    Blob,
-    #[datum(other)]
-    Unknown(String),
-}
-
-/// Why content is not text.
-#[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BlobReason {
-    /// Not valid UTF-8, or holds a NUL.
-    #[serde(rename = "binary")]
-    Binary,
-    /// Over 256 KiB.
-    #[serde(rename = "large")]
-    Large,
-    /// A known lockfile, or `linguist-generated` or `-diff` in `.gitattributes`.
-    #[serde(rename = "generated")]
-    Generated,
     #[datum(other)]
     Unknown(String),
 }

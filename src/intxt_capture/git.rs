@@ -22,9 +22,11 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::btree_map::Entry;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::process::Stdio;
 
 /// A `git` runner in one directory. Optional locks are off, so observing never makes git rewrite
 /// the index under a running agent.
@@ -60,6 +62,91 @@ impl Git {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             })
         }
+    }
+
+    /// [`Self::run`] with `input` on stdin and `envs` set. Feeds and drains concurrently: a large
+    /// listing fills the pipe in both directions.
+    pub(crate) fn run_with_input(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        input: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let mut child = self
+            .command(args)
+            .envs(envs.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let output = std::thread::scope(|scope| {
+            let writer = scope.spawn(move || stdin.write_all(input));
+            let output = child.wait_with_output();
+            writer.join().expect("the writer does not panic")?;
+            output
+        })?;
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            Err(Error::Git {
+                args: args.join(" "),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            })
+        }
+    }
+
+    /// Keeps `blobs` reachable from `refs/intxt/keep/<worktree_id>`, a ref of intxt's own that no
+    /// git command moves.
+    ///
+    /// Why: capture writes uncommitted content with `git hash-object -w`, which makes loose
+    /// objects that nothing references, and `git gc` prunes unreachable loose objects older than
+    /// `gc.pruneExpire` (two weeks by default). An op records only the blob id, so the content
+    /// must outlive that until an intxt has packed it from here or the capture is dropped. jj
+    /// does the same with `refs/jj/keep/*`.
+    ///
+    /// How: a tree holding every blob as a flat entry named by its own id, in a commit whose
+    /// parent is the previous keep commit, so the chain keeps every earlier blob and each
+    /// commit adds only the new ones. The ref moves with a compare-and-swap against the commit
+    /// the tree was built on, so two writers racing can not drop each other's blobs (the
+    /// per-worktree lock already makes that one writer). The commit's author and committer are
+    /// fixed, and signing is off, so it does not depend on the user's git config.
+    pub(crate) fn keep(&self, worktree_id: &str, blobs: &BTreeSet<&str>) -> Result<(), Error> {
+        if blobs.is_empty() {
+            return Ok(());
+        }
+        let reference = format!("refs/intxt/keep/{worktree_id}");
+        let previous = self.ask(&["rev-parse", "--verify", "--quiet", &reference])?;
+        let mut entries = String::new();
+        for blob in blobs {
+            entries.push_str(&format!("100644 blob {blob}\t{blob}\n"));
+        }
+        let tree =
+            String::from_utf8_lossy(&self.run_with_input(&["mktree"], &[], entries.as_bytes())?)
+                .trim()
+                .to_owned();
+        let identity = [
+            ("GIT_AUTHOR_NAME", "intxt"),
+            ("GIT_AUTHOR_EMAIL", "intxt@localhost"),
+            ("GIT_COMMITTER_NAME", "intxt"),
+            ("GIT_COMMITTER_EMAIL", "intxt@localhost"),
+        ];
+        let mut args = vec!["-c", "commit.gpgsign=false", "commit-tree", &tree];
+        if let Some(previous) = &previous {
+            args.extend(["-p", previous]);
+        }
+        args.extend(["-m", "intxt keep"]);
+        let commit = String::from_utf8_lossy(&self.run_with_input(&args, &identity, &[])?)
+            .trim()
+            .to_owned();
+        // An empty old value asserts that the ref does not exist yet.
+        self.run(&[
+            "update-ref",
+            &reference,
+            &commit,
+            previous.as_deref().unwrap_or(""),
+        ])?;
+        Ok(())
     }
 
     pub(crate) fn text(&self, args: &[&str]) -> Result<String, Error> {

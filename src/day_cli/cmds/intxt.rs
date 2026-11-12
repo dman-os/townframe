@@ -163,7 +163,7 @@ async fn capture_hook(verbose: bool) -> Res<()> {
 }
 
 /// What a run says on stderr: everything under `--verbose`, otherwise only what the operator
-/// should see (a blob that was not put, a tool call recorded without its cause).
+/// should see (a tool call recorded without its cause).
 fn report(summary: &capture::Summary, verbose: bool) {
     if summary.uncaused_tool_calls > 0 {
         eprintln!(
@@ -171,23 +171,14 @@ fn report(summary: &capture::Summary, verbose: bool) {
             summary.uncaused_tool_calls
         );
     }
-    for path in &summary.stale_blobs {
-        eprintln!("intxt capture: {path} changed after it was observed; its bytes were not stored");
-    }
-    for path in &summary.oversize_blobs {
-        eprintln!(
-            "intxt capture: {path} is over 8 MiB; recorded as changed, its bytes were not stored"
-        );
-    }
     if verbose {
         eprintln!(
-            "intxt capture: {} ({} blob(s) stored)",
+            "intxt capture: {}",
             if summary.recorded.is_some() {
                 "recorded"
             } else {
                 "nothing to record"
-            },
-            summary.blobs_put
+            }
         );
     }
 }

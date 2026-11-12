@@ -120,6 +120,19 @@ fn the_adr_examples_are_valid_datums() {
         "dtxt:datum:self/org.example.intxt.work.worktreeEntry/0193a",
         "dtxt:datum:self/org.example.intxt.annotationsEntry/main"
     ]}));
+    // A comment on code: the op and a path, whose content is git's blob at that op (ADR 041 §2).
+    codec_round_trip::<annotation::Comment>(json!({
+        "targets": [{
+            "source": {
+                "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktreeOp/41"
+            },
+            "path": "src/big_cabinet_core/reference.rs",
+            "lines": {"start": 120, "end": 124},
+            "quote": {"exact": "fn parse("}
+        }],
+        "body": {"mime": "text/markdown", "content": "Why a second parser?"},
+        "motivation": "commenting"
+    }));
     codec_round_trip::<annotation::Comment>(json!({
         "targets": [{
             "source": {
@@ -167,16 +180,14 @@ fn the_adr_examples_are_valid_datums() {
         "clone": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitClone/0193c",
         "id": "0193a",
         "path": "/run/media/p3N/townframe-p3N-3",
-        "files": {"src/big_cabinet_core/reference.rs": "zFileA"},
         "opLogs": [{"doc": "zOps0", "from": 0}, {"doc": "zOps1", "from": 256}]
     }));
     codec_round_trip::<work::WorktreeOp>(json!({
         "at": "2026-11-10T21:04:11Z",
         "kind": "edit",
         "cause": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.promptTurn/t41#toolCalls/%7B%22id%22:%22toolu_01%22%7D",
-        "files": {"src/big_cabinet_core/reference.rs": ["z11111111111111111111111111111111"]},
-        "deleted": ["src/old.rs"],
-        "renames": {"src/new.rs": "src/older.rs"}
+        "files": {"src/big_cabinet_core/reference.rs": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"},
+        "deleted": ["src/old.rs"]
     }));
     codec_round_trip::<work::WorktreeOp>(json!({
         "at": "2026-11-10T21:05:00Z",

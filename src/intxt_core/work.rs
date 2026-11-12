@@ -68,8 +68,6 @@ pub struct Worktree {
     pub id: String,
     /// Absolute path of the checkout; a hint, not identity.
     pub path: String,
-    /// Path → file document id, for every path an op touched.
-    pub files: BTreeMap<String, String>,
     /// The op-log documents, in sequence order.
     pub op_logs: Vec<OpLogDoc>,
     #[serde(flatten)]
@@ -99,15 +97,14 @@ pub struct WorktreeOp {
     /// The tool call whose window the change fell in, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<Location>,
-    /// Path → the file document's heads after this op (multibase text, hash-byte order, as
-    /// `big_cabinet_core::reference::head_text` spells them).
-    pub files: BTreeMap<String, Vec<String>>,
-    /// Paths this op deleted. Their documents keep the earlier states.
+    /// Path → the git blob id of the path's content after this op, for every path the op changed
+    /// and did not delete. The content is a git object (ADR 040 §4): committed, or written by the
+    /// host with `git hash-object -w` and kept under `refs/intxt/keep/<worktree id>`. Renames are
+    /// not recorded; a reader pairs `deleted` and `files` with `git diff -M`.
+    pub files: BTreeMap<String, String>,
+    /// Paths this op deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<String>,
-    /// New path → old path, for renames this op continued in the old path's document.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub renames: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<GitObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

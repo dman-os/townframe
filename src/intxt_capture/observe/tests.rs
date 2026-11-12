@@ -5,10 +5,7 @@ use crate::git::GitMove;
 use crate::identity;
 use crate::testing::Repo;
 use crate::testing::git_in;
-use intxt_core::capture::BlobReason;
 use intxt_core::capture::ChangeKind;
-use intxt_core::capture::Content;
-use intxt_core::capture::ContentClass;
 use intxt_core::work::FileStatus;
 use intxt_core::work::OpKind;
 
@@ -24,6 +21,22 @@ impl Observe for Repo {
         *state = next;
         observation
     }
+}
+
+/// What `git cat-file` says the blob `id` holds in the clone at `root`.
+fn git_cat_file(root: &std::path::Path, id: &str) -> Vec<u8> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["cat-file", "blob", id])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{id}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
 }
 
 fn kinds(moves: &[GitMove]) -> Vec<OpKind> {
@@ -107,13 +120,12 @@ fn the_deepest_worktree_wins_and_no_worktree_is_none() {
 }
 
 #[test]
-fn snapshots_diff_into_classified_changes() {
+fn snapshots_diff_into_changes_carrying_blob_ids() {
     let repo = Repo::new();
     for (path, content) in [
         ("a.txt", "one\n"),
         ("old.txt", "rename me\n"),
         ("gone.txt", "bye\n"),
-        ("Cargo.lock", "x\n"),
     ] {
         repo.write(path, content);
     }
@@ -126,15 +138,11 @@ fn snapshots_diff_into_classified_changes() {
     repo.write("new.txt", "new\n");
     std::fs::remove_file(repo.root.join("gone.txt")).unwrap();
     std::fs::rename(repo.root.join("old.txt"), repo.root.join("renamed.txt")).unwrap();
-    repo.write("bin.dat", [0u8, 159, 146, 150]);
-    repo.write("big.txt", "a".repeat(300 * 1024));
-    repo.write("Cargo.lock", "y\n");
-    repo.write(
-        ".gitattributes",
-        "gen.txt linguist-generated\nraw.txt -diff\n",
-    );
-    repo.write("gen.txt", "generated\n");
-    repo.write("raw.txt", "raw\n");
+    // Binary and large files are blobs like any other: no classification.
+    let binary = [0u8, 159, 146, 150];
+    repo.write("bin.dat", binary);
+    let large = "a".repeat(300 * 1024);
+    repo.write("big.txt", &large);
 
     let observed = repo.observe(&mut state);
     let change = |path: &str| {
@@ -144,42 +152,28 @@ fn snapshots_diff_into_classified_changes() {
             .find(|change| change.path == path)
             .unwrap_or_else(|| panic!("no change for {path}: {:?}", observed.changes))
     };
-    let blob_reason = |path: &str| {
-        let content = change(path).content.as_ref().unwrap();
-        assert_eq!(content.class, ContentClass::Blob, "{path} is a blob");
-        assert_eq!(content.text, None);
-        assert_eq!(
-            content.size,
-            Some(std::fs::metadata(repo.root.join(path)).unwrap().len())
-        );
-        content.reason.clone().unwrap()
+    // The blob id resolves to the content the worktree had, in the clone's object store.
+    let content = |path: &str| {
+        let blob = change(path)
+            .blob
+            .as_deref()
+            .unwrap_or_else(|| panic!("{path}"));
+        git_cat_file(&repo.root, blob)
     };
 
-    assert_eq!(observed.changes.len(), 10, "{:?}", observed.changes);
+    assert_eq!(observed.changes.len(), 7, "{:?}", observed.changes);
     assert_eq!(change("a.txt").kind, ChangeKind::Modified);
-    assert_eq!(
-        change("a.txt").content,
-        Some(Content::text("one\nedited\n"))
-    );
+    assert_eq!(content("a.txt"), b"one\nedited\n");
     assert_eq!(change("new.txt").kind, ChangeKind::Added);
-    assert_eq!(change("new.txt").content, Some(Content::text("new\n")));
+    assert_eq!(content("new.txt"), b"new\n");
     assert_eq!(change("gone.txt").kind, ChangeKind::Deleted);
-    assert_eq!(change("gone.txt").content, None);
-    assert_eq!(change("renamed.txt").kind, ChangeKind::Renamed);
-    assert_eq!(change("renamed.txt").from.as_deref(), Some("old.txt"));
-    assert!(
-        observed
-            .changes
-            .iter()
-            .all(|change| change.path != "old.txt")
-    );
-    assert_eq!(blob_reason("bin.dat"), BlobReason::Binary);
-    assert_eq!(blob_reason("big.txt"), BlobReason::Large);
-    assert_eq!(blob_reason("Cargo.lock"), BlobReason::Generated);
-    assert_eq!(change("Cargo.lock").kind, ChangeKind::Modified);
-    assert_eq!(blob_reason("gen.txt"), BlobReason::Generated);
-    assert_eq!(blob_reason("raw.txt"), BlobReason::Generated);
-    assert_eq!(change(".gitattributes").kind, ChangeKind::Added);
+    assert_eq!(change("gone.txt").blob, None);
+    // A rename is a deletion and an addition: readers pair them with `git diff -M`.
+    assert_eq!(change("old.txt").kind, ChangeKind::Deleted);
+    assert_eq!(change("renamed.txt").kind, ChangeKind::Added);
+    assert_eq!(content("renamed.txt"), b"rename me\n");
+    assert_eq!(content("bin.dat"), binary);
+    assert_eq!(content("big.txt"), large.as_bytes());
 
     // Nothing changed since, and committing what was observed is not a change either.
     assert!(repo.observe(&mut state).changes.is_empty());
@@ -201,6 +195,39 @@ fn snapshots_diff_into_classified_changes() {
     assert_eq!(status("gone.txt").status, FileStatus::Deleted);
     assert_eq!(status("new.txt").status, FileStatus::Added);
     assert_eq!(status("a.txt").status, FileStatus::Modified);
+}
+
+#[test]
+fn the_first_observation_records_what_already_differs_from_head_staged_or_not() {
+    let repo = Repo::new();
+    repo.write("a.txt", "one\n");
+    repo.write("b.txt", "bee\n");
+    repo.write("c.txt", "sea\n");
+    repo.commit_all("first");
+    // Staged and unchanged since, staged and edited again, and untouched: only the last has its
+    // content in `HEAD`'s tree alone.
+    repo.write("a.txt", "staged\n");
+    repo.write("b.txt", "staged\n");
+    repo.git(&["add", "a.txt", "b.txt"]);
+    repo.write("b.txt", "staged then edited\n");
+
+    let mut state = WorktreeState::default();
+    let observed = repo.observe(&mut state);
+    let paths: Vec<_> = observed
+        .changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect();
+    assert_eq!(paths, ["a.txt", "b.txt"]);
+    let blobs: Vec<_> = observed
+        .changes
+        .iter()
+        .map(|change| git_cat_file(&repo.root, change.blob.as_deref().unwrap()))
+        .collect();
+    assert_eq!(
+        blobs,
+        [b"staged\n".to_vec(), b"staged then edited\n".to_vec()]
+    );
 }
 
 #[test]

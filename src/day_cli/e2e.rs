@@ -837,9 +837,7 @@ mod library {
             let edited = capture::run(client, &node_root, &hook("PostToolUse", true))
                 .await
                 .unwrap();
-            assert_eq!(edited.blobs_put, 1);
             assert_eq!(edited.uncaused_tool_calls, 0);
-            assert!(edited.stale_blobs.is_empty() && edited.oversize_blobs.is_empty());
             let recorded = edited.recorded.unwrap();
             let root = repo.display().to_string();
             let docs = &recorded.worktrees[&root].docs;
@@ -870,48 +868,19 @@ mod library {
                 op["cause"].as_str().unwrap().contains("promptTurn/u1"),
                 "{op}"
             );
-            assert!(op["files"].as_object().unwrap().contains_key("pic.png"));
-            assert!(op["files"].as_object().unwrap().contains_key("a.txt"));
-
-            // The binary file's document holds the blob datum, and its `File` points at it.
-            let picture: DocId = worktree.files["pic.png"].parse().unwrap();
-            let blob = read_at(
-                client,
-                &picture,
-                &"org.example.daybook.blob/main".parse().unwrap(),
-            )
-            .await
-            .unwrap()
-            .1;
-            assert_eq!(blob["mime"], "image/png");
-            assert_eq!(blob["lengthOctets"], binary.len());
-            assert!(blob["digest"].as_str().unwrap().starts_with('z'));
-            let file = read_at(
-                client,
-                &picture,
-                &format!("{}/main", work::File::ID).parse().unwrap(),
-            )
-            .await
-            .unwrap()
-            .1;
-            assert_eq!(
-                file["blob"],
-                "dtxt:datum:self/org.example.daybook.blob/main"
-            );
-
-            // The text file is a note.
-            let text: DocId = worktree.files["a.txt"].parse().unwrap();
-            let note = read_at(
-                client,
-                &text,
-                &format!("{}/main", intxt_core::generic::Note::ID)
-                    .parse()
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .1;
-            assert_eq!(note["content"], "one\ntwo\n");
+            // Ops carry git blob ids, and git resolves them to the content the call wrote: no
+            // file documents, no uploaded bytes.
+            let cat = |blob: &str| {
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["cat-file", "blob", blob])
+                    .output()
+                    .unwrap()
+                    .stdout
+            };
+            assert_eq!(cat(op["files"]["a.txt"].as_str().unwrap()), b"one\ntwo\n");
+            assert_eq!(cat(op["files"]["pic.png"].as_str().unwrap()), binary);
 
             // A hook with nothing new records nothing; the machine and the capture drawer are the
             // node's, remembered for the next hook.

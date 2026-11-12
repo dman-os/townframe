@@ -10,9 +10,7 @@ pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 8]
 pub enum intxt_core::annotation::Motivation { # [serde (rename = "assessing")] Assessing, # [serde (rename = "bookmarking")] Bookmarking, # [serde (rename = "classifying")] Classifying, # [serde (rename = "commenting")] Commenting, # [serde (rename = "describing")] Describing, # [serde (rename = "editing")] Editing, # [serde (rename = "highlighting")] Highlighting, # [serde (rename = "identifying")] Identifying, # [serde (rename = "linking")] Linking, # [serde (rename = "moderating")] Moderating, # [serde (rename = "questioning")] Questioning, # [serde (rename = "replying")] Replying, # [serde (rename = "tagging")] Tagging, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::Progress { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::StructureKind { # [serde (rename = "task")] Task, # [serde (rename = "decision")] Decision, # [serde (rename = "section")] Section, # [datum (other)] Unknown (String) }
-pub enum intxt_core::capture::BlobReason { # [doc = " Not valid UTF-8, or holds a NUL."] # [serde (rename = "binary")] Binary, # [doc = " Over 256 KiB."] # [serde (rename = "large")] Large, # [doc = " A known lockfile, or `linguist-generated` or `-diff` in `.gitattributes`."] # [serde (rename = "generated")] Generated, # [datum (other)] Unknown (String) }
-pub enum intxt_core::capture::ChangeKind { # [serde (rename = "added")] Added, # [serde (rename = "modified")] Modified, # [serde (rename = "deleted")] Deleted, # [doc = " A path that disappeared and another that appeared with identical content."] # [serde (rename = "renamed")] Renamed, # [datum (other)] Unknown (String) }
-pub enum intxt_core::capture::ContentClass { # [serde (rename = "text")] Text, # [serde (rename = "blob")] Blob, # [datum (other)] Unknown (String) }
+pub enum intxt_core::capture::ChangeKind { # [serde (rename = "added")] Added, # [serde (rename = "modified")] Modified, # [serde (rename = "deleted")] Deleted, # [datum (other)] Unknown (String) }
 pub enum intxt_core::methods::IntxtError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [doc = " A call the handler made was refused or failed; `reason` is what the callee answered."] # [error ("{operation} failed: {reason}")] Upstream { operation : String , reason : String }, # [doc = " The request named something an intxt cannot include or a document that is not what it"] # [doc = " was said to be."] # [error ("invalid request: {0}")] Invalid (String), # [doc = " The caller reaches the part through no drawer at Read or above, so there is nothing to"] # [doc = " lend the intxt's drawer."] # [error ("the part's document {0} is reached through no drawer at Read or above")] NotReachable (DocId) }
 pub enum intxt_core::work::FileStatus { # [serde (rename = "added")] Added, # [serde (rename = "modified")] Modified, # [serde (rename = "deleted")] Deleted, # [serde (rename = "renamed")] Renamed, # [serde (rename = "copied")] Copied, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::MessageKind { # [serde (rename = "userMessage")] UserMessage, # [serde (rename = "agentMessage")] AgentMessage, # [serde (rename = "agentThought")] AgentThought, # [serde (rename = "notification")] Notification, # [serde (rename = "localCommand")] LocalCommand, # [serde (rename = "interrupt")] Interrupt, # [serde (rename = "spawnPrompt")] SpawnPrompt, # [doc = " Text the harness injected that the model saw: reminders and records it marks as meta."] # [serde (rename = "meta")] Meta, # [doc = " A message from another agent session."] # [serde (rename = "crossSession")] CrossSession, # [serde (rename = "compactionSummary")] CompactionSummary, # [datum (other)] Unknown (String) }
@@ -23,9 +21,6 @@ pub enum intxt_core::work::ToolKind { # [serde (rename = "read")] Read, # [serde
 pub enum intxt_core::work::ToolStatus { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [serde (rename = "failed")] Failed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::work::Vcs { # [serde (rename = "git")] Git, # [serde (rename = "jj")] Jj, # [datum (other)] Unknown (String) }
 pub impl intxt_core::capture::Batch::fn is_empty (& self) -> bool
-pub impl intxt_core::capture::Content::fn blob (size : u64 , hash : impl Into < String > , reason : BlobReason) -> Self
-pub impl intxt_core::capture::Content::fn text (text : impl Into < String >) -> Self
-pub impl intxt_core::capture::Content::fn with_blob (mut self , blob : BlobRef) -> Self
 pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
 pub impl intxt_core::client::Caller < H >::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn doc_capability (& self , scope : DocScope) -> Result < CapId , IntxtError >
@@ -51,14 +46,12 @@ pub struct intxt_core::annotation::Content  { mime: String, content: String, ext
 pub struct intxt_core::annotation::LineRange  { start: u32, end: u32, extra: Extra }
 pub struct intxt_core::annotation::Seen  { datums: BTreeMap < String , Vec < String > >, reviewed: BTreeMap < String , String >, extra: Extra }
 pub struct intxt_core::annotation::Structure  { kind: StructureKind, title: String, body: Option < Content >, status: Option < Progress >, targets: Vec < Target >, parent: Option < DatumReference >, order: Option < String >, extra: Extra }
-pub struct intxt_core::annotation::Target  { source: DatumPin, lines: Option < LineRange >, quote: Option < TextQuote >, to: Option < Location >, extra: Extra }
+pub struct intxt_core::annotation::Target  { source: DatumPin, path: Option < String >, lines: Option < LineRange >, quote: Option < TextQuote >, to: Option < Location >, extra: Extra }
 pub struct intxt_core::annotation::TextQuote  { exact: String, prefix: Option < String >, suffix: Option < String >, extra: Extra }
 pub struct intxt_core::annotation::ThreadState  { resolved: bool, extra: Extra }
 pub struct intxt_core::capture::Batch  { session: SessionBatch, worktrees: Vec < WorktreeBatch >, uncaused_tool_calls: u64, extra: Extra }
-pub struct intxt_core::capture::BlobRef  { digest: String, length_octets: u64, mime: String, extra: Extra }
 pub struct intxt_core::capture::Cause  { agent_id: Option < String >, turn: Option < String >, tool_use_id: String, extra: Extra }
-pub struct intxt_core::capture::Change  { path: String, kind: ChangeKind, from: Option < String >, content: Option < Content >, extra: Extra }
-pub struct intxt_core::capture::Content  { class: ContentClass, text: Option < String >, size: Option < u64 >, hash: Option < String >, reason: Option < BlobReason >, blob: Option < BlobRef >, extra: Extra }
+pub struct intxt_core::capture::Change  { path: String, kind: ChangeKind, blob: Option < String >, extra: Extra }
 pub struct intxt_core::capture::Imported  { session: Option < AgentSession >, turns: BTreeMap < String , PromptTurn >, plan: Option < Plan >, extra: Extra }
 pub struct intxt_core::capture::Op  { at: Timestamp, kind: OpKind, cause: Option < Cause >, changes: Vec < Change >, git: Option < GitObservation >, extra: Extra }
 pub struct intxt_core::capture::RecordedIds  { session: Option < String >, subagents: BTreeMap < String , String >, worktrees: BTreeMap < String , RecordedWorktree >, extra: Extra }
@@ -100,6 +93,6 @@ pub struct intxt_core::work::SessionEntry  { session: DatumReference, extra: Ext
 pub struct intxt_core::work::ToolCall  { id: String, seq: u64, title: String, kind: ToolKind, status: ToolStatus, cwd: Option < String >, locations: Vec < ToolLocation >, diffs: Vec < ToolDiff >, output: Option < String >, extra: Extra }
 pub struct intxt_core::work::ToolDiff  { path: String, patch: String, extra: Extra }
 pub struct intxt_core::work::ToolLocation  { path: String, line: Option < u32 >, extra: Extra }
-pub struct intxt_core::work::Worktree  { clone: DatumReference, id: String, path: String, files: BTreeMap < String , String >, op_logs: Vec < OpLogDoc >, extra: Extra }
+pub struct intxt_core::work::Worktree  { clone: DatumReference, id: String, path: String, op_logs: Vec < OpLogDoc >, extra: Extra }
 pub struct intxt_core::work::WorktreeEntry  { worktree: DatumReference, extra: Extra }
-pub struct intxt_core::work::WorktreeOp  { at: Timestamp, kind: OpKind, cause: Option < Location >, files: BTreeMap < String , Vec < String > >, deleted: Vec < String >, renames: BTreeMap < String , String >, git: Option < GitObservation >, jj: Option < JjObservation >, extra: Extra }
+pub struct intxt_core::work::WorktreeOp  { at: Timestamp, kind: OpKind, cause: Option < Location >, files: BTreeMap < String , String >, deleted: Vec < String >, git: Option < GitObservation >, jj: Option < JjObservation >, extra: Extra }

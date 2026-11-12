@@ -17,7 +17,7 @@ pub impl intxt_capture::acp::Recorder::fn set_doc (& mut self , session_id : & s
 pub impl intxt_capture::hook::Hook::fn parse (input : & [u8]) -> Result < Self , Error >
 pub impl intxt_capture::host::Prepared::fn commit (mut self , recorded : RecordedIds) -> Result < () , Error >
 pub impl intxt_capture::host::Prepared::fn worktree_roots (& self) -> impl Iterator < Item = & Path >
-pub impl intxt_capture::snapshot::Snapshot::fn diff (& self , after : & Snapshot , root : & Path) -> Result < Vec < Change > , Error >
+pub impl intxt_capture::snapshot::Snapshot::fn diff (& self , after : & Snapshot) -> Vec < Change >
 pub impl intxt_capture::snapshot::Snapshot::fn take (root : & Path) -> Result < Self , Error >
 pub impl intxt_capture::transcript::Imported::fn into_batch (self) -> intxt_core :: capture :: Imported
 pub impl intxt_capture::transcript::TranscriptImporter::fn import (& mut self , tail : & [u8]) -> Result < Imported , ImportError >
