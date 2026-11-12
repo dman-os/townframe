@@ -109,7 +109,9 @@ Design points beyond the host table.
 4. `instanceChanged` is annotated upstream as "technically broken" (`NOTE(amadeus)`: it should collect changed instances and recompute all tops); the port inherits it as is.
 5. `resolveAlignedScrollPosition` carries `REVIEW: lets turn this into a named interface object`; the Rust struct for its arguments is the natural resolution and not a divergence.
 
-Open questions for the operator (recommendations, not decisions):
+Decided (operator, 2026-11-12): every recommendation below is accepted as written, Q1-Q10. Slices follow Q10: C1 alone, then C2/C3, then C4/C5/C6.
+
+Questions put to the operator (recommendations, all accepted):
 
 - Q1. File items. `CodeViewItem::File` needs `VirtualizedFile` (1,390 lines) over `File` (2,370) and `FileRenderer` (1,219), all DEFER. Recommend diff items only first: keep the `CodeViewContextItem` enum with a file arm that is `todo!("file items: VirtualizedFile is DEFER")` (the repo's own idiom for an unhandled branch), so the structure stays faithful and the file lane slots in later. Cost: most upstream CodeView tests build file items (`makeFileItem` in `headerFooter`, `interactionOptions`, `removeItem`, `updateItemId`, most of `collapsed`, `elementPooling` and `scrollAnchoring`); the fixtures become diff items, which changes heights, so each converted test goes in `divergences.psv` with its fixture change.
 - Q2. Smooth scroll. Recommend port the spring in full (about 90 lines of pure math plus the render re-queue), default behavior stays `instant`, `prefers_reduced_motion` answers false until the embedder wires a query, and the frame pacing from point 7 is fixed in C6. Alternative: DEFER smooth scroll and keep `scrollTo` instant-only, then the oracle scenarios are simpler; the cost of doing it now is small and the later retrofit touches `computeRenderRangeAndEmit`.
