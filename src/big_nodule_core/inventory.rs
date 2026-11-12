@@ -3,8 +3,8 @@
 //! [`admit_cartridge_nodule`] validates the carrying [`Cartridge`] envelope, extracts its [`Nodule`]
 //! contribution, checks the contribution schema and nodule admission rules, and verifies that
 //! every artifact the handler names is declared in the envelope. [`InstalledNodule`] is the admitted
-//! result that [`crate::config::NoduleConfig`] resolves, with its enablement, configuration,
-//! artifact availability, and readiness.
+//! result that [`crate::config::NoduleConfig`] resolves, with its enablement, artifact availability,
+//! and readiness.
 
 use crate::Admitted;
 use crate::Nodule;
@@ -16,8 +16,8 @@ use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
+use big_cartridges_core::config::Component;
 use big_dispatch_core::Readiness;
-use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -55,18 +55,12 @@ pub struct InstalledNodule {
     pub admitted: Admitted,
     pub artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
     pub enabled: bool,
-    pub config: Option<IndexMap<String, Value>>,
     /// Set when a dev takeover fills this slot: `cartridge_id` is the slot, while `version`,
     /// `revision`, `nodule`, `admitted` and `artifacts` are the filler's.
     pub filled_by: Option<FilledBy>,
-    configured: bool,
 }
 
 impl InstalledNodule {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "crate-private constructor assembling validated fields"
-    )]
     pub(crate) fn new(
         cartridge_id: CartridgeId,
         version: Version,
@@ -75,8 +69,6 @@ impl InstalledNodule {
         admitted: Admitted,
         artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
         enabled: bool,
-        config: Option<IndexMap<String, Value>>,
-        configured: bool,
     ) -> Self {
         Self {
             cartridge_id,
@@ -86,9 +78,7 @@ impl InstalledNodule {
             admitted,
             artifacts,
             enabled,
-            config,
             filled_by: None,
-            configured,
         }
     }
 
@@ -98,12 +88,6 @@ impl InstalledNodule {
             .iter()
             .map(|(key, (_, state))| (key.clone(), *state))
             .collect()
-    }
-
-    /// Whether an operator has set `config` explicitly. Unconfigured settings are the selected
-    /// revision's defaults and follow an upgrade; configured settings are kept and re-validated.
-    pub fn is_configured(&self) -> bool {
-        self.configured
     }
 
     /// Readiness as the inventory alone can tell it, which is what a node without an executor
@@ -173,8 +157,18 @@ pub enum InventoryError {
     InvalidRoute { pattern: String, reason: String },
     #[error("nodule for cartridge `{0}` is not installed")]
     UnknownCartridge(CartridgeId),
-    #[error("nodule for cartridge `{0}` declares no config schema")]
-    NoConfigSchema(CartridgeId),
+    #[error(
+        "cartridge `{0}` contributes neither a nodule nor a micro, so there is nothing to install"
+    )]
+    NothingToInstall(CartridgeId),
+    #[error("invalid grant `{grant}`: {reason}")]
+    InvalidGrant { grant: String, reason: String },
+    #[error("cartridge `{id}` has no `{component}` component to {action}")]
+    NoComponent {
+        id: CartridgeId,
+        component: Component,
+        action: &'static str,
+    },
 }
 
 type Result<T> = std::result::Result<T, InventoryError>;

@@ -15,11 +15,10 @@ use big_cartridges_core::Contribution;
 use big_cartridges_core::Digest;
 use big_cartridges_core::NoduleContribution;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
 use big_nodule_core::config::artifact_key;
-use big_nodule_core::protocol::AdmitNodule;
-use big_nodule_core::protocol::UninstallNodule;
 use method_core::ByteBody;
 use std::time::Duration;
 
@@ -88,18 +87,7 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
             extra: Default::default(),
         }));
     let operator = Authorization::identity(node.authority.root);
-    node.nodules
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator.metadata(),
-            AdmitNodule {
-                cartridge,
-                drawers: None,
-            },
-        )
-        .await
-        .unwrap();
+    super::super::nodule_wasm::admit(&node, cartridge).await;
 
     // The workers pick the config document up, encrypt the referenced bytes into it and
     // retain both representations for it.
@@ -148,7 +136,7 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
         .call_with(
             RequestContext::root(),
             operator.metadata(),
-            UninstallNodule {
+            UninstallCartridge {
                 cartridge_id: CARTRIDGE.parse().unwrap(),
             },
         )

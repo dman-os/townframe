@@ -16,7 +16,10 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::Contribution;
 use big_cartridges_core::Digest;
 use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::config::Component;
+use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::request::Necessity;
 use big_cartridges_core::request::Request;
 use big_dispatch::Caller;
@@ -38,13 +41,9 @@ use big_nodule_core::RunMode;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::NoduleInitStatus;
 use big_nodule_core::protocol::NoduleRecord;
-use big_nodule_core::protocol::SetNoduleDrawerGrants;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -281,27 +280,31 @@ impl Node {
     /// A config change that touches nothing: every config mutation reconciles once, which is
     /// what retries a failed initializer.
     async fn touch(&self, cartridge_id: &str) -> NoduleRecord {
-        self.call(
+        // Revoking a grant that was never made changes nothing in the document, and still
+        // reconciles.
+        self.set_grant(
             self.operator(),
-            SetNoduleDrawerGrants {
-                cartridge_id: id(cartridge_id),
-                drawers: BTreeMap::new(),
-            },
+            cartridge_id,
+            GrantKey::Method("org.example.never.granted".to_owned()),
+            None,
         )
         .await
-        .unwrap()
+        .unwrap();
+        self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
     pub(super) async fn set_enabled_record(&self, cartridge_id: &str) -> NoduleRecord {
         self.call(
             self.operator(),
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(cartridge_id),
+                component: Component::Nodule,
                 enabled: true,
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+        self.get(self.operator(), cartridge_id).await.unwrap()
     }
 
     async fn list_records(&self) -> Vec<NoduleRecord> {
@@ -316,18 +319,14 @@ impl Node {
         cartridge_id: &str,
         authorities: &[&str],
     ) -> NoduleRecord {
-        self.call(
-            self.operator(),
-            SetNoduleMethodGrants {
-                cartridge_id: id(cartridge_id),
-                methods: DispatchScope {
-                    authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
-                    ..Default::default()
-                },
+        self.set_methods(
+            cartridge_id,
+            DispatchScope {
+                authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
+                ..Default::default()
             },
         )
         .await
-        .unwrap()
     }
 }
 
@@ -735,23 +734,19 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     // Granted: the requested operation (under a covering prefix), a prefix that covers nothing
     // requested, and an operation nobody requested.
     let record = node
-        .call(
-            operator,
-            SetNoduleMethodGrants {
-                cartridge_id: id(ALPHA),
-                methods: DispatchScope {
-                    operations: ["org.example.mail.send".to_owned()].into(),
-                    authorities: [
-                        "org.example.remote".to_owned(),
-                        "org.example.other".to_owned(),
-                    ]
-                    .into(),
-                    ..Default::default()
-                },
+        .set_methods(
+            ALPHA,
+            DispatchScope {
+                operations: ["org.example.mail.send".to_owned()].into(),
+                authorities: [
+                    "org.example.remote".to_owned(),
+                    "org.example.other".to_owned(),
+                ]
+                .into(),
+                ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
     let operations = record.methods.unwrap();
     assert!(operations.granted);
     // The prefix is applied as the one requested operation it covers, not as the prefix.
@@ -810,23 +805,20 @@ async fn a_privileged_grant_is_not_applied_though_every_authority_is() {
     .unwrap();
     node.set_enabled(ALPHA, true).await;
     let grant = |privileged| {
-        node.call(
-            operator,
-            SetNoduleMethodGrants {
-                cartridge_id: id(ALPHA),
-                methods: DispatchScope {
-                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
-                    privileged,
-                    ..Default::default()
-                },
+        node.set_methods(
+            ALPHA,
+            DispatchScope {
+                authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                privileged,
+                ..Default::default()
             },
         )
     };
-    let status = grant(false).await.unwrap().methods.unwrap();
+    let status = grant(false).await.methods.unwrap();
     assert!(status.granted, "{status:?}");
     assert!(!status.desired.privileged);
 
-    let status = grant(true).await.unwrap().methods.unwrap();
+    let status = grant(true).await.methods.unwrap();
     assert!(!status.granted, "{status:?}");
     assert!(
         status

@@ -7,6 +7,7 @@ use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Digest;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::CartridgeChanges;
@@ -1495,4 +1496,152 @@ async fn listed_ids(node: &BigNode) -> Vec<big_cartridges_core::CartridgeId> {
         .into_iter()
         .map(|record| record.id)
         .collect()
+}
+
+#[tokio::test]
+async fn an_installed_cartridge_is_ready_after_a_restart_with_its_settings_intact() {
+    use big_cabinet_core::datum::DatumMember;
+    use big_cartridges_core::Contribution;
+    use big_cartridges_core::NoduleContribution;
+    use big_cartridges_core::config::Component;
+    use big_cartridges_core::protocol::ListCartridgeInstalls;
+    use big_cartridges_core::protocol::SetCartridgeEnabled;
+    use big_dispatch_core::Readiness;
+    use big_nodule_core::Nodule;
+    use big_nodule_core::protocol::GetNodule;
+
+    // A nodule with no handler hosts nothing, so it is ready as soon as it is enabled and the
+    // test needs no component bytes; its one declared settings datum is what is kept.
+    const SETTINGS: &str = "org.example.settingsprobe.settings";
+    let mut nodule = Nodule::default();
+    nodule.lexicons.push(
+        serde_json::from_value(json!({
+            "lexicon": 1,
+            "id": SETTINGS,
+            "defs": { "main": {
+                "type": "object",
+                "properties": { "thumbnails": { "type": "boolean" } }
+            } }
+        }))
+        .unwrap(),
+    );
+    nodule.settings = vec![SETTINGS.to_owned()];
+    let mut cartridge = Cartridge::new(
+        example_cartridge!("settingsprobe").parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+    );
+    cartridge.authority = Some("org.example.settingsprobe".into());
+    cartridge
+        .contributions
+        .push(Contribution::Nodule(NoduleContribution {
+            schema: Nodule::ID.into(),
+            description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
+            extra: Default::default(),
+        }));
+    let cartridge_id: CartridgeId = example_cartridge!("settingsprobe").parse().unwrap();
+
+    let directory = tempfile::tempdir().unwrap();
+    let secrets = secrets().await;
+    let sql_path = directory.path().join("cabinet.sqlite");
+    let boot = async || {
+        let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+        let config = config(
+            Arc::clone(&secrets),
+            runtime.database(&sql_path, &[], "_sqlite_rs_migrations"),
+            big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None)
+                .unwrap(),
+        );
+        BigNode::boot(config).await.unwrap()
+    };
+    let operator = |node: &BigNode| Authorization::identity(node.authority.root);
+    let record = async |node: &BigNode| {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                GetNodule {
+                    cartridge_id: cartridge_id.clone(),
+                },
+            )
+            .await
+            .unwrap()
+    };
+    let config_doc = async |node: &BigNode| {
+        node.nodules
+            .client
+            .call_with(
+                RequestContext::root(),
+                operator(node).metadata(),
+                ListCartridgeInstalls {},
+            )
+            .await
+            .unwrap()
+            .installs
+            .into_iter()
+            .find(|row| row.cartridge_id == cartridge_id)
+            .expect("the cartridge is installed")
+            .install
+            .config_doc
+    };
+
+    let (node, stop) = boot().await;
+    super::nodule_wasm::admit(&node, cartridge).await;
+    node.nodules
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            SetCartridgeEnabled {
+                cartridge_id: cartridge_id.clone(),
+                component: Component::Nodule,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(record(&node).await.readiness, Readiness::Ready);
+    let doc = config_doc(&node).await;
+    let settings_key = DatumKey::from_text(SETTINGS, "main").unwrap();
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: capability(
+                    &node,
+                    DocScope {
+                        write: BTreeSet::from([doc.clone()]),
+                        ..DocScope::default()
+                    },
+                )
+                .await,
+                command: None,
+                doc_id: doc.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(
+                    settings_key.clone(),
+                    json!({ "$type": SETTINGS, "thumbnails": false }),
+                )]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    shutdown(node, stop).await;
+
+    // The same directory boots the same node: the install, its enablement and the settings are
+    // in its documents, and the service reconciles them to Ready without anyone installing again.
+    let (node, stop) = boot().await;
+    assert_eq!(config_doc(&node).await, doc);
+    let record = record(&node).await;
+    assert_eq!(record.readiness, Readiness::Ready, "{record:?}");
+    assert_eq!(record.error, None);
+    let DatumRead::Accepted { value, .. } =
+        &super::blobs::all_datums(&node, &doc).await.datums[&settings_key]
+    else {
+        panic!("the settings survived the restart");
+    };
+    assert_eq!(value["thumbnails"], json!(false));
+    shutdown(node, stop).await;
 }
