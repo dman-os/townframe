@@ -1,0 +1,38 @@
+{
+  "id": "dayframe.lifecycle-fixture",
+  "package_version": 1,
+  "authority": "org.example.clay.test.context",
+  "entrypoints": {
+    "initialize": "townframe:dayframe/micro-lifecycle@0.4.0",
+    "presentation": "townframe:dayframe/presentation-events@0.4.0",
+    "installer": null
+  },
+  "publications": [
+    {
+      "name": "detail",
+      "kind": "presentation",
+      "contract": null
+    },
+    {
+      "name": "echo",
+      "kind": "call",
+      "contract": "org.example.clay.test.context.echo"
+    },
+    {
+      "name": "relay",
+      "kind": "call",
+      "contract": "org.example.clay.test.context.relay"
+    }
+  ],
+  "requires": [
+    {
+      "binding": "peer",
+      "contract": "org.example.clay.test.context.peer",
+      "necessity": "optional"
+    }
+  ],
+  "configuration_requests": [],
+  "collection_contracts": [],
+  "collection_requests": [],
+  "contributions": []
+}

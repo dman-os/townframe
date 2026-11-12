@@ -4,12 +4,24 @@ members = [
   "./src/am_utils_rs",
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
+  "./src/datum_core/",
+  "./src/big_cartridges_core/",
+  "./src/big_cartridges/",
+  "./src/big_dispatch_core/",
+  "./src/big_dispatch/",
+  "./src/big_nodule_core/",
+  "./src/big_nodule/",
+  "./src/big_nodule_wasm/",
+  "./src/big_ndk/",
+  "./src/test_nodule_handlers/",
+  "./src/big_ndk_testing/",
   "./src/big_blobs/",
   "./src/big_blobs_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
   "./src/big_node/",
+  "./src/day_cli",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -23,8 +35,11 @@ members = [
   "./src/plug_plabels_manifest",
   "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
+  "./src/method_core/",
+  "./src/method_lexicon/",
   "./src/service_core_rs/",
-  "./src/service_client_rs/",
+  "./src/service_client_core_rs/",
+  "./src/service_client_native_rs/",
   "./src/service_utils_rs/",
   "./src/sqlite_rs/",
   "./src/utils_rs",
@@ -41,7 +56,7 @@ members = [
   "./src/clay_host",
   "./src/clay_docs",
   "./src/clay_collection",
-  "./src/clay_micro_core",
+  "./src/clay_store",
   "./src/clay_dioxus",
   "./src/clay_mdk",
   "./src/clay_rt_wasmtime",
@@ -50,8 +65,13 @@ members = [
   "./src/clay_guest_session",
   "./src/micro_settings_manifest",
   "./src/micro_settings",
+  "./src/micro_toolbar_manifest",
+  "./src/micro_toolbar",
+  "./src/micro_layout_manifest",
+  "./src/micro_layout",
   "./src/micro_sample",
   "./src/micro_counter",
+  "./src/micro_collection_probe",
   "./src/micro_counter_manifest",
   "./src/ui",
   "./src/dayframe_composition",
@@ -91,8 +111,10 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
+method_core = { path = "./src/method_core", default-features = false }
 service_core_rs = { path = "./src/service_core_rs", default-features = false }
-service_client_rs = { path = "./src/service_client_rs", default-features = false }
+service_client_core_rs = { path = "./src/service_client_core_rs", default-features = false }
+service_client_native_rs = { path = "./src/service_client_native_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
@@ -106,13 +128,23 @@ wflow_wdk_native = { path = "./src/wflow_wdk_native", default-features = false }
 wash_plugin_sqlite = { path = "./src/wash_plugin_sqlite", default-features = false }
 wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false }
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
+datum_core = { path = "./src/datum_core", default-features = false }
+big_cartridges_core = { path = "./src/big_cartridges_core/", default-features = false }
+big_cartridges = { path = "./src/big_cartridges/" }
+big_dispatch_core = { path = "./src/big_dispatch_core/" }
+big_dispatch = { path = "./src/big_dispatch/" }
+big_nodule_core = { path = "./src/big_nodule_core/", default-features = false }
+big_nodule = { path = "./src/big_nodule/" }
+big_nodule_wasm = { path = "./src/big_nodule_wasm/" }
+big_ndk = { path = "./src/big_ndk/" }
+test_nodule_handlers = { path = "./src/test_nodule_handlers/" }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
 big_node = { path = "./src/big_node/" }
 clay_collection = { path = "./src/clay_collection" }
+clay_store = { path = "./src/clay_store" }
 clay_host = { path = "./src/clay_host" }
 clay_docs = { path = "./src/clay_docs" }
-clay_micro_core = { path = "./src/clay_micro_core" }
 clay_surface = { path = "./src/clay_surface" }
 clay_dioxus = { path = "./src/clay_dioxus" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
@@ -125,6 +157,9 @@ clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
 micro_settings_manifest = { path = "./src/micro_settings_manifest" }
 micro_settings = { path = "./src/micro_settings" }
+micro_toolbar_manifest = { path = "./src/micro_toolbar_manifest" }
+micro_toolbar = { path = "./src/micro_toolbar" }
+micro_layout_manifest = { path = "./src/micro_layout_manifest" }
 micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
@@ -166,6 +201,7 @@ surelock = "0.1"
 # encoding
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+ciborium = "0.2.2"
 postcard = { version = "1.1.3", features = ["alloc"] }
 serde_with = "3.16"
 multihash = "0.19.3"
@@ -225,6 +261,7 @@ sha2 = "0.10"
 axum = { version = "0.8.9", default-features = false }
 axum-extra = { version = "0.12.6", default-features = false }
 http = "1"
+hyper = { version = "1", default-features = false }
 utoipa = { version = "5.4.0", features = ["debug", "uuid", "time", "smallvec",  "preserve_order"] }
 # utoipa-swagger-ui = "9"
 tower = "0.5"
@@ -237,18 +274,18 @@ automerge = "0.11.0"
 autosurgeon = "0.13.0"
 # automerge-test = "0.9"
 
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "5f418129c5188750a34847d2624ace583c192c59" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
-keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
-beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
+keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
+beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "a84137d1f2bdd81cc6c883253a534cc3f0380b5e" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -274,21 +311,30 @@ uniffi = { version = "0.31.0" }
 
 #
 # wasm
-wasmtime = "48.0.7"
+wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 # `default-features = false` matches wash-runtime's own wasmtime-wasi pin so the
 # two deps do not disagree on the p1/p2 (wiggle) surface; `p3` is what links the
 # WASI 0.3 imports a wasm32-wasip3 component brings in.
 wasmtime-wasi = { version = "48.0.7", default-features = false, features = ["p3"] }
-wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794", default-features = false }
-wit-bindgen = "0.62.0"
+# Our fork's `townframe-changes`: upstream 1bcaebae plus the in-process
+# `Ingress::dispatch_request` the nodule Wasm executor (`big_nodule_wasm`) calls.
+wash-runtime = { git = "https://github.com/dman-os/wasmCloud", rev = "e7648c6e939c50ba1be8d9c138ef6da3305a672e", default-features = false }
+wasmtime-wasi-http = { version = "48.0.7", default-features = false }
+# `default-features = false` is load-bearing on wasm32-wasip3: wit-bindgen's `std` feature keeps the
+# async export task state in a libc `thread_local!`, which cannot be swapped per component-model
+# task. Without `std` it goes through the `wit_bindgen_0_62_0_{get,set}_task_context` hooks that
+# `clay_mdk` defines over context slot 0 (see `clay_mdk/lib.rs`). Each guest crate names the
+# features it needs; `x/check-dayframe.ts` fails if `std` comes back. The exact `=` pin is on
+# purpose: `clay_mdk` defines `wit_bindgen_0_62_0_*` symbols, so a bump must be a visible edit there.
+wit-bindgen = { version = "=0.62.0", default-features = false }
 wstd = "0.6.8"
 # The browser guest engine (ADR 018). Upstream pins `wasm-bindgen = "=0.2.126"`
 # exactly; this fork moves only that pin to the 0.2.127 the Dioxus fork needs,
 # because one lockfile serves every target. It brings its own
 # `wasmtime-environ` 50 and `wasmparser` 0.261 next to wasmtime 48's.
-wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
-wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
-wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "687e486c3bbf4c265f7edb5bc13e6c9c91ccee60" }
+wcmp = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
+wcmp-wasm-core-wasmi = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
+wcmp-wasm-core-web = { git = "https://github.com/dman-os/wasm-component-model-polyfill", rev = "7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55" }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "0.4.77"
 js-sys = "0.3.104"
@@ -326,6 +372,7 @@ ui = { path = "./src/ui" }
 #
 
 [patch.crates-io]
+wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
@@ -393,6 +440,27 @@ opt-level = 3
 [profile.dev.package."wgpu_context"]
 opt-level = 3
 [profile.dev.package."winit"]
+opt-level = 3
+
+# Wasmtime compiles every guest component with Cranelift on a cache miss. At the dev
+# opt-level a cold compile of one debug guest takes ~30s, so parallel tests that each
+# compile a fresh component blow past nextest's slow-timeout. Optimizing the compiler
+# itself keeps cold compiles to a few seconds without touching the code under test.
+[profile.dev.package."cranelift-codegen"]
+opt-level = 3
+[profile.dev.package."cranelift-assembler-x64"]
+opt-level = 3
+[profile.dev.package."cranelift-bforest"]
+opt-level = 3
+[profile.dev.package."cranelift-entity"]
+opt-level = 3
+[profile.dev.package."cranelift-frontend"]
+opt-level = 3
+[profile.dev.package."regalloc2"]
+opt-level = 3
+[profile.dev.package."wasmtime-internal-cranelift"]
+opt-level = 3
+[profile.dev.package."wasmparser"]
 opt-level = 3
 
 # dx serve uses this profile for the native desktop development binary.
@@ -497,6 +565,9 @@ clippy.clone_on_ref_ptr = "warn"
 clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
+# `methods!` / `service_method!` test the caller's `schemars` feature; a crate that declares
+# methods without publishing Lexicons has no such feature, and its absence is the answer.
+rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("schemars"))'] }
 # clippy.used_underscore_binding = "warn"
 
 # [patch."https://github.com/dman-os/iroh-blobs"]

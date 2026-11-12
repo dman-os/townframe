@@ -190,23 +190,29 @@ impl State {
         let rows = sqlite::load_local(&self.sql).await.map_err(storage)?;
         let mut present = None;
         let mut originated = None;
-        let mut registry = None;
+        let mut known_drawers = None;
+        let mut config = None;
         for row in rows {
             let id = id_column(&row.drawer_id);
             match row.role.as_str() {
                 "present" => present = Some(id),
                 "originated" => originated = Some(id),
-                "registry" => registry = Some(id),
+                // The stored role keeps its original `registry` spelling (SQL CHECK constraint).
+                "registry" => known_drawers = Some(id),
+                "config" => config = Some(id),
                 role => unreachable!("the role column is constrained: {role}"),
             }
         }
-        match (present, originated, registry) {
-            (Some(present), Some(originated), Some(registry)) => Ok(Some(LocalDrawers {
-                present_id: present,
-                originated_id: originated,
-                registry_id: registry,
-            })),
-            (None, None, None) => Ok(None),
+        match (present, originated, known_drawers, config) {
+            (Some(present), Some(originated), Some(known_drawers), Some(config)) => {
+                Ok(Some(LocalDrawers {
+                    present_id: present,
+                    originated_id: originated,
+                    known_drawers_id: known_drawers,
+                    config_id: config,
+                }))
+            }
+            (None, None, None, None) => Ok(None),
             _ => unreachable!("the local drawers are written together"),
         }
     }
@@ -216,7 +222,9 @@ impl State {
         for (role, id) in [
             ("present", &local.present_id),
             ("originated", &local.originated_id),
-            ("registry", &local.registry_id),
+            // Stored role name; see `load_local`.
+            ("registry", &local.known_drawers_id),
+            ("config", &local.config_id),
         ] {
             sqlite::set_local(&transaction, role.to_owned(), id.to_string())
                 .await

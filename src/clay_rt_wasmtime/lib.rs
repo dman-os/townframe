@@ -5,15 +5,24 @@
 //! `dispatch`, the adapter immediately withdraws the surface and closes the micro's [`Instance`],
 //! which revokes its [`clay_host::ComponentRef`] and any host collections bound to that instance.
 
+mod collections;
 mod documents;
 
-use clay_docs::DocumentRef;
 use clay_guest_session::DocumentSession;
+pub use clay_guest_session::InitialContext;
+pub use clay_guest_session::InitializationFailure;
 use clay_guest_session::Limits as DocumentLimits;
 use clay_guest_session::Placement;
 use clay_guest_session::PresentationHost;
 use clay_guest_session::Surface;
 use clay_guest_session::Work;
+use clay_guest_session::capabilities::CallError;
+use clay_guest_session::capabilities::CapabilityFailure;
+use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::capabilities::GuestCall;
+use clay_guest_session::capabilities::InFlightCall;
+use clay_guest_session::capabilities::InFlightCalls;
+use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
@@ -26,6 +35,7 @@ use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
+use tokio::sync::oneshot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ActivationError {
@@ -33,6 +43,9 @@ pub enum ActivationError {
     Access(#[from] clay_host::AccessError),
     #[error("Wasm initialization failed: {0}")]
     Initialization(String),
+    /// The guest declined to initialize under this configuration (no trap).
+    #[error("guest refused initialization: {0}")]
+    Refused(#[from] InitializationFailure),
 }
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -43,29 +56,148 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Wake;
 use std::task::Waker;
 use tokio::sync::mpsc;
 use wasmtime_wasi::WasiCtx;
 use wasmtime_wasi::WasiCtxView;
 use wasmtime_wasi::WasiView;
 
+/// Marks a presentation call that suspended on its first poll: a guest contract violation
+/// (the sync exports promise a decision before the listener closure returns), handled at
+/// every call site exactly like a trap — withdraw the surface, close the instance.
+#[derive(Debug, thiserror::Error)]
+#[error("guest presentation call suspended on its first poll")]
+pub(crate) struct Suspended;
+
+/// Test probe: how many presentation calls hit [`Suspended`] (i.e. returned `Pending`)
+/// rather than completing or failing on the first poll. The W2 spike asserts a guest that
+/// blocks inside `dispatch` fails with the engine's `CannotBlock` (`Ready(Err)`) and never
+/// increments this counter.
+#[cfg(test)]
+pub(crate) fn suspended_count() -> u64 {
+    SUSPENDED.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+static SUSPENDED: AtomicU64 = AtomicU64::new(0);
+
 /// Drive a presentation or document call to completion on its first poll. The WIT world has no
 /// async export (ADR 018 §3); WASI p3 lifts the *imports* through component-model async, which
-/// forces async `call_*` bindings, but a guest call that returns `Pending` has suspended where
-/// the contract has no suspension point — that is a broken invariant, not a condition to wait out.
-pub(crate) fn first_poll<F: Future>(call: F) -> F::Output {
-    match std::pin::pin!(call).poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("guest presentation call suspended on its first poll"),
+/// forces async `call_*` bindings. A conforming guest that blocks inside a sync-typed call fails
+/// with the spec's `CannotBlock` cause on the first poll (`Ready(Err)`); a guest that actually
+/// suspends returns `Pending` and is treated as [`Suspended`], i.e. as a trap. Either way the
+/// caller withdraws the surface and closes the instance — never a host panic.
+pub(crate) fn first_poll<F: Future>(call: F, waker: &Waker) -> Result<F::Output, Suspended> {
+    match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
+        Poll::Ready(output) => Ok(output),
+        Poll::Pending => {
+            #[cfg(test)]
+            SUSPENDED.fetch_add(1, Ordering::Relaxed);
+            Err(Suspended)
+        }
     }
 }
 
-/// Wasmtime reaches this crate only through wash-runtime's re-export, so the
+struct IncarnationWake {
+    notified: AtomicBool,
+    driver: futures::task::AtomicWaker,
+}
+
+struct IncarnationCallWake {
+    call: Waker,
+    incarnation: Arc<IncarnationWake>,
+}
+
+impl Wake for IncarnationCallWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.call.wake_by_ref();
+        self.incarnation.wake_by_ref();
+    }
+}
+
+impl IncarnationWake {
+    fn new() -> Self {
+        Self {
+            notified: AtomicBool::new(true),
+            driver: futures::task::AtomicWaker::new(),
+        }
+    }
+
+    async fn wait(&self) {
+        std::future::poll_fn(|context| {
+            self.driver.register(context.waker());
+            if self.notified.swap(false, Ordering::AcqRel) {
+                self.driver.register(context.waker());
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    /// A waker that wakes `call` and this incarnation's driver.
+    fn waker_for(self: &Arc<Self>, call: &Waker) -> Waker {
+        Waker::from(Arc::new(IncarnationCallWake {
+            call: call.clone(),
+            incarnation: Arc::clone(self),
+        }))
+    }
+
+    /// Drive a host future a guest import is awaiting. Its completion also wakes the
+    /// incarnation's driver, so the store task that awaits it is polled again.
+    async fn drive<F: Future>(self: &Arc<Self>, call: F) -> F::Output {
+        let mut call = std::pin::pin!(call);
+        std::future::poll_fn(|context| {
+            let result = call
+                .as_mut()
+                .poll(&mut Context::from_waker(&self.waker_for(context.waker())));
+            if result.is_ready() {
+                self.wake_by_ref();
+            }
+            result
+        })
+        .await
+    }
+
+    /// Run one bounded burst of the store's event loop. Whatever host future a store task is
+    /// left awaiting keeps this waker, so its wake-up (a clock, a stream, a nested call) sets
+    /// the incarnation's `notified` flag and the driver ticks again. Unlike [`Self::drive`] a
+    /// finished burst does not wake the driver: it ends because nothing is runnable.
+    async fn drive_burst<F: Future>(self: &Arc<Self>, burst: F) -> F::Output {
+        let mut burst = std::pin::pin!(burst);
+        std::future::poll_fn(|context| {
+            burst
+                .as_mut()
+                .poll(&mut Context::from_waker(&self.waker_for(context.waker())))
+        })
+        .await
+    }
+}
+
+impl Wake for IncarnationWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notified.store(true, Ordering::Release);
+        self.driver.wake();
+    }
+}
+
 /// host and the runtime can never resolve to two wasmtime copies. The
 /// `wasmtime_crate` option below points the generated bindings at the same
 /// path instead of a bare `wasmtime::` dependency.
 pub(crate) use wash_runtime::wasmtime;
 
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use wasmtime::Config;
 use wasmtime::Engine;
 use wasmtime::Store;
@@ -75,6 +207,7 @@ use wasmtime::component::Component;
 use wasmtime::component::HasSelf;
 use wasmtime::component::Linker;
 use wasmtime::component::Resource;
+use wasmtime::component::ResourceAny;
 use wasmtime::component::ResourceTable;
 
 mod bindings {
@@ -91,6 +224,13 @@ mod bindings {
             "townframe:dayframe/documents.document-access": super::documents::WasmDocumentAccess,
             "townframe:dayframe/documents.document-watch": super::documents::WasmDocumentWatch,
             "townframe:dayframe/documents.operation": super::documents::WasmOperation,
+            "townframe:dayframe/collections.collection-reader": clay_guest_session::collections::CollectionReader,
+            "townframe:dayframe/collections.projection-lease": clay_guest_session::collections::ProjectionReader,
+            "townframe:dayframe/collection-registration.registration-writer": clay_guest_session::collections::RegistrationWriter,
+            "townframe:dayframe/capability-bank.capability-ref": clay_guest_session::capabilities::CapabilityRef,
+            "townframe:dayframe/capability-bank.call-binding": clay_guest_session::capabilities::CallBinding,
+            "townframe:dayframe/capability-bank.published-capability": clay_guest_session::capabilities::PublishedCapability,
+            "townframe:dayframe/capability-bank.presentation-component": clay_guest_session::capabilities::PresentationComponent,
         },
     });
 }
@@ -101,24 +241,72 @@ use bindings::townframe::dayframe::presentation::{self as wit_presentation};
 
 pub struct WasmComponentRef(ComponentRef);
 
-struct WasmStoreState {
-    wasi: WasiCtx,
-    table: ResourceTable,
-    documents: DocumentSession,
-    presentation: PresentationHost,
-    limits: StoreLimits,
+/// The store task of one [`GuestCall`], see [`WasmIncarnation::start_call`].
+struct GuestCallTask {
+    lifecycle: bindings::exports::townframe::dayframe::micro_lifecycle::Guest,
+    publication: String,
+    request: Vec<u8>,
+    reply: oneshot::Sender<Result<Vec<u8>, CallError>>,
+    /// Counts the task as in flight until it ends or the store drops it.
+    _in_flight: InFlightCall,
 }
 
-impl WasiView for WasmStoreState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
+impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
+    async fn run(
+        self,
+        accessor: &wasmtime::component::Accessor<WasmStoreState>,
+    ) -> wasmtime::Result<()> {
+        let Self {
+            lifecycle,
+            publication,
+            request,
+            reply,
+            _in_flight,
+        } = self;
+        match lifecycle.call_call(accessor, publication, request).await {
+            Ok(handled) => {
+                // A caller that dropped its call meanwhile just loses the reply: the host
+                // cannot cancel a guest task, so the handler ran to completion regardless.
+                drop(reply.send(handled.map_err(CallError::Provider)));
+                Ok(())
+            }
+            Err(trap) => {
+                drop(reply.send(Err(CallError::Provider(format!(
+                    "guest trapped during call: {trap:#}"
+                )))));
+                Err(trap)
+            }
         }
     }
 }
 
+struct WasmStoreState {
+    wasi: WasiCtx,
+    table: ResourceTable,
+    documents: DocumentSession,
+    collections: clay_guest_session::collections::CollectionSession,
+    capabilities: clay_guest_session::capabilities::CapabilitySession,
+    collection_wake: Option<Arc<IncarnationWake>>,
+    /// Where this incarnation's call publications queue their requests (see [`GuestCall`]).
+    calls: mpsc::UnboundedSender<GuestCall>,
+    presentation: PresentationHost,
+    limits: StoreLimits,
+}
+
+#[cfg(test)]
 impl WasmStoreState {
+    /// A store state for tests that drive host imports directly, with nothing to serve its
+    /// call publications: the call queue's receiving end is dropped.
+    fn detached(
+        host: Host,
+        instance: Instance,
+        limits: DocumentLimits,
+    ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
+        Self::new(host, instance, limits, mpsc::unbounded_channel().0)
+    }
+
+    /// Push component handles the way a capability redemption does (and under its limit), for
+    /// tests that drive the presentation imports with handles of their own.
     fn grant_components(
         &mut self,
         components: &[ComponentRef],
@@ -134,14 +322,36 @@ impl WasmStoreState {
             })
             .collect())
     }
+}
 
+impl WasiView for WasmStoreState {
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
+    }
+}
+
+impl WasmStoreState {
     fn new(
         host: Host,
         instance: Instance,
         limits: DocumentLimits,
+        calls: mpsc::UnboundedSender<GuestCall>,
     ) -> Result<(Self, mpsc::Receiver<Work>), clay_host::AccessError> {
         let (documents, incoming) = DocumentSession::new(host.clone(), instance.clone(), limits)?;
-        let presentation = PresentationHost::new(host, instance);
+        let presentation = PresentationHost::new(host.clone(), instance.clone());
+        let collections = clay_guest_session::collections::CollectionSession::new(
+            host.clone(),
+            instance.clone(),
+            clay_guest_session::collections::CollectionLimits::default(),
+        );
+        let capabilities = clay_guest_session::capabilities::CapabilitySession::new(
+            host,
+            instance,
+            clay_guest_session::capabilities::CapabilityLimits::default(),
+        );
         let mut wasi = WasiCtx::builder();
         wasi.inherit_stderr();
         Ok((
@@ -149,6 +359,10 @@ impl WasmStoreState {
                 wasi: wasi.build(),
                 table: ResourceTable::new(),
                 documents,
+                collections,
+                capabilities,
+                collection_wake: None,
+                calls,
                 presentation,
                 limits: StoreLimitsBuilder::new()
                     .memory_size(64 * 1024 * 1024)
@@ -291,10 +505,131 @@ pub struct WasmPackage {
     linker: Arc<Linker<WasmStoreState>>,
 }
 
+/// The process-wide engine. Wasmtime's model is one engine per process: it owns the code and
+/// type registries, the allocator, and every policy that has to be uniform (memory reservation,
+/// epoch interruption, compilation cache). One engine per package (`F10`) leaves nowhere to put
+/// those, so packages share this.
+pub fn engine() -> Result<Engine, String> {
+    static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let mut config = Config::new();
+            config.consume_fuel(true);
+            // WASI p3 lifts stream/future types through the component-model async builtins, and
+            // `p3::add_to_linker` registers at least one `async func` import
+            // (`monotonic-clock.wait-for`), so the store requires `*_async` entrypoints: async
+            // export bindings + `instantiate_async`.
+            config.wasm_component_model_async(true);
+            // Stores cap linear memory at 64 MiB (`WasmStoreState::new`). Wasmtime otherwise
+            // reserves 4 GiB of address space per memory, which caps a 39-bit user address space
+            // at tens of instances; reserving the store limit keeps static memories (no bounds
+            // checks) while making the per-instance cost 64 MiB of untouched VA.
+            config.memory_reservation(RESERVED_MEMORY_BYTES);
+            config.memory_guard_size(MEMORY_GUARD_BYTES);
+            Engine::new(&config).map_err(|error| error.to_string())
+        })
+        .clone()
+}
+
+/// Linear-memory reservation per instance, matching the store limit in [`WasmStoreState::new`].
+const RESERVED_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+/// Wasmtime requires a guard size that is a multiple of the host page size; one page catches the
+/// overflow a guest would otherwise write into its neighbour.
+const MEMORY_GUARD_BYTES: u64 = 64 * 1024;
+
+/// The linker is identical for every package on the shared engine (WASI p3 plus the micro
+/// client), so it is built once rather than rebuilt per micro.
+fn linker(engine: &Engine) -> Result<Arc<Linker<WasmStoreState>>, String> {
+    static LINKER: OnceLock<Result<Arc<Linker<WasmStoreState>>, String>> = OnceLock::new();
+    LINKER
+        .get_or_init(|| {
+            let mut linker = Linker::new(engine);
+            wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|error| error.to_string())?;
+            MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
+                .map_err(|error| error.to_string())?;
+            Ok(Arc::new(linker))
+        })
+        .clone()
+}
+
+/// Compile a component, reusing a precompiled artifact when one exists.
+///
+/// A cold compile of a Dioxus-sized micro is ~160 ms, and demand-driven activation now puts that
+/// on the user's first click. The cache is keyed by the artifact bytes plus the engine's own
+/// compatibility hash, so a wasmtime upgrade or a config change invalidates it instead of loading
+/// incompatible machine code. A missing or unusable cache entry is repaired by compiling.
+fn compile_component(engine: &Engine, bytes: &[u8]) -> Result<Component, String> {
+    let Some(path) = cache_path(engine, bytes) else {
+        return Component::new(engine, bytes).map_err(|error| error.to_string());
+    };
+    if path.exists() {
+        // SAFETY: this file was written by this module and is only ever read afterwards; nothing
+        // may modify it while it is mapped. A corrupt or incompatible file fails to load and is
+        // recompiled rather than trusted.
+        if let Ok(component) = unsafe { Component::deserialize_file(engine, &path) } {
+            return Ok(component);
+        }
+    }
+    let compiled = engine
+        .precompile_component(bytes)
+        .map_err(|error| error.to_string())?;
+    if let Some(directory) = path.parent() {
+        std::fs::create_dir_all(directory).map_err(|error| {
+            format!(
+                "cannot create component cache {}: {error}",
+                directory.display()
+            )
+        })?;
+    }
+    // Write-then-rename so a concurrent reader never maps a partial artifact.
+    static TEMP: AtomicU64 = AtomicU64::new(0);
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&temporary, &compiled).map_err(|error| {
+        format!(
+            "cannot write component cache {}: {error}",
+            temporary.display()
+        )
+    })?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("cannot publish component cache {}: {error}", path.display()))?;
+    // Load the artifact just compiled instead of compiling `bytes` a second time: a miss costs
+    // one compile, not two.
+    // SAFETY: `compiled` is the output of `precompile_component` on this same engine, in this
+    // call; it is not untrusted input.
+    unsafe { Component::deserialize(engine, &compiled) }.map_err(|error| error.to_string())
+}
+
+/// `$DAYFRAME_COMPONENT_CACHE`, else the XDG/home cache, keyed by content and engine
+/// compatibility. `None` means the process has no cache location at all (no `HOME`, no
+/// `XDG_CACHE_HOME`); compilation then happens in memory only.
+fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
+    let directory = match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+        Some(directory) => PathBuf::from(directory),
+        None => {
+            let base = std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                })?;
+            base.join("dayframe").join("components")
+        }
+    };
+    let mut key = blake3::Hasher::new();
+    key.update(bytes);
+    let mut compatibility = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&engine.precompile_compatibility_hash(), &mut compatibility);
+    key.update(&std::hash::Hasher::finish(&compatibility).to_le_bytes());
+    Some(directory.join(format!("{}.cwasm", key.finalize().to_hex())))
+}
+
 impl WasmPackage {
     /// Load a component artifact prepared by `x/check-dayframe.ts`, named by the environment
-    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `slots` →
-    /// `DAYFRAME_SLOTS_COMPONENT`). Test and fixture code only: compositions that ship a package
+    /// variable `DAYFRAME_<name>_COMPONENT` (uppercased, `-` → `_`; e.g. `sleeper` →
+    /// `DAYFRAME_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
         let variable = format!(
@@ -319,22 +654,13 @@ impl WasmPackage {
     }
 
     pub async fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
-        let mut config = Config::new();
-        config.consume_fuel(true);
-        // WASI p3 lifts stream/future types through the component-model async builtins, and
-        // `p3::add_to_linker` registers at least one `async func` import (`monotonic-clock.wait-for`),
-        // so the store requires `*_async` entrypoints: async export bindings + `instantiate_async`.
-        config.wasm_component_model_async(true);
-        let engine = Engine::new(&config).map_err(|error| error.to_string())?;
-        let component = Component::new(&engine, bytes).map_err(|err| err.to_string())?;
-        let mut linker = Linker::new(&engine);
-        wasmtime_wasi::p3::add_to_linker(&mut linker).map_err(|err| err.to_string())?;
-        MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
-            .map_err(|err| err.to_string())?;
+        let engine = engine()?;
+        let component = compile_component(&engine, bytes.as_ref())?;
+        let linker = linker(&engine)?;
         Ok(Self {
             engine,
             component,
-            linker: Arc::new(linker),
+            linker,
         })
     }
 
@@ -342,9 +668,20 @@ impl WasmPackage {
         &self,
         host: &Host,
         instance: Instance,
-    ) -> Result<(WasmIncarnation, mpsc::Receiver<Work>), ActivationError> {
-        let (state, incoming) =
-            WasmStoreState::new(host.clone(), instance, DocumentLimits::default())?;
+    ) -> Result<
+        (
+            WasmIncarnation,
+            mpsc::Receiver<Work>,
+            mpsc::UnboundedReceiver<GuestCall>,
+        ),
+        ActivationError,
+    > {
+        let (calls, incoming_calls) = mpsc::unbounded_channel();
+        let (mut state, incoming) =
+            WasmStoreState::new(host.clone(), instance, DocumentLimits::default(), calls)?;
+        let wake = Arc::new(IncarnationWake::new());
+        let waker = Waker::from(Arc::clone(&wake));
+        state.collection_wake = Some(Arc::clone(&wake));
         let mut store = Store::new(&self.engine, state);
         store.limiter(|state| &mut state.limits);
         let fuel_per_call = Arc::new(AtomicU64::new(WasmIncarnation::FUEL_PER_CALL));
@@ -361,8 +698,14 @@ impl WasmPackage {
                 store,
                 client,
                 fuel_per_call,
+                wake,
+                waker,
+                root: None,
+                publications: BTreeMap::new(),
+                calls_in_flight: InFlightCalls::default(),
             },
             incoming,
+            incoming_calls,
         ))
     }
 }
@@ -371,6 +714,16 @@ struct WasmIncarnation {
     store: Store<WasmStoreState>,
     client: MicroClient,
     fuel_per_call: Arc<AtomicU64>,
+    wake: Arc<IncarnationWake>,
+    waker: Waker,
+    /// The guest's `instance-root`, held from a successful `initialize` until [`Self::close`].
+    root: Option<ResourceAny>,
+    /// Publication leases of the publications `initialize` returned, by name. Dropping one
+    /// revokes the publication and every consumer proxy derived from it.
+    publications: BTreeMap<String, PublishedCapability>,
+    /// How many [`GuestCallTask`]s are in the store: calls whose handler has not returned,
+    /// including those whose caller already gave up.
+    calls_in_flight: InFlightCalls,
 }
 
 impl WasmIncarnation {
@@ -384,6 +737,69 @@ impl WasmIncarnation {
             .set_fuel(self.fuel_per_call.load(Ordering::Relaxed))
             .unwrap();
     }
+
+    async fn tick(&mut self) -> wasmtime::Result<()> {
+        self.refuel();
+        self.wake
+            .drive_burst(self.store.drive_until_stalled())
+            .await
+    }
+
+    /// Start the guest's exported `call` for one queued request as a task in this incarnation's
+    /// store and return without waiting for it. Any number of calls may be in flight: every
+    /// call is its own component-model task, and the guest keeps each task's state apart (see
+    /// `clay_mdk`'s task hook). The task advances only while the store's event loop is driven,
+    /// which [`Self::tick`] does in bounded bursts exactly as for other pending async work, so
+    /// a call suspended on something external (a nested call into another micro, or into this
+    /// one) never keeps the incarnation lock and the synchronous `mount`/`dispatch` entries
+    /// interleave freely. The reply is sent from the task when the handler returns; dropping
+    /// the store first (a trap, a forced close) drops the task and with it the reply, which
+    /// the caller reads as `Revoked`.
+    fn start_call(&mut self, call: GuestCall) -> wasmtime::Result<()> {
+        let GuestCall {
+            publication,
+            request,
+            reply,
+        } = call;
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle().clone();
+        self.store.spawn(GuestCallTask {
+            lifecycle,
+            publication,
+            request,
+            reply,
+            _in_flight: self.calls_in_flight.start(),
+        })?;
+        Ok(())
+    }
+
+    /// The guest half of an orderly close (ADR 030 §6): run `instance-root.close` while the
+    /// incarnation's host authority and dependencies are still live, then drop the root (its
+    /// guest destructor releases whatever the root held) and only then revoke the publications.
+    /// The store itself stays up so a caller can audit what the guest still holds.
+    async fn close(&mut self) -> Result<(), String> {
+        let root = self
+            .root
+            .take()
+            .expect("only an initialized incarnation is closed");
+        self.refuel();
+        let lifecycle = self.client.townframe_dayframe_micro_lifecycle();
+        let closed = self
+            .store
+            .run_concurrent(async |accessor| {
+                lifecycle.instance_root().call_close(accessor, root).await
+            })
+            .await
+            .and_then(|trapped| trapped)
+            .map_err(|trap| format!("guest trapped while closing: {trap:#}"));
+        self.refuel();
+        let dropped = root
+            .resource_drop_async(&mut self.store)
+            .await
+            .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
+        self.publications.clear();
+        closed??;
+        dropped
+    }
 }
 
 #[derive(Clone)]
@@ -391,30 +807,103 @@ pub struct WasmRuntime {
     host: Host,
     instance: Instance,
     incarnation: Arc<Mutex<Option<WasmIncarnation>>>,
+    /// What each returned publication publishes, by name. The leases themselves live in the
+    /// incarnation, so a close revokes them.
+    publications: Arc<BTreeMap<String, CapabilityPublication>>,
     revoked: Arc<AtomicBool>,
     fuel: Arc<AtomicU64>,
 }
 
 impl WasmRuntime {
-    pub async fn activate(
+    /// Instantiate `package` for `instance` and run its `micro-lifecycle.initialize` with
+    /// `context`. The returned driver future delivers document events and drives the guest's
+    /// background tasks until the incarnation ends; the caller owns it.
+    pub async fn initialize(
         host: &Host,
         instance: Instance,
         package: &WasmPackage,
-        configs: BTreeMap<String, DocumentRef>,
+        context: InitialContext,
     ) -> Result<(Self, impl std::future::Future<Output = ()> + 'static), ActivationError> {
-        let (mut active, incoming) = package.instantiate(host, instance.clone()).await?;
-        documents::activate(&mut active, configs).await?;
+        let (mut active, incoming, mut calls) = package.instantiate(host, instance.clone()).await?;
+        let (root, leases) = documents::initialize(&mut active, context).await?;
+        active.root = Some(root);
+        let publications = leases
+            .iter()
+            .map(|(name, lease)| (name.clone(), lease.publication()))
+            .collect();
+        active.publications = leases;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
         let fuel = active.fuel_per_call.clone();
         let incarnation = Arc::new(Mutex::new(Some(active)));
         let driver_incarnation = incarnation.clone();
-        let driver = clay_guest_session::drive(
+        let pump_incarnation = incarnation.clone();
+        let pump_host = host.clone();
+        let pump_instance = instance.clone();
+        let documents = clay_guest_session::drive(
             host.clone(),
             instance.clone(),
             incoming,
             pending_limit,
             move |work, delivery| documents::deliver(&driver_incarnation, work, delivery),
         );
+        // Stall-driving must retain exclusive store access across its await so synchronous
+        // mount/dispatch entry cannot borrow the same incarnation while the engine is active.
+        #[expect(
+            clippy::await_holding_lock,
+            reason = "store access is serialized across stall-driving"
+        )]
+        let driver = async move {
+            tokio::pin!(documents);
+            loop {
+                let wake = {
+                    let guard = pump_incarnation.lock().unwrap();
+                    let Some(active) = guard.as_ref() else {
+                        return;
+                    };
+                    active.wake.clone()
+                };
+                tokio::select! {
+                    () = &mut documents => return,
+                    Some(call) = calls.recv() => {
+                        // Start the handler as a task in the provider's own store and go back
+                        // to the loop: the wake arm drives it in bounded bursts, so this
+                        // incarnation's sync entries and other calls are never held up
+                        // behind a handler that is suspended on something external.
+                        let mut guard = pump_incarnation.lock().unwrap();
+                        let Some(active) = guard.as_mut() else {
+                            // Closing or closed: the guest half ended before this call began.
+                            drop(call.reply.send(Err(CapabilityFailure::Revoked.into())));
+                            return;
+                        };
+                        // Spawning only fails when the store lacks concurrency support,
+                        // which the engine configuration rules out.
+                        active
+                            .start_call(call)
+                            .expect("store spawns the call task");
+                        active.wake.wake_by_ref();
+                    }
+                    () = wake.wait() => {
+                        let trapped = {
+                            let mut guard = pump_incarnation.lock().unwrap();
+                            let Some(active) = guard.as_mut() else {
+                                return;
+                            };
+                            let trapped = active.tick().await.is_err();
+                            if trapped {
+                                guard.take();
+                            }
+                            trapped
+                        };
+                        if trapped {
+                            if pump_host.check(&pump_instance).is_ok() {
+                                pump_host.close_instance(&pump_instance).unwrap();
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        };
         let revoked = Arc::new(AtomicBool::new(false));
         let cleanup_revoked = revoked.clone();
         host.own(
@@ -428,6 +917,7 @@ impl WasmRuntime {
                 host: host.clone(),
                 instance,
                 incarnation,
+                publications: Arc::new(publications),
                 revoked,
                 fuel,
             },
@@ -435,26 +925,37 @@ impl WasmRuntime {
         ))
     }
 
+    /// The publications this incarnation's `initialize` returned, by name. They become
+    /// reachable to other micros only once the host commits the initialization.
+    pub fn publications(&self) -> BTreeMap<String, CapabilityPublication> {
+        (*self.publications).clone()
+    }
+
+    /// Close the incarnation's guest half (ADR 030 §6 step 2). The incarnation stops taking
+    /// presentation and document calls, its `instance-root.close` runs to completion, the
+    /// root and the publication leases are released, and the store is dropped. The caller has
+    /// already withdrawn outward visibility and tears the host incarnation down afterwards.
+    pub async fn close(&self) -> Result<(), String> {
+        let mut active = self
+            .incarnation
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| "the incarnation already ended".to_owned())?;
+        active.close().await
+    }
+
+    /// Mount the presentation this incarnation published as `publication`.
     pub fn mount(
         &self,
+        publication: &str,
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
-        components: &[ComponentRef],
     ) -> Result<SurfaceSession, PresentationError> {
-        for &reference in components {
-            self.host
-                .check_component(reference)
-                .map_err(|error| match error {
-                    clay_host::AccessError::Revoked => PresentationError::Revoked,
-                    clay_host::AccessError::Denied => PresentationError::InvalidBatch(
-                        "component grant belongs to another host".into(),
-                    ),
-                })?;
-        }
         let instance_for_surface = self.instance.clone();
         let incarnation_for_surface = self.incarnation.clone();
         let surface_rep = self.mount_guest_surface(
+            publication,
             &writer,
-            components,
             &instance_for_surface,
             &incarnation_for_surface,
         )?;
@@ -485,7 +986,7 @@ impl WasmRuntime {
                         return EventResponse::default();
                     };
                     active.refuel();
-                    let outcome = first_poll(
+                    match first_poll(
                         active
                             .client
                             .townframe_dayframe_presentation_events()
@@ -494,11 +995,21 @@ impl WasmRuntime {
                                 Resource::new_borrow(surface_rep),
                                 &wit_event,
                             ),
-                    );
-                    if outcome.is_err() {
-                        guard.take();
+                        &active.waker,
+                    ) {
+                        Ok(outcome) => {
+                            if outcome.is_err() {
+                                guard.take();
+                            }
+                            outcome
+                        }
+                        Err(Suspended) => {
+                            guard.take();
+                            Err(wasmtime::Error::msg(
+                                "guest presentation call suspended on its first poll",
+                            ))
+                        }
                     }
-                    outcome
                 };
                 match result {
                     Ok(response) => EventResponse {
@@ -517,12 +1028,18 @@ impl WasmRuntime {
                 let trapped = if let Some(active) = guard.as_mut() {
                     let outcome = if drop_host.check(&drop_instance).is_ok() {
                         active.refuel();
-                        first_poll(
+                        match first_poll(
                             active
                                 .client
                                 .townframe_dayframe_presentation_events()
                                 .call_unmount(&mut active.store, Resource::new_borrow(surface_rep)),
-                        )
+                            &active.waker,
+                        ) {
+                            Ok(outcome) => outcome,
+                            Err(Suspended) => Err(wasmtime::Error::msg(
+                                "guest presentation call suspended on its first poll",
+                            )),
+                        }
                     } else {
                         Ok(())
                     };
@@ -551,8 +1068,8 @@ impl WasmRuntime {
 
     fn mount_guest_surface(
         &self,
+        publication: &str,
         writer: &Arc<dyn SurfaceSink<ComponentRef>>,
-        components: &[ComponentRef],
         instance: &Instance,
         incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
     ) -> Result<u32, PresentationError> {
@@ -564,7 +1081,6 @@ impl WasmRuntime {
         let Some(active) = guard.as_mut() else {
             return Err(PresentationError::Revoked);
         };
-        let components = active.store.data_mut().grant_components(components)?;
         let placement = active
             .store
             .data_mut()
@@ -573,16 +1089,22 @@ impl WasmRuntime {
             .map_err(|_| PresentationError::Revoked)?;
         let placement_rep = placement.rep();
         active.refuel();
-        let mount_result = first_poll(
+        let mount_result = match first_poll(
             active
                 .client
                 .townframe_dayframe_presentation_events()
                 .call_mount(
                     &mut active.store,
+                    publication,
                     Resource::new_borrow(placement_rep),
-                    &components,
                 ),
-        );
+            &active.waker,
+        ) {
+            Ok(outcome) => outcome,
+            Err(Suspended) => Err(wasmtime::Error::msg(
+                "guest presentation call suspended on its first poll",
+            )),
+        };
         let placement = active
             .store
             .data_mut()
@@ -645,5 +1167,7 @@ impl WasmRuntime {
     }
 }
 
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod tests;

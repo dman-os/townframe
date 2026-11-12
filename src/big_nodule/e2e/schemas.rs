@@ -1,0 +1,322 @@
+//! The schema registry (ADR 028 §4–§5, plan item P7): an enabled nodule's datum records are
+//! registered live in the node's schema repo and retired with it, data requests resolve against
+//! the cartridge holding the datum (with `minRevision` checked), and copies of a Lexicon that cannot
+//! be reconciled are refused. Against the fake executor, with no sleeps.
+
+use super::Node;
+use super::init::Probe;
+use super::init::init_cartridge;
+use super::init::node_hosting;
+use super::init::with_requests;
+use big_cabinet_core::datum::Codec;
+use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::Dmeta;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Request;
+use big_dispatch_core::Readiness;
+use big_nodule_core::providers::LockedProvider;
+use big_nodule_core::providers::RequestStatus;
+use big_nodule_core::providers::Unresolved;
+use serde_json::Value;
+use serde_json::json;
+
+const ALPHA: &str = example_cartridge!("alpha");
+const BETA: &str = example_cartridge!("beta");
+const GAMMA: &str = example_cartridge!("gamma");
+const NOTE: &str = "org.example.beta.note";
+
+/// A record Lexicon for `nsid` with one string property `field`, at `revision` when given.
+fn record(nsid: &str, revision: Option<u32>, field: &str) -> Value {
+    let mut lexicon = json!({
+        "lexicon": 1,
+        "id": nsid,
+        "defs": { "main": {
+            "type": "record",
+            "key": "tid",
+            "record": { "type": "object", "properties": { field: { "type": "string" } } },
+        } },
+    });
+    if let Some(revision) = revision {
+        lexicon["revision"] = revision.into();
+    }
+    lexicon
+}
+
+/// `cartridge` carrying one more Lexicon file.
+fn with_lexicon(mut cartridge: Cartridge, lexicon: Value) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
+    };
+    nodule
+        .description
+        .entry("lexicons".into())
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .unwrap()
+        .push(lexicon);
+    cartridge
+}
+
+/// Beta, holding the `note` record at `revision`.
+fn beta(version: &str, revision: u32) -> Cartridge {
+    with_lexicon(
+        init_cartridge("beta", version, &[], &[], &[]),
+        record(NOTE, Some(revision), "text"),
+    )
+}
+
+fn read(contract: &str, min_revision: Option<u32>) -> Request {
+    let mut request = Request::new(contract, contract);
+    request.access = Some("read".into());
+    request.min_revision = min_revision;
+    request
+}
+
+/// An installed, disabled alpha making `requests`.
+async fn node_with_alpha(requests: Vec<Request>) -> Node {
+    let node = node_hosting(&Probe::new()).await;
+    node.admit(
+        node.operator(),
+        with_requests(init_cartridge("alpha", "1.0.0", &[], &[], &[]), requests),
+    )
+    .await
+    .unwrap();
+    node
+}
+
+fn locked(
+    contract: &str,
+    provider: &str,
+    version: Option<&str>,
+    revision: Option<u32>,
+) -> LockedProvider {
+    LockedProvider {
+        contract: contract.to_owned(),
+        provider: provider.to_owned(),
+        version: version.map(|version| version.parse().unwrap()),
+        lexicon_revision: revision,
+    }
+}
+
+#[tokio::test]
+async fn an_enabled_nodules_datums_are_registered_live_and_retired_with_it() {
+    let node = node_with_alpha(Vec::new()).await;
+    node.admit(node.operator(), beta("1.0.0", 1)).await.unwrap();
+    // Installed but disabled holds nothing: nobody can write the datum yet.
+    assert!(node.schemas.resolve_for_read(NOTE).is_none());
+
+    node.set_enabled(BETA, true).await;
+    let handle = node.schemas.require_for_write(NOTE).unwrap();
+    assert_eq!(handle.lexicon()["revision"], 1);
+    assert!(!node.schemas.is_boot_schema(NOTE));
+
+    // An upgrade re-registers the new revision under the same owner.
+    node.admit(node.operator(), beta("1.1.0", 2)).await.unwrap();
+    assert_eq!(
+        node.schemas.resolve_for_read(NOTE).unwrap().lexicon()["revision"],
+        2
+    );
+
+    node.set_enabled(BETA, false).await;
+    assert!(node.schemas.resolve_for_read(NOTE).is_none());
+    assert!(
+        node.schemas.resolve_for_read(Dmeta::ID).is_some(),
+        "the boot schemas are untouched"
+    );
+    node.shutdown().await;
+}
+
+/// `cartridge` with `document` as the sidecar of its record `nsid`.
+fn with_sidecar(mut cartridge: Cartridge, nsid: &str, document: Value) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
+    };
+    nodule
+        .description
+        .entry("sidecar".into())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .unwrap()
+        .insert(nsid.to_owned(), document);
+    cartridge
+}
+
+/// The sidecar document `Bundle::document` renders for a record with one string `field`, stored
+/// in the form `storage` names.
+fn sidecar(field: &str, storage: &str) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/Note",
+        "$defs": { "Note": {
+            "type": "object",
+            "properties": { field: { "type": "string", "x-automerge": storage } },
+        } },
+    })
+}
+
+/// The storage form a compiled record gives its `text` member, if it declares one.
+fn text_storage(compiled: &CompiledSchema) -> Option<Codec> {
+    let member = compiled.member(&["text"]).unwrap();
+    Codec::of(member.document()).unwrap()
+}
+
+#[tokio::test]
+async fn a_held_records_sidecar_gives_it_storage_forms() {
+    let node = node_with_alpha(Vec::new()).await;
+    // The Lexicon alone states no storage form: registered without a sidecar `text` is a plain
+    // string, stored as a scalar.
+    node.admit(node.operator(), beta("1.0.0", 1)).await.unwrap();
+    node.set_enabled(BETA, true).await;
+    let plain = node.schemas.require_for_write(NOTE).unwrap();
+    assert_eq!(text_storage(plain.compiled()), None);
+
+    let cartridge = with_sidecar(
+        with_lexicon(
+            init_cartridge("beta", "1.1.0", &[], &[], &[]),
+            record(NOTE, Some(2), "text"),
+        ),
+        NOTE,
+        sidecar("text", "text"),
+    );
+    node.admit(node.operator(), cartridge).await.unwrap();
+    let declared = node.schemas.require_for_write(NOTE).unwrap();
+    assert_eq!(declared.lexicon()["revision"], 2);
+    assert_eq!(text_storage(declared.compiled()), Some(Codec::Text));
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_sidecar_for_a_record_the_nodule_does_not_hold_is_refused() {
+    let node = node_hosting(&Probe::new()).await;
+    // Alpha holds nothing under `org.example.beta`: describing beta's record is not its to do.
+    let cartridge = with_sidecar(
+        init_cartridge("alpha", "1.0.0", &[], &[], &[]),
+        NOTE,
+        sidecar("text", "text"),
+    );
+    let error = node
+        .admit(node.operator(), cartridge)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not a record this cartridge holds"),
+        "{error}"
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_nodule_holding_a_datum_the_node_already_knows_is_refused() {
+    // `dmeta` is a boot schema: a cartridge claiming its NSID would shadow the node's own.
+    let node = node_hosting(&Probe::new()).await;
+    let mut cartridge = with_lexicon(
+        init_cartridge("beta", "1.0.0", &[], &[], &[]),
+        record(Dmeta::ID, None, "text"),
+    );
+    cartridge.authority = Some("org.example".into());
+    node.install(cartridge).await;
+    let record = node.record(BETA).await;
+    assert_eq!(record.readiness, Readiness::Refused);
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("schema registration refused")),
+        "{:?}",
+        record.error
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_data_request_resolves_to_the_holder_and_min_revision_is_checked() {
+    let node = node_with_alpha(vec![read(NOTE, Some(2))]).await;
+    node.install(beta("1.0.0", 1)).await;
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::ProviderMissing);
+    assert_eq!(
+        record.requests[NOTE],
+        RequestStatus {
+            contract: NOTE.to_owned(),
+            locked: None,
+            unresolved: Some(Unresolved::RevisionTooOld {
+                provider: BETA.to_owned(),
+                required: 2,
+                offered: 1,
+            }),
+        }
+    );
+
+    // The holder at a sufficient revision resolves it, and the lockfile records that revision.
+    node.admit(node.operator(), beta("1.1.0", 2)).await.unwrap();
+    let record = node.record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert_eq!(
+        record.requests[NOTE],
+        RequestStatus {
+            contract: NOTE.to_owned(),
+            locked: Some(locked(NOTE, BETA, Some("1.1.0"), Some(2))),
+            unresolved: None,
+        }
+    );
+
+    // Without a holder it waits, however it is spelled elsewhere.
+    node.set_enabled(BETA, false).await;
+    let record = node.record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::ProviderMissing);
+    assert_eq!(
+        record.requests[NOTE].unresolved,
+        Some(Unresolved::NoProvider)
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_boot_schema_satisfies_a_data_request_as_a_native_provider() {
+    let node = node_with_alpha(vec![read(Dmeta::ID, None)]).await;
+    let record = node.set_enabled_record(ALPHA).await;
+    assert_eq!(record.readiness, Readiness::Ready);
+    assert_eq!(
+        record.requests[Dmeta::ID].locked,
+        Some(locked(Dmeta::ID, "native", None, None))
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_vendored_copy_that_conflicts_with_the_holders_is_refused_and_surfaced() {
+    let node = node_hosting(&Probe::new()).await;
+    node.install(beta("1.0.0", 1)).await;
+
+    // Gamma vendors `note` at the holder's revision with a different body.
+    let gamma = with_requests(
+        with_lexicon(
+            init_cartridge("gamma", "1.0.0", &[], &[], &[]),
+            record(NOTE, Some(1), "title"),
+        ),
+        vec![read(NOTE, None)],
+    );
+    node.install(gamma).await;
+    let record = node.record(GAMMA).await;
+    assert_eq!(record.readiness, Readiness::Refused);
+    assert!(
+        record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains(NOTE) && error.contains("conflicts")),
+        "{:?}",
+        record.error
+    );
+    // The holder is not refused for a vendor's copy, and its schema stands.
+    assert_eq!(node.record(BETA).await.readiness, Readiness::Ready);
+    assert_eq!(
+        node.schemas.resolve_for_read(NOTE).unwrap().lexicon()["defs"]["main"]["record"]["properties"]
+            ["text"]["type"],
+        "string"
+    );
+    node.shutdown().await;
+}

@@ -11,24 +11,75 @@ use dioxus_core::BorrowedAttributeValue;
 use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 
+/// The attribute a slot element carries (an integer slot id). Dioxus has no way to write a
+/// `mount-component` mutation, so a slot is an element whose creation ends with this attribute
+/// and [`WireMutations`] turns the attribute write into the mutation (see
+/// [`WireMutations::take_resolving`]).
+pub const SLOT_ATTRIBUTE: &str = "data-clay-slot";
+
+/// One recorded edit: a finished wire mutation, or a slot whose component reference is only
+/// looked up when the batch is taken.
+enum Edit<'a> {
+    Wire(Mutation<'a>),
+    Slot(u64),
+}
+
 /// Records one batch of edits. `take` drains it; allocations are kept for the next render.
 #[derive(Default)]
 pub struct WireMutations<'a> {
-    batch: Vec<Mutation<'a>>,
+    batch: Vec<Edit<'a>>,
 }
 
 impl<'a> WireMutations<'a> {
     pub fn mount_component(&mut self, component: &'a crate::presentation::ComponentRef) {
-        self.batch.push(Mutation::MountComponent(component));
+        self.batch
+            .push(Edit::Wire(Mutation::MountComponent(component)));
     }
 
-    /// The edits written since the last `take`, in order.
+    /// The edits written since the last `take`, in order. Panics when a slot was written: a
+    /// slot's component is only known to [`Self::take_resolving`].
     pub fn take(&mut self) -> Vec<Mutation<'a>> {
-        std::mem::take(&mut self.batch)
+        self.batch
+            .drain(..)
+            .map(|edit| match edit {
+                Edit::Wire(mutation) => mutation,
+                Edit::Slot(id) => panic!("slot {id} written to a batch with no slot registry"),
+            })
+            .collect()
+    }
+
+    /// The edits written since the last `take`, in order, each slot expanded to a mounted
+    /// component appended to the slot element: the element is on top of the stack when its
+    /// attribute is written, so `mount-component` pushes the component above it and
+    /// `append-children` leaves the element on top again, which is the stack the surrounding
+    /// edits expect. `component` names the held reference of each slot id; an unknown id is a
+    /// bug in the adapter that registered it.
+    pub fn take_resolving<'b>(
+        &mut self,
+        component: impl Fn(u64) -> &'b crate::presentation::ComponentRef,
+    ) -> Vec<Mutation<'b>>
+    where
+        'a: 'b,
+    {
+        let mut batch = Vec::with_capacity(self.batch.len());
+        for edit in self.batch.drain(..) {
+            match edit {
+                Edit::Wire(mutation) => batch.push(mutation),
+                Edit::Slot(id) => {
+                    batch.push(Mutation::MountComponent(component(id)));
+                    batch.push(Mutation::AppendChildren(1));
+                }
+            }
+        }
+        batch
     }
 
     pub fn is_empty(&self) -> bool {
         self.batch.is_empty()
+    }
+
+    fn push(&mut self, mutation: Mutation<'a>) {
+        self.batch.push(Edit::Wire(mutation));
     }
 }
 
@@ -44,53 +95,65 @@ fn count(m: usize) -> u32 {
 
 impl WriteMutations for WireMutations<'_> {
     fn push_id(&mut self, id: ElementId) {
-        self.batch.push(Mutation::PushId(node_id(id)));
+        self.push(Mutation::PushId(node_id(id)));
     }
 
     fn set_id(&mut self, id: ElementId) {
-        self.batch.push(Mutation::SetId(node_id(id)));
+        self.push(Mutation::SetId(node_id(id)));
     }
 
     fn child(&mut self, index: usize) {
-        self.batch.push(Mutation::Child(count(index)));
+        self.push(Mutation::Child(count(index)));
     }
 
     fn pop(&mut self) {
-        self.batch.push(Mutation::Pop);
+        self.push(Mutation::Pop);
     }
 
     fn create_element(&mut self, tag: &str, ns: Option<&str>) {
-        self.batch.push(Mutation::CreateElement((
+        self.push(Mutation::CreateElement((
             tag.to_owned(),
             ns.map(str::to_owned),
         )));
     }
 
     fn create_text(&mut self, value: &str) {
-        self.batch.push(Mutation::CreateText(value.to_owned()));
+        self.push(Mutation::CreateText(value.to_owned()));
     }
 
     fn clone(&mut self) {
-        self.batch.push(Mutation::CloneNode);
+        self.push(Mutation::CloneNode);
     }
 
     fn append_children(&mut self, m: usize) {
-        self.batch.push(Mutation::AppendChildren(count(m)));
+        self.push(Mutation::AppendChildren(count(m)));
     }
 
     fn replace_with(&mut self, m: usize) {
-        self.batch.push(Mutation::ReplaceWith(count(m)));
+        self.push(Mutation::ReplaceWith(count(m)));
     }
 
     fn insert_after(&mut self, m: usize) {
-        self.batch.push(Mutation::InsertAfter(count(m)));
+        self.push(Mutation::InsertAfter(count(m)));
     }
 
     fn insert_before(&mut self, m: usize) {
-        self.batch.push(Mutation::InsertBefore(count(m)));
+        self.push(Mutation::InsertBefore(count(m)));
     }
 
     fn set_attribute(&mut self, name: &str, ns: Option<&str>, value: BorrowedAttributeValue<'_>) {
+        if name == SLOT_ATTRIBUTE {
+            // Written once, while the slot element is created: it is keyed by its slot id, so
+            // another component is another element and Dioxus never rewrites a live one (that
+            // would leave the old component mounted beside the new one).
+            let BorrowedAttributeValue::Int(id) = value else {
+                panic!("`{SLOT_ATTRIBUTE}` is an integer slot id");
+            };
+            self.batch.push(Edit::Slot(
+                u64::try_from(id).expect("slot ids are unsigned"),
+            ));
+            return;
+        }
         let value = match value {
             BorrowedAttributeValue::Text(text) => AttributeValue::Text(text.to_owned()),
             BorrowedAttributeValue::Float(float) => AttributeValue::Float(float),
@@ -103,7 +166,7 @@ impl WriteMutations for WireMutations<'_> {
                 panic!("`Any` attribute `{name}` cannot cross the presentation boundary")
             }
         };
-        self.batch.push(Mutation::SetAttribute((
+        self.push(Mutation::SetAttribute((
             name.to_owned(),
             ns.map(str::to_owned),
             value,
@@ -111,20 +174,19 @@ impl WriteMutations for WireMutations<'_> {
     }
 
     fn set_text(&mut self, value: &str) {
-        self.batch.push(Mutation::SetText(value.to_owned()));
+        self.push(Mutation::SetText(value.to_owned()));
     }
 
     fn add_event_listener(&mut self, name: &str) {
-        self.batch.push(Mutation::AddEventListener(name.to_owned()));
+        self.push(Mutation::AddEventListener(name.to_owned()));
     }
 
     fn remove_event_listener(&mut self, name: &str) {
-        self.batch
-            .push(Mutation::RemoveEventListener(name.to_owned()));
+        self.push(Mutation::RemoveEventListener(name.to_owned()));
     }
 
     fn remove(&mut self) {
-        self.batch.push(Mutation::Remove);
+        self.push(Mutation::Remove);
     }
 }
 
@@ -224,6 +286,33 @@ mod tests {
             Mutation::RemoveEventListener(name) if name == "keydown"
         ));
         assert!(matches!(one(|edits| edits.remove()), Mutation::Remove));
+    }
+
+    // A component reference is a host resource a native test cannot mint, so the expansion
+    // into `mount-component` is covered end to end by the `clay_mdk` wasm tests; here, that the
+    // attribute is recorded as a slot at its position rather than as an attribute.
+    #[test]
+    fn a_slot_attribute_is_recorded_as_a_slot_not_an_attribute() {
+        let mut edits = WireMutations::default();
+        edits.push_id(ElementId::from_raw(3));
+        edits.set_attribute(SLOT_ATTRIBUTE, None, BorrowedAttributeValue::Int(7));
+        edits.pop();
+        assert!(matches!(
+            edits.batch.as_slice(),
+            [
+                Edit::Wire(Mutation::PushId(3)),
+                Edit::Slot(7),
+                Edit::Wire(Mutation::Pop)
+            ]
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "slot 7 written to a batch with no slot registry")]
+    fn taking_a_slot_without_a_registry_is_an_adapter_bug() {
+        let mut edits = WireMutations::default();
+        edits.set_attribute(SLOT_ATTRIBUTE, None, BorrowedAttributeValue::Int(7));
+        edits.take();
     }
 
     #[test]

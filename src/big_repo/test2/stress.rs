@@ -4,6 +4,7 @@
 //! documents, performs mutations on nodes that are already ready, and checks
 //! the resulting durable frontier after the runner reconnects the full mesh.
 
+use super::harness::StorageConfig;
 use super::harness::fixtures::wait_for_agent;
 use super::harness::log_nickname;
 use super::harness::topo::Node;
@@ -11,7 +12,6 @@ use crate::BigKeyhiveGroup;
 use crate::DocumentId;
 use crate::PeerKey;
 use crate::Res;
-use crate::StorageConfig;
 use am_utils_rs::codecs::ThroughJson;
 use big_sync::HostPartStore;
 use big_sync::stress_support::StressFixture;
@@ -28,7 +28,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -80,7 +79,9 @@ pub(crate) struct BigRepoStressFixture {
     relay_peer_ids: Arc<Mutex<BTreeSet<PeerKey>>>,
     obj_doc_map: Arc<Mutex<HashMap<ObjKey, DocumentId>>>,
     all_docs: Arc<Mutex<BTreeSet<DocumentId>>>,
-    node_paths: Arc<Mutex<HashMap<PeerKey, PathBuf>>>,
+    /// Each node's durable storage directory, owned by the fixture so it is
+    /// removed when the fixture drops (restarts reopen the same directory).
+    node_paths: Arc<Mutex<HashMap<PeerKey, tempfile::TempDir>>>,
 }
 
 impl BigRepoStressFixture {
@@ -499,7 +500,8 @@ impl StressFixture for BigRepoStressFixture {
             Some(index) if index + 1 == peer_seed as usize => "relay",
             _ => Box::leak(format!("editor-{peer_seed}").into_boxed_str()),
         };
-        let path = tempdir()?.keep();
+        let directory = tempdir()?;
+        let path = directory.path().to_path_buf();
         let actual_peer_seed = peer_seed
             .checked_add(self.config.peer_seed_offset)
             .expect("stress peer seed offset overflowed");
@@ -515,7 +517,10 @@ impl StressFixture for BigRepoStressFixture {
             HashSet::from([crate::seds_part_id()]),
         )
         .await?;
-        self.node_paths.lock().await.insert(node.peer_id(), path);
+        self.node_paths
+            .lock()
+            .await
+            .insert(node.peer_id(), directory);
         Ok(node)
     }
 
@@ -537,7 +542,7 @@ impl StressFixture for BigRepoStressFixture {
             .lock()
             .await
             .get(&peer_id)
-            .cloned()
+            .map(|directory| directory.path().to_path_buf())
             .ok_or_else(|| crate::ferr!("no persistent path for restarted node {peer_id}"))?;
         node.restart(StorageConfig::Disk { path }).await
     }
@@ -1451,7 +1456,8 @@ mod tests {
             .await
             .get(&offline_peer)
             .unwrap()
-            .clone();
+            .path()
+            .to_path_buf();
         offline.shutdown().await;
         for node in nodes.iter().flatten() {
             node.disconnect_peer(offline_peer.clone()).await?;

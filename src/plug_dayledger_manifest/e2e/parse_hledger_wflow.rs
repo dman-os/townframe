@@ -112,7 +112,12 @@ async fn test_parse_hledger_writes_one_claim_per_transaction() -> Res<()> {
             .src_refs
             .first()
             .expect("claim should record a source ref");
-        assert_eq!(src_ref.r#ref.scheme(), daybook_types::url::FACET_SCHEME);
+        assert!(
+            src_ref
+                .r#ref
+                .as_str()
+                .starts_with(daybook_types::url::FACET_URL_PREFIX)
+        );
         assert!(
             !src_ref.heads.is_empty(),
             "expected source heads to be recorded"

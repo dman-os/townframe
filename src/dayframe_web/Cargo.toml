@@ -8,11 +8,19 @@ dioxus = { workspace = true }
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
 clay_dioxus = { workspace = true }
-clay_micro_core = { workspace = true }
-clay_mdk = { workspace = true, features = ["in_process", "view", "wcmp"] }
+clay_mdk = { workspace = true, features = ["in_process", "view", "wcmp", "package"] }
 clay_rt_wcmp = { workspace = true }
+clay_store = { workspace = true }
 clay_rt_wcmp_web = { workspace = true }
+micro_settings = { workspace = true }
+micro_settings_manifest = { workspace = true }
+micro_toolbar = { workspace = true }
+micro_toolbar_manifest = { workspace = true }
+micro_sample = { workspace = true }
 micro_counter_manifest = { workspace = true }
+clay_docs = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true

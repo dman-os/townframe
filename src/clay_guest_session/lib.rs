@@ -1,5 +1,6 @@
 use clay_docs::DocumentAccess;
 use clay_docs::DocumentError;
+use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::DocumentWatch;
 use clay_docs::FacetMutation;
@@ -10,6 +11,7 @@ use clay_docs::WatchSelection;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
@@ -20,6 +22,10 @@ use tokio::sync::watch;
 #[cfg(test)]
 mod tests;
 
+pub mod capabilities;
+pub mod collections;
+#[cfg(feature = "test-utils")]
+pub mod lifecycle_conformance;
 pub mod presentation;
 pub use presentation::Placement;
 pub use presentation::PresentationHost;
@@ -30,6 +36,43 @@ pub use presentation::ingress_budget;
 pub struct Limits {
     pub handles: usize,
     pub pending_deliveries: usize,
+}
+
+/// Everything one guest incarnation's `micro-lifecycle.initialize` receives (ADR 030 §5), in
+/// host terms. Engines grant each entry into the guest's resource table under its local
+/// binding name; `requirements` are the provisions the incarnation's resolved providers
+/// published, minted into recipient-local capability references for this incarnation.
+#[derive(Default)]
+pub struct InitialContext {
+    /// Opaque, configuration-supplied CBOR.
+    pub arguments: Vec<u8>,
+    pub configs: BTreeMap<String, DocumentRef>,
+    pub collections: BTreeMap<String, collections::BytesProjection>,
+    pub registrations: BTreeMap<String, clay_host::Grant<collections::BytesRegistrations>>,
+    pub requirements: BTreeMap<String, capabilities::CapabilityPublication>,
+    /// The publications the package's manifest declares, by name. What `initialize` returns is
+    /// admitted against this (see [`capabilities::admit_publications`]).
+    pub publications: BTreeMap<String, capabilities::DeclaredPublication>,
+    /// The micro this incarnation belongs to; with `publications` it lets a row the guest
+    /// writes attach one of its own publications by name (see
+    /// [`capabilities::CapabilitySession::own_endpoint`]). `None` where no micro identity
+    /// exists (engine tests), and every such attachment is then invalid.
+    pub micro: Option<clay_host::MicroId>,
+    /// The supervisor's demand handle, behind the lazy references this incarnation mints from
+    /// stored endpoints (see [`capabilities::CapabilitySession::mint_lazy`]). `None` where no
+    /// supervisor runs (engine tests); minting a lazy reference then crashes.
+    pub activator: Option<clay_host::Activator<capabilities::CapabilityPublication>>,
+}
+
+/// A guest's own refusal to initialize, as opposed to a trap.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum InitializationFailure {
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(String),
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+    #[error("rejected: {0}")]
+    Rejected(String),
 }
 
 impl Default for Limits {

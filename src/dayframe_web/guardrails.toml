@@ -4,11 +4,17 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "clay_dioxus",
     "clay_mdk",
-    "clay_micro_core",
     "clay_rt_wcmp",
     "clay_rt_wcmp_web",
+    "clay_store",
     "dayframe_composition",
+    "clay_docs",
     "micro_counter_manifest",
+    "micro_sample",
+    "micro_settings",
+    "micro_settings_manifest",
+    "micro_toolbar",
+    "micro_toolbar_manifest",
     "ui",
 ]
 allow_external_api_types = false

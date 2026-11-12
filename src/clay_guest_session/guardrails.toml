@@ -2,8 +2,10 @@ version = 1
 role = "runtime"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 allowed_dependencies = [
+    "clay_collection",
     "clay_docs",
     "clay_host",
+    "clay_store",
     "clay_surface",
     "daybook_types",
 ]
@@ -11,6 +13,8 @@ allow_external_api_types = false
 
 # The browser host (ADR 018) links this crate on wasm32, so both targets are contracts.
 [builds.native]
+# `test-utils` carries the engine conformance scenarios the engine crates run natively.
+features = ["test-utils"]
 
 [builds.wasm32-unknown-unknown]
 

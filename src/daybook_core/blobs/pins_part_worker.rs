@@ -1186,7 +1186,7 @@ mod tests {
             &big_blobs::encrypt::MasterKey::random(),
         )
         .await?;
-        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let key_ref = format!("dtxt:datum:{key_doc_id}/org.example.daybook.jwk/relay");
         test_context
             .drawer_repo
             .update_at_heads_with_scope(

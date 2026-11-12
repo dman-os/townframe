@@ -22,7 +22,8 @@ use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::drawer::DrawerMetaDoc;
 use big_cabinet_core::drawer::MetaRoot;
 use big_repo::SharedPartStore;
-use service_utils_rs::Client;
+use futures::future::BoxFuture;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use sqlite_rs::Database;
@@ -32,11 +33,19 @@ use std::sync::Arc;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::eyre;
 
+/// Whether this node can commit to an inventory doc: its own keyhive standing on it, the
+/// predicate big_repo's commit gate enforces. The metadata capability cannot answer this: it is
+/// minted by the operator, a cabinet superuser on every drawer the node knows, including a
+/// drawer synced in from a peer where the node holds only keyhive Read.
+pub(crate) type InventoryWriteAccess =
+    Arc<dyn Fn(DocId) -> BoxFuture<'static, Res<bool>> + Send + Sync>;
+
 pub(crate) struct Retention {
     sql: Database,
     service: Arc<BlobService>,
     docs: Client<DocsProtocol>,
     metadata: MetadataCapabilities,
+    writable: InventoryWriteAccess,
     parts: SharedPartStore,
 }
 
@@ -63,6 +72,7 @@ impl Retention {
         service: Arc<BlobService>,
         docs: Client<DocsProtocol>,
         metadata: MetadataCapabilities,
+        writable: InventoryWriteAccess,
         parts: SharedPartStore,
     ) -> Res<Self> {
         Self::migrate(&sql).await?;
@@ -71,6 +81,7 @@ impl Retention {
             service,
             docs,
             metadata,
+            writable,
             parts,
         };
         let service = Arc::clone(&retention.service);
@@ -166,7 +177,7 @@ impl Retention {
             .await
         {
             Ok(read) => Ok(Some(read)),
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Denied
                 | DocsError::DocNotFound
                 | DocsError::Pending { .. }
@@ -195,7 +206,6 @@ impl Retention {
                 })
             })
             .collect()
-
     }
 
     async fn refresh_targets(&mut self, doc: &DocId) -> Res<()> {
@@ -206,6 +216,17 @@ impl Retention {
         });
         let descriptor_key = DatumKey::from_text(Drawer::ID, "main")?;
         for target in &targets {
+            // A doc is a candidate for the inventory of every drawer that contains it, and a
+            // drawer synced in from a peer may grant this node only Read: its inventory is that
+            // peer's to pin into, not ours. Such a target is left exactly as it stands, like a
+            // denied read below: never newly claimed, and claims made while the node could
+            // write are kept until it can write again (ADR 026 §5: an unreadable or unwritable
+            // inventory must not shrink retention). Asking first keeps retention from staging
+            // pins that keyhive refuses at commit; a grant arriving later rearms the work queue
+            // through the permissions ingress, which reruns this.
+            if !(self.writable)(target.inventory.clone()).await? {
+                continue;
+            }
             if !snapshots.contains_key(&target.drawer) {
                 let mut keys = Self::reference_keys(&targets, &target.drawer, MetaRoot::Public)?;
                 keys.extend(member_keys.clone());
@@ -317,129 +338,137 @@ impl Retention {
         let target = target.clone();
         let inventory = inventory.cloned();
         let service = Arc::clone(&self.service);
-        self.service.ownership.transaction(move |ownership| Box::pin(async move {
-        let inventory = inventory.as_ref();
-        let tx = ownership.sql();
-        let params = (
-            doc.to_string(),
-            target.drawer.to_string(),
-            target.root.as_str(),
-            target.name.as_str(),
-        );
-        let previous = sqlite::queries::writer_target_inventory(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
-        let claims = sqlite::queries::target_claims(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?
-        .into_iter()
-        .map(|row| (row.digest, row.length_octets as u64))
-        .collect::<Vec<_>>();
-        let desired = if inventory.is_some() {
-            sqlite::queries::target_retention(tx, doc.to_string(), target.root.as_str().to_owned())
-                .await?
-                .into_iter()
-                .map(|row| (row.digest, row.length_octets as u64))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if previous.as_ref() == inventory.map(ToString::to_string).as_ref() && claims == desired {
-            return Ok(());
-        }
-        sqlite::queries::retention_effects_from_claims(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
-        sqlite::queries::writer_effects_from_claims(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
-        sqlite::queries::delete_claims(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
-        sqlite::queries::delete_targets(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
+        self.service
+            .ownership
+            .transaction(move |ownership| {
+                Box::pin(async move {
+                    let inventory = inventory.as_ref();
+                    let tx = ownership.sql();
+                    let params = (
+                        doc.to_string(),
+                        target.drawer.to_string(),
+                        target.root.as_str(),
+                        target.name.as_str(),
+                    );
+                    let previous = sqlite::queries::writer_target_inventory(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
+                    let claims = sqlite::queries::target_claims(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|row| (row.digest, row.length_octets as u64))
+                    .collect::<Vec<_>>();
+                    let desired = if inventory.is_some() {
+                        sqlite::queries::target_retention(
+                            tx,
+                            doc.to_string(),
+                            target.root.as_str().to_owned(),
+                        )
+                        .await?
+                        .into_iter()
+                        .map(|row| (row.digest, row.length_octets as u64))
+                        .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if previous.as_ref() == inventory.map(ToString::to_string).as_ref()
+                        && claims == desired
+                    {
+                        return Ok(());
+                    }
+                    sqlite::queries::retention_effects_from_claims(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
+                    sqlite::queries::writer_effects_from_claims(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
+                    sqlite::queries::delete_claims(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
+                    sqlite::queries::delete_targets(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
 
+                    if let Some(inventory) = inventory {
+                        sqlite::queries::insert_target(
+                            tx,
+                            params.0.clone(),
+                            params.1.clone(),
+                            params.2.to_owned(),
+                            params.3.to_owned(),
+                            inventory.to_string(),
+                        )
+                        .await?;
+                        sqlite::queries::insert_claims_from_retention(
+                            tx,
+                            params.0.clone(),
+                            params.1.clone(),
+                            params.2.to_owned(),
+                            params.3.to_owned(),
+                            inventory.to_string(),
+                        )
+                        .await?;
+                    }
+                    sqlite::queries::retention_effects_from_claims(
+                        tx,
+                        params.0.clone(),
+                        params.1.clone(),
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
+                    sqlite::queries::writer_effects_from_claims(
+                        tx,
+                        params.0,
+                        params.1,
+                        params.2.to_owned(),
+                        params.3.to_owned(),
+                    )
+                    .await?;
 
-        if let Some(inventory) = inventory {
-            sqlite::queries::insert_target(
-                tx,
-                params.0.clone(),
-                params.1.clone(),
-                params.2.to_owned(),
-                params.3.to_owned(),
-                inventory.to_string(),
-            )
-            .await?;
-            sqlite::queries::insert_claims_from_retention(
-                tx,
-                params.0.clone(),
-                params.1.clone(),
-                params.2.to_owned(),
-                params.3.to_owned(),
-                inventory.to_string(),
-            )
-            .await?;
-        }
-        sqlite::queries::retention_effects_from_claims(
-            tx,
-            params.0.clone(),
-            params.1.clone(),
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
-        sqlite::queries::writer_effects_from_claims(
-            tx,
-            params.0,
-            params.1,
-            params.2.to_owned(),
-            params.3.to_owned(),
-        )
-        .await?;
-
-
-        let digests = claims
-            .into_iter()
-            .chain(desired)
-            .map(|(digest, _)| digest)
-            .collect();
-        Self::reconcile(&service, ownership, digests).await
-        })).await
+                    let digests = claims
+                        .into_iter()
+                        .chain(desired)
+                        .map(|(digest, _)| digest)
+                        .collect();
+                    Self::reconcile(&service, ownership, digests).await
+                })
+            })
+            .await
     }
 
     pub(crate) async fn is_inventory(&self, doc: &DocId) -> Res<bool> {
-
         Ok(!sqlite::queries::is_inventory(
             &self.sql,
             doc.to_string(),
@@ -478,55 +507,60 @@ impl Retention {
         }
         let doc_id = doc.to_string();
         let service = Arc::clone(&self.service);
-        self.service.ownership.transaction(move |ownership| Box::pin(async move {
-        let tx = ownership.sql();
-        let mut digests: BTreeSet<String> = sqlite::queries::retention_digests(tx, doc_id.clone())
-            .await?
-            .into_iter()
-            .collect();
-        sqlite::queries::retention_effects_for_doc(tx, doc_id.clone()).await?;
-        if !preserve {
-            sqlite::queries::delete_retention_doc(tx, doc_id.clone()).await?;
-        }
-        for (digest, plaintext, length, root) in representations {
-            match root {
-                MetaRoot::Public => {
-                    sqlite::queries::insert_retention_plain(
-                        tx,
-                        doc_id.clone(),
-                        digest.to_string(),
-                        plaintext.expect("public retention has plaintext"),
-                        i64::try_from(length)?,
-                        root.as_str().to_owned(),
-                    )
-                    .await?;
-                }
-                MetaRoot::Sensitive => {
-                    sqlite::queries::insert_retention_cipher(
-                        tx,
-                        doc_id.clone(),
-                        digest.to_string(),
-                        i64::try_from(length)?,
-                        root.as_str().to_owned(),
-                    )
-                    .await?;
-                }
-            }
-
-        }
-        for (digest, length) in pins {
-            sqlite::queries::insert_retention_pin(
-                tx,
-                doc_id.clone(),
-                digest.to_string(),
-                i64::try_from(length)?,
-            )
+        self.service
+            .ownership
+            .transaction(move |ownership| {
+                Box::pin(async move {
+                    let tx = ownership.sql();
+                    let mut digests: BTreeSet<String> =
+                        sqlite::queries::retention_digests(tx, doc_id.clone())
+                            .await?
+                            .into_iter()
+                            .collect();
+                    sqlite::queries::retention_effects_for_doc(tx, doc_id.clone()).await?;
+                    if !preserve {
+                        sqlite::queries::delete_retention_doc(tx, doc_id.clone()).await?;
+                    }
+                    for (digest, plaintext, length, root) in representations {
+                        match root {
+                            MetaRoot::Public => {
+                                sqlite::queries::insert_retention_plain(
+                                    tx,
+                                    doc_id.clone(),
+                                    digest.to_string(),
+                                    plaintext.expect("public retention has plaintext"),
+                                    i64::try_from(length)?,
+                                    root.as_str().to_owned(),
+                                )
+                                .await?;
+                            }
+                            MetaRoot::Sensitive => {
+                                sqlite::queries::insert_retention_cipher(
+                                    tx,
+                                    doc_id.clone(),
+                                    digest.to_string(),
+                                    i64::try_from(length)?,
+                                    root.as_str().to_owned(),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                    for (digest, length) in pins {
+                        sqlite::queries::insert_retention_pin(
+                            tx,
+                            doc_id.clone(),
+                            digest.to_string(),
+                            i64::try_from(length)?,
+                        )
+                        .await?;
+                    }
+                    sqlite::queries::retention_effects_for_doc(tx, doc_id.clone()).await?;
+                    digests.extend(sqlite::queries::retention_digests(tx, doc_id).await?);
+                    Self::reconcile(&service, ownership, digests).await
+                })
+            })
             .await?;
-        }
-        sqlite::queries::retention_effects_for_doc(tx, doc_id.clone()).await?;
-        digests.extend(sqlite::queries::retention_digests(tx, doc_id).await?);
-        Self::reconcile(&service, ownership, digests).await
-        })).await?;
         self.refresh_targets(doc).await?;
         Ok(())
     }
@@ -589,7 +623,7 @@ impl Retention {
             .await
         {
             Ok(_) => Ok(true),
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 DocsError::Conflict { .. }
                 | DocsError::Denied
                 | DocsError::DocNotFound
@@ -610,12 +644,9 @@ impl Retention {
             let digest = effect.digest;
             let inventory_id: DocId = inventory.parse()?;
             let id: BlobId = digest.parse()?;
-            let lengths = sqlite::queries::claim_lengths(
-                &self.sql,
-                inventory.clone(),
-                digest.clone(),
-            )
-            .await?;
+            let lengths =
+                sqlite::queries::claim_lengths(&self.sql, inventory.clone(), digest.clone())
+                    .await?;
             eyre::ensure!(
                 lengths.len() <= 1,
                 "writer claims disagree on object length"
@@ -642,7 +673,8 @@ impl Retention {
                     Box::pin(async move {
                         let tx = ownership.sql();
                         sqlite::queries::mark_retention_effect(tx, digest.clone()).await?;
-                        sqlite::queries::delete_writer_effect(tx, inventory, digest.clone()).await?;
+                        sqlite::queries::delete_writer_effect(tx, inventory, digest.clone())
+                            .await?;
                         Self::reconcile(&service, ownership, BTreeSet::from([digest])).await
                     })
                 })
@@ -677,7 +709,8 @@ impl Retention {
                 .ownership
                 .transaction(move |ownership| {
                     Box::pin(async move {
-                        sqlite::queries::delete_retention_effect(ownership.sql(), digest.clone()).await?;
+                        sqlite::queries::delete_retention_effect(ownership.sql(), digest.clone())
+                            .await?;
                         Self::reconcile(&service, ownership, BTreeSet::from([digest])).await
                     })
                 })

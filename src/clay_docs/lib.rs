@@ -9,18 +9,21 @@
 //! Source cursors and cache policy remain host-owned. Native wrappers use these data values
 //! and handles; the WIT resources in `clay_guest_session` map the same watch/selection/mutation
 //! protocol without transporting callbacks or renderer state.
-use clay_collection::BaseDelta;
+use clay_collection::Change;
 use clay_collection::Ledger;
 use clay_collection::OperationId;
 use clay_collection::Overlay;
-use clay_collection::OverlayPolicy;
 use clay_collection::OverlayWait;
 use clay_collection::Replica;
+use clay_collection::RowEvidence;
 use clay_collection::Version;
 use clay_collection::WriteOutcome;
 use clay_host::AccessError;
 use clay_host::Host;
 use clay_host::Instance;
+use clay_store::BatchOp;
+use clay_store::OrderedStore;
+use clay_store::StoreError;
 use daybook_types::manifest::RoutineFacetAccess;
 use serde::Deserialize;
 use serde::Serialize;
@@ -31,6 +34,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 // ── Types: wire vocabulary, public handles, then private state records ───────
@@ -41,6 +45,44 @@ pub struct FacetRoute {
     pub branch: String,
     pub tag: String,
     pub key_id: String,
+}
+
+impl FacetRoute {
+    /// The durable source key: the four fields in declaration order, each as a big-endian
+    /// `u32` byte length followed by its UTF-8 bytes. Length-prefixing is unambiguous for any
+    /// field content (no separator byte can occur inside a field) and deterministic, unlike a
+    /// self-describing format whose encoding could drift between versions; the byte order also
+    /// groups a document's routes contiguously.
+    fn encode(&self) -> Vec<u8> {
+        let fields = [&self.document, &self.branch, &self.tag, &self.key_id];
+        let mut key = Vec::with_capacity(fields.iter().map(|field| 4 + field.len()).sum());
+        for field in fields {
+            let length = u32::try_from(field.len()).expect("a route field fits in u32");
+            key.extend_from_slice(&length.to_be_bytes());
+            key.extend_from_slice(field.as_bytes());
+        }
+        key
+    }
+
+    /// Inverse of [`Self::encode`]. Only this service writes the store, so a malformed key is
+    /// corruption, not input.
+    fn decode(mut key: &[u8]) -> Self {
+        let mut field = || {
+            let (length, rest) = key.split_first_chunk::<4>().expect("truncated route key");
+            let length = u32::from_be_bytes(*length) as usize;
+            let (field, rest) = rest.split_at_checked(length).expect("truncated route key");
+            key = rest;
+            String::from_utf8(field.to_vec()).expect("route fields are UTF-8")
+        };
+        let route = Self {
+            document: field(),
+            branch: field(),
+            tag: field(),
+            key_id: field(),
+        };
+        assert!(key.is_empty(), "trailing bytes in route key");
+        route
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,9 +240,17 @@ struct State {
     clock: u64,
     capacity: usize,
     source: BTreeMap<FacetRoute, Value>,
+    /// Set by [`DocumentService::durable`]: every change to `source` is queued here, in order,
+    /// for the persist future to apply to the store.
+    persist: Persistence,
+    /// How many source changes have been queued for persistence so far.
+    queued: u64,
+    /// How many of them the persist future has applied to the store; `None` when volatile.
+    applied: Option<watch::Receiver<u64>>,
     // Mock FacetSet lookup: selected document/tag routes, including removal tombstones.
     membership: BTreeMap<(String, String, String), BTreeSet<String>>,
-    config_owners: BTreeMap<String, (String, String)>,
+    /// Which `(document, branch)` configuration picked for each config binding name.
+    config_documents: BTreeMap<String, (String, String)>,
     cache: BTreeMap<FacetRoute, CacheEntry>,
     replica: Replica<FacetRoute, Value>,
     ledger: Ledger<FacetRoute, Value>,
@@ -209,6 +259,15 @@ struct State {
     reads: Vec<FacetRoute>,
     hold_refresh: bool,
     requests: BTreeMap<FacetRoute, BTreeMap<u64, u64>>,
+}
+
+enum Persistence {
+    /// [`DocumentService::new`]: the source lives in memory only.
+    Volatile,
+    Open(mpsc::UnboundedSender<(FacetRoute, Option<Value>)>),
+    /// The sender is dropped, so the persist future ends once it has drained the queue. A source
+    /// write after this point would be silently lost, so it panics instead.
+    Closed,
 }
 
 struct CacheEntry {
@@ -226,6 +285,11 @@ struct WatchRecord {
 struct PendingMutation {
     route: FacetRoute,
     mutation: FacetMutation,
+    /// Set for a mutation of a [`DocumentService::durable`] service: the source already holds
+    /// its value, queued as this source change, and the persist future completes the operation
+    /// once the store has applied that many changes. `None` while volatile, where only
+    /// [`MockDocuments::complete`]/[`MockDocuments::settle`] complete an operation.
+    stored_at: Option<u64>,
     updates: watch::Sender<OperationReceipt>,
 }
 
@@ -247,11 +311,14 @@ impl DocumentService {
                 clock: 0,
                 capacity,
                 source: BTreeMap::new(),
+                persist: Persistence::Volatile,
+                queued: 0,
+                applied: None,
                 membership: BTreeMap::new(),
-                config_owners: BTreeMap::new(),
+                config_documents: BTreeMap::new(),
                 cache: BTreeMap::new(),
                 replica: Replica::new(1),
-                ledger: Ledger::new(OverlayPolicy::Replicated),
+                ledger: Ledger::new(),
                 watches: BTreeMap::new(),
                 pending: BTreeMap::new(),
                 reads: Vec::new(),
@@ -261,47 +328,143 @@ impl DocumentService {
         }
     }
 
-    /// Uses the manifest's owner-config semantics. The composition root supplies already-approved
-    /// ACLs; dependency/tag validation remains the loader's responsibility, not a second ACL model.
+    /// A service whose mock source is backed by `store`: the stored documents are loaded now,
+    /// and every later source change is written back by the returned future, which the caller
+    /// must drive (alongside the rest of the composition) for as long as the service lives.
+    ///
+    /// Changes are queued in the order the source applied them and the future applies whatever
+    /// has queued up as one atomic batch, so the store never reflects a prefix of a pair of
+    /// changes that happened under one lock hold. Only the source is persisted; cache, watches,
+    /// pending operations, membership routes' bindings and config owners are rebuilt per boot.
+    /// There is no remote to accept or reject a write here, so a mutation's operation stays
+    /// pending exactly until its change has been applied to the store, and then completes
+    /// accepted: local persistence is acceptance. (A volatile service leaves operations to
+    /// [`MockDocuments::settle`]/[`MockDocuments::complete`].)
+    /// A store failure while writing panics: the source is a stand-in for the node, and a
+    /// silently dropped write would only surface later as lost documents. Failures to read the
+    /// store at construction are returned.
+    pub async fn durable<St: OrderedStore + 'static>(
+        store: Arc<St>,
+        capacity: usize,
+    ) -> Result<(Self, impl Future<Output = ()> + use<St>), StoreError> {
+        let service = Self::new(capacity);
+        let (sender, mut queue) = mpsc::unbounded_channel::<(FacetRoute, Option<Value>)>();
+        let (applied_sender, applied) = watch::channel(0_u64);
+        let stored = store.scan_prefix(b"").await?;
+        {
+            let mut state = service.inner.lock().unwrap();
+            for (key, bytes) in stored {
+                let route = FacetRoute::decode(&key);
+                let value = serde_json::from_slice(&bytes)
+                    .expect("the document store holds only JSON values this service wrote");
+                // Routes feed the mock FacetSet lookup, so a loaded route must be noted
+                // exactly as `seed` and `external_change` note theirs.
+                state.note_route(&route);
+                state.source.insert(route, value);
+            }
+            state.persist = Persistence::Open(sender);
+            state.applied = Some(applied);
+        }
+        // Weak: the persist future must not keep the state (and so the queue's sender) alive.
+        let state = Arc::downgrade(&service.inner);
+        let persist = async move {
+            let mut applied_count = 0_u64;
+            while let Some(first) = queue.recv().await {
+                let mut batch = Vec::new();
+                let mut next = Some(first);
+                while let Some((route, value)) = next {
+                    let key = route.encode();
+                    batch.push(match value {
+                        Some(value) => BatchOp::Put(
+                            key,
+                            serde_json::to_vec(&value).expect("a JSON value serializes"),
+                        ),
+                        None => BatchOp::Delete(key),
+                    });
+                    next = queue.try_recv().ok();
+                    applied_count += 1;
+                }
+                store
+                    .apply(batch)
+                    .await
+                    .unwrap_or_else(|error| panic!("persisting the mock document source: {error}"));
+                // Complete the operations the batch made durable before waking `persisted()`
+                // waiters, so whoever it releases already sees them settled.
+                if let Some(state) = state.upgrade() {
+                    state.lock().unwrap().complete_stored(applied_count);
+                }
+                applied_sender.send_replace(applied_count);
+            }
+        };
+        Ok((service, persist))
+    }
+
+    /// Resolves once every source change made before this call has been applied to the store
+    /// (immediately for a volatile service). Orderly shutdown drains the queue by itself, but a
+    /// browser page reload never runs it, so a caller whose write must survive a reload awaits
+    /// this before it lets the user proceed. The future needs the persist future to be driven.
+    pub fn persisted(&self) -> impl Future<Output = ()> + use<> {
+        let (target, applied) = {
+            let state = self.inner.lock().unwrap();
+            (state.queued, state.applied.clone())
+        };
+        async move {
+            if let Some(mut applied) = applied {
+                applied
+                    .wait_for(|count| *count >= target)
+                    .await
+                    .expect("the persist future drains the queue before it ends");
+            }
+        }
+    }
+
+    /// Ends persistence for a [`Self::durable`] service: the persist future writes everything
+    /// already queued and then completes. Every later source change panics, so call this only
+    /// once nothing can change documents anymore (after every micro has closed). A no-op on a
+    /// volatile service.
+    pub fn close_persistence(&self) {
+        let mut state = self.inner.lock().unwrap();
+        if matches!(state.persist, Persistence::Open(_)) {
+            state.persist = Persistence::Closed;
+        }
+    }
+
+    /// Grants the configuration document that configuration picked for `binding`, with the
+    /// manifest's facet ACL. A manifest request names facets by tag and never the plug or
+    /// document that holds them (ADR 028 §4), so no ACL entry may carry an owner: the one
+    /// document is whatever `binding` was bound to. The composition root supplies
+    /// already-approved ACLs; tag validation remains the loader's responsibility, not a second
+    /// ACL model.
     pub fn grant_config(
         &self,
         host: &Host,
         instance: &Instance,
-        invoking_plug: &str,
+        binding: &str,
         acl: Vec<RoutineFacetAccess>,
-    ) -> Result<BTreeMap<String, DocumentRef>, AccessError> {
+    ) -> Result<DocumentRef, AccessError> {
         host.check(instance)?;
-        let mut owners: BTreeMap<String, Vec<RoutineFacetAccess>> = BTreeMap::new();
-        for access in acl {
-            let owner = access
-                .owner_plug_id
-                .as_deref()
-                .unwrap_or(invoking_plug)
-                .to_owned();
-            owners.entry(owner).or_default().push(access);
-        }
-        let mut result = BTreeMap::new();
-        for (owner, facets) in owners {
-            let (document, branch) = self
-                .inner
-                .lock()
-                .unwrap()
-                .config_owners
-                .get(&owner)
-                .cloned()
-                .expect("approved config owner has no document binding");
-            let access = self.grant_documents(
-                host,
-                instance,
-                vec![DocumentGrant {
-                    document: document.clone(),
-                    branch: branch.clone(),
-                    facets,
-                }],
-            )?;
-            result.insert(owner, access.document(document, branch)?);
-        }
-        Ok(result)
+        assert!(
+            acl.iter().all(|access| access.owner_plug_id.is_none()),
+            "a config ACL names no owner plug: configuration picks the document"
+        );
+        let (document, branch) = self
+            .inner
+            .lock()
+            .unwrap()
+            .config_documents
+            .get(binding)
+            .cloned()
+            .expect("approved config binding has no document");
+        let access = self.grant_documents(
+            host,
+            instance,
+            vec![DocumentGrant {
+                document: document.clone(),
+                branch: branch.clone(),
+                facets: acl,
+            }],
+        )?;
+        access.document(document, branch)
     }
 
     pub fn mock_documents(&self) -> MockDocuments {
@@ -431,6 +594,17 @@ impl DocumentAccess {
             FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value.clone()),
             FacetMutation::Delete => None,
         };
+        // A durable service has no remote to accept or reject a write, so reaching the local
+        // store is acceptance: the change goes into the source (and the persist queue) now,
+        // the overlay stays until the persist future has applied it, and that same point
+        // completes the operation with `Ok` (see `complete_stored`). A volatile service leaves
+        // the operation pending for a test to settle.
+        let stored_at = if matches!(state.persist, Persistence::Volatile) {
+            None
+        } else {
+            state.write_source(route.clone(), value.clone());
+            Some(state.queued)
+        };
         assert!(
             state.ledger.get(OperationId(id)).is_none(),
             "duplicate operation"
@@ -456,6 +630,7 @@ impl DocumentAccess {
                     PendingMutation {
                         route,
                         mutation,
+                        stored_at,
                         updates
                     }
                 )
@@ -724,22 +899,35 @@ impl Operation {
 }
 
 impl MockDocuments {
-    pub fn bind_config(&self, owner: String, document: String, branch: String) {
+    pub fn bind_config(&self, binding: String, document: String, branch: String) {
         assert!(
             self.service
                 .inner
                 .lock()
                 .unwrap()
-                .config_owners
-                .insert(owner, (document, branch))
+                .config_documents
+                .insert(binding, (document, branch))
                 .is_none(),
-            "config owner already bound"
+            "config binding already bound"
         );
+    }
+    /// The source's current value, for the host-side writer that must decide before writing.
+    pub fn get(&self, route: &FacetRoute) -> Option<Value> {
+        self.service
+            .inner
+            .lock()
+            .unwrap()
+            .source
+            .get(route)
+            .cloned()
     }
     pub fn seed(&self, route: FacetRoute, value: Value) {
         let mut state = self.service.inner.lock().unwrap();
         state.note_route(&route);
-        state.source.entry(route).or_insert(value);
+        // A persisted value wins over the seed, so only a seed that lands is written.
+        if !state.source.contains_key(&route) {
+            state.write_source(route, Some(value));
+        }
     }
     pub fn complete(&self, id: u64, outcome: Result<(), OperationError>) {
         self.service.inner.lock().unwrap().complete(id, outcome);
@@ -762,11 +950,7 @@ impl MockDocuments {
     pub fn external_change(&self, route: FacetRoute, value: Option<Value>) {
         let mut state = self.service.inner.lock().unwrap();
         state.note_route(&route);
-        if let Some(value) = value {
-            state.source.insert(route.clone(), value);
-        } else {
-            state.source.remove(&route);
-        }
+        state.write_source(route.clone(), value);
         if state.watches.values().any(|record| record.contains(&route))
             || state.pending.values().any(|pending| pending.route == route)
         {
@@ -946,6 +1130,26 @@ impl State {
         routes
     }
 
+    /// The one place the source changes: applies the change and queues it for persistence.
+    fn write_source(&mut self, route: FacetRoute, value: Option<Value>) {
+        match &value {
+            Some(value) => self.source.insert(route.clone(), value.clone()),
+            None => self.source.remove(&route),
+        };
+        match &self.persist {
+            Persistence::Volatile => {}
+            Persistence::Open(persist) => {
+                persist
+                    .send((route, value))
+                    .expect("the persist future outlives the document service");
+                self.queued += 1;
+            }
+            Persistence::Closed => {
+                panic!("document source changed after the composition shut down")
+            }
+        }
+    }
+
     fn note_route(&mut self, route: &FacetRoute) {
         self.membership
             .entry((
@@ -968,17 +1172,19 @@ impl State {
         self.clock += 1;
         let version = Version::new(self.replica.incarnation(), self.clock);
         let delta = match value {
-            Some(value) => BaseDelta::Upsert {
+            Some(value) => Change::Upsert {
                 key: route.clone(),
-                version,
+                row_version: version,
                 value,
+                evidence: RowEvidence::Authoritative,
+                write_context: None,
             },
-            None => BaseDelta::Remove {
+            None => Change::Remove {
                 key: route.clone(),
-                version,
+                row_version: version,
             },
         };
-        self.replica.apply(version.incarnation, &[delta]);
+        self.replica.apply(&[delta]);
         version
     }
 
@@ -1075,21 +1281,33 @@ impl State {
         self.evict();
     }
 
+    /// Accepts every durable operation whose source change is among the first `applied` ones
+    /// the store has applied.
+    fn complete_stored(&mut self, applied: u64) {
+        let ids = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.stored_at.is_some_and(|at| at <= applied))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.complete(id, Ok(()));
+        }
+    }
+
     fn complete(&mut self, id: u64, outcome: Result<(), OperationError>) {
         let pending = self.pending.remove(&id).expect("operation is not pending");
         let op_id = OperationId(id);
         let status = match outcome {
             Ok(()) => {
                 let value = match pending.mutation {
-                    FacetMutation::Write(value) | FacetMutation::Create(value) => {
-                        self.source.insert(pending.route.clone(), value.clone());
-                        Some(value)
-                    }
-                    FacetMutation::Delete => {
-                        self.source.remove(&pending.route);
-                        None
-                    }
+                    FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value),
+                    FacetMutation::Delete => None,
                 };
+                // A durable operation's change was written to the source when it was made.
+                if pending.stored_at.is_none() {
+                    self.write_source(pending.route.clone(), value.clone());
+                }
                 let version = self.apply_base(&pending.route, value);
                 self.ledger.settle(op_id, WriteOutcome::Durable { version });
                 let retired = self
@@ -1099,6 +1317,10 @@ impl State {
                 OperationStatus::Accepted
             }
             Err(error) => {
+                assert!(
+                    pending.stored_at.is_none(),
+                    "a durable operation is already in the source: nothing remote can reject it"
+                );
                 assert!(
                     self.ledger.settle(op_id, WriteOutcome::Rejected).is_some(),
                     "operation overlay disappeared"

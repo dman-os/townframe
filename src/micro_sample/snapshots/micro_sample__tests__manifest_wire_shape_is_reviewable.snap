@@ -1,23 +1,45 @@
 ---
 source: src/micro_sample/tests.rs
-expression: manifest()
+expression: sidecar()
 ---
 id: dayframe.sample
-version: 1
-requirements:
-  - id: settings.sections
-    version: 1
-provisions:
-  - id: sample.controller
-    version: 1
-config:
-  name: sample
-  facets:
-    - owner_plug_id: ~
-      tag: org.dayframe.sample.config
-      key_id: main
-      read: true
-      write: true
-      create: false
-      delete: false
-contributions: []
+package_version: 1
+authority: org.example.dayframe.sample
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+publications:
+  - name: detail
+    kind: presentation
+    contract: ~
+requires: []
+configuration_requests:
+  - binding: sample
+    facets:
+      - tag: org.example.dayframe.sample.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
+collection_contracts: []
+collection_requests:
+  - binding: sections
+    contract: org.example.dayframe.settings.sections
+    access: write
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: write
+    necessity: optional
+contributions:
+  - id: layout-panel
+    binding: panels
+    key: dayframe.sample
+    payload:
+      content:
+        $attachment: 0
+      title: Sample micro
+    attachments:
+      - index: 0
+        publication: detail

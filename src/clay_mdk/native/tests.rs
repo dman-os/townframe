@@ -1,441 +1,817 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::Mutex;
+use super::*;
+use crate::Access;
+use crate::BindingResolution;
+use crate::Entrypoints;
+use crate::Necessity;
+use crate::PublicationDeclaration;
+use crate::PublicationKind;
+use crate::Registration;
+use crate::Request;
+use crate::SHELL_ROOTS;
+use crate::Sidecar;
+use clay_collection::ReplicaId;
+use clay_guest_session::capabilities::PublicationEndpoint;
+use clay_guest_session::capabilities::presentation_component;
+use clay_guest_session::collections::bytes_registrations;
+use clay_host::CollectionContract;
+use clay_host::ConfiguredMicro;
+use clay_host::MicroState;
+use clay_host::Requirement;
+use clay_host::StartError;
+use clay_host::Supervisor;
+use dioxus_core::Element;
+use dioxus_core::VNode;
+use std::cell::Cell;
+use std::num::NonZeroUsize;
 
-use clay_host::AccessError;
-use clay_host::Host;
-use clay_host::Instance;
-use clay_host::RendererRegistry;
-use clay_micro_core::application::ApplicationRuntime;
-use clay_micro_core::micros::MicroDescriptor;
-use clay_micro_core::micros::MicroId as ComposeMicroId;
-use clay_micro_core::micros::MicroProvision;
-use clay_micro_core::micros::composition::ConfiguredMicro;
-use clay_micro_core::micros::composition::Enablement;
-use clay_micro_core::micros::composition::InstanceState;
-use serde_json::Value;
+const ROWS: &str = "org.example.clay.test.rows";
+const INCREMENT: &str = "org.example.clay.test.calls.increment";
 
-use super::Collection;
-use super::Context;
-use super::Contributable;
-use super::compose_descriptor;
-use super::output;
-use super::provider;
-use super::routine_facets;
-use crate::ComponentRef;
-use crate::Contribution;
-use crate::MicroId;
-use crate::MicroManifest;
-use crate::Provision;
-use crate::ProvisionRef;
-use crate::manifest::FacetAccess;
+fn rows() -> Nsid {
+    Nsid::literal(ROWS)
+}
 
-// ── Fixtures ──
+fn blank() -> Element {
+    VNode::empty()
+}
 
-// The stub registry publishes through the host so revocation stays authoritative, but produces
-// no renderable element: contribution routing never looks at the element.
-#[derive(Clone)]
-struct StubRegistry {
+/// One test micro's manifest-side declaration; `Rig::micro` pairs it with an `activate`.
+/// The supervisor-side id of the built-in micro named `name`, the one its factory is given.
+fn host_id(name: &str) -> clay_host::MicroId {
+    clay_host::MicroId::new(crate::MicroId::local(name).as_str())
+}
+
+#[derive(Default)]
+struct Spec {
+    publications: Vec<PublicationDeclaration>,
+    requests: Vec<Request>,
+    requires: Vec<Request>,
+    bindings: CollectionBindings,
+    eager: bool,
+    requirements: BTreeMap<String, Requirement>,
+}
+
+struct Rig {
     host: Host,
+    resources: Resources,
 }
 
-impl RendererRegistry for StubRegistry {
-    type Render = ();
-
-    fn for_host(host: &Host) -> Self {
-        Self { host: host.clone() }
+impl Rig {
+    fn new() -> Self {
+        let host = Host::new();
+        let resources = Resources::new(
+            NativeComponents::new(&host),
+            DocumentService::new(16),
+            CollectionRegistry::new(ReplicaId::from_bytes([1; ReplicaId::LEN])),
+        );
+        resources
+            .collections
+            .declare(
+                CollectionContract {
+                    id: rows(),
+                    key_schema: Nsid::literal("org.example.clay.test.rowKey"),
+                    value_schema: Nsid::literal("org.example.clay.test.rowValue"),
+                },
+                bytes_registrations(NonZeroUsize::new(64).unwrap(), [0, 0]),
+            )
+            .unwrap();
+        Self { host, resources }
     }
 
-    fn publish<F>(
+    fn micro<Fut: Future<Output = Result<(), Error>> + 'static>(
         &self,
-        owner: &Instance,
-        _render: F,
-    ) -> Result<clay_host::ComponentRef, AccessError>
-    where
-        F: Fn() -> Self::Render + 'static,
-    {
-        self.host.publish_component(owner)
-    }
-}
-
-type Runtime = ApplicationRuntime<StubRegistry>;
-
-// A native contract that accepts declared contributions — the composition-side half every
-// declared contribution needs (native twin of the wasm suite's shelf). It shelves each
-// contributor's surface in a host collection, so withdrawal is observable, and records who
-// contributed what, so routing and order are observable.
-#[derive(Clone)]
-struct Shelf {
-    entries: Collection<ComponentRef>,
-    seen: Arc<Mutex<Vec<(Instance, Value, ComponentRef)>>>,
-}
-
-impl Provision for Shelf {
-    const ID: &'static str = "test.shelf";
-}
-
-impl Contributable for Shelf {
-    fn contribute(
-        &self,
-        contributor: &Instance,
-        payload: &Value,
-        surface: ComponentRef,
-    ) -> Result<(), AccessError> {
-        if payload["reject"].as_bool().unwrap() {
-            return Err(AccessError::Denied);
-        }
-        self.entries.writer(contributor)?.insert(surface)?;
-        self.seen
-            .lock()
-            .unwrap()
-            .push((contributor.clone(), payload.clone(), surface));
-        Ok(())
-    }
-}
-
-fn contribution(slot: &str, reject: bool) -> Contribution {
-    Contribution {
-        provision: Shelf::ID.into(),
-        payload: serde_json::json!({ "slot": slot, "reject": reject }),
-    }
-}
-
-fn shelf_provider(app: &Runtime, contributable: bool) -> clay_micro_core::micros::MicroFactory {
-    provider(
-        app,
-        MicroManifest {
-            id: MicroId::new("test.shelf"),
-            version: 1,
-            requirements: vec![],
-            provisions: vec![ProvisionRef::of::<Shelf>()],
-            config: None,
+        id: &str,
+        spec: Spec,
+        activate: impl Fn(Context) -> Fut + 'static,
+    ) -> ConfiguredMicro<CapabilityPublication> {
+        let manifest = MicroManifest {
+            entrypoints: Entrypoints::micro_client(),
+            publications: spec.publications,
+            requires: spec.requires,
+            configuration_requests: vec![],
+            collection_contracts: vec![],
+            collection_requests: spec.requests,
             contributions: vec![],
-        },
-        move |context| {
-            let shelf = Shelf {
-                entries: context.collection()?,
-                seen: Arc::default(),
-            };
-            if contributable {
-                context.publish_contributable(shelf);
-            } else {
-                context.publish(shelf);
+            extra: BTreeMap::new(),
+        };
+        manifest.validate().unwrap();
+        ConfiguredMicro {
+            identity: host_id(id),
+            eager: spec.eager,
+            enabled: true,
+            requirements: spec.requirements,
+            unresolved_bindings: Vec::new(),
+            factory: factory(
+                self.resources.clone(),
+                crate::MicroId::local(id),
+                manifest,
+                spec.bindings,
+                activate,
+            ),
+        }
+    }
+}
+
+fn presentation(name: &str) -> PublicationDeclaration {
+    PublicationDeclaration {
+        name: name.into(),
+        kind: PublicationKind::Presentation,
+        contract: None,
+    }
+}
+
+fn call(name: &str) -> PublicationDeclaration {
+    PublicationDeclaration {
+        name: name.into(),
+        kind: PublicationKind::Call,
+        contract: Some(Nsid::literal(INCREMENT)),
+    }
+}
+
+/// The binding name the test micros use for the `ROWS` collection.
+const ROWS_BINDING: &str = "rows";
+
+fn rows_request(access: Access, necessity: Necessity) -> Request {
+    Request {
+        binding: ROWS_BINDING.into(),
+        contract: rows(),
+        access: Some(access),
+        necessity,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
+    }
+}
+
+fn writes_rows() -> Spec {
+    Spec {
+        eager: true,
+        requests: vec![rows_request(Access::Write, Necessity::Required)],
+        bindings: CollectionBindings::new([(
+            ROWS_BINDING.to_owned(),
+            BoundCollection::write(rows()),
+        )]),
+        ..Spec::default()
+    }
+}
+
+fn reads_rows() -> Spec {
+    Spec {
+        requests: vec![rows_request(Access::Read, Necessity::Required)],
+        bindings: CollectionBindings::new([(
+            ROWS_BINDING.to_owned(),
+            BoundCollection::read(rows()),
+        )]),
+        ..Spec::default()
+    }
+}
+
+async fn in_local_set<T>(future: impl Future<Output = T>) -> T {
+    tokio::task::LocalSet::new().run_until(future).await
+}
+
+fn titles(collection: &Collection<String, String>) -> Vec<(String, String)> {
+    collection
+        .rows()
+        .unwrap()
+        .iter()
+        .map(|row| (row.key.clone(), row.value.clone()))
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn declared_presentations_are_published_by_name_and_leased() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let micro = rig.micro(
+            "native.shelf",
+            Spec {
+                publications: vec![presentation("view"), presentation("detail")],
+                ..Spec::default()
+            },
+            |context| async move {
+                context.publish_component("view", blank)?;
+                context.publish_component("detail", blank)?;
+                Ok(())
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        let id = host_id("native.shelf");
+        let view = supervisor.acquire(&id, "view").await.unwrap();
+        let detail = supervisor.acquire(&id, "detail").await.unwrap();
+        assert_eq!(view.name(), "view");
+        assert_eq!(detail.name(), "detail");
+        assert_eq!(
+            view.kind(),
+            clay_guest_session::capabilities::PublicationKind::Presentation
+        );
+        assert!(matches!(
+            supervisor.acquire(&id, "other").await.err(),
+            Some(StartError::Unpublished { .. })
+        ));
+        drop((view, detail));
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn publishing_an_undeclared_name_fails_initialization() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let ran = Rc::new(Cell::new(false));
+        let micro = rig.micro(
+            "native.rogue",
+            Spec {
+                publications: vec![presentation("view")],
+                ..reads_rows()
+            },
+            {
+                let ran = Rc::clone(&ran);
+                move |context| {
+                    let ran = Rc::clone(&ran);
+                    async move {
+                        // A mirror task is registered before the rejected publication.
+                        context.collection::<String, String>(ROWS_BINDING).unwrap();
+                        context.publish_component("undeclared", blank)?;
+                        ran.set(true);
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        let id = host_id("native.rogue");
+        let error = supervisor.acquire(&id, "view").await.err().unwrap();
+        assert!(
+            matches!(&error, StartError::Faulted(message) if message.contains("undeclared")),
+            "{error:?}"
+        );
+        assert!(ran.get());
+        assert!(matches!(supervisor.state(&id), MicroState::Faulted(_)));
+        rig.host.close();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_closes() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let watched = Rc::new(RefCell::new(None::<Collection<String, String>>));
+        let reader = rig.micro(
+            "native.reader",
+            Spec {
+                eager: true,
+                ..reads_rows()
+            },
+            {
+                let watched = Rc::clone(&watched);
+                move |context| {
+                    let watched = Rc::clone(&watched);
+                    async move {
+                        *watched.borrow_mut() = context.collection(ROWS_BINDING);
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let writer = rig.micro("native.writer", writes_rows(), |context| async move {
+            let registration = context
+                .registration::<String, String>(ROWS_BINDING)
+                .unwrap();
+            registration
+                .put(&"counter".to_owned(), &"Counter".to_owned(), vec![])
+                .await?;
+            Ok(())
+        });
+        let supervisor = Supervisor::new(rig.host.clone(), [reader, writer]);
+        assert!(supervisor.reconcile().await.is_empty());
+        let mut watch = watched.borrow().clone().unwrap();
+        while titles(&watch) != [("counter".to_owned(), "Counter".to_owned())] {
+            watch.changed().await.unwrap();
+        }
+        supervisor.disable(&host_id("native.writer")).await.unwrap();
+        while !titles(&watch).is_empty() {
+            watch.changed().await.unwrap();
+        }
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rows_are_decoded_once_per_revision_and_rewritten_over_what_the_mirror_saw() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let written = Rc::new(RefCell::new(None::<Registration<String, String>>));
+        let writer = rig.micro("native.writer", writes_rows(), {
+            let written = Rc::clone(&written);
+            move |context| {
+                let written = Rc::clone(&written);
+                async move {
+                    *written.borrow_mut() = context.registration(ROWS_BINDING);
+                    Ok(())
+                }
             }
-            Ok(())
-        },
-    )
+        });
+        let supervisor = Supervisor::new(rig.host.clone(), [writer]);
+        assert!(supervisor.reconcile().await.is_empty());
+        let registration = written.borrow().clone().unwrap();
+        let mut watch = registration.collection().clone();
+        let key = "k".to_owned();
+        registration
+            .put(&key, &"one".to_owned(), vec![])
+            .await
+            .unwrap();
+        while titles(&watch) != [(key.clone(), "one".to_owned())] {
+            watch.changed().await.unwrap();
+        }
+        let first = watch.rows().unwrap();
+        assert!(Rc::ptr_eq(&first, &watch.rows().unwrap()));
+        // The default basis is the mirror's stamp for the key, so this supersedes "one".
+        registration
+            .put(&key, &"two".to_owned(), vec![])
+            .await
+            .unwrap();
+        while titles(&watch) != [(key.clone(), "two".to_owned())] {
+            watch.changed().await.unwrap();
+        }
+        assert!(!Rc::ptr_eq(&first, &watch.rows().unwrap()));
+        registration.delete(&key).await.unwrap();
+        while !titles(&watch).is_empty() {
+            watch.changed().await.unwrap();
+        }
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
-// A native micro that lands its declared contributions exactly the way the wasm backend does
-// (wasm.rs): activate, publish a surface, then contribute the manifest's declared entries.
-fn contributor_provider(
-    app: &Runtime,
-    contributions: Vec<Contribution>,
-    requirements: Vec<ProvisionRef>,
-) -> clay_micro_core::micros::MicroFactory {
-    provider(
-        app,
-        MicroManifest {
-            id: MicroId::new("test.contributor"),
-            version: 1,
-            requirements,
-            provisions: vec![],
-            config: None,
-            contributions: contributions.clone(),
-        },
-        move |context| {
-            let surface = context.publish_component(|| ())?;
-            context.contribute(&contributions, surface)?;
-            Ok(())
-        },
-    )
-}
-
-fn composed(
-    contributions: Vec<Contribution>,
-    requirements: Vec<ProvisionRef>,
-    contributable: bool,
-) -> Runtime {
-    let mut app = Runtime::new();
-    app.register_provider(shelf_provider(&app, contributable))
-        .unwrap();
-    app.register_provider(contributor_provider(&app, contributions, requirements))
-        .unwrap();
-    app
-}
-
-fn configuration() -> BTreeMap<String, ConfiguredMicro> {
-    BTreeMap::from([
-        (
-            "shelf".into(),
-            ConfiguredMicro {
-                provider: ComposeMicroId::new("test.shelf"),
-                enablement: Enablement::Enabled,
-                bindings: BTreeMap::new(),
+#[tokio::test(flavor = "current_thread")]
+async fn optional_requests_configuration_left_unbound_are_none() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let unbound = Rc::new(Cell::new(false));
+        let micro = rig.micro(
+            "native.unbound",
+            Spec {
+                eager: true,
+                requests: vec![rows_request(Access::Write, Necessity::Optional)],
+                ..Spec::default()
             },
-        ),
-        (
-            "contributor".into(),
-            ConfiguredMicro {
-                provider: ComposeMicroId::new("test.contributor"),
-                enablement: Enablement::Enabled,
-                bindings: BTreeMap::from([(Shelf::ID.into(), "shelf".into())]),
+            {
+                let unbound = Rc::clone(&unbound);
+                move |context| {
+                    let unbound = Rc::clone(&unbound);
+                    async move {
+                        unbound.set(
+                            context.collection::<String, String>(ROWS_BINDING).is_none()
+                                && context
+                                    .registration::<String, String>(ROWS_BINDING)
+                                    .is_none(),
+                        );
+                        Ok(())
+                    }
+                }
             },
-        ),
-    ])
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        assert!(supervisor.reconcile().await.is_empty());
+        assert!(unbound.get());
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
-fn shelved(app: &Runtime) -> (Vec<ComponentRef>, Vec<(Instance, Value, ComponentRef)>) {
-    let shelf = output::<Shelf, _>(app, "shelf").unwrap();
-    let entries = shelf
-        .entries
-        .reader(&app.root())
-        .snapshot()
-        .unwrap()
-        .into_values()
-        .collect();
-    let seen = shelf.seen.lock().unwrap().clone();
-    (entries, seen)
+#[tokio::test(flavor = "current_thread")]
+async fn each_incarnation_sees_the_binding_resolution_current_when_it_started() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let spec = Spec {
+            requests: vec![rows_request(Access::Read, Necessity::Optional)],
+            ..reads_rows()
+        };
+        let bindings = spec.bindings.clone();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let micro = rig.micro("native.rebound", spec, {
+            let seen = Rc::clone(&seen);
+            move |context| {
+                let seen = Rc::clone(&seen);
+                async move {
+                    seen.borrow_mut()
+                        .push(context.collection::<String, String>(ROWS_BINDING).is_some());
+                    Ok(())
+                }
+            }
+        });
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        let id = host_id("native.rebound");
+        supervisor.reconfigure(&id, vec![]).await.unwrap();
+        supervisor.acquire(&id, "none").await.err().unwrap();
+        // The binding changes while the incarnation runs: it keeps what it started with,
+        // and only the restart reads the new resolution.
+        bindings.replace(BTreeMap::new());
+        assert_eq!(*seen.borrow(), [true]);
+        supervisor.reconfigure(&id, vec![]).await.unwrap();
+        supervisor.acquire(&id, "none").await.err().unwrap();
+        assert_eq!(*seen.borrow(), [true, false]);
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
-fn declared() -> Vec<ProvisionRef> {
-    vec![ProvisionRef::of::<Shelf>()]
+#[tokio::test(flavor = "current_thread")]
+async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let provider = rig.micro(
+            "native.provider",
+            Spec {
+                publications: vec![presentation("view")],
+                ..Spec::default()
+            },
+            |context| async move {
+                context.publish_component("view", blank)?;
+                Ok(())
+            },
+        );
+        let status = Rc::new(RefCell::new(None));
+        let consumer = rig.micro(
+            "native.consumer",
+            Spec {
+                eager: true,
+                requires: vec![
+                    required("host", Necessity::Required),
+                    required("absent", Necessity::Optional),
+                ],
+                requirements: BTreeMap::from([(
+                    "host".to_owned(),
+                    provides("native.provider", "view"),
+                )]),
+                ..Spec::default()
+            },
+            {
+                let status = Rc::clone(&status);
+                move |context| {
+                    let status = Rc::clone(&status);
+                    async move {
+                        *status.borrow_mut() =
+                            Some(context.require("host").map(Capability::status));
+                        assert!(context.require("absent").is_none());
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [provider, consumer]);
+        assert!(supervisor.reconcile().await.is_empty());
+        assert_eq!(*status.borrow(), Some(Some(crate::RefStatus::Live)));
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
 }
 
-// ── Contribution routing ──
-
-#[tokio::test]
-async fn contributions_route_in_manifest_order_and_withdraw_on_close() {
-    let app = composed(
-        vec![
-            contribution("toolbar", false),
-            contribution("footer", false),
-        ],
-        declared(),
-        true,
-    );
-    let states = app.configure(&configuration()).await.unwrap();
-    assert_eq!(states["contributor"], InstanceState::Active);
-
-    let (entries, seen) = shelved(&app);
-    let [
-        (instance, first_payload, surface),
-        (second_instance, second_payload, second_surface),
-    ] = seen.as_slice()
-    else {
-        panic!("both contributions reached the shelf: {seen:?}");
-    };
-    assert_eq!(instance, second_instance);
-    assert_eq!(surface, second_surface);
-    // Routing follows the manifest's declared order, and both land on the one published surface.
-    assert_eq!(
-        (first_payload, second_payload),
-        (
-            &serde_json::json!({ "slot": "toolbar", "reject": false }),
-            &serde_json::json!({ "slot": "footer", "reject": false })
-        )
-    );
-    assert_eq!(entries, vec![*surface, *surface]);
-
-    app.host().close_instance(instance).unwrap();
-    assert_eq!(shelved(&app).0, vec![]);
-    app.host().close();
-}
-
-#[tokio::test]
-#[should_panic(expected = "manifest contributes to a contract it does not require")]
-async fn contributing_an_undeclared_contract_panics_the_guest() {
-    let app = composed(vec![contribution("toolbar", false)], vec![], true);
-    // The contributor declares no requirements, so there is nothing to bind.
-    let mut configuration = configuration();
-    configuration
-        .get_mut("contributor")
-        .unwrap()
-        .bindings
-        .clear();
-    let _ = app.configure(&configuration).await;
-}
-
-#[tokio::test]
-#[should_panic(expected = "accepts no contributions")]
-async fn contributing_to_a_non_contributable_target_panics_the_guest() {
-    let app = composed(vec![contribution("toolbar", false)], declared(), false);
-    let _ = app.configure(&configuration()).await;
-}
-
-#[tokio::test]
-async fn a_rejected_contribution_rolls_back_surfaces_entries_and_publications() {
-    let app = composed(
-        vec![contribution("toolbar", false), contribution("footer", true)],
-        declared(),
-        true,
-    );
-    let states = app.configure(&configuration()).await.unwrap();
-    assert!(matches!(states["contributor"], InstanceState::Failed(_)));
-
-    // Exactly the accepted contribution reached the acceptor; activation rollback withdrew its
-    // collection entry and closed the contributor.
-    let (entries, seen) = shelved(&app);
-    let [(instance, _, surface)] = seen.as_slice() else {
-        panic!("exactly the accepted contribution reached the shelf: {seen:?}");
-    };
-    assert!(entries.is_empty());
-    assert_eq!(app.host().check(instance), Err(AccessError::Revoked));
-    assert!(matches!(
-        app.host().mount(&app.root(), surface.host()),
-        Err(AccessError::Revoked)
-    ));
-    app.host().close();
-}
-
-// ── Typed requirement resolution ──
-
-#[tokio::test]
-async fn require_returns_the_published_value_for_a_declared_requirement() {
-    let mut app = Runtime::new();
-    app.register_provider(shelf_provider(&app, true)).unwrap();
-    let observed = Arc::new(Mutex::new(None));
-    let captured = observed.clone();
-    app.register_provider(provider(
-        &app,
-        MicroManifest {
-            id: MicroId::new("test.consumer"),
-            version: 1,
-            requirements: declared(),
-            provisions: vec![],
-            config: None,
-            contributions: vec![],
-        },
-        move |context: &Context<StubRegistry>| {
-            *captured.lock().unwrap() = Some(context.require::<Shelf>().unwrap());
-            Ok(())
-        },
-    ))
-    .unwrap();
-    let states = app
-        .configure(&BTreeMap::from([
-            (
-                "shelf".into(),
-                ConfiguredMicro {
-                    provider: ComposeMicroId::new("test.shelf"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::new(),
-                },
-            ),
-            (
-                "consumer".into(),
-                ConfiguredMicro {
-                    provider: ComposeMicroId::new("test.consumer"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::from([(Shelf::ID.into(), "shelf".into())]),
-                },
-            ),
-        ]))
-        .await
-        .unwrap();
-    assert_eq!(states["consumer"], InstanceState::Active);
-
-    let required = observed.lock().unwrap().clone().unwrap();
-    let published = output::<Shelf, _>(&app, "shelf").unwrap();
-    assert!(Arc::ptr_eq(&required.seen, &published.seen));
-    app.host().close();
-}
-
-#[tokio::test]
-#[should_panic(expected = "contract identity mapped to two native types")]
-async fn output_at_the_wrong_native_type_for_a_contract_id_is_an_invariant_failure() {
-    #[derive(Clone)]
-    struct Impostor;
-    impl Provision for Impostor {
-        const ID: &'static str = Shelf::ID;
+fn required(binding: &str, necessity: Necessity) -> Request {
+    Request {
+        binding: binding.into(),
+        contract: Nsid::literal(INCREMENT),
+        access: None,
+        necessity,
+        resolution: BindingResolution::Configured,
+        min_revision: None,
     }
-    let mut app = Runtime::new();
-    app.register_provider(shelf_provider(&app, true)).unwrap();
-    app.configure(&configuration()).await.unwrap();
-    let _ = output::<Impostor, _>(&app, "shelf");
 }
 
-// ── Wire lowering ──
+fn provides(provider: &str, publication: &str) -> Requirement {
+    Requirement {
+        provider: host_id(provider),
+        publication: publication.into(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_published_call_serves_typed_requests_and_reports_handler_rejections() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let provider = rig.micro(
+            "native.provider",
+            Spec {
+                publications: vec![call("increment")],
+                ..Spec::default()
+            },
+            |context| async move {
+                context.publish_call("increment", |value: u32| async move {
+                    // The await point proves handlers run as tasks, not inline in the queue.
+                    tokio::task::yield_now().await;
+                    if value == 0 {
+                        return Err(Error::Rejected("zero".into()));
+                    }
+                    Ok(value + 1)
+                })?;
+                Ok(())
+            },
+        );
+        let capability = Rc::new(RefCell::new(None::<Capability>));
+        let consumer = rig.micro(
+            "native.consumer",
+            Spec {
+                eager: true,
+                requires: vec![required("increment", Necessity::Required)],
+                requirements: BTreeMap::from([(
+                    "increment".to_owned(),
+                    provides("native.provider", "increment"),
+                )]),
+                ..Spec::default()
+            },
+            {
+                let capability = Rc::clone(&capability);
+                move |context| {
+                    let capability = Rc::clone(&capability);
+                    async move {
+                        *capability.borrow_mut() = context.require("increment").cloned();
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [provider, consumer]);
+        assert!(supervisor.reconcile().await.is_empty());
+        let increment = capability.borrow().clone().unwrap();
+        assert_eq!(increment.call::<u32, u32>(&41).await, Ok(42));
+        assert_eq!(
+            increment.call::<u32, u32>(&0).await,
+            Err(Error::Rejected("rejected: zero".into()))
+        );
+        // A request the handler cannot decode is the provider's rejection, not a crash.
+        assert!(matches!(
+            increment.call::<String, u32>(&"nope".to_owned()).await,
+            Err(Error::Rejected(message)) if message.contains("does not decode")
+        ));
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+/// A row may attach one of its writer's own declared publications at any time: the host stores
+/// the endpoint, so no handle from `activate` is needed and a reader redeems the row's
+/// reference like a manifest row's. A name the manifest does not declare fails the write.
+#[tokio::test(flavor = "current_thread")]
+async fn a_row_written_after_activate_attaches_the_writers_own_declared_publication() {
+    in_local_set(async {
+        let rig = Rig::new();
+        let writer = rig.micro(
+            "native.late",
+            Spec {
+                publications: vec![presentation("detail"), call("attach")],
+                ..writes_rows()
+            },
+            |context| async move {
+                let rows = context
+                    .registration::<String, String>(ROWS_BINDING)
+                    .unwrap();
+                context.publish_component("detail", blank)?;
+                // The handler runs long after `activate` returned and its staged handles moved.
+                context.publish_call("attach", move |publication: String| {
+                    let rows = rows.clone();
+                    async move {
+                        rows.put(
+                            &"late".to_owned(),
+                            &"Late".to_owned(),
+                            vec![crate::RowAttachment::own(publication)],
+                        )
+                        .await?;
+                        Ok(())
+                    }
+                })?;
+                Ok(())
+            },
+        );
+        let watched = Rc::new(RefCell::new(None::<Collection<String, String>>));
+        let attach = Rc::new(RefCell::new(None::<Capability>));
+        let reader = rig.micro(
+            "native.reader",
+            Spec {
+                eager: true,
+                requires: vec![required("attach", Necessity::Required)],
+                requirements: BTreeMap::from([(
+                    "attach".to_owned(),
+                    provides("native.late", "attach"),
+                )]),
+                ..reads_rows()
+            },
+            {
+                let watched = Rc::clone(&watched);
+                let attach = Rc::clone(&attach);
+                move |context| {
+                    let watched = Rc::clone(&watched);
+                    let attach = Rc::clone(&attach);
+                    async move {
+                        *watched.borrow_mut() = context.collection(ROWS_BINDING);
+                        *attach.borrow_mut() = context.require("attach").cloned();
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Rc::new(Supervisor::new(rig.host.clone(), [writer, reader]));
+        // Redeeming a reference is served by the supervisor's driver.
+        let driver = tokio::task::spawn_local({
+            let supervisor = Rc::clone(&supervisor);
+            async move { supervisor.drive().await }
+        });
+        assert!(supervisor.reconcile().await.is_empty());
+        let attach = attach.borrow().clone().unwrap();
+        assert_eq!(
+            attach.call::<String, ()>(&"detail".to_owned()).await,
+            Ok(())
+        );
+        let mut watch = watched.borrow().clone().unwrap();
+        while watch.rows().unwrap().is_empty() {
+            watch.changed().await.unwrap();
+        }
+        let rows = watch.rows().unwrap();
+        let detail = rows[0].attachments[0].redeem_presentation().await.unwrap();
+        assert!(detail.component().is_ok());
+        drop(detail);
+        // Neither an undeclared name nor a declared call attaches as a presentation row.
+        assert!(matches!(
+            attach.call::<String, ()>(&"nope".to_owned()).await,
+            Err(Error::Rejected(message)) if message.contains("attachment")
+        ));
+        drop((attach, rows, watch));
+        driver.abort();
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
+
+/// ADR 030 §6 for a view: the render closure of a published component is dropped by the
+/// incarnation's close, while the incarnation is still `Closing` and not yet torn down, and
+/// not later with whatever registry holds it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_value_captured_by_a_view_is_dropped_inside_the_close() {
+    struct Probe {
+        host: Host,
+        instance: Rc<RefCell<Option<clay_host::Instance>>>,
+        seen: Rc<RefCell<Vec<clay_host::Lifecycle>>>,
+    }
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let instance = self.instance.borrow().clone().unwrap();
+            self.seen.borrow_mut().push(self.host.lifecycle(&instance));
+        }
+    }
+    in_local_set(async {
+        let rig = Rig::new();
+        let instance = Rc::new(RefCell::new(None));
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let micro = rig.micro(
+            "native.viewer",
+            Spec {
+                eager: true,
+                publications: vec![presentation("view")],
+                ..Spec::default()
+            },
+            {
+                let (host, instance, seen) = (rig.host.clone(), instance.clone(), seen.clone());
+                move |context| {
+                    let probe = Probe {
+                        host: host.clone(),
+                        instance: instance.clone(),
+                        seen: seen.clone(),
+                    };
+                    async move {
+                        context.publish_component("view", move || {
+                            let _ = &probe;
+                            blank()
+                        })?;
+                        Ok(())
+                    }
+                }
+            },
+        );
+        let supervisor = Supervisor::new(rig.host.clone(), [micro]);
+        let id = host_id("native.viewer");
+        assert!(supervisor.reconcile().await.is_empty());
+        *instance.borrow_mut() = supervisor.instance(&id);
+        assert!(seen.borrow().is_empty(), "a live view keeps its captures");
+        supervisor.disable(&id).await.unwrap();
+        assert_eq!(*seen.borrow(), [clay_host::Lifecycle::Closing]);
+        supervisor.shutdown().await.unwrap();
+        rig.host.close();
+    })
+    .await;
+}
 
 #[test]
-fn compose_descriptor_lowers_identity_and_contracts_verbatim() {
+fn declared_publications_keep_the_manifest_contract_and_skip_unknown_kinds() {
     let manifest = MicroManifest {
-        id: MicroId::new("test.counter"),
-        version: 2,
-        requirements: vec![
-            ProvisionRef {
-                id: "a".into(),
-                version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        publications: vec![
+            presentation("view"),
+            PublicationDeclaration {
+                name: "echo".into(),
+                kind: PublicationKind::Call,
+                contract: Some(Nsid::literal("org.example.clay.test.lifecycle.echoV2")),
             },
-            ProvisionRef {
-                id: "b".into(),
-                version: 3,
+            PublicationDeclaration {
+                name: "future".into(),
+                kind: PublicationKind::Other("stream".into()),
+                contract: None,
             },
         ],
-        provisions: vec![ProvisionRef {
-            id: "c".into(),
-            version: 1,
-        }],
-        config: None,
+        requires: vec![],
+        configuration_requests: vec![],
+        collection_contracts: vec![],
+        collection_requests: vec![],
         contributions: vec![],
+        extra: BTreeMap::new(),
     };
-
+    let declared = declared_publications(&manifest);
+    assert_eq!(declared.len(), 2, "an unknown kind is not served");
     assert_eq!(
-        compose_descriptor(&manifest),
-        MicroDescriptor {
-            id: ComposeMicroId::new("test.counter"),
-            version: 2,
-            requirements: vec![
-                MicroProvision {
-                    id: "a".into(),
-                    version: 1,
-                },
-                MicroProvision {
-                    id: "b".into(),
-                    version: 3,
-                },
-            ],
-            provisions: vec![MicroProvision {
-                id: "c".into(),
-                version: 1,
+        declared["echo"].contract,
+        Nsid::literal("org.example.clay.test.lifecycle.echoV2")
+    );
+    assert_eq!(declared["view"].contract, presentation_component());
+}
+
+#[test]
+fn declared_rows_store_endpoints_and_tag_attachment_slots() {
+    use crate::AttachmentDeclaration;
+    use crate::ContributionDeclaration;
+
+    let mut sidecar = Sidecar::new(
+        "native.declares",
+        1,
+        MicroManifest {
+            entrypoints: Entrypoints::micro_client(),
+            publications: vec![presentation("view")],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: vec![],
+            collection_requests: vec![Request {
+                binding: "roots".into(),
+                contract: Nsid::literal(SHELL_ROOTS),
+                access: Some(Access::Write),
+                necessity: Necessity::Required,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
             }],
+            contributions: vec![ContributionDeclaration {
+                id: "root".into(),
+                binding: "roots".into(),
+                key: "native.declares".into(),
+                payload: serde_json::json!({"title": "Declared", "content": {"$attachment": 0}}),
+                attachments: vec![AttachmentDeclaration {
+                    index: 0,
+                    publication: "view".into(),
+                }],
+            }],
+            extra: BTreeMap::new(),
+        },
+    );
+    let micro = crate::MicroId::local("native.declares");
+    let rows = declared_rows(&micro, &sidecar).unwrap();
+    let mut key = Vec::new();
+    ciborium::into_writer("native.declares", &mut key).unwrap();
+    let value = rows["roots"][&key].clone().unwrap();
+    let row: RootRow = ciborium::from_reader(value.body.as_slice()).unwrap();
+    assert_eq!(
+        row,
+        RootRow {
+            title: "Declared".into(),
+            content: Attachment::at(0),
+            pinned: false,
         }
     );
-}
+    assert_eq!(
+        value.attachments,
+        [clay_guest_session::capabilities::RowAttachment::Endpoint(
+            PublicationEndpoint {
+                micro: host_id(micro.name()),
+                publication: "view".into(),
+                contract: presentation_component(),
+            }
+        )]
+    );
+    assert_ne!(
+        manifest_scope(&host_id(micro.name())),
+        runtime_scope(&host_id(micro.name()))
+    );
 
-#[test]
-fn routine_facets_carries_acl_fields_and_wraps_tags_verbatim() {
-    let facets = vec![
-        FacetAccess {
-            owner_plug_id: None,
-            tag: "org.dayframe.counter.config".into(),
-            key_id: Some("count".into()),
-            read: true,
-            write: true,
-            create: false,
-            delete: false,
-        },
-        FacetAccess {
-            owner_plug_id: Some("dayframe.organizer".into()),
-            tag: "org.dayframe.slots".into(),
-            key_id: None,
-            read: true,
-            write: false,
-            create: true,
-            delete: true,
-        },
-    ];
-
-    let lowered = routine_facets(&facets);
-    assert_eq!(lowered.len(), facets.len());
-    // RoutineFacetAccess carries no PartialEq; pin the lowering field by field.
-    for (lowered, facet) in lowered.iter().zip(&facets) {
-        assert_eq!(lowered.owner_plug_id, facet.owner_plug_id);
-        assert_eq!(lowered.tag.to_string(), facet.tag);
-        assert_eq!(lowered.key_id, facet.key_id);
-        assert_eq!(lowered.read, facet.read);
-        assert_eq!(lowered.write, facet.write);
-        assert_eq!(lowered.create, facet.create);
-        assert_eq!(lowered.delete, facet.delete);
-    }
+    // An attachment index that the contribution does not declare is refused.
+    sidecar.manifest.contributions[0].attachments[0].index = 3;
+    assert!(
+        declared_rows(&micro, &sidecar)
+            .unwrap_err()
+            .contains("index 3")
+    );
 }

@@ -41,8 +41,8 @@ use super::codec::Cipher;
 use super::codec::HEADER_LEN;
 use super::codec::RECORD_OVERHEAD;
 use super::codec::ciphertext_len;
-use super::codec::header;
 use super::codec::encoded_record_count;
+use super::codec::header;
 use super::codec::payload_size;
 use super::keys::MasterKey;
 use super::params::EncodingParams;
@@ -180,7 +180,11 @@ impl PlainPair {
             if plain.len() != want {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    format!("plaintext {} unreadable at {pt_start}: {} of {want} octets", self.p_hash, plain.len()),
+                    format!(
+                        "plaintext {} unreadable at {pt_start}: {} of {want} octets",
+                        self.p_hash,
+                        plain.len()
+                    ),
                 ));
             }
             plain.to_vec()
@@ -604,8 +608,7 @@ mod tests {
                 .temp_tag()
                 .await?;
             let key = MasterKey::random();
-            let expected =
-                encrypt_with_rs(&key, b"local durable provenance", 4096, Padding::Padme);
+            let expected = encrypt_with_rs(&key, b"local durable provenance", 4096, Padding::Padme);
             let cipher = Hash::new(&expected);
             let encoding = EncodingParams::new(4096, Padding::Padme)?;
             for path in ["accepted", "local", "local-document"] {

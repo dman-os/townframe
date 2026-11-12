@@ -5,8 +5,8 @@ allowed_dependencies = [
     "clay_collection",
     "clay_dioxus",
     "clay_docs",
+    "clay_guest_session",
     "clay_host",
-    "clay_micro_core",
     "clay_rt_wasmtime",
     "clay_rt_wcmp",
     "clay_surface",
@@ -17,13 +17,13 @@ allow_external_api_types = false
 # Both engines compose through this crate: Wasmtime is native-only (cfg-gated dep); `wcmp`
 # links on wasm32 for the browser shell. Features ≤8 so the matrix needs no powerset.
 [builds.native]
-features = ["in_process", "view", "wasmtime", "wcmp"]
-required_features = ["dioxus", "wit"]
+features = ["contract", "in_process", "view", "wasmtime", "wcmp", "package"]
+required_features = ["guest", "wit"]
 
 [builds.wasm32-unknown-unknown]
-features = ["in_process", "view", "wcmp"]
-required_features = ["dioxus", "wit"]
+features = ["contract", "in_process", "view", "wcmp", "package"]
+required_features = ["guest", "wit"]
 
-# Guest-side authoring (wit + Dioxus guest adapter) as a wasip3 component.
+# Guest-side authoring (the guest backend over the WIT imports) as a wasip3 component.
 [builds.wasm32-wasip3]
-required_features = ["dioxus", "wit"]
+required_features = ["guest", "wit"]

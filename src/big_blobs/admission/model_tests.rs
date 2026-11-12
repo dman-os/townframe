@@ -57,6 +57,15 @@ impl AdmissionModel {
             .any(|source| source.seen && source.present)
     }
 
+    /// Whether admission may fetch this pair: its inventory is selected and readable, and the
+    /// digest is pinned and observed present at a source.
+    fn fetchable(&self, inventory: usize, digest: usize) -> bool {
+        self.selected(inventory)
+            && self.pairs[inventory][digest].pinned
+            && self.observed(inventory, digest)
+            && self.readable[inventory]
+    }
+
     fn invalidate_fetches(&mut self, inventory: usize) {
         for pair in &mut self.pairs[inventory] {
             pair.fetching = false;
@@ -121,15 +130,21 @@ impl AdmissionModel {
     ) {
         // Big Sync delivers observations in cursor order and this backend treats
         // the durable (inventory, digest, peer) row as the idempotency key. The
-        // compatibility revision argument is therefore intentionally ignored.
+        // compatibility revision argument is therefore intentionally ignored, and
+        // an observation that repeats the row is a no-op.
         let source = &mut self.sources[inventory][digest][peer];
+        if source.seen && source.present == present {
+            return;
+        }
         source.seen = true;
         source.present = present;
         let observed = self.observed(inventory, digest);
         let pair = &mut self.pairs[inventory][digest];
         pair.created = true;
         pair.observed = observed;
-        self.invalidate_fetches(inventory);
+        // A changed observation re-arms its own pair only: what a source says
+        // about one digest leaves a transfer of another digest running.
+        pair.fetching = false;
     }
 
     fn available(&mut self, inventory: usize, digest: usize, available: bool) {
@@ -356,7 +371,10 @@ async fn run_script(script: Vec<Command>) {
                     .expect("select inventory");
             }
 
-            Command::Authorize { inventory, readable } => {
+            Command::Authorize {
+                inventory,
+                readable,
+            } => {
                 apply_authorize(&admission, &mut model, inventory, readable).await;
             }
             Command::Pins {
@@ -414,10 +432,7 @@ async fn run_script(script: Vec<Command>) {
             } => {
                 let pair = model.pairs[inventory][digest_index];
                 let expected = pair.created
-                    && model.selected(inventory)
-                    && pair.pinned
-                    && model.observed(inventory, digest_index)
-                    && model.readable[inventory]
+                    && model.fetchable(inventory, digest_index)
                     && !pair.bytes
                     && !pair.fetching;
                 let actual = admission
@@ -442,10 +457,7 @@ async fn run_script(script: Vec<Command>) {
                 };
                 let expected = attempt_live
                     && authorized
-                    && model.selected(inventory_index)
-                    && model.pairs[inventory_index][digest_index].pinned
-                    && model.observed(inventory_index, digest_index)
-                    && model.readable[inventory_index]
+                    && model.fetchable(inventory_index, digest_index)
                     && model.pairs[inventory_index][digest_index].fetching;
                 let actual = admission
                     .complete(attempt, authorized)

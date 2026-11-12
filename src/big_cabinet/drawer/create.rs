@@ -94,19 +94,20 @@ impl Core {
                     let receipt = self
                         .as_signer(
                             context,
-                            actor.capability,
+                            caller.via,
                             DocScope {
                                 write: [doc_id.clone()].into(),
                                 ..Default::default()
                             },
-                            |capability| {
+                            |authorization| {
                                 let (command, doc_id) = (&command, &doc_id);
                                 async move {
                                     self.docs()
-                                        .call(
+                                        .call_with(
                                             context.child(),
+                                            authorization.metadata(),
                                             WriteDatums {
-                                                capability,
+                                                capability: authorization.authority,
                                                 command: Some(command.clone()),
                                                 doc_id: doc_id.clone(),
                                                 mode: WriteMode::AtCurrent,
@@ -161,7 +162,10 @@ impl Core {
                     read: [doc_id.clone()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -330,7 +334,10 @@ impl Core {
                     create: [METADATA_PLACEMENT.into()].into(),
                     ..Default::default()
                 },
-                |capability| {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| {
                     let descriptor = &descriptor;
                     async move {
                         self.docs()
@@ -393,7 +400,10 @@ impl Core {
                     create: [METADATA_PLACEMENT.into()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -494,7 +504,10 @@ impl Core {
                             create: [METADATA_PLACEMENT.into()].into(),
                             ..Default::default()
                         },
-                        |capability| async move {
+                        |Authorization {
+                             authority: capability,
+                             ..
+                         }| async move {
                             self.docs()
                                 .call(
                                     context.child(),
@@ -617,63 +630,74 @@ impl DrawerService {
                     .drawer_id,
             );
         }
-        // The registry is a fresh self-doc drawer: a metadata doc that is its own drawer, its
-        // known entries are bookkeeping datums on it, and a foreign layout arriving from a
-        // peer is carried rather than operated, as anywhere else.
-        let command = CommandId::try_from("local drawer registry".to_owned())
-            .expect("the registry command is within bounds");
-        let receipt = self
-            .core
-            .as_signer(
-                &context,
-                self.core.issuer,
-                DocScope {
-                    create: [METADATA_PLACEMENT.into()].into(),
-                    ..Default::default()
-                },
-                |capability| {
-                    let (command, context) = (&command, &context);
-                    async move {
-                        self.core
-                            .docs()
-                            .call(
-                                context.child(),
-                                CreateDoc {
-                                    capability,
-                                    command: command.clone(),
-                                    placement: METADATA_PLACEMENT.into(),
-                                    datums: BTreeMap::from([(
-                                        drawer_key(),
-                                        datum_value(&Drawer::self_doc()),
-                                    )]),
-                                },
-                            )
-                            .await
-                            .map_err(docs_error)
-                    }
-                },
-            )
-            .await?;
-        self.core
-            .state
-            .put_drawer(&receipt.doc_id, &Drawer::self_doc())
-            .await?;
-        self.core
-            .grant(
-                &context,
-                actor,
-                drawer_object(Access::Admin, &receipt.doc_id),
-                None,
-            )
-            .await?;
+        // The known-drawers and node config drawers are fresh self-doc drawers: metadata docs that are
+        // their own drawers, whose entries are bookkeeping/config datums on them, and a foreign
+        // layout arriving from a peer is carried rather than operated, as anywhere else.
+        let mut self_docs = Vec::with_capacity(2);
+        for command in ["local known drawers", "local drawer config"] {
+            let command = CommandId::try_from(command.to_owned())
+                .expect("the local self-doc drawer commands are within bounds");
+            let receipt = self
+                .core
+                .as_signer(
+                    &context,
+                    self.core.issuer,
+                    DocScope {
+                        create: [METADATA_PLACEMENT.into()].into(),
+                        ..Default::default()
+                    },
+                    |Authorization {
+                         authority: capability,
+                         ..
+                     }| {
+                        let (command, context) = (&command, &context);
+                        async move {
+                            self.core
+                                .docs()
+                                .call(
+                                    context.child(),
+                                    CreateDoc {
+                                        capability,
+                                        command: command.clone(),
+                                        placement: METADATA_PLACEMENT.into(),
+                                        datums: BTreeMap::from([(
+                                            drawer_key(),
+                                            datum_value(&Drawer::self_doc()),
+                                        )]),
+                                    },
+                                )
+                                .await
+                                .map_err(docs_error)
+                        }
+                    },
+                )
+                .await?;
+            self.core
+                .state
+                .put_drawer(&receipt.doc_id, &Drawer::self_doc())
+                .await?;
+            self.core
+                .grant(
+                    &context,
+                    actor,
+                    drawer_object(Access::Admin, &receipt.doc_id),
+                    None,
+                )
+                .await?;
+            self_docs.push(receipt.doc_id);
+        }
         let [present, originated]: [DrawerId; 2] =
             created.try_into().expect("two local drawers were created");
+        let [known_drawers_id, config_id]: [DrawerId; 2] = self_docs
+            .try_into()
+            .expect("two local self-doc drawers were created");
         self.core
             .state
             .set_local(LocalDrawers {
                 present_id: present,
                 originated_id: originated,
-                registry_id: receipt.doc_id,
+                known_drawers_id,
+                config_id,
             })
             .await
     }

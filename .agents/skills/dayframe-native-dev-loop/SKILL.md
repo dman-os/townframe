@@ -25,12 +25,14 @@ least once. Read the **False signals** section before concluding a build failed.
 ## The one command
 
 ```sh
-deno run --allow-all x/dx.ts serve --desktop -p desktop --renderer native --hot-patch false
+deno run --allow-all x/dayframe.ts desktop
 ```
 
+This builds the Wasm packages, exports `DAYFRAME_PACKAGE_DIR`, then runs `x/dx.ts serve --desktop -p dayframe_desktop --renderer native --hot-patch false`, printing the package dir and store path. `--fresh` starts from an empty temp store, `--store <path>` picks one, `--webview` switches renderer. `x/dayframe.ts --help` lists the other commands (`web`, `showcase`, `packages`, `test`).
+
 - **Native renderer always.** `--renderer native` is the default expectation for this work; wry exists only as a production fallback.
-- **Webview fallback for interaction checks.** When native/Blitz cannot dispatch accessibility actions, stop the native serve process and run the same command with `--renderer webview`. The webview build is slower on a cold target, but its AT-SPI tree exposes element titles and `accessibility-cli --click '[title="..."]'` can verify real callbacks. The native `with_window_attributes(...with_title(...))` configuration does not control the webview window title; expect `dioxus | ⛺` there.
-- **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `desktop`.
+- **Webview fallback for interaction checks.** When native/Blitz cannot dispatch accessibility actions, stop the native serve process and run the same command with `x/dayframe.ts desktop --webview`. The webview build is slower on a cold target, but its AT-SPI tree exposes element titles and `accessibility-cli --click '[title="..."]'` can verify real callbacks. The native `with_window_attributes(...with_title(...))` configuration does not control the webview window title; expect `dioxus | ⛺` there.
+- **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `dayframe_desktop` (the script does).
 - **Let the serve process own compilation.** Do not run `cargo build` alongside it. The wrapper forwards the arguments to the repository-local Dioxus CLI, and installs that CLI through `x/install-dx.ts` when needed.
 - Use the same wrapper for other Dioxus commands, for example `deno run --allow-all x/dx.ts check ...`.
 
@@ -49,15 +51,14 @@ metadata to find `dioxus-cli` in that workspace; a Git patch requires both `git`
 substitutes a registry CLI when the local fork is absent. Validate the installer with
 `nix develop --command deno test --allow-all x/install-dx.ts`; its bounded local-workspace fixture
 checks package discovery, installation, spaced paths and the `no-downloads` feature without compiling
-Dioxus. Before launching the document-backed counter, prepare its component with
-`x/check-dayframe.ts --prepare-only` and export the printed absolute `DAYFRAME_COUNTER_COMPONENT`.
+Dioxus. Before launching the document-backed counter, `x/dayframe.ts desktop` prepares the packages itself (`x/dayframe.ts packages` prints the env for hand runs).
 
 ## Run it in tmux, not in the background
 
 The operator's convention is tmux session **`townframe`**, window **4**:
 
 ```sh
-tmux send-keys -t townframe:4 'deno run --allow-all x/dx.ts serve --desktop -p desktop --renderer native --hot-patch false' Enter
+tmux send-keys -t townframe:4 'deno run --allow-all x/dayframe.ts desktop' Enter
 ```
 
 Do not launch detached background processes. The tmux pane keeps the server's own keybindings
@@ -169,7 +170,7 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
 - Capture `a11y.sh --llm-query` to a file, then filter that file. Piping the CLI directly into `head` closes stdout early and makes its Rust printing path panic with `Broken pipe`; that is a CLI output failure, not an application crash.
 - Semantic verification must target the actual lifecycle control, not a configuration switch with a similar label. Expand `Mock node and micro lifecycle controls` before targeting the demo lifecycle buttons. Selectors can include `[role-description="push button"]` to distinguish buttons from switches. The sample's configuration-flag toggle is now labelled separately from micro enablement.
 
-- (2026-10) `x/dx.ts`, `x/install-dx.ts`, and `x/check-dayframe.ts` now resolve `CARGO_TARGET_DIR` from the environment or `.env` and place `dioxus-cli` at `$CARGO_TARGET_DIR/dioxus-cli` so running `dx` or `install-dx.ts` never creates a `./target` directory inside the worktree (which `nix develop` would otherwise copy into `/nix/store`).
+- (2026-11) `x/dx.ts` and `x/install-dx.ts` no longer read `CARGO_TARGET_DIR` from `.env`. Builds go through mbx, which manages `./target` as a symlink into its cache (see AGENTS.md), so `dioxus-cli` lands at `target/dioxus-cli` unless `DIOXUS_CLI_ROOT` or `CARGO_TARGET_DIR` says otherwise. If mbx prunes an unused target, `x/dx.ts` reinstalls the CLI on its next run.
 - (2026-10) `blitz-dom 0.3.0-beta.4` has an inverted `BaseDocument::has_changes(&self)` (`self.changed_nodes.is_empty()`), so `blitz-shell 0.3.0-beta.4` only publishes the `InitialTreeRequested` accessibility snapshot from initial `dom.rebuild()` (`Heading`, `Button[title="Close Settings"]`, `Switch`) and never pushes later `use_future` micro-reconciliation or interaction updates to AT-SPI, even though the native window renders those updates visually.
 - (2026-09) `blitz-shell 0.3.0-beta.2` enables accessibility but depends on `accesskit_xplat 0.1.1` with defaults disabled. Without an explicit Linux dependency enabling xplat defaults, its Unix adapter is absent and the app never registers on AT-SPI even with the service configured. Desktop now enables that backend. This is distinct from missing `XDG_DATA_DIRS`.
 - The native window may have a CLI-generated title (`dioxus | ⛺`) and no app ID. Resolve it from `niri msg -j windows` rather than assuming `desktop` matches. Desktop now explicitly requests the title `Dayframe`.

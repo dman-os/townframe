@@ -32,7 +32,7 @@ fun facetTagDisplayString(tag: FacetTag): String = when (tag) {
 }
 
 fun facetKeyRefPathString(key: FacetKey): String =
-    org.example.daybook.ui.buildSelfFacetRefUrl(key).removePrefix("db+facet:///self/")
+    org.example.daybook.ui.buildSelfFacetRefUrl(key).removePrefix("dtxt:datum:self/")
 
 fun facetDisplayHintKey(key: FacetKey): String = when (val tag = key.tag) {
     is FacetTag.WellKnown -> wellKnownFacetTagCanonicalString(tag.v1)

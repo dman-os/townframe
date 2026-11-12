@@ -1,8 +1,8 @@
 version = 1
 role = "foundation"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
-allowed_dependencies = [
-]
+# sqlite_rs is a dev-dependency only: the durable restart test opens a SqliteStore.
+allowed_dependencies = ["clay_store", "sqlite_rs"]
 allow_external_api_types = false
 
 # The browser host (ADR 018) links this crate on wasm32, so both targets are contracts.

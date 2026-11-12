@@ -25,7 +25,7 @@ async fn long_af_test_image_label_fallback_multi_label_screenshot_meme() -> Res<
         length_octets: image_bytes.len() as u64,
         digest: daybook_core::blobs::blob_id_to_digest_str(blob_hash.clone()),
         inline: None,
-        urls: Some(vec![format!("db+blob:///{blob_hash}")]),
+        urls: Some(vec![format!("dtxt:blob:{blob_hash}")]),
     };
 
     let new_doc = AddDocArgs {

@@ -120,7 +120,9 @@ impl State {
 
     pub async fn recover(&self) -> Res<()> {
         let tx = self.sql.begin_write().await?;
-        let inventories = sqlite::queries::recover_inventories(&tx).await?.rows_affected;
+        let inventories = sqlite::queries::recover_inventories(&tx)
+            .await?
+            .rows_affected;
         let pairs = sqlite::queries::recover_pairs(&tx).await?.rows_affected;
         tx.commit().await?;
         if inventories > 0 || pairs > 0 {
@@ -210,7 +212,13 @@ impl State {
             )
             .await?;
         }
-        sqlite::queries::update_pin_state(&tx, i64::try_from(revision)?, complete, inventory.to_string()).await?;
+        sqlite::queries::update_pin_state(
+            &tx,
+            i64::try_from(revision)?,
+            complete,
+            inventory.to_string(),
+        )
+        .await?;
         tx.commit().await?;
         self.changes.send_modify(|revision| *revision += 1);
         self.changed.notify_one();
@@ -291,9 +299,21 @@ impl State {
             return Ok(());
         }
         if active {
-            sqlite::queries::insert_producer_claim(&tx, inventory.to_string(), digest.to_string(), owner.to_owned()).await?;
+            sqlite::queries::insert_producer_claim(
+                &tx,
+                inventory.to_string(),
+                digest.to_string(),
+                owner.to_owned(),
+            )
+            .await?;
         } else {
-            sqlite::queries::delete_producer_claim(&tx, inventory.to_string(), digest.to_string(), owner.to_owned()).await?;
+            sqlite::queries::delete_producer_claim(
+                &tx,
+                inventory.to_string(),
+                digest.to_string(),
+                owner.to_owned(),
+            )
+            .await?;
         }
         Self::touch(&tx, inventory, digest).await?;
         if active {
@@ -332,7 +352,15 @@ impl State {
     }
 
     pub async fn available(&self, inventory: &DocId, digest: BlobId, available: bool) -> Res<()> {
-        let changed = sqlite::queries::set_available(&self.sql, available, inventory.to_string(), digest.to_string(), available).await?.rows_affected;
+        let changed = sqlite::queries::set_available(
+            &self.sql,
+            available,
+            inventory.to_string(),
+            digest.to_string(),
+            available,
+        )
+        .await?
+        .rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
             self.changed.notify_one();
@@ -373,23 +401,40 @@ impl State {
 
     #[cfg(test)]
     pub async fn settle(&self, inventory: &DocId, digest: BlobId, generation: u64) -> Res<()> {
-        let changed = sqlite::queries::settle(&self.sql, inventory.to_string(), digest.to_string(), i64::try_from(generation)?).await?.rows_affected;
+        let changed = sqlite::queries::settle(
+            &self.sql,
+            inventory.to_string(),
+            digest.to_string(),
+            i64::try_from(generation)?,
+        )
+        .await?
+        .rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
         }
         Ok(())
     }
 
+    /// Publish the pair as the caller decided it at `generation`, and settle that generation.
+    ///
+    /// A pair that has moved past `generation` since is left as it is. Every move bumps the
+    /// generation and marks the pair dirty, so the next round decides it again; settling the new
+    /// generation here would mark a change clean that no decision (whether to fetch it, above all)
+    /// ever saw, and nothing would wake for it again.
     pub(super) async fn publish(
         &self,
         inventory: &DocId,
         digest: BlobId,
+        generation: u64,
         effect: impl FnOnce(PairState, Option<u64>) -> futures::future::BoxFuture<'static, Res<bool>>,
     ) -> Res<()> {
         let Some(pair) = self.state(inventory, digest).await? else {
             return Ok(());
         };
-        let generation = i64::try_from(pair.generation)?;
+        if pair.generation != generation {
+            return Ok(());
+        }
+        let generation = i64::try_from(generation)?;
         let length = self.length(inventory, digest).await?;
         let invalidated = sqlite::queries::invalidate_publish(
             &self.sql,
@@ -428,7 +473,15 @@ impl State {
     }
 
     pub async fn fail(&self, attempt: &Attempt) -> Res<()> {
-        let changed = sqlite::queries::fail_attempt(&self.sql, attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?, i64::try_from(attempt.generation)?).await?.rows_affected;
+        let changed = sqlite::queries::fail_attempt(
+            &self.sql,
+            attempt.inventory.to_string(),
+            attempt.digest.to_string(),
+            i64::try_from(attempt.generation)?,
+            i64::try_from(attempt.generation)?,
+        )
+        .await?
+        .rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
         }
@@ -455,7 +508,8 @@ impl State {
             tx.rollback().await?;
             return Ok(None);
         }
-        let sources = sqlite::queries::source_peers(&tx, inventory.to_string(), digest.to_string()).await?;
+        let sources =
+            sqlite::queries::source_peers(&tx, inventory.to_string(), digest.to_string()).await?;
         let Some(peer) = sources
             .into_iter()
             .map(PeerKey::new)
@@ -486,9 +540,23 @@ impl State {
                 && state.authorization == attempt.authorization
         });
         let changed = if current {
-            sqlite::queries::complete_success(&tx, attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?).await?.rows_affected
+            sqlite::queries::complete_success(
+                &tx,
+                attempt.inventory.to_string(),
+                attempt.digest.to_string(),
+                i64::try_from(attempt.generation)?,
+            )
+            .await?
+            .rows_affected
         } else {
-            sqlite::queries::complete_failure(&tx, attempt.inventory.to_string(), attempt.digest.to_string(), i64::try_from(attempt.generation)?).await?.rows_affected
+            sqlite::queries::complete_failure(
+                &tx,
+                attempt.inventory.to_string(),
+                attempt.digest.to_string(),
+                i64::try_from(attempt.generation)?,
+            )
+            .await?
+            .rows_affected
         };
         tx.commit().await?;
         if changed > 0 {

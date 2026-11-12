@@ -95,8 +95,8 @@ Multiple facets can be updated at once and if so, will be put into a single tran
 
 ```js
 const facetRef = new URL(
-  // NOTE: empty authority
-  "db+facet:///self/org.example.daybook.title/main?at=hash1|hash2",
+  // NOTE: opaque path, no authority
+  "dtxt:datum:self/org.example.daybook.title/main?at=hash1|hash2",
 )
 ```
 
@@ -124,11 +124,11 @@ We use the blob facet to manage references to this.
     digest: "<hash>",
     inlineBase64: "small blobs are stored inline as base64 strings but not all blobs",
     urls: [
-      "db+blob://<digest>"
+      "dtxt:blob:<digest>"
     ],
   },
   "org.example.daybook.imagemetadata/main": {
-    facetRef: "db+facet://self/org.example.daybook.blob/main",
+    facetRef: "dtxt:datum:self/org.example.daybook.blob/main",
     refHeads: [],
   }
 }

@@ -4,30 +4,45 @@
 mod tests;
 mod view;
 
-use clay_mdk::ComponentRef;
-use clay_mdk::ConfigGrant;
+use clay_mdk::Access;
+use clay_mdk::Attachment;
+use clay_mdk::AttachmentDeclaration;
+use clay_mdk::BindingResolution;
+use clay_mdk::ConfigurationRequest;
+use clay_mdk::Context;
+use clay_mdk::ContributionDeclaration;
+use clay_mdk::Entrypoints;
+use clay_mdk::Error;
 use clay_mdk::FacetAccess;
-use clay_mdk::MicroId;
 use clay_mdk::MicroManifest;
-use clay_mdk::Provision;
-use clay_mdk::ProvisionRef;
-use clay_mdk::native::AccessError;
-use clay_mdk::native::Context;
-use clay_mdk::native::DocumentService;
-use clay_mdk::native::Facet;
-use clay_mdk::native::FacetValue;
-use clay_mdk::native::Instance;
-use clay_mdk::native::RendererRegistry;
+use clay_mdk::Necessity;
+use clay_mdk::Nsid;
+use clay_mdk::PublicationDeclaration;
+use clay_mdk::PublicationKind;
+use clay_mdk::Request;
+use clay_mdk::RowAttachment;
+use clay_mdk::Sidecar;
+use clay_mdk::host::DocumentService;
 use dioxus::prelude::*;
-use micro_settings_manifest::SettingsSection;
-use micro_settings_manifest::SettingsSections;
+use micro_layout_manifest::PANELS;
+use micro_settings_manifest::SECTIONS;
+use micro_settings_manifest::Section;
 use serde::Deserialize;
 use serde::Serialize;
 
 pub const ID: &str = "dayframe.sample";
+pub const PACKAGE_VERSION: u32 = 1;
+/// The NSID prefix the sample holds. It declares no NSID, only requests the sections contract.
+pub const AUTHORITY: &str = "org.example.dayframe.sample";
 pub const CONFIG_NAME: &str = "sample";
-pub const CONFIG_TAG: &str = "org.dayframe.sample.config";
+pub const CONFIG_TAG: &str = "org.example.dayframe.sample.config";
 pub const CONFIG_KEY: &str = "main";
+/// The one publication: the presentation Settings mounts for this micro's section.
+pub const DETAIL: &str = "detail";
+/// The local binding name under which the sample registers its Settings section.
+pub const SECTIONS_BINDING: &str = "sections";
+/// The local binding name under which the sample contributes its layout panel.
+pub const PANELS_BINDING: &str = "panels";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleConfig {
@@ -35,107 +50,106 @@ pub struct SampleConfig {
     pub greeting: String,
 }
 
-#[derive(Clone)]
-pub struct SampleMicro {
-    pub instance: Instance,
-    config: Facet<SampleConfig>,
-    detail: ComponentRef,
-}
-
-impl PartialEq for SampleMicro {
-    fn eq(&self, other: &Self) -> bool {
-        self.instance == other.instance
-    }
-}
-
-impl Provision for SampleMicro {
-    const ID: &'static str = "sample.controller";
-}
-
-/// The Sample micro's compile-time declaration: it requires the Settings sections collection,
-/// provides its controller, and declares read/write access to its own configuration facet.
+/// The Sample micro's compile-time declaration: it publishes its detail presentation and
+/// declares read/write access to its own configuration facet. Its Settings section is written
+/// at runtime, so it exists only while the micro runs.
 pub fn manifest() -> MicroManifest {
     MicroManifest {
-        id: MicroId::new(ID),
-        version: 1,
-        requirements: vec![ProvisionRef::of::<SettingsSections>()],
-        provisions: vec![ProvisionRef {
-            id: SampleMicro::ID.into(),
-            version: 1,
+        entrypoints: Entrypoints::micro_client(),
+        publications: vec![PublicationDeclaration {
+            name: DETAIL.into(),
+            kind: PublicationKind::Presentation,
+            contract: None,
         }],
-        config: Some(ConfigGrant {
-            name: CONFIG_NAME.into(),
+        requires: vec![],
+        configuration_requests: vec![ConfigurationRequest {
+            binding: CONFIG_NAME.into(),
             facets: vec![FacetAccess {
-                tag: CONFIG_TAG.into(),
+                tag: Nsid::literal(CONFIG_TAG),
                 key_id: Some(CONFIG_KEY.into()),
                 read: true,
                 write: true,
-                ..Default::default()
+                create: false,
+                delete: false,
             }],
-        }),
-        contributions: vec![],
+        }],
+        collection_contracts: vec![],
+        collection_requests: vec![
+            Request {
+                binding: SECTIONS_BINDING.into(),
+                contract: Nsid::literal(SECTIONS),
+                access: Some(Access::Write),
+                necessity: Necessity::Required,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+            Request {
+                binding: PANELS_BINDING.into(),
+                contract: Nsid::literal(PANELS),
+                access: Some(Access::Write),
+                necessity: Necessity::Optional,
+                resolution: BindingResolution::Configured,
+                min_revision: None,
+            },
+        ],
+        // The layout panel is declared, not written at runtime: it is listed while the sample is
+        // stopped, and showing it starts the sample.
+        contributions: vec![ContributionDeclaration {
+            id: "layout-panel".into(),
+            binding: PANELS_BINDING.into(),
+            key: ID.into(),
+            payload: serde_json::json!({
+                "title": "Sample micro",
+                "content": { "$attachment": 0 },
+            }),
+            attachments: vec![AttachmentDeclaration {
+                index: 0,
+                publication: DETAIL.into(),
+            }],
+        }],
+        extra: Default::default(),
     }
+}
+
+/// The Sample package as its sidecar carries it: identity, authority and manifest.
+pub fn sidecar() -> Sidecar {
+    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
 }
 
 /// Activation receives already-bound dependencies through the context; it cannot mint grants or
-/// reach the mock node. The host validated the manifest's facet ACL before this runs.
-pub fn activate<R: RendererRegistry<Render = Element>>(
-    context: &Context<R>,
-) -> Result<(), AccessError> {
-    let instance = context.instance();
-    let settings = context.require::<SettingsSections>()?.bind(&instance)?;
-    let config_document = context
+/// reach the mock node. The host validated the manifest's facet ACL before this runs. The
+/// micro registers its Settings section with a registration writer, so the row lives exactly as
+/// long as this incarnation.
+pub async fn activate(context: Context) -> Result<(), Error> {
+    let config = context
         .config(CONFIG_NAME)
-        .expect("manifest declares the sample configuration binding");
-    let config = config_document.facet::<SampleConfig>(CONFIG_TAG.into(), CONFIG_KEY.into())?;
-    let content = config.clone();
-    let detail = context.publish_component(move || {
-        dioxus::prelude::rsx! { view::SampleDetail { config: content.clone() } }
+        .expect("manifest declares the sample configuration binding")
+        .facet::<SampleConfig>(CONFIG_TAG, CONFIG_KEY)?;
+    context.publish_component(DETAIL, move || {
+        dioxus::prelude::rsx! { view::SampleDetail { config: config.clone() } }
     })?;
-    settings.insert(SettingsSection {
-        title: "Sample micro".into(),
-        detail,
-    })?;
-    context.publish(SampleMicro {
-        instance,
-        config,
-        detail,
-    });
+    context
+        .registration::<String, Section>(SECTIONS_BINDING)
+        .expect("configuration binds the sections collection")
+        .put(
+            &ID.to_owned(),
+            &Section {
+                title: "Sample micro".into(),
+                detail: Attachment::at(0),
+            },
+            vec![RowAttachment::own(DETAIL)],
+        )
+        .await?;
     Ok(())
 }
 
-impl SampleMicro {
-    pub fn detail(&self) -> ComponentRef {
-        self.detail
-    }
-
-    pub fn watch(&self) -> &clay_mdk::native::DocumentWatch {
-        &self.config.watch
-    }
-
-    pub fn state(&self, snapshot: &clay_mdk::native::DocumentSnapshot) -> FacetValue<SampleConfig> {
-        self.config.state(snapshot)
-    }
-
-    pub fn decode(&self, snapshot: &clay_mdk::native::DocumentSnapshot) -> Option<SampleConfig> {
-        self.config.value(snapshot)
-    }
-
-    pub fn edit(&self, value: SampleConfig) -> Result<clay_mdk::native::Operation, AccessError> {
-        self.config.write(value)
-    }
-}
-
-/// Bind and seed the mock configuration document for `sample` on the composition root's mock
-/// document service. A composition-time helper; the runtime authoring surface is [`activate`].
-pub fn bind_mock_defaults(documents: &DocumentService) {
-    documents.mock_documents().bind_config(
-        CONFIG_NAME.into(),
-        "sample-config".into(),
-        "main".into(),
-    );
+/// Seed the demo configuration value for `sample` on a composition whose catalog
+/// installation already bound the micro's config document (the composition root binds
+/// `<name>-config` per manifest grant). A launcher's demo seed; the runtime authoring
+/// surface is [`activate`].
+pub fn seed_mock_defaults(documents: &DocumentService) {
     documents.mock_documents().seed(
-        clay_mdk::native::FacetRoute {
+        clay_mdk::host::FacetRoute {
             document: "sample-config".into(),
             branch: "main".into(),
             tag: CONFIG_TAG.into(),

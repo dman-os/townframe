@@ -1,22 +1,13 @@
 //! Durable Keyhive admission-log source shared by runtime2 workers.
 
-use crate::runtime2::Timer;
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
-use future_form::Sendable;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
 use utils_rs::prelude::eyre;
-
-/// Idle recovery bound only: `notify_one` wakeups deliver new rows
-/// promptly, so this is how long a missed wakeup can linger — not a
-/// latency target. Three workers tail the same admission table; a tighter
-/// poll would multiply idle read-pool queries for no benefit.
-pub(crate) const IDLE_POLL: Duration = Duration::from_millis(250);
 
 /// One admitted Keyhive event from the durable admission log.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,12 +21,20 @@ pub(crate) struct AdmittedRow {
 #[derive(Clone)]
 pub(crate) struct Store {
     pub(crate) store: SqliteBigRepoStore,
-    pub(crate) timer: Arc<dyn Timer<Sendable>>,
 }
 
+/// Tails the admission log from a cursor.
+///
+/// A caught-up reader parks on the store's admission watermark rather than
+/// on a timer: [`SqliteBigRepoStore::append_admitted_events`] is the only
+/// writer of the log and raises the watermark after every commit that adds
+/// rows. No backstop poll is kept, because there is no append the watermark
+/// does not see — rows admitted before this process booted (the only ones it
+/// never announces) are below the `through` frozen at `open` and served by
+/// the replay.
 pub(crate) struct Reader {
     store: SqliteBigRepoStore,
-    timer: Arc<dyn Timer<Sendable>>,
+    appends: tokio::sync::watch::Receiver<u64>,
     cursor: u64,
     through: u64,
     replay_complete: bool,
@@ -57,7 +56,7 @@ impl RevisionedStore for Store {
     async fn open<'a>(&'a self, (): (), after: u64) -> Result<Self::Reader<'a>, eyre::Report> {
         Ok(Reader {
             store: self.store.clone(),
-            timer: Arc::clone(&self.timer),
+            appends: self.store.admission_appends(),
             cursor: after,
             through: self.latest_revision().await?,
             replay_complete: false,
@@ -80,17 +79,19 @@ impl RevisionedStoreReader<u64, AdmittedRow, eyre::Report> for Reader {
                 });
             }
 
-            let rows = if self.replay_complete {
-                if self.buffered.is_empty() {
-                    self.store
-                        .admission_events_after(self.cursor, limits.max_entries.get() as u32)
-                        .await?
-                } else {
-                    self.buffered
-                        .drain(..limits.max_entries.get().min(self.buffered.len()))
-                        .collect()
-                }
+            let rows = if self.replay_complete && !self.buffered.is_empty() {
+                self.buffered
+                    .drain(..limits.max_entries.get().min(self.buffered.len()))
+                    .collect()
             } else {
+                // Mark the watermark seen *before* reading the table, never
+                // after: an append committed before this mark is in the read
+                // below, and one that publishes after it leaves `changed()`
+                // ready for the park at the bottom of the loop, so no append
+                // can fall between the read and the park unannounced. A
+                // cancelled read (callers drive this from `select!`) has moved
+                // nothing but the mark, and the retry re-marks and re-reads.
+                self.appends.borrow_and_update();
                 self.store
                     .admission_events_after(self.cursor, limits.max_entries.get() as u32)
                     .await?
@@ -127,7 +128,10 @@ impl RevisionedStoreReader<u64, AdmittedRow, eyre::Report> for Reader {
                     through: self.through,
                 });
             }
-            self.timer.sleep(IDLE_POLL).await;
+            self.appends
+                .changed()
+                .await
+                .expect("the admission watermark sender lives in the store this reader holds");
         }
     }
 }
@@ -135,7 +139,6 @@ impl RevisionedStoreReader<u64, AdmittedRow, eyre::Report> for Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime2::tasks::TokioTimer;
     use crate::store::sqlite::SqliteBigRepoStore;
     use big_sync_core::BuckId;
     use big_sync_core::revisioned_store::contract::RevisionedStoreContractHarness;
@@ -161,7 +164,6 @@ mod tests {
                     .expect("create sqlite big repo store");
             let source = Store {
                 store: store.clone(),
-                timer: Arc::new(TokioTimer),
             };
             Self {
                 _sql: sql,
@@ -270,6 +272,42 @@ mod tests {
             RevisionRead::Entries {
                 revision: 5,
                 entries: vec![harness.entry(5)],
+            },
+        );
+    }
+
+    /// A caught-up reader parks on the admission watermark, not on a poll: the
+    /// append itself is what wakes it. Nothing here advances time, so a reader
+    /// that went back to sleeping on a timer between table reads would leave
+    /// the parked read pending and only the hard test timeout would fire.
+    #[tokio::test]
+    async fn a_caught_up_reader_wakes_on_append() {
+        let harness = SqliteAdmissionHarness::new().await;
+        let mut reader = harness.source.open((), 0).await.expect("open reader");
+        let limits = RevisionReadLimits::default();
+        assert_eq!(
+            reader.next(limits).await.expect("read replay boundary"),
+            RevisionRead::ReplayComplete { through: 0 },
+            "an empty log replays nothing"
+        );
+
+        let parked = tokio::spawn(async move { reader.next(limits).await });
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !parked.is_finished(),
+            "a reader with nothing to read must park, not return"
+        );
+        harness.commit(harness.entry(1)).await.expect("admit row 1");
+        assert_eq!(
+            parked
+                .await
+                .expect("reader task must not panic")
+                .expect("read the admitted row"),
+            RevisionRead::Entries {
+                revision: 1,
+                entries: vec![harness.entry(1)],
             },
         );
     }

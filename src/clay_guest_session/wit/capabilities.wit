@@ -1,0 +1,78 @@
+package townframe:dayframe@0.4.0;
+
+/// The capability bank (ADR 030 §9, ADR 031 §§5-6). A `capability-ref` is bound to one live
+/// publication or lazy (it names a micro's publication and activates the micro on use);
+/// consumers cannot tell which except through `status`. Because using a lazy reference may
+/// activate its provider, every redemption and invocation is async. Presentation `mount`,
+/// `dispatch` and `unmount` stay synchronous (ADR 018): redeem first, then mount.
+@since(version = 0.4.0)
+interface capability-bank {
+    use presentation.{component-ref};
+
+    variant capability-error {
+        contract-mismatch,
+        revoked,
+        limit-exceeded,
+        /// A lazy reference's provider could not be activated or does not publish the name.
+        unavailable,
+    }
+
+    /// Why a call failed: the reference was unusable, or the provider's handler rejected it.
+    variant call-error {
+        capability(capability-error),
+        provider(string),
+    }
+
+    /// What a reference reports without activating anything.
+    enum ref-status {
+        live,
+        dormant,
+        disabled,
+        faulted,
+        unavailable,
+        revoked,
+    }
+
+    resource capability-ref {
+        /// Never activates.
+        status: func() -> ref-status;
+        /// One call: strong for the duration of the call only.
+        call: async func(request: list<u8>) -> result<list<u8>, call-error>;
+        /// Strong while the binding is held.
+        retain-call: async func() -> result<call-binding, capability-error>;
+        /// Strong while the component is held or mounted.
+        redeem-presentation: async func() -> result<presentation-component, capability-error>;
+        /// Completes once `status` differs from `seen` (at once if it already does), so a holder
+        /// that saw a failure waits for the provider to change (a disabled micro enabled, an
+        /// unconfigured one configured) rather than redeeming in a loop. Driven by the
+        /// supervisor's status ticks; never activates anything. A reference to a live
+        /// publication has no restarts to follow and never completes.
+        status-changed: async func(seen: ref-status);
+    }
+
+    resource call-binding {
+        call: async func(request: list<u8>) -> result<list<u8>, call-error>;
+    }
+
+    resource presentation-component {
+        component: func() -> result<component-ref, capability-error>;
+        /// Completes once the provider incarnation this proxy was redeemed from has ended, after
+        /// which `component` reports `revoked`; so a slot knows to redeem again (which
+        /// demand-starts the next incarnation) without polling. Never completes for a proxy of
+        /// a live publication, which is never restarted.
+        revoked: async func();
+    }
+
+    resource published-capability {
+        reference: func() -> result<capability-ref, capability-error>;
+    }
+
+    /// Publish a presentation named `name`; the host serves it through `mount`.
+    publish-presentation: func(name: string) -> result<published-capability, capability-error>;
+
+    /// Publish a call named `name` under `contract`, an NSID (ADR 028 §4) naming the call's
+    /// request and response Lexicons; the host serves it through the exported
+    /// `micro-lifecycle.call`. A string that is not an NSID, or the presentation-component
+    /// contract, is `contract-mismatch`.
+    publish-call: func(name: string, contract: string) -> result<published-capability, capability-error>;
+}

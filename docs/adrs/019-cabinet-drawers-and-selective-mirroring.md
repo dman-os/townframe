@@ -443,13 +443,13 @@ boot and records locally:
 - docs physically present on this node;
 - docs originated by this node.
 
-Plus one registry drawer: the known-drawers list, a self-doc drawer holding
+Plus one known-drawers drawer: the list, a self-doc drawer holding
 `org.example.daybook.drawer.knownEntry/<drawerId>` datums (`{ mirror?: true }`). It is an
 explicitly managed list, not a collection and not a tag scan: remembering a drawer grants
 no access to it, mirroring intent certifies no fetched or retained bytes, forgetting edits
-nothing but the local registry, and child relationships or observed datums never write it.
+nothing but the local list, and child relationships or observed datums never write it.
 DrawerService's `rememberDrawer` / `forgetDrawer` / `listKnownDrawers` / `setDrawerPolicy`
-are the only writers. The registry doc is the durable home — the list survives a restart
+are the only writers. The known-drawers doc is the durable home — the list survives a restart
 by being read back from the doc — and its id anchors in the same local record as the other
 two, because it cannot name itself inside itself.
 
@@ -585,7 +585,7 @@ discovery are specified elsewhere.
 
 ### Per-node drawer policy (deferred design)
 
-The known-drawers registry above records this node's remembered drawers and its mirror
+The known-drawers list above records this node's remembered drawers and its mirror
 intent. The fuller design makes each node's policy an ordinary syncable doc
 (`NodeDrawerPolicy { nodeId, drawers: map<DrawerId, Know | Mirror | Selected { subset }>,
 retentionPreferences? }`) rather than a SQLite-only list or a Keyhive group used as a

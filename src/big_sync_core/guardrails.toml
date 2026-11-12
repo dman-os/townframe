@@ -1,7 +1,7 @@
 version = 1
 role = "domain"
 dependency_reason = "initial guardrail baseline"
-allowed_dependencies = ["utils_rs"]
+allowed_dependencies = ["datum_core", "utils_rs"]
 allow_external_api_types = false
 
 [api]
@@ -76,7 +76,7 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 code = "ERROR_INLINE_TEST_MOD"
 path = "src/big_sync_core/lib.rs"
 symbol = "module::tests"
-ceiling = 2165
+ceiling = 2164
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
 reference = "docs/scratch/agent-guardrails-open-items.md"

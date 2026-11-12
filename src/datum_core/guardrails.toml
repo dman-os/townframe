@@ -1,0 +1,14 @@
+version = 1
+role = "interface"
+dependency_reason = "The datum vocabulary every declared type states itself in (ids, shapes, open-union wire helpers), small enough that a wasm guest links it without the cabinet."
+allowed_dependencies = ["macros"]
+allow_external_api_types = false
+
+[builds.native]
+features = ["schemars", "jiff", "automerge"]
+
+[builds.wasm32-unknown-unknown]
+features = ["schemars"]
+
+[builds.wasm32-wasip3]
+features = ["schemars"]

@@ -127,7 +127,6 @@ impl State {
         Ok(())
     }
 
-
     pub(super) async fn discovery_work(&self) -> Res<Option<(DocId, u64)>> {
         let tx = self.sql.begin_write().await?;
         let work = sqlite::queries::work(&tx).await?.into_iter().next();
@@ -160,7 +159,8 @@ impl State {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        let changed = sqlite::queries::invalidate(&self.sql, serde_json::to_string(&documents)?).await?
+        let changed = sqlite::queries::invalidate(&self.sql, serde_json::to_string(&documents)?)
+            .await?
             .rows_affected;
         if changed > 0 {
             self.changes.send_modify(|revision| *revision += 1);
@@ -177,7 +177,6 @@ impl State {
         }
         Ok(())
     }
-
 
     pub(super) async fn observe_drawer(
         &self,
@@ -222,8 +221,10 @@ impl State {
             .copied()
             .map(MetaRoot::as_str)
             .collect::<Vec<_>>();
-        sqlite::queries::remove_children(tx, drawer.to_string(), serde_json::to_string(&children)?).await?;
-        sqlite::queries::remove_roots(tx, drawer.to_string(), serde_json::to_string(&roots)?).await?;
+        sqlite::queries::remove_children(tx, drawer.to_string(), serde_json::to_string(&children)?)
+            .await?;
+        sqlite::queries::remove_roots(tx, drawer.to_string(), serde_json::to_string(&roots)?)
+            .await?;
         if snapshot.self_doc {
             sqlite::queries::delete_slots(tx, drawer.to_string()).await?;
             return Ok(());
@@ -268,7 +269,10 @@ impl State {
     pub(super) async fn coverage(&self, root: &DocId) -> Res<Coverage> {
         let tx = self.sql.begin_read().await?;
         let mut gaps = Vec::new();
-        if sqlite::queries::root_selected(&tx, root.to_string()).await?.is_empty() {
+        if sqlite::queries::root_selected(&tx, root.to_string())
+            .await?
+            .is_empty()
+        {
             gaps.push(CoverageGap::UnselectedRoot);
         }
         Self::discovery_metadata_gaps(&tx, root, &mut gaps).await?;

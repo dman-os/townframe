@@ -15,18 +15,21 @@ use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use service_utils_rs::ClientError;
 
+mod nodule_artifacts;
+
 pub(super) async fn drawer_cap(node: &BigNode, drawer: &DocId) -> CapId {
     node.drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -130,7 +133,7 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
         .unwrap()
 }
 
-async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> CapId {
+pub(super) async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> CapId {
     node.authority
         .client
         .call(
@@ -141,6 +144,7 @@ async fn blob_cap(node: &BigNode, object: String, dependencies: Vec<CapId>) -> C
                 dependencies,
                 object,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -159,14 +163,13 @@ async fn named_inventory_distribution_is_root_scoped_and_survives_restart() {
         "_sqlite_rs_migrations",
     );
     let mut cfg = config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Disk {
-            path: directory.path().join("repo"),
-        },
+        big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None).unwrap(),
     );
-    cfg.blob_storage = big_blobs::Storage::Filesystem(directory.path().join("blobs"));
+    cfg.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+        .await
+        .unwrap();
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
     let drawer = node.drawers.local().originated_id.clone();
     let mut inventories = Vec::new();
@@ -304,14 +307,13 @@ async fn named_inventory_distribution_is_root_scoped_and_survives_restart() {
     drop(changes);
     shutdown(node, stop).await;
     let mut cfg = config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql,
-        StorageConfig::Disk {
-            path: directory.path().join("repo"),
-        },
+        big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None).unwrap(),
     );
-    cfg.blob_storage = big_blobs::Storage::Filesystem(directory.path().join("blobs"));
+    cfg.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+        .await
+        .unwrap();
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
     for (root, inventory) in &inventories {
         let expected = match root {
@@ -339,9 +341,13 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
     let secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let (node, stop) = BigNode::boot(config(&secrets, &runtime, sql, StorageConfig::Memory))
-        .await
-        .unwrap();
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
     let drawer = node.drawers.local().originated_id.clone();
     let public = inventory(&node, &drawer, MetaRoot::Public, "ciphertext").await;
     let sensitive = inventory(&node, &drawer, MetaRoot::Sensitive, "plaintext").await;
@@ -356,7 +362,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
         .grants()
         .grant(
             &RequestContext::root(),
-            node.drawers_actor.actor_id,
+            node.drawers_actor.actor.actor_id,
             big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT.into(),
             Rights::USE,
             None,
@@ -366,15 +372,16 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
     let create_cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: true,
                     drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -397,10 +404,10 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
     let cap = node
         .drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DrawerScope {
                     create: false,
                     drawers: BTreeMap::from([
@@ -409,6 +416,7 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
                     ]),
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -536,10 +544,9 @@ async fn put_blob_keeps_independent_durable_standalone_holds() {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
     let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     ))
     .await
     .unwrap();
@@ -601,9 +608,13 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
     let secrets = secrets().await;
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    let (node, stop) = BigNode::boot(config(&secrets, &runtime, sql, StorageConfig::Memory))
-        .await
-        .unwrap();
+    let (node, stop) = BigNode::boot(config(
+        Arc::clone(&secrets),
+        sql,
+        big_repo::Storage::memory(&runtime).unwrap(),
+    ))
+    .await
+    .unwrap();
     let put = blob_cap(&node, BlobService::put_object().into(), Vec::new()).await;
     let info = node
         .blobs
@@ -630,7 +641,7 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(denied, ClientError::Operation(BlobsError::Denied)));
+    assert!(matches!(denied, ClientError::Method(BlobsError::Denied)));
     let range = node
         .blobs
         .client
@@ -663,7 +674,7 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         .unwrap_err();
     assert!(matches!(
         invalid,
-        ClientError::Operation(BlobsError::InvalidInput { .. })
+        ClientError::Method(BlobsError::InvalidInput { .. })
     ));
     node.authority
         .client
@@ -688,7 +699,7 @@ async fn blob_capabilities_bound_ranges_and_revocation() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(denied, ClientError::Operation(BlobsError::Denied)));
+    assert!(matches!(denied, ClientError::Method(BlobsError::Denied)));
     shutdown(node, stop).await;
 }
 
@@ -703,14 +714,13 @@ async fn filesystem_store_has_one_owner_and_reopens_with_bytes() {
         "_sqlite_rs_migrations",
     );
     let mut cfg = config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Disk {
-            path: directory.path().join("repo"),
-        },
+        big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None).unwrap(),
     );
-    cfg.blob_storage = big_blobs::Storage::Filesystem(directory.path().join("blobs"));
+    cfg.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+        .await
+        .unwrap();
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
     let put = blob_cap(&node, BlobService::put_object().into(), Vec::new()).await;
     let info = node
@@ -725,13 +735,9 @@ async fn filesystem_store_has_one_owner_and_reopens_with_bytes() {
         )
         .await
         .unwrap();
-    let duplicate = big_blobs::boot(big_blobs::Config {
-        storage: big_blobs::Storage::Filesystem(directory.path().join("blobs")),
-        sql: sql.clone(),
-        authority: node.authority.client.clone(),
-        namespace: node.blobs_namespace,
-    })
-    .await;
+    // The owner lock is taken when the store is opened, so a second open fails before any
+    // service is booted on it.
+    let duplicate = big_blobs::Storage::filesystem(directory.path().join("blobs")).await;
     assert!(
         duplicate
             .err()
@@ -741,14 +747,13 @@ async fn filesystem_store_has_one_owner_and_reopens_with_bytes() {
     );
     shutdown(node, stop).await;
     let mut cfg = config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql,
-        StorageConfig::Disk {
-            path: directory.path().join("repo"),
-        },
+        big_repo::Storage::in_directory(&runtime, &directory.path().join("repo"), None).unwrap(),
     );
-    cfg.blob_storage = big_blobs::Storage::Filesystem(directory.path().join("blobs"));
+    cfg.blob_storage = big_blobs::Storage::filesystem(directory.path().join("blobs"))
+        .await
+        .unwrap();
     let (node, stop) = BigNode::boot(cfg).await.unwrap();
     assert_eq!(
         node.blobs.service.stat(&info.blob_id).await.unwrap(),

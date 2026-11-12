@@ -1,0 +1,19 @@
+[package]
+name = "micro_toolbar"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_mdk = { workspace = true, features = ["in_process", "view"] }
+micro_toolbar_manifest = { workspace = true }
+dioxus.workspace = true
+
+[dev-dependencies]
+ciborium.workspace = true
+clay_dioxus = { workspace = true }
+clay_guest_session = { workspace = true }
+clay_host = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }

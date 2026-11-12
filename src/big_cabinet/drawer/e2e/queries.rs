@@ -3,7 +3,7 @@
 use super::*;
 
 /// The document's current heads, read as `actor` without verifying any datum.
-async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
+async fn heads(node: &Node, actor: &OpenedActor, doc_id: &DocId) -> Vec<ChangeHash> {
     let capability = node
         .mint_doc(
             actor,
@@ -32,7 +32,7 @@ async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
 
 /// Wait until the `datum_set` index carries the note of `doc_id` at the document's current
 /// heads: not merely some row for the document, but the row for the state the test wrote.
-async fn wait_for_datum_set(node: &Node, actor: &Actor, doc_id: &DocId) {
+async fn wait_for_datum_set(node: &Node, actor: &OpenedActor, doc_id: &DocId) {
     let heads = heads(node, actor, doc_id).await;
     let note_key = note("").0;
     node.wait_indexed(NOTE, |route, membership| {
@@ -77,8 +77,8 @@ async fn wait_for_datum_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
     }
 }
 
-/// Consume a poll until `expected` enters the predicate, asserting the enter carries a present
-/// datum. Events about other documents (the opening replay, or a concurrent change) are skipped.
+/// Consume a poll until a present row of `expected` arrives, which is how a move-in shows.
+/// Events about other documents (the opening replay, or a concurrent change) are skipped.
 async fn next_enter(poll: &mut crate::test_poll::Poller, expected: &DocId) {
     loop {
         match poll
@@ -87,15 +87,11 @@ async fn next_enter(poll: &mut crate::test_poll::Poller, expected: &DocId) {
             .unwrap()
             .expect("the poll ended before the expected enter")
         {
-            DatumEvent::Enter { doc_id, datums, .. } if doc_id == *expected => {
-                assert!(
-                    datums
-                        .values()
-                        .any(|datum| matches!(datum, ObservedDatum::Present { .. })),
-                    "the enter for {expected:?} carried no present datum"
-                );
-                return;
-            }
+            DatumEvent::Datum {
+                doc_id,
+                datum: ObservedDatum::Present { .. },
+                ..
+            } if doc_id == *expected => return,
             _ => {}
         }
     }
@@ -124,9 +120,9 @@ async fn next_leave(poll: &mut crate::test_poll::Poller, expected: &DocId) {
 /// `parent`; Carol holds only `Relay` on `parent`.
 struct Containment {
     node: Node,
-    alice: Actor,
-    bob: Actor,
-    carol: Actor,
+    alice: OpenedActor,
+    bob: OpenedActor,
+    carol: OpenedActor,
     parent: DrawerId,
     other: DrawerId,
     doc_direct: DocId,
@@ -259,12 +255,12 @@ impl Containment {
         }
     }
 
-    async fn capability(&self, actor: &Actor, scope: DocScope) -> CapId {
+    async fn capability(&self, actor: &OpenedActor, scope: DocScope) -> CapId {
         self.node.mint_doc(actor, scope).await.unwrap()
     }
 
     /// A doc-scope capability over `parent` alone at `access`.
-    async fn parent_capability(&self, actor: &Actor, access: Access) -> CapId {
+    async fn parent_capability(&self, actor: &OpenedActor, access: Access) -> CapId {
         self.capability(
             actor,
             DocScope {
@@ -349,7 +345,7 @@ async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_datum_querie
     .await;
     assert_eq!(
         carol_query.unwrap_err(),
-        ClientError::Operation(DocsError::Denied)
+        ClientError::Method(DocsError::Denied)
     );
 
     fx.node.stop().await;
@@ -405,7 +401,7 @@ async fn drawer_scoped_datum_queries_obey_containment_and_attenuation() {
     .await;
     assert_eq!(
         bob_unscoped.unwrap_err(),
-        ClientError::Operation(DocsError::Denied)
+        ClientError::Method(DocsError::Denied)
     );
 
     // Through `other`, Bob reaches `doc_outside` and `doc_relay_entry`: the attenuation of
@@ -464,12 +460,8 @@ async fn drawer_scoped_datum_queries_obey_containment_and_attenuation() {
     loop {
         let page = poll.page(0).await.unwrap();
         for event in page.events {
-            if let DatumEvent::Enter { doc_id, datums, .. } = event {
-                assert!(
-                    datums
-                        .values()
-                        .all(|datum| matches!(datum, ObservedDatum::Present { .. }))
-                );
+            if let DatumEvent::Datum { doc_id, datum, .. } = event {
+                assert!(matches!(datum, ObservedDatum::Present { .. }));
                 observed.insert(doc_id);
             }
         }
@@ -530,6 +522,7 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
             )
             .await
             .unwrap()
+            .refs
             .is_empty()
     );
 
@@ -559,7 +552,8 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
                 },
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .refs,
         vec![fx.note_edge(&fx.doc_outside, &fx.doc_direct)],
     );
     assert_eq!(
@@ -575,7 +569,7 @@ async fn anchored_queries_are_narrowed_to_the_capability_scope() {
             )
             .await
             .unwrap_err(),
-        ClientError::Operation(DocsError::Denied),
+        ClientError::Method(DocsError::Denied),
     );
 
     fx.node.stop().await;
@@ -607,7 +601,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         )
         .await
         .unwrap();
-    assert!(scoped_backlinks.is_empty());
+    assert!(scoped_backlinks.refs.is_empty());
 
     let dave_unscoped_backlinks = fx
         .node
@@ -622,7 +616,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         )
         .await
         .unwrap();
-    assert!(dave_unscoped_backlinks.is_empty());
+    assert!(dave_unscoped_backlinks.refs.is_empty());
 
     let bob_unscoped_backlinks = fx
         .node
@@ -638,7 +632,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .await
         .unwrap();
     assert_eq!(
-        bob_unscoped_backlinks,
+        bob_unscoped_backlinks.refs,
         vec![fx.note_edge(&fx.doc_outside, &fx.doc_direct)]
     );
 
@@ -661,7 +655,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .await
         .unwrap();
     assert_eq!(
-        scoped_outgoing,
+        scoped_outgoing.refs,
         vec![fx.note_edge(&fx.doc_direct, &fx.doc_in_child_read)]
     );
 
@@ -751,7 +745,7 @@ async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_doc
     loop {
         let page = poll.page(0).await.unwrap();
         for event in page.events {
-            if let DatumEvent::Enter { doc_id, .. } = event {
+            if let DatumEvent::Datum { doc_id, .. } = event {
                 entered.insert(doc_id);
             }
         }
@@ -890,12 +884,10 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(first_page.caught_up);
     let mut entered = BTreeSet::new();
     for event in first_page.events {
-        if let DatumEvent::Enter { doc_id, datums, .. } = event {
+        if let DatumEvent::Datum { doc_id, datum, .. } = event {
             assert!(
-                datums
-                    .values()
-                    .any(|datum| matches!(datum, ObservedDatum::Present { .. })),
-                "the enter for {doc_id:?} carried no present datum"
+                matches!(datum, ObservedDatum::Present { .. }),
+                "the row for {doc_id:?} is not present"
             );
             entered.insert(doc_id);
         }
@@ -980,7 +972,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
             RevokeDrawer {
                 capability: node.drawer_capability(&alice, &[&drawer]).await.unwrap(),
                 drawer_id: drawer.clone(),
-                subject_id: bob.actor_id,
+                subject_id: bob.actor.actor_id,
             },
         )
         .await
@@ -988,7 +980,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     let cursor = poll.cursor();
     assert_eq!(
         poll.next().await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     );
     assert_eq!(
         poll.cursor(),
@@ -1004,7 +996,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .page(0)
         .await;
     assert!(
-        matches!(refused, Err(ClientError::Operation(DocsError::Denied))),
+        matches!(refused, Err(ClientError::Method(DocsError::Denied))),
         "regrant must not revive the withdrawn capability"
     );
     let mut poll = crate::test_poll::Poller::new(
@@ -1018,8 +1010,234 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     node.stop().await;
 }
 
+/// Pages from `poll` until a hold of 200 ms passes with nothing new, returning every event.
+/// A write's rows land on the frontier asynchronously, so one page can miss the tail.
+async fn drain(poll: &mut crate::test_poll::Poller) -> Vec<DatumEvent> {
+    let mut events = Vec::new();
+    loop {
+        let page = poll.page(200).await.unwrap();
+        if page.events.is_empty() {
+            return events;
+        }
+        events.extend(page.events);
+    }
+}
+
+/// ADR 025 section 7: a poll delivers plain rows, so a roster write costs the changed entries,
+/// not the whole roster.
 #[tokio::test]
-async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_known_registry() {
+async fn roster_write_polled_on_the_drawer_doc_delivers_only_the_changed_entry_rows() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let drawer = node.collection(&alice, "roster-rows").await;
+    let mut docs = Vec::new();
+    for name in ["a", "b", "c"] {
+        let doc = node.create_doc(&alice, &drawer, name).await.unwrap();
+        wait_for_datum_set(&node, &alice, &doc).await;
+        docs.push(doc);
+    }
+    let mut poll = crate::test_poll::Poller::doc(
+        node.docs(),
+        node.mint_doc(
+            &alice,
+            DocScope {
+                read: [drawer.clone()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap(),
+        drawer.clone(),
+    );
+    let replay = drain(&mut poll).await;
+    let roster_rows = replay.len();
+    assert!(
+        replay
+            .iter()
+            .all(|event| matches!(event, DatumEvent::Datum { doc_id, .. } if *doc_id == drawer)),
+        "an `IsDoc(drawer)` poll only ever carries the drawer doc's rows: {replay:?}"
+    );
+
+    let added = node.create_doc(&alice, &drawer, "d").await.unwrap();
+    let delta = drain(&mut poll).await;
+    let entry_slot = added.to_string();
+    let named: Vec<_> = delta
+        .iter()
+        .map(|event| match event {
+            DatumEvent::Datum {
+                doc_id, datum_key, ..
+            } if *doc_id == drawer => datum_key.clone(),
+            other => panic!("unexpected event {other:?}"),
+        })
+        .collect();
+    assert!(
+        named.iter().any(|key| {
+            key.tag().as_str() == DrawerDocEntry::ID
+                && std::str::from_utf8(key.slot_bytes()).unwrap() == entry_slot
+        }),
+        "the new doc's entry row is delivered: {named:?}"
+    );
+    assert!(
+        delta.len() < roster_rows,
+        "a roster write delivered {} rows, the whole roster is {roster_rows}",
+        delta.len()
+    );
+    assert_eq!(
+        delta.len(),
+        named.iter().collect::<BTreeSet<_>>().len(),
+        "no row is delivered twice"
+    );
+    node.stop().await;
+}
+
+/// ADR 025 section 7: move-ins deliver the doc's older selected rows at the move-in revision,
+/// move-outs deliver `Leave`, and an unrelated write to a doc that already matches delivers only
+/// the changed row.
+#[tokio::test]
+async fn move_in_delivers_older_rows_move_out_leaves_and_resume_does_not_redeliver() {
+    let node = Node::boot().await;
+    let alice = node.creator("alice").await;
+    let drawer = node.collection(&alice, "moves").await;
+    let other = node.collection(&alice, "moves-source").await;
+    let moving = node.create_doc(&alice, &other, "moving").await.unwrap();
+    wait_for_datum_set(&node, &alice, &moving).await;
+    // A second row, so a move-in has more than the note to deliver.
+    let (note_key, _) = note("");
+    let extra_key: DatumKey = format!("{NOTE}/extra").parse().unwrap();
+    node.docs()
+        .call(
+            RequestContext::root(),
+            WriteDatums {
+                capability: node
+                    .mint_doc(
+                        &alice,
+                        DocScope {
+                            write: [moving.clone()].into(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap(),
+                command: None,
+                doc_id: moving.clone(),
+                mode: WriteMode::AtCurrent,
+                set: BTreeMap::from([(extra_key.clone(), note("extra").1)]),
+                remove: BTreeSet::new(),
+            },
+        )
+        .await
+        .unwrap();
+    node.wait_indexed(NOTE, |route, membership| {
+        route.doc_id == moving
+            && route.datum_key == extra_key
+            && matches!(membership, DatumMembership::Present { .. })
+    })
+    .await;
+    let own_rows = crate::test_poll::query(
+        node.docs(),
+        node.mint_doc(
+            &alice,
+            DocScope {
+                read: [moving.clone()].into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap(),
+        Predicate::IsDoc {
+            doc_id: moving.clone(),
+        },
+        DatumSelection::All,
+    )
+    .await
+    .unwrap()
+    .remove(&moving)
+    .unwrap();
+    assert_eq!(
+        own_rows.keys().cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([note_key.clone(), extra_key.clone()])
+    );
+
+    let mut poll = crate::test_poll::Poller::new(
+        node.docs(),
+        PollDatums {
+            capability: node
+                .mint_doc(
+                    &alice,
+                    DocScope {
+                        drawers: [(drawer.clone(), Access::Read)].into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            predicate: Predicate::InDrawer {
+                drawer_id: drawer.clone(),
+                transitive: false,
+                at_least: Access::Read,
+            },
+            datums: DatumSelection::All,
+            after: 0,
+            limit: 0,
+            hold_ms: 0,
+        },
+    );
+    assert!(drain(&mut poll).await.is_empty());
+    let cursor = poll.cursor();
+
+    // 1. The doc joins after `cursor`: both its rows, older than the join, arrive at the
+    //    revision of the roster write that moved it in.
+    node.add_doc(&alice, "move-in", &drawer, &moving, Access::Read)
+        .await
+        .unwrap();
+    let moved_in = drain(&mut poll).await;
+    let mut delivered = BTreeMap::new();
+    let mut revisions = BTreeSet::new();
+    for event in &moved_in {
+        let DatumEvent::Datum {
+            revision,
+            doc_id,
+            datum_key,
+            datum,
+        } = event
+        else {
+            panic!("a move-in delivers only rows: {event:?}");
+        };
+        assert_eq!(*doc_id, moving);
+        revisions.insert(*revision);
+        delivered.insert(datum_key.clone(), datum.clone());
+    }
+    assert_eq!(moved_in.len(), own_rows.len(), "{moved_in:?}");
+    assert_eq!(delivered, own_rows);
+    assert_eq!(revisions.len(), 1, "one move-in revision: {revisions:?}");
+    assert!(revisions.into_iter().all(|revision| revision > cursor));
+
+    // 2. An unrelated write to the doc that now matches delivers the changed row alone.
+    node.write_note(&alice, &moving, "edited").await.unwrap();
+    let edited = drain(&mut poll).await;
+    assert!(
+        matches!(
+            edited.as_slice(),
+            [DatumEvent::Datum { doc_id, datum_key, .. }]
+                if *doc_id == moving && *datum_key == note_key
+        ),
+        "a resumed poll re-delivered unchanged rows: {edited:?}"
+    );
+
+    // 3. Removing the doc from the drawer is a move-out.
+    node.remove_doc(&alice, "move-out", &drawer, &moving)
+        .await
+        .unwrap();
+    let left = drain(&mut poll).await;
+    assert!(
+        matches!(left.as_slice(), [DatumEvent::Leave { doc_id, .. }] if *doc_id == moving),
+        "{left:?}"
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_known_list() {
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
     let bob = node.actor("bob").await;
@@ -1093,7 +1311,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         )
         .await
         .unwrap();
-    let listed_ids: BTreeSet<DocId> = listed.iter().map(|d| d.drawer_id.clone()).collect();
+    let listed_ids: BTreeSet<DocId> = listed.drawers.iter().map(|d| d.drawer_id.clone()).collect();
     assert!(listed_ids.contains(&parent));
     assert!(listed_ids.contains(&child));
 
@@ -1110,11 +1328,11 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         )
         .await
         .unwrap();
-    assert_eq!(docs.len(), 1);
-    assert_eq!(docs[0].doc_id, doc);
-    assert_eq!(docs[0].access, Access::Read);
+    assert_eq!(docs.docs.len(), 1);
+    assert_eq!(docs.docs[0].doc_id, doc);
+    assert_eq!(docs.docs[0].access, Access::Read);
 
-    // 3. Discovering and projecting synced-in drawers never auto-populates `registry_id`; only an
+    // 3. Discovering and projecting synced-in drawers never auto-populates `known_drawers_id`; only an
     //    explicit `RememberDrawer` adds a drawer to `ListKnownDrawers`.
     let known_before = node
         .drawers()
@@ -1122,21 +1340,21 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
             RequestContext::root(),
             ListKnownDrawers {
                 capability: node
-                    .drawer_capability(&node.drawers_actor, &[&node.local().registry_id])
+                    .drawer_capability(&node.drawers_actor, &[&node.local().known_drawers_id])
                     .await
                     .unwrap(),
             },
         )
         .await
         .unwrap();
-    assert!(known_before.is_empty());
+    assert!(known_before.drawers.is_empty());
 
     node.drawers()
         .call(
             RequestContext::root(),
             RememberDrawer {
                 capability: node
-                    .drawer_capability(&node.drawers_actor, &[&node.local().registry_id])
+                    .drawer_capability(&node.drawers_actor, &[&node.local().known_drawers_id])
                     .await
                     .unwrap(),
                 drawer_id: parent.clone(),
@@ -1151,15 +1369,15 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
             RequestContext::root(),
             ListKnownDrawers {
                 capability: node
-                    .drawer_capability(&node.drawers_actor, &[&node.local().registry_id])
+                    .drawer_capability(&node.drawers_actor, &[&node.local().known_drawers_id])
                     .await
                     .unwrap(),
             },
         )
         .await
         .unwrap();
-    assert_eq!(known_after.len(), 1);
-    assert_eq!(known_after[0].drawer_id, parent);
+    assert_eq!(known_after.drawers.len(), 1);
+    assert_eq!(known_after.drawers[0].drawer_id, parent);
 
     node.stop().await;
 }

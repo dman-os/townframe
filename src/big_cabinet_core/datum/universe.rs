@@ -1,15 +1,15 @@
-//! What one plug declares: the definitions it carries, which of them are datums, and the context
+//! What one cartridge declares: the definitions it carries, which of them are datums, and the context
 //! they are read in.
 //!
 //! A definition is not standalone. A datum's schema refers to the types it names by `#/$defs/<name>`,
 //! so it is read in a context — the way an OpenAPI document resolves against its own components and
 //! the documents it includes, and the way an AT Proto record resolves against every NSID in the
-//! world. Ours is narrower and explicit: **the plug, plus the plugs it references**.
+//! world. Ours is narrower and explicit: **the cartridge, plus the cartridges it references**.
 //!
 //! # The definitions are carried, not looked up
 //!
-//! There is no registry. A plug carries the schema of every type its datums reach, *including* one
-//! that belongs to another plug, so a plug can be read on its own and a definition can disappear
+//! There is no registry. A cartridge carries the schema of every type its datums reach, *including* one
+//! that belongs to another cartridge, so a cartridge can be read on its own and a definition can disappear
 //! from the world without taking its consumers with it. [`Declaration::of`] hoists those definitions
 //! out of a datum's schema into the manifest, so a type two datums both name is carried once, and a
 //! datum's own schema is its definition with nothing extra inlined.
@@ -19,7 +19,7 @@
 //! `check_shape` runs per declaration, inside [`Declaration::of`], because only the compiler knows
 //! the shape a type *claims*. Everything plural is checked in [`Bundle::validate`]: two datums
 //! claiming one tag, two definitions disagreeing about a name they both declare, and a reference
-//! that resolves in neither this plug nor a dependency.
+//! that resolves in neither this cartridge nor a dependency.
 
 use crate::datum::DatumMember;
 use crate::datum::DatumShape;
@@ -34,11 +34,11 @@ use serde_json::Map;
 use serde_json::Value;
 use std::collections::HashSet;
 
-/// A datum a plug declares: the tag a datum key carries, the name a definition refers to it by, its
+/// A datum a cartridge declares: the tag a datum key carries, the name a definition refers to it by, its
 /// definition, and the decisions that declaration makes at a cost.
 ///
 /// The Lexicon it publishes is not a field: it is projected from the definitions the whole bundle
-/// carries ([`Bundle::lexicons`]), because a reference a datum makes resolves against the plug and
+/// carries ([`Bundle::lexicons`]), because a reference a datum makes resolves against the cartridge and
 /// its dependencies and not against the declaration alone.
 #[derive(Debug, Clone)]
 pub struct DatumDecl {
@@ -56,7 +56,7 @@ pub struct TypeDecl {
     pub schema: Schema,
 }
 
-/// One datum and the definitions its schema brought with it, before the plug has collected them.
+/// One datum and the definitions its schema brought with it, before the cartridge has collected them.
 #[derive(Debug, Clone)]
 pub struct Declaration {
     pub datum: DatumDecl,
@@ -94,8 +94,15 @@ impl Declaration {
     where
         T: DatumMember + DatumShape + JsonSchema,
     {
-        let derived = schemars::schema_for!(T);
-        let document = serde_json::to_value(&derived).expect("a schema serializes");
+        let mut document =
+            serde_json::to_value(schemars::schema_for!(T)).expect("a schema serializes");
+        rust_number_formats_to_bounds(&mut document).map_err(|reason| {
+            crate::datum::ShapeError::NotLexiconAligned {
+                name: T::ID.to_owned(),
+                reason,
+            }
+        })?;
+        let derived = Schema::try_from(document.clone()).expect("a schema is a valid JSON Schema");
         let schema = without_definitions(&derived);
         let flags = check_shape(T::ID, &schema, T::SHAPE)?;
         if let Publish::Yes = publish {
@@ -110,6 +117,89 @@ impl Declaration {
             },
             types: definitions(&derived),
         })
+    }
+}
+
+/// Turns the Rust number widths `schemars` states as `format` into the bounds Lexicon and JSON
+/// Schema state them with, and drops the float widths.
+///
+/// `schemars` spells a Rust integer as `{"type": "integer", "format": "uint32", "minimum": 0}` and
+/// an `f32` as `{"type": "number", "format": "float"}`. Neither format is part of the datum model:
+/// an integer is `minimum`/`maximum` (`uint32` becomes `minimum: 0, maximum: 4294967295`, a signed
+/// width its two-sided range, `uint64` just `minimum: 0` because a Lexicon bound is an `i64`) and
+/// Automerge has the one `f64` for every float, so the float formats say nothing. A bound the
+/// field's own attribute states is kept when it is narrower than the width's. The sign survives as
+/// `minimum >= 0`, which is what the codec stores as an Automerge `Uint`; a signed width given such
+/// a bound would flip to `Uint` and no longer hydrate into its `iN`, so it is refused here.
+///
+/// Only schema positions are walked: `const`, `enum`, `default` and `examples` hold data.
+pub fn rust_number_formats_to_bounds(schema: &mut Value) -> Result<(), String> {
+    match schema {
+        Value::Array(items) => items.iter_mut().try_for_each(rust_number_formats_to_bounds),
+        Value::Object(object) => {
+            let mentions = |object: &Map<String, Value>, stated: &str| match object.get("type") {
+                Some(Value::String(one)) => one == stated,
+                Some(Value::Array(ones)) => ones.iter().any(|one| one == stated),
+                _ => false,
+            };
+            if let Some(format) = object
+                .get("format")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                if mentions(object, "integer") {
+                    // The width's inclusive range, where the `i64` a Lexicon bound is can state it.
+                    let range = match format.as_str() {
+                        "int8" => Some((Some(i64::from(i8::MIN)), Some(i64::from(i8::MAX)))),
+                        "int16" => Some((Some(i64::from(i16::MIN)), Some(i64::from(i16::MAX)))),
+                        "int32" => Some((Some(i64::from(i32::MIN)), Some(i64::from(i32::MAX)))),
+                        "int64" => Some((None, None)),
+                        "uint8" => Some((Some(0), Some(i64::from(u8::MAX)))),
+                        "uint16" => Some((Some(0), Some(i64::from(u16::MAX)))),
+                        "uint32" => Some((Some(0), Some(i64::from(u32::MAX)))),
+                        "uint64" => Some((Some(0), None)),
+                        // `int`, `uint` and the 128-bit widths are not datum shapes; whatever
+                        // reaches here with one is left for admission to refuse.
+                        _ => None,
+                    };
+                    if let Some((low, high)) = range {
+                        let narrowed =
+                            |key: &str, bound: Option<i64>, tighter: fn(i64, i64) -> i64| match (
+                                object.get(key).and_then(Value::as_i64),
+                                bound,
+                            ) {
+                                (Some(stated), Some(bound)) => Some(tighter(stated, bound)),
+                                (stated, bound) => stated.or(bound),
+                            };
+                        let minimum = narrowed("minimum", low, i64::max);
+                        let maximum = narrowed("maximum", high, i64::min);
+                        if !format.starts_with('u') && minimum.is_some_and(|minimum| minimum >= 0) {
+                            return Err(format!(
+                                "a signed `{format}` bounded to `minimum >= 0` would be stored as \
+                                 an unsigned Automerge integer that an `iN` cannot hydrate"
+                            ));
+                        }
+                        for (key, bound) in [("minimum", minimum), ("maximum", maximum)] {
+                            if let Some(bound) = bound {
+                                object.insert(key.to_owned(), bound.into());
+                            }
+                        }
+                        object.remove("format");
+                    }
+                } else if mentions(object, "number")
+                    && matches!(format.as_str(), "float" | "double")
+                {
+                    object.remove("format");
+                }
+            }
+            object
+                .iter_mut()
+                .filter(|(key, _)| {
+                    !matches!(key.as_str(), "const" | "enum" | "default" | "examples")
+                })
+                .try_for_each(|(_, value)| rust_number_formats_to_bounds(value))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -141,7 +231,7 @@ fn check_aligned(id: &str, shape: Shape, document: &Value) -> Result<(), crate::
     Ok(())
 }
 
-/// Everything one plug declares.
+/// Everything one cartridge declares.
 #[derive(Debug, Clone, Default)]
 pub struct Universe {
     pub datums: Vec<DatumDecl>,
@@ -202,22 +292,25 @@ impl Universe {
     }
 }
 
-/// The context a definition is read in: one plug's declarations, and the declarations of the plugs it
+/// The context a definition is read in: one cartridge's declarations, and the declarations of the cartridges it
 /// refers to, nearest first.
 #[derive(Debug, Clone)]
 pub struct Bundle<'a> {
-    pub plug: &'a Universe,
+    pub cartridge: &'a Universe,
     pub dependencies: Vec<&'a Universe>,
 }
 
 impl<'a> Bundle<'a> {
-    pub fn new(plug: &'a Universe, dependencies: Vec<&'a Universe>) -> Self {
-        Self { plug, dependencies }
+    pub fn new(cartridge: &'a Universe, dependencies: Vec<&'a Universe>) -> Self {
+        Self {
+            cartridge,
+            dependencies,
+        }
     }
 
     /// Every definition in scope, with the name it is declared under.
     pub fn definitions(&self) -> Vec<Declared<'a>> {
-        std::iter::once(self.plug)
+        std::iter::once(self.cartridge)
             .chain(self.dependencies.iter().copied())
             .flat_map(|universe| {
                 universe
@@ -250,7 +343,7 @@ impl<'a> Bundle<'a> {
 
         let mut seen_ids: HashSet<&str> = HashSet::new();
         let mut flags: Vec<ShapeFlag> = Vec::new();
-        for datum in &self.plug.datums {
+        for datum in &self.cartridge.datums {
             if !seen_ids.insert(&datum.id) {
                 return Err(UniverseError::DuplicateId {
                     id: datum.id.clone(),
@@ -323,16 +416,16 @@ impl<'a> Bundle<'a> {
         Schema::try_from(Value::Object(root)).ok()
     }
 
-    /// Every Lexicon file this bundle publishes, one per datum, in the order the plug declares them.
+    /// Every Lexicon file this bundle publishes, one per datum, in the order the cartridge declares them.
     ///
     /// Projected against the whole bundle rather than against one declaration, so a definition a
     /// datum reaches resolves here the same way it does in [`Bundle::document`] — including one
-    /// carried by a dependency plug. This is the publish step, and it is where a declaration that
+    /// carried by a dependency cartridge. This is the publish step, and it is where a declaration that
     /// was [`assemble`d](Declaration::assemble) without the alignment gate is refused instead of
     /// being handed to a peer that cannot read it.
     pub fn lexicons(&self) -> Result<Vec<Lexicon>, LexiconError> {
         let defs = Value::Object(self.defs_in_scope());
-        self.plug
+        self.cartridge
             .datums
             .iter()
             .map(|datum| {
@@ -365,7 +458,7 @@ impl<'a> Bundle<'a> {
             .collect()
     }
 
-    /// Every definition in scope, flattened, nearest plug first: the context a reference resolves in.
+    /// Every definition in scope, flattened, nearest cartridge first: the context a reference resolves in.
     fn defs_in_scope(&self) -> Map<String, Value> {
         let mut defs = Map::new();
         for (name, schema, _owner) in self.definitions() {
@@ -393,7 +486,7 @@ pub enum LexiconError {
 /// The declaration and the manifest do not agree, or the manifest does not stand on its own.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum UniverseError {
-    /// two datums of one plug claim the tag {id}
+    /// two datums of one cartridge claim the tag {id}
     DuplicateId { id: String },
     /// {name} is declared twice, as {first} and as {second}, and the two disagree
     Conflict {
@@ -401,7 +494,7 @@ pub enum UniverseError {
         first: String,
         second: String,
     },
-    /// {referenced_by} refers to a definition named {name}, which neither this plug nor a dependency declares
+    /// {referenced_by} refers to a definition named {name}, which neither this cartridge nor a dependency declares
     Undeclared { name: String, referenced_by: String },
 }
 

@@ -9,6 +9,7 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 2, name: "002_meta_docs.sql", sql: include_str!("migrations/002_meta_docs.sql") },
     Migration { version: 3, name: "003_meta_doc_roots.sql", sql: include_str!("migrations/003_meta_doc_roots.sql") },
     Migration { version: 4, name: "004_sensitive_root_index.sql", sql: include_str!("migrations/004_sensitive_root_index.sql") },
+    Migration { version: 5, name: "005_config_drawer.sql", sql: include_str!("migrations/005_config_drawer.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]

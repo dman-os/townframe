@@ -8,8 +8,9 @@ use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::dmeta::Uuid7;
 use futures::future::BoxFuture;
 use iroh_blobs::Hash;
-use service_utils_rs::Client;
-use service_utils_rs::InlineRoute;
+use service_client_native_rs::Client;
+use service_client_native_rs::InlineRoute;
+use service_client_native_rs::Transport;
 use service_utils_rs::StopToken;
 
 struct UnusedAuthority;
@@ -30,23 +31,20 @@ struct Harness {
 impl Harness {
     async fn boot() -> Res<Self> {
         let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
-        let (repo, repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&runtime),
-            big_repo::Config {
-                node_identity_seed: [92; 32],
-                storage: big_repo::StorageConfig::Memory,
-                scope_key: "admission-projection".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: [92; 32],
+            storage: big_repo::Storage::memory(&runtime).unwrap(),
+            scope_key: "admission-projection".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await?;
         let (blobs, blobs_stop) = crate::boot(crate::Config {
-            storage: crate::Storage::Memory,
+            storage: crate::Storage::memory().unwrap(),
             sql: runtime.ephemeral(&[])?,
-            authority: Client::direct(Arc::new(UnusedAuthority)),
+            authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
             namespace: Namespace {
                 namespace_id: Uuid7::new(),
                 capability: CapId::from_bytes([93; 16]),
@@ -86,9 +84,16 @@ impl Harness {
             .await
     }
 
+    /// Publish the pair as it stands now, as the runtime does for a decision it just made.
     async fn apply(&self, inventory: &DocId, digest: BlobId) -> Res<()> {
+        let generation = self
+            .admission
+            .state(inventory, digest)
+            .await?
+            .expect("an applied pair exists")
+            .generation;
         self.projection
-            .apply(&self.admission, inventory, digest)
+            .apply(&self.admission, inventory, digest, generation)
             .await
     }
 }
@@ -302,6 +307,44 @@ async fn virtual_publication_requires_provider_and_physical_plaintext_dependency
             .await?
             .is_empty()
     );
+    harness.stop.stop().await;
+    harness.repo_stop.stop().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_change_landing_during_a_decision_stays_dirty_for_the_next_round() -> Res<()> {
+    let harness = Harness::boot().await?;
+    let inventory = harness.inventory().await?;
+    let digest = BlobId::new(*Hash::new(b"observed mid-decision").as_bytes());
+    harness.pin(&inventory, digest, 21).await?;
+    // The runtime reads the pair, finds nothing to fetch (no source has it yet), and goes on to
+    // publish what it decided.
+    let decided = harness
+        .admission
+        .state(&inventory, digest)
+        .await?
+        .unwrap()
+        .generation;
+    // A source reports the digest before that publish lands.
+    harness
+        .admission
+        .observe(&inventory, digest, &PeerKey::new([95; 32]), 1, true, None)
+        .await?;
+    harness
+        .projection
+        .apply(&harness.admission, &inventory, digest, decided)
+        .await?;
+    // The observation is a newer generation no decision saw: it must still be dirty, or nothing
+    // would ever consider fetching it.
+    let dirty = harness.admission.dirty().await?;
+    let pending = dirty
+        .iter()
+        .find(|(dirty_inventory, dirty_digest, _)| {
+            *dirty_inventory == inventory && *dirty_digest == digest
+        })
+        .expect("the observed pair is still dirty");
+    assert!(pending.2 > decided);
     harness.stop.stop().await;
     harness.repo_stop.stop().await?;
     Ok(())

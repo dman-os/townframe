@@ -1,3 +1,12 @@
+// The `Send` auto-trait proof for the blob projection task's future
+// (workers.rs spawning BlobProjection::run) unfolds the projection's nested
+// `tokio::select!` loops over cabinet frontier readers, where every opaque
+// `impl Future` adds several trait-selection frames. That overflows rustc's
+// default 128-step recursion budget, which nightly reports as the crate-wide
+// `recursion_depth_exceeding_limit` lint (rust-lang/rust#159228); raising the
+// limit lets the proof complete.
+#![recursion_limit = "256"]
+
 pub(crate) use sqlite_rs as sqlite_rs_alias;
 mod admission;
 pub mod documents;

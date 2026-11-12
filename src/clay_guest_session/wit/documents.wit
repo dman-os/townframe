@@ -1,4 +1,4 @@
-package townframe:dayframe@0.1.0;
+package townframe:dayframe@0.4.0;
 
 interface documents {
     type doc-id = string;
@@ -112,15 +112,71 @@ interface document-events {
     completed: func(receipt: operation-receipt);
 }
 
+/// One initialization entry point per incarnation (ADR 030 §5). Everything the guest publishes
+/// while `initialize` runs (registration rows, capability publications) stays invisible to
+/// other micros until it returns `ok`; an error, trap, or cancellation drops it unseen.
 interface micro-lifecycle {
     use documents.{document-binding};
+    use collections.{collection-binding};
+    use collection-registration.{registration-binding};
+    use capability-bank.{capability-ref, published-capability};
 
-    activate: func(configs: list<document-binding>) -> result<_, string>;
+    /// A resolved requirement: the local binding name the manifest declares and the provider's
+    /// capability, minted for this incarnation.
+    record requirement-binding {
+        name: string,
+        capability: capability-ref,
+    }
+
+    /// One-shot initialization input. `arguments` is opaque, configuration-supplied CBOR.
+    record initial-context {
+        arguments: list<u8>,
+        configs: list<document-binding>,
+        collections: list<collection-binding>,
+        registrations: list<registration-binding>,
+        requirements: list<requirement-binding>,
+    }
+
+    variant initialization-error {
+        invalid-configuration(string),
+        unavailable(string),
+        rejected(string),
+    }
+
+    /// Proof of successful initialization, held by the host for the incarnation. The host calls
+    /// `close` exactly once, while the incarnation's dependencies are still live, and drops the
+    /// root afterwards. It is not a stop capability: the guest never receives it back.
+    resource instance-root {
+        close: async func() -> result<_, string>;
+    }
+
+    /// A publication this incarnation serves, by the name its manifest declares (ADR 031 §8).
+    /// The host owns the publication lease for the rest of the incarnation and checks the name,
+    /// kind and contract against the manifest; a mismatch fails the initialization.
+    record named-publication {
+        name: string,
+        capability: published-capability,
+    }
+
+    record initialized {
+        root: instance-root,
+        publications: list<named-publication>,
+    }
+
+    initialize: async func(context: initial-context) -> result<initialized, initialization-error>;
+
+    /// Serve one call publication (ADR 031 §5). The host routes every call into this
+    /// incarnation's own store; `publication` is the name given to `publish-call`. The error is
+    /// the provider's own rejection, carried to the caller as `call-error.provider`.
+    call: async func(publication: string, request: list<u8>) -> result<list<u8>, string>;
 }
 
 world micro-client {
     include presentation-client;
     import documents;
+    import collections;
+    import collection-registration;
+    import capability-bank;
     export document-events;
     export micro-lifecycle;
 }

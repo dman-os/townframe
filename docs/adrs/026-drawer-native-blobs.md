@@ -107,7 +107,7 @@ To sponsor or encrypt a doc you cannot write, you branch it and work on the bran
   blocker, since you will eventually want other edits too, and a branch handles all of
   them.
 - Adopting someone else's public doc into your sponsored set is the same act.
-- The branch is an ordinary writable doc (`BranchDoc`, ADR 007), so encryption is
+- The branch is an ordinary writable doc (`BranchDoc`, ADR 034), so encryption is
   in-doc (§3) and resolution needs nothing extra.
 - If the origin's owner already encrypted it, the origin can be sponsored without a
   branch: its in-doc slots are readable, so its pins can be written.

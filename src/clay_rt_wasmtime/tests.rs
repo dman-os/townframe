@@ -1,11 +1,240 @@
 use super::*;
+use clay_guest_session::capabilities::RowAttachment;
 use clay_surface::SurfaceTree;
 use wasmtime::component::Resource;
+
+pub(super) struct RecordingSink {
+    tree: Mutex<Option<SurfaceTree<ComponentRef>>>,
+    changed: tokio::sync::Notify,
+}
+
+impl RecordingSink {
+    pub(super) fn new() -> Self {
+        Self {
+            tree: Mutex::new(Some(SurfaceTree::new())),
+            changed: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(super) fn tree<R>(&self, read: impl FnOnce(&SurfaceTree<ComponentRef>) -> R) -> R {
+        read(self.tree.lock().unwrap().as_ref().expect("surface is live"))
+    }
+
+    async fn wait_for(&self, predicate: impl Fn(&str) -> bool) -> String {
+        loop {
+            let changed = self.changed.notified();
+            let text = self.tree(SurfaceTree::text_content);
+            if predicate(&text) {
+                return text;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl SurfaceSink<ComponentRef> for RecordingSink {
+    fn is_live(&self) -> bool {
+        self.tree.lock().unwrap().is_some()
+    }
+
+    fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+        let result = self
+            .tree
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or(PresentationError::Revoked)?
+            .apply(edits);
+        self.changed.notify_waiters();
+        result
+    }
+
+    fn withdraw(&self) {
+        self.tree.lock().unwrap().take();
+        self.changed.notify_waiters();
+    }
+}
+
+/// Redeem the table entry `reference` as a presentation, through the async host import a guest
+/// would call.
+async fn redeem(
+    store: &mut Store<WasmStoreState>,
+    reference: u32,
+) -> Result<
+    Resource<clay_guest_session::capabilities::PresentationComponent>,
+    bindings::townframe::dayframe::capability_bank::CapabilityError,
+> {
+    use bindings::townframe::dayframe::capability_bank::HostCapabilityRefWithStore;
+    store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::redeem_presentation(
+                accessor,
+                Resource::new_borrow(reference),
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+/// The counter publishes the presentations `view` and `badge` and the call `count`, which its
+/// manifest has to declare.
+fn counter_context() -> InitialContext {
+    use clay_collection::Nsid;
+    use clay_guest_session::capabilities::DeclaredPublication;
+    use clay_guest_session::capabilities::PublicationKind;
+    use clay_guest_session::capabilities::presentation_component;
+    let presentation = || DeclaredPublication {
+        kind: PublicationKind::Presentation,
+        contract: presentation_component(),
+    };
+    InitialContext {
+        publications: BTreeMap::from([
+            ("view".to_owned(), presentation()),
+            ("badge".to_owned(), presentation()),
+            (
+                "count".to_owned(),
+                DeclaredPublication {
+                    kind: PublicationKind::Call,
+                    contract: Nsid::literal("org.example.dayframe.counter.count"),
+                },
+            ),
+            (
+                "increment".to_owned(),
+                DeclaredPublication {
+                    kind: PublicationKind::Call,
+                    contract: Nsid::literal("org.example.dayframe.toolbar.action"),
+                },
+            ),
+        ]),
+        ..InitialContext::default()
+    }
+}
 
 async fn counter_package() -> WasmPackage {
     WasmPackage::from_env("counter")
         .await
         .expect("prepared counter component is valid")
+}
+
+async fn read_capability_page(
+    store: &mut Store<WasmStoreState>,
+    lease: u32,
+    committed: Option<Vec<u8>>,
+) -> bindings::townframe::dayframe::collections::Page {
+    use bindings::townframe::dayframe::collections as wit_collections;
+    use wit_collections::HostProjectionLeaseWithStore;
+
+    store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::read(
+                accessor,
+                Resource::new_borrow(lease),
+                committed,
+                wit_collections::ReadLimits {
+                    max_transactions: None,
+                    max_changes: None,
+                    poll_timeout_ms: 1_000,
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
+
+/// A grant of `micro` over `registrations`.
+fn full_grant(
+    registrations: &clay_guest_session::collections::BytesRegistrations,
+    micro: &str,
+) -> clay_host::Grant<clay_guest_session::collections::BytesRegistrations> {
+    clay_host::Grant {
+        collection: registrations.clone(),
+        micro: clay_host::MicroId::new(micro),
+        writer: clay_collection::WriterId::new(
+            &clay_collection::ReplicaId::from_bytes([1; clay_collection::ReplicaId::LEN]),
+            micro,
+        ),
+    }
+}
+
+/// The bodies of the registrations' live rows; tombstones are skipped.
+fn bodies(registrations: &clay_guest_session::collections::BytesRegistrations) -> Vec<Vec<u8>> {
+    registrations
+        .snapshot()
+        .into_values()
+        .filter_map(|row| Some(row.value?.body))
+        .collect()
+}
+
+/// A projected row as a fixed writer's first write.
+fn stamped(
+    value: clay_guest_session::collections::CollectionValue,
+) -> clay_collection::Stamped<Option<clay_guest_session::collections::CollectionValue>> {
+    clay_collection::Stamped {
+        stamp: clay_collection::Stamp {
+            lamport: 1,
+            writer: clay_collection::WriterId::from_encoded("test"),
+        },
+        value: Some(value),
+    }
+}
+
+async fn capability_delivery(
+    host: &Host,
+    name: &str,
+    projection: &clay_guest_session::collections::BytesProjection,
+) -> (
+    Store<WasmStoreState>,
+    mpsc::Receiver<Work>,
+    u32,
+    u32,
+    Vec<u8>,
+) {
+    use bindings::townframe::dayframe::collections as wit_collections;
+    use wit_collections::HostCollectionReaderWithStore;
+
+    let owner = host.start(name);
+    let (mut state, incoming) =
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
+    let reader = state
+        .table
+        .push(state.collections.grant(projection.clone()).unwrap())
+        .unwrap();
+    let reader_rep = reader.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+    let lease_rep = store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::acquire(
+                accessor,
+                Resource::new_borrow(reader_rep),
+                Vec::new(),
+                None,
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .rep();
+    let page = read_capability_page(&mut store, lease_rep, None).await;
+    let wit_collections::Change::Upsert(upsert) = &page.transactions[0].changes[0] else {
+        panic!("capability delivery must start with the published upsert");
+    };
+    let value = upsert.value.as_ref().expect("the published row is live");
+    assert_eq!(value.body, [0xd9, 0xa7, 0xf8, 0]);
+    assert_eq!(value.capabilities.len(), 1);
+    (
+        store,
+        incoming,
+        lease_rep,
+        value.capabilities[0].rep(),
+        page.through,
+    )
 }
 
 #[test]
@@ -16,7 +245,7 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
     let owner = host.start("layout");
     let component = host.publish_component(&owner).unwrap();
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let mut resources = state
         .grant_components(&vec![component; PresentationHost::MAX_COMPONENT_HANDLES])
         .unwrap();
@@ -62,6 +291,686 @@ fn component_resource_borrows_resolve_only_granted_handles_and_release_capacity(
         HostComponentRef::drop(&mut state, resource).unwrap();
     }
     assert_eq!(state.presentation.component_handles(), 0);
+    host.close();
+}
+
+#[test]
+fn registration_writer_resources_release_budget_and_reuse_table_slots() {
+    use bindings::townframe::dayframe::collection_registration::HostRegistrationWriter;
+    use clay_collection::WriteBasis;
+    use clay_guest_session::collections::CollectionLimits;
+    use clay_guest_session::collections::CollectionSession;
+    use clay_guest_session::collections::RegistrationWriter;
+    use clay_guest_session::collections::WriteFailure;
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+    use wasmtime::component::ResourceAny;
+
+    let host = Host::new();
+    let owner = host.start("writer-budget");
+    let limits = CollectionLimits {
+        writers: 2,
+        ..CollectionLimits::default()
+    };
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [31, 32]);
+    let (mut state, _incoming) =
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+    state.collections = CollectionSession::new(host.clone(), owner, limits);
+    state.table.set_max_capacity(limits.writers);
+    let first = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    let other = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(state.collections.writer_count(), limits.writers);
+    assert_eq!(
+        state
+            .collections
+            .grant_writer(full_grant(&registrations, "writer"))
+            .err(),
+        Some(clay_host::AccessError::Denied)
+    );
+    let first_stamp = state
+        .table
+        .get(&first)
+        .unwrap()
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
+    let other_stamp = state
+        .table
+        .get(&other)
+        .unwrap()
+        .put(vec![2], WriteBasis::Concurrent, vec![2])
+        .unwrap();
+    let first_rep = first.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+    let stale = ResourceAny::try_from_resource(first, &mut store).unwrap();
+    let first = stale
+        .try_into_resource::<RegistrationWriter>(&mut store)
+        .unwrap();
+    HostRegistrationWriter::drop(store.data_mut(), first).unwrap();
+    assert_eq!(store.data().collections.writer_count(), 1);
+    assert!(
+        store
+            .data()
+            .table
+            .get(&Resource::<RegistrationWriter>::new_borrow(first_rep))
+            .is_err()
+    );
+    assert!(HostRegistrationWriter::drop(store.data_mut(), Resource::new_own(first_rep)).is_err());
+    assert_eq!(store.data().collections.writer_count(), 1);
+    assert_eq!(bodies(&registrations), [vec![1], vec![2]]);
+    let state = store.data_mut();
+    let replacement = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(replacement.rep(), first_rep);
+    assert_eq!(state.collections.writer_count(), limits.writers);
+    let current = ResourceAny::try_from_resource(replacement, &mut store).unwrap();
+    assert_ne!(stale, current);
+    assert!(
+        stale
+            .try_into_resource::<RegistrationWriter>(&mut store)
+            .is_err()
+    );
+    let replacement = current
+        .try_into_resource::<RegistrationWriter>(&mut store)
+        .unwrap();
+    let state = store.data_mut();
+    let writer = state.table.get(&replacement).unwrap();
+    // The replacement scope holds nothing, but the dropped writer's row is still visible.
+    assert_eq!(
+        writer.put(vec![1], WriteBasis::CompareAndSet(None), vec![3]),
+        Err(WriteFailure::Conflict {
+            current: Some(first_stamp.clone())
+        })
+    );
+    writer
+        .put(vec![1], WriteBasis::Observed(first_stamp), vec![3])
+        .unwrap();
+    state
+        .table
+        .get(&other)
+        .unwrap()
+        .delete(vec![2], WriteBasis::Observed(other_stamp))
+        .unwrap();
+    assert_eq!(bodies(&registrations), [vec![3]]);
+    HostRegistrationWriter::drop(state, replacement).unwrap();
+    HostRegistrationWriter::drop(state, other).unwrap();
+    assert_eq!(state.collections.writer_count(), 0);
+    assert!(state.table.is_empty());
+    assert_eq!(registrations.snapshot().len(), 2);
+    host.close();
+    assert!(registrations.snapshot().is_empty());
+}
+
+#[test]
+fn registration_writer_table_capacity_failure_releases_its_permit() {
+    use bindings::townframe::dayframe::collection_registration::HostRegistrationWriter;
+    use clay_collection::WriteBasis;
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+    use wasmtime::component::ResourceTableError;
+
+    let host = Host::new();
+    let owner = host.start("writer-table-capacity");
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [33, 34]);
+    let (mut state, _incoming) =
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
+    state.table.set_max_capacity(1);
+    let first = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    state
+        .table
+        .get(&first)
+        .unwrap()
+        .put(vec![1], WriteBasis::Concurrent, vec![1])
+        .unwrap();
+    assert!(matches!(
+        state.table.push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap()
+        ),
+        Err(ResourceTableError::Full)
+    ));
+    assert_eq!(state.collections.writer_count(), 1);
+    assert_eq!(registrations.snapshot().len(), 1);
+    let first_rep = first.rep();
+    HostRegistrationWriter::drop(&mut state, first).unwrap();
+    assert_eq!(state.collections.writer_count(), 0);
+    assert_eq!(registrations.snapshot().len(), 1);
+    let replacement = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(replacement.rep(), first_rep);
+    assert_eq!(state.collections.writer_count(), 1);
+    HostRegistrationWriter::drop(&mut state, replacement).unwrap();
+    assert_eq!(state.collections.writer_count(), 0);
+    assert!(state.table.is_empty());
+    host.close();
+}
+
+#[tokio::test]
+async fn registration_writer_adapter_revokes_without_affecting_other_instances() {
+    use bindings::townframe::dayframe::collection_registration as registration_wit;
+    use clay_guest_session::collections::CollectionLimits;
+    use clay_guest_session::collections::CollectionSession;
+    use clay_guest_session::collections::bytes_registrations;
+    use registration_wit::HostRegistrationWriter;
+    use registration_wit::HostRegistrationWriterWithStore;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let owner = host.start("revoked-writer");
+    let other_session = CollectionSession::new(
+        host.clone(),
+        host.start("live-writer"),
+        CollectionLimits::default(),
+    );
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [35, 36]);
+    let (mut state, _incoming) =
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+    let writer = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    let other = state
+        .table
+        .push(
+            other_session
+                .grant_writer(full_grant(&registrations, "other"))
+                .unwrap(),
+        )
+        .unwrap();
+    let writer_rep = writer.rep();
+    let other_rep = other.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+    store
+        .run_concurrent(async |accessor| {
+            let put = async |rep, basis, body| {
+                HasSelf::<WasmStoreState>::put(
+                    accessor,
+                    Resource::new_borrow(rep),
+                    vec![1],
+                    basis,
+                    registration_wit::WrittenValue {
+                        body: vec![body],
+                        attachments: Vec::new(),
+                    },
+                )
+                .await
+            };
+            let delete = async |rep, basis| {
+                HasSelf::<WasmStoreState>::delete(
+                    accessor,
+                    Resource::new_borrow(rep),
+                    vec![1],
+                    basis,
+                )
+                .await
+            };
+            let concurrent = || registration_wit::WriteBasis::Concurrent;
+            let observed = |stamp: &bindings::townframe::dayframe::collections::Stamp| {
+                registration_wit::WriteBasis::Observed(
+                    bindings::townframe::dayframe::collections::Stamp {
+                        lamport: stamp.lamport,
+                        writer: stamp.writer.clone(),
+                    },
+                )
+            };
+            // Both scopes write key 1 at lamport 1; "writer" outranks "other", so the other
+            // writer's row is hidden until the first scope retracts.
+            let accepted = put(writer_rep, concurrent(), 1).await.unwrap().unwrap();
+            let other_accepted = put(other_rep, concurrent(), 7).await.unwrap().unwrap();
+            host.close_instance(&owner).unwrap();
+            assert_eq!(bodies(&registrations), [vec![7]]);
+            assert!(matches!(
+                put(writer_rep, concurrent(), 2).await.unwrap(),
+                Err(registration_wit::MutationError::Revoked)
+            ));
+            assert!(matches!(
+                delete(writer_rep, observed(&accepted)).await.unwrap(),
+                Err(registration_wit::MutationError::Revoked)
+            ));
+            accessor.with(|mut access| {
+                let state = access.get();
+                assert_eq!(state.collections.writer_count(), 1);
+                assert_eq!(
+                    state
+                        .collections
+                        .grant_writer(full_grant(&registrations, "writer"))
+                        .err(),
+                    Some(clay_host::AccessError::Revoked)
+                );
+                HostRegistrationWriter::drop(state, writer).unwrap();
+                assert_eq!(state.collections.writer_count(), 0);
+            });
+            assert!(put(writer_rep, concurrent(), 3).await.is_err());
+            assert!(delete(writer_rep, concurrent()).await.is_err());
+            let updated = put(other_rep, observed(&other_accepted), 9)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(bodies(&registrations), [vec![9]]);
+            assert!(delete(other_rep, observed(&updated)).await.unwrap().is_ok());
+            accessor.with(|mut access| {
+                let state = access.get();
+                HostRegistrationWriter::drop(state, other).unwrap();
+                assert!(state.table.is_empty());
+            });
+        })
+        .await
+        .unwrap();
+    assert_eq!(other_session.writer_count(), 0);
+    // The deletion left its tombstone row until the writer's instance closes.
+    assert!(bodies(&registrations).is_empty());
+    host.close();
+    assert!(registrations.snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn capability_delivery_mints_distinct_recipient_refs_that_redeem_independently() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use cap_wit::HostCapabilityRef;
+    use cap_wit::HostPresentationComponent;
+    use clay_collection::Change;
+    use clay_collection::RowEvidence;
+    use clay_collection::Version;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilityRef;
+    use clay_guest_session::capabilities::CapabilitySession;
+    use clay_guest_session::collections::BytesProjection;
+    use clay_guest_session::collections::BytesSource;
+    use clay_guest_session::collections::CollectionValue;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let provider = CapabilitySession::new(
+        host.clone(),
+        host.start("capability-provider"),
+        CapabilityLimits::default(),
+    );
+    let lease = provider.publish_presentation("view").unwrap();
+    let projection =
+        BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [41, 42]);
+    projection.publish(vec![Change::Upsert {
+        key: vec![1],
+        row_version: Version::new(1, 1),
+        value: stamped(CollectionValue {
+            body: vec![0xd9, 0xa7, 0xf8, 0],
+            attachments: vec![RowAttachment::Bound(lease.publication())],
+        }),
+        evidence: RowEvidence::Authoritative,
+        write_context: None,
+    }]);
+
+    let (mut store_a, _incoming_a, _lease_a, reference_a, _through_a) =
+        capability_delivery(&host, "capability-reader-a", &projection).await;
+    let (mut store_b, _incoming_b, _lease_b, reference_b, _through_b) =
+        capability_delivery(&host, "capability-reader-b", &projection).await;
+
+    let (publication_a, scope_a) = {
+        let state = store_a.data_mut();
+        let reference = state
+            .table
+            .get(&Resource::<CapabilityRef>::new_borrow(reference_a))
+            .unwrap();
+        assert!(state.capabilities.same_recipient(reference));
+        assert_eq!(state.capabilities.reference_count(), 1);
+        (reference.attachment(), reference.recipient_scope())
+    };
+    let (publication_b, scope_b) = {
+        let state = store_b.data_mut();
+        let reference = state
+            .table
+            .get(&Resource::<CapabilityRef>::new_borrow(reference_b))
+            .unwrap();
+        assert!(state.capabilities.same_recipient(reference));
+        assert_eq!(state.capabilities.reference_count(), 1);
+        (reference.attachment(), reference.recipient_scope())
+    };
+    assert_eq!(publication_a, publication_b);
+    assert_eq!(publication_a, RowAttachment::Bound(lease.publication()));
+    assert_ne!(scope_a, scope_b);
+
+    let proxy_a = redeem(&mut store_a, reference_a).await.unwrap();
+    assert_eq!(store_a.data().capabilities.proxy_count(), 1);
+    let proxy_b = redeem(&mut store_b, reference_b).await.unwrap();
+    assert_eq!(store_b.data().capabilities.proxy_count(), 1);
+
+    let component_a = {
+        let state = store_a.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy_a.rep()))
+                .unwrap()
+                .unwrap();
+        let component = state.table.get(&resource).unwrap().0;
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        component
+    };
+    let component_b = {
+        let state = store_b.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy_b.rep()))
+                .unwrap()
+                .unwrap();
+        let component = state.table.get(&resource).unwrap().0;
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        component
+    };
+    assert_eq!(component_a, component_b);
+
+    // Releasing reader A's proxy and reference leaves reader B fully usable.
+    {
+        let state = store_a.data_mut();
+        HostPresentationComponent::drop(state, proxy_a).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 0);
+        HostCapabilityRef::drop(state, Resource::new_own(reference_a)).unwrap();
+        assert_eq!(state.capabilities.reference_count(), 0);
+    }
+    {
+        let state = store_b.data_mut();
+        assert_eq!(state.capabilities.proxy_count(), 1);
+        assert_eq!(state.capabilities.reference_count(), 1);
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy_b.rep()))
+                .unwrap()
+                .unwrap();
+        assert_eq!(state.table.get(&resource).unwrap().0, component_b);
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        HostPresentationComponent::drop(state, proxy_b).unwrap();
+        HostCapabilityRef::drop(state, Resource::new_own(reference_b)).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 0);
+        assert_eq!(state.capabilities.reference_count(), 0);
+    }
+    drop(lease);
+    host.close();
+}
+
+#[tokio::test]
+async fn retained_presentation_proxy_survives_row_removal_but_turns_inert_when_lease_drops() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use bindings::townframe::dayframe::collections as wit_collections;
+    use cap_wit::HostCapabilityRef;
+    use cap_wit::HostPresentationComponent;
+    use clay_collection::Change;
+    use clay_collection::RowEvidence;
+    use clay_collection::Version;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilitySession;
+    use clay_guest_session::collections::BytesProjection;
+    use clay_guest_session::collections::BytesSource;
+    use clay_guest_session::collections::CollectionValue;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let provider = CapabilitySession::new(
+        host.clone(),
+        host.start("retained-provider"),
+        CapabilityLimits::default(),
+    );
+    let lease = provider.publish_presentation("view").unwrap();
+    let projection =
+        BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [43, 44]);
+    projection.publish(vec![Change::Upsert {
+        key: vec![1],
+        row_version: Version::new(1, 1),
+        value: stamped(CollectionValue {
+            body: vec![0xd9, 0xa7, 0xf8, 0],
+            attachments: vec![RowAttachment::Bound(lease.publication())],
+        }),
+        evidence: RowEvidence::Authoritative,
+        write_context: None,
+    }]);
+    let (mut store, _incoming, lease_rep, reference, through) =
+        capability_delivery(&host, "retained-reader", &projection).await;
+    let proxy = redeem(&mut store, reference).await.unwrap();
+    {
+        let state = store.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy.rep()))
+                .unwrap()
+                .unwrap();
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+    }
+
+    projection.publish(vec![Change::Remove {
+        key: vec![1],
+        row_version: Version::new(1, 2),
+    }]);
+    let page = read_capability_page(&mut store, lease_rep, Some(through)).await;
+    assert!(matches!(
+        page.transactions[0].changes[0],
+        wit_collections::Change::Remove(_)
+    ));
+    {
+        let state = store.data_mut();
+        let resource =
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy.rep()))
+                .unwrap()
+                .unwrap();
+        wit_presentation::HostComponentRef::drop(state, resource).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 1);
+    }
+
+    drop(lease);
+    {
+        let state = store.data_mut();
+        assert!(matches!(
+            HostPresentationComponent::component(state, Resource::new_borrow(proxy.rep()))
+                .unwrap()
+                .err(),
+            Some(cap_wit::CapabilityError::Revoked)
+        ));
+        assert_eq!(state.capabilities.proxy_count(), 1);
+        HostPresentationComponent::drop(state, proxy).unwrap();
+        assert_eq!(state.capabilities.proxy_count(), 0);
+        HostCapabilityRef::drop(state, Resource::new_own(reference)).unwrap();
+        assert_eq!(state.capabilities.reference_count(), 0);
+    }
+    host.close();
+}
+
+#[tokio::test]
+async fn registration_writer_surfaces_invalid_attachment_for_fabricated_capability_index() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use bindings::townframe::dayframe::collection_registration as registration_wit;
+    use cap_wit::HostPublishedCapability;
+    use clay_guest_session::capabilities::CapabilityRef;
+    use clay_guest_session::collections::bytes_registrations;
+    use registration_wit::HostRegistrationWriterWithStore;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let owner = host.start("capability-writer");
+    let registrations = bytes_registrations(NonZeroUsize::new(8).unwrap(), [45, 46]);
+    let (mut state, _incoming) =
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
+    let writer = state
+        .table
+        .push(
+            state
+                .collections
+                .grant_writer(full_grant(&registrations, "writer"))
+                .unwrap(),
+        )
+        .unwrap();
+    let writer_rep = writer.rep();
+    let lease = cap_wit::Host::publish_presentation(&mut state, "view".into())
+        .unwrap()
+        .unwrap();
+    let publication = state.table.get(&lease).unwrap().publication();
+    let lease_rep = lease.rep();
+    let reference = HostPublishedCapability::reference(&mut state, Resource::new_borrow(lease_rep))
+        .unwrap()
+        .unwrap();
+    let reference_rep = reference.rep();
+    let mut store = Store::new(&engine().unwrap(), state);
+
+    let fabricated = store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::put(
+                accessor,
+                Resource::new_borrow(writer_rep),
+                vec![1],
+                registration_wit::WriteBasis::Concurrent,
+                registration_wit::WrittenValue {
+                    body: vec![0xd9, 0xa7, 0xf8, 0],
+                    attachments: Vec::new(),
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        fabricated.err(),
+        Some(registration_wit::MutationError::InvalidAttachment)
+    ));
+    assert!(registrations.snapshot().is_empty());
+
+    let accepted = store
+        .run_concurrent(async |accessor| {
+            HasSelf::<WasmStoreState>::put(
+                accessor,
+                Resource::new_borrow(writer_rep),
+                vec![1],
+                registration_wit::WriteBasis::Concurrent,
+                registration_wit::WrittenValue {
+                    body: vec![0xd9, 0xa7, 0xf8, 0],
+                    attachments: vec![registration_wit::RowAttachment::Reference(Resource::<
+                        CapabilityRef,
+                    >::new_own(
+                        reference_rep
+                    ))],
+                },
+            )
+            .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(accepted.is_ok());
+    let stored = registrations
+        .snapshot()
+        .into_values()
+        .next()
+        .unwrap()
+        .value
+        .unwrap();
+    assert_eq!(stored.body, [0xd9, 0xa7, 0xf8, 0]);
+    assert_eq!(stored.attachments.len(), 1);
+    assert_eq!(stored.attachments[0], RowAttachment::Bound(publication));
+
+    let state = store.data_mut();
+    HostPublishedCapability::drop(state, Resource::new_own(lease_rep)).unwrap();
+    registration_wit::HostRegistrationWriter::drop(state, Resource::new_own(writer_rep)).unwrap();
+    host.close();
+}
+
+#[tokio::test]
+async fn capability_bank_table_drops_release_reference_and_proxy_capacity() {
+    use bindings::townframe::dayframe::capability_bank as cap_wit;
+    use cap_wit::HostCapabilityRef;
+    use cap_wit::HostPresentationComponent;
+    use cap_wit::HostPublishedCapability;
+    use clay_guest_session::capabilities::CapabilityLimits;
+    use clay_guest_session::capabilities::CapabilitySession;
+
+    let host = Host::new();
+    let owner = host.start("capability-budget");
+    let (mut state, _incoming) =
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+    state.capabilities = CapabilitySession::new(
+        host.clone(),
+        owner,
+        CapabilityLimits {
+            publications: 1,
+            references: 1,
+            proxies: 1,
+        },
+    );
+    let mut store = Store::new(&engine().unwrap(), state);
+    let lease = cap_wit::Host::publish_presentation(store.data_mut(), "view".into())
+        .unwrap()
+        .unwrap();
+    assert_eq!(store.data().capabilities.publication_count(), 1);
+
+    let reference =
+        HostPublishedCapability::reference(store.data_mut(), Resource::new_borrow(lease.rep()))
+            .unwrap()
+            .unwrap();
+    assert_eq!(store.data().capabilities.reference_count(), 1);
+    assert!(matches!(
+        HostPublishedCapability::reference(store.data_mut(), Resource::new_borrow(lease.rep()))
+            .unwrap()
+            .err(),
+        Some(cap_wit::CapabilityError::LimitExceeded)
+    ));
+    HostCapabilityRef::drop(store.data_mut(), reference).unwrap();
+    assert_eq!(store.data().capabilities.reference_count(), 0);
+    let reference =
+        HostPublishedCapability::reference(store.data_mut(), Resource::new_borrow(lease.rep()))
+            .unwrap()
+            .unwrap();
+
+    let proxy = redeem(&mut store, reference.rep()).await.unwrap();
+    assert_eq!(store.data().capabilities.proxy_count(), 1);
+    assert!(matches!(
+        redeem(&mut store, reference.rep()).await.err(),
+        Some(cap_wit::CapabilityError::LimitExceeded)
+    ));
+    HostPresentationComponent::drop(store.data_mut(), proxy).unwrap();
+    assert_eq!(store.data().capabilities.proxy_count(), 0);
+    let proxy = redeem(&mut store, reference.rep()).await.unwrap();
+
+    HostPresentationComponent::drop(store.data_mut(), proxy).unwrap();
+    HostCapabilityRef::drop(store.data_mut(), reference).unwrap();
+    HostPublishedCapability::drop(store.data_mut(), lease).unwrap();
+    assert_eq!(store.data().capabilities.proxy_count(), 0);
+    assert_eq!(store.data().capabilities.reference_count(), 0);
+    assert_eq!(store.data().capabilities.publication_count(), 0);
+    assert!(store.data().table.is_empty());
     host.close();
 }
 
@@ -142,7 +1051,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let owner = host.start("ingress-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(
@@ -173,18 +1082,18 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
 async fn execution_and_linear_memory_are_bounded_per_incarnation() {
     let host = Host::new();
     let package = counter_package().await;
-    let (mut active, _incoming) = package
+    let (mut active, _incoming, _calls) = package
         .instantiate(&host, host.start("bounded"))
         .await
         .unwrap();
-    let module = wasmtime::Module::new(
-        &package.engine,
+    let wasm = wat::parse_str(
         r#"(module
         (memory (export "memory") 1)
         (func (export "loop") (loop br 0))
     )"#,
     )
     .unwrap();
+    let module = wasmtime::Module::new(&package.engine, wasm).unwrap();
     // The component's async imports set `async_required` on the store, so core-module
     // entrypoints must use the async variants (`Instance::new_async`,
     // `Memory::grow_async`, `TypedFunc::call_async`).
@@ -211,11 +1120,11 @@ async fn execution_and_linear_memory_are_bounded_per_incarnation() {
 async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     let host = Host::new();
     let owner = host.start("close-before-mount");
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &counter_package().await,
-        BTreeMap::new(),
+        counter_context(),
     )
     .await
     .unwrap();
@@ -223,7 +1132,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount(writer.clone(), &[]).err(),
+        runtime.mount("view", writer.clone()).err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -231,6 +1140,104 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     drop(driver);
     assert_eq!(Arc::strong_count(&fuel), 1);
     host.close();
+}
+
+/// W2 spike: a guest whose sync-typed `dispatch` blocks via `std::thread::sleep` (which lifts
+/// to the async `monotonic-clock.wait-until` import).
+/// The component model's may-not-suspend rule must surface the block as `Err` (CannotBlock)
+/// on the first poll — not `Pending`, not a host panic — and the host must handle it as a
+/// trap: withdraw the surface, close the instance. Pinned by `sleeper_fixture`.
+#[tokio::test]
+async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
+    struct LiveSink(AtomicBool);
+
+    impl SurfaceSink<ComponentRef> for LiveSink {
+        fn is_live(&self) -> bool {
+            !self.0.load(Ordering::Acquire)
+        }
+
+        fn apply(&self, _edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            Ok(0)
+        }
+
+        fn withdraw(&self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let host = Host::new();
+    let owner = host.start("sleeper");
+    let ended = host.observe_instance(&owner).unwrap();
+    let package = WasmPackage::from_env("sleeper")
+        .await
+        .expect("prepared sleeper component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    let writer = Arc::new(LiveSink(AtomicBool::new(false)));
+    let session = runtime
+        .mount("view", Arc::clone(&writer) as _)
+        .expect("mount must complete before dispatch blocks");
+    assert!(writer.is_live());
+
+    let suspended_before = suspended_count();
+    // A real event so the guest's dispatch runs; the sleeper sleeps inside it.
+    let response = session.handler()(Event {
+        revision: 1,
+        element: clay_surface::NodeId::try_from(1_u32).unwrap(),
+        name: "click".into(),
+        bubbles: true,
+        data_json: "{}".into(),
+    });
+    // Trap-equivalent: default response, surface withdrawn, instance closed.
+    assert_eq!(response, EventResponse::default());
+    assert!(
+        !writer.is_live(),
+        "a blocked dispatch withdraws the surface"
+    );
+    assert_eq!(
+        host.check(&owner),
+        Err(clay_host::AccessError::Revoked),
+        "a blocked dispatch closes the instance"
+    );
+    assert_eq!(
+        *ended.borrow(),
+        Some(clay_host::CloseReason::Requested),
+        "closure is reported to the terminal observer"
+    );
+    // The block must surface as Ready(Err) (CannotBlock), never as Pending/Suspended.
+    assert_eq!(
+        suspended_count(),
+        suspended_before,
+        "wasmtime must fail a blocking sync-typed call with CannotBlock on the first poll, \
+         not return Pending"
+    );
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
+#[test]
+fn first_poll_maps_pending_to_suspended_and_ready_to_output() {
+    use std::task::Poll;
+
+    struct AlwaysPending;
+    impl std::future::Future for AlwaysPending {
+        type Output = ();
+        fn poll(self: std::pin::Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+
+    assert!(matches!(
+        first_poll(AlwaysPending, Waker::noop()),
+        Err(Suspended)
+    ));
+    assert!(matches!(
+        first_poll(std::future::ready(()), Waker::noop()),
+        Ok(())
+    ));
 }
 
 #[tokio::test]
@@ -242,27 +1249,6 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     use std::task::Context;
     use std::task::Waker;
 
-    struct RecordingSink(Mutex<Option<SurfaceTree<ComponentRef>>>);
-
-    impl SurfaceSink<ComponentRef> for RecordingSink {
-        fn is_live(&self) -> bool {
-            self.0.lock().unwrap().is_some()
-        }
-
-        fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
-            self.0
-                .lock()
-                .unwrap()
-                .as_mut()
-                .ok_or(PresentationError::Revoked)?
-                .apply(edits)
-        }
-
-        fn withdraw(&self) {
-            self.0.lock().unwrap().take();
-        }
-    }
-
     let host = Host::new();
     let owner = host.start("counter");
     let ended = host.observe_instance(&owner).unwrap();
@@ -271,7 +1257,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     let route = FacetRoute {
         document: "counter-config".into(),
         branch: "main".into(),
-        tag: "org.dayframe.counter.config".into(),
+        tag: "org.example.dayframe.counter.config".into(),
         key_id: "count".into(),
     };
     node.seed(route.clone(), serde_json::json!(3));
@@ -295,18 +1281,21 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     let document = access
         .document(route.document.clone(), route.branch.clone())
         .unwrap();
-    let (runtime, driver) = WasmRuntime::activate(
+    let (runtime, driver) = WasmRuntime::initialize(
         &host,
         owner.clone(),
         &counter_package().await,
-        [("counter".into(), document)].into(),
+        InitialContext {
+            configs: [("counter".into(), document)].into(),
+            ..counter_context()
+        },
     )
     .await
     .unwrap();
-    let writer = Arc::new(RecordingSink(Mutex::new(Some(SurfaceTree::new()))));
-    let surface = runtime.mount(writer.clone(), &[]).unwrap();
+    let writer = Arc::new(RecordingSink::new());
+    let surface = runtime.mount("view", writer.clone()).unwrap();
     assert_eq!(
-        writer.0.lock().unwrap().as_ref().unwrap().text_content(),
+        writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
     );
     let mut driver = std::pin::pin!(driver);
@@ -324,7 +1313,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
             .is_pending()
     );
     assert_eq!(
-        writer.0.lock().unwrap().as_ref().unwrap().text_content(),
+        writer.tree(SurfaceTree::text_content),
         "7Pending counter writes: 0Refresh counter"
     );
     runtime.exhaust_fuel();
@@ -340,6 +1329,334 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     assert!(!writer.is_live());
     drop(surface);
     host.close();
+}
+
+#[tokio::test]
+async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() {
+    use clay_collection::Change;
+    use clay_collection::RowEvidence;
+    use clay_collection::Version;
+    use clay_guest_session::collections::BytesProjection;
+    use clay_guest_session::collections::BytesSource;
+    use std::num::NonZeroUsize;
+
+    fn cbor(value: &str) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        ciborium::into_writer(value, &mut encoded).unwrap();
+        encoded
+    }
+
+    fn upsert(
+        key: &str,
+        value: &str,
+        sequence: u64,
+    ) -> Change<
+        Vec<u8>,
+        clay_collection::Stamped<Option<clay_guest_session::collections::CollectionValue>>,
+    > {
+        Change::Upsert {
+            key: cbor(key),
+            row_version: Version::new(1, sequence),
+            value: stamped(clay_guest_session::collections::CollectionValue::plain(
+                cbor(value),
+            )),
+            evidence: RowEvidence::Authoritative,
+            write_context: None,
+        }
+    }
+
+    let host = Host::new();
+    let owner = host.start("collection-probe");
+    let package = WasmPackage::from_env("collection-probe")
+        .await
+        .expect("prepared collection probe is valid");
+    let projection =
+        BytesProjection::with_source(BytesSource, NonZeroUsize::new(8).unwrap(), [11, 12]);
+    projection.publish(vec![upsert("alpha", "one", 1), upsert("beta", "two", 2)]);
+    let (runtime, driver) = WasmRuntime::initialize(
+        &host,
+        owner.clone(),
+        &package,
+        InitialContext {
+            collections: [("rows".into(), projection.clone())].into(),
+            ..InitialContext::default()
+        },
+    )
+    .await
+    .unwrap();
+    let scenario = async move {
+        let writer = Arc::new(RecordingSink::new());
+        let session = runtime.mount("view", writer.clone()).unwrap();
+        let text = writer
+            .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
+            .await;
+        assert!(text.contains("alpha=one"), "{text}");
+
+        writer
+            .wait_for(|text| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix("empty-reads="))
+                    .is_some_and(|count| count.parse::<u64>().unwrap() >= 1)
+            })
+            .await;
+        projection.publish(vec![upsert("gamma", "three", 3)]);
+        writer.wait_for(|text| text.contains("gamma=three")).await;
+
+        let command = |element: u32| {
+            let revision = writer.tree(|tree| tree.revision());
+            session.handler()(Event {
+                revision,
+                element: clay_surface::NodeId::try_from(element).unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json: "{}".into(),
+            });
+        };
+
+        command(2);
+        projection.publish(vec![upsert("delta", "four", 4)]);
+        let text = writer
+            .wait_for(|text| text.contains("replays=1") && text.contains("delta=four"))
+            .await;
+        assert!(text.contains("gamma=three"), "{text}");
+
+        command(3);
+        writer.wait_for(|text| text.contains("resumes=1")).await;
+        command(4);
+        writer
+            .wait_for(|text| text.contains("status=stopped"))
+            .await;
+        projection.publish(vec![upsert("epsilon", "five", 5)]);
+        command(3);
+        writer
+            .wait_for(|text| text.contains("resumes=2") && text.contains("epsilon=five"))
+            .await;
+
+        projection.reset();
+        projection.publish(vec![upsert("fresh", "six", 6)]);
+        let text = writer
+            .wait_for(|text| {
+                text.contains("resets=1")
+                    && text.contains("status=live")
+                    && text.contains("fresh=six")
+            })
+            .await;
+        assert!(!text.contains("alpha=one"), "{text}");
+
+        projection.revoke();
+        writer
+            .wait_for(|text| text.contains("status=revoked"))
+            .await;
+        drop(session);
+        host.close();
+    };
+    tokio::join!(driver, scenario);
+}
+
+#[tokio::test]
+async fn collection_probe_registration_writers_are_owner_scoped_compare_and_set_and_withdrawn() {
+    use clay_collection::Change;
+    use clay_collection::ReadLimits;
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+
+    fn removals(page: &clay_guest_session::collections::BytesPage) -> Vec<usize> {
+        page.transactions
+            .iter()
+            .map(|transaction| {
+                transaction
+                    .changes
+                    .iter()
+                    .filter(|change| matches!(change, Change::Remove { .. }))
+                    .count()
+            })
+            .collect()
+    }
+
+    let host = Host::new();
+    let owner = host.start("collection-probe");
+    let package = WasmPackage::from_env("collection-probe")
+        .await
+        .expect("prepared collection probe is valid");
+    let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [21, 22]);
+    let observer = registrations.projection();
+    let mut lease = observer.acquire(Vec::new(), None).unwrap();
+    let bootstrap = lease.read(None, ReadLimits::default()).await.unwrap();
+    assert!(bootstrap.bootstrap_complete);
+    let (runtime, driver) = WasmRuntime::initialize(
+        &host,
+        owner.clone(),
+        &package,
+        InitialContext {
+            collections: [("rows".into(), registrations.projection())].into(),
+            registrations: [
+                ("a".into(), full_grant(&registrations, "probe")),
+                ("b".into(), full_grant(&registrations, "probe")),
+            ]
+            .into(),
+            ..InitialContext::default()
+        },
+    )
+    .await
+    .unwrap();
+    let scenario = async move {
+        let writer = Arc::new(RecordingSink::new());
+        let session = runtime
+            .mount("view", Arc::<RecordingSink>::clone(&writer))
+            .unwrap();
+        writer.wait_for(|text| text.contains("status=live")).await;
+        let command = |element: u32| {
+            let revision = writer.tree(|tree| tree.revision());
+            session.handler()(Event {
+                revision,
+                element: clay_surface::NodeId::try_from(element).unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json: "{}".into(),
+            });
+        };
+
+        command(5);
+        let text = writer
+            .wait_for(|text| text.contains("scenario=done") && text.contains("rows=2"))
+            .await;
+        let log = text
+            .lines()
+            .skip_while(|line| !line.starts_with("a-put-x="))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            log,
+            [
+                "a-put-x=ok@1",
+                "b-put-x=ok@2",
+                "a-stale-cas-x=conflict@2",
+                "a-put-x-again=ok@3",
+                "b-delete-y=ok@1",
+                // Blind: concurrent writes lose to the tombstone they never saw.
+                "a-blind-put-y=ok@1",
+                // Default basis: the replica holds the tombstone's stamp, so the write wins.
+                "a-recreate-y=ok@2",
+                "a-put-big-key=key-too-large",
+                "a-put-big-value-y=value-too-large",
+                "b-delete-x=ok@4",
+                "b-put-x-again=ok@5",
+            ],
+            "{text}"
+        );
+        assert!(
+            text.contains("\nx=b2\ny=a3\n"),
+            "both writers contest the same logical keys: {text}"
+        );
+        let writes = lease
+            .read(Some(bootstrap.through), ReadLimits::default())
+            .await
+            .unwrap();
+        // Tombstones replicate as rows, so no write publishes a removal.
+        assert_eq!(removals(&writes), [0, 0, 0, 0, 0, 0, 0]);
+
+        command(6);
+        let text = writer
+            .wait_for(|text| text.contains("a-writer-drop=ok"))
+            .await;
+        assert!(text.contains("\nx=b2\ny=a3\n"), "{text}");
+        let unchanged = lease
+            .read(Some(writes.through.clone()), ReadLimits::default())
+            .complete_timeout()
+            .unwrap();
+        assert!(unchanged.transactions.is_empty());
+
+        host.close_instance(&owner).unwrap();
+        let revoked = lease
+            .read(Some(writes.through), ReadLimits::default())
+            .await
+            .unwrap();
+        // Closing the owner retracts both scopes: x and y have no candidates left.
+        assert_eq!(removals(&revoked), [2]);
+        assert!(registrations.snapshot().is_empty());
+        drop(session);
+        host.close();
+    };
+    tokio::join!(driver, scenario);
+}
+
+#[tokio::test]
+async fn collection_probe_capability_publication_redemption_and_closure_cross_the_boundary() {
+    use clay_guest_session::collections::bytes_registrations;
+    use std::num::NonZeroUsize;
+
+    let host = Host::new();
+    let owner = host.start("collection-probe");
+    let package = WasmPackage::from_env("collection-probe")
+        .await
+        .expect("prepared collection probe is valid");
+    let registrations = bytes_registrations(NonZeroUsize::new(64).unwrap(), [41, 42]);
+    let (runtime, driver) = WasmRuntime::initialize(
+        &host,
+        owner.clone(),
+        &package,
+        InitialContext {
+            collections: [("rows".into(), registrations.projection())].into(),
+            registrations: [("cap".into(), full_grant(&registrations, "probe"))].into(),
+            ..InitialContext::default()
+        },
+    )
+    .await
+    .unwrap();
+    let scenario = async move {
+        let writer = Arc::new(RecordingSink::new());
+        let session = runtime
+            .mount("view", Arc::<RecordingSink>::clone(&writer))
+            .unwrap();
+        writer.wait_for(|text| text.contains("status=live")).await;
+        let command = |element: u32| {
+            let revision = writer.tree(|tree| tree.revision());
+            session.handler()(Event {
+                revision,
+                element: clay_surface::NodeId::try_from(element).unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json: "{}".into(),
+            });
+        };
+
+        command(5);
+        let text = writer
+            .wait_for(|text| text.contains("scenario=done") && text.contains("cap-put=ok@1"))
+            .await;
+        assert!(text.contains("cap-publish=ok"), "{text}");
+        assert!(
+            text.contains("cap-fabricated-put=invalid-attachment"),
+            "a tagged body without attachments conveys no authority: {text}"
+        );
+        assert!(text.contains("cap@0"), "{text}");
+        let stored = registrations
+            .snapshot()
+            .into_values()
+            .next()
+            .unwrap()
+            .value
+            .unwrap();
+        assert_eq!(stored.attachments.len(), 1);
+
+        command(7);
+        let text = writer.wait_for(|text| text.contains("cap-redeem=")).await;
+        assert!(text.contains("cap-redeem=mounted"), "{text}");
+
+        command(6);
+        let text = writer
+            .wait_for(|text| text.contains("cap-proxy-drop=ok"))
+            .await;
+        assert!(text.contains("cap-remove=ok@2"), "{text}");
+        assert!(text.contains("cap-close=ok"), "{text}");
+        assert!(
+            text.contains("cap-proxy=revoked"),
+            "provider closure leaves the retained proxy inert but droppable: {text}"
+        );
+        assert!(bodies(&registrations).is_empty());
+        drop(session);
+        host.close();
+    };
+    tokio::join!(driver, scenario);
 }
 
 #[derive(Default)]
@@ -368,7 +1685,7 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     let owner = host.start("surface-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::new(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(
@@ -452,4 +1769,59 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     assert_eq!(state.presentation.surface_handles(), 0);
     HostMountPoint::drop(&mut state, placement).unwrap();
     host.close();
+}
+
+// ── One engine per process, and a precompiled artifact cache (F10/W6) ────
+
+#[tokio::test]
+async fn packages_share_one_engine_and_one_linker() {
+    let first = counter_package().await;
+    let second = counter_package().await;
+    assert!(Engine::same(&first.engine, &second.engine));
+    assert!(Arc::ptr_eq(&first.linker, &second.linker));
+    assert!(Engine::same(&first.engine, &engine().unwrap()));
+}
+
+#[tokio::test]
+async fn precompiled_artifacts_are_reused_by_content() {
+    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
+        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let bytes = std::fs::read(path).unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "clay-component-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let artifact = {
+        let engine = engine().unwrap();
+        // The cache directory is process-global configuration; this test owns it for its duration.
+        let previous = std::env::var_os("DAYFRAME_COMPONENT_CACHE");
+        // SAFETY: tests in this binary do not read this variable concurrently except through
+        // this test, which restores it before returning.
+        unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", &directory) };
+        let first = compile_component(&engine, &bytes).unwrap();
+        let artifact = cache_path(&engine, &bytes).unwrap();
+        assert!(artifact.exists(), "a cold compile publishes its artifact");
+        let modified = std::fs::metadata(&artifact).unwrap().modified().unwrap();
+        let second = compile_component(&engine, &bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&artifact).unwrap().modified().unwrap(),
+            modified,
+            "a warm load must not recompile"
+        );
+        drop((first, second));
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", previous) },
+            None => unsafe { std::env::remove_var("DAYFRAME_COMPONENT_CACHE") },
+        }
+        artifact
+    };
+    // A warm load produces a component on the shared engine, from the published artifact.
+    let package = WasmPackage::from_bytes(&bytes).await.unwrap();
+    assert!(Engine::same(&package.engine, &engine().unwrap()));
+    assert!(artifact.exists());
+    std::fs::remove_dir_all(directory).ok();
 }

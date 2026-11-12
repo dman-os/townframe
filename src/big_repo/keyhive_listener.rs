@@ -20,6 +20,44 @@ use keyhive_crypto::signed::Signed;
 use keyhive_crypto::signer::memory::MemorySigner;
 use std::sync::Arc;
 
+/// The durable storage a [`BigRepoKeyhiveListener`] writes prekey state to,
+/// severable at shutdown.
+///
+/// Keyhive objects form `Arc` cycles that outlive the `Keyhive` handle: a
+/// group's shared delegation store holds the delegations whose delegate is
+/// that very group (`Agent::Group(Arc<Group>)`, e.g. a document's coparent
+/// group), so a dropped `Keyhive` leaves such groups, their delegations and the
+/// `Active` agent alive, and each of them owns a listener clone. A plain
+/// storage field would keep the SQLite database (and an ephemeral database's
+/// temporary directory) alive for the rest of the process through those
+/// leaked clones. All clones share this cell, so [`Self::detach`] at
+/// `BigRepo` stop releases the database no matter how many leaked listeners
+/// remain.
+#[derive(Clone, Debug)]
+pub(crate) struct ListenerStorage(
+    Arc<std::sync::Mutex<Option<crate::keyhive_storage::BigRepoKeyhiveStorage>>>,
+);
+
+impl ListenerStorage {
+    fn new(storage: crate::keyhive_storage::BigRepoKeyhiveStorage) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(storage))))
+    }
+
+    /// Drop the storage for every listener clone. Keyhive writes after this
+    /// are an invariant break, see [`Self::attached`].
+    pub(crate) fn detach(&self) {
+        self.0.lock().expect(ERROR_MUTEX).take();
+    }
+
+    fn attached(&self) -> crate::keyhive_storage::BigRepoKeyhiveStorage {
+        self.0
+            .lock()
+            .expect(ERROR_MUTEX)
+            .clone()
+            .expect("keyhive listener used after its BigRepo stopped")
+    }
+}
+
 /// Listens for keyhive events and forwards them to the big_repo runtime.
 ///
 /// Implements every keyhive listener trait. Each `on_*` packs the event into
@@ -29,11 +67,26 @@ use std::sync::Arc;
 /// Cloning is cheap (the sender is `Clone`).
 #[derive(Clone, Debug)]
 pub struct BigRepoKeyhiveListener {
-    pub(crate) evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
-    pub(crate) storage: crate::keyhive_storage::BigRepoKeyhiveStorage,
+    evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+    storage: ListenerStorage,
 }
 
 impl BigRepoKeyhiveListener {
+    pub(crate) fn new(
+        evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
+        storage: crate::keyhive_storage::BigRepoKeyhiveStorage,
+    ) -> Self {
+        Self {
+            evt_tx,
+            storage: ListenerStorage::new(storage),
+        }
+    }
+
+    /// The cell [`BigRepo`]'s stop token severs; see [`ListenerStorage`].
+    pub(crate) fn storage_cell(&self) -> ListenerStorage {
+        self.storage.clone()
+    }
+
     fn send_evt(&self, evt: crate::runtime2::Runtime2Evt) {
         match self.evt_tx.try_send(evt) {
             Ok(()) => {}
@@ -95,7 +148,7 @@ impl BigRepoKeyhiveListener {
         local_secret: &keyhive_core::principal::active::LocalPrekeySecret,
     ) -> eyre::Result<()> {
         subduction_keyhive::save_local_prekey_change(
-            &self.storage,
+            &self.storage.attached(),
             op,
             &local_secret.share_secret_key(),
         )

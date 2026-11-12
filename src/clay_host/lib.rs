@@ -1,43 +1,43 @@
 //! Privileged composition host. Micros receive bound handles, not this constructor surface.
 //!
-//! This crate is the authority kernel only: lifecycle, tokens, contribution collections,
-//! component references, and mount records. Component (wasm) hosting lives in the engine
-//! crates and document data lives in `clay_docs`; neither is this crate's concern
+//! This crate is the authority kernel: lifecycle, tokens, component references, mount records,
+//! and the engine-neutral activation supervisor (ADR 030). Component (wasm) hosting lives in the
+//! engine crates and document data lives in `clay_docs`; neither is this crate's concern
 //! (ADR 015 §3, §6).
-//!
-//! Modules: [`instance`] owns lifecycle and capability authority and [`collection`] bridges that
-//! authority to the `clay_collection` substrate.
 
-pub use clay_collection::BaseDelta;
-pub use clay_collection::Batch;
-pub use clay_collection::DemandId;
-pub use clay_collection::DemandToken;
-pub use clay_collection::OverlayPolicy;
-pub use clay_collection::ReadOnly;
-pub use clay_collection::Replica;
-pub use clay_collection::ScopeId;
-pub use clay_collection::Version;
-pub use clay_collection::View;
-pub use clay_collection::Writable;
-
-mod collection;
+mod collections;
 mod instance;
+mod supervisor;
 
-pub use collection::CollectionReader;
-pub use collection::CollectionSubscription;
-pub use collection::CollectionView;
-pub use collection::CollectionWriter;
-pub use collection::Entry;
-pub use collection::HostedCollection;
+pub use collections::CollectionContract;
+pub use collections::CollectionRegistry;
+pub use collections::DeclareError;
+pub use collections::Grant;
+pub use collections::GrantError;
 pub use instance::AccessError;
+pub use instance::Binding;
 pub use instance::CloseReason;
 pub use instance::ComponentRef;
 pub use instance::Host;
 pub use instance::HostStatus;
 pub use instance::Instance;
+pub use instance::Lifecycle;
 pub use instance::Mount;
 pub use instance::RendererRegistry;
 pub use instance::RootMount;
+pub use supervisor::Activator;
+pub use supervisor::CloseError;
+pub use supervisor::ConfiguredMicro;
+pub use supervisor::Factory;
+pub use supervisor::Initialized;
+pub use supervisor::Lease;
+pub use supervisor::LocalFuture;
+pub use supervisor::MicroId;
+pub use supervisor::MicroState;
+pub use supervisor::Requirement;
+pub use supervisor::Root;
+pub use supervisor::StartError;
+pub use supervisor::Supervisor;
 
 #[cfg(test)]
 mod tests;

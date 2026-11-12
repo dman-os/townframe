@@ -152,17 +152,31 @@ impl DocsService {
                 tx.delete(&datums, key.to_string()).map_err(repository)?;
             }
         }
+        // Only the parts of dmeta this write decides from are read: its `docUuid` bindings, the
+        // aliases bound to the touched keys, the touched keys' metadata and the actor's binding.
+        // Hydrating the whole drawer's dmeta here would make every write's cost grow with the
+        // number of datums the document holds.
+        let touched: BTreeSet<DatumKey> = plan.keys().cloned().collect();
         let mut dmeta = match tx.get(&datums, DMETA_KEY).map_err(repository)? {
             None => Dmeta::new(plan.now),
-            Some(_) => Dmeta::hydrate(&tx, &datums, DMETA_KEY.into(), self.dmeta.compiled())
-                .map_err(repository)?,
+            Some(_) => Dmeta::hydrate_for(
+                &tx,
+                &datums,
+                DMETA_KEY.into(),
+                &self.dmeta,
+                &DmetaRead {
+                    datums: &touched,
+                    actor: plan.actor.actor_id,
+                    document: plan.document,
+                },
+            )
+            .map_err(repository)?,
         };
         let doc_uuid = dmeta
             .doc_uuid(plan.document, plan.doc_uuid)
             .expect("a freshly minted document UUID is unbound");
         let mut claims = BTreeMap::new();
-        let keys: Vec<DatumKey> = plan.keys().cloned().collect();
-        for key in keys {
+        for key in touched.iter().cloned() {
             let visible = dmeta
                 .datum_uuids
                 .iter()
@@ -240,13 +254,20 @@ impl DocsService {
                 delegation: Some(plan.actor.certificate.clone()),
             });
         dmeta.updated_at = vec![plan.now];
+        // Only what this write changed is validated and written back: its datums' metadata, the
+        // bindings it relies on and `updatedAt`. The rest of the hydrated dmeta only informed the
+        // alias and `docUuid` choices above.
         let tx = dmeta
-            .reconcile_atomic(
+            .write_atomic(
                 tx,
-                self.dmeta.compiled(),
+                &self.dmeta,
                 &datums,
                 DMETA_KEY.into(),
-                &plan.keys().cloned().collect(),
+                &DmetaWrite {
+                    datums: &touched,
+                    actor: plan.actor.actor_id,
+                    doc_uuid,
+                },
             )
             .map_err(repository)?;
         Ok((tx, claims))
@@ -265,7 +286,7 @@ impl DocsService {
                 .call(
                     context.child(),
                     SignDatumClaim {
-                        actor: capability,
+                        via: capability,
                         claim: claim.clone(),
                     },
                 )

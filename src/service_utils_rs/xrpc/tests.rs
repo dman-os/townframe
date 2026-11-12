@@ -7,18 +7,20 @@ use super::serve::serve_with_acceptor;
 use super::*;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
-use crate::operation::HttpInput;
-use crate::operation::HttpMethod;
-use crate::operation::XrpcKind;
-use crate::operation::XrpcOperation;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::header;
 use futures::future::BoxFuture;
+use method_core::HttpInput;
+use method_core::HttpMethod;
+use method_core::MethodKind;
+use method_core::XrpcMethod;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
+use service_client_core_rs::xrpc::XrpcClientError;
+use service_client_native_rs::XrpcClient;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -33,37 +35,36 @@ use url::Url;
 #[cfg(feature = "iroh-http")]
 mod iroh_wire;
 
-const QUERY_OPERATION: XrpcOperation = XrpcOperation {
+const QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.echo",
-    kind: XrpcKind::Query,
+    kind: MethodKind::Query,
     method: HttpMethod::Get,
     input: HttpInput::Query,
     output_schema: "EchoOutput",
     error_schema: "TestError",
     long_poll: false,
 };
-const PROCEDURE_OPERATION: XrpcOperation = XrpcOperation {
+const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.write",
-    kind: XrpcKind::Procedure,
+    kind: MethodKind::Procedure,
     method: HttpMethod::Post,
     input: HttpInput::JsonBody,
     output_schema: "WriteOutput",
     error_schema: "TestError",
     long_poll: false,
 };
-const NUMERIC_QUERY_OPERATION: XrpcOperation = XrpcOperation {
+const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.numeric",
-    kind: XrpcKind::Query,
+    kind: MethodKind::Query,
     method: HttpMethod::Get,
     input: HttpInput::Query,
     output_schema: "NumericOutput",
     error_schema: "TestError",
     long_poll: false,
 };
-const LONG_POLL_OPERATION: XrpcOperation =
-    XrpcOperation::query("org.example.test.poll").long_poll();
+const LONG_POLL_OPERATION: XrpcMethod = XrpcMethod::query("org.example.test.poll").long_poll();
 
-fn query_request(operation: XrpcOperation, value: &str) -> axum::http::Request<axum::body::Body> {
+fn query_request(operation: XrpcMethod, value: &str) -> axum::http::Request<axum::body::Body> {
     axum::http::Request::builder()
         .method("GET")
         .uri(format!("/xrpc/{}?value={value}", operation.nsid))
@@ -139,7 +140,10 @@ struct ScriptedAcceptor {
 }
 
 impl ConnectionAcceptor for ScriptedAcceptor {
-    fn accept(&mut self) -> AcceptFuture<'_> {
+    type Stream = tokio::net::TcpStream;
+    type Peer = std::net::SocketAddr;
+
+    fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
         let call = self.calls.fetch_add(1, Ordering::AcqRel);
         if call == 0 {
             let listener = &mut self.listener;
@@ -189,7 +193,7 @@ async fn test_server() -> (
 ) {
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             |context, metadata, params: EchoParams| async move {
                 Ok(Output {
@@ -202,7 +206,7 @@ async fn test_server() -> (
         ))
         .expect("query registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             PROCEDURE_OPERATION,
             |context, metadata, params: EchoParams| async move {
                 if params.value == "pending" {
@@ -224,7 +228,7 @@ async fn test_server() -> (
         ))
         .expect("procedure registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             NUMERIC_QUERY_OPERATION,
             |_context, _metadata, params: NumericParams| async move {
                 Ok(NumericOutput {
@@ -251,7 +255,7 @@ async fn test_server() -> (
 #[tokio::test]
 async fn loopback_query_and_procedure_map_http_and_context() {
     let (client, task, shutdown) = test_server().await;
-    assert_eq!(QUERY_OPERATION.kind, XrpcKind::Query);
+    assert_eq!(QUERY_OPERATION.kind, MethodKind::Query);
     assert_eq!(QUERY_OPERATION.input, HttpInput::Query);
     assert_eq!(PROCEDURE_OPERATION.method, HttpMethod::Post);
     let context = RequestContext::root();
@@ -982,7 +986,7 @@ async fn blocked_fragmented_request_drops_on_shutdown_before_handler() {
     router.observe_body_drop(Arc::clone(&body_dropped));
     let handler_invoked = Arc::clone(&invoked);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             handler_invoked.store(true, Ordering::Release);
             async { Ok(json!({"value":"late"})) }
         }))
@@ -1046,7 +1050,7 @@ async fn peer_disconnect_drops_blocked_body_and_recovers_capacity() {
     router.observe_body_drop_notify(Arc::clone(&body_dropped));
     let handler_invoked = Arc::clone(&invoked);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             handler_invoked.store(true, Ordering::Release);
             async { Ok(json!({"value":"complete"})) }
         }))
@@ -1102,7 +1106,7 @@ async fn body_deadline_drops_incomplete_upload_and_recovers_capacity() {
     router.observe_body_drop(Arc::clone(&body_dropped));
     let handler_invoked = Arc::clone(&invoked);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             handler_invoked.store(true, Ordering::Release);
             async { Ok(json!({"value":"complete"})) }
         }))
@@ -1168,7 +1172,7 @@ async fn handler_timeout_drops_guard_before_receipt() {
     let handler_started = Arc::clone(&started);
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             let active = Arc::clone(&handler_active);
             let started = Arc::clone(&handler_started);
             async move {
@@ -1321,7 +1325,7 @@ async fn shutdown_cancels_and_joins_pending_connection() {
     let handler_completed = Arc::clone(&completed);
     let handler_started = Arc::clone(&started);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             if let Some(sender) = handler_started.lock().expect("started lock").take() {
                 sender.send(()).expect("started receiver");
             }
@@ -1528,7 +1532,7 @@ async fn listener_failure_aborts_and_joins_active_connection() {
     let handler_started = Arc::clone(&started);
     let mut router = XrpcRouter::new(1024);
     router
-        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+        .register(XrpcMethodHandler::new(PROCEDURE_OPERATION, move |_| {
             if let Some(sender) = handler_started.lock().expect("started lock").take() {
                 sender.send(()).expect("started receiver");
             }
@@ -1607,7 +1611,7 @@ async fn connection_capacity_waits_before_accepting_more_peers() {
 async fn repeated_normal_connections_complete_under_connection_bound() {
     let mut router = XrpcRouter::new(1024);
     router
-            .register(XrpcOperationHandler::typed(
+            .register(XrpcMethodHandler::typed(
                 QUERY_OPERATION,
                 |_context, _metadata, params: EchoParams| async move {
                     Ok(json!({"value": params.value}))
@@ -1648,13 +1652,13 @@ async fn exhausted_long_poll_pool_still_admits_ordinary_requests() {
     let release = Arc::new(tokio::sync::Notify::new());
     let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             LONG_POLL_OPERATION,
             holding_handler(Arc::clone(&started), Arc::clone(&release)),
         ))
         .expect("long-poll registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             |_context, _metadata, params: EchoParams| async move {
                 Ok(json!({"value": params.value}))
@@ -1692,13 +1696,13 @@ async fn exhausted_ordinary_requests_still_admit_long_polls() {
     let release = Arc::new(tokio::sync::Notify::new());
     let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             holding_handler(Arc::clone(&started), Arc::clone(&release)),
         ))
         .expect("query registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             LONG_POLL_OPERATION,
             |_context, _metadata, _params: EchoParams| async move {
                 Ok(json!({"value": "polled"}))
@@ -1739,13 +1743,13 @@ async fn each_admission_class_refuses_when_its_own_pool_is_exhausted() {
     let long_poll_release = Arc::new(tokio::sync::Notify::new());
     let mut router = XrpcRouter::with_admission_limits(1024, 1, 1);
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             QUERY_OPERATION,
             holding_handler(Arc::clone(&ordinary_started), Arc::clone(&ordinary_release)),
         ))
         .expect("query registration");
     router
-        .register(XrpcOperationHandler::typed(
+        .register(XrpcMethodHandler::typed(
             LONG_POLL_OPERATION,
             holding_handler(
                 Arc::clone(&long_poll_started),
@@ -1803,9 +1807,9 @@ async fn each_admission_class_refuses_when_its_own_pool_is_exhausted() {
 
 #[tokio::test]
 async fn unsupported_subscription_is_explicit() {
-    let subscription = XrpcOperation {
+    let subscription = XrpcMethod {
         nsid: "org.example.test.events",
-        kind: XrpcKind::Subscription,
+        kind: MethodKind::Subscription,
         method: HttpMethod::Get,
         input: HttpInput::Query,
         output_schema: "Event",
@@ -1815,7 +1819,7 @@ async fn unsupported_subscription_is_explicit() {
     let mut router = XrpcRouter::new(1024);
     assert_eq!(
         router
-            .register(XrpcOperationHandler::new(subscription, |_| async {
+            .register(XrpcMethodHandler::new(subscription, |_| async {
                 Ok(json!({}))
             }))
             .expect_err("subscription must be rejected"),
@@ -1825,12 +1829,13 @@ async fn unsupported_subscription_is_explicit() {
 
 #[tokio::test]
 async fn websocket_subscription_streams_hosted_events() {
-    use crate::Client;
     use crate::Route;
     use crate::sample::PutValue;
     use crate::sample::SampleProtocol;
     use crate::sample::SubscribeEvents;
     use futures::StreamExt;
+    use service_client_native_rs::Client;
+    use service_client_native_rs::Transport;
     let (sample, stop) = crate::sample::boot("initial");
     let mut router = XrpcRouter::new(1024);
     SampleProtocol::mount(&mut router, Arc::clone(&sample.host)).expect("mount sample protocol");
@@ -1841,13 +1846,13 @@ async fn websocket_subscription_streams_hosted_events() {
     let (task, shutdown) = serve(listener, router.into_router())
         .await
         .expect("start server");
-    let client = Client::<SampleProtocol>::xrpc(
+    let client = Client::new(Transport::<SampleProtocol>::xrpc(
         XrpcClient::new(
             Url::parse(&format!("http://{address}")).expect("base url"),
             1024 * 1024,
         )
         .expect("xrpc client"),
-    );
+    ));
     let mut events = client
         .subscribe(
             RequestContext::root(),
@@ -1873,4 +1878,151 @@ async fn websocket_subscription_streams_hosted_events() {
     shutdown.send(()).expect("shutdown receiver");
     task.await.expect("server task join").expect("server task");
     stop.stop().await;
+}
+
+/// A fallback serves every NSID nothing is registered for, and learns which from the request and
+/// with which verb (a GET hands over its raw query string, a POST its JSON body); a registered
+/// operation still wins and keeps its own verb; and a query cannot be a fallback.
+#[tokio::test]
+async fn the_fallback_serves_unregistered_nsids_and_registered_operations_win() {
+    let mut router = XrpcRouter::new(1024);
+    router
+        .register(XrpcMethodHandler::typed(
+            PROCEDURE_OPERATION,
+            |_context, _metadata, _params: Value| async move { Ok(json!("registered")) },
+        ))
+        .unwrap();
+    assert_eq!(
+        router
+            .register_fallback(XrpcMethodHandler::new(QUERY_OPERATION, |_| async {
+                Ok::<_, XrpcHandlerError>(json!(null))
+            }))
+            .unwrap_err(),
+        XrpcRegistrationError::FallbackNotProcedure
+    );
+    let fallback = || {
+        XrpcMethodHandler::new(
+            XrpcMethod::procedure(""),
+            |request: XrpcRequest| async move {
+                Ok::<_, XrpcHandlerError>(json!({
+                    "nsid": request.nsid,
+                    "verb": format!("{:?}", request.verb),
+                    "input": request.params,
+                    "rawQuery": request.raw_query,
+                }))
+            },
+        )
+    };
+    router.register_fallback(fallback()).unwrap();
+    assert_eq!(
+        router.register_fallback(fallback()).unwrap_err(),
+        XrpcRegistrationError::DuplicateFallback
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (task, shutdown) = serve(listener, router.into_router()).await.unwrap();
+    let client = reqwest::Client::new();
+    let post = |nsid: &'static str| {
+        let client = client.clone();
+        async move {
+            client
+                .post(format!("http://{address}/xrpc/{nsid}"))
+                .json(&json!({ "n": 1 }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(post("org.example.test.write").await, json!("registered"));
+    assert_eq!(
+        post("org.example.anything.at.all").await,
+        json!({
+            "nsid": "org.example.anything.at.all",
+            "verb": "Post",
+            "input": { "n": 1 },
+            "rawQuery": null,
+        })
+    );
+    // A GET to the fallback reaches the handler with the query string as sent, repeats intact.
+    let got = client
+        .get(format!(
+            "http://{address}/xrpc/org.example.anything.get?a=1&a=2&b=x"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "nsid": "org.example.anything.get",
+            "verb": "Get",
+            "input": null,
+            "rawQuery": "a=1&a=2&b=x",
+        })
+    );
+    // A registered procedure still refuses a GET.
+    let refused = client
+        .get(format!("http://{address}/xrpc/org.example.test.write"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status().as_u16(), 405);
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+/// The Unix transport end to end: the acceptor reports the kernel's credentials for the peer,
+/// every request of the connection can read them, and an `XrpcClient` reaches the server over
+/// the socket.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_unix_acceptor_reports_peer_credentials_to_the_handlers() {
+    use std::os::unix::fs::MetadataExt;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("server.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let mut router = XrpcRouter::new(1024);
+    router
+        .register(XrpcMethodHandler::new(
+            PROCEDURE_OPERATION,
+            |_request| async move { Ok::<_, XrpcHandlerError>(json!("ok")) },
+        ))
+        .unwrap();
+    let seen = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&seen);
+    let router = router.into_router().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let observed = Arc::clone(&observed);
+            async move {
+                *observed.lock().unwrap() = request.extensions().get::<PeerCredentials>().copied();
+                next.run(request).await
+            }
+        },
+    ));
+    let (task, shutdown) = serve_with_acceptor(UnixConnectionAcceptor::new(listener), router, 4)
+        .await
+        .unwrap();
+    let client = XrpcClient::unix(&path, 1024).unwrap();
+    let output: Value = client
+        .execute::<_, Value, Value>(
+            PROCEDURE_OPERATION,
+            RequestContext::root(),
+            &HttpMetadata::default(),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(output, json!("ok"));
+    // The socket file was created by this process, so its owner is the peer's uid.
+    let credentials = seen.lock().unwrap().expect("the handler saw the peer");
+    assert_eq!(credentials.uid, std::fs::metadata(&path).unwrap().uid());
+    assert_eq!(credentials.pid, Some(std::process::id() as i32));
+    shutdown.send(()).unwrap();
+    task.await.unwrap().unwrap();
 }

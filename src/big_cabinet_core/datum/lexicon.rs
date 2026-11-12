@@ -33,7 +33,7 @@ const TAG: &str = "$type";
 /// Lexicon file it publishes.
 ///
 /// Named definitions the datum reaches are carried into this file and referenced locally, which is
-/// what lets a plug be read on its own: there is no registry, and a definition two datums both
+/// what lets a cartridge be read on its own: there is no registry, and a definition two datums both
 /// reach is carried by both. A union member is referenced by the id its `$type` const states,
 /// because that id is data a peer reads and not a structure this file owns.
 pub fn project_datum(id: &str, document: &Value) -> Result<Value, String> {
@@ -96,6 +96,20 @@ fn position(
             "a position is a schema object: `true` admits any JSON value, which no Lexicon type does",
         ));
     };
+    if let Some(reference) = object.get(crate::reference::LEXICON_REF) {
+        // The Rust type declares itself a def of another Lexicon (a `DatumReference` is
+        // `org.example.daybook.defs#datumRef`), so the position is a `ref` to it and nothing of the
+        // type's own schema is carried.
+        return match reference.as_str() {
+            Some(reference) if reference.contains('#') || reference.contains('.') => {
+                Ok(json!({ "type": "ref", "ref": reference }))
+            }
+            _ => Err(here(
+                path,
+                format!("`{}` names a Lexicon def", crate::reference::LEXICON_REF),
+            )),
+        };
+    }
     for keyword in [
         "allOf",
         "not",
@@ -237,7 +251,7 @@ fn marked(
             }
             Ok(Some(json!({ "type": "bytes" })))
         }
-        "float" | "text" | "timestamp" | "reference" => {
+        "float" | "text" | "timestamp" => {
             if !stated("string") {
                 return Err(here(
                     path,
@@ -314,7 +328,7 @@ fn typed(
         "number" => Err(here(
             path,
             "a plain `number` has no Lexicon type: a float is carried as the decimal string \
-             `datum::Float64` declares, and a whole number is an `integer`",
+             `datum::F64` declares, and a whole number is an `integer`",
         )),
         "null" => Err(here(
             path,

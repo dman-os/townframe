@@ -11,10 +11,7 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
 {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, evt_rx) = async_channel::unbounded();
-    let listener = BigRepoKeyhiveListener {
-        evt_tx,
-        storage: storage.clone(),
-    };
+    let listener = BigRepoKeyhiveListener::new(evt_tx, storage.clone());
     let seed = [40; 32];
     let owner = BigKeyhiveHandle::new(seed, listener.clone()).await?;
     let storage_id = subduction_keyhive::StorageHash::new(*owner.keyhive_peer_id().verifying_key());
@@ -82,10 +79,7 @@ async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparen
     let (evt_tx, _evt_rx) = async_channel::unbounded();
     let owner = BigKeyhiveHandle::new(
         [43; 32],
-        BigRepoKeyhiveListener {
-            evt_tx,
-            storage: storage.clone(),
-        },
+        BigRepoKeyhiveListener::new(evt_tx, storage.clone()),
     )
     .await?;
     let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
@@ -143,10 +137,7 @@ async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparen
 async fn authority_change_archive_immediately_restores_private_document_key() -> Res<()> {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, _evt_rx) = async_channel::unbounded();
-    let listener = BigRepoKeyhiveListener {
-        evt_tx,
-        storage: storage.clone(),
-    };
+    let listener = BigRepoKeyhiveListener::new(evt_tx, storage.clone());
     let owner_seed = [41; 32];
     let owner = BigKeyhiveHandle::new(owner_seed, listener.clone()).await?;
     owner.save_prekey_state(&storage).await?;
@@ -212,10 +203,10 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     let (clone_evt_tx, _clone_evt_rx) = async_channel::unbounded();
     let clone = BigKeyhiveHandle::new(
         [42; 32],
-        BigRepoKeyhiveListener {
-            evt_tx: clone_evt_tx,
-            storage: crate::keyhive_storage::BigRepoKeyhiveStorage::memory(),
-        },
+        BigRepoKeyhiveListener::new(
+            clone_evt_tx,
+            crate::keyhive_storage::BigRepoKeyhiveStorage::memory(),
+        ),
     )
     .await?;
     owner
@@ -341,10 +332,7 @@ async fn local_hive_and_unmaterialized_peer(
     let (owner_tx, _owner_rx) = async_channel::unbounded();
     let owner = BigKeyhiveHandle::new(
         [owner_seed; 32],
-        BigRepoKeyhiveListener {
-            evt_tx: owner_tx,
-            storage: storage.clone(),
-        },
+        BigRepoKeyhiveListener::new(owner_tx, storage.clone()),
     )
     .await?;
     let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
@@ -358,10 +346,7 @@ async fn local_hive_and_unmaterialized_peer(
     let (peer_tx, _peer_rx) = async_channel::unbounded();
     let peer = BigKeyhiveHandle::new(
         [peer_seed; 32],
-        BigRepoKeyhiveListener {
-            evt_tx: peer_tx,
-            storage: peer_storage.clone(),
-        },
+        BigRepoKeyhiveListener::new(peer_tx, peer_storage.clone()),
     )
     .await?;
     // The peer's own published prekey op: the material a sync would carry.
@@ -532,6 +517,76 @@ async fn group_creation_succeeds_once_the_coparent_material_is_present() -> Res<
             .await
             .is_empty(),
         "a group created with no documents yet must still be a live handle"
+    );
+    Ok(())
+}
+
+/// Reader reconciliation runs once per admitted delegation or prekey expansion, so the
+/// documents it visits must be the ones the change can reach, not every document in the
+/// hive: with thirty unrelated documents present, a change entering at a group reaches
+/// only the documents that list that group.
+#[tokio::test]
+async fn reverse_membership_names_only_the_documents_that_reach_the_entry_point() -> Res<()> {
+    let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
+    let (tx, _rx) = async_channel::unbounded();
+    let owner =
+        BigKeyhiveHandle::new([71; 32], BigRepoKeyhiveListener::new(tx, storage.clone())).await?;
+    let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+        owner.clone_keyhive(),
+        storage.clone(),
+        owner.keyhive_peer_id(),
+        owner.contact_card().clone(),
+    ));
+
+    let mut unrelated = Vec::new();
+    for seed in 0..30u8 {
+        let (doc, _) = owner
+            .create_doc(Vec::new(), nonempty![[seed; 32]], &protocol)
+            .await?;
+        unrelated.push(doc);
+    }
+    let (inner, _) = owner
+        .create_group_with_parents(Vec::new(), &protocol)
+        .await?;
+    let (outer, _) = owner
+        .create_group_with_parents(vec![inner.clone().into()], &protocol)
+        .await?;
+    let (through_outer, _) = owner
+        .create_doc(
+            vec![outer.clone().into()],
+            nonempty![[100u8; 32]],
+            &protocol,
+        )
+        .await?;
+    let (through_inner, _) = owner
+        .create_doc(
+            vec![inner.clone().into()],
+            nonempty![[101u8; 32]],
+            &protocol,
+        )
+        .await?;
+
+    let reach = MembershipReach::from_hive(&owner).await;
+    let docs = |entry: Identifier| {
+        let reaching = reach.reaching(entry);
+        let owner = owner.clone();
+        async move { MembershipReach::documents_among(&owner, reaching).await }
+    };
+    // `inner` is a member of `outer`, so a change at `inner` reaches both documents only
+    // if the walk climbs through groups; a change at `outer` reaches only its own.
+    assert_eq!(
+        docs(inner.id().into()).await,
+        BTreeSet::from([through_outer.clone(), through_inner.clone()])
+    );
+    assert_eq!(
+        docs(outer.id().into()).await,
+        BTreeSet::from([through_outer.clone()])
+    );
+    // A document is its own entry point and is reached by nothing else here.
+    let lone = unrelated[3].clone();
+    assert_eq!(
+        docs(keyhive_doc_id(lone.clone())?.into()).await,
+        BTreeSet::from([lone])
     );
     Ok(())
 }

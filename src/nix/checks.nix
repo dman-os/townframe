@@ -12,8 +12,8 @@
 # Deliberately not here (they need build artifacts, a package manager's module
 # tree, or facts about the host): `cargo x sql gen --check` and
 # `cargo x guardrails lint|api` (building xtask in the store would discard the
-# warm ./target), clippy/check-matrix/nextest (need ./target plus the
-# agent-build jobserver), tsc/detekt/gradle/playwright (node_modules or the
+# warm ./target), clippy/check-matrix/nextest (need ./target and the mbx
+# cache), tsc/detekt/gradle/playwright (node_modules or the
 # Android SDK), and `cargo x guardrails doctor` (asserts facts about the
 # invoking shell's environment, which a sandbox cannot represent). Those stay
 # as pre-commit hooks run inside the devshells.

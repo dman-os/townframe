@@ -1,14 +1,52 @@
 ---
 source: src/micro_settings_manifest/lib.rs
-expression: manifest()
+expression: sidecar()
 ---
 id: dayframe.settings
-version: 1
-requirements: []
-provisions:
-  - id: settings.sections
-    version: 1
-  - id: settings.controller
-    version: 1
-config: ~
-contributions: []
+package_version: 1
+authority: org.example.dayframe.settings
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+publications:
+  - name: view
+    kind: presentation
+    contract: ~
+requires: []
+configuration_requests:
+  - binding: settings
+    facets:
+      - tag: org.example.dayframe.settings.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
+collection_contracts:
+  - id: org.example.dayframe.settings.sections
+    selector_schema: org.example.dayframe.settings.sectionSelector
+    key_schema: org.example.dayframe.settings.sectionKey
+    value_schema: org.example.dayframe.settings.section
+    write_context_schema: ~
+    offered:
+      - read
+      - register
+collection_requests:
+  - binding: sections
+    contract: org.example.dayframe.settings.sections
+    access: read
+  - binding: roots
+    contract: org.example.clay.shell.roots
+    access: write
+contributions:
+  - id: root
+    binding: roots
+    key: dayframe.settings
+    payload:
+      content:
+        $attachment: 0
+      title: Settings
+    attachments:
+      - index: 0
+        publication: view

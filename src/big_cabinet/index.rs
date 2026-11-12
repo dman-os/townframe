@@ -103,27 +103,29 @@ mod test_support {
         big_cabinet_core::DocId,
     ) {
         let directory = tempfile::tempdir().unwrap();
-        let config = big_repo::Config {
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        // Each boot opens the directory afresh, as a restarted process would.
+        let config = || big_repo::Config {
             node_identity_seed: [59; 32],
-            storage: big_repo::StorageConfig::Disk {
-                path: directory.path().join("repo"),
-            },
+            storage: big_repo::Storage::in_directory(
+                &runtime,
+                &directory.path().join("repo"),
+                None,
+            )
+            .unwrap(),
             scope_key: "projection-demand-test".into(),
             hidden_parts: Default::default(),
             automerge_frontier_group_scope: Default::default(),
             causal_checkpoint_group_scope: Default::default(),
             group_part_group_scope: Default::default(),
         };
-        let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
-        let (repo, stop) = big_repo::BigRepo::boot(Arc::clone(&runtime), config.clone())
-            .await
-            .unwrap();
+        let (repo, stop) = big_repo::BigRepo::boot(config()).await.unwrap();
         let handle = repo.create_doc(document).await.unwrap();
         let doc_id = handle.document_id();
         drop(handle);
         drop(repo);
         stop.stop().await.unwrap();
-        let (repo, stop) = big_repo::BigRepo::boot(runtime, config).await.unwrap();
+        let (repo, stop) = big_repo::BigRepo::boot(config()).await.unwrap();
         assert!(repo.sync_demand().documents().is_empty());
         (directory, repo, stop, doc_id)
     }
