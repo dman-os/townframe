@@ -106,3 +106,32 @@ mod tests {
         assert_eq!(*clicks.borrow(), 2);
     }
 }
+
+/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
+/// any order of events is a bug, and a seed that found one stays here as a regression case.
+#[cfg(test)]
+mod storm {
+    use super::*;
+    use dioxus_storm::Storm;
+
+    fn owner() -> Element {
+        let mut mode = use_signal(|| NavButtonMode::Sidebar);
+        rsx! {
+            NavButton {
+                mode: mode(),
+                onclick: move |()| {
+                    mode.set(match mode() {
+                        NavButtonMode::Back => NavButtonMode::Sidebar,
+                        NavButtonMode::Sidebar => NavButtonMode::Back,
+                    });
+                },
+                "icon"
+            }
+        }
+    }
+
+    #[test]
+    fn a_nav_button_survives_any_order_of_events() {
+        Storm::of(owner).run_seeds(0..16);
+    }
+}
