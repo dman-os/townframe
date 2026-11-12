@@ -2,6 +2,8 @@
 
 **Status:** Proposed.
 
+**Changed 2026-11-12:** §2.9 adds key references for content-addressed datums, which can sit in several documents with identical content (intxt ledger D61, designed with the nodules lane).
+
 **Supersedes:** the `db+datum:` grammar of ADR 007 ("Datum addresses have no URI authority") and ADR 021 §2, the hex encoding of the sibling `refHeads` pin (ADR 007 plug manifests, ADR 021), the `db+actor://` form of ADR 020/022, and the `db+blob:` form of ADR 001 ("Blob Identity and URIs"). **Keeps:** the semantics those records already gave references (§2 gathers them in one place). **Related:** ADR 020 (datum identity, signed claims), ADR 022 (authorization), ADR 025 (reference predicates), ADR 026 (blobs), ADRs 036, 040 and 041 (the first heavy users). Discussion and evidence: `docs/scratch/intxt-ledger.md` N3–N6, A1, D24, D25.
 
 ## 1. Context
@@ -46,6 +48,14 @@ These rules hold for every kind in §3. Most were already decided for `db+datum:
 7. **One canonical spelling.** Each reference has exactly one canonical string: the encoding rules below, heads sorted, percent-escapes uppercase, nothing escaped that does not need to be. Writers emit the canonical form, so equal references compare equal as strings and indexes can key on them. Parsers accept non-canonical input and canonicalize.
 8. **Stored references split off the version.** The URL with `?heads=` is the text form: what a CLI prints, a link carries and a person pastes. Inside a datum the version is a sibling field: a reference position holds the URL without its query, and an optional sibling array holds the heads. Re-pinning a reference to newer heads is the common write, and keeping it in its own field means it rewrites only that field, not the string naming the target. The fragment stays in the URL field: it changes when the position changes, not when the pin moves (an Automerge cursor survives revisions, so re-pinning an annotation leaves its fragment alone).
 
+9. **A content-addressed datum is referenced by its key.** Some datums are keyed by a hash of their own content: `gitCommit/<sha>` is the commit's git id. Every recorder that sees the commit writes the same value under the same key, so one commit sits in many documents, and a `#datumRef` naming one of them would break when that copy is deleted or isn't readable. Such a datum is referenced by a fourth def:
+   - `#keyRef`: an object `{ "key": "org.example.intxt.work.gitCommit/4c1f…" }`, the tag and slot with no document.
+
+   It is valid only for kinds whose Lexicon (or sidecar) declares that the slot is a content hash of the value and how it is computed, for `gitCommit` git's object id. Other kinds can't be key-referenced.
+
+   **Resolving** finds the documents holding the key (`Predicate::HasKey`, index-backed per ADR 024), picks one the reader can read (preferably one already local), and checks that the value hashes to the key. A copy that doesn't is treated as absent, never as another version. So equivalence between copies is verified, not assumed, and no heads are needed, because the content can't change under its key. Read access is unchanged: the reader still needs Read on some holding document's drawer. Deleting one copy doesn't break the reference while another copy is readable. The index keys a `#keyRef` by its key, so "what references this commit" is one query whichever document holds it.
+
+   No text form yet: a key reference is stored, not pasted. If one is needed, it is a new kind in §3.
 ## 3. Decision: one scheme, kinds as namespaces
 
 ```
