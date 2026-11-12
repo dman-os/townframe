@@ -289,31 +289,16 @@ struct ArcGeometry {
 }
 
 impl ArcGeometry {
-    fn new(
-        viewport: (f64, f64),
-        items: &[&'static str],
-        focus: f64,
-        settle: f64,
-        thumb_x: Option<f64>,
-        pull: f64,
-        hovered: Option<usize>,
-    ) -> Self {
+    fn new(viewport: (f64, f64), items: &[&'static str], state: &ArcState) -> Self {
         let count = items.len();
+        // The list is the caller's and may shrink between renders; a focus left past its
+        // end would place the strip off the list.
+        let focus = state.focus.min((count - 1) as f64);
+        let (settle, thumb_x, pull, hovered) =
+            (state.settle, state.thumb_x, state.pull, state.hovered);
         let active = focus.round().clamp(0.0, (count - 1) as f64) as usize;
-        // A zero-sized window happens before the shell reports a real size; fall
-        // back so the rest layout is still sane rather than NaN-ridden.
-        let (width, height) = if viewport.1 > 0.0 {
-            viewport
-        } else {
-            (viewport.0, FALLBACK_HEIGHT)
-        };
-        let base_spacing = spacing(height, count);
-        let spacing = if settle > 0.0 {
-            base_spacing * ACTIVE_SPACING_MULTIPLIER
-        } else {
-            base_spacing
-        };
-        let top = top_inset(spacing, count, height);
+        let Metrics { spacing, top, .. } = Metrics::of(viewport, count, settle);
+        let width = viewport.0;
 
         // How far the thumb has come in from the resting column, and how much
         // window is left for a label to retreat into.
@@ -435,13 +420,7 @@ impl ArcGeometry {
         }
     }
 
-    fn accessibility(
-        &self,
-        count: usize,
-        commit: Callback<f64>,
-        focus: Signal<f64>,
-        live: &str,
-    ) -> Element {
+    fn accessibility(&self, count: usize, send: Callback<ArcEvent>, live: &str) -> Element {
         let active = self.active;
         let active_label = self.active_label;
         rsx! {
@@ -464,7 +443,7 @@ impl ArcGeometry {
                         _ => 0.0,
                     };
                     if step != 0.0 {
-                        commit.call((*focus.peek() + step).round());
+                        send.call(ArcEvent::Nudge(step));
                     }
                 },
             }
@@ -473,6 +452,209 @@ impl ArcGeometry {
                 style: "position:absolute; width:1px; height:1px; overflow:hidden;",
                 "{live}"
             }
+        }
+    }
+}
+
+/// The window-derived layout every transition and the render share. Computed from the state's
+/// own `settle` (the strip spaces out while engaged), so an event always sees the geometry of
+/// the state it transitions from rather than whatever the last render captured.
+struct Metrics {
+    height: f64,
+    spacing: f64,
+    top: f64,
+}
+
+impl Metrics {
+    fn of(viewport: (f64, f64), count: usize, settle: f64) -> Self {
+        // A zero-sized window happens before the shell reports a real size; fall back so the
+        // rest layout is still sane rather than NaN-ridden.
+        let height = if viewport.1 > 0.0 {
+            viewport.1
+        } else {
+            FALLBACK_HEIGHT
+        };
+        let base = spacing(height, count);
+        let spacing = if settle > 0.0 {
+            base * ACTIVE_SPACING_MULTIPLIER
+        } else {
+            base
+        };
+        Self {
+            height,
+            spacing,
+            top: top_inset(spacing, count, height),
+        }
+    }
+}
+
+/// Everything the strip remembers, in one value in one signal. Handlers never touch it: they
+/// send an [`ArcEvent`] and [`ArcState::next`] computes the successor, so no two signals can
+/// disagree and no handler can hold a borrow across a write.
+#[derive(Clone, Debug, PartialEq)]
+struct ArcState {
+    /// Continuous position in breakpoint space. The fractional part drives the in-between
+    /// spacing so the strip glides instead of stepping.
+    focus: f64,
+    /// 1 while the strip is bent around a thumb, easing to 0 once it lifts.
+    settle: f64,
+    /// Where the thumb is horizontally while pressed, `None` at rest. Its vertical position
+    /// needs no state: the selection follows the pointer directly. It stays set through the
+    /// settle animation, because the strip is anchored to the thumb for the whole of it.
+    thumb_x: Option<f64>,
+    /// How far past either end the pointer is, in px. Absolute, like the selection, so the two
+    /// cannot disagree.
+    pull: f64,
+    /// Bumped on every press and release so a settle animation in flight can tell that it has
+    /// been superseded and its remaining ticks are ignored.
+    generation: u64,
+    /// The last breakpoint reported through `on_select` (and spoken by the live region).
+    announced: Option<usize>,
+    /// The breakpoint under a hovering pointer, when not pressed.
+    hovered: Option<usize>,
+}
+
+impl Default for ArcState {
+    fn default() -> Self {
+        Self {
+            focus: 0.0,
+            settle: 0.0,
+            thumb_x: None,
+            pull: 0.0,
+            generation: 0,
+            announced: None,
+            hovered: None,
+        }
+    }
+}
+
+/// What can happen to the strip. Positions are viewport coordinates in px.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ArcEvent {
+    /// A press on the grab band.
+    Press {
+        x: f64,
+        y: f64,
+    },
+    /// A pointer move over the overlay; only continues a gesture this strip started.
+    Drag {
+        x: f64,
+        y: f64,
+    },
+    /// A release or cancel; only ends a gesture this strip started. A release can arrive
+    /// without one: a scrollbar drag captures the pointer, so its press never reaches the grab
+    /// band, but the release bubbles here when the cursor ends over the band, and settling
+    /// from rest would flash the strip engaged.
+    Release,
+    /// A pointer move over the grab band, for the hover label.
+    Hover {
+        y: f64,
+    },
+    HoverEnd,
+    /// A wheel over the index, as travel along the strip in px.
+    Wheel {
+        travel: f64,
+    },
+    /// A keyboard step of `by` breakpoints.
+    Nudge(f64),
+    /// One frame of the settle animation begun by the release of `generation`.
+    Tick {
+        generation: u64,
+        step: u32,
+    },
+}
+
+/// What a transition asks the component to do once the new state is written.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Effect {
+    /// Tell the owner the selection moved to this breakpoint.
+    Select(usize),
+    /// Start the settle animation of this generation.
+    Settle(u64),
+}
+
+impl ArcState {
+    /// The state after `event`, and the effects to run. Pure: `viewport` and `count` are the
+    /// props the strip is laid out from.
+    fn next(&self, viewport: (f64, f64), count: usize, event: ArcEvent) -> (ArcState, Vec<Effect>) {
+        // The list is the caller's and may shrink between renders.
+        let mut state = Self {
+            focus: self.focus.min((count - 1) as f64),
+            ..self.clone()
+        };
+        let mut effects = Vec::new();
+        let Metrics {
+            height,
+            spacing,
+            top,
+        } = Metrics::of(viewport, count, state.settle);
+        match event {
+            ArcEvent::Press { x, y } => {
+                // Start from the breakpoint actually under the finger, and leave the list
+                // exactly where it is: only a drag past an end moves it.
+                state.commit(focus_at(y, top, spacing, count), count, &mut effects);
+                state.generation += 1;
+                state.thumb_x = Some(x);
+                state.pull = pull_for(y, top, spacing, count, height);
+                state.settle = 1.0;
+            }
+            ArcEvent::Drag { x, y } => {
+                // No press yet, so there is no gesture to continue.
+                if state.thumb_x.is_some() {
+                    // Both from the same absolute pointer, so the picked breakpoint stays
+                    // exactly under the thumb at every point of the drag.
+                    state.commit(focus_at(y, top, spacing, count), count, &mut effects);
+                    state.pull = pull_for(y, top, spacing, count, height);
+                    state.thumb_x = Some(x);
+                }
+            }
+            ArcEvent::Release => {
+                if state.thumb_x.is_some() {
+                    state.generation += 1;
+                    effects.push(Effect::Settle(state.generation));
+                }
+            }
+            ArcEvent::Hover { y } => {
+                if state.thumb_x.is_none() {
+                    state.hovered = Some(
+                        focus_at(y, top, spacing, count)
+                            .round()
+                            .clamp(0.0, (count - 1) as f64) as usize,
+                    );
+                }
+            }
+            ArcEvent::HoverEnd => state.hovered = None,
+            ArcEvent::Wheel { travel } => {
+                state.commit(state.focus + travel / spacing, count, &mut effects);
+            }
+            ArcEvent::Nudge(by) => {
+                state.commit((state.focus + by).round(), count, &mut effects);
+            }
+            ArcEvent::Tick { generation, step } => {
+                if state.generation == generation {
+                    if step >= SETTLE_STEPS {
+                        state.settle = 0.0;
+                        state.pull = 0.0;
+                        state.thumb_x = None;
+                    } else {
+                        // Ease out: leaves the finger quickly, arrives slowly.
+                        let remaining = 1.0 - step as f64 / SETTLE_STEPS as f64;
+                        state.settle = remaining * remaining * remaining;
+                    }
+                }
+            }
+        }
+        (state, effects)
+    }
+
+    /// Move the focus to `next` (clamped to the list) and report the breakpoint it lands on
+    /// once per change.
+    fn commit(&mut self, next: f64, count: usize, effects: &mut Vec<Effect>) {
+        self.focus = next.clamp(0.0, (count - 1) as f64);
+        let index = self.focus.round() as usize;
+        if self.announced != Some(index) {
+            self.announced = Some(index);
+            effects.push(Effect::Select(index));
         }
     }
 }
@@ -493,56 +675,51 @@ pub fn ArcIndex(
     assert!(!items.is_empty(), "ArcIndex requires at least one item");
     let count = items.len();
 
-    // Continuous position in breakpoint space. The fractional part drives the
-    // in-between spacing so the strip glides instead of stepping.
-    let focus = use_signal(|| 0.0f64);
-    // 1 while the strip is bent around a thumb, easing to 0 once it lifts.
-    let settle = use_signal(|| 0.0f64);
-    // Where the thumb is horizontally while pressed. Its vertical position needs
-    // no state at all: the selection follows the pointer directly.
-    let mut thumb_x = use_signal(|| None::<f64>);
-    // How far past either end the pointer is, in px. Absolute, like the
-    // selection, so the two cannot disagree.
-    let mut pull = use_signal(|| 0.0f64);
-    // Bumped on every press so a settle animation in flight can tell that it has
-    // been superseded and stop writing.
-    let generation = use_signal(|| 0u64);
-    let announced = use_signal(|| usize::MAX);
-    let mut hovered = use_signal(|| None::<usize>);
-
-    let height = if viewport.1 > 0.0 {
-        viewport.1
-    } else {
-        FALLBACK_HEIGHT
+    let state = use_signal(ArcState::default);
+    // The one place the state is written: copy it out, compute the successor, write it. The
+    // `peek` guard ends with the statement that took the copy, so nothing is borrowed while
+    // the transition runs or while the caller acts on the effects, which may do anything
+    // (the owner's `on_select` may write its own signals). Only `Copy` values are captured,
+    // so the closure is `Copy` and the animation task below gets its own.
+    let apply = move |event: ArcEvent| {
+        let mut state = state;
+        let before = state.peek().clone();
+        let (after, effects) = before.next(viewport, count, event);
+        if after != before {
+            state.set(after);
+        }
+        effects
     };
-    let geometry = ArcGeometry::new(
-        viewport,
-        &items,
-        // The list is the caller's and may shrink between renders; a focus
-        // left past its end would place the strip off the list.
-        (*focus.read()).min((count - 1) as f64),
-        *settle.read(),
-        *thumb_x.read(),
-        *pull.read(),
-        *hovered.read(),
-    );
-    let top = geometry.top;
-    let spacing = geometry.spacing;
+    // `use_callback` so the same closure can be handed to several handlers.
+    let send = use_callback(move |event: ArcEvent| {
+        for effect in apply(event) {
+            match effect {
+                Effect::Select(index) => on_select.call(index),
+                // Releasing eases the strip back to its resting column *and* its resting
+                // position in the window, so the index is always fully visible once you let
+                // go. Each frame is an event, so the animation is just more input, and a
+                // frame of a superseded release is dropped by its generation.
+                Effect::Settle(generation) => {
+                    spawn(async move {
+                        for step in 1..=SETTLE_STEPS {
+                            settle_tick().await;
+                            apply(ArcEvent::Tick { generation, step });
+                        }
+                    });
+                }
+            }
+        }
+    });
+
+    let view = state();
+    let pressed = view.thumb_x.is_some();
+    let geometry = ArcGeometry::new(viewport, &items, &view);
     let pointer_events = geometry.pointer_events;
     let scrim = &geometry.scrim;
-
-    // `use_callback` so the same closure can be handed to several handlers.
-    let commit = use_callback(move |next: f64| {
-        commit_breakpoint(next, count, focus, announced, on_select);
-    });
-    let press_strip = use_callback(move |point: (f64, f64)| {
-        begin_press(
-            point, top, spacing, count, height, generation, thumb_x, pull, settle, commit,
-        );
-    });
-    let release_strip = use_callback(move |()| {
-        spawn_release(generation, settle, pull, thumb_x);
-    });
+    let live = view
+        .announced
+        .and_then(|index| items.get(index).copied())
+        .unwrap_or("");
 
     rsx! {
         div {
@@ -553,42 +730,23 @@ pub fn ArcIndex(
             style: "position:fixed; top:0; left:0; right:0; bottom:0; user-select:none; -webkit-user-select:none; \
                     pointer-events:{pointer_events};",
             onpointermove: move |event| {
-                // No pointerdown yet, so there is no gesture to continue.
-                if thumb_x.peek().is_none() {
-                    return;
+                // Only a pressed strip owns the move; otherwise there is no gesture to
+                // continue and the default stays.
+                if pressed {
+                    event.prevent_default();
                 }
-                event.prevent_default();
                 // Fixed-position overlays use viewport coordinates. Page coordinates
                 // include document scroll and would move the arc offscreen after scrolling.
                 let point = event.data().client_coordinates();
-                // Both from the same absolute pointer, so the picked breakpoint
-                // stays exactly under the thumb at every point of the drag.
-                commit.call(focus_at(point.y, top, spacing, count));
-                pull.set(pull_for(point.y, top, spacing, count, height));
-                thumb_x.set(Some(point.x));
+                send.call(ArcEvent::Drag { x: point.x, y: point.y });
             },
-            // Only a gesture this strip started is released. A release can arrive
-            // without one: a scrollbar drag captures the pointer, so its press never
-            // reaches the grab band, but the release bubbles here when the cursor ends
-            // over the band, and settling from rest would flash the strip engaged.
-            onpointerup: move |_| {
-                if thumb_x.peek().is_some() {
-                    release_strip.call(());
-                }
-            },
-            onpointercancel: move |_| {
-                if thumb_x.peek().is_some() {
-                    release_strip.call(());
-                }
-            },
+            onpointerup: move |_| send.call(ArcEvent::Release),
+            onpointercancel: move |_| send.call(ArcEvent::Release),
             onwheel: move |event| {
                 let delta = event.data().delta().strip_units();
                 let travel = if delta.y.abs() > delta.x.abs() { delta.y } else { delta.x };
                 if travel != 0.0 {
-                    // Read first: a `peek` guard in the argument would live until the end of
-                    // the statement, and `commit` writes `focus` while it is still borrowed.
-                    let current = *focus.peek();
-                    commit.call(current + travel / spacing);
+                    send.call(ArcEvent::Wheel { travel });
                 }
             },
 
@@ -602,102 +760,19 @@ pub fn ArcIndex(
             div {
                 class: "arc-index-grab-band",
                 onpointermove: move |event| {
-                    if thumb_x.peek().is_none() {
-                        let point = event.data().client_coordinates();
-                        let index = focus_at(point.y, top, spacing, count)
-                            .round()
-                            .clamp(0.0, (count - 1) as f64) as usize;
-                        hovered.set(Some(index));
-                    }
+                    send.call(ArcEvent::Hover { y: event.data().client_coordinates().y });
                 },
-                onpointerleave: move |_| hovered.set(None),
+                onpointerleave: move |_| send.call(ArcEvent::HoverEnd),
                 onpointerdown: move |event| {
                     event.prevent_default();
                     let point = event.data().client_coordinates();
-                    press_strip.call((point.x, point.y));
+                    send.call(ArcEvent::Press { x: point.x, y: point.y });
                 },
             }
 
-            {geometry.accessibility(count, commit, focus, items.get(*announced.read()).copied().unwrap_or(""))}
+            {geometry.accessibility(count, send, live)}
         }
     }
-}
-
-fn commit_breakpoint(
-    next: f64,
-    count: usize,
-    mut focus: Signal<f64>,
-    mut announced: Signal<usize>,
-    on_select: EventHandler<usize>,
-) {
-    let clamped = next.clamp(0.0, (count - 1) as f64);
-    focus.set(clamped);
-
-    let index = clamped.round() as usize;
-    if index != *announced.peek() {
-        announced.set(index);
-        on_select.call(index);
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the gesture state is a flat set of signals"
-)]
-fn begin_press(
-    point: (f64, f64),
-    top: f64,
-    spacing: f64,
-    count: usize,
-    height: f64,
-    mut generation: Signal<u64>,
-    mut thumb_x: Signal<Option<f64>>,
-    mut pull: Signal<f64>,
-    mut settle: Signal<f64>,
-    commit: Callback<f64>,
-) {
-    // Start from the breakpoint actually under the finger, and leave the list
-    // exactly where it is: only a drag past an end moves it.
-    let next_focus = focus_at(point.1, top, spacing, count);
-    commit.call(next_focus);
-
-    let next = *generation.peek() + 1;
-    generation.set(next);
-    thumb_x.set(Some(point.0));
-    pull.set(pull_for(point.1, top, spacing, count, height));
-    settle.set(1.0);
-}
-
-// Releasing eases the strip back to its resting column *and* back to its
-// resting position in the window, so the index is always fully visible once
-// you let go. `press` is held until the animation lands, because the strip
-// is anchored to the thumb for the whole of it.
-fn spawn_release(
-    mut generation: Signal<u64>,
-    mut settle: Signal<f64>,
-    mut pull: Signal<f64>,
-    mut thumb_x: Signal<Option<f64>>,
-) {
-    let mine = *generation.peek() + 1;
-    generation.set(mine);
-
-    spawn(async move {
-        for step in 1..=SETTLE_STEPS {
-            settle_tick().await;
-            if *generation.peek() != mine {
-                return;
-            }
-            let progress = step as f64 / SETTLE_STEPS as f64;
-            // Ease out: leaves the finger quickly, arrives slowly.
-            let remaining = 1.0 - progress;
-            settle.set(remaining * remaining * remaining);
-        }
-        if *generation.peek() == mine {
-            settle.set(0.0);
-            pull.set(0.0);
-            thumb_x.set(None);
-        }
-    });
 }
 
 #[cfg(test)]
