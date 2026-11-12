@@ -139,6 +139,12 @@ fn idempotency_key(batch: &intxt_core::capture::Batch) -> String {
     key
 }
 
+/// The directory of the host's per-session state files: a hook session's, and an ACP session's
+/// (`intxt_capture::host::prepare_acp`).
+pub(crate) fn sessions_dir(node_dir: &Path) -> PathBuf {
+    node_dir.join("intxt/sessions")
+}
+
 /// Runs the hook whose JSON is `input`, with the node's capture state under `node_dir`.
 pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> Res<Summary> {
     let hook = Hook::parse(input)?;
@@ -151,9 +157,7 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
         "the session id `{}` is not a safe file name",
         hook.session_id
     );
-    let session_path = node_dir
-        .join("intxt/sessions")
-        .join(format!("{}.json", hook.session_id));
+    let session_path = sessions_dir(node_dir).join(format!("{}.json", hook.session_id));
     // Locks and git: blocking work, so off the runtime's threads. The locks are held until the
     // `Prepared` is committed or dropped, whichever thread that is on.
     let prepared =

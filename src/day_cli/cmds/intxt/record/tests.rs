@@ -55,7 +55,7 @@ async fn drive(
     let (status, received) = tokio::join!(
         proxy(
             &agent,
-            false,
+            Recorder::new(PathBuf::new()),
             agent_reads,
             agent_writes,
             TEE_CHUNKS,
@@ -143,7 +143,7 @@ async fn an_agent_that_is_not_acp_is_still_proxied() {
     let mut reasons: Vec<String> = Vec::new();
     let status = proxy(
         &agent,
-        false,
+        Recorder::new(PathBuf::new()),
         &b""[..],
         &mut output,
         TEE_CHUNKS,
@@ -189,7 +189,7 @@ async fn a_recorder_that_never_drains_does_not_block_forwarding() {
     let (status, received) = tokio::join!(
         proxy(
             &agent,
-            false,
+            Recorder::new(PathBuf::new()),
             agent_reads,
             agent_writes,
             4,

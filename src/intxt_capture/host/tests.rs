@@ -536,6 +536,7 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
     // The start of a session: first sight of the worktree, with what already differs.
     let start = prepare_acp(
         acp_session("acp1"),
+        env.session_state.parent().unwrap(),
         &env.repo.root,
         &none,
         &Window::Boundary,
@@ -551,6 +552,7 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
     env.repo.write("a.txt", "two\n");
     let turn = prepare_acp(
         acp_session("acp1"),
+        env.session_state.parent().unwrap(),
         &env.repo.root,
         &roots,
         &Window::Boundary,
@@ -569,6 +571,7 @@ fn an_acp_window_observes_the_cwd_worktree_and_resumes_from_its_state() {
     // Nothing more happened: nothing to record.
     let idle = prepare_acp(
         acp_session("acp1"),
+        env.session_state.parent().unwrap(),
         &env.repo.root,
         &roots,
         &Window::Boundary,
@@ -584,6 +587,7 @@ fn acp_tool_call_windows_give_one_caused_op_each_and_the_rest_goes_to_the_turn_e
     let none = BTreeSet::new();
     let start = prepare_acp(
         acp_session("acp1"),
+        env.session_state.parent().unwrap(),
         &env.repo.root,
         &none,
         &Window::Boundary,
@@ -606,6 +610,7 @@ fn acp_tool_call_windows_give_one_caused_op_each_and_the_rest_goes_to_the_turn_e
     let mut window = |env: &Env, id: &str, file: &str, content: &str| -> Batch {
         let open = prepare_acp(
             acp_session("acp1"),
+            env.session_state.parent().unwrap(),
             &env.repo.root,
             &roots,
             &Window::Open(tool(id)),
@@ -616,6 +621,7 @@ fn acp_tool_call_windows_give_one_caused_op_each_and_the_rest_goes_to_the_turn_e
         env.repo.write(file, content);
         let close = prepare_acp(
             acp_session("acp1"),
+            env.session_state.parent().unwrap(),
             &env.repo.root,
             &roots,
             &Window::Close(tool(id)),
@@ -664,6 +670,7 @@ fn acp_tool_call_windows_give_one_caused_op_each_and_the_rest_goes_to_the_turn_e
     env.repo.write("between.txt", "x\n");
     let end = prepare_acp(
         acp_session("acp1"),
+        env.session_state.parent().unwrap(),
         &env.repo.root,
         &roots,
         &Window::Boundary,
@@ -706,6 +713,7 @@ fn acp_sessions_reusing_a_tool_call_id_keep_their_own_pre_snapshots() {
     for session in ["acp1", "acp2"] {
         let open = prepare_acp(
             acp_session(session),
+            env.session_state.parent().unwrap(),
             &env.repo.root,
             &roots,
             &Window::Open(window("call")),
@@ -716,6 +724,7 @@ fn acp_sessions_reusing_a_tool_call_id_keep_their_own_pre_snapshots() {
     assert_eq!(pending(), 2, "one pre-snapshot per session, same call id");
     let close = prepare_acp(
         acp_session("acp1"),
+        env.session_state.parent().unwrap(),
         &env.repo.root,
         &roots,
         &Window::Close(window("call")),

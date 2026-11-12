@@ -30,14 +30,29 @@
 //! | `plan` | `plan`, replaced whole |
 //!
 //! A message and a tool call share the turn's `seq` order. ACP has no turn ids, so a turn is
-//! named by a UUIDv7 and its `parentTurn` is the session's previous turn in this connection.
+//! named by a UUIDv7 and its `parentTurn` is the session's previous turn.
 //!
-//! Replays are not recorded: `session/load` makes the agent stream the whole history as
-//! `session/update` notifications before it answers, and they are dropped (they are what an
-//! earlier recording already holds; the gap is that a loaded session this recorder sees for the
-//! first time loses its history). `user_message_chunk` is dropped too: the prompt request is
-//! the turn's user message. `fs/*`, `terminal/*` and `session/request_permission` are not
-//! recorded; terminal content is a `terminalId`, whose output only the client sees.
+//! A session outlives its connection, so the host keeps a [`Resume`] per session (the file
+//! `host::prepare_acp` writes beside the hook sessions' state, committed with each batch the
+//! session emits). `session/load` makes the agent stream the whole history as `session/update`
+//! notifications before it answers, and what the recorder does with it depends on that file,
+//! which [`Recorder::new`]'s directory is searched for when the load request passes:
+//!
+//! - There is one (an earlier connection recorded the session, or this one did): the replay is
+//!   dropped, since the recording already holds it, and the session continues into the same
+//!   document: its document id, turn count, last turn (the next turn's `parentTurn`) and title
+//!   come from the file.
+//! - There is none (the session was never recorded): the replay is the session's history and is
+//!   recorded with the load's answer, as one batch. The prompt requests are not there, so a turn
+//!   begins at each replayed `user_message_chunk` (consecutive ones are the blocks of one prompt
+//!   and join like a prompt's blocks do) and the turns carry no stop reason and the time the
+//!   replayed update was seen. Tool calls in a replay have no worktree windows: whatever they
+//!   changed happened long ago. A replay the connection ends before the load is answered records
+//!   nothing, so the next load of the session replays again.
+//!
+//! In a live connection `user_message_chunk` is dropped: the prompt request is the turn's user
+//! message. `fs/*`, `terminal/*` and `session/request_permission` are not recorded; terminal
+//! content is a `terminalId`, whose output only the client sees.
 
 use crate::Error;
 use big_cabinet_core::datum::Extra;
@@ -58,6 +73,7 @@ use intxt_core::work::ToolLocation;
 use intxt_core::work::ToolStatus;
 use jiff::Timestamp;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -131,7 +147,9 @@ struct Rpc {
     rename_all_fields = "camelCase"
 )]
 enum SessionUpdate {
-    UserMessageChunk,
+    UserMessageChunk {
+        content: Block,
+    },
     AgentMessageChunk {
         content: Block,
         message_id: Option<String>,
@@ -236,6 +254,8 @@ enum Request {
         session_id: String,
         cwd: String,
         additional: Vec<String>,
+        /// What the host holds of the session; none when it is to be recorded from its replay.
+        resume: Option<Resume>,
     },
     Prompt {
         session_id: String,
@@ -256,6 +276,36 @@ struct OpenTurn {
     calls: BTreeMap<String, CallState>,
 }
 
+/// What a later connection needs to continue a session the host has recorded: its file's
+/// existence says the history up to the last commit is recorded.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Resume {
+    /// The session's document, once the node answered with it.
+    pub doc: Option<String>,
+    /// Turns recorded: the next turn's `seq`.
+    pub turns: u64,
+    /// The latest turn, which the next one follows.
+    pub last_turn: Option<String>,
+    /// The session's title, which a datum emitted by the continuing connection must not lose.
+    pub title: Option<String>,
+}
+
+impl Resume {
+    /// Fold in a batch the recorder emitted for the session (not its document: the node's answer
+    /// carries that).
+    pub(crate) fn absorb(&mut self, batch: &SessionBatch) {
+        if let Some(session) = &batch.imported.session {
+            self.title = session.title.clone();
+        }
+        for (id, turn) in &batch.imported.turns {
+            if turn.seq >= self.turns {
+                self.turns = turn.seq + 1;
+                self.last_turn = Some(id.clone());
+            }
+        }
+    }
+}
+
 struct Session {
     datum: AgentSession,
     cwd: PathBuf,
@@ -268,11 +318,17 @@ struct Session {
     plan: Option<Plan>,
     /// The session datum changed (its title) and has not been emitted.
     dirty: bool,
+    /// The session is being loaded and its replay recorded: the turns it has made so far, which
+    /// the load's answer emits.
+    replay: Option<BTreeMap<String, PromptTurn>>,
 }
 
-/// Records one ACP connection. All state is here; nothing persists, so a recording lasts as long
-/// as the connection (and a `session/load` of an earlier session starts its turns afresh).
+/// Records one ACP connection. The connection's sessions live here; what outlives it is each
+/// session's [`Resume`], which the host persists and this reads from `sessions` when a
+/// `session/load` passes.
 pub struct Recorder {
+    /// The directory of the host's session state files.
+    sessions_dir: PathBuf,
     record_thinking: bool,
     harness: String,
     /// The unfinished last line of each direction.
@@ -282,15 +338,11 @@ pub struct Recorder {
     sessions: BTreeMap<String, Session>,
 }
 
-impl Default for Recorder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Recorder {
-    pub fn new() -> Self {
+    /// `sessions_dir` is where the host keeps the state of the sessions it has recorded.
+    pub fn new(sessions_dir: PathBuf) -> Self {
         Self {
+            sessions_dir,
             record_thinking: false,
             harness: "acp".to_owned(),
             partial: [Vec::new(), Vec::new()],
@@ -348,10 +400,14 @@ impl Recorder {
     pub fn finish(&mut self) -> Vec<Emit> {
         let mut emits = Vec::new();
         for session in self.sessions.values_mut() {
+            if session.replay.is_some() {
+                // The load was never answered: a partial history is not recorded.
+                continue;
+            }
             if session.open.is_some() {
                 emits.push(Self::close_turn(session, None));
             } else if session.dirty {
-                emits.push(Self::emit(session, None, None));
+                emits.push(Self::emit(session, None, BTreeMap::new()));
             }
         }
         emits
@@ -412,11 +468,32 @@ impl Recorder {
                 cwd: required("cwd")?,
                 additional: additional(),
             },
-            "session/load" => Request::Load {
-                session_id: required("sessionId")?,
-                cwd: required("cwd")?,
-                additional: additional(),
-            },
+            "session/load" => {
+                let session_id = required("sessionId")?;
+                let cwd = required("cwd")?;
+                let additional = additional();
+                // A session this connection holds keeps its turns. Otherwise the host's file
+                // says whether an earlier connection recorded it; with none, the replay is its
+                // history and the session is held from here to take it.
+                let resume = if self.sessions.contains_key(&session_id) {
+                    None
+                } else {
+                    let resume = crate::host::acp_resume(&self.sessions_dir, &session_id)?;
+                    if resume.is_none() {
+                        let mut session =
+                            self.new_session(&session_id, &cwd, additional.clone(), None);
+                        session.replay = Some(BTreeMap::new());
+                        self.sessions.insert(session_id.clone(), session);
+                    }
+                    resume
+                };
+                Request::Load {
+                    session_id,
+                    cwd,
+                    additional,
+                    resume,
+                }
+            }
             "session/prompt" => {
                 let session_id = required("sessionId")?;
                 let session = self.sessions.get_mut(&session_id).ok_or_else(|| {
@@ -435,33 +512,7 @@ impl Recorder {
                     .filter_map(Block::prompt_text)
                     .collect::<Vec<_>>()
                     .join("\n");
-                let id = Uuid::now_v7().to_string();
-                let mut turn = PromptTurn {
-                    seq: session.turns,
-                    at,
-                    parent_turn: session.last_turn.clone(),
-                    stop_reason: None,
-                    messages: Vec::new(),
-                    tool_calls: Vec::new(),
-                    extra: Extra::default(),
-                };
-                session.turns += 1;
-                session.last_turn = Some(id.clone());
-                if !text.is_empty() {
-                    turn.messages.push(Message {
-                        id: format!("{id}.0"),
-                        seq: 0,
-                        at,
-                        kind: MessageKind::UserMessage,
-                        text,
-                        extra: Extra::default(),
-                    });
-                }
-                session.open = Some(OpenTurn {
-                    id,
-                    turn,
-                    calls: BTreeMap::new(),
-                });
+                Self::begin_turn(session, at, text);
                 Request::Prompt { session_id }
             }
             // `session/cancel` and the rest: nothing to wait for or to record.
@@ -470,6 +521,66 @@ impl Recorder {
         let id = id.ok_or_else(|| Error::Acp(format!("{method} is a notification")))?;
         self.requests.insert(id.to_string(), request);
         Ok(())
+    }
+
+    /// Open the session's next turn with `text` as its user message, if any.
+    fn begin_turn(session: &mut Session, at: Timestamp, text: String) {
+        let id = Uuid::now_v7().to_string();
+        let mut turn = PromptTurn {
+            seq: session.turns,
+            at,
+            parent_turn: session.last_turn.clone(),
+            stop_reason: None,
+            messages: Vec::new(),
+            tool_calls: Vec::new(),
+            extra: Extra::default(),
+        };
+        session.turns += 1;
+        session.last_turn = Some(id.clone());
+        if !text.is_empty() {
+            turn.messages.push(Message {
+                id: format!("{id}.0"),
+                seq: 0,
+                at,
+                kind: MessageKind::UserMessage,
+                text,
+                extra: Extra::default(),
+            });
+        }
+        session.open = Some(OpenTurn {
+            id,
+            turn,
+            calls: BTreeMap::new(),
+        });
+    }
+
+    /// A replayed `user_message_chunk`: another block of the open turn's prompt, or else the
+    /// prompt of a turn of its own.
+    fn replay_user(session: &mut Session, at: Timestamp, content: &Block) {
+        let Some(text) = content.prompt_text() else {
+            return;
+        };
+        if let Some(open) = &mut session.open
+            && open.turn.tool_calls.is_empty()
+            && let [only] = &mut open.turn.messages[..]
+            && only.kind == MessageKind::UserMessage
+        {
+            only.text.push('\n');
+            only.text.push_str(text);
+            return;
+        }
+        Self::end_replayed_turn(session);
+        Self::begin_turn(session, at, text.to_owned());
+    }
+
+    fn end_replayed_turn(session: &mut Session) {
+        if let Some(open) = session.open.take() {
+            session
+                .replay
+                .as_mut()
+                .expect("only a replay ends a turn without a response")
+                .insert(open.id, open.turn);
+        }
     }
 
     fn response(
@@ -501,17 +612,28 @@ impl Recorder {
                         Error::Acp("session/new answered without a sessionId".to_owned())
                     })?
                     .to_owned();
-                Ok(Some(self.start(session_id, cwd, additional)))
+                Ok(Some(self.start(session_id, cwd, additional, None)))
             }
             Request::Load {
                 session_id,
                 cwd,
                 additional,
-            } => Ok(if error.is_some() {
-                None
-            } else {
-                Some(self.start(session_id, cwd, additional))
-            }),
+                resume,
+            } => {
+                if error.is_some() {
+                    // A failed load made no session: drop the one that was to take its replay.
+                    if resume.is_none()
+                        && self
+                            .sessions
+                            .get(&session_id)
+                            .is_some_and(|session| session.replay.is_some())
+                    {
+                        self.sessions.remove(&session_id);
+                    }
+                    return Ok(None);
+                }
+                Ok(Some(self.start(session_id, cwd, additional, resume)))
+            }
             Request::Prompt { session_id } => {
                 let session = self
                     .sessions
@@ -530,46 +652,68 @@ impl Recorder {
         }
     }
 
-    /// The session exists from here; loading one a connection already holds keeps its turns.
-    fn start(&mut self, session_id: String, cwd: String, additional: Vec<String>) -> Emit {
-        let harness = self.harness.clone();
-        let session = self
-            .sessions
-            .entry(session_id.clone())
-            .or_insert_with(|| Session {
-                datum: AgentSession {
-                    harness,
-                    session_id,
-                    title: None,
-                    cwd: cwd.clone(),
-                    additional_directories: additional,
-                    parent: None,
-                    extra: Extra::default(),
-                },
-                cwd: PathBuf::from(&cwd),
-                doc: None,
-                turns: 0,
-                last_turn: None,
-                open: None,
-                plan: None,
-                dirty: false,
-            });
+    /// The session exists from here: one held already (a connection loading a session it holds,
+    /// or the one a replay was recorded into) keeps its turns, else it continues from `resume`.
+    /// A replay's turns are emitted with the start.
+    fn start(
+        &mut self,
+        session_id: String,
+        cwd: String,
+        additional: Vec<String>,
+        resume: Option<Resume>,
+    ) -> Emit {
+        if !self.sessions.contains_key(&session_id) {
+            let session = self.new_session(&session_id, &cwd, additional, resume);
+            self.sessions.insert(session_id.clone(), session);
+        }
+        let session = self.sessions.get_mut(&session_id).expect("inserted above");
+        Self::end_replayed_turn(session);
+        let turns = session.replay.take().unwrap_or_default();
         let datum = session.datum.clone();
-        Self::emit(session, Some(datum), None)
+        Self::emit(session, Some(datum), turns)
+    }
+
+    fn new_session(
+        &self,
+        session_id: &str,
+        cwd: &str,
+        additional: Vec<String>,
+        resume: Option<Resume>,
+    ) -> Session {
+        let resume = resume.unwrap_or_default();
+        Session {
+            datum: AgentSession {
+                harness: self.harness.clone(),
+                session_id: session_id.to_owned(),
+                title: resume.title,
+                cwd: cwd.to_owned(),
+                additional_directories: additional,
+                parent: None,
+                extra: Extra::default(),
+            },
+            cwd: PathBuf::from(cwd),
+            doc: resume.doc,
+            turns: resume.turns,
+            last_turn: resume.last_turn,
+            open: None,
+            plan: None,
+            dirty: false,
+            replay: None,
+        }
     }
 
     fn close_turn(session: &mut Session, stop: Option<StopReason>) -> Emit {
         let mut open = session.open.take().expect("a turn is open");
         open.turn.stop_reason = stop;
-        Self::emit(session, None, Some((open.id, open.turn)))
+        Self::emit(session, None, BTreeMap::from([(open.id, open.turn)]))
     }
 
     /// The emit of `session`: its datum when `datum` or its title changed, the plan if it
-    /// changed, and `turn`.
+    /// changed, and `turns`.
     fn emit(
         session: &mut Session,
         datum: Option<AgentSession>,
-        turn: Option<(String, PromptTurn)>,
+        turns: BTreeMap<String, PromptTurn>,
     ) -> Emit {
         let datum = datum.or_else(|| session.dirty.then(|| session.datum.clone()));
         session.dirty = false;
@@ -580,7 +724,7 @@ impl Recorder {
                 doc: session.doc.clone(),
                 imported: Imported {
                     session: datum,
-                    turns: turn.into_iter().collect(),
+                    turns,
                     plan: session.plan.take(),
                     extra: Extra::default(),
                 },
@@ -596,10 +740,17 @@ impl Recorder {
             .get("sessionId")
             .and_then(Value::as_str)
             .ok_or_else(|| Error::Acp("session/update lacks `sessionId`".to_owned()))?;
-        // A load's replay: the history streams in before the load is answered.
-        if self.requests.values().any(
-            |request| matches!(request, Request::Load { session_id: loading, .. } if loading == session_id),
-        ) {
+        // A load's replay: the history streams in before the load is answered. It is recorded
+        // when the session's turns are to come from it and dropped otherwise.
+        let replaying = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| session.replay.is_some());
+        if !replaying
+            && self.requests.values().any(
+                |request| matches!(request, Request::Load { session_id: loading, .. } if loading == session_id),
+            )
+        {
             return Ok(None);
         }
         let update: SessionUpdate = serde_json::from_value(
@@ -613,8 +764,30 @@ impl Recorder {
             .sessions
             .get_mut(session_id)
             .ok_or_else(|| Error::Acp(format!("an update for unknown session {session_id}")))?;
+        if session.replay.is_some() {
+            // The first update of a replay may not be a user's, and the tool calls of a replay
+            // have no worktree windows.
+            if let SessionUpdate::UserMessageChunk { content } = &update {
+                Self::replay_user(session, at, content);
+                return Ok(None);
+            }
+            let conversational = match &update {
+                SessionUpdate::AgentMessageChunk { .. }
+                | SessionUpdate::ToolCall(_)
+                | SessionUpdate::ToolCallUpdate(_) => true,
+                SessionUpdate::AgentThoughtChunk { .. } => self.record_thinking,
+                _ => false,
+            };
+            if session.open.is_none() && conversational {
+                Self::begin_turn(session, at, String::new());
+            }
+            if let SessionUpdate::ToolCall(call) | SessionUpdate::ToolCallUpdate(call) = update {
+                Self::tool_call(session, call)?;
+                return Ok(None);
+            }
+        }
         match update {
-            SessionUpdate::UserMessageChunk | SessionUpdate::Other => Ok(None),
+            SessionUpdate::UserMessageChunk { .. } | SessionUpdate::Other => Ok(None),
             SessionUpdate::SessionInfoUpdate { title } => {
                 if let Some(title) =
                     title.filter(|title| session.datum.title.as_ref() != Some(title))

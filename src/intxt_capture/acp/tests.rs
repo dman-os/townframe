@@ -1,9 +1,14 @@
 use super::*;
+use crate::host::prepare_acp;
+use intxt_core::capture::RecordedIds;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::BTreeSet;
+use std::path::Path;
 
 const SESSION: &str = include_str!("fixtures/session.trace");
 const LOAD: &str = include_str!("fixtures/load.trace");
+const REPLAY: &str = include_str!("fixtures/replay.trace");
 
 fn at() -> Timestamp {
     "2026-05-01T10:00:00Z".parse().unwrap()
@@ -56,7 +61,7 @@ fn assert_all_round_trip(emit: &Emit) {
 
 #[test]
 fn a_session_becomes_its_datum_then_one_batch_per_turn() {
-    let mut recorder = Recorder::new();
+    let mut recorder = Recorder::new(PathBuf::new());
     let emits = boundaries(play(&mut recorder, SESSION));
     emits.iter().for_each(assert_all_round_trip);
     assert_eq!(emits.len(), 3, "the session, then two turns");
@@ -147,7 +152,7 @@ fn a_session_becomes_its_datum_then_one_batch_per_turn() {
 
 #[test]
 fn a_tool_calls_window_opens_at_its_first_report_and_closes_at_a_terminal_status() {
-    let mut recorder = Recorder::new();
+    let mut recorder = Recorder::new(PathBuf::new());
     let emits = play(&mut recorder, SESSION);
     let windows: Vec<_> = emits
         .iter()
@@ -209,7 +214,7 @@ fn a_tool_calls_window_opens_at_its_first_report_and_closes_at_a_terminal_status
 
 #[test]
 fn a_call_first_reported_finished_has_no_window() {
-    let mut recorder = Recorder::new();
+    let mut recorder = Recorder::new(PathBuf::new());
     let emits = play(
         &mut recorder,
         r#"> {"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/w","mcpServers":[]}}
@@ -224,13 +229,13 @@ fn a_call_first_reported_finished_has_no_window() {
 
 #[test]
 fn chunking_the_bytes_changes_nothing() {
-    let mut whole = Recorder::new();
+    let mut whole = Recorder::new(PathBuf::new());
     let expected = play(&mut whole, SESSION);
     let bytes: Vec<(Direction, Vec<u8>)> = lines(SESSION)
         .into_iter()
         .map(|(direction, line)| (direction, line.into_bytes()))
         .collect();
-    let mut chunked = Recorder::new();
+    let mut chunked = Recorder::new(PathBuf::new());
     let mut emits = Vec::new();
     for (direction, line) in &bytes {
         for piece in line.chunks(7) {
@@ -267,7 +272,7 @@ fn without_uuids(text: &str) -> String {
 
 #[test]
 fn thinking_is_recorded_only_when_asked() {
-    let mut recorder = Recorder::new().recording_thinking();
+    let mut recorder = Recorder::new(PathBuf::new()).recording_thinking();
     let emits = boundaries(play(&mut recorder, SESSION));
     let turn = emits[1].session.imported.turns.values().next().unwrap();
     let thoughts: Vec<_> = turn
@@ -281,26 +286,195 @@ fn thinking_is_recorded_only_when_asked() {
     assert_eq!(turn.messages.len(), 4);
 }
 
+/// What the host does with the emits of a connection: prepare each and commit it, the node
+/// answering with a document id.
+fn host_records(sessions: &Path, emits: &[Emit]) {
+    for emit in emits {
+        prepare_acp(
+            emit.session.clone(),
+            sessions,
+            &emit.cwd,
+            &BTreeSet::new(),
+            &emit.window,
+        )
+        .unwrap()
+        .commit(RecordedIds {
+            session: Some("zdoc".to_owned()),
+            ..RecordedIds::default()
+        })
+        .unwrap();
+    }
+}
+
+/// A connection that starts `sess_old`, prompts it once and ends; its emits.
+const FIRST_CONNECTION: &str = r#"> {"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/work/repo","mcpServers":[]}}
+< {"jsonrpc":"2.0","id":1,"result":{"sessionId":"sess_old"}}
+> {"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"sess_old","prompt":[{"type":"text","text":"hello"}]}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"session_info_update","title":"Old title"}}}
+< {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_old","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}}}
+< {"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}
+"#;
+
 #[test]
-fn a_load_replay_is_not_recorded_and_a_cut_connection_closes_its_turn() {
-    let mut recorder = Recorder::new();
-    let emits = play(&mut recorder, LOAD);
-    assert_eq!(emits.len(), 1, "only the session: the replay made no turn");
-    assert_eq!(emits[0].session.session_id, "sess_old");
+fn the_replay_of_a_session_not_recorded_is_its_history() {
+    let sessions = tempfile::tempdir().unwrap();
+    let mut recorder = Recorder::new(sessions.path().to_owned());
+    let emits = play(&mut recorder, REPLAY);
+    emits.iter().for_each(assert_all_round_trip);
+    // The replay made no windows, and its turns come with the load's answer.
+    assert_eq!(emits.len(), 1, "{emits:?}");
+    let batch = &emits[0].session;
+    assert_eq!(batch.session_id, "sess_unseen");
     assert_eq!(
-        emits[0].session.imported.session.as_ref().unwrap().harness,
-        "acp"
+        batch.imported.session.as_ref().unwrap().harness,
+        "example-agent"
+    );
+    let mut turns: Vec<_> = batch.imported.turns.iter().collect();
+    turns.sort_by_key(|(_, turn)| turn.seq);
+    let [(first_id, first), (_, second)] = turns[..] else {
+        panic!("two turns: {turns:?}");
+    };
+    assert_eq!((first.seq, first.parent_turn.as_deref()), (0, None));
+    assert_eq!(
+        (second.seq, second.parent_turn.as_deref()),
+        (1, Some(first_id.as_str()))
+    );
+    assert!(first.stop_reason.is_none() && second.stop_reason.is_none());
+    let items = |turn: &PromptTurn| -> Vec<(u64, String)> {
+        let mut items: Vec<_> = turn
+            .messages
+            .iter()
+            .map(|message| (message.seq, format!("{:?} {}", message.kind, message.text)))
+            .chain(
+                turn.tool_calls
+                    .iter()
+                    .map(|call| (call.seq, format!("tool {} {:?}", call.id, call.status))),
+            )
+            .collect();
+        items.sort();
+        items
+    };
+    assert_eq!(
+        items(first),
+        [
+            (
+                0,
+                "UserMessage Rename the loader\nfile:///work/repo/src/lib.rs".to_owned()
+            ),
+            (1, "AgentMessage Looking.".to_owned()),
+            (2, "tool call_a Completed".to_owned()),
+            (3, "AgentMessage Renamed.".to_owned()),
+        ]
+    );
+    assert_eq!(first.tool_calls[0].output.as_deref(), Some("fn load() {}"));
+    assert_eq!(
+        first.tool_calls[0].locations[0].path,
+        "/work/repo/src/lib.rs"
+    );
+    assert_eq!(
+        items(second),
+        [
+            (0, "UserMessage And the tests".to_owned()),
+            (1, "tool call_b Failed".to_owned()),
+            (2, "AgentMessage The tests failed.".to_owned()),
+        ]
+    );
+    assert_eq!(
+        batch.imported.session.as_ref().unwrap().title.as_deref(),
+        Some("Rename")
+    );
+    assert!(recorder.finish().is_empty());
+
+    // The host commits it: the next load of the session is a continuation.
+    host_records(sessions.path(), &emits);
+    let mut next = Recorder::new(sessions.path().to_owned());
+    let emits = play(&mut next, REPLAY);
+    assert!(emits[0].session.imported.turns.is_empty());
+    assert_eq!(emits[0].session.doc.as_deref(), Some("zdoc"));
+}
+
+#[test]
+fn a_replay_the_connection_never_answers_records_nothing_and_a_failed_load_leaves_no_session() {
+    let sessions = tempfile::tempdir().unwrap();
+    let trace: Vec<_> = lines(REPLAY);
+    let answer = trace
+        .iter()
+        .position(|(_, line)| line.contains(r#""id":1,"result""#))
+        .unwrap();
+    let mut recorder = Recorder::new(sessions.path().to_owned());
+    for (direction, line) in &trace[..answer] {
+        recorder.feed(*direction, at(), line.as_bytes()).unwrap();
+    }
+    assert!(recorder.finish().is_empty());
+
+    let mut recorder = Recorder::new(sessions.path().to_owned());
+    for (direction, line) in &trace[..answer] {
+        recorder.feed(*direction, at(), line.as_bytes()).unwrap();
+    }
+    let refused = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"no such session"}}"#;
+    let emits = recorder
+        .feed(
+            Direction::FromAgent,
+            at(),
+            format!("{refused}\n").as_bytes(),
+        )
+        .unwrap();
+    assert!(emits.is_empty() && recorder.finish().is_empty());
+    let error = recorder
+        .feed(
+            Direction::ToAgent,
+            at(),
+            br#"{"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"sess_unseen","prompt":[]}}
+"#,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown session"), "{error}");
+}
+
+#[test]
+fn a_recorded_session_loaded_by_a_later_connection_drops_the_replay_and_continues() {
+    let sessions = tempfile::tempdir().unwrap();
+    let mut first = Recorder::new(sessions.path().to_owned());
+    let recorded = play(&mut first, FIRST_CONNECTION);
+    let first_turn = recorded
+        .iter()
+        .flat_map(|emit| emit.session.imported.turns.keys())
+        .next()
+        .unwrap()
+        .clone();
+    host_records(sessions.path(), &recorded);
+
+    let mut second = Recorder::new(sessions.path().to_owned());
+    let emits = play(&mut second, LOAD);
+    assert_eq!(emits.len(), 1, "only the session: the replay made no turn");
+    let start = &emits[0].session;
+    assert_eq!(start.session_id, "sess_old");
+    assert_eq!(
+        start.doc.as_deref(),
+        Some("zdoc"),
+        "the same session document"
+    );
+    assert!(start.imported.turns.is_empty());
+    assert_eq!(
+        start.imported.session.as_ref().unwrap().title.as_deref(),
+        Some("Old title")
     );
 
-    let finished = recorder.finish();
+    // The connection is cut mid-turn: the turn follows the one the earlier connection recorded.
+    let finished = second.finish();
     assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].session.doc.as_deref(), Some("zdoc"));
     let turn = finished[0].session.imported.turns.values().next().unwrap();
+    assert_eq!(
+        (turn.seq, turn.parent_turn.as_deref()),
+        (1, Some(first_turn.as_str()))
+    );
     assert_eq!(turn.stop_reason, None);
-    // A messageId joins the chunks that name it.
+    // A message id joins the chunks that name it, and the dropped replay is nowhere in the turn.
     let texts: Vec<_> = turn
         .messages
         .iter()
-        .map(|m| (m.id.as_str(), m.text.as_str()))
+        .map(|message| (message.id.as_str(), message.text.as_str()))
         .collect();
     assert_eq!(
         texts,
@@ -310,12 +484,27 @@ fn a_load_replay_is_not_recorded_and_a_cut_connection_closes_its_turn() {
         ]
     );
     assert!(turn.tool_calls.is_empty());
-    assert!(recorder.finish().is_empty());
+    assert!(second.finish().is_empty());
+}
+
+#[test]
+fn an_acp_session_never_shares_a_state_file_with_a_hook_session() {
+    let dir = Path::new("/sessions");
+    let acp = crate::host::acp_state_path(dir, "a/b.c%");
+    assert_eq!(acp, dir.join("acp.a%2fb%2ec%25.json"));
+    // A hook's session id is `[A-Za-z0-9_-]+`, so `<id>.json` never begins `acp.`.
+    assert!(
+        acp.file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("acp.")
+    );
 }
 
 #[test]
 fn doc_ids_from_the_recorder_ride_later_emits() {
-    let mut recorder = Recorder::new();
+    let mut recorder = Recorder::new(PathBuf::new());
     let all = lines(SESSION);
     let mut emits = Vec::new();
     for (direction, line) in &all[..4] {
@@ -336,7 +525,7 @@ fn doc_ids_from_the_recorder_ride_later_emits() {
 #[test]
 fn protocol_violations_are_errors_naming_the_message() {
     let feed = |direction, line: &str| {
-        Recorder::new()
+        Recorder::new(PathBuf::new())
             .feed(direction, at(), format!("{line}\n").as_bytes())
             .unwrap_err()
             .to_string()
@@ -356,7 +545,7 @@ fn protocol_violations_are_errors_naming_the_message() {
         )
         .contains("unknown session x")
     );
-    let mut recorder = Recorder::new();
+    let mut recorder = Recorder::new(PathBuf::new());
     for (direction, line) in &lines(SESSION)[..6] {
         recorder.feed(*direction, at(), line.as_bytes()).unwrap();
     }
