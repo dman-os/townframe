@@ -312,7 +312,7 @@ pierre/test/virtualiz*|PENDING|S10||
 pierre/test/InteractionManager.gutterUtility.test.ts|PORTED|S11b|managers/interaction_manager_gutter_utility_test.rs|the 17 tests of `InteractionManager gutter utility`; the six editor active-line tests are dropped with the editor active line
 pierre/test/getChangedDocumentLines*|OUT|-||edit session helper
 pierre/test/updateDiffHunks*|OUT|-||edit session hunk recompute
-pierre/test/realignChangeContent*|PENDING|S3||
+pierre/test/realignChangeContent*|PORTED|S3|utils/realign_change_content_upstream_tests.rs|the non-blank and whitespace cases are ported unchanged; the four documented jsdiff→similar tie-break cases are a_blank_inserted_beside_an_existing_blank_keeps_its_parsed_position, a_blank_removed_beside_an_existing_blank_keeps_its_parsed_position, keeps_the_parsed_position_at_the_bottom_of_a_multi_blank_run, and keeps_the_parsed_blank_line_position_across_separate_hunks (divergence row "realign blank-line tie-breaks (four cases)")
 pierre/test/setDeferredArrayItem*|PENDING|S4||
 pierre/test/getHighlighterThemeStyles*|PENDING|S5||
 pierre/test/registerCustomTheme*|OUT|-||Shiki theme registry
@@ -323,6 +323,7 @@ pierre/test/highlighter*|PENDING|S7||adapted where the behavior exists behind th
 pierre/test/resolveTheme*|PENDING|S7||
 pierre/test/themeTypeUpdates*|PENDING|S7||
 pierre/test/UniversalRenderingManager.test.ts|PORTED|S10|managers/universal_rendering_manager_test.rs|all six cases; the module-level queue is a manager value; one added case pins clearRenderQueue
+pierre/test/scrollbarGutter.test.ts|PORTED|S11a|utils/dom/scrollbar_gutter_upstream_tests.rs|all three CSS-helper cases are ported unchanged; the probe itself is exercised through ScrollbarGutterHost by the S11a oracle test
 pierre/test/*|PENDING|-||not yet assigned to a slice; triage in the owning slice
 jsdiff/libesm/diff/base.js|REPLACED|S2|diff.rs|Myers is `similar`; ChangeObject shape kept. Divergence: hunk and run boundaries may differ where several minimal diffs exist; maxEditLength/timeout/callback/comparator options not offered
 jsdiff/libesm/diff/line.js|REPLACED|S2|diff.rs|diffLines -> diff::diff_lines (invariants and minimal edit totals checked against jsdiff goldens); ignoreWhitespace/newlineIsToken/stripTrailingCr/ignoreNewlineAtEof options not offered

@@ -50,6 +50,8 @@ mod parse_diff_from_file_test;
 #[cfg(test)]
 mod parse_patch_files_test;
 #[cfg(test)]
+mod realign_change_content_upstream_tests;
+#[cfg(test)]
 mod parse_quoted_diff_file_name_test;
 #[cfg(test)]
 mod trim_patch_context_test;

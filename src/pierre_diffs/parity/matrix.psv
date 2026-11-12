@@ -449,11 +449,11 @@ pierre/test/reactCodeViewEditorOptions.test.ts|1084|OUT|-||edit mode is out of s
 pierre/test/reactEditorOptions.test.ts|2164|OUT|-||edit mode is out of scope for v1
 pierre/test/reactPartialHydration.test.ts|448|OUT|-||React adapter
 pierre/test/reactStrictMode.test.ts|223|OUT|-||React adapter
-pierre/test/realignChangeContent.test.ts|633|PENDING|S3||
+pierre/test/realignChangeContent.test.ts|633|PORTED|S3|utils/realign_change_content_upstream_tests.rs|the non-blank and whitespace cases are ported unchanged; the four documented jsdiff→similar tie-break cases are a_blank_inserted_beside_an_existing_blank_keeps_its_parsed_position, a_blank_removed_beside_an_existing_blank_keeps_its_parsed_position, keeps_the_parsed_position_at_the_bottom_of_a_multi_blank_run, and keeps_the_parsed_blank_line_position_across_separate_hunks (divergence row "realign blank-line tie-breaks (four cases)")
 pierre/test/registerCustomTheme.test.ts|314|OUT|-||Shiki theme registry
 pierre/test/renderTokenLines.test.ts|93|PORTED|S5|utils/render/render_token_lines_test.rs|two of three cases, asserted on the hast tree instead of HTML+JSDOM; the useTokenTransformer case is out (editor token transformer is not ported)
 pierre/test/resolveTheme.test.ts|220|PENDING|S7||
-pierre/test/scrollbarGutter.test.ts|41|PENDING|-||not yet assigned to a slice; triage in the owning slice
+pierre/test/scrollbarGutter.test.ts|41|PORTED|S11a|utils/dom/scrollbar_gutter_upstream_tests.rs|all three CSS-helper cases are ported unchanged; the probe itself is exercised through ScrollbarGutterHost by the S11a oracle test
 pierre/test/setDeferredArrayItem.test.ts|86|PENDING|S4||
 pierre/test/sharedHighlighter.test.ts|348|OUT|-||Shiki highlighter registry
 pierre/test/sparseLayoutCheckpoints.test.ts|539|PENDING|S12b||PARTIAL. Ported (window_upstream_tests.rs): `VirtualizedFileDiff uses checkpoints for deep expanded line positions and anchors` (the `getLinePosition` half; `getNumericScrollAnchor` is dropped, dropped.psv) and `VirtualizedFileDiff maps hidden collapsed line indexes to their separator row`. Ported in S12b-3 (integration_upstream_tests.rs): `VirtualizedFileDiff marks diff indicator changes as layout dirty` (`Virtualizer::is_dom_dirty` stands in for the stub that records `instanceChanged`'s argument); the VirtualizedFile cases are DEFER. The sparse-checkpoint arithmetic itself is covered by the layout oracle

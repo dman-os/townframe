@@ -6,9 +6,9 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 
 | status | files | upstream LOC |
 |---|---:|---:|
-| PORTED | 120 | 32855 |
+| PORTED | 122 | 33529 |
 | REPLACED | 10 | 1817 |
-| PENDING | 84 | 26737 |
+| PENDING | 82 | 26063 |
 | OUT | 248 | 98288 |
 | DEFER | 22 | 10731 |
 
@@ -465,11 +465,11 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/reactEditorOptions.test.ts` | 2164 | OUT | - |  | edit mode is out of scope for v1 |
 | `pierre/test/reactPartialHydration.test.ts` | 448 | OUT | - |  | React adapter |
 | `pierre/test/reactStrictMode.test.ts` | 223 | OUT | - |  | React adapter |
-| `pierre/test/realignChangeContent.test.ts` | 633 | PENDING | S3 |  |  |
+| `pierre/test/realignChangeContent.test.ts` | 633 | PORTED | S3 | `utils/realign_change_content_upstream_tests.rs` | the non-blank and whitespace cases are ported unchanged; the four documented jsdiff→similar tie-break cases are a_blank_inserted_beside_an_existing_blank_keeps_its_parsed_position, a_blank_removed_beside_an_existing_blank_keeps_its_parsed_position, keeps_the_parsed_position_at_the_bottom_of_a_multi_blank_run, and keeps_the_parsed_blank_line_position_across_separate_hunks (divergence row "realign blank-line tie-breaks (four cases)") |
 | `pierre/test/registerCustomTheme.test.ts` | 314 | OUT | - |  | Shiki theme registry |
 | `pierre/test/renderTokenLines.test.ts` | 93 | PORTED | S5 | `utils/render/render_token_lines_test.rs` | two of three cases, asserted on the hast tree instead of HTML+JSDOM; the useTokenTransformer case is out (editor token transformer is not ported) |
 | `pierre/test/resolveTheme.test.ts` | 220 | PENDING | S7 |  |  |
-| `pierre/test/scrollbarGutter.test.ts` | 41 | PENDING | - |  | not yet assigned to a slice; triage in the owning slice |
+| `pierre/test/scrollbarGutter.test.ts` | 41 | PORTED | S11a | `utils/dom/scrollbar_gutter_upstream_tests.rs` | all three CSS-helper cases are ported unchanged; the probe itself is exercised through ScrollbarGutterHost by the S11a oracle test |
 | `pierre/test/setDeferredArrayItem.test.ts` | 86 | PENDING | S4 |  |  |
 | `pierre/test/sharedHighlighter.test.ts` | 348 | OUT | - |  | Shiki highlighter registry |
 | `pierre/test/sparseLayoutCheckpoints.test.ts` | 539 | PENDING | S12b |  | PARTIAL. Ported (window_upstream_tests.rs): `VirtualizedFileDiff uses checkpoints for deep expanded line positions and anchors` (the `getLinePosition` half; `getNumericScrollAnchor` is dropped, dropped.psv) and `VirtualizedFileDiff maps hidden collapsed line indexes to their separator row`. Ported in S12b-3 (integration_upstream_tests.rs): `VirtualizedFileDiff marks diff indicator changes as layout dirty` (`Virtualizer::is_dom_dirty` stands in for the stub that records `instanceChanged`'s argument); the VirtualizedFile cases are DEFER. The sparse-checkpoint arithmetic itself is covered by the layout oracle |
@@ -499,7 +499,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `highlights/dist/highlights.wasm` | 0 | OUT | S7 |  | unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern |
 | `theming/dist/modules/createThemeResolver.js` | 116 | PORTED | S7 | `highlights/theming.rs` | synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed |
 
-## Assertions converted to invariants (45)
+## Assertions converted to invariants (46)
 
 | upstream test | title | conversion |
 |---|---|---|
@@ -548,6 +548,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/managers/InteractionManager.ts` | `document.elementFromPoint(x, y)` / `shadowRoot.elementFromPoint` | the Dioxus host answers from its cached row geometry: when a drag starts it asks the engine for the client rects of the `pre` and of one content column (async `get_client_rect`), which anchor the stacked row heights it already keeps (`onresize`); a lookup moves the anchor by the scroll and layout shift since. It answers the content-column child (line, annotation, buffer) under the point and not the gutter cell, which the manager normalizes to the row; a split diff's two columns share the pre equally (the stylesheet's `1fr 1fr`). A non-virtualized view measures its rows the same way (`onresize` on each line, annotation and no-newline row, and `onmounted` on the `pre` and a content column) while the pointer acts on rows, which costs one resize listener per row and suits short diffs (every view also measures hunk separators, into the geometry cache only, since no style sets a separator's height and the rows below one would sit off by it); with no scroller its scroll position is 0 and the rect measured at drag start is the whole anchor. Until the rects land, or on a renderer without client rects, it answers `Unavailable` and the manager follows the event path (a mouse drag still works; a touch drag stays on its origin row) |
 | `pierre/src/managers/InteractionManager.ts` | `handlePointerClick(event: MouseEvent)` reading `event.pointerId`/`pointerType` | `click` arrives as the platform's mouse payload (no pointer id or type); the manager reads only the target and shift key of a click, so the host fills pointer id 0 and type mouse |
 | `pierre/src/managers/InteractionManager.ts` | `hoveredLine` / `gutterUtilityLine` kept as references to elements a render replaced | upstream leaves them pointing at detached elements (the utility container is appended into the detached number element, out of the view, and `getHoveredLine` keeps answering the replaced row's line); the owner here frees replaced rows after the manager's `setup`, and the container with them, so `setup` ends both while the rows exist: the hover is cleared and the utility hidden (the container is out of any row, as upstream's detached placement has it), and `getHoveredLine` answers no line until the pointer moves |
+| `pierre/test/realignChangeContent.test.ts` | realign blank-line tie-breaks (four cases) | the four upstream jsdiff block-boundary expectations are documented in the port comments; Rust keeps the similar-backed output because these are equal-cost alignment tie-breaks: inserted beside blank, removed beside blank, bottom of a multi-blank run, and separate hunks |
 
 ## Dropped branches (63)
 
