@@ -33,5 +33,7 @@ features = []
 "src/big_cabinet/drawer/sqlite/migrations/005_config_drawer.sql" = "a96ad1c2ec934d9080231dc6e132475f2e1da268865058fb2601d26f4229200d"
 "src/big_cabinet/grants/sqlite/migrations/001_grants.sql" = "edb7fc250a18bc27e1acaf04f61cefe73a5077ab9fc4baa9f09ae74adeb58380"
 "src/big_cabinet/index/datum_ref/sqlite/migrations/001_init.sql" = "6f48d99e84520d17824e28824447e8919cf8c20a91df29f2002d8b4162001f37"
+"src/big_cabinet/index/datum_ref/sqlite/migrations/002_key_edges.sql" = "05cc37067201115332e931d466655d540042f9c525a90aa8c96d8c2dc6b60fd4"
 "src/big_cabinet/index/datum_set/sqlite/migrations/001_init.sql" = "5ae10c8c2ce066a47e276b380556a693f72d12e108db9c1103dba4873df12845"
 "src/big_cabinet/index/datum_set/sqlite/migrations/002_ref_tags.sql" = "fa474961c7ffb38890e5978be8dea8995f5ed5b2183c6595ef5845c6a63f19c9"
+"src/big_cabinet/index/datum_set/sqlite/migrations/003_key_edges.sql" = "f77703cafbd4f82797476f949d3712409fda5846c04f6d9db2a111be2877aacf"
