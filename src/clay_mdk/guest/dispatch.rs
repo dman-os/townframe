@@ -89,13 +89,12 @@ pub async fn send_to(
 
     let body = request.body;
     wit_bindgen::spawn_local(async move {
-        let remaining = body_tx.write_all(body).await;
-        assert!(remaining.is_empty(), "outgoing body stream closed early");
+        // The host may refuse or answer a request without reading its body (a denied origin
+        // drops the request outright). The reader closing the stream or the trailers future is
+        // then its decision, not a fault here: `client::send`'s result below is the outcome.
+        drop(body_tx.write_all(body).await);
         drop(body_tx);
-        trailers_tx
-            .write(Ok(None))
-            .await
-            .expect("outgoing trailers receiver disappeared");
+        drop(trailers_tx.write(Ok(None)).await);
     });
 
     let response = client::send(outgoing)
