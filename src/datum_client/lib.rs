@@ -165,8 +165,8 @@ where
 
     Ok(response
         .datums
-        .into_iter()
-        .filter_map(|(key, _version)| (key.tag().as_str() == D::TAG).then_some(key))
+        .into_keys()
+        .filter_map(|key| (key.tag().as_str() == D::TAG).then_some(key))
         .collect())
 }
 
@@ -315,6 +315,8 @@ mod tests {
         requests: Mutex<Vec<RecordedRequest>>,
     }
 
+    struct FakeTransportHandle(Arc<FakeTransport>);
+
     #[derive(Debug)]
     enum RecordedRequest {
         Read(ReadDatums),
@@ -323,16 +325,18 @@ mod tests {
         Poll(PollDatums),
     }
 
-    impl service_client_core_rs::UnaryTransport<ReadDatums> for Arc<FakeTransport> {
+    impl service_client_core_rs::UnaryTransport<ReadDatums> for FakeTransportHandle {
         async fn call(
             &self,
             request: Envelope<ReadDatums>,
         ) -> Result<ResponseEnvelope<DatumsRead>, ClientError<DocsError>> {
-            self.requests
+            self.0
+                .requests
                 .lock()
                 .unwrap()
                 .push(RecordedRequest::Read(request.params));
             Ok(self
+                .0
                 .reads
                 .lock()
                 .unwrap()
@@ -342,17 +346,19 @@ mod tests {
         }
     }
 
-    impl service_client_core_rs::UnaryTransport<ListDatums> for Arc<FakeTransport> {
+    impl service_client_core_rs::UnaryTransport<ListDatums> for FakeTransportHandle {
         async fn call(
             &self,
             request: Envelope<ListDatums>,
         ) -> Result<ResponseEnvelope<big_cabinet_core::doc::DatumListing>, ClientError<DocsError>>
         {
-            self.requests
+            self.0
+                .requests
                 .lock()
                 .unwrap()
                 .push(RecordedRequest::List(request.params));
             Ok(self
+                .0
                 .listings
                 .lock()
                 .unwrap()
@@ -362,16 +368,18 @@ mod tests {
         }
     }
 
-    impl service_client_core_rs::UnaryTransport<WriteDatums> for Arc<FakeTransport> {
+    impl service_client_core_rs::UnaryTransport<WriteDatums> for FakeTransportHandle {
         async fn call(
             &self,
             request: Envelope<WriteDatums>,
         ) -> Result<ResponseEnvelope<WriteReceipt>, ClientError<DocsError>> {
-            self.requests
+            self.0
+                .requests
                 .lock()
                 .unwrap()
                 .push(RecordedRequest::Write(request.params));
             Ok(self
+                .0
                 .writes
                 .lock()
                 .unwrap()
@@ -381,16 +389,18 @@ mod tests {
         }
     }
 
-    impl service_client_core_rs::UnaryTransport<PollDatums> for Arc<FakeTransport> {
+    impl service_client_core_rs::UnaryTransport<PollDatums> for FakeTransportHandle {
         async fn call(
             &self,
             request: Envelope<PollDatums>,
         ) -> Result<ResponseEnvelope<DatumPage>, ClientError<DocsError>> {
-            self.requests
+            self.0
+                .requests
                 .lock()
                 .unwrap()
                 .push(RecordedRequest::Poll(request.params));
             Ok(self
+                .0
                 .polls
                 .lock()
                 .unwrap()
@@ -437,7 +447,7 @@ mod tests {
             key(NOTE_TAG, "main"),
             accepted(serde_json::to_value(&expected).unwrap()),
         ));
-        let client = Client::new(Arc::clone(&transport));
+        let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
 
         assert_eq!(
             read::<_, Note>(
@@ -475,7 +485,7 @@ mod tests {
             doc_id: doc(),
             heads: Vec::new(),
         });
-        let client = Client::new(Arc::clone(&transport));
+        let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
         assert_eq!(
             read::<_, Note>(
                 &client,
@@ -531,7 +541,7 @@ mod tests {
                 ]),
                 authors: BTreeMap::new(),
             });
-        let client = Client::new(Arc::clone(&transport));
+        let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
 
         assert_eq!(
             list::<_, Note>(&client, RequestContext::root(), capability(), doc())
@@ -563,7 +573,7 @@ mod tests {
             through: 13,
             caught_up: true,
         });
-        let client = Client::new(Arc::clone(&transport));
+        let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
 
         let page = poll::<_, Note>(
             &client,
@@ -604,7 +614,7 @@ mod tests {
             key("org.example.other", "main"),
             accepted(serde_json::json!({"text": "wrong row"})),
         ));
-        let client = Client::new(Arc::clone(&transport));
+        let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
 
         let error = read::<_, Note>(
             &client,
