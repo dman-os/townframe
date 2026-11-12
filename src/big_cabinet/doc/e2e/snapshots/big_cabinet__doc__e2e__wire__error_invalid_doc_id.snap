@@ -1,0 +1,9 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: error
+---
+{
+  "InvalidDocId": {
+    "doc_id": "zE93Jxy"
+  }
+}
