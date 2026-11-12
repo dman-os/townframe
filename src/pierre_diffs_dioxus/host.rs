@@ -238,6 +238,18 @@ impl DioxusHost {
         self.registrations.borrow().visible.contains(&node)
     }
 
+    #[cfg(test)]
+    pub(crate) fn geometry_total_for_probe(&self) -> f64 {
+        let geometry = self.geometry.borrow();
+        let document = &self.document;
+        let shadow = document.shadow_root(self.container).unwrap();
+        document
+            .child_nodes(shadow)
+            .into_iter()
+            .map(|child| geometry.height(document, child))
+            .sum()
+    }
+
     pub(crate) fn wants_scroll(&self, node: NodeKey) -> bool {
         self.registrations.borrow().scroll.contains_key(&node)
     }

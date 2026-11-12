@@ -404,6 +404,28 @@ fn jump_probe() {
 }
 
 #[test]
+fn bottom_probe() {
+    let mut rig = Rig::new(3000);
+    rig.boot();
+    let mut measured = std::collections::HashSet::new();
+    rig.measure_new_rows(20.0, &mut measured);
+    let est = rig.estimated_height();
+    for top in [0.0, 30_000.0, est - VIEWPORT - 200.0, est - VIEWPORT] {
+        rig.scroll_to(top);
+        rig.measure_new_rows(20.0, &mut measured);
+        let document = super::host_document(&rig.view.host);
+        let shadow = document.shadow_root(rig.view.host.container()).unwrap();
+        let mut out = Vec::new();
+        for child in document.child_nodes(shadow) {
+            out.push(format!("{}:{:?}", document.tag_name(&child), document.get_attribute(child, "style")));
+        }
+        let lines = rig.rendered_lines();
+        let geometry = rig.view.host.geometry_total_for_probe();
+        eprintln!("BOTTOM top={top} est={est} rows={} {:?}..{:?} shadow_children={out:?} stacked_total={geometry}", lines.len(), lines.first(), lines.last());
+    }
+}
+
+#[test]
 fn drift_probe() {
     for height in [20.0, 20.5, 19.0] {
         let mut rig = Rig::new(3000);
