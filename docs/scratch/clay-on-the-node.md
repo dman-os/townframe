@@ -1,8 +1,8 @@
 # Clay on the node (claytxt lane, ADR draft)
 
-Status: draft, 2026-11-12. The operator answered the first round on 2026-11-12 (recorded per section).
+Status: draft, 2026-11-12. The operator answered both rounds on 2026-11-12 (recorded per section); remaining work is review of the whole.
 Number: to be assigned when it moves to `docs/adrs/` (ADRs 029–031 are Clay's; the node lane is at
-045 on `feat/big-node-next`). The app this serves is **Daytext** (the user-facing name; "Dayframe"
+045 on `feat/big-node-next`). The app this serves is **daytxt** (the user-facing name, spelled with TXT; "Dayframe"
 is free for other use).
 
 Sources read for this draft: ADR 022 (actors and grants), ADR 027 (cartridges and nodules), ADR
@@ -34,25 +34,16 @@ The node side is settled enough to build on:
 
 ## 1. Where a host's node comes from
 
-**Decided (operator, 2026-11-12): like the CLI.** A Daytext host looks for a running node and
-uses it; if none is running, it boots one in its own process and becomes the holder.
-
-- Discovery is `day`'s: the `--node` flag or `DAY_NODE`, else the platform data directory; the
-  socket is `$XDG_RUNTIME_DIR/day/<node-id>.sock` (else `/tmp/day-<euid>/`), and `node.lock` (a
-  flock) marks the holder.
-- When no node holds the lock, the host boots it in-process (`Booted::boot`, `Mode::InProcess`),
-  serves the socket for `day` and other clients, and calls its own router without a socket, exactly
-  as `day_cli/client.rs` does. The holder logic moves out of `day_cli` into a crate both use, so
-  there is one implementation of "find or become the holder".
-- Android has no second process, so the app is always the holder. The web host embeds a webnode
-  (ADR 038; webnodes lane).
-- A host that is only a client and loses its node shows that state; it does not silently boot a
-  second node.
+**Decided (operator, 2026-11-12): exactly as `day` does.** A daytxt host finds a running node by
+`day`'s discovery and attaches as a socket client, or boots it in-process and becomes the holder
+(`day_cli/client.rs`). Nothing new is designed here: the find-or-hold code moves out of `day_cli`
+into a crate both use. Android has no second process, so the app is always the holder; the web
+host embeds a webnode (ADR 038).
 
 ## 2. Who a micro acts as
 
-**Decided in direction (operator, 2026-11-12): a micro is a subsystem actor, not its cartridge's
-actor.**
+**Decided (operator, 2026-11-12): a micro is a subsystem actor, not its cartridge's actor, and the
+`micros` and `nodules` subsystems stay parallel for now.**
 
 - Actor tree: operator → `micros` subsystem actor → one actor per installed micro, mirroring
   operator → `nodules` → per-nodule actor (ADR 027). The path segment follows the nodule rule
@@ -77,18 +68,12 @@ through its host.**
 - Authors write the same thing in both: `ctx.call::<M>(input).await` with a `method_core::Method`,
   through `service_client_core_rs::Client` with a transport the environment supplies. A typed
   client (`ctx.docs()`, …) is shared code, not two implementations.
-- The micro transport is a host import, routed into dispatch as the micro's actor (§2). Two
-  shapes:
-  - **(a) Reuse `wasi:http/client` to `dispatch.local`**, byte for byte the nodule transport. One
-    transport crate; but every Clay runtime (wasmtime, wcmp, and the browser's wcmp path) must
-    host `wasi:http/client`, and micros otherwise have no network imports (the WASI no-network
-    pin).
-  - **(b) A small Clay import**, `clay:node/dispatch.call(nsid, body) -> result<bytes, error>`
-    (async), with a `Transport` impl in `clay_mdk` that frames the same XRPC request. Portable to
-    every Clay runtime and keeps the egress pin simple.
-  
-  Recommendation: **(b)**. The author-facing API is identical either way; only the transport crate
-  differs.
+- **Decided (operator, 2026-11-12): the micro transport is `wasi:http/client` to
+  `dispatch.local`, the nodule transport byte for byte.** Host services should align with the WASI
+  ecosystem wherever they can, for Clay and the node alike. So every Clay runtime (wasmtime, wcmp,
+  and wcmp in the browser) hosts `wasi:http/client`, with egress admitting only `dispatch.local`
+  (the WASI no-network pin becomes "no network except dispatch"). The host answers that origin by
+  routing into dispatch as the micro's actor (§2), as `big_nodule/egress.rs` does for nodules.
 - Calls are async-only and run only in async contexts: the synchronous mount and dispatch exports
   must not suspend (wcmp's first-poll rule). A call from an event handler is spawned.
 - The capability bank stays for micro-to-micro calls (publications, presentations). Node methods do
@@ -112,9 +97,11 @@ nodules and micros, but not the partial-sync collection machinery.**
 - Answer to the operator's question (can the guest documents API run on a shallow host?): layer 1
   can, by construction. Layer 2's watches, pushes and optimistic overlay need the host-side mirror;
   a nodule that wants them uses layer 1's poll directly.
-- To settle: `clay_docs` addresses `FacetRoute {document, branch, key {tag, key-id}}`; the node
-  addresses `DatumKey` with a doc capability per request. The facet key must map onto a
-  `DatumKey` one to one (proposed), and the host holds the doc capabilities per binding.
+- **Naming (operator, 2026-11-12): "facet" is retired; Clay says datum.** `clay_docs`'s
+  `FacetRoute {document, branch, tag, key_id}` is a doc, a branch and a `DatumKey {tag, slot}`
+  under an older name. Clay's types, WIT and manifests are renamed to the datum vocabulary (about
+  870 mentions across `clay_*`, `micro_*` and `dayframe_*`), and Clay addresses datums by the
+  node's `DatumKey`. The host holds the doc capabilities per binding.
 
 ## 5. Micros in cartridges
 
@@ -134,8 +121,11 @@ nodules and micros, but not the partial-sync collection machinery.**
 
 Lanes that can run in parallel (files don't collide):
 - **Holder crate** (§1): move `day_cli`'s find-or-hold logic into a shared crate; `day` uses it.
-- **Micro transport** (§3): the Clay import, its wasmtime and wcmp hosts, and the `clay_mdk`
-  transport; a micro calls a test method end to end.
+- **Micro transport** (§3): `wasi:http/client` in the wasmtime and wcmp Clay runtimes with
+  `dispatch.local`-only egress, routed into dispatch as the micro's actor; a micro calls a test
+  method end to end.
+- **Facet → datum rename** (§4): mechanical, Clay-side only; first, since the other lanes then
+  write datum names.
 - **Docs layer 1** (§4): shared typed docs helpers over the docs methods (a good Luna lane: an
   interface with tests).
 - **Cartridge micros** (§5): typed `MicroContribution`, the config-document install record, a host
@@ -147,10 +137,7 @@ Lanes that can run in parallel (files don't collide):
 Dependency: the node lane's newer work (method routes, `day carts`, ADRs 037 and 042–045) is on
 `feat/big-node-next`, not yet on main. Lanes touching cartridges or dispatch build on that branch.
 
-## Open questions for the operator
+## Open questions
 
-1. §3 transport: (b) a Clay import (recommended), or (a) reuse `wasi:http/client`?
-2. §2: keep `micros` and `nodules` as parallel subsystems for now, with a cartridge-level parent
-   left to the consent ADR?
-3. §4: confirm the facet key ↔ `DatumKey` one-to-one mapping, and that the intext lane (owner of
-   intxt's datums) agrees.
+None from the first two rounds. The cartridge-level parent actor (§2) waits for the cartridge
+consent ADR.
