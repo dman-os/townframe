@@ -84,6 +84,25 @@ where
         request: Envelope<P>,
     ) -> Result<ResponseEnvelope<P::Output>, ClientError<P::Error>> {
         let context = request.context.clone();
+        // A byte body is a stream moved with the message (ADR 042 §2). Only a transport that
+        // moves the message itself carries it: a wire would silently drop the request stream
+        // (it is not serialized) and cannot return the response one, so it is refused here.
+        if (P::XRPC.input_encoding.is_bytes() || P::XRPC.output_encoding.is_bytes())
+            && match self {
+                Self::Direct(_) => false,
+                Self::Irpc(client) => client.as_local().is_none(),
+                Self::Xrpc(_) => true,
+            }
+        {
+            return Err(ClientError::transport(
+                format!(
+                    "`{}` has a byte body, which only an in-process client carries; over HTTP it is the raw body of `/xrpc/{}` on the node's router",
+                    P::XRPC.nsid,
+                    P::XRPC.nsid
+                ),
+                false,
+            ));
+        }
         within_deadline(
             &context,
             Box::pin(async {

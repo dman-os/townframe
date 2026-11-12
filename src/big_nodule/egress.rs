@@ -6,7 +6,11 @@
 //! with the calling workload's nodule actor as the signer. A GET reaches dispatch as the same
 //! [`HttpForm::Get`] the node's XRPC listener (`big_dispatch::xrpc_router`) hands it, so the
 //! query string is decoded by the method's Lexicon `parameters` in one place, and a verb that
-//! is not the method's kind is refused by dispatch as it is for the listener. Dispatch then admits the call as it
+//! is not the method's kind is refused by dispatch as it is for the listener. A guest's bodies
+//! are JSON in both directions until byte bodies reach guests with wasi:http streams (ADR 042
+//! §2): a method that takes bytes is refused by dispatch's encoding check, and one that answers
+//! bytes is answered `NotImplemented`. The call's origin is [`Origin::Remote`], never inherited
+//! from whoever the nodule is serving, so a local-only method is refused (ADR 042 §3). Dispatch then admits the call as it
 //! admits any other: the capability must be live, permit the NSID and be bound to that actor, so
 //! a handler that presents another nodule's capability id is denied there. Nothing else the
 //! handler says (headers, body) is trusted as identity. The trace and `x-timeout-ms` budget
@@ -16,11 +20,13 @@
 
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
+use big_dispatch_core::Origin;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
@@ -74,7 +80,9 @@ pub async fn call(
                 query: query.to_owned(),
             }
         }
-        Method::POST => HttpForm::Post,
+        Method::POST => HttpForm::Post {
+            query: query.to_owned(),
+        },
         _ => {
             return bad(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -132,18 +140,27 @@ pub async fn call(
                 idempotency_key: idempotency_key.clone(),
                 ..Authorization { authority, signer }.metadata()
             },
-            Invoke {
+            Invoke::json(
                 operation,
                 input,
-                context: InvocationContext {
+                InvocationContext {
                     idempotency_key,
                     http: Some(http),
+                    range: None,
+                    origin: Origin::Remote,
                 },
-            },
+            ),
         )
         .await;
     match result {
-        Ok(output) => (StatusCode::OK, output.output),
+        Ok(output) => match output.body {
+            Body::Json(output) => (StatusCode::OK, output),
+            Body::Bytes(_) => bad(
+                StatusCode::NOT_IMPLEMENTED,
+                "NotImplemented",
+                "the method answers bytes, which reach guests with wasi:http streams",
+            ),
+        },
         Err(ClientError::Method(error)) => dispatch_error_response(error),
         Err(ClientError::Transport { message, .. }) => {
             panic!("in-process dispatch transport failed: {message}")
@@ -165,6 +182,15 @@ fn dispatch_error_response(error: DispatchError) -> (StatusCode, Value) {
     };
     match &error {
         DispatchError::Denied => named(StatusCode::FORBIDDEN, "Denied"),
+        DispatchError::LocalOnly => named(StatusCode::FORBIDDEN, "LocalOnly"),
+        DispatchError::BodyMismatch { .. } => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            json!({ "error": "InvalidRequest", "message": error.to_string() }),
+        ),
+        DispatchError::TooLarge { .. } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({ "error": "InvalidRequest", "message": error.to_string() }),
+        ),
         DispatchError::UnknownOperation => named(StatusCode::NOT_FOUND, "UnknownOperation"),
         DispatchError::NotReady { .. } => named(StatusCode::SERVICE_UNAVAILABLE, "NotReady"),
         DispatchError::InvalidInput(message) => (

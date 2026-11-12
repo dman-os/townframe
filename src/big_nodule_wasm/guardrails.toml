@@ -7,6 +7,7 @@ allowed_dependencies = [
     "big_cabinet_core",
     "big_dispatch",
     "big_dispatch_core",
+    "method_core",
     "big_nodule",
     "big_nodule_core",
     "big_cartridges_core",

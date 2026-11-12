@@ -3,7 +3,6 @@
 use super::blobs::put_cap;
 use super::*;
 use big_blobs_core::BlobInfo;
-use big_blobs_core::PutBlob;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cartridges_core::Artifact;
@@ -31,6 +30,7 @@ use big_cartridges_core::signature::SignatureError;
 use big_cartridges_core::test_support::cartridge_id;
 use big_cartridges_core::test_support::sign_as_example;
 use big_cartridges_core::test_support::sign_with_seed;
+use method_core::ByteBody;
 use service_utils_rs::ClientError;
 use std::time::Duration;
 
@@ -68,13 +68,10 @@ fn operation<E>(error: ClientError<E>) -> E {
 
 async fn put(node: &BigNode, bytes: &[u8]) -> BlobInfo {
     node.blobs
-        .client
-        .call(
+        .put(
             RequestContext::root(),
-            PutBlob {
-                capability: put_cap(node).await,
-                bytes: bytes.to_vec().into(),
-            },
+            put_cap(node).await,
+            ByteBody::from_bytes(bytes.to_vec()),
         )
         .await
         .unwrap()

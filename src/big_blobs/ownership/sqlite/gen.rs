@@ -9,6 +9,7 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 2, name: "002_upload_receipts.sql", sql: include_str!("migrations/002_upload_receipts.sql") },
     Migration { version: 3, name: "003_pair_root_triggers.sql", sql: include_str!("migrations/003_pair_root_triggers.sql") },
     Migration { version: 4, name: "004_upload_receipts_held_digest.sql", sql: include_str!("migrations/004_upload_receipts_held_digest.sql") },
+    Migration { version: 5, name: "005_upload_receipt_expiry.sql", sql: include_str!("migrations/005_upload_receipt_expiry.sql") },
 ];
 
 pub const CONTAINS_SQL: &str = include_str!("queries/contains.sql");
@@ -53,6 +54,12 @@ pub async fn dependencies(db: &impl crate::sqlite_rs_alias::QueryExecutor, diges
     set.all()
 }
 
+pub const EXPIRED_UPLOAD_OWNERS_SQL: &str = include_str!("queries/expired_upload_owners.sql");
+pub async fn expired_upload_owners(db: &impl crate::sqlite_rs_alias::QueryExecutor, before: i64) -> SqlResult<Vec<String>> {
+    let set = db.query(EXPIRED_UPLOAD_OWNERS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(before)]).await?;
+    set.all()
+}
+
 pub const HAS_STAGED_DOCUMENT_SQL: &str = include_str!("queries/has_staged_document.sql");
 pub async fn has_staged_document(db: &impl crate::sqlite_rs_alias::QueryExecutor, staging_owner: String, document_owner: String) -> SqlResult<Vec<i64>> {
     let set = db.query(HAS_STAGED_DOCUMENT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(staging_owner), crate::sqlite_rs_alias::IntoValue::into_value(document_owner)]).await?;
@@ -85,8 +92,8 @@ pub async fn insert_pin_root(db: &impl crate::sqlite_rs_alias::Executor, digest:
 }
 
 pub const INSERT_UPLOAD_RECEIPT_SQL: &str = include_str!("queries/insert_upload_receipt.sql");
-pub async fn insert_upload_receipt(db: &impl crate::sqlite_rs_alias::Executor, owner: String, digest: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(INSERT_UPLOAD_RECEIPT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(owner), crate::sqlite_rs_alias::IntoValue::into_value(digest)]).await
+pub async fn insert_upload_receipt(db: &impl crate::sqlite_rs_alias::Executor, owner: String, digest: String, held_at: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_UPLOAD_RECEIPT_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(owner), crate::sqlite_rs_alias::IntoValue::into_value(digest), crate::sqlite_rs_alias::IntoValue::into_value(held_at)]).await
 }
 
 pub const MANAGED_PIN_SQL: &str = include_str!("queries/managed_pin.sql");
