@@ -141,6 +141,7 @@ impl Handler<Relay> for Fixture {
             &HttpMetadata {
                 authorization: Some(bearer_header_value(authority)),
                 idempotency_key: cx.idempotency_key().map(str::to_owned),
+                range: None,
             },
         )
         .expect("context headers are valid HTTP");

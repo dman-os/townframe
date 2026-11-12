@@ -59,6 +59,89 @@ async fn ciphertext(store: &Store, hash: Hash) -> Res<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A put streams its body into the store and answers the id the node hashed (ADR 042 §6): the
+/// same one for the same bytes however they are chunked, a no-op when the node already holds
+/// them, and a typed `TooLarge` when the body is over the limit, whether it says so up front or
+/// only shows it while it streams.
+#[tokio::test]
+async fn a_put_is_authoritative_idempotent_and_refuses_an_item_over_the_limit() -> Res<()> {
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let (blobs, stop) = boot(Config {
+        storage: Storage::memory().unwrap(),
+        sql: runtime.ephemeral(&[])?,
+        authority: Client::new(Transport::direct(Arc::new(UnusedAuthority))),
+        operator: Uuid7::new(),
+        namespace: Namespace {
+            namespace_id: Uuid7::new(),
+            capability: CapId::from_bytes([7; 16]),
+        },
+    })
+    .await?;
+    let chunked = |chunks: &[&'static [u8]]| {
+        ByteBody::new(futures::stream::iter(
+            chunks
+                .iter()
+                .map(|chunk| Ok(Bytes::from_static(chunk)))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let first = blobs
+        .service
+        .put(chunked(&[b"hello ", b"world"]), 64)
+        .await
+        .unwrap();
+    assert_eq!(first.length_octets, 11);
+    // The same bytes in one piece, and again: the same answer, no earlier `stat` needed.
+    let whole = blobs
+        .service
+        .put(ByteBody::from_bytes(Bytes::from_static(b"hello world")), 64)
+        .await
+        .unwrap();
+    assert_eq!(whole, first);
+    assert_eq!(
+        blobs.service.stat(&first.blob_id).await?,
+        Some(first.clone())
+    );
+
+    let too_large = BlobsError::TooLarge { limit_octets: 10 };
+    // A body that states its length is refused before it is read...
+    let stated = ByteBody::from_bytes(Bytes::from_static(b"hello world"));
+    assert_eq!(blobs.service.put(stated, 10).await.unwrap_err(), too_large);
+    // ...and one that does not is refused once it has gone over.
+    let unstated = chunked(&[b"hello ", b"world"]);
+    assert_eq!(
+        blobs.service.put(unstated, 10).await.unwrap_err(),
+        too_large
+    );
+    // A body that fails mid-stream is that item's refusal, and nothing of it is held: the
+    // store's importer waits forever on a failed source, so the service ends the stream itself.
+    let failing = ByteBody::new(futures::stream::iter([
+        Ok(Bytes::from_static(b"partial")),
+        Err(std::io::Error::other("connection reset")),
+    ]));
+    let Err(BlobsError::Unreadable { reason }) = blobs.service.put(failing, 64).await else {
+        panic!("a failed body is refused as unreadable");
+    };
+    assert!(reason.contains("connection reset"), "{reason}");
+    assert!(
+        blobs
+            .service
+            .stat(&BlobId::new(*iroh_blobs::Hash::new(b"partial").as_bytes()))
+            .await?
+            .is_none()
+            || !blobs
+                .service
+                .ownership
+                .contains(&BlobId::new(*iroh_blobs::Hash::new(b"partial").as_bytes()))
+                .await?,
+        "the partial body is not held"
+    );
+    // The service is released by `stop`, which waits for no handle to outlive it.
+    drop(blobs);
+    stop.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn shutdown_recovers_pending_effects_after_service_handles_drop() -> Res<()> {
     let directory = tempfile::tempdir()?;

@@ -6,6 +6,7 @@
 pub big_nodule::async fn boot (config : NodulesConfig) -> Result < (Nodules , StopToken) , NodulesError >
 pub big_nodule::egress::async fn call (dispatch : & Client < DispatchProtocol > , signer : Option < CapId > , method : & Method , path : & str , headers : & HeaderMap , body : & [u8] ,) -> (StatusCode , Value)
 pub big_nodule::fn schema_group () -> SchemaRegistrationGroup < 'static >
+pub big_nodule::wire::fn byte_body_refused () -> ProviderError
 pub big_nodule::wire::fn delivery_headers (caller : & Caller , request : & RequestContext , context : & InvocationContext , nodule_capability : Option < CapId > ,) -> HeaderMap
 pub big_nodule::wire::fn gateway_error (message : impl std :: fmt :: Display) -> ProviderError
 pub big_nodule::wire::fn provider_result (status : StatusCode , body : & [u8]) -> Result < Value , ProviderError >

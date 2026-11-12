@@ -45,6 +45,32 @@ fn a_query_states_its_request_as_parameters() {
     insta::assert_json_snapshot!(lexicon_of::<big_cabinet_core::doc::GetDocAvailability>());
 }
 
+/// A byte body (ADR 042 §1) is stated by its encoding alone, `*/*` for any media type, and the
+/// method keeps JSON parameters: a procedure with a byte input states them as `parameters`, so
+/// dispatch checks those, as it does for a query.
+#[test]
+fn a_byte_body_is_stated_by_its_encoding_and_its_parameters_stay_json() {
+    let put = lexicon_of::<big_blobs_core::PutBlob>();
+    let main = &put["defs"]["main"];
+    assert_eq!(main["type"], "procedure");
+    assert_eq!(main["input"], json!({ "encoding": "*/*" }));
+    assert_eq!(main["output"]["encoding"], "application/json");
+    assert!(main["parameters"]["properties"]["capability"].is_object());
+    let contract = super::MethodContract::compile(&put, &[]).unwrap();
+    assert!(
+        contract.check_request(&json!({})).is_err(),
+        "the parameters are what is checked, and `capability` is required"
+    );
+
+    let read = lexicon_of::<big_blobs_core::ReadBlob>();
+    let main = &read["defs"]["main"];
+    assert_eq!(main["type"], "query");
+    assert_eq!(main["output"], json!({ "encoding": "*/*" }));
+    for name in ["capability", "blobId"] {
+        assert!(main["parameters"]["properties"][name].is_object(), "{name}");
+    }
+}
+
 #[test]
 fn a_subscription_states_its_event_as_the_message() {
     insta::assert_json_snapshot!(lexicon_of::<big_cabinet_core::doc::ObserveDocAvailability>());
@@ -175,9 +201,10 @@ fn every_builtin_methods_positions_compile_to_validators() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The body a method takes: a procedure's input, else a query's parameters.
+/// The body a method takes: a procedure's JSON input, else its parameters (a query's, or a
+/// procedure whose body is bytes, which states only the body's encoding).
 fn request_position(file: &Value) -> super::Position {
-    if file["defs"]["main"].get("input").is_some() {
+    if file["defs"]["main"]["input"].get("schema").is_some() {
         super::Position::Input
     } else {
         super::Position::Parameters

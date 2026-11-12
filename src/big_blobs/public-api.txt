@@ -44,6 +44,8 @@ pub impl big_blobs::service::BlobService::async fn read_all (& self , blob_id : 
 pub impl big_blobs::service::BlobService::async fn release_import (& self , imported : & ImportedBlob) -> Res < () >
 pub impl big_blobs::service::BlobService::async fn stat (& self , blob_id : & BlobId) -> Res < Option < BlobInfo > >
 pub impl big_blobs::service::BlobService::fn store (& self) -> & Store
+pub impl big_blobs::service::Blobs::async fn put (& self , context : RequestContext , capability : CapId , body : ByteBody ,) -> Result < BlobInfo , ClientError < BlobsError > >
+pub impl big_blobs::service::Blobs::async fn read (& self , context : RequestContext , capability : CapId , blob_id : BlobId , range : Option < method_core :: ByteRange > ,) -> Result < ByteBody , ClientError < BlobsError > >
 pub impl big_blobs::service::Storage::async fn filesystem (root : PathBuf) -> Res < Self >
 pub impl big_blobs::service::Storage::fn memory () -> Res < Self >
 pub impl big_blobs::sync::BlobSyncBackend::fn active_peer_ids (& self) -> Vec < PeerKey >

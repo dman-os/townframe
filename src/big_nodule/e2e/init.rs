@@ -25,6 +25,7 @@ use big_dispatch::Provider;
 use big_dispatch::ProviderError;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -130,7 +131,8 @@ impl Provider for Probe {
         _request: &RequestContext,
         context: &InvocationContext,
         _input: Value,
-    ) -> Result<Value, ProviderError> {
+        _body: Option<method_core::ByteBody>,
+    ) -> Result<Body, ProviderError> {
         self.calls.lock().unwrap().push(Call {
             operation: operation.to_owned(),
             idempotency_key: context.idempotency_key.clone(),
@@ -147,7 +149,7 @@ impl Provider for Probe {
                 body: json!({ "error": "boom" }),
             });
         }
-        Ok(json!({}))
+        Ok(Body::Json(json!({})))
     }
 }
 

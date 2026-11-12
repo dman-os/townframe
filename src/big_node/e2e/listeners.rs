@@ -10,10 +10,20 @@ use super::nodule_wasm::caller;
 use super::nodule_wasm::cartridge;
 use super::nodule_wasm::guest_bytes;
 use super::nodule_wasm::put;
+use super::nodule_wasm::relay;
 use super::nodule_wasm::set_enabled;
+use super::nodule_wasm::set_operations;
 use super::*;
+use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::GetDocAvailability;
+use big_dispatch::Operation;
+use big_dispatch::Provider;
+use big_dispatch::ProviderKind;
+use big_dispatch::ProviderState;
+use big_dispatch_core::Body;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Origin;
 use method_core::Method;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
@@ -31,6 +41,16 @@ async fn boot_listening(
     secrets: &Arc<SecretStore>,
     listeners: Listeners,
 ) -> (BigNode, StopToken, Spec) {
+    boot_listening_requesting(secrets, listeners, &[]).await
+}
+
+/// [`boot_listening`] with the nodule requesting (optionally) each of `calls`, which its grant can
+/// then cover.
+async fn boot_listening_requesting(
+    secrets: &Arc<SecretStore>,
+    listeners: Listeners,
+    calls: &[String],
+) -> (BigNode, StopToken, Spec) {
     let bytes = guest_bytes();
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
@@ -43,7 +63,7 @@ async fn boot_listening(
     let (node, stop) = BigNode::boot(config).await.unwrap();
     let spec = caller();
     put(&node, &bytes).await;
-    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    admit(&node, cartridge(&spec, &bytes, calls)).await;
     set_enabled(&node, &spec, true).await;
     (node, stop, spec)
 }
@@ -451,5 +471,89 @@ async fn draining_closes_the_listener_first_and_keeps_the_clients_it_had_accepte
     drop(client);
     clients.wait_until_idle().await.unwrap();
 
+    shutdown(node, stop).await;
+}
+
+/// Answers `{"ok": true}` to whatever it is asked.
+struct AlwaysOk;
+
+#[async_trait::async_trait]
+impl Provider for AlwaysOk {
+    async fn call(
+        &self,
+        _: &big_dispatch::Caller,
+        _: &str,
+        _: &RequestContext,
+        _: &InvocationContext,
+        _: Value,
+        _: Option<method_core::ByteBody>,
+    ) -> Result<Body, big_dispatch::ProviderError> {
+        Result::Ok(Body::Json(json!({ "ok": true })))
+    }
+}
+
+/// A local-only method (ADR 042 §3) is served over the Unix socket, whose peer the kernel says
+/// is the node's own uid, and refused to the very same operator capability over TCP and to a
+/// nodule's egress, even when the nodule is serving a call that was itself local.
+#[tokio::test]
+async fn a_local_only_method_is_served_over_the_socket_and_refused_over_tcp_and_to_a_guest() {
+    const NSID: &str = "org.example.local.only";
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, spec) = boot_listening_requesting(
+        &secrets,
+        Listeners {
+            tcp: tcp().tcp,
+            ..unix(&socket)
+        },
+        &[NSID.to_owned()],
+    )
+    .await;
+    node.dispatch
+        .router
+        .register(
+            "local",
+            [(
+                NSID.to_owned(),
+                Operation {
+                    local_only: true,
+                    ..Operation::unchecked(Some(OperationKind::Procedure))
+                },
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(AlwaysOk))),
+        )
+        .unwrap();
+
+    let unix_client = XrpcClient::unix(&socket, MAX_RESPONSE).unwrap();
+    let (status, body) = post(&unix_client, NSID, None, json!({})).await;
+    assert_eq!((status, &body), (200, &json!({ "ok": true })));
+
+    let operator = Authorization::identity(node.authority.root);
+    let (status, body) = post(&tcp_client(&node), NSID, Some(operator), json!({})).await;
+    assert_eq!((status, body["error"].as_str()), (403, Some("LocalOnly")));
+
+    set_operations(
+        &node,
+        &spec,
+        DispatchScope {
+            operations: [NSID.to_owned()].into(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let relayed = relay(
+        &node,
+        &spec,
+        NSID,
+        None,
+        InvocationContext {
+            origin: Origin::Embedded,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(relayed["status"], 403, "{relayed}");
+    assert_eq!(relayed["body"]["error"], "LocalOnly", "{relayed}");
     shutdown(node, stop).await;
 }

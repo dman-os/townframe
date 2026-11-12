@@ -416,19 +416,33 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
             "Capability",
         ),
         (PutBlob::XRPC, "org.example.daybook.blobs.put", "BlobInfo"),
-        (
-            ReadBlob::XRPC,
-            "org.example.daybook.blobs.read",
-            "BlobRange",
-        ),
+        (ReadBlob::XRPC, "org.example.daybook.blobs.read", "ByteBody"),
         (StatBlob::XRPC, "org.example.daybook.blobs.stat", "BlobStat"),
     ] {
         assert!(big_cabinet_core::datum::is_nsid(operation.nsid));
         assert_eq!(operation.nsid, nsid);
         assert_eq!(operation.output_schema, output);
     }
-    assert_eq!(MAX_READ_BYTES, 1024 * 1024);
-    assert_eq!(MAX_PUT_BYTES, 8 * 1024 * 1024);
+    // ADR 042 §1: the bodies of `put` and `read` are bytes, their parameters JSON; `put` answers
+    // JSON, and the other methods are unchanged.
+    assert_eq!(
+        PutBlob::XRPC.input_encoding,
+        method_core::Encoding::Bytes { mime: None }
+    );
+    assert_eq!(PutBlob::XRPC.output_encoding, method_core::Encoding::Json);
+    assert_eq!(PutBlob::XRPC.input, method_core::HttpInput::Query);
+    assert_eq!(ReadBlob::XRPC.kind, method_core::MethodKind::Query);
+    assert_eq!(
+        ReadBlob::XRPC.output_encoding,
+        method_core::Encoding::Bytes { mime: None }
+    );
+    for unchanged in [MintBlobsCapability::XRPC, StatBlob::XRPC] {
+        assert_eq!(unchanged.input_encoding, method_core::Encoding::Json);
+        assert_eq!(unchanged.output_encoding, method_core::Encoding::Json);
+        assert!(!unchanged.local_only);
+    }
+    // A put streams, so no 8 MiB message cap bounds it.
+    assert_eq!(MAX_PUT_OCTETS, 4 * 1024 * 1024 * 1024);
 }
 
 #[test]
@@ -452,15 +466,10 @@ fn protocol_requests_accept_capability_ids_not_resolved_records() {
 
     let capability = CapId::from_bytes([1; 16]);
     let blob_id = BlobId::new([4; 32]);
-    check(PutBlob {
-        capability,
-        bytes: vec![0, 1, 255].into(),
-    });
+    check(PutBlob { capability });
     check(ReadBlob {
         capability,
         blob_id,
-        offset: 0,
-        length: MAX_READ_BYTES,
     });
     check(StatBlob {
         capability,
@@ -473,23 +482,12 @@ fn protocol_requests_results_and_errors_round_trip() {
     use big_cabinet_core::authority::CapId;
     let capability = CapId::from_bytes([1; 16]);
     let blob_id = BlobId::new([4; 32]);
-    let put = PutBlob {
-        capability,
-        bytes: vec![0, 1, 255].into(),
-    };
-    // Bytes are the datum model's bytes object, not an array of numbers.
+    // The body is not a field of the request: a put's parameters are its capability alone.
     assert_eq!(
-        serde_json::to_value(&put).unwrap()["bytes"],
-        json!({"$bytes": "AAH/"})
+        serde_json::to_value(PutBlob { capability }).unwrap(),
+        json!({ "capability": capability })
     );
-    protocol_json(put);
-    assert!(
-        serde_json::from_value::<PutBlob>(json!({
-            "capability": capability,
-            "bytes": [0, 1, 255]
-        }))
-        .is_err()
-    );
+    protocol_wire(PutBlob { capability });
     let scope = BlobsScope {
         put: true,
         read: BTreeSet::from([blob_id]),
@@ -516,12 +514,9 @@ fn protocol_requests_results_and_errors_round_trip() {
     let read = ReadBlob {
         capability,
         blob_id,
-        offset: u64::MAX,
-        length: MAX_READ_BYTES,
     };
     let value = serde_json::to_value(&read).unwrap();
     assert_eq!(value["blobId"], json!(blob_id.to_string()));
-    assert_eq!(value["offset"], json!(u64::MAX));
     protocol_wire(read);
     protocol_wire(StatBlob {
         capability,
@@ -546,10 +541,6 @@ fn protocol_requests_results_and_errors_round_trip() {
         serde_json::from_value::<BlobStat>(serde_json::to_value(&stat).unwrap()).unwrap(),
         stat
     );
-    protocol_json(BlobRange {
-        bytes: vec![0, 255].into(),
-        length_octets: 123456789,
-    });
     protocol_wire(Option::<BlobInfo>::None);
     protocol_wire(Some(BlobInfo {
         blob_id,
@@ -564,6 +555,13 @@ fn protocol_requests_results_and_errors_round_trip() {
         },
         BlobsError::Storage {
             reason: "store unavailable".into(),
+        },
+        BlobsError::TooLarge {
+            limit_octets: u64::MAX,
+        },
+        BlobsError::RangeNotSatisfiable { total_octets: 18 },
+        BlobsError::Unreadable {
+            reason: "reset by peer".into(),
         },
     ] {
         protocol_wire(error);
