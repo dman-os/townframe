@@ -31,6 +31,7 @@ pub use defs::DATUM_LOCATION;
 pub use defs::DATUM_PIN;
 pub use defs::DATUM_REF;
 pub use defs::DEFS_NSID;
+pub use defs::KEY_REF;
 pub use defs::LEXICON_REF;
 pub use defs::defs_lexicon;
 pub use defs::node_type_libraries;
@@ -689,6 +690,50 @@ impl schemars::JsonSchema for DatumPin {
             },
             "required": ["ref"],
             LEXICON_REF: DATUM_PIN,
+        })
+    }
+}
+
+/// A content-addressed datum named by its key alone: `#keyRef`, `{ "key": "<tag>/<slot>" }`
+/// (ADR 035 §2.9). Unlike a [`DatumReference`] it names no document: the datum's slot is a hash of
+/// its value, so any document holding that key with a value that hashes to it is the datum. Like
+/// every open datum object it keeps members it does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyReference {
+    pub key: DatumKey,
+    #[serde(flatten)]
+    extra: crate::datum::Extra,
+}
+
+impl KeyReference {
+    pub fn new(key: DatumKey) -> Self {
+        Self {
+            key,
+            extra: crate::datum::Extra::default(),
+        }
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for KeyReference {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "KeyReference".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::KeyReference").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": { "key": { "type": "string" } },
+            "required": ["key"],
+            LEXICON_REF: KEY_REF,
         })
     }
 }

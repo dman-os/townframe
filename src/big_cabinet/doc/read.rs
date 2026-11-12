@@ -10,7 +10,7 @@ impl DocsService {
             .map_err(|error| error.to_string())
     }
 
-    async fn read(
+    pub(super) async fn read(
         &self,
         context: &RequestContext,
         params: ReadDatums,

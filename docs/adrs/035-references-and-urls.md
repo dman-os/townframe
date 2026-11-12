@@ -53,6 +53,10 @@ These rules hold for every kind in §3. Most were already decided for `db+datum:
 
    It is valid only for kinds whose Lexicon (or sidecar) declares that the slot is a content hash of the value and how it is computed, for `gitCommit` git's object id. Other kinds can't be key-referenced.
 
+   The declaration is the sidecar keyword `x-content-hash` on the datum's own definition: `{ "algorithm": "gitObject", "type": "commit", "content": "raw" }` says the slot is the lowercase hex SHA-1 of git's object header (`commit <len>\0`) followed by the bytes of the value's `raw` member (a `$bytes` object), which is git's object id. A Lexicon has no extension keyword, and the sidecar is what a cartridge already carries for each record it holds (ADR 028), so the declaration travels with the kind. The value has to carry the object's bytes, because a hash can only be checked against the content it was computed from. A kind is admitted only if the member it names is one it declares.
+
+   **Admission** refuses a write of a content-addressed kind whose value does not hash to its key, and a write of a `#keyRef` whose target tag is not a registered kind with such a declaration. Resolving is the `ResolveKeyRef` procedure and the reverse query is `QueryDatumRefs` by key.
+
    **Resolving** finds the documents holding the key (`Predicate::HasKey`, index-backed per ADR 024), picks one the reader can read (preferably one already local), and checks that the value hashes to the key. A copy that doesn't is treated as absent, never as another version. So equivalence between copies is verified, not assumed, and no heads are needed, because the content can't change under its key. Read access is unchanged: the reader still needs Read on some holding document's drawer. Deleting one copy doesn't break the reference while another copy is readable. The index keys a `#keyRef` by its key, so "what references this commit" is one query whichever document holds it.
 
    No text form yet: a key reference is stored, not pasted. If one is needed, it is a new kind in §3.
