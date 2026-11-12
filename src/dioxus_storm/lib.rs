@@ -87,7 +87,7 @@ impl Storm {
 
     /// A storm over `app` rendered with `props` (cloned for every seed).
     pub fn with_props<P: Clone + 'static, M: 'static>(
-        app: impl ComponentFunction<P, M> + Clone + 'static,
+        app: impl ComponentFunction<P, M>,
         props: P,
     ) -> Self {
         Self::from_factory(Box::new(move || {

@@ -268,8 +268,6 @@ async fn settle_tick() {
 struct ArcGeometry {
     active: usize,
     settle: f64,
-    spacing: f64,
-    top: f64,
     floor: f64,
     limit: f64,
     reach: f64,
@@ -348,8 +346,6 @@ impl ArcGeometry {
         Self {
             active,
             settle,
-            spacing,
-            top,
             floor,
             limit,
             reach,
