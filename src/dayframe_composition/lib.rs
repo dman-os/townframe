@@ -26,9 +26,9 @@ use clay_collection::ReplicaId;
 use clay_dioxus::NativeComponents;
 use clay_docs::DocumentGrant;
 use clay_docs::DocumentWatch;
-use clay_docs::FacetRoute;
-use clay_docs::FacetSelection;
-use clay_docs::FacetValue;
+use clay_docs::DatumRoute;
+use clay_docs::DatumSelection;
+use clay_docs::DatumValue;
 use clay_docs::WatchSelection;
 use clay_guest_session::collections::durable_bytes_registrations;
 use clay_guest_session::collections::BytesRegistrations;
@@ -178,21 +178,21 @@ impl InstalledMicro {
 }
 
 /// Desired enablement lives in a config document, shaped like big_nodule's install datum: one
-/// facet per micro, `{ "enabled": bool, "package_version": u32 }`, keyed by micro id.
+/// datum per micro, `{ "enabled": bool, "package_version": u32 }`, keyed by micro id.
 const INSTALLS_DOCUMENT: &str = "dayframe.installs";
 const INSTALLS_BRANCH: &str = "main";
 const INSTALL_TAG: &str = "clay.micro.install";
 
-fn install_route(micro: &MicroId) -> FacetRoute {
-    FacetRoute {
+fn install_route(micro: &MicroId) -> DatumRoute {
+    DatumRoute {
         document: INSTALLS_DOCUMENT.into(),
         branch: INSTALLS_BRANCH.into(),
         tag: INSTALL_TAG.into(),
-        key_id: micro.as_str().into(),
+        slot: micro.as_str().into(),
     }
 }
 
-/// One install facet's value. Unknown fields ride along in `extra` so a datum written by a
+/// One install datum's value. Unknown fields ride along in `extra` so a datum written by a
 /// newer build survives a rewrite by this one (as big_nodule's install datum does).
 #[derive(Serialize, Deserialize)]
 struct InstallDatum {
@@ -253,7 +253,7 @@ fn admit_installs(
 }
 
 /// The shell's read-only watch of the install document: the install datums and the binding
-/// datums, which are both per-micro facets of it.
+/// datums, which are both per-micro datums of it.
 fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) -> DocumentWatch {
     documents
         .grant_documents(
@@ -262,8 +262,8 @@ fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) ->
             vec![DocumentGrant {
                 document: INSTALLS_DOCUMENT.into(),
                 branch: INSTALLS_BRANCH.into(),
-                facets: [INSTALL_TAG, bindings::BINDINGS_TAG]
-                    .map(|tag| daybook_types::manifest::RoutineFacetAccess {
+                datums: [INSTALL_TAG, bindings::BINDINGS_TAG]
+                    .map(|tag| clay_docs::DatumAccess {
                         tag: tag.into(),
                         read: true,
                         ..Default::default()
@@ -275,7 +275,7 @@ fn watch_installs(documents: &DocumentService, host: &Host, shell: &Instance) ->
             access.watch(WatchSelection {
                 documents: [INSTALLS_DOCUMENT.to_owned()].into(),
                 branch: INSTALLS_BRANCH.into(),
-                facets: FacetSelection::Tags(
+                datums: DatumSelection::Tags(
                     [INSTALL_TAG, bindings::BINDINGS_TAG]
                         .map(str::to_owned)
                         .into(),
@@ -309,22 +309,22 @@ async fn reconcile_installs(
     declared: DeclaredCollections,
     failure: watch::Sender<Option<String>>,
 ) {
-    // Micros by key id, so a facet is matched without building a route or a MicroId.
+    // Micros by key id, so a datum is matched without building a route or a MicroId.
     let mut micros: BTreeMap<String, ManagedMicro> = micros
         .into_iter()
         .map(|micro| (micro.id.as_str().to_owned(), micro))
         .collect();
     let mut snapshot = installs.current().expect("the install watch is live");
     loop {
-        for (route, value) in &snapshot.facets {
+        for (route, value) in &snapshot.datums {
             // The watch selects only this crate's tags; ids of micros no longer in the catalog
             // are left alone.
-            let Some(micro) = micros.get_mut(route.key_id.as_str()) else {
+            let Some(micro) = micros.get_mut(route.slot.as_str()) else {
                 continue;
             };
             match route.tag.as_str() {
                 INSTALL_TAG => {
-                    let FacetValue::Present(datum) = value else {
+                    let DatumValue::Present(datum) = value else {
                         continue;
                     };
                     let disabled = supervisor.state(&micro.id) == MicroState::Disabled;
@@ -340,7 +340,7 @@ async fn reconcile_installs(
                 }
                 bindings::BINDINGS_TAG => {
                     let datum = match value {
-                        FacetValue::Present(datum) => Some(BindingsDatum::decode(datum.clone())),
+                        DatumValue::Present(datum) => Some(BindingsDatum::decode(datum.clone())),
                         _ => None,
                     };
                     let resolution = bindings::resolve(&micro.manifest, datum.as_ref(), &declared);

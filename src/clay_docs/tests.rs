@@ -13,19 +13,19 @@ fn assert_pending<T>(future: Pin<&mut impl Future<Output = T>>) {
     );
 }
 
-fn route(document: &str, key_id: &str) -> FacetRoute {
-    FacetRoute {
+fn route(document: &str, slot: &str) -> DatumRoute {
+    DatumRoute {
         document: document.into(),
         branch: "main".into(),
         tag: "org.example.config".into(),
-        key_id: key_id.into(),
+        slot: slot.into(),
     }
 }
 fn selection(documents: &[&str]) -> WatchSelection {
     WatchSelection {
         documents: documents.iter().map(|id| (*id).into()).collect(),
         branch: "main".into(),
-        facets: FacetSelection::Tags(["org.example.config".into()].into()),
+        datums: DatumSelection::Tags(["org.example.config".into()].into()),
     }
 }
 fn grant(
@@ -33,7 +33,7 @@ fn grant(
     host: &Host,
     instance: &Instance,
     documents: &[&str],
-    key_id: Option<&str>,
+    slot: Option<&str>,
 ) -> DocumentAccess {
     service
         .grant_documents(
@@ -44,9 +44,9 @@ fn grant(
                 .map(|document| DocumentGrant {
                     document: (*document).into(),
                     branch: "main".into(),
-                    facets: vec![RoutineFacetAccess {
+                    datums: vec![DatumAccess {
                         tag: "org.example.config".into(),
-                        key_id: key_id.map(str::to_owned),
+                        slot: slot.map(str::to_owned),
                         read: true,
                         write: true,
                         create: true,
@@ -69,18 +69,18 @@ fn multiple_document_mirrors_filter_warm_cache_and_follow_membership() {
     node.seed(route("b", "main"), json!(3));
     node.seed(route("unrelated", "main"), json!(4));
     let privileged = host.start("privileged");
-    let warm = grant(&service, &host, &privileged, &["a"], /*key_id*/ None)
+    let warm = grant(&service, &host, &privileged, &["a"], /*slot*/ None)
         .watch(selection(&["a"]))
         .unwrap();
-    assert_eq!(warm.current().unwrap().facets.len(), 2);
+    assert_eq!(warm.current().unwrap().datums.len(), 2);
     let instance = host.start("restricted");
     let access = grant(&service, &host, &instance, &["a", "b"], Some("main"));
     let mirror = access.watch(selection(&["a", "b"])).unwrap();
     assert_eq!(
-        mirror.current().unwrap().facets,
+        mirror.current().unwrap().datums,
         BTreeMap::from([
-            (route("a", "main"), FacetValue::Present(json!(1))),
-            (route("b", "main"), FacetValue::Present(json!(3)))
+            (route("a", "main"), DatumValue::Present(json!(1))),
+            (route("b", "main"), DatumValue::Present(json!(3)))
         ])
     );
     let reads = node.reads();
@@ -94,19 +94,19 @@ fn multiple_document_mirrors_filter_warm_cache_and_follow_membership() {
     assert_eq!(mirror.current().unwrap(), before);
     node.external_change(route("b", "main"), /*value*/ None);
     assert_eq!(
-        mirror.current().unwrap().facets[&route("b", "main")],
-        FacetValue::Absent
+        mirror.current().unwrap().datums[&route("b", "main")],
+        DatumValue::Absent
     );
     node.external_change(route("b", "main"), Some(json!(5)));
     assert_eq!(
-        mirror.current().unwrap().facets[&route("b", "main")],
-        FacetValue::Present(json!(5))
+        mirror.current().unwrap().datums[&route("b", "main")],
+        DatumValue::Present(json!(5))
     );
     assert!(!node.cached_routes().contains(&route("unrelated", "main")));
     let mut updates = mirror.subscribe().unwrap();
     host.close_instance(&instance).unwrap();
     assert!(updates.borrow_and_update().revoked);
-    assert!(updates.borrow().facets.is_empty());
+    assert!(updates.borrow().datums.is_empty());
     assert!(updates.has_changed().is_err());
     host.close();
 }
@@ -126,15 +126,15 @@ fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
             &instance,
             "alpha",
             vec![
-                RoutineFacetAccess {
+                DatumAccess {
                     tag: "org.example.config".into(),
-                    key_id: Some("main".into()),
+                    slot: Some("main".into()),
                     read: true,
                     ..Default::default()
                 },
-                RoutineFacetAccess {
+                DatumAccess {
                     tag: "org.example.config".into(),
-                    key_id: Some("main".into()),
+                    slot: Some("main".into()),
                     write: true,
                     ..Default::default()
                 },
@@ -146,25 +146,25 @@ fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
             &host,
             &instance,
             "beta",
-            vec![RoutineFacetAccess {
+            vec![DatumAccess {
                 tag: "org.example.config".into(),
-                key_id: Some("new".into()),
+                slot: Some("new".into()),
                 create: true,
                 ..Default::default()
             }],
         )
         .unwrap();
-    let facet = alpha
-        .facet::<Value>("org.example.config".into(), "main".into())
+    let datum = alpha
+        .datum::<Value>("org.example.config".into(), "main".into())
         .unwrap();
-    assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(1)));
-    facet.write(json!(2)).unwrap();
+    assert_eq!(datum.value(&datum.watch.current().unwrap()), Some(json!(1)));
+    datum.write(json!(2)).unwrap();
     assert_eq!(
         alpha
             .mutate(
                 "org.example.config".into(),
                 "main".into(),
-                FacetMutation::Delete
+                DatumMutation::Delete
             )
             .unwrap_err(),
         AccessError::Denied
@@ -174,26 +174,26 @@ fn config_binding_resolution_and_manifest_rights_are_not_conflated() {
             .mutate(
                 "org.example.config".into(),
                 "other".into(),
-                FacetMutation::Write(json!(3))
+                DatumMutation::Write(json!(3))
             )
             .unwrap_err(),
         AccessError::Denied
     );
     assert!(matches!(
-        beta.facet::<Value>("org.example.config".into(), "new".into()),
+        beta.datum::<Value>("org.example.config".into(), "new".into()),
         Err(AccessError::Denied)
     ));
     beta.mutate(
         "org.example.config".into(),
         "new".into(),
-        FacetMutation::Create(json!(4)),
+        DatumMutation::Create(json!(4)),
     )
     .unwrap();
     assert_eq!(
         beta.mutate(
             "org.example.config".into(),
             "new".into(),
-            FacetMutation::Write(json!(5))
+            DatumMutation::Write(json!(5))
         )
         .unwrap_err(),
         AccessError::Denied
@@ -216,7 +216,7 @@ fn a_config_acl_naming_an_owner_plug_is_a_programming_error() {
         &host,
         &instance,
         "alpha",
-        vec![RoutineFacetAccess {
+        vec![DatumAccess {
             owner_plug_id: Some("beta".into()),
             tag: "org.example.config".into(),
             read: true,
@@ -252,8 +252,8 @@ fn held_refreshes_deduplicate_and_cannot_resurrect_removed_selections() {
     let snapshot = mirror.current().unwrap();
     assert!(!matches!(snapshot.freshness, Freshness::Refreshing));
     assert_eq!(
-        snapshot.facets,
-        BTreeMap::from([(route("b", "main"), FacetValue::Present(json!(2)))])
+        snapshot.datums,
+        BTreeMap::from([(route("b", "main"), DatumValue::Present(json!(2)))])
     );
     mirror.select(selection(&["a"])).unwrap();
     host.close_instance(&first).unwrap();
@@ -276,23 +276,23 @@ fn optimistic_overlays_are_shared_authorized_and_pinned_after_watch_closure() {
         .watch(selection(&["a"]))
         .unwrap();
     access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(2)))
         .unwrap();
     access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(3)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(3)))
         .unwrap();
     mirror.refresh().unwrap();
     assert_eq!(
-        other.current().unwrap().facets[&route("a", "main")],
-        FacetValue::Present(json!(3))
+        other.current().unwrap().datums[&route("a", "main")],
+        DatumValue::Present(json!(3))
     );
     assert_eq!(other.current().unwrap().pending.len(), 2);
     host.close_instance(&first).unwrap();
     node.settle(/*accept*/ true);
     assert!(other.current().unwrap().pending.is_empty());
     assert_eq!(
-        other.current().unwrap().facets[&route("a", "main")],
-        FacetValue::Present(json!(3))
+        other.current().unwrap().datums[&route("a", "main")],
+        DatumValue::Present(json!(3))
     );
     host.close_instance(&second).unwrap();
     assert!(node.cached_routes().contains(&route("a", "main")));
@@ -339,13 +339,13 @@ fn a_targeted_read_hydrates_only_that_route_and_preserves_loading_states() {
     let mirror = access.watch(selection(&["a", "b"])).unwrap();
     assert_eq!(
         mirror.read(&route("a", "main")),
-        Ok(FacetValue::Present(json!(1)))
+        Ok(DatumValue::Present(json!(1)))
     );
     // The read hydrated exactly one route; the unrequested route stays where it was.
     assert!(node.cached_routes().contains(&route("a", "main")));
     assert_eq!(
         mirror.read(&route("b", "main")),
-        Ok(FacetValue::Present(json!(2)))
+        Ok(DatumValue::Present(json!(2)))
     );
     assert!(matches!(
         mirror.read(&route("a", "secret")),
@@ -372,9 +372,9 @@ fn read_only_grants_reject_every_mutation_without_hydration() {
             vec![DocumentGrant {
                 document: "a".into(),
                 branch: "main".into(),
-                facets: vec![RoutineFacetAccess {
+                datums: vec![DatumAccess {
                     tag: "org.example.config".into(),
-                    key_id: Some("main".into()),
+                    slot: Some("main".into()),
                     read: true,
                     ..Default::default()
                 }],
@@ -385,9 +385,9 @@ fn read_only_grants_reject_every_mutation_without_hydration() {
     let before = mirror.current().unwrap();
     let reads = node.reads();
     for mutation in [
-        FacetMutation::Write(json!(2)),
-        FacetMutation::Create(json!(3)),
-        FacetMutation::Delete,
+        DatumMutation::Write(json!(2)),
+        DatumMutation::Create(json!(3)),
+        DatumMutation::Delete,
     ] {
         assert_eq!(
             access.mutate(route("a", "main"), mutation).unwrap_err(),
@@ -396,7 +396,7 @@ fn read_only_grants_reject_every_mutation_without_hydration() {
     }
     assert_eq!(
         access
-            .mutate(route("a", "secret"), FacetMutation::Write(json!(4)))
+            .mutate(route("a", "secret"), DatumMutation::Write(json!(4)))
             .unwrap_err(),
         AccessError::Denied
     );
@@ -423,9 +423,9 @@ fn document_ref_access_preserves_the_grant_and_its_revocation() {
             vec![DocumentGrant {
                 document: "a".into(),
                 branch: "approved-branch".into(),
-                facets: vec![RoutineFacetAccess {
+                datums: vec![DatumAccess {
                     tag: "org.example.config".into(),
-                    key_id: Some("main".into()),
+                    slot: Some("main".into()),
                     read: true,
                     ..Default::default()
                 }],
@@ -450,19 +450,19 @@ fn document_ref_access_preserves_the_grant_and_its_revocation() {
     let permitted = WatchSelection {
         documents: [document.document_id().into()].into(),
         branch: document.branch().into(),
-        facets: FacetSelection::Keys([("org.example.config".into(), "main".into())].into()),
+        datums: DatumSelection::Keys([("org.example.config".into(), "main".into())].into()),
     };
     let mirror = cloned.watch(permitted.clone()).unwrap();
     assert_eq!(
-        mirror.current().unwrap().facets,
+        mirror.current().unwrap().datums,
         BTreeMap::from([(
-            FacetRoute {
+            DatumRoute {
                 document: "a".into(),
                 branch: "approved-branch".into(),
                 tag: "org.example.config".into(),
-                key_id: "main".into()
+                slot: "main".into()
             },
-            FacetValue::Absent,
+            DatumValue::Absent,
         )])
     );
     assert_eq!(
@@ -470,7 +470,7 @@ fn document_ref_access_preserves_the_grant_and_its_revocation() {
             .mutate(
                 "org.example.config".into(),
                 "main".into(),
-                FacetMutation::Write(json!(1))
+                DatumMutation::Write(json!(1))
             )
             .unwrap_err(),
         AccessError::Denied
@@ -495,7 +495,7 @@ async fn operation_subscription_retains_the_receipt_before_and_after_owner_closu
     let instance = host.start("writer");
     let access = grant(&service, &host, &instance, &["a"], Some("main"));
     let operation = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(1)))
         .unwrap();
     let mut updates = operation.subscribe();
     assert_eq!(*updates.borrow_and_update(), operation.current());
@@ -523,19 +523,19 @@ async fn operation_subscription_retains_the_receipt_before_and_after_owner_closu
 fn accepting_one_mutation_never_persists_a_later_overlay() {
     for (accepted, rejected, expected) in [
         (
-            FacetMutation::Write(json!(2)),
-            FacetMutation::Write(json!(3)),
-            FacetValue::Present(json!(2)),
+            DatumMutation::Write(json!(2)),
+            DatumMutation::Write(json!(3)),
+            DatumValue::Present(json!(2)),
         ),
         (
-            FacetMutation::Create(json!(2)),
-            FacetMutation::Delete,
-            FacetValue::Present(json!(2)),
+            DatumMutation::Create(json!(2)),
+            DatumMutation::Delete,
+            DatumValue::Present(json!(2)),
         ),
         (
-            FacetMutation::Delete,
-            FacetMutation::Create(json!(3)),
-            FacetValue::Absent,
+            DatumMutation::Delete,
+            DatumMutation::Create(json!(3)),
+            DatumValue::Absent,
         ),
     ] {
         let host = Host::new();
@@ -577,12 +577,12 @@ fn accepting_one_mutation_never_persists_a_later_overlay() {
             }
         );
         assert_eq!(
-            mirror.current().unwrap().facets,
+            mirror.current().unwrap().datums,
             BTreeMap::from([(route("a", "main"), expected.clone())])
         );
         mirror.refresh().unwrap();
         assert_eq!(
-            mirror.current().unwrap().facets,
+            mirror.current().unwrap().datums,
             BTreeMap::from([(route("a", "main"), expected)])
         );
         assert!(mirror.current().unwrap().pending.is_empty());
@@ -601,12 +601,12 @@ fn transport_failures_preserve_uncertainty_and_restore_the_latest_source() {
         let access = grant(&service, &host, &instance, &["a"], Some("main"));
         let mirror = access.watch(selection(&["a"])).unwrap();
         let operation = access
-            .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+            .mutate(route("a", "main"), DatumMutation::Write(json!(2)))
             .unwrap();
         node.external_change(route("a", "main"), Some(json!(3)));
         assert_eq!(
-            mirror.current().unwrap().facets[&route("a", "main")],
-            FacetValue::Present(json!(2))
+            mirror.current().unwrap().datums[&route("a", "main")],
+            DatumValue::Present(json!(2))
         );
         let failure = OperationError::Transport {
             message: "connection lost".into(),
@@ -622,14 +622,14 @@ fn transport_failures_preserve_uncertainty_and_restore_the_latest_source() {
             }
         );
         assert_eq!(
-            mirror.current().unwrap().facets,
-            BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(3)))])
+            mirror.current().unwrap().datums,
+            BTreeMap::from([(route("a", "main"), DatumValue::Present(json!(3)))])
         );
         assert!(mirror.current().unwrap().pending.is_empty());
         node.external_change(route("a", "main"), Some(json!(2)));
         assert_eq!(
-            mirror.current().unwrap().facets[&route("a", "main")],
-            FacetValue::Present(json!(2))
+            mirror.current().unwrap().datums[&route("a", "main")],
+            DatumValue::Present(json!(2))
         );
         host.close();
     }
@@ -647,13 +647,13 @@ async fn independent_receipts_survive_out_of_order_completion_and_snapshot_coale
     let before = mirror.current().unwrap();
     let mut notifications = mirror.subscribe().unwrap();
     let first = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(1)))
         .unwrap();
     let second = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(2)))
         .unwrap();
     let third = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(3)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(3)))
         .unwrap();
     assert!(first.id() < second.id() && second.id() < third.id());
     let transport = OperationError::Transport {
@@ -669,8 +669,8 @@ async fn independent_receipts_survive_out_of_order_completion_and_snapshot_coale
     let current = mirror.current().unwrap();
     assert!(current.revision > before.revision + 1);
     assert_eq!(
-        current.facets,
-        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(1)))])
+        current.datums,
+        BTreeMap::from([(route("a", "main"), DatumValue::Present(json!(1)))])
     );
     assert!(current.pending.is_empty());
     assert_eq!(*notifications.borrow_and_update(), current);
@@ -693,7 +693,7 @@ async fn independent_receipts_survive_out_of_order_completion_and_snapshot_coale
     drop(first);
     for value in 4..40 {
         let operation = access
-            .mutate(route("a", "main"), FacetMutation::Write(json!(value)))
+            .mutate(route("a", "main"), DatumMutation::Write(json!(value)))
             .unwrap();
         node.complete(operation.id(), Ok(()));
     }
@@ -718,10 +718,10 @@ fn out_of_order_acceptance_and_rejection_remain_operation_local() {
     let access = grant(&service, &host, &instance, &["a"], Some("main"));
     let mirror = access.watch(selection(&["a"])).unwrap();
     let older = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(1)))
         .unwrap();
     let newer = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(2)))
         .unwrap();
     node.complete(newer.id(), Ok(()));
     assert_eq!(newer.current().status, OperationStatus::Accepted);
@@ -737,8 +737,8 @@ fn out_of_order_acceptance_and_rejection_remain_operation_local() {
     assert_eq!(newer.current().status, OperationStatus::Accepted);
     mirror.refresh().unwrap();
     assert_eq!(
-        mirror.current().unwrap().facets,
-        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(2)))])
+        mirror.current().unwrap().datums,
+        BTreeMap::from([(route("a", "main"), DatumValue::Present(json!(2)))])
     );
     host.close();
 }
@@ -751,7 +751,7 @@ async fn operation_next_atomically_observes_completion_after_read_or_while_waiti
     let instance = host.start("writer");
     let access = grant(&service, &host, &instance, &["a"], Some("main"));
     let first = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(1)))
         .unwrap();
     let before = first.current();
     node.complete(first.id(), Ok(()));
@@ -761,7 +761,7 @@ async fn operation_next_atomically_observes_completion_after_read_or_while_waiti
     );
     assert_eq!(first.next(2).await, Err(DocumentError::SubscriptionLagged));
     let second = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(2)))
         .unwrap();
     let mut next = std::pin::pin!(second.next(second.current().revision));
     assert_pending(next.as_mut());
@@ -784,7 +784,7 @@ async fn owner_and_watch_closure_do_not_cancel_operations_or_erase_receipts() {
         .watch(selection(&["a"]))
         .unwrap();
     let operation = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(1)))
         .unwrap();
     let initial = operation.current();
     let mut next = std::pin::pin!(operation.next(initial.revision));
@@ -803,8 +803,8 @@ async fn owner_and_watch_closure_do_not_cancel_operations_or_erase_receipts() {
         })
     );
     assert_eq!(
-        other.current().unwrap().facets,
-        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(1)))])
+        other.current().unwrap().datums,
+        BTreeMap::from([(route("a", "main"), DatumValue::Present(json!(1)))])
     );
     assert!(other.current().unwrap().pending.is_empty());
     host.close();
@@ -819,7 +819,7 @@ fn dropping_an_operation_handle_does_not_cancel_source_completion() {
     let writer = host.start("writer");
     let access = grant(&service, &host, &writer, &["a"], Some("main"));
     let operation = access
-        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .mutate(route("a", "main"), DatumMutation::Write(json!(1)))
         .unwrap();
     let id = operation.id();
     drop(operation);
@@ -830,8 +830,8 @@ fn dropping_an_operation_handle_does_not_cancel_source_completion() {
         .watch(selection(&["a"]))
         .unwrap();
     assert_eq!(
-        mirror.current().unwrap().facets,
-        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(1)))])
+        mirror.current().unwrap().datums,
+        BTreeMap::from([(route("a", "main"), DatumValue::Present(json!(1)))])
     );
     assert!(mirror.current().unwrap().pending.is_empty());
     host.close();
@@ -845,24 +845,24 @@ fn all_mutation_wrappers_use_the_same_source_completion_path() {
     let instance = host.start("writer");
     let access = grant(&service, &host, &instance, &["a"], Some("main"));
     let document = access.document("a".into(), "main".into()).unwrap();
-    let facet = document
-        .facet::<Value>("org.example.config".into(), "main".into())
+    let datum = document
+        .datum::<Value>("org.example.config".into(), "main".into())
         .unwrap();
-    let write = facet.write(json!(1)).unwrap();
+    let write = datum.write(json!(1)).unwrap();
     let create = document
         .mutate(
             "org.example.config".into(),
             "main".into(),
-            FacetMutation::Create(json!(2)),
+            DatumMutation::Create(json!(2)),
         )
         .unwrap();
     node.settle(true);
     assert_eq!(write.current().status, OperationStatus::Accepted);
     assert_eq!(create.current().status, OperationStatus::Accepted);
-    facet.watch.refresh().unwrap();
-    assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(2)));
+    datum.watch.refresh().unwrap();
+    assert_eq!(datum.value(&datum.watch.current().unwrap()), Some(json!(2)));
     let delete = access
-        .mutate(route("a", "main"), FacetMutation::Delete)
+        .mutate(route("a", "main"), DatumMutation::Delete)
         .unwrap();
     node.settle(false);
     assert_eq!(
@@ -871,7 +871,7 @@ fn all_mutation_wrappers_use_the_same_source_completion_path() {
             message: "mock source rejected operation".into()
         })
     );
-    assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(2)));
+    assert_eq!(datum.value(&datum.watch.current().unwrap()), Some(json!(2)));
     host.close();
 }
 
@@ -915,8 +915,8 @@ async fn document_next_rejects_old_selection_continuations_and_allows_rereading(
     assert_eq!(next.await, Err(DocumentError::SubscriptionLagged));
     let selected = mirror.current().unwrap();
     assert_eq!(
-        selected.facets,
-        BTreeMap::from([(route("b", "main"), FacetValue::Absent)])
+        selected.datums,
+        BTreeMap::from([(route("b", "main"), DatumValue::Absent)])
     );
     let mut next = std::pin::pin!(mirror.next(selected.revision));
     assert_pending(next.as_mut());
@@ -966,17 +966,17 @@ async fn flush(service: DocumentService, persist: impl Future<Output = ()>) {
 }
 
 /// What the unrestricted `document` mirror observes in a service.
-fn observed(service: &DocumentService, documents: &[&str]) -> BTreeMap<FacetRoute, FacetValue> {
+fn observed(service: &DocumentService, documents: &[&str]) -> BTreeMap<DatumRoute, DatumValue> {
     let host = Host::new();
     let instance = host.start("observer");
-    let facets = grant(service, &host, &instance, documents, /*key_id*/ None)
+    let datums = grant(service, &host, &instance, documents, /*slot*/ None)
         .watch(selection(documents))
         .unwrap()
         .current()
         .unwrap()
-        .facets;
+        .datums;
     host.close();
-    facets
+    datums
 }
 
 #[tokio::test]
@@ -997,10 +997,10 @@ async fn the_durable_source_survives_a_rebuild_and_persisted_values_beat_seeds()
     let instance = host.start("writer");
     let access = grant(&service, &host, &instance, &["a"], None);
     let accepted = access
-        .mutate(route("a", "written"), FacetMutation::Write(json!(2)))
+        .mutate(route("a", "written"), DatumMutation::Write(json!(2)))
         .unwrap();
     let created = access
-        .mutate(route("a", "created"), FacetMutation::Create(json!(3)))
+        .mutate(route("a", "created"), DatumMutation::Create(json!(3)))
         .unwrap();
     host.close();
     drop((access, accepted, created, node));
@@ -1016,24 +1016,24 @@ async fn the_durable_source_survives_a_rebuild_and_persisted_values_beat_seeds()
     let after = observed(&service, &["a"]);
     assert_eq!(
         after.get(&route("a", "written")),
-        Some(&FacetValue::Present(json!(2)))
+        Some(&DatumValue::Present(json!(2)))
     );
     assert_eq!(
         after.get(&route("a", "created")),
-        Some(&FacetValue::Present(json!(3)))
+        Some(&DatumValue::Present(json!(3)))
     );
     assert_eq!(
         after.get(&route("a", "seeded")),
-        Some(&FacetValue::Present(json!(1)))
+        Some(&DatumValue::Present(json!(1)))
     );
     assert_eq!(
         after.get(&route("a", "replaced")),
-        Some(&FacetValue::Present(json!("external")))
+        Some(&DatumValue::Present(json!("external")))
     );
     // The removal was persisted, so the reseed lands as a fresh insert this boot.
     assert_eq!(
         after.get(&route("a", "removed")),
-        Some(&FacetValue::Present(json!("seed")))
+        Some(&DatumValue::Present(json!("seed")))
     );
     drop(node);
     flush(service, persist).await;
@@ -1057,21 +1057,21 @@ async fn a_persisted_removal_stays_removed_after_a_rebuild() {
 
 #[test]
 fn route_keys_round_trip_and_stay_unambiguous() {
-    let a = FacetRoute {
+    let a = DatumRoute {
         document: "ab".into(),
         branch: "c".into(),
         tag: "".into(),
-        key_id: "\u{0}é".into(),
+        slot: "\u{0}é".into(),
     };
-    let b = FacetRoute {
+    let b = DatumRoute {
         document: "a".into(),
         branch: "bc".into(),
         tag: "".into(),
-        key_id: "\u{0}é".into(),
+        slot: "\u{0}é".into(),
     };
     assert_ne!(a.encode(), b.encode());
-    assert_eq!(FacetRoute::decode(&a.encode()), a);
-    assert_eq!(FacetRoute::decode(&b.encode()), b);
+    assert_eq!(DatumRoute::decode(&a.encode()), a);
+    assert_eq!(DatumRoute::decode(&b.encode()), b);
 }
 
 #[tokio::test]
@@ -1108,7 +1108,7 @@ async fn a_durable_operation_is_accepted_once_its_write_reaches_the_store() {
     let instance = host.start("writer");
     let access = grant(&service, &host, &instance, &["a"], None);
     let operation = access
-        .mutate(route("a", "x"), FacetMutation::Create(json!(1)))
+        .mutate(route("a", "x"), DatumMutation::Create(json!(1)))
         .unwrap();
     let persisted = service.persisted();
     // Until the persist future runs the write is only an overlay.

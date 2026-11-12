@@ -1,5 +1,5 @@
 //! The shell's declaration types: its package, the presentations it publishes, its
-//! arrangement facet and its panels collection.
+//! arrangement datum and its panels collection.
 use super::*;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionDecl;
@@ -38,7 +38,7 @@ impl ComponentDecl for ShellNavButton {
     const NAME: &'static str = NAV_BUTTON;
 }
 
-/// The arrangement weights facet.
+/// The arrangement weights datum.
 pub struct ShellArrangement;
 
 impl ConfigDecl for ShellArrangement {

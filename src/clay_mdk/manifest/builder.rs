@@ -109,15 +109,15 @@ impl ManifestBuilder {
         self
     }
 
-    /// Request read and write access to the facet `C` declares.
+    /// Request read and write access to the datum `C` declares.
     pub fn config<C: ConfigDecl>(mut self) -> Self {
         self.manifest
             .configuration_requests
             .push(ConfigurationRequest {
                 binding: C::BINDING.into(),
-                facets: vec![FacetAccess {
+                datums: vec![DatumAccess {
                     tag: Nsid::literal(C::NSID),
-                    key_id: Some(C::KEY.into()),
+                    slot: Some(C::KEY.into()),
                     read: true,
                     write: true,
                     create: false,

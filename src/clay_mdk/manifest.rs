@@ -361,27 +361,27 @@ pub struct Request {
     pub min_revision: Option<u32>,
 }
 
-/// One requested facet access right (manifest-as-allowlist, ADR 015 §8). Neutral data; the
-/// native backend lowers it into the node seam's `RoutineFacetAccess` vocabulary (D6). The
-/// request names the facet's datum by NSID `tag` and never the plug or document that holds it:
+/// One requested datum access right (manifest-as-allowlist, ADR 015 §8). Neutral data; the
+/// native backend passes it to clay_docs as the document service's access vocabulary. The
+/// request names the datum's datum by NSID `tag` and never the plug or document that holds it:
 /// configuration picks the document, so a substituted plug keeps working (ADR 028 §4).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct FacetAccess {
+pub struct DatumAccess {
     pub tag: Nsid,
-    pub key_id: Option<String>,
+    pub slot: Option<String>,
     pub read: bool,
     pub write: bool,
     pub create: bool,
     pub delete: bool,
 }
 
-/// A configuration document the package asks for under a local binding name, with the facet
+/// A configuration document the package asks for under a local binding name, with the datum
 /// ACL it requests. A request, not a grant: configuration picks the document and what access
 /// is actually allowed.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConfigurationRequest {
     pub binding: String,
-    pub facets: Vec<FacetAccess>,
+    pub datums: Vec<DatumAccess>,
 }
 
 /// A collection shape this package can serve or exposes. `id` is the contract's NSID, which
@@ -488,7 +488,7 @@ impl Sidecar {
     /// instead be outside the authority when the package requests them (ADR 028 §4: anything
     /// outside the authority must be requested, whatever refers to it), i.e. a request's
     /// `contract` names the schema. What a package merely requests (collection requests,
-    /// requirements, facet tags) may name anyone's NSIDs; runtime-defined NSIDs
+    /// requirements, datum tags) may name anyone's NSIDs; runtime-defined NSIDs
     /// (`org.example.clay.*`) are only ever requested, never declared.
     pub fn validate(&self) -> Result<(), String> {
         if !is_plug_name(&self.id) {

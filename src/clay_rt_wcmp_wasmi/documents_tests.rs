@@ -12,13 +12,13 @@ use wit::HostDocumentAccess;
 use wit::HostDocumentWatch;
 use wit::HostOperation;
 
-fn route(document: &str) -> wit::FacetRoute {
-    wit::FacetRoute {
+fn route(document: &str) -> wit::DatumRoute {
+    wit::DatumRoute {
         document: document.into(),
         branch: "main".into(),
-        key: wit::FacetKey {
+        key: wit::DatumKey {
             tag: "config".into(),
-            key_id: "count".into(),
+            slot: "count".into(),
         },
     }
 }
@@ -35,9 +35,9 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
             vec![DocumentGrant {
                 document: "allowed".into(),
                 branch: "main".into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                datums: vec![clay_docs::DatumAccess {
                     tag: "config".into(),
-                    key_id: Some("count".into()),
+                    slot: Some("count".into()),
                     read: true,
                     write: true,
                     ..Default::default()
@@ -53,7 +53,7 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
         &mut state,
         Resource::new_borrow(access),
         route("forged"),
-        wit::FacetMutation::Update("1".into()),
+        wit::DatumMutation::Update("1".into()),
     )
     .unwrap();
     assert!(matches!(denied, Err(wit::DocumentError::Denied)));
@@ -61,7 +61,7 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
         &mut state,
         Resource::new_borrow(access),
         route("allowed"),
-        wit::FacetMutation::Update("{".into()),
+        wit::DatumMutation::Update("{".into()),
     )
     .unwrap();
     assert!(matches!(
@@ -69,8 +69,8 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
         Err(wit::DocumentError::InvalidValue(_))
     ));
     for mutation in [
-        wit::FacetMutation::Create("1".into()),
-        wit::FacetMutation::Delete,
+        wit::DatumMutation::Create("1".into()),
+        wit::DatumMutation::Delete,
     ] {
         assert!(matches!(
             HostDocumentAccess::mutate(
@@ -92,9 +92,9 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
         wit::WatchSelection {
             documents: vec!["allowed".into()],
             branch: "main".into(),
-            facets: wit::FacetSelection::Keys(vec![wit::FacetKey {
+            datums: wit::DatumSelection::Keys(vec![wit::DatumKey {
                 tag: "config".into(),
-                key_id: "count".into(),
+                slot: "count".into(),
             }]),
         },
     )
@@ -104,13 +104,13 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
     let initial = HostDocumentWatch::current(&mut state, Resource::new_borrow(watch_rep))
         .unwrap()
         .unwrap();
-    assert!(matches!(initial.facets[0].value, wit::FacetValue::Absent));
+    assert!(matches!(initial.datums[0].value, wit::DatumValue::Absent));
     let watch_work = incoming.recv().await.unwrap();
     let operation = HostDocumentAccess::mutate(
         &mut state,
         Resource::new_borrow(access),
         route("allowed"),
-        wit::FacetMutation::Update("7".into()),
+        wit::DatumMutation::Update("7".into()),
     )
     .unwrap()
     .unwrap();
@@ -150,7 +150,7 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
             &mut state,
             Resource::new_borrow(access),
             route("allowed"),
-            wit::FacetMutation::Update("8".into()),
+            wit::DatumMutation::Update("8".into()),
         )
         .unwrap(),
         Err(wit::DocumentError::Revoked)
@@ -162,7 +162,7 @@ async fn granted_resources_validate_input_and_preserve_transport_outcomes() {
             wit::WatchSelection {
                 documents: vec!["allowed".into()],
                 branch: "main".into(),
-                facets: wit::FacetSelection::Tags(vec!["config".into()]),
+                datums: wit::DatumSelection::Tags(vec!["config".into()]),
             },
         )
         .unwrap(),
@@ -186,7 +186,7 @@ async fn a_full_delivery_queue_rejects_before_creating_an_optimistic_write() {
             vec![DocumentGrant {
                 document: "allowed".into(),
                 branch: "main".into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                datums: vec![clay_docs::DatumAccess {
                     tag: "config".into(),
                     write: true,
                     ..Default::default()
@@ -209,7 +209,7 @@ async fn a_full_delivery_queue_rejects_before_creating_an_optimistic_write() {
         &mut state,
         Resource::new_borrow(access),
         route("allowed"),
-        wit::FacetMutation::Update("0".into()),
+        wit::DatumMutation::Update("0".into()),
     )
     .unwrap()
     .unwrap();
@@ -222,7 +222,7 @@ async fn a_full_delivery_queue_rejects_before_creating_an_optimistic_write() {
             &mut state,
             Resource::new_borrow(access),
             route("allowed"),
-            wit::FacetMutation::Update("1".into())
+            wit::DatumMutation::Update("1".into())
         )
         .unwrap(),
         Err(wit::DocumentError::Denied)
@@ -236,7 +236,7 @@ async fn a_full_delivery_queue_rejects_before_creating_an_optimistic_write() {
         &mut state,
         Resource::new_borrow(access),
         route("allowed"),
-        wit::FacetMutation::Update("2".into()),
+        wit::DatumMutation::Update("2".into()),
     )
     .unwrap()
     .unwrap();

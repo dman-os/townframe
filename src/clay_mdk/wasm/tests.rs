@@ -1,7 +1,7 @@
 use super::*;
 use crate::ConfigurationRequest;
 use crate::Entrypoints;
-use crate::FacetAccess;
+use crate::DatumAccess;
 use crate::MicroId;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
@@ -63,9 +63,9 @@ fn manifest(view: &str, config: Option<(bool, bool)>) -> MicroManifest {
         configuration_requests: config
             .map(|(read, write)| ConfigurationRequest {
                 binding: "counter".into(),
-                facets: vec![FacetAccess {
+                datums: vec![DatumAccess {
                     tag: Nsid::literal("org.example.dayframe.counter.config"),
-                    key_id: Some("count".into()),
+                    slot: Some("count".into()),
                     read,
                     write,
                     create: false,
@@ -155,11 +155,11 @@ impl Rig {
         let documents = self.resources.documents.mock_documents();
         documents.bind_config("counter".into(), "counter-config".into(), "main".into());
         documents.seed(
-            clay_docs::FacetRoute {
+            clay_docs::DatumRoute {
                 document: "counter-config".into(),
                 branch: "main".into(),
                 tag: "org.example.dayframe.counter.config".into(),
-                key_id: "count".into(),
+                slot: "count".into(),
             },
             serde_json::json!(0),
         );

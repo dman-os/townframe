@@ -23,9 +23,9 @@ requires:
     contract: org.example.dayframe.shell.navButton
 configuration_requests:
   - binding: settings
-    facets:
+    datums:
       - tag: org.example.dayframe.settings.config
-        key_id: main
+        slot: main
         read: true
         write: true
         create: false

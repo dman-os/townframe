@@ -94,7 +94,7 @@ impl ComponentDecl for LayoutView {
     const NAME: &'static str = VIEW;
 }
 
-/// The viewer's arrangement facet.
+/// The viewer's arrangement datum.
 pub struct LayoutArrangement;
 
 impl ConfigDecl for LayoutArrangement {

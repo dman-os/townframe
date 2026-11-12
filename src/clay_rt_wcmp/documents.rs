@@ -5,10 +5,10 @@ use super::bindings::exports::townframe::dayframe::micro_lifecycle as lifecycle_
 pub use super::bindings::townframe::dayframe::documents as wit;
 use super::first_poll;
 use clay_docs::DocumentSnapshot;
-use clay_docs::FacetMutation;
-use clay_docs::FacetRoute;
-use clay_docs::FacetSelection;
-use clay_docs::FacetValue;
+use clay_docs::DatumMutation;
+use clay_docs::DatumRoute;
+use clay_docs::DatumSelection;
+use clay_docs::DatumValue;
 use clay_docs::OperationError;
 use clay_docs::OperationReceipt;
 use clay_docs::OperationStatus;
@@ -218,21 +218,21 @@ fn selection_from_wire(selection: wit::WatchSelection) -> WatchSelection {
     WatchSelection {
         documents: selection.documents.into_iter().collect(),
         branch: selection.branch,
-        facets: match selection.facets {
-            wit::FacetSelection::Tags(tags) => FacetSelection::Tags(tags.into_iter().collect()),
-            wit::FacetSelection::Keys(keys) => {
-                FacetSelection::Keys(keys.into_iter().map(|key| (key.tag, key.key_id)).collect())
+        datums: match selection.datums {
+            wit::DatumSelection::Tags(tags) => DatumSelection::Tags(tags.into_iter().collect()),
+            wit::DatumSelection::Keys(keys) => {
+                DatumSelection::Keys(keys.into_iter().map(|key| (key.tag, key.slot)).collect())
             }
         },
     }
 }
 
-fn route_from_wire(route: wit::FacetRoute) -> FacetRoute {
-    FacetRoute {
+fn route_from_wire(route: wit::DatumRoute) -> DatumRoute {
+    DatumRoute {
         document: route.document,
         branch: route.branch,
         tag: route.key.tag,
-        key_id: route.key.key_id,
+        slot: route.key.slot,
     }
 }
 
@@ -240,23 +240,23 @@ fn snapshot_to_wire(id: u64, snapshot: DocumentSnapshot) -> wit::DocumentSnapsho
     wit::DocumentSnapshot {
         watch_id: id,
         revision: snapshot.revision,
-        facets: snapshot
-            .facets
+        datums: snapshot
+            .datums
             .into_iter()
-            .map(|(route, value)| wit::FacetEntry {
-                route: wit::FacetRoute {
+            .map(|(route, value)| wit::DatumEntry {
+                route: wit::DatumRoute {
                     document: route.document,
                     branch: route.branch,
-                    key: wit::FacetKey {
+                    key: wit::DatumKey {
                         tag: route.tag,
-                        key_id: route.key_id,
+                        slot: route.slot,
                     },
                 },
                 value: match value {
-                    FacetValue::Loading => wit::FacetValue::Loading,
-                    FacetValue::Absent => wit::FacetValue::Absent,
-                    FacetValue::Present(value) => {
-                        wit::FacetValue::Present(serde_json::to_string(&value).unwrap())
+                    DatumValue::Loading => wit::DatumValue::Loading,
+                    DatumValue::Absent => wit::DatumValue::Absent,
+                    DatumValue::Present(value) => {
+                        wit::DatumValue::Present(serde_json::to_string(&value).unwrap())
                     }
                 },
             })
@@ -307,20 +307,20 @@ impl wit::HostDocumentAccess for WcmpStoreState {
     fn mutate(
         &mut self,
         access: Resource<WasmDocumentAccess>,
-        route: wit::FacetRoute,
-        mutation: wit::FacetMutation,
+        route: wit::DatumRoute,
+        mutation: wit::DatumMutation,
     ) -> wcmp::Result<Result<Resource<WasmOperation>, wit::DocumentError>> {
         if let Err(error) = self.documents.check() {
             return Ok(Err(access_error(error)));
         }
         let parsed = match mutation {
-            wit::FacetMutation::Update(value) => {
-                serde_json::from_str(&value).map(FacetMutation::Write)
+            wit::DatumMutation::Update(value) => {
+                serde_json::from_str(&value).map(DatumMutation::Write)
             }
-            wit::FacetMutation::Create(value) => {
-                serde_json::from_str(&value).map(FacetMutation::Create)
+            wit::DatumMutation::Create(value) => {
+                serde_json::from_str(&value).map(DatumMutation::Create)
             }
-            wit::FacetMutation::Delete => Ok(FacetMutation::Delete),
+            wit::DatumMutation::Delete => Ok(DatumMutation::Delete),
         };
         let mutation = match parsed {
             Ok(mutation) => mutation,

@@ -25,7 +25,7 @@ mod view;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
-use clay_mdk::Facet;
+use clay_mdk::Datum;
 use contract::NavigateRequest;
 use contract::OpenSheetRequest;
 use contract::Panel;
@@ -99,7 +99,7 @@ struct State {
 struct Shell {
     state: Rc<watch::Sender<State>>,
     panels: Collection<String, Panel>,
-    config: Facet<ShellConfig>,
+    config: Datum<ShellConfig>,
     /// Whether the development seed ([`HostInputs::start`]) has been applied: the frame remounts
     /// when the window crosses a breakpoint, and that must not reset the user's place.
     started: Rc<Cell<bool>>,

@@ -9,10 +9,10 @@ use super::first_poll;
 use super::trap_reason;
 use super::wasmtime;
 use clay_docs::DocumentSnapshot;
-use clay_docs::FacetMutation;
-use clay_docs::FacetRoute;
-use clay_docs::FacetSelection;
-use clay_docs::FacetValue;
+use clay_docs::DatumMutation;
+use clay_docs::DatumRoute;
+use clay_docs::DatumSelection;
+use clay_docs::DatumValue;
 use clay_docs::OperationError;
 use clay_docs::OperationReceipt;
 use clay_docs::OperationStatus;
@@ -227,21 +227,21 @@ fn selection_from_wire(selection: wit::WatchSelection) -> WatchSelection {
     WatchSelection {
         documents: selection.documents.into_iter().collect(),
         branch: selection.branch,
-        facets: match selection.facets {
-            wit::FacetSelection::Tags(tags) => FacetSelection::Tags(tags.into_iter().collect()),
-            wit::FacetSelection::Keys(keys) => {
-                FacetSelection::Keys(keys.into_iter().map(|key| (key.tag, key.key_id)).collect())
+        datums: match selection.datums {
+            wit::DatumSelection::Tags(tags) => DatumSelection::Tags(tags.into_iter().collect()),
+            wit::DatumSelection::Keys(keys) => {
+                DatumSelection::Keys(keys.into_iter().map(|key| (key.tag, key.slot)).collect())
             }
         },
     }
 }
 
-fn route_from_wire(route: wit::FacetRoute) -> FacetRoute {
-    FacetRoute {
+fn route_from_wire(route: wit::DatumRoute) -> DatumRoute {
+    DatumRoute {
         document: route.document,
         branch: route.branch,
         tag: route.key.tag,
-        key_id: route.key.key_id,
+        slot: route.key.slot,
     }
 }
 
@@ -249,23 +249,23 @@ fn snapshot_to_wire(id: u64, snapshot: DocumentSnapshot) -> wit::DocumentSnapsho
     wit::DocumentSnapshot {
         watch_id: id,
         revision: snapshot.revision,
-        facets: snapshot
-            .facets
+        datums: snapshot
+            .datums
             .into_iter()
-            .map(|(route, value)| wit::FacetEntry {
-                route: wit::FacetRoute {
+            .map(|(route, value)| wit::DatumEntry {
+                route: wit::DatumRoute {
                     document: route.document,
                     branch: route.branch,
-                    key: wit::FacetKey {
+                    key: wit::DatumKey {
                         tag: route.tag,
-                        key_id: route.key_id,
+                        slot: route.slot,
                     },
                 },
                 value: match value {
-                    FacetValue::Loading => wit::FacetValue::Loading,
-                    FacetValue::Absent => wit::FacetValue::Absent,
-                    FacetValue::Present(value) => {
-                        wit::FacetValue::Present(serde_json::to_string(&value).unwrap())
+                    DatumValue::Loading => wit::DatumValue::Loading,
+                    DatumValue::Absent => wit::DatumValue::Absent,
+                    DatumValue::Present(value) => {
+                        wit::DatumValue::Present(serde_json::to_string(&value).unwrap())
                     }
                 },
             })
@@ -316,20 +316,20 @@ impl wit::HostDocumentAccess for WasmStoreState {
     fn mutate(
         &mut self,
         access: Resource<WasmDocumentAccess>,
-        route: wit::FacetRoute,
-        mutation: wit::FacetMutation,
+        route: wit::DatumRoute,
+        mutation: wit::DatumMutation,
     ) -> wasmtime::Result<Result<Resource<WasmOperation>, wit::DocumentError>> {
         if let Err(error) = self.documents.check() {
             return Ok(Err(access_error(error)));
         }
         let parsed = match mutation {
-            wit::FacetMutation::Update(value) => {
-                serde_json::from_str(&value).map(FacetMutation::Write)
+            wit::DatumMutation::Update(value) => {
+                serde_json::from_str(&value).map(DatumMutation::Write)
             }
-            wit::FacetMutation::Create(value) => {
-                serde_json::from_str(&value).map(FacetMutation::Create)
+            wit::DatumMutation::Create(value) => {
+                serde_json::from_str(&value).map(DatumMutation::Create)
             }
-            wit::FacetMutation::Delete => Ok(FacetMutation::Delete),
+            wit::DatumMutation::Delete => Ok(DatumMutation::Delete),
         };
         let mutation = match parsed {
             Ok(mutation) => mutation,
@@ -416,13 +416,13 @@ mod tests {
     use wit::HostDocumentWatch;
     use wit::HostOperation;
 
-    fn route(document: &str) -> wit::FacetRoute {
-        wit::FacetRoute {
+    fn route(document: &str) -> wit::DatumRoute {
+        wit::DatumRoute {
             document: document.into(),
             branch: "main".into(),
-            key: wit::FacetKey {
+            key: wit::DatumKey {
                 tag: "config".into(),
-                key_id: "count".into(),
+                slot: "count".into(),
             },
         }
     }
@@ -439,9 +439,9 @@ mod tests {
                 vec![DocumentGrant {
                     document: "allowed".into(),
                     branch: "main".into(),
-                    facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                    datums: vec![clay_docs::DatumAccess {
                         tag: "config".into(),
-                        key_id: Some("count".into()),
+                        slot: Some("count".into()),
                         read: true,
                         write: true,
                         ..Default::default()
@@ -457,7 +457,7 @@ mod tests {
             &mut state,
             Resource::new_borrow(access),
             route("forged"),
-            wit::FacetMutation::Update("1".into()),
+            wit::DatumMutation::Update("1".into()),
         )
         .unwrap();
         assert!(matches!(denied, Err(wit::DocumentError::Denied)));
@@ -465,7 +465,7 @@ mod tests {
             &mut state,
             Resource::new_borrow(access),
             route("allowed"),
-            wit::FacetMutation::Update("{".into()),
+            wit::DatumMutation::Update("{".into()),
         )
         .unwrap();
         assert!(matches!(
@@ -473,8 +473,8 @@ mod tests {
             Err(wit::DocumentError::InvalidValue(_))
         ));
         for mutation in [
-            wit::FacetMutation::Create("1".into()),
-            wit::FacetMutation::Delete,
+            wit::DatumMutation::Create("1".into()),
+            wit::DatumMutation::Delete,
         ] {
             assert!(matches!(
                 HostDocumentAccess::mutate(
@@ -496,9 +496,9 @@ mod tests {
             wit::WatchSelection {
                 documents: vec!["allowed".into()],
                 branch: "main".into(),
-                facets: wit::FacetSelection::Keys(vec![wit::FacetKey {
+                datums: wit::DatumSelection::Keys(vec![wit::DatumKey {
                     tag: "config".into(),
-                    key_id: "count".into(),
+                    slot: "count".into(),
                 }]),
             },
         )
@@ -508,13 +508,13 @@ mod tests {
         let initial = HostDocumentWatch::current(&mut state, Resource::new_borrow(watch_rep))
             .unwrap()
             .unwrap();
-        assert!(matches!(initial.facets[0].value, wit::FacetValue::Absent));
+        assert!(matches!(initial.datums[0].value, wit::DatumValue::Absent));
         let watch_work = incoming.recv().await.unwrap();
         let operation = HostDocumentAccess::mutate(
             &mut state,
             Resource::new_borrow(access),
             route("allowed"),
-            wit::FacetMutation::Update("7".into()),
+            wit::DatumMutation::Update("7".into()),
         )
         .unwrap()
         .unwrap();
@@ -554,7 +554,7 @@ mod tests {
                 &mut state,
                 Resource::new_borrow(access),
                 route("allowed"),
-                wit::FacetMutation::Update("8".into()),
+                wit::DatumMutation::Update("8".into()),
             )
             .unwrap(),
             Err(wit::DocumentError::Revoked)
@@ -566,7 +566,7 @@ mod tests {
                 wit::WatchSelection {
                     documents: vec!["allowed".into()],
                     branch: "main".into(),
-                    facets: wit::FacetSelection::Tags(vec!["config".into()]),
+                    datums: wit::DatumSelection::Tags(vec!["config".into()]),
                 },
             )
             .unwrap(),
@@ -590,7 +590,7 @@ mod tests {
                 vec![DocumentGrant {
                     document: "allowed".into(),
                     branch: "main".into(),
-                    facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                    datums: vec![clay_docs::DatumAccess {
                         tag: "config".into(),
                         write: true,
                         ..Default::default()
@@ -613,7 +613,7 @@ mod tests {
             &mut state,
             Resource::new_borrow(access),
             route("allowed"),
-            wit::FacetMutation::Update("0".into()),
+            wit::DatumMutation::Update("0".into()),
         )
         .unwrap()
         .unwrap();
@@ -626,7 +626,7 @@ mod tests {
                 &mut state,
                 Resource::new_borrow(access),
                 route("allowed"),
-                wit::FacetMutation::Update("1".into())
+                wit::DatumMutation::Update("1".into())
             )
             .unwrap(),
             Err(wit::DocumentError::Denied)
@@ -640,7 +640,7 @@ mod tests {
             &mut state,
             Resource::new_borrow(access),
             route("allowed"),
-            wit::FacetMutation::Update("2".into()),
+            wit::DatumMutation::Update("2".into()),
         )
         .unwrap()
         .unwrap();

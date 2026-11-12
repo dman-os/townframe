@@ -11,7 +11,7 @@ use super::Launch;
 use crate::composition::assemble;
 use crate::composition::desktop_runtime;
 use crate::composition::CompositionRuntime;
-use clay_docs::FacetRoute;
+use clay_docs::DatumRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
 use dayframe_composition::HostInputs;
@@ -28,12 +28,12 @@ const HIDE_SAMPLE: &str = "button[aria-label=\"Hide Sample micro panel\"]";
 const SHOW_SAMPLE: &str = "button[aria-label=\"Show Sample micro panel\"]";
 const OPEN_LAYOUT: &str = "button[aria-label=\"Open Layout\"]";
 
-fn arrangement_route() -> FacetRoute {
-    FacetRoute {
+fn arrangement_route() -> DatumRoute {
+    DatumRoute {
         document: format!("{}-config", micro_layout_manifest::CONFIG_NAME),
         branch: "main".into(),
         tag: micro_layout_manifest::CONFIG_TAG.into(),
-        key_id: micro_layout_manifest::CONFIG_KEY.into(),
+        slot: micro_layout_manifest::CONFIG_KEY.into(),
     }
 }
 

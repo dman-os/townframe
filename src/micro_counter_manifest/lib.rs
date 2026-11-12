@@ -55,7 +55,7 @@ impl PackageDecl for Counter {
     const AUTHORITY: &'static str = AUTHORITY;
 }
 
-/// The counter's configuration facet: the count, a plain `u64`.
+/// The counter's configuration datum: the count, a plain `u64`.
 pub struct CounterConfig;
 
 impl ConfigDecl for CounterConfig {

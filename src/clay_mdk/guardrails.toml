@@ -10,7 +10,6 @@ allowed_dependencies = [
     "clay_rt_wasmtime",
     "clay_rt_wcmp",
     "clay_surface",
-    "daybook_types",
 ]
 allow_external_api_types = false
 

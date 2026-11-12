@@ -1,16 +1,16 @@
 //! Contributor-owned native presentation; Settings mounts it without reading its document.
 use super::SampleConfig;
-use clay_mdk::Facet;
-use clay_mdk::FacetState;
+use clay_mdk::Datum;
+use clay_mdk::DatumState;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
-use clay_mdk::hooks::use_facet;
+use clay_mdk::hooks::use_datum;
 use dioxus::prelude::*;
 
 #[component]
-pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
-    let facet = config;
-    let snapshot = use_facet(&facet);
+pub(super) fn SampleDetail(config: Datum<SampleConfig>) -> Element {
+    let datum = config;
+    let snapshot = use_datum(&datum);
     let config_state = snapshot.state.clone();
     let mut status = use_signal(|| "Configuration loaded from the mock node.".to_string());
     let mut receipt = use_signal(|| None::<OperationReceipt>);
@@ -28,13 +28,13 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
             }
         });
     };
-    let sample_for_toggle = facet.clone();
-    let sample_for_refresh = facet.clone();
+    let sample_for_toggle = datum.clone();
+    let sample_for_refresh = datum.clone();
     rsx! {
         div { class: "flex flex-col gap-4",
             p { "This detail component belongs to the sample micro, not Settings." }
             match config_state {
-                FacetState::Present(config) => {
+                DatumState::Present(config) => {
                     let config_for_toggle = config.clone();
                     rsx! {
                         p { "Greeting preview: {config.greeting}" }
@@ -63,7 +63,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                                 oninput: move |event| {
                                     let mut next = SampleConfig { enabled: config.enabled, greeting: event.value() };
                                     clamp_greeting(&mut next.greeting);
-                                    match facet.write(next) {
+                                    match datum.write(next) {
                                         Ok(operation) => {
                                              track(operation);
                                              status.set("Optimistic greeting edit pending.".into());
@@ -75,8 +75,8 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                         }
                     }
                 }
-                FacetState::Loading => rsx! { p { "Configuration is loading." } },
-                FacetState::Absent => rsx! { p { "Configuration is absent." } },
+                DatumState::Loading => rsx! { p { "Configuration is loading." } },
+                DatumState::Absent => rsx! { p { "Configuration is absent." } },
             }
             if snapshot.refreshing {
                 p { role: "status", "Refreshing sample configuration." }

@@ -5,8 +5,8 @@
 //! this module and so never name a renderer crate (ADR 015 §3 dependency direction).
 use crate::Capability;
 use crate::Collection;
-use crate::Facet;
-use crate::FacetSnapshot;
+use crate::Datum;
+use crate::DatumSnapshot;
 use crate::RefStatus;
 use crate::Row;
 use crate::context::Mount;
@@ -255,18 +255,18 @@ where
         .expect("the collection mirror outlives the view that reads it")
 }
 
-/// Bind a configuration facet to Dioxus reactivity: the returned snapshot is current at this
-/// render and the calling component re-renders on every change of the facet's document watch.
-pub fn use_facet<T>(facet: &Facet<T>) -> FacetSnapshot<T>
+/// Bind a configuration datum to Dioxus reactivity: the returned snapshot is current at this
+/// render and the calling component re-renders on every change of the datum's document watch.
+pub fn use_datum<T>(datum: &Datum<T>) -> DatumSnapshot<T>
 where
     T: Clone + DeserializeOwned + Serialize + 'static,
 {
     use_changes(|| {
-        facet
+        datum
             .changes()
             .expect("the document watch outlives the view that reads it")
     });
-    facet
+    datum
         .current()
         .expect("the document watch outlives the view that reads it")
 }

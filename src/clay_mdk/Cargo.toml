@@ -65,7 +65,6 @@ thiserror = { workspace = true, optional = true }
 clay_dioxus = { workspace = true, optional = true }
 clay_surface = { workspace = true, optional = true }
 clay_rt_wcmp = { workspace = true, optional = true }
-daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }
 blake3 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -100,7 +99,7 @@ wit = []
 # over the host sessions. A context publishes through the `clay_dioxus::NativeComponents`
 # registry its `Resources` carry. Micro crates depend on this, never on the host-side crates
 # directly.
-in_process = ["contract", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:daybook_types", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
+in_process = ["contract", "dep:clay_host", "dep:clay_docs", "dep:clay_guest_session", "dep:ciborium", "dep:tokio", "dep:dioxus-core", "dep:thiserror", "dep:clay_dioxus"]
 # The Dioxus half of the in-process backend: the view-side slot components and hooks. Micros with a host-linked view need this; contract
 # crates and headless compositions do not.
 view = ["in_process", "dep:dioxus"]

@@ -45,12 +45,12 @@ pub trait DeclaredCollection: CollectionDecl {
     const OFFERED: &'static [CollectionCapability];
 }
 
-/// A configuration facet a micro requests read and write access to: one facet (`NSID`, `KEY`)
+/// A configuration datum a micro requests read and write access to: one datum (`NSID`, `KEY`)
 /// of the document bound under `BINDING`.
 pub trait ConfigDecl {
     /// The local binding name of the configuration document.
     const BINDING: &'static str;
-    /// The facet's datum tag.
+    /// The datum's datum tag.
     const NSID: &'static str;
     const KEY: &'static str;
     type Value: Serialize + DeserializeOwned;

@@ -40,9 +40,9 @@ publications:
 requires: []
 configuration_requests:
   - binding: shell
-    facets:
+    datums:
       - tag: org.example.dayframe.shell.config
-        key_id: main
+        slot: main
         read: true
         write: true
         create: false

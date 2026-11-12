@@ -1382,7 +1382,7 @@ fn first_poll_maps_pending_to_suspended_and_ready_to_output() {
 async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     use clay_docs::DocumentGrant;
     use clay_docs::DocumentService;
-    use clay_docs::FacetRoute;
+    use clay_docs::DatumRoute;
     use std::future::Future;
     use std::task::Context;
     use std::task::Waker;
@@ -1392,11 +1392,11 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     let ended = host.observe_instance(&owner).unwrap();
     let service = DocumentService::new(32);
     let node = service.mock_documents();
-    let route = FacetRoute {
+    let route = DatumRoute {
         document: "counter-config".into(),
         branch: "main".into(),
         tag: "org.example.dayframe.counter.config".into(),
-        key_id: "count".into(),
+        slot: "count".into(),
     };
     node.seed(route.clone(), serde_json::json!(3));
     let access = service
@@ -1406,9 +1406,9 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
             vec![DocumentGrant {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                datums: vec![clay_docs::DatumAccess {
                     tag: route.tag.clone().into(),
-                    key_id: Some(route.key_id.clone()),
+                    slot: Some(route.slot.clone()),
                     read: true,
                     write: true,
                     ..Default::default()

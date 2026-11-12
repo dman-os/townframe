@@ -318,7 +318,7 @@ async fn close_before_mount_revokes_the_incarnation() {
 async fn document_driver_delivers_neutral_updates() {
     use clay_docs::DocumentGrant;
     use clay_docs::DocumentService;
-    use clay_docs::FacetRoute;
+    use clay_docs::DatumRoute;
     use std::future::Future;
     use std::task::Context;
     use std::task::Waker;
@@ -327,11 +327,11 @@ async fn document_driver_delivers_neutral_updates() {
     let owner = host.start("counter");
     let service = DocumentService::new(32);
     let node = service.mock_documents();
-    let route = FacetRoute {
+    let route = DatumRoute {
         document: "counter-config".into(),
         branch: "main".into(),
         tag: "org.example.dayframe.counter.config".into(),
-        key_id: "count".into(),
+        slot: "count".into(),
     };
     node.seed(route.clone(), serde_json::json!(3));
     let access = service
@@ -341,9 +341,9 @@ async fn document_driver_delivers_neutral_updates() {
             vec![DocumentGrant {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                datums: vec![clay_docs::DatumAccess {
                     tag: route.tag.clone().into(),
-                    key_id: Some(route.key_id.clone()),
+                    slot: Some(route.slot.clone()),
                     read: true,
                     write: true,
                     ..Default::default()

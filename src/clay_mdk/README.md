@@ -15,8 +15,8 @@ The same authoring vocabulary has two backends:
 - **`guest`** (feature `dioxus`, Wasm): `activate(&Context)` with the same shape over WIT
   imports, plus `export_micro!(activate)` which generates the `Guest` impl and
   `bindings::export!`. See `micro_counter` for the exemplar. Guest hooks that hold per-document
-  state (`use_facet`, `use_document_changes`) must live in the root `render` closure — a child
-  component's state is per mounted surface, so a facet watch in a child would split state across
+  state (`use_datum`, `use_document_changes`) must live in the root `render` closure — a child
+  component's state is per mounted surface, so a datum watch in a child would split state across
   surfaces of one incarnation.
 
 `view` (Dioxus slot/hook glue for host-linked views), `wasmtime` (host-side provider assembly

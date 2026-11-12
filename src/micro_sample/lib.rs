@@ -53,10 +53,10 @@ impl PackageDecl for Sample {
     const AUTHORITY: &'static str = AUTHORITY;
 }
 
-/// The sample's configuration facet.
-pub struct SampleFacet;
+/// The sample's configuration datum.
+pub struct SampleDatum;
 
-impl ConfigDecl for SampleFacet {
+impl ConfigDecl for SampleDatum {
     const BINDING: &'static str = CONFIG_NAME;
     const NSID: &'static str = CONFIG_TAG;
     const KEY: &'static str = CONFIG_KEY;
@@ -71,12 +71,12 @@ impl ComponentDecl for SampleDetailView {
 }
 
 /// The Sample micro's compile-time declaration: it publishes its detail presentation and
-/// declares read/write access to its own configuration facet. Its Settings section is written
+/// declares read/write access to its own configuration datum. Its Settings section is written
 /// at runtime, so it exists only while the micro runs.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
         .component::<SampleDetailView>()
-        .config::<SampleFacet>()
+        .config::<SampleDatum>()
         .writes::<SettingsSections>(SECTIONS_BINDING, Necessity::Required)
         .writes::<LayoutPanels>(PANELS_BINDING, Necessity::Optional)
         // The layout panel is declared, not written at runtime: it is listed while the sample is
@@ -94,12 +94,12 @@ pub fn sidecar() -> Sidecar {
 }
 
 /// Activation receives already-bound dependencies through the context; it cannot mint grants or
-/// reach the mock node. The host validated the manifest's facet ACL before this runs. The
+/// reach the mock node. The host validated the manifest's datum ACL before this runs. The
 /// micro registers its Settings section with a registration writer, so the row lives exactly as
 /// long as this incarnation.
 pub async fn activate(context: Context) -> Result<(), Error> {
     let config = context
-        .config::<SampleFacet>()?
+        .config::<SampleDatum>()?
         .expect("manifest declares the sample configuration binding");
     context.publish::<SampleDetailView>(move || {
         dioxus::prelude::rsx! { view::SampleDetail { config: config.clone() } }
@@ -125,11 +125,11 @@ pub async fn activate(context: Context) -> Result<(), Error> {
 /// surface is [`activate`].
 pub fn seed_mock_defaults(documents: &DocumentService) {
     documents.mock_documents().seed(
-        clay_mdk::host::FacetRoute {
+        clay_mdk::host::DatumRoute {
             document: "sample-config".into(),
             branch: "main".into(),
             tag: CONFIG_TAG.into(),
-            key_id: CONFIG_KEY.into(),
+            slot: CONFIG_KEY.into(),
         },
         serde_json::to_value(SampleConfig {
             enabled: true,

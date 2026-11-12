@@ -1,10 +1,10 @@
 use super::*;
 use clay_docs::DocumentGrant;
 use clay_docs::DocumentService;
-use clay_docs::FacetSelection;
+use clay_docs::DatumSelection;
 use clay_docs::MockDocuments;
 use clay_docs::OperationStatus;
-use daybook_types::manifest::RoutineFacetAccess;
+use clay_docs::DatumAccess;
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
@@ -32,9 +32,9 @@ impl Rig {
                 vec![DocumentGrant {
                     document: "allowed".into(),
                     branch: "main".into(),
-                    facets: vec![RoutineFacetAccess {
+                    datums: vec![DatumAccess {
                         tag: "config".into(),
-                        key_id: Some("count".into()),
+                        slot: Some("count".into()),
                         read: true,
                         write: true,
                         ..Default::default()
@@ -55,12 +55,12 @@ impl Rig {
         }
     }
 
-    fn route() -> FacetRoute {
-        FacetRoute {
+    fn route() -> DatumRoute {
+        DatumRoute {
             document: "allowed".into(),
             branch: "main".into(),
             tag: "config".into(),
-            key_id: "count".into(),
+            slot: "count".into(),
         }
     }
 
@@ -68,7 +68,7 @@ impl Rig {
         WatchSelection {
             documents: ["allowed".into()].into(),
             branch: "main".into(),
-            facets: FacetSelection::Keys([("config".into(), "count".into())].into()),
+            datums: DatumSelection::Keys([("config".into(), "count".into())].into()),
         }
     }
 }
@@ -133,7 +133,7 @@ async fn pending_operation_release_preserves_source_completion_without_guest_del
     let mut rig = Rig::new(Limits::default());
     let operation = rig
         .access
-        .mutate(Rig::route(), FacetMutation::Write(json!(1)))
+        .mutate(Rig::route(), DatumMutation::Write(json!(1)))
         .unwrap();
     let retained = operation.operation.clone();
     let work = rig.incoming.recv().await.unwrap();
@@ -159,7 +159,7 @@ async fn completed_receipts_recheck_release_or_session_closure_before_delivery()
         let mut rig = Rig::new(Limits::default());
         let operation = rig
             .access
-            .mutate(Rig::route(), FacetMutation::Write(json!(1)))
+            .mutate(Rig::route(), DatumMutation::Write(json!(1)))
             .unwrap();
         let receipt = operation.current().unwrap();
         rig.node.complete(receipt.id, Ok(()));
@@ -197,7 +197,7 @@ async fn admission_rejects_before_mutation_and_releases_resource_and_queue_capac
     ));
     assert!(matches!(
         rig.access
-            .mutate(Rig::route(), FacetMutation::Write(json!(1))),
+            .mutate(Rig::route(), DatumMutation::Write(json!(1))),
         Err(AccessError::Denied)
     ));
     assert!(rig.node.reads().is_empty());
@@ -208,7 +208,7 @@ async fn admission_rejects_before_mutation_and_releases_resource_and_queue_capac
     assert_eq!(rig.session.handle_count(), 1);
     assert!(matches!(
         rig.access
-            .mutate(Rig::route(), FacetMutation::Write(json!(2))),
+            .mutate(Rig::route(), DatumMutation::Write(json!(2))),
         Err(AccessError::Denied)
     ));
     assert_eq!(rig.node.reads(), reads);
@@ -217,14 +217,14 @@ async fn admission_rejects_before_mutation_and_releases_resource_and_queue_capac
     denied_route.document = "forged".into();
     assert!(matches!(
         rig.access
-            .mutate(denied_route, FacetMutation::Write(json!(3))),
+            .mutate(denied_route, DatumMutation::Write(json!(3))),
         Err(AccessError::Denied)
     ));
     assert_eq!(rig.session.handle_count(), 1);
     assert!(rig.incoming.try_recv().is_err());
     let operation = rig
         .access
-        .mutate(Rig::route(), FacetMutation::Write(json!(4)))
+        .mutate(Rig::route(), DatumMutation::Write(json!(4)))
         .unwrap();
     assert_eq!(operation.current().unwrap().id, 2);
     assert_eq!(rig.session.handle_count(), 2);
@@ -273,7 +273,7 @@ async fn session_authority_is_independent_of_the_document_grant_owner() {
     let access = session.grant(rig.access.access.clone()).unwrap();
     let watch = access.watch(Rig::selection()).unwrap();
     let operation = access
-        .mutate(Rig::route(), FacetMutation::Write(json!(1)))
+        .mutate(Rig::route(), DatumMutation::Write(json!(1)))
         .unwrap();
     let retained = operation.operation.clone();
     let watch_work = incoming.recv().await.unwrap();
@@ -292,7 +292,7 @@ async fn session_authority_is_independent_of_the_document_grant_owner() {
         Err(AccessError::Revoked)
     ));
     assert!(matches!(
-        access.mutate(Rig::route(), FacetMutation::Write(json!(2))),
+        access.mutate(Rig::route(), DatumMutation::Write(json!(2))),
         Err(AccessError::Revoked)
     ));
     assert_eq!(watch.current(), Err(AccessError::Revoked));

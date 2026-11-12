@@ -31,10 +31,10 @@ expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
   "configuration_requests": [
     {
       "binding": "counter",
-      "facets": [
+      "datums": [
         {
           "tag": "org.example.test.counter.config",
-          "key_id": "count",
+          "slot": "count",
           "read": true,
           "write": false,
           "create": false,

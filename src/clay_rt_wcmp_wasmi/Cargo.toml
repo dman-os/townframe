@@ -20,7 +20,6 @@ clay_guest_session = { workspace = true, features = ["test-utils"] }
 clay_host.workspace = true
 clay_rt_wcmp = { workspace = true, features = ["test-utils"] }
 clay_surface.workspace = true
-daybook_types.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 

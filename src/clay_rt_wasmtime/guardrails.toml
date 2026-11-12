@@ -7,6 +7,5 @@ allowed_dependencies = [
     "clay_guest_session",
     "clay_host",
     "clay_surface",
-    "daybook_types",
 ]
 allow_external_api_types = false

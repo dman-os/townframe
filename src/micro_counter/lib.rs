@@ -1,4 +1,4 @@
-//! The counter, authored once against the MDK's [`Context`]: a configured facet it counts in (or
+//! The counter, authored once against the MDK's [`Context`]: a configured datum it counts in (or
 //! an in-memory count when the composition granted none), two presentations of it (`view`, the
 //! one its Settings section mounts, and a compact `badge`), a `count` call that answers the
 //! current value and an `increment` call, which the toolbar's Increment button performs.
@@ -6,11 +6,11 @@
 //! the native `ACTIVATE` entry everywhere else; nothing here names a backend.
 use clay_mdk::Context;
 use clay_mdk::Error;
-use clay_mdk::Facet;
-use clay_mdk::FacetState;
+use clay_mdk::Datum;
+use clay_mdk::DatumState;
 use clay_mdk::Operation;
 use clay_mdk::OperationStatus;
-use clay_mdk::hooks::use_facet;
+use clay_mdk::hooks::use_datum;
 use dioxus::prelude::*;
 use micro_counter_manifest::COUNT;
 use micro_counter_manifest::CounterBadge;
@@ -20,47 +20,47 @@ use micro_counter_manifest::INCREMENT;
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// What every presentation and the call count in: the granted configuration facet, or, when the
+/// What every presentation and the call count in: the granted configuration datum, or, when the
 /// composition granted none (the counter also runs standalone), an in-memory count that only
 /// the `view` increments.
 #[derive(Clone)]
 struct Counter {
-    facet: Option<Facet<u64>>,
+    datum: Option<Datum<u64>>,
     standalone: Rc<Cell<u64>>,
 }
 
 impl Counter {
-    /// The count the facet holds, `None` while it is still loading. An absent facet counts zero.
+    /// The count the datum holds, `None` while it is still loading. An absent datum counts zero.
     fn value(&self) -> Result<Option<u64>, Error> {
-        let Some(facet) = &self.facet else {
+        let Some(datum) = &self.datum else {
             return Ok(Some(self.standalone.get()));
         };
-        Ok(match facet.current()?.state {
-            FacetState::Loading => None,
-            FacetState::Absent => Some(0),
-            FacetState::Present(count) => Some(count),
+        Ok(match datum.current()?.state {
+            DatumState::Loading => None,
+            DatumState::Absent => Some(0),
+            DatumState::Present(count) => Some(count),
         })
     }
 
-    /// Count one more: the facet write (returned as submitted; the caller decides whether to await
-    /// its settlement), or nothing more for an in-memory count. A facet still
+    /// Count one more: the datum write (returned as submitted; the caller decides whether to await
+    /// its settlement), or nothing more for an in-memory count. A datum still
     /// loading is [`Error::Unavailable`]: counting from a guessed zero would overwrite the stored
     /// count.
     fn increment(&self) -> Result<Option<Operation>, Error> {
-        let Some(facet) = &self.facet else {
+        let Some(datum) = &self.datum else {
             self.standalone.set(self.standalone.get() + 1);
             return Ok(None);
         };
         let current = self.value()?.ok_or(Error::Unavailable)?;
-        facet.write(current + 1).map(Some)
+        datum.write(current + 1).map(Some)
     }
 }
 
-/// Bind the counter's configuration facet when the composition granted one and publish its two
+/// Bind the counter's configuration datum when the composition granted one and publish its two
 /// presentations and its call over it.
 async fn activate(context: Context) -> Result<(), Error> {
     let counter = Counter {
-        facet: context.config::<CounterConfig>()?,
+        datum: context.config::<CounterConfig>()?,
         standalone: Rc::default(),
     };
     context.publish::<CounterView>({
@@ -114,19 +114,19 @@ fn view(counter: Counter) -> Element {
     let _ = rerender();
     let mut operation = use_signal(|| None::<Operation>);
     let mut error = use_signal(|| None::<String>);
-    let snapshot = counter.facet.as_ref().map(use_facet);
+    let snapshot = counter.datum.as_ref().map(use_datum);
     let value = match &snapshot {
         Some(snapshot) => snapshot.state.clone(),
-        None => FacetState::Present(counter.standalone.get()),
+        None => DatumState::Present(counter.standalone.get()),
     };
     let increment = counter.clone();
-    let document = counter.facet.clone().zip(snapshot);
+    let document = counter.datum.clone().zip(snapshot);
     rsx! {
         div { class: "flex flex-col gap-4",
             button {
                 class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                 "aria-label": "Increment Wasm counter",
-                disabled: matches!(value, FacetState::Loading),
+                disabled: matches!(value, DatumState::Loading),
                 onclick: move |_| match increment.increment() {
                     // A standalone count has no document to notify the view of it changing.
                     Ok(None) => rerender += 1,
@@ -137,13 +137,13 @@ fn view(counter: Counter) -> Element {
                     Err(failure) => error.set(Some(format!("Write failed: {failure}"))),
                 },
                 match &value {
-                    FacetState::Loading => rsx! { "Loading counter" },
-                    FacetState::Absent => rsx! { "0" },
-                    FacetState::Present(count) => rsx! { "{count}" },
+                    DatumState::Loading => rsx! { "Loading counter" },
+                    DatumState::Absent => rsx! { "0" },
+                    DatumState::Present(count) => rsx! { "{count}" },
                 }
             }
-            if let Some((facet, snapshot)) = document {
-                if matches!(value, FacetState::Absent) {
+            if let Some((datum, snapshot)) = document {
+                if matches!(value, DatumState::Absent) {
                     p { "Counter configuration is absent; increment starts at zero." }
                 }
                 if snapshot.refreshing {
@@ -160,7 +160,7 @@ fn view(counter: Counter) -> Element {
                     class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                     "aria-label": "Refresh Wasm counter",
                     onclick: move |_| {
-                        error.set(facet.refresh().err().map(|failure| format!("Refresh failed: {failure}")));
+                        error.set(datum.refresh().err().map(|failure| format!("Refresh failed: {failure}")));
                     },
                     "Refresh counter"
                 }
@@ -172,12 +172,12 @@ fn view(counter: Counter) -> Element {
 /// The compact presentation: the count and nothing to act on. A standalone counter's badge shows
 /// the in-memory count as of its last render, since only the `view` is notified of it changing.
 fn badge(counter: Counter) -> Element {
-    let snapshot = counter.facet.as_ref().map(use_facet);
+    let snapshot = counter.datum.as_ref().map(use_datum);
     let text = match snapshot.map(|snapshot| snapshot.state) {
         None => counter.standalone.get().to_string(),
-        Some(FacetState::Loading) => "…".into(),
-        Some(FacetState::Absent) => "0".into(),
-        Some(FacetState::Present(count)) => count.to_string(),
+        Some(DatumState::Loading) => "…".into(),
+        Some(DatumState::Absent) => "0".into(),
+        Some(DatumState::Present(count)) => count.to_string(),
     };
     rsx! { span { role: "status", "aria-label": "Wasm counter badge", "Count: {text}" } }
 }

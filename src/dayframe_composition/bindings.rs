@@ -11,7 +11,7 @@
 //! user bound it) and holds only for requests that grant still covers (ADR 028 §3): a package
 //! update that widens a request under the same binding name must be configured again, not
 //! inherit the old consent.
-use clay_docs::FacetRoute;
+use clay_docs::DatumRoute;
 use clay_mdk::host::BoundCollection;
 use clay_mdk::Access;
 use clay_mdk::BindingResolution;
@@ -25,15 +25,15 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-/// The binding datum shares the install datum's document, one facet per micro.
+/// The binding datum shares the install datum's document, one datum per micro.
 pub(crate) const BINDINGS_TAG: &str = "clay.micro.bindings";
 
-pub(crate) fn bindings_route(micro: &MicroId) -> FacetRoute {
-    FacetRoute {
+pub(crate) fn bindings_route(micro: &MicroId) -> DatumRoute {
+    DatumRoute {
         document: super::INSTALLS_DOCUMENT.into(),
         branch: super::INSTALLS_BRANCH.into(),
         tag: BINDINGS_TAG.into(),
-        key_id: micro.as_str().into(),
+        slot: micro.as_str().into(),
     }
 }
 
@@ -91,7 +91,7 @@ pub(crate) struct BindingsDatum {
 impl BindingsDatum {
     /// Only this crate writes the document, so a malformed datum is a bug.
     pub fn decode(value: serde_json::Value) -> Self {
-        serde_json::from_value(value).expect("the bindings facet holds only binding datums")
+        serde_json::from_value(value).expect("the bindings datum holds only binding datums")
     }
 
     pub fn encode(&self) -> serde_json::Value {

@@ -4,7 +4,7 @@ expression: "serde_json::to_string_pretty(&acl).unwrap()"
 ---
 {
   "tag": "org.example.test.counter.config",
-  "key_id": "count",
+  "slot": "count",
   "read": true,
   "write": true,
   "create": false,

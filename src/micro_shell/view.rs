@@ -17,11 +17,11 @@ use clay_dioxus_kit::Sheet;
 use clay_dioxus_kit::SizeRule;
 use clay_dioxus_kit::Split;
 use clay_dioxus_kit::WidthClass;
-use clay_mdk::FacetSnapshot;
-use clay_mdk::FacetState;
+use clay_mdk::DatumSnapshot;
+use clay_mdk::DatumState;
 use clay_mdk::Row;
 use clay_mdk::hooks::PresentationSlot;
-use clay_mdk::hooks::use_facet;
+use clay_mdk::hooks::use_datum;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use micro_shell_manifest::NavigateRequest;
@@ -137,9 +137,9 @@ fn use_state(shell: &Shell) -> State {
 /// The arrangement weights in `snapshot`. A document that has none yet, or one a sync wrote
 /// with weights a split cannot lay out (external input, unlike the weights this shell writes),
 /// reads as the defaults.
-fn arrangement(snapshot: &FacetSnapshot<ShellConfig>) -> ShellConfig {
+fn arrangement(snapshot: &DatumSnapshot<ShellConfig>) -> ShellConfig {
     match &snapshot.state {
-        FacetState::Present(config)
+        DatumState::Present(config)
             if [config.sidebar, config.list, config.details]
                 .iter()
                 .all(|weight| weight.is_finite() && *weight > 0.0) =>
@@ -303,7 +303,7 @@ fn Frame(shell: Shell) -> Element {
     let width = WidthClass::from_px(width_px);
     let state = use_state(&shell);
     let panels = use_rows(&shell.panels);
-    let config = arrangement(&use_facet(&shell.config));
+    let config = arrangement(&use_datum(&shell.config));
     let failure = use_signal(|| None::<String>);
 
     use_host_wiring(&shell, &host, state.navigation.can_back());
@@ -630,8 +630,8 @@ mod tests {
 
     #[test]
     fn weights_a_split_cannot_lay_out_read_as_the_defaults() {
-        let present = |config| FacetSnapshot {
-            state: FacetState::Present(config),
+        let present = |config| DatumSnapshot {
+            state: DatumState::Present(config),
             refreshing: false,
             revision: 0,
             pending: 0,

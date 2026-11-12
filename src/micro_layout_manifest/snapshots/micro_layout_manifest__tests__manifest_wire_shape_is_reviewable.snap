@@ -18,9 +18,9 @@ requires:
     contract: org.example.dayframe.shell.navButton
 configuration_requests:
   - binding: layout
-    facets:
+    datums:
       - tag: org.example.dayframe.layout.config
-        key_id: main
+        slot: main
         read: true
         write: true
         create: false

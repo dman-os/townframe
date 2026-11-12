@@ -16,9 +16,9 @@ publications:
 requires: []
 configuration_requests:
   - binding: sample
-    facets:
+    datums:
       - tag: org.example.dayframe.sample.config
-        key_id: main
+        slot: main
         read: true
         write: true
         create: false

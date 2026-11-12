@@ -23,7 +23,7 @@ use crate::Capability;
 use crate::Config;
 use crate::Context;
 use crate::Error;
-use crate::FacetSnapshot;
+use crate::DatumSnapshot;
 use crate::MicroManifest;
 use crate::OperationError;
 use crate::OperationReceipt;
@@ -40,7 +40,7 @@ use crate::context::Shared;
 use crate::documents;
 use crate::micro_lifecycle;
 use crate::mirror::DocumentMirror;
-use crate::mirror::Facet;
+use crate::mirror::Datum;
 use crate::mirror::MirrorStatus;
 use crate::presentation;
 use crate::presentation_events;
@@ -644,15 +644,15 @@ impl Runtime {
     }
 }
 
-/// `facet`'s state in the mirror, or [`Error::Revoked`] once its watch was released or revoked.
-pub(crate) fn snapshot<T: DeserializeOwned>(facet: &Facet<T>) -> Result<FacetSnapshot<T>, Error> {
-    let snapshot = facet.current();
+/// `datum`'s state in the mirror, or [`Error::Revoked`] once its watch was released or revoked.
+pub(crate) fn snapshot<T: DeserializeOwned>(datum: &Datum<T>) -> Result<DatumSnapshot<T>, Error> {
+    let snapshot = datum.current();
     match snapshot.status {
         MirrorStatus::Released | MirrorStatus::Revoked => Err(Error::Revoked),
         // A lagged watch is resynchronized as soon as the host says so (`Runtime::lagged`); its
         // retained state is what a view shows meanwhile.
-        MirrorStatus::Live | MirrorStatus::Lagged => Ok(FacetSnapshot {
-            state: facet.state(&snapshot),
+        MirrorStatus::Live | MirrorStatus::Lagged => Ok(DatumSnapshot {
+            state: datum.state(&snapshot),
             refreshing: snapshot.refreshing,
             revision: snapshot.revision,
             pending: snapshot.pending.len(),

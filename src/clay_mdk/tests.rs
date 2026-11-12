@@ -541,8 +541,8 @@ impl documents::HostDocumentAccess for TestHost {
     fn mutate(
         &mut self,
         _access: Resource<documents::DocumentAccess>,
-        _route: documents::FacetRoute,
-        _mutation: documents::FacetMutation,
+        _route: documents::DatumRoute,
+        _mutation: documents::DatumMutation,
     ) -> wasmtime::Result<Result<Resource<documents::Operation>, documents::DocumentError>> {
         Ok(Err(documents::DocumentError::Denied))
     }

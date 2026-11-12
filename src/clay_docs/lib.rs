@@ -1,7 +1,7 @@
 //! The document data layer (ADR 015 §4). Three layers with different runtime shapes:
 //! [`DocumentService`] is the shared host service (sparse cache, refresh deduplication,
 //! retention, optimistic transactions, permissioned delivery); [`DocumentAccess`] is a
-//! context's authorized mirror entry point; `Facet<T>` is the typed authoring surface.
+//! context's authorized mirror entry point; `Datum<T>` is the typed authoring surface.
 //! Contribution collections (Settings sections, root mounts) are a deliberately separate
 //! mechanism in `clay_host`: they share the reactive-read shape but have registration and
 //! disposal semantics instead of optimistic persistence or source cursors.
@@ -24,7 +24,6 @@ use clay_host::Instance;
 use clay_store::BatchOp;
 use clay_store::OrderedStore;
 use clay_store::StoreError;
-use daybook_types::manifest::RoutineFacetAccess;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -40,21 +39,21 @@ use tokio::sync::watch;
 // ── Types: wire vocabulary, public handles, then private state records ───────
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct FacetRoute {
+pub struct DatumRoute {
     pub document: String,
     pub branch: String,
     pub tag: String,
-    pub key_id: String,
+    pub slot: String,
 }
 
-impl FacetRoute {
+impl DatumRoute {
     /// The durable source key: the four fields in declaration order, each as a big-endian
     /// `u32` byte length followed by its UTF-8 bytes. Length-prefixing is unambiguous for any
     /// field content (no separator byte can occur inside a field) and deterministic, unlike a
     /// self-describing format whose encoding could drift between versions; the byte order also
     /// groups a document's routes contiguously.
     fn encode(&self) -> Vec<u8> {
-        let fields = [&self.document, &self.branch, &self.tag, &self.key_id];
+        let fields = [&self.document, &self.branch, &self.tag, &self.slot];
         let mut key = Vec::with_capacity(fields.iter().map(|field| 4 + field.len()).sum());
         for field in fields {
             let length = u32::try_from(field.len()).expect("a route field fits in u32");
@@ -78,7 +77,7 @@ impl FacetRoute {
             document: field(),
             branch: field(),
             tag: field(),
-            key_id: field(),
+            slot: field(),
         };
         assert!(key.is_empty(), "trailing bytes in route key");
         route
@@ -86,7 +85,7 @@ impl FacetRoute {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FacetSelection {
+pub enum DatumSelection {
     Tags(BTreeSet<String>),
     Keys(BTreeSet<(String, String)>),
 }
@@ -95,12 +94,12 @@ pub enum FacetSelection {
 pub struct WatchSelection {
     pub documents: BTreeSet<String>,
     pub branch: String,
-    pub facets: FacetSelection,
+    pub datums: DatumSelection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FacetValue<T = Value> {
-    /// Not yet hydrated locally. Distinct from `Absent` so an uncached facet is never mistaken
+pub enum DatumValue<T = Value> {
+    /// Not yet hydrated locally. Distinct from `Absent` so an uncached datum is never mistaken
     /// for a nonexistent one (transcript:322).
     Loading,
     /// Known absent after a successful read.
@@ -108,7 +107,7 @@ pub enum FacetValue<T = Value> {
     Present(T),
 }
 
-/// Freshness evidence for a facet value (ADR 014 §4). A pending refresh never hides an existing
+/// Freshness evidence for a datum value (ADR 014 §4). A pending refresh never hides an existing
 /// local value; `Refreshing` is evidence, not a loading state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Freshness {
@@ -123,14 +122,14 @@ pub enum Freshness {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentSnapshot {
     pub revision: u64,
-    pub facets: BTreeMap<FacetRoute, FacetValue>,
+    pub datums: BTreeMap<DatumRoute, DatumValue>,
     pub pending: BTreeSet<u64>,
     pub freshness: Freshness,
     pub revoked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum FacetMutation {
+pub enum DatumMutation {
     Write(Value),
     Create(Value),
     Delete,
@@ -169,12 +168,24 @@ pub enum DocumentError {
     SubscriptionLagged,
 }
 
+/// A Clay-owned datum access rule used by document grants and watches.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DatumAccess {
+    pub owner_plug_id: Option<String>,
+    pub tag: String,
+    pub slot: Option<String>,
+    pub read: bool,
+    pub write: bool,
+    pub create: bool,
+    pub delete: bool,
+}
+
 /// Resolved, host-approved document grants. Owner configuration resolution precedes issuance;
 /// normal document predicate evaluation will likewise precede issuance in the core adapter.
 pub struct DocumentGrant {
     pub document: String,
     pub branch: String,
-    pub facets: Vec<RoutineFacetAccess>,
+    pub datums: Vec<DatumAccess>,
 }
 
 #[derive(Clone)]
@@ -205,10 +216,10 @@ pub struct DocumentWatch {
 }
 
 #[derive(Clone)]
-pub struct Facet<T> {
+pub struct Datum<T> {
     pub watch: DocumentWatch,
     access: DocumentAccess,
-    route: FacetRoute,
+    route: DatumRoute,
     marker: std::marker::PhantomData<T>,
 }
 
@@ -225,7 +236,7 @@ pub struct MockDocuments {
 }
 
 struct Authority {
-    documents: BTreeMap<(String, String), Vec<RoutineFacetAccess>>,
+    documents: BTreeMap<(String, String), Vec<DatumAccess>>,
     revoked: AtomicBool,
 }
 
@@ -239,7 +250,7 @@ struct State {
     next: u64,
     clock: u64,
     capacity: usize,
-    source: BTreeMap<FacetRoute, Value>,
+    source: BTreeMap<DatumRoute, Value>,
     /// Set by [`DocumentService::durable`]: every change to `source` is queued here, in order,
     /// for the persist future to apply to the store.
     persist: Persistence,
@@ -247,24 +258,24 @@ struct State {
     queued: u64,
     /// How many of them the persist future has applied to the store; `None` when volatile.
     applied: Option<watch::Receiver<u64>>,
-    // Mock FacetSet lookup: selected document/tag routes, including removal tombstones.
+    // Mock DatumSet lookup: selected document/tag routes, including removal tombstones.
     membership: BTreeMap<(String, String, String), BTreeSet<String>>,
     /// Which `(document, branch)` configuration picked for each config binding name.
     config_documents: BTreeMap<String, (String, String)>,
-    cache: BTreeMap<FacetRoute, CacheEntry>,
-    replica: Replica<FacetRoute, Value>,
-    ledger: Ledger<FacetRoute, Value>,
+    cache: BTreeMap<DatumRoute, CacheEntry>,
+    replica: Replica<DatumRoute, Value>,
+    ledger: Ledger<DatumRoute, Value>,
     watches: BTreeMap<u64, WatchRecord>,
     pending: BTreeMap<u64, PendingMutation>,
-    reads: Vec<FacetRoute>,
+    reads: Vec<DatumRoute>,
     hold_refresh: bool,
-    requests: BTreeMap<FacetRoute, BTreeMap<u64, u64>>,
+    requests: BTreeMap<DatumRoute, BTreeMap<u64, u64>>,
 }
 
 enum Persistence {
     /// [`DocumentService::new`]: the source lives in memory only.
     Volatile,
-    Open(mpsc::UnboundedSender<(FacetRoute, Option<Value>)>),
+    Open(mpsc::UnboundedSender<(DatumRoute, Option<Value>)>),
     /// The sender is dropped, so the persist future ends once it has drained the queue. A source
     /// write after this point would be silently lost, so it panics instead.
     Closed,
@@ -283,8 +294,8 @@ struct WatchRecord {
 }
 
 struct PendingMutation {
-    route: FacetRoute,
-    mutation: FacetMutation,
+    route: DatumRoute,
+    mutation: DatumMutation,
     /// Set for a mutation of a [`DocumentService::durable`] service: the source already holds
     /// its value, queued as this source change, and the persist future completes the operation
     /// once the store has applied that many changes. `None` while volatile, where only
@@ -348,16 +359,16 @@ impl DocumentService {
         capacity: usize,
     ) -> Result<(Self, impl Future<Output = ()> + use<St>), StoreError> {
         let service = Self::new(capacity);
-        let (sender, mut queue) = mpsc::unbounded_channel::<(FacetRoute, Option<Value>)>();
+        let (sender, mut queue) = mpsc::unbounded_channel::<(DatumRoute, Option<Value>)>();
         let (applied_sender, applied) = watch::channel(0_u64);
         let stored = store.scan_prefix(b"").await?;
         {
             let mut state = service.inner.lock().unwrap();
             for (key, bytes) in stored {
-                let route = FacetRoute::decode(&key);
+                let route = DatumRoute::decode(&key);
                 let value = serde_json::from_slice(&bytes)
                     .expect("the document store holds only JSON values this service wrote");
-                // Routes feed the mock FacetSet lookup, so a loaded route must be noted
+                // Routes feed the mock DatumSet lookup, so a loaded route must be noted
                 // exactly as `seed` and `external_change` note theirs.
                 state.note_route(&route);
                 state.source.insert(route, value);
@@ -430,7 +441,7 @@ impl DocumentService {
     }
 
     /// Grants the configuration document that configuration picked for `binding`, with the
-    /// manifest's facet ACL. A manifest request names facets by tag and never the plug or
+    /// manifest's datum ACL. A manifest request names datums by tag and never the plug or
     /// document that holds them (ADR 028 §4), so no ACL entry may carry an owner: the one
     /// document is whatever `binding` was bound to. The composition root supplies
     /// already-approved ACLs; tag validation remains the loader's responsibility, not a second
@@ -440,7 +451,7 @@ impl DocumentService {
         host: &Host,
         instance: &Instance,
         binding: &str,
-        acl: Vec<RoutineFacetAccess>,
+        acl: Vec<DatumAccess>,
     ) -> Result<DocumentRef, AccessError> {
         host.check(instance)?;
         assert!(
@@ -461,7 +472,7 @@ impl DocumentService {
             vec![DocumentGrant {
                 document: document.clone(),
                 branch: branch.clone(),
-                facets: acl,
+                datums: acl,
             }],
         )?;
         access.document(document, branch)
@@ -484,7 +495,7 @@ impl DocumentService {
             documents
                 .entry((grant.document, grant.branch))
                 .or_default()
-                .extend(grant.facets);
+                .extend(grant.datums);
         }
         let authority = Arc::new(Authority {
             documents,
@@ -538,7 +549,7 @@ impl DocumentAccess {
         let id = state.next;
         let (updates, _) = watch::channel(DocumentSnapshot {
             revision: 0,
-            facets: BTreeMap::new(),
+            datums: BTreeMap::new(),
             pending: BTreeSet::new(),
             freshness: Freshness::Cached,
             revoked: false,
@@ -570,29 +581,29 @@ impl DocumentAccess {
 
     pub fn mutate(
         &self,
-        route: FacetRoute,
-        mutation: FacetMutation,
+        route: DatumRoute,
+        mutation: DatumMutation,
     ) -> Result<Operation, AccessError> {
         self.check()?;
         let right = match &mutation {
-            FacetMutation::Write(_) => Right::Write,
-            FacetMutation::Create(_) => Right::Create,
-            FacetMutation::Delete => Right::Delete,
+            DatumMutation::Write(_) => Right::Write,
+            DatumMutation::Create(_) => Right::Create,
+            DatumMutation::Delete => Right::Delete,
         };
         if !self.authority.allows(&route, right) {
             return Err(AccessError::Denied);
         }
         let mut state = self.service.inner.lock().unwrap();
         self.check()?;
-        // Seed this route's base before overlaying a write. Never hydrate unrelated facets.
+        // Seed this route's base before overlaying a write. Never hydrate unrelated datums.
         if !state.cache.contains_key(&route) {
             state.hydrate(&route);
         }
         state.next += 1;
         let id = state.next;
         let value = match &mutation {
-            FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value.clone()),
-            FacetMutation::Delete => None,
+            DatumMutation::Write(value) | DatumMutation::Create(value) => Some(value.clone()),
+            DatumMutation::Delete => None,
         };
         // A durable service has no remote to accept or reject a write, so reaching the local
         // store is acceptance: the change goes into the source (and the persist queue) now,
@@ -676,36 +687,36 @@ impl DocumentRef {
     pub fn mutate(
         &self,
         tag: String,
-        key_id: String,
-        mutation: FacetMutation,
+        slot: String,
+        mutation: DatumMutation,
     ) -> Result<Operation, AccessError> {
         self.access.mutate(
-            FacetRoute {
+            DatumRoute {
                 document: self.document.clone(),
                 branch: self.branch.clone(),
                 tag,
-                key_id,
+                slot,
             },
             mutation,
         )
     }
-    pub fn facet<T: serde::de::DeserializeOwned + serde::Serialize>(
+    pub fn datum<T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         tag: String,
-        key_id: String,
-    ) -> Result<Facet<T>, AccessError> {
-        let route = FacetRoute {
+        slot: String,
+    ) -> Result<Datum<T>, AccessError> {
+        let route = DatumRoute {
             document: self.document.clone(),
             branch: self.branch.clone(),
             tag,
-            key_id,
+            slot,
         };
         let watch = self.access.watch(WatchSelection {
             documents: [route.document.clone()].into(),
             branch: route.branch.clone(),
-            facets: FacetSelection::Keys([(route.tag.clone(), route.key_id.clone())].into()),
+            datums: DatumSelection::Keys([(route.tag.clone(), route.slot.clone())].into()),
         })?;
-        Ok(Facet {
+        Ok(Datum {
             watch,
             access: self.access.clone(),
             route,
@@ -714,32 +725,32 @@ impl DocumentRef {
     }
 }
 
-impl<T: serde::de::DeserializeOwned + serde::Serialize> Facet<T> {
-    /// Decoded availability state of this facet in `snapshot`: distinguishes `Loading`
+impl<T: serde::de::DeserializeOwned + serde::Serialize> Datum<T> {
+    /// Decoded availability state of this datum in `snapshot`: distinguishes `Loading`
     /// (not yet hydrated locally) from `Absent` (known absent after hydration) and
     /// `Present(T)` (ADR 015 §4, §Boundary correction).
-    pub fn state(&self, snapshot: &DocumentSnapshot) -> FacetValue<T> {
-        match snapshot.facets.get(&self.route) {
-            Some(FacetValue::Present(value)) => FacetValue::Present(
+    pub fn state(&self, snapshot: &DocumentSnapshot) -> DatumValue<T> {
+        match snapshot.datums.get(&self.route) {
+            Some(DatumValue::Present(value)) => DatumValue::Present(
                 serde_json::from_value(value.clone())
-                    .expect("configuration facet violates its declared value shape"),
+                    .expect("configuration datum violates its declared value shape"),
             ),
-            Some(FacetValue::Absent) => FacetValue::Absent,
-            Some(FacetValue::Loading) | None => FacetValue::Loading,
+            Some(DatumValue::Absent) => DatumValue::Absent,
+            Some(DatumValue::Loading) | None => DatumValue::Loading,
         }
     }
 
     pub fn value(&self, snapshot: &DocumentSnapshot) -> Option<T> {
         match self.state(snapshot) {
-            FacetValue::Present(value) => Some(value),
-            FacetValue::Loading | FacetValue::Absent => None,
+            DatumValue::Present(value) => Some(value),
+            DatumValue::Loading | DatumValue::Absent => None,
         }
     }
     pub fn write(&self, value: T) -> Result<Operation, AccessError> {
         self.access.mutate(
             self.route.clone(),
-            FacetMutation::Write(
-                serde_json::to_value(value).expect("facet value must serialize to JSON"),
+            DatumMutation::Write(
+                serde_json::to_value(value).expect("datum value must serialize to JSON"),
             ),
         )
     }
@@ -791,7 +802,7 @@ impl DocumentWatch {
     }
     /// Targeted read of one authorized route through this watch's mirror: hydrates exactly that
     /// route (never a whole-map clone) and returns the mirror's current view of it.
-    pub fn read(&self, route: &FacetRoute) -> Result<FacetValue, AccessError> {
+    pub fn read(&self, route: &DatumRoute) -> Result<DatumValue, AccessError> {
         self.lease.access.check()?;
         let mut state = self.lease.service.inner.lock().unwrap();
         self.lease.access.check()?;
@@ -809,8 +820,8 @@ impl DocumentWatch {
         Ok(state
             .watches
             .get(&self.lease.id)
-            .and_then(|record| record.updates.borrow().facets.get(route).cloned())
-            .unwrap_or(FacetValue::Absent))
+            .and_then(|record| record.updates.borrow().datums.get(route).cloned())
+            .unwrap_or(DatumValue::Absent))
     }
     /// Request a targeted refresh of this watch's retained selection. The returned snapshot is
     /// the post-request view; a pending refresh shows up as `Freshness::Refreshing`, never as a
@@ -912,7 +923,7 @@ impl MockDocuments {
         );
     }
     /// The source's current value, for the host-side writer that must decide before writing.
-    pub fn get(&self, route: &FacetRoute) -> Option<Value> {
+    pub fn get(&self, route: &DatumRoute) -> Option<Value> {
         self.service
             .inner
             .lock()
@@ -921,7 +932,7 @@ impl MockDocuments {
             .get(route)
             .cloned()
     }
-    pub fn seed(&self, route: FacetRoute, value: Value) {
+    pub fn seed(&self, route: DatumRoute, value: Value) {
         let mut state = self.service.inner.lock().unwrap();
         state.note_route(&route);
         // A persisted value wins over the seed, so only a seed that lands is written.
@@ -947,7 +958,7 @@ impl MockDocuments {
             state.complete(id, outcome);
         }
     }
-    pub fn external_change(&self, route: FacetRoute, value: Option<Value>) {
+    pub fn external_change(&self, route: DatumRoute, value: Option<Value>) {
         let mut state = self.service.inner.lock().unwrap();
         state.note_route(&route);
         state.write_source(route.clone(), value);
@@ -980,10 +991,10 @@ impl MockDocuments {
         }
         state.publish();
     }
-    pub fn reads(&self) -> Vec<FacetRoute> {
+    pub fn reads(&self) -> Vec<DatumRoute> {
         self.service.inner.lock().unwrap().reads.clone()
     }
-    pub fn cached_routes(&self) -> BTreeSet<FacetRoute> {
+    pub fn cached_routes(&self) -> BTreeSet<DatumRoute> {
         self.service
             .inner
             .lock()
@@ -1007,7 +1018,7 @@ impl std::fmt::Debug for Operation {
     }
 }
 
-impl<T> PartialEq for Facet<T> {
+impl<T> PartialEq for Datum<T> {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.watch.lease, &other.watch.lease)
     }
@@ -1016,18 +1027,18 @@ impl<T> PartialEq for Facet<T> {
 // ── Internals: authority checks, watch records, and service state machine ────
 
 impl Authority {
-    fn allows(&self, route: &FacetRoute, right: Right) -> bool {
+    fn allows(&self, route: &DatumRoute, right: Right) -> bool {
         !self.revoked.load(Ordering::Acquire)
             && self
                 .documents
                 .get(&(route.document.clone(), route.branch.clone()))
                 .is_some_and(|acl| {
                     acl.iter().any(|access| {
-                        access.tag.0 == route.tag
+                        access.tag == route.tag
                             && access
-                                .key_id
+                                .slot
                                 .as_ref()
-                                .is_none_or(|key| key == &route.key_id)
+                                .is_none_or(|key| key == &route.slot)
                             && match right {
                                 Right::Read => access.read,
                                 Right::Write => access.write,
@@ -1043,21 +1054,21 @@ impl Authority {
                 .documents
                 .get(&(document.clone(), selection.branch.clone()))
                 .ok_or(AccessError::Denied)?;
-            match &selection.facets {
-                FacetSelection::Tags(tags) => {
+            match &selection.datums {
+                DatumSelection::Tags(tags) => {
                     for tag in tags {
-                        if !acl.iter().any(|access| access.read && access.tag.0 == *tag) {
+                        if !acl.iter().any(|access| access.read && access.tag == *tag) {
                             return Err(AccessError::Denied);
                         }
                     }
                 }
-                FacetSelection::Keys(keys) => {
-                    for (tag, key_id) in keys {
-                        let route = FacetRoute {
+                DatumSelection::Keys(keys) => {
+                    for (tag, slot) in keys {
+                        let route = DatumRoute {
                             document: document.clone(),
                             branch: selection.branch.clone(),
                             tag: tag.clone(),
-                            key_id: key_id.clone(),
+                            slot: slot.clone(),
                         };
                         if !self.allows(&route, Right::Read) {
                             return Err(AccessError::Denied);
@@ -1071,13 +1082,13 @@ impl Authority {
 }
 
 impl WatchRecord {
-    fn contains(&self, route: &FacetRoute) -> bool {
+    fn contains(&self, route: &DatumRoute) -> bool {
         self.selection.documents.contains(&route.document)
             && self.selection.branch == route.branch
-            && match &self.selection.facets {
-                FacetSelection::Tags(tags) => tags.contains(&route.tag),
-                FacetSelection::Keys(keys) => {
-                    keys.contains(&(route.tag.clone(), route.key_id.clone()))
+            && match &self.selection.datums {
+                DatumSelection::Tags(tags) => tags.contains(&route.tag),
+                DatumSelection::Keys(keys) => {
+                    keys.contains(&(route.tag.clone(), route.slot.clone()))
                 }
             }
             && self.authority.allows(route, Right::Read)
@@ -1085,12 +1096,12 @@ impl WatchRecord {
 }
 
 impl State {
-    fn routes_for(&self, record: &WatchRecord) -> BTreeSet<FacetRoute> {
+    fn routes_for(&self, record: &WatchRecord) -> BTreeSet<DatumRoute> {
         let mut routes = BTreeSet::new();
         for document in &record.selection.documents {
-            let keys = match &record.selection.facets {
-                FacetSelection::Keys(keys) => keys.clone(),
-                FacetSelection::Tags(tags) => {
+            let keys = match &record.selection.datums {
+                DatumSelection::Keys(keys) => keys.clone(),
+                DatumSelection::Tags(tags) => {
                     let mut keys = BTreeSet::new();
                     for tag in tags {
                         if let Some(ids) = self.membership.get(&(
@@ -1105,8 +1116,8 @@ impl State {
                             [&(document.clone(), record.selection.branch.clone())]
                         {
                             if acl.read
-                                && acl.tag.0 == *tag
-                                && let Some(id) = &acl.key_id
+                                && acl.tag == *tag
+                                && let Some(id) = &acl.slot
                             {
                                 keys.insert((tag.clone(), id.clone()));
                             }
@@ -1115,12 +1126,12 @@ impl State {
                     keys
                 }
             };
-            for (tag, key_id) in keys {
-                let route = FacetRoute {
+            for (tag, slot) in keys {
+                let route = DatumRoute {
                     document: document.clone(),
                     branch: record.selection.branch.clone(),
                     tag,
-                    key_id,
+                    slot,
                 };
                 if record.contains(&route) {
                     routes.insert(route);
@@ -1131,7 +1142,7 @@ impl State {
     }
 
     /// The one place the source changes: applies the change and queues it for persistence.
-    fn write_source(&mut self, route: FacetRoute, value: Option<Value>) {
+    fn write_source(&mut self, route: DatumRoute, value: Option<Value>) {
         match &value {
             Some(value) => self.source.insert(route.clone(), value.clone()),
             None => self.source.remove(&route),
@@ -1150,7 +1161,7 @@ impl State {
         }
     }
 
-    fn note_route(&mut self, route: &FacetRoute) {
+    fn note_route(&mut self, route: &DatumRoute) {
         self.membership
             .entry((
                 route.document.clone(),
@@ -1158,17 +1169,17 @@ impl State {
                 route.tag.clone(),
             ))
             .or_default()
-            .insert(route.key_id.clone());
+            .insert(route.slot.clone());
     }
 
-    fn visible(&self, route: &FacetRoute) -> Option<Value> {
+    fn visible(&self, route: &DatumRoute) -> Option<Value> {
         match self.ledger.pending(route) {
             Some(pending) => pending.cloned(),
             None => self.replica.get(route).map(|entry| entry.value.clone()),
         }
     }
 
-    fn apply_base(&mut self, route: &FacetRoute, value: Option<Value>) -> Version {
+    fn apply_base(&mut self, route: &DatumRoute, value: Option<Value>) -> Version {
         self.clock += 1;
         let version = Version::new(self.replica.incarnation(), self.clock);
         let delta = match value {
@@ -1188,7 +1199,7 @@ impl State {
         version
     }
 
-    fn hydrate(&mut self, route: &FacetRoute) {
+    fn hydrate(&mut self, route: &DatumRoute) {
         self.reads.push(route.clone());
         let value = self.source.get(route).cloned();
         let version = self.apply_base(route, value);
@@ -1218,25 +1229,25 @@ impl State {
     }
 
     fn snapshot(&self, id: u64, record: &WatchRecord) -> DocumentSnapshot {
-        let mut facets = BTreeMap::new();
+        let mut datums = BTreeMap::new();
         let mut pending = BTreeSet::new();
         for route in self.routes_for(record) {
             let value = if self.cache.contains_key(&route) {
                 self.visible(&route)
-                    .map_or(FacetValue::Absent, FacetValue::Present)
+                    .map_or(DatumValue::Absent, DatumValue::Present)
             } else {
-                FacetValue::Loading
+                DatumValue::Loading
             };
             for (id, mutation) in &self.pending {
                 if mutation.route == route {
                     pending.insert(*id);
                 }
             }
-            facets.insert(route, value);
+            datums.insert(route, value);
         }
         DocumentSnapshot {
             revision: record.updates.borrow().revision,
-            facets,
+            datums,
             pending,
             freshness: if self
                 .requests
@@ -1268,7 +1279,7 @@ impl State {
             let revision = record.updates.borrow().revision + 1;
             record.updates.send_replace(DocumentSnapshot {
                 revision,
-                facets: BTreeMap::new(),
+                datums: BTreeMap::new(),
                 pending: BTreeSet::new(),
                 freshness: Freshness::Cached,
                 revoked,
@@ -1301,8 +1312,8 @@ impl State {
         let status = match outcome {
             Ok(()) => {
                 let value = match pending.mutation {
-                    FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value),
-                    FacetMutation::Delete => None,
+                    DatumMutation::Write(value) | DatumMutation::Create(value) => Some(value),
+                    DatumMutation::Delete => None,
                 };
                 // A durable operation's change was written to the source when it was made.
                 if pending.stored_at.is_none() {

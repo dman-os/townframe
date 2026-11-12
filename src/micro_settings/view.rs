@@ -9,7 +9,7 @@ use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
 use clay_mdk::Row;
 use clay_mdk::hooks::PresentationSlot;
-use clay_mdk::hooks::use_facet;
+use clay_mdk::hooks::use_datum;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use micro_settings_manifest::ID;
@@ -22,7 +22,7 @@ pub struct SettingsListProps {
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn SettingsList(props: SettingsListProps) -> Element {
-    let preferences = props.micro.preferences(&use_facet(&props.micro.config));
+    let preferences = props.micro.preferences(&use_datum(&props.micro.config));
     let mut receipt = use_signal(|| None::<OperationReceipt>);
     let mut error = use_signal(|| None::<String>);
     let mut track = move |result: Result<Operation, Error>| match result {

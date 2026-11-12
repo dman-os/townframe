@@ -15,7 +15,6 @@ clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view"] }
 clay_store = { workspace = true }
-daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
 dioxus = { workspace = true }
 micro_settings_manifest = { workspace = true }
 micro_shell = { workspace = true }

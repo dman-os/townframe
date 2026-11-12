@@ -25,9 +25,9 @@ publications:
 requires: []
 configuration_requests:
   - binding: counter
-    facets:
+    datums:
       - tag: org.example.dayframe.counter.config
-        key_id: count
+        slot: count
         read: true
         write: true
         create: false

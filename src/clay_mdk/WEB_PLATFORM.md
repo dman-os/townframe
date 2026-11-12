@@ -19,7 +19,7 @@ small boundary changes; they do not replace the Dioxus implementation baseline.
 - **webidl2wit** converts Web IDL into WIT. Its README labels it WIP and lists unresolved mappings
   for `any`, `object`, callback interfaces, and several other types. It maps dictionaries to
   records, unions to variants, and interfaces to resources or interfaces. This is useful prior
-  art for future platform facets, not evidence that the entire DOM can be translated mechanically.
+  art for future platform datums, not evidence that the entire DOM can be translated mechanically.
   Source: https://github.com/wasi-gfx/webidl2wit , README type-conversion table.
 - **browser.wit** generates browser WIT from Web IDL and supplies browser-component examples
   in several languages. Its example instructions use Jco, JSPI, and explicit browser/WASI shim

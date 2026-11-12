@@ -3,7 +3,7 @@
 //! other micros' panels (ADR 031 §13).
 //!
 //! The mechanism: the `layout.panels` collection describes the installed panels, each row a
-//! title and a lazy presentation reference; the viewer's [`LayoutConfig`] (a facet of the
+//! title and a lazy presentation reference; the viewer's [`LayoutConfig`] (a datum of the
 //! layout's configuration document) lists the registration ids that are shown. The view mounts
 //! exactly the configured ids, each through a [`PresentationSlot`], and only a mounted slot
 //! redeems its reference, so a panel that is installed but not shown never activates its
@@ -14,10 +14,10 @@ use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
-use clay_mdk::Facet;
-use clay_mdk::FacetState;
+use clay_mdk::Datum;
+use clay_mdk::DatumState;
 use clay_mdk::hooks::PresentationSlot;
-use clay_mdk::hooks::use_facet;
+use clay_mdk::hooks::use_datum;
 use clay_mdk::hooks::use_rows;
 use dioxus::prelude::*;
 use micro_layout_manifest::LayoutArrangement;
@@ -27,7 +27,7 @@ use micro_layout_manifest::LayoutView;
 use micro_layout_manifest::Panel;
 use micro_layout_manifest::SHELL_NAV_BUTTON;
 
-/// Bind the panels collection and the arrangement facet, and publish the view over them. The
+/// Bind the panels collection and the arrangement datum, and publish the view over them. The
 /// shell's sidebar/back button is required (the view mounts it in its app bar), so the layout can
 /// be left on a compact host.
 async fn activate(context: Context) -> Result<(), Error> {
@@ -52,25 +52,25 @@ clay_mdk::export_micro!(activate, micro_layout_manifest::manifest);
 /// per installed panel (the viewer's way to edit the arrangement), then the arrangement itself.
 fn view(
     panels: Collection<String, Panel>,
-    config: Facet<LayoutConfig>,
+    config: Datum<LayoutConfig>,
     nav_button: Capability,
 ) -> Element {
     let rows = use_rows(&panels);
-    let snapshot = use_facet(&config);
+    let snapshot = use_datum(&config);
     let mut failure = use_signal(|| None::<String>);
     // Every state is the body of one frame (see `framed`). `Loading` is also what a released or
     // revoked document watch reads as, so it must keep the frame's app bar (the shell's
     // sidebar/back button): without it a compact host has no way out of the panel.
     let arrangement = match snapshot.state {
-        FacetState::Loading => {
+        DatumState::Loading => {
             return framed(
                 rsx! { PresentationSlot { reference: nav_button } },
                 rsx! { p { role: "status", "Loading layout…" } },
             );
         }
         // No document yet: nothing is shown (see `LayoutConfig`).
-        FacetState::Absent => LayoutConfig::default(),
-        FacetState::Present(arrangement) => arrangement,
+        DatumState::Absent => LayoutConfig::default(),
+        DatumState::Present(arrangement) => arrangement,
     };
     framed(
         rsx! { PresentationSlot { reference: nav_button } },

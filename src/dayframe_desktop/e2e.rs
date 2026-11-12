@@ -638,11 +638,11 @@ async fn external_document_changes_reach_the_counter_guest() {
     })
     .await;
     runtime.documents().mock_documents().external_change(
-        clay_docs::FacetRoute {
+        clay_docs::DatumRoute {
             document: "counter-config".into(),
             branch: "main".into(),
             tag: micro_counter_manifest::CONFIG_TAG.into(),
-            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+            slot: micro_counter_manifest::CONFIG_KEY.into(),
         },
         Some(serde_json::json!(41)),
     );

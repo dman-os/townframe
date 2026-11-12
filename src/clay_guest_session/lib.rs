@@ -3,8 +3,8 @@ use clay_docs::DocumentError;
 use clay_docs::DocumentRef;
 use clay_docs::DocumentSnapshot;
 use clay_docs::DocumentWatch;
-use clay_docs::FacetMutation;
-use clay_docs::FacetRoute;
+use clay_docs::DatumMutation;
+use clay_docs::DatumRoute;
 use clay_docs::Operation as DataOperation;
 use clay_docs::OperationReceipt;
 use clay_docs::WatchSelection;
@@ -201,8 +201,8 @@ impl Access {
 
     pub fn mutate(
         &self,
-        route: FacetRoute,
-        mutation: FacetMutation,
+        route: DatumRoute,
+        mutation: DatumMutation,
     ) -> Result<Operation, AccessError> {
         let lease = self.lease.0.admit()?;
         let permit = self.work.try_reserve().map_err(|_| AccessError::Denied)?;

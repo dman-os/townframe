@@ -110,7 +110,7 @@ impl ComponentDecl for SettingsSectionView {
     const NAME: &'static str = SECTION;
 }
 
-/// The viewer's preferences facet.
+/// The viewer's preferences datum.
 pub struct SettingsPreferences;
 
 impl ConfigDecl for SettingsPreferences {

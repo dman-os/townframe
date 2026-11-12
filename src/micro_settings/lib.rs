@@ -11,9 +11,9 @@ use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
-use clay_mdk::Facet;
-use clay_mdk::FacetSnapshot;
-use clay_mdk::FacetState;
+use clay_mdk::Datum;
+use clay_mdk::DatumSnapshot;
+use clay_mdk::DatumState;
 use clay_mdk::Instance;
 use clay_mdk::Operation;
 use contract::Section;
@@ -39,7 +39,7 @@ pub struct ShellHandles {
 pub struct SettingsMicro {
     pub instance: Instance,
     pub sections: Collection<String, Section>,
-    pub config: Facet<SettingsConfig>,
+    pub config: Datum<SettingsConfig>,
     pub shell: ShellHandles,
 }
 
@@ -52,11 +52,11 @@ impl PartialEq for SettingsMicro {
 impl SettingsMicro {
     /// The viewer's preferences in `snapshot`: the defaults while the document has none, and
     /// `None` while it is still loading.
-    pub fn preferences(&self, snapshot: &FacetSnapshot<SettingsConfig>) -> Option<SettingsConfig> {
+    pub fn preferences(&self, snapshot: &DatumSnapshot<SettingsConfig>) -> Option<SettingsConfig> {
         match &snapshot.state {
-            FacetState::Loading => None,
-            FacetState::Absent => Some(SettingsConfig::default()),
-            FacetState::Present(config) => Some(config.clone()),
+            DatumState::Loading => None,
+            DatumState::Absent => Some(SettingsConfig::default()),
+            DatumState::Present(config) => Some(config.clone()),
         }
     }
 

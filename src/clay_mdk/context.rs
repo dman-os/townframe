@@ -16,7 +16,7 @@ use crate::Collection;
 use crate::CollectionDecl;
 use crate::ComponentDecl;
 use crate::ConfigDecl;
-use crate::FacetState;
+use crate::DatumState;
 use crate::Registration;
 use crate::manifest::Access;
 use crate::manifest::Request;
@@ -432,28 +432,28 @@ impl Config {
         Self(ConfigInner::Guest(document))
     }
 
-    /// The typed facet `tag`/`key_id` of this document, watched for the incarnation's life.
-    pub(crate) fn facet<T: DeserializeOwned + Serialize>(
+    /// The typed datum `tag`/`slot` of this document, watched for the incarnation's life.
+    pub(crate) fn datum<T: DeserializeOwned + Serialize>(
         &self,
         tag: &str,
-        key_id: &str,
-    ) -> Result<Facet<T>, Error> {
-        Ok(Facet(match &self.0 {
+        slot: &str,
+    ) -> Result<Datum<T>, Error> {
+        Ok(Datum(match &self.0 {
             #[cfg(feature = "in_process")]
             ConfigInner::InProcess(document) => {
-                FacetInner::InProcess(document.facet(tag.into(), key_id.into())?)
+                DatumInner::InProcess(document.datum(tag.into(), slot.into())?)
             }
             #[cfg(feature = "guest")]
-            ConfigInner::Guest(document) => FacetInner::Guest(document.facet(tag, key_id)?),
+            ConfigInner::Guest(document) => DatumInner::Guest(document.datum(tag, slot)?),
         }))
     }
 }
 
-/// One configuration facet's decoded state at a revision of its document watch.
+/// One configuration datum's decoded state at a revision of its document watch.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FacetSnapshot<T> {
+pub struct DatumSnapshot<T> {
     /// `Loading` (not hydrated yet) is distinct from `Absent` (known absent after hydration).
-    pub state: FacetState<T>,
+    pub state: DatumState<T>,
     /// A targeted refresh is in flight; the state still shows the retained local value.
     pub refreshing: bool,
     pub revision: u64,
@@ -461,50 +461,50 @@ pub struct FacetSnapshot<T> {
     pub pending: usize,
 }
 
-/// A typed configuration facet: reads see local writes optimistically, writes return the
+/// A typed configuration datum: reads see local writes optimistically, writes return the
 /// [`Operation`] that tracks their acknowledgement.
-pub struct Facet<T>(FacetInner<T>);
+pub struct Datum<T>(DatumInner<T>);
 
-enum FacetInner<T> {
+enum DatumInner<T> {
     #[cfg(feature = "in_process")]
-    InProcess(clay_docs::Facet<T>),
+    InProcess(clay_docs::Datum<T>),
     #[cfg(feature = "guest")]
-    Guest(crate::mirror::Facet<T>),
+    Guest(crate::mirror::Datum<T>),
 }
 
-impl<T: Clone> Clone for Facet<T> {
+impl<T: Clone> Clone for Datum<T> {
     fn clone(&self) -> Self {
         Self(match &self.0 {
             #[cfg(feature = "in_process")]
-            FacetInner::InProcess(facet) => FacetInner::InProcess(facet.clone()),
+            DatumInner::InProcess(datum) => DatumInner::InProcess(datum.clone()),
             #[cfg(feature = "guest")]
-            FacetInner::Guest(facet) => FacetInner::Guest(facet.clone()),
+            DatumInner::Guest(datum) => DatumInner::Guest(datum.clone()),
         })
     }
 }
 
-/// Two facets are equal when they watch through the same lease, so a re-rendered component
-/// handed the same facet is not re-rendered for it.
-impl<T> PartialEq for Facet<T> {
+/// Two datums are equal when they watch through the same lease, so a re-rendered component
+/// handed the same datum is not re-rendered for it.
+impl<T> PartialEq for Datum<T> {
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             #[cfg(feature = "in_process")]
-            (FacetInner::InProcess(left), FacetInner::InProcess(right)) => left == right,
+            (DatumInner::InProcess(left), DatumInner::InProcess(right)) => left == right,
             #[cfg(feature = "guest")]
-            (FacetInner::Guest(left), FacetInner::Guest(right)) => left == right,
+            (DatumInner::Guest(left), DatumInner::Guest(right)) => left == right,
             #[cfg(all(feature = "in_process", feature = "guest"))]
             _ => false,
         }
     }
 }
 
-impl<T: Clone + DeserializeOwned + Serialize> Facet<T> {
-    pub fn current(&self) -> Result<FacetSnapshot<T>, Error> {
+impl<T: Clone + DeserializeOwned + Serialize> Datum<T> {
+    pub fn current(&self) -> Result<DatumSnapshot<T>, Error> {
         match &self.0 {
             #[cfg(feature = "in_process")]
-            FacetInner::InProcess(facet) => Ok(in_process_snapshot(facet, &facet.watch.current()?)),
+            DatumInner::InProcess(datum) => Ok(in_process_snapshot(datum, &datum.watch.current()?)),
             #[cfg(feature = "guest")]
-            FacetInner::Guest(facet) => crate::guest::snapshot(facet),
+            DatumInner::Guest(datum) => crate::guest::snapshot(datum),
         }
     }
 
@@ -515,55 +515,55 @@ impl<T: Clone + DeserializeOwned + Serialize> Facet<T> {
     pub fn write(&self, value: T) -> Result<Operation, Error> {
         Ok(Operation(match &self.0 {
             #[cfg(feature = "in_process")]
-            FacetInner::InProcess(facet) => OperationInner::InProcess(facet.write(value)?),
+            DatumInner::InProcess(datum) => OperationInner::InProcess(datum.write(value)?),
             #[cfg(feature = "guest")]
-            FacetInner::Guest(facet) => {
-                let operation = facet.write(&value)?;
-                facet.resync()?;
+            DatumInner::Guest(datum) => {
+                let operation = datum.write(&value)?;
+                datum.resync()?;
                 OperationInner::Guest(operation)
             }
         }))
     }
 
     /// Request a targeted refresh. Returns the post-request view; a pending refresh shows as
-    /// [`FacetSnapshot::refreshing`], never as a missing value.
-    pub fn refresh(&self) -> Result<FacetSnapshot<T>, Error> {
+    /// [`DatumSnapshot::refreshing`], never as a missing value.
+    pub fn refresh(&self) -> Result<DatumSnapshot<T>, Error> {
         match &self.0 {
             #[cfg(feature = "in_process")]
-            FacetInner::InProcess(facet) => Ok(in_process_snapshot(facet, &facet.watch.refresh()?)),
+            DatumInner::InProcess(datum) => Ok(in_process_snapshot(datum, &datum.watch.refresh()?)),
             #[cfg(feature = "guest")]
-            FacetInner::Guest(facet) => {
-                facet.refresh()?;
-                crate::guest::snapshot(facet)
+            DatumInner::Guest(datum) => {
+                datum.refresh()?;
+                crate::guest::snapshot(datum)
             }
         }
     }
 
-    /// The stream of this facet's changes, for a hook to turn into re-renders.
+    /// The stream of this datum's changes, for a hook to turn into re-renders.
     #[cfg(any(feature = "view", feature = "guest"))]
     pub(crate) fn changes(&self) -> Result<crate::hooks::Changes, Error> {
         Ok(match &self.0 {
             #[cfg(feature = "in_process")]
-            FacetInner::InProcess(facet) => {
-                crate::hooks::Changes::Document(facet.watch.subscribe()?)
+            DatumInner::InProcess(datum) => {
+                crate::hooks::Changes::Document(datum.watch.subscribe()?)
             }
             #[cfg(feature = "guest")]
-            FacetInner::Guest(_) => crate::hooks::Changes::Pushed,
+            DatumInner::Guest(_) => crate::hooks::Changes::Pushed,
         })
     }
 }
 
 #[cfg(feature = "in_process")]
 fn in_process_snapshot<T: Clone + DeserializeOwned + Serialize>(
-    facet: &clay_docs::Facet<T>,
+    datum: &clay_docs::Datum<T>,
     snapshot: &clay_docs::DocumentSnapshot,
-) -> FacetSnapshot<T> {
-    use clay_docs::FacetValue;
-    FacetSnapshot {
-        state: match facet.state(snapshot) {
-            FacetValue::Loading => FacetState::Loading,
-            FacetValue::Absent => FacetState::Absent,
-            FacetValue::Present(value) => FacetState::Present(value),
+) -> DatumSnapshot<T> {
+    use clay_docs::DatumValue;
+    DatumSnapshot {
+        state: match datum.state(snapshot) {
+            DatumValue::Loading => DatumState::Loading,
+            DatumValue::Absent => DatumState::Absent,
+            DatumValue::Present(value) => DatumState::Present(value),
         },
         refreshing: snapshot.freshness == clay_docs::Freshness::Refreshing,
         revision: snapshot.revision,
@@ -722,15 +722,15 @@ impl Context {
         }
     }
 
-    /// The facet `C` declares, watched for the incarnation's life, or `None` when the
+    /// The datum `C` declares, watched for the incarnation's life, or `None` when the
     /// composition activated the micro standalone and granted no document under `C::BINDING`.
     ///
     /// Panics when the manifest requests no configuration under `C::BINDING`.
-    pub fn config<C: ConfigDecl>(&self) -> Result<Option<Facet<C::Value>>, Error> {
+    pub fn config<C: ConfigDecl>(&self) -> Result<Option<Datum<C::Value>>, Error> {
         self.0
             .configs
             .get(C::BINDING)
-            .map(|config| config.facet(C::NSID, C::KEY))
+            .map(|config| config.datum(C::NSID, C::KEY))
             .transpose()
     }
 

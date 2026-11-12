@@ -2,28 +2,28 @@ package townframe:dayframe@0.4.0;
 
 interface documents {
     type doc-id = string;
-    type facet-raw = string;
+    type datum-raw = string;
 
-    record facet-key {
+    record datum-key {
         tag: string,
-        key-id: string,
+        slot: string,
     }
 
-    record facet-route {
+    record datum-route {
         document: doc-id,
         branch: string,
-        key: facet-key,
+        key: datum-key,
     }
 
-    variant facet-selection {
+    variant datum-selection {
         tags(list<string>),
-        keys(list<facet-key>),
+        keys(list<datum-key>),
     }
 
     record watch-selection {
         documents: list<doc-id>,
         branch: string,
-        facets: facet-selection,
+        datums: datum-selection,
     }
 
     variant document-error {
@@ -33,21 +33,21 @@ interface documents {
         subscription-lagged,
     }
 
-    variant facet-value {
+    variant datum-value {
         loading,
         absent,
-        present(facet-raw),
+        present(datum-raw),
     }
 
-    record facet-entry {
-        route: facet-route,
-        value: facet-value,
+    record datum-entry {
+        route: datum-route,
+        value: datum-value,
     }
 
     record document-snapshot {
         watch-id: u64,
         revision: u64,
-        facets: list<facet-entry>,
+        datums: list<datum-entry>,
         pending: list<u64>,
         refreshing: bool,
         revoked: bool,
@@ -75,9 +75,9 @@ interface documents {
         status: operation-status,
     }
 
-    variant facet-mutation {
-        update(facet-raw),
-        create(facet-raw),
+    variant datum-mutation {
+        update(datum-raw),
+        create(datum-raw),
         delete,
     }
 
@@ -93,7 +93,7 @@ interface documents {
 
     resource document-access {
         watch: func(selection: watch-selection) -> result<document-watch, document-error>;
-        mutate: func(route: facet-route, mutation: facet-mutation) -> result<operation, document-error>;
+        mutate: func(route: datum-route, mutation: datum-mutation) -> result<operation, document-error>;
     }
 
     record document-binding {

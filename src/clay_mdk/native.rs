@@ -45,7 +45,7 @@ use crate::Error;
 use crate::context::Backend;
 use crate::context::RawHandler;
 use crate::context::Shared;
-use crate::manifest::FacetAccess;
+use crate::manifest::DatumAccess;
 use crate::manifest::MicroManifest;
 use crate::manifest::PublicationDeclaration;
 use crate::manifest::PublicationKind;
@@ -687,7 +687,7 @@ pub(crate) fn grant_configs(
                 host,
                 instance,
                 &request.binding,
-                routine_facets(&request.facets),
+                routine_datums(&request.datums),
             )
             .map_err(|error| format!("config {}: {error}", request.binding))?;
         configs.insert(request.binding.clone(), document);
@@ -713,20 +713,20 @@ pub(crate) fn declared_publications(
         .collect()
 }
 
-pub(crate) fn routine_facets(
-    facets: &[FacetAccess],
-) -> Vec<daybook_types::manifest::RoutineFacetAccess> {
-    facets
+pub(crate) fn routine_datums(
+    datums: &[DatumAccess],
+) -> Vec<clay_docs::DatumAccess> {
+    datums
         .iter()
-        .map(|facet| daybook_types::manifest::RoutineFacetAccess {
+        .map(|datum| clay_docs::DatumAccess {
             // A manifest request never names the plug that owns the document (ADR 028 §4).
             owner_plug_id: None,
-            tag: facet.tag.as_str().into(),
-            key_id: facet.key_id.clone(),
-            read: facet.read,
-            write: facet.write,
-            create: facet.create,
-            delete: facet.delete,
+            tag: datum.tag.as_str().into(),
+            slot: datum.slot.clone(),
+            read: datum.read,
+            write: datum.write,
+            create: datum.create,
+            delete: datum.delete,
         })
         .collect()
 }

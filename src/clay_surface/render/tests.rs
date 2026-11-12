@@ -931,8 +931,8 @@ fn custom_element_names_follow_the_html_rule_narrowed_to_ascii() {
     ] {
         assert!(!is_custom_element_name(bad), "{bad:?} is not admitted");
     }
-    // `font-facet` merely shares a prefix with the reserved names.
-    assert!(is_custom_element_name("font-facet"));
+    // `font-datum` merely shares a prefix with the reserved names.
+    assert!(is_custom_element_name("font-datum"));
 }
 
 #[test]

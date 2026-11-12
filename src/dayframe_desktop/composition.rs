@@ -267,11 +267,11 @@ pub(crate) async fn assemble<St: OrderedStore + Send + Sync + 'static>(
     // Demo seed for the counter package the check script installs: start its config at
     // zero so the guest renders its value instead of the absent-config notice.
     runtime.documents().mock_documents().seed(
-        clay_docs::FacetRoute {
+        clay_docs::DatumRoute {
             document: "counter-config".into(),
             branch: "main".into(),
             tag: micro_counter_manifest::CONFIG_TAG.into(),
-            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+            slot: micro_counter_manifest::CONFIG_KEY.into(),
         },
         serde_json::json!(0),
     );

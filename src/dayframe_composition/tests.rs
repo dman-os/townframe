@@ -647,16 +647,16 @@ async fn the_replica_id_is_stable_across_boots_and_stamps_rows_with_the_micro_id
 #[tokio::test(flavor = "current_thread")]
 async fn a_document_written_in_one_boot_is_read_in_the_next() {
     use clay_docs::DocumentGrant;
-    use clay_docs::FacetRoute;
-    use clay_docs::FacetSelection;
-    use clay_docs::FacetValue;
+    use clay_docs::DatumRoute;
+    use clay_docs::DatumSelection;
+    use clay_docs::DatumValue;
     use clay_docs::WatchSelection;
     let store = Arc::new(clay_store::MemoryStore::new());
-    let route = FacetRoute {
+    let route = DatumRoute {
         document: "notes".into(),
         branch: "main".into(),
         tag: "org.example.note".into(),
-        key_id: "main".into(),
+        slot: "main".into(),
     };
     let boot = || async {
         CompositionRuntime::new(
@@ -694,7 +694,7 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
             vec![DocumentGrant {
                 document: "notes".into(),
                 branch: "main".into(),
-                facets: vec![daybook_types::manifest::RoutineFacetAccess {
+                datums: vec![clay_docs::DatumAccess {
                     tag: "org.example.note".into(),
                     read: true,
                     ..Default::default()
@@ -706,12 +706,12 @@ async fn a_document_written_in_one_boot_is_read_in_the_next() {
         .watch(WatchSelection {
             documents: ["notes".into()].into(),
             branch: "main".into(),
-            facets: FacetSelection::Tags(["org.example.note".into()].into()),
+            datums: DatumSelection::Tags(["org.example.note".into()].into()),
         })
         .unwrap();
     assert_eq!(
-        mirror.current().unwrap().facets.get(&route),
-        Some(&FacetValue::Present(serde_json::json!("from boot one")))
+        mirror.current().unwrap().datums.get(&route),
+        Some(&DatumValue::Present(serde_json::json!("from boot one")))
     );
     second.host.close();
 }
@@ -1322,11 +1322,11 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
     .expect("a memory store does not fail");
     assert!(runtime.installation_errors.is_empty());
     runtime.documents().mock_documents().seed(
-        clay_docs::FacetRoute {
+        clay_docs::DatumRoute {
             document: "counter-config".into(),
             branch: "main".into(),
             tag: micro_counter_manifest::CONFIG_TAG.into(),
-            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+            slot: micro_counter_manifest::CONFIG_KEY.into(),
         },
         serde_json::json!(0),
     );

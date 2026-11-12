@@ -1,13 +1,13 @@
 use super::*;
 use std::cell::Cell;
 
-fn route() -> documents::FacetRoute {
-    documents::FacetRoute {
+fn route() -> documents::DatumRoute {
+    documents::DatumRoute {
         document: "config".into(),
         branch: "main".into(),
-        key: documents::FacetKey {
+        key: documents::DatumKey {
             tag: "counter".into(),
-            key_id: "count".into(),
+            slot: "count".into(),
         },
     }
 }
@@ -15,12 +15,12 @@ fn route() -> documents::FacetRoute {
 fn snapshot(
     watch_id: u64,
     revision: u64,
-    value: documents::FacetValue,
+    value: documents::DatumValue,
 ) -> documents::DocumentSnapshot {
     documents::DocumentSnapshot {
         watch_id,
         revision,
-        facets: vec![documents::FacetEntry {
+        datums: vec![documents::DatumEntry {
             route: route(),
             value,
         }],
@@ -34,7 +34,7 @@ fn retain(mirror: &DocumentMirror, id: u64) -> MirrorWatch {
     mirror.retain(
         None,
         route(),
-        snapshot(id, 1, documents::FacetValue::Loading),
+        snapshot(id, 1, documents::DatumValue::Loading),
     )
 }
 
@@ -57,15 +57,15 @@ fn reads_are_local_and_preserve_availability_freshness_and_pending() {
     for _ in 0..10 {
         assert_eq!(
             watch.current().value::<u64>("counter", "count").unwrap(),
-            FacetState::Loading
+            DatumState::Loading
         );
     }
-    assert!(mirror.changed(snapshot(1, 2, documents::FacetValue::Absent)));
+    assert!(mirror.changed(snapshot(1, 2, documents::DatumValue::Absent)));
     assert_eq!(
         watch.current().value::<u64>("counter", "count").unwrap(),
-        FacetState::Absent
+        DatumState::Absent
     );
-    let mut incoming = snapshot(1, 3, documents::FacetValue::Present("5".into()));
+    let mut incoming = snapshot(1, 3, documents::DatumValue::Present("5".into()));
     incoming.pending = vec![42];
     incoming.refreshing = true;
     assert!(mirror.changed(incoming));
@@ -73,9 +73,9 @@ fn reads_are_local_and_preserve_availability_freshness_and_pending() {
         watch.current(),
         MirrorSnapshot {
             revision: 3,
-            facets: [(
+            datums: [(
                 ("counter".into(), "count".into()),
-                FacetState::Present("5".into())
+                DatumState::Present("5".into())
             )]
             .into(),
             pending: vec![42],
@@ -85,7 +85,7 @@ fn reads_are_local_and_preserve_availability_freshness_and_pending() {
     );
     assert_eq!(
         watch.current().value::<u64>("counter", "count").unwrap(),
-        FacetState::Present(5)
+        DatumState::Present(5)
     );
     assert!(matches!(
         watch.current().value::<u64>("other", "count"),
@@ -99,10 +99,10 @@ fn routing_is_monotonic_and_isolated_between_watches() {
     let first = retain(&mirror, 1);
     let second = retain(&mirror, 2);
     let second_initial = second.current();
-    assert!(mirror.changed(snapshot(1, 3, documents::FacetValue::Present("8".into()))));
+    assert!(mirror.changed(snapshot(1, 3, documents::DatumValue::Present("8".into()))));
     let current = first.current();
     for (id, revision) in [(1, 1), (1, 3), (99, 9)] {
-        assert!(!mirror.changed(snapshot(id, revision, documents::FacetValue::Absent)));
+        assert!(!mirror.changed(snapshot(id, revision, documents::DatumValue::Absent)));
     }
     assert_eq!(first.current(), current);
     assert_eq!(second.current(), second_initial);
@@ -113,22 +113,22 @@ fn routing_is_monotonic_and_isolated_between_watches() {
 fn lag_requires_explicit_reset_and_never_fetches_during_reads() {
     let mirror = DocumentMirror::default();
     let watch = retain(&mirror, 1);
-    mirror.changed(snapshot(1, 3, documents::FacetValue::Present("8".into())));
+    mirror.changed(snapshot(1, 3, documents::DatumValue::Present("8".into())));
     let lagged = mirror.lagged(1).unwrap();
     for _ in 0..10 {
         assert_eq!(watch.current().status, MirrorStatus::Lagged);
         assert_eq!(
             watch.current().value::<u64>("counter", "count").unwrap(),
-            FacetState::Present(8)
+            DatumState::Present(8)
         );
     }
-    assert!(mirror.changed(snapshot(1, 4, documents::FacetValue::Present("9".into()))));
+    assert!(mirror.changed(snapshot(1, 4, documents::DatumValue::Present("9".into()))));
     assert_eq!(watch.current().status, MirrorStatus::Lagged);
     let reads = Cell::new(0);
     assert!(matches!(
         lagged.resync_with(|| {
             reads.set(reads.get() + 1);
-            Ok(snapshot(1, 3, documents::FacetValue::Absent))
+            Ok(snapshot(1, 3, documents::DatumValue::Absent))
         }),
         Err(documents::DocumentError::SubscriptionLagged)
     ));
@@ -137,7 +137,7 @@ fn lag_requires_explicit_reset_and_never_fetches_during_reads() {
         lagged
             .resync_with(|| {
                 reads.set(reads.get() + 1);
-                Ok(snapshot(1, 4, documents::FacetValue::Present("9".into())))
+                Ok(snapshot(1, 4, documents::DatumValue::Present("9".into())))
             })
             .unwrap()
     );
@@ -145,7 +145,7 @@ fn lag_requires_explicit_reset_and_never_fetches_during_reads() {
     assert_eq!(watch.current().status, MirrorStatus::Live);
     assert_eq!(
         watch.current().value::<u64>("counter", "count").unwrap(),
-        FacetState::Present(9)
+        DatumState::Present(9)
     );
 }
 
@@ -155,11 +155,11 @@ fn release_and_revocation_are_terminal_for_every_clone() {
         let mirror = DocumentMirror::default();
         let watch = retain(&mirror, 1);
         let clone = watch.clone();
-        mirror.changed(snapshot(1, 2, documents::FacetValue::Present("7".into())));
+        mirror.changed(snapshot(1, 2, documents::DatumValue::Present("7".into())));
         match terminal {
             MirrorStatus::Released => watch.release(),
             MirrorStatus::Revoked => {
-                let mut revoked = snapshot(1, 3, documents::FacetValue::Present("99".into()));
+                let mut revoked = snapshot(1, 3, documents::DatumValue::Present("99".into()));
                 revoked.revoked = true;
                 revoked.pending = vec![4];
                 revoked.refreshing = true;
@@ -175,13 +175,13 @@ fn release_and_revocation_are_terminal_for_every_clone() {
                 } else {
                     3
                 },
-                facets: BTreeMap::new(),
+                datums: BTreeMap::new(),
                 pending: vec![],
                 refreshing: false,
                 status: terminal,
             }
         );
-        assert!(!mirror.changed(snapshot(1, 9, documents::FacetValue::Present("99".into()))));
+        assert!(!mirror.changed(snapshot(1, 9, documents::DatumValue::Present("99".into()))));
         assert!(mirror.lagged(1).is_none());
         assert!(matches!(
             clone.resync_with(|| panic!("released watch performed IO")),
@@ -200,14 +200,14 @@ fn release_and_revocation_are_terminal_for_every_clone() {
 fn resync_authority_failure_withdraws_local_values() {
     let mirror = DocumentMirror::default();
     let watch = retain(&mirror, 1);
-    mirror.changed(snapshot(1, 2, documents::FacetValue::Present("7".into())));
+    mirror.changed(snapshot(1, 2, documents::DatumValue::Present("7".into())));
     assert!(matches!(
         watch.resync_with(|| Err(documents::DocumentError::Revoked)),
         Err(documents::DocumentError::Revoked)
     ));
     assert_eq!(watch.current().status, MirrorStatus::Revoked);
-    assert!(watch.current().facets.is_empty());
-    assert!(!mirror.changed(snapshot(1, 3, documents::FacetValue::Present("8".into()))));
+    assert!(watch.current().datums.is_empty());
+    assert!(!mirror.changed(snapshot(1, 3, documents::DatumValue::Present("8".into()))));
 }
 
 #[test]
@@ -220,10 +220,10 @@ fn last_watch_drop_removes_routing_but_not_pending_operations() {
         receipt(42, 0, documents::OperationStatus::LocallyApplied),
     );
     drop(watch);
-    assert!(mirror.changed(snapshot(1, 2, documents::FacetValue::Present("1".into()))));
+    assert!(mirror.changed(snapshot(1, 2, documents::DatumValue::Present("1".into()))));
     drop(clone);
     assert!(mirror.state.borrow().watches.is_empty());
-    assert!(!mirror.changed(snapshot(1, 3, documents::FacetValue::Absent)));
+    assert!(!mirror.changed(snapshot(1, 3, documents::DatumValue::Absent)));
     assert!(!mirror.completed(receipt(42, 0, documents::OperationStatus::Accepted)));
     assert!(mirror.completed(receipt(42, 1, documents::OperationStatus::Accepted)));
     assert!(matches!(
@@ -311,11 +311,11 @@ fn notifier_runs_exactly_once_per_applied_change_and_never_for_a_non_change() {
     assert_eq!(calls.get(), 0);
 
     // An applied change notifies once; a stale, duplicate, or unrouted snapshot does not.
-    assert!(mirror.changed(snapshot(1, 2, documents::FacetValue::Present("1".into()))));
+    assert!(mirror.changed(snapshot(1, 2, documents::DatumValue::Present("1".into()))));
     assert_eq!(calls.get(), 1);
-    assert!(!mirror.changed(snapshot(1, 2, documents::FacetValue::Present("9".into()))));
-    assert!(!mirror.changed(snapshot(1, 1, documents::FacetValue::Absent)));
-    assert!(!mirror.changed(snapshot(99, 9, documents::FacetValue::Absent)));
+    assert!(!mirror.changed(snapshot(1, 2, documents::DatumValue::Present("9".into()))));
+    assert!(!mirror.changed(snapshot(1, 1, documents::DatumValue::Absent)));
+    assert!(!mirror.changed(snapshot(99, 9, documents::DatumValue::Absent)));
     assert_eq!(calls.get(), 1);
 
     // A lag mark on a routed watch notifies; an unknown watch does not.
@@ -342,7 +342,7 @@ fn notifier_runs_exactly_once_per_applied_change_and_never_for_a_non_change() {
     assert_eq!(calls.get(), 4);
     watch.release();
     assert_eq!(calls.get(), 4);
-    assert!(!mirror.changed(snapshot(1, 3, documents::FacetValue::Absent)));
+    assert!(!mirror.changed(snapshot(1, 3, documents::DatumValue::Absent)));
     assert_eq!(calls.get(), 4);
 }
 
@@ -356,7 +356,7 @@ fn resync_notifies_whichever_way_the_read_went() {
     // settle against the mirror either way.
     assert!(
         !watch
-            .resync_with(|| Ok(snapshot(1, 1, documents::FacetValue::Loading)))
+            .resync_with(|| Ok(snapshot(1, 1, documents::DatumValue::Loading)))
             .unwrap()
     );
     assert_eq!(calls.get(), 1);
@@ -393,14 +393,14 @@ fn installing_a_second_notifier_is_an_invariant_failure() {
 }
 
 #[test]
-#[should_panic(expected = "configuration facet violates its declared value shape")]
-fn decoding_a_present_facet_at_the_wrong_shape_is_an_invariant_failure() {
+#[should_panic(expected = "configuration datum violates its declared value shape")]
+fn decoding_a_present_datum_at_the_wrong_shape_is_an_invariant_failure() {
     let mirror = DocumentMirror::default();
     let watch = retain(&mirror, 1);
     mirror.changed(snapshot(
         1,
         2,
-        documents::FacetValue::Present("not a number".into()),
+        documents::DatumValue::Present("not a number".into()),
     ));
     let _ = watch.current().value::<u64>("counter", "count");
 }

@@ -434,7 +434,7 @@ pub use manifest::CollectionContract;
 pub use manifest::ConfigurationRequest;
 pub use manifest::ContributionDeclaration;
 pub use manifest::Entrypoints;
-pub use manifest::FacetAccess;
+pub use manifest::DatumAccess;
 pub use manifest::InterfaceRef;
 pub use manifest::LOCAL_NAMESPACE;
 pub use manifest::MANIFEST_NSID;
@@ -553,9 +553,9 @@ pub use context::Context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use context::Error;
 #[cfg(any(feature = "in_process", feature = "guest"))]
-pub use context::Facet;
+pub use context::Datum;
 #[cfg(any(feature = "in_process", feature = "guest"))]
-pub use context::FacetSnapshot;
+pub use context::DatumSnapshot;
 #[cfg(feature = "in_process")]
 pub use context::Instance;
 #[cfg(any(feature = "in_process", feature = "guest"))]
@@ -581,11 +581,11 @@ pub use rows::Registration;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 pub use rows::Row;
 
-/// A configuration facet's availability (ADR 015 §4): distinct `Loading` (not hydrated yet) and
-/// `Absent` (known absent after hydration) so an uncached facet is never mistaken for a missing
-/// one. Shared by every backend's facet reads.
+/// A configuration datum's availability (ADR 015 §4): distinct `Loading` (not hydrated yet) and
+/// `Absent` (known absent after hydration) so an uncached datum is never mistaken for a missing
+/// one. Shared by every backend's datum reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FacetState<T = String> {
+pub enum DatumState<T = String> {
     Loading,
     Absent,
     Present(T),

@@ -39,9 +39,9 @@ fn canonical_manifest() -> MicroManifest {
         }],
         configuration_requests: vec![ConfigurationRequest {
             binding: "counter".into(),
-            facets: vec![FacetAccess {
+            datums: vec![DatumAccess {
                 tag: nsid("config"),
-                key_id: Some("count".into()),
+                slot: Some("count".into()),
                 read: true,
                 write: false,
                 create: false,
@@ -353,10 +353,10 @@ fn contribution_nested_payload_wire_shape() {
 }
 
 #[test]
-fn facet_access_acl_wire_shape() {
-    let acl = FacetAccess {
+fn datum_access_acl_wire_shape() {
+    let acl = DatumAccess {
         tag: nsid("config"),
-        key_id: Some("count".into()),
+        slot: Some("count".into()),
         read: true,
         write: true,
         create: false,

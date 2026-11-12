@@ -17,7 +17,7 @@ use std::rc::Weak;
 use std::task::Poll;
 use std::task::Waker;
 
-use crate::FacetState;
+use crate::DatumState;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MirrorStatus {
@@ -30,7 +30,7 @@ pub enum MirrorStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirrorSnapshot {
     pub revision: u64,
-    pub facets: BTreeMap<(String, String), FacetState>,
+    pub datums: BTreeMap<(String, String), DatumState>,
     pub pending: Vec<u64>,
     pub refreshing: bool,
     pub status: MirrorStatus,
@@ -40,18 +40,18 @@ impl MirrorSnapshot {
     pub fn value<T: serde::de::DeserializeOwned>(
         &self,
         tag: &str,
-        key_id: &str,
-    ) -> Result<FacetState<T>, documents::DocumentError> {
+        slot: &str,
+    ) -> Result<DatumState<T>, documents::DocumentError> {
         if matches!(self.status, MirrorStatus::Released | MirrorStatus::Revoked) {
             return Err(documents::DocumentError::Revoked);
         }
-        match self.facets.get(&(tag.to_owned(), key_id.to_owned())) {
-            Some(FacetState::Present(raw)) => Ok(FacetState::Present(
+        match self.datums.get(&(tag.to_owned(), slot.to_owned())) {
+            Some(DatumState::Present(raw)) => Ok(DatumState::Present(
                 serde_json::from_str(raw)
-                    .expect("configuration facet violates its declared value shape"),
+                    .expect("configuration datum violates its declared value shape"),
             )),
-            Some(FacetState::Loading) => Ok(FacetState::Loading),
-            Some(FacetState::Absent) => Ok(FacetState::Absent),
+            Some(DatumState::Loading) => Ok(DatumState::Loading),
+            Some(DatumState::Absent) => Ok(DatumState::Absent),
             None => Err(documents::DocumentError::Denied),
         }
     }
@@ -115,7 +115,7 @@ impl DocumentMirror {
     fn retain(
         &self,
         remote: Option<documents::DocumentWatch>,
-        route: documents::FacetRoute,
+        route: documents::DatumRoute,
         snapshot: documents::DocumentSnapshot,
     ) -> MirrorWatch {
         let id = snapshot.watch_id;
@@ -213,7 +213,7 @@ impl DocumentMirror {
 }
 
 /// One named, already-authorized document binding handed to a micro at activation. The host
-/// resolved the owner-config document and granted exactly this facet access; the binding is
+/// resolved the owner-config document and granted exactly this datum access; the binding is
 /// authority, not a lookup result. Clones share the binding's `document-access` resource.
 #[derive(Clone)]
 pub struct ConfigDocument {
@@ -226,40 +226,40 @@ impl ConfigDocument {
         &self.binding.name
     }
 
-    /// A typed handle on one facet of this document: a retained watch plus the write route, the
-    /// guest-side twin of the native `DocumentRef::facet`. Fails only if the host refuses the
-    /// watch, i.e. the manifest did not grant this facet.
-    pub fn facet<T>(&self, tag: &str, key_id: &str) -> Result<Facet<T>, documents::DocumentError> {
-        let watch = self.watch(tag, key_id)?;
-        Ok(Facet {
+    /// A typed handle on one datum of this document: a retained watch plus the write route, the
+    /// guest-side twin of the native `DocumentRef::datum`. Fails only if the host refuses the
+    /// watch, i.e. the manifest did not grant this datum.
+    pub fn datum<T>(&self, tag: &str, slot: &str) -> Result<Datum<T>, documents::DocumentError> {
+        let watch = self.watch(tag, slot)?;
+        Ok(Datum {
             document: self.clone(),
-            key: documents::FacetKey {
+            key: documents::DatumKey {
                 tag: tag.into(),
-                key_id: key_id.into(),
+                slot: slot.into(),
             },
             watch,
             _value: PhantomData,
         })
     }
 
-    pub fn watch(&self, tag: &str, key_id: &str) -> Result<MirrorWatch, documents::DocumentError> {
+    pub fn watch(&self, tag: &str, slot: &str) -> Result<MirrorWatch, documents::DocumentError> {
         let watch = self.binding.access.watch(&documents::WatchSelection {
             documents: vec![self.binding.document.clone()],
             branch: self.binding.branch.clone(),
-            facets: documents::FacetSelection::Keys(vec![documents::FacetKey {
+            datums: documents::DatumSelection::Keys(vec![documents::DatumKey {
                 tag: tag.into(),
-                key_id: key_id.into(),
+                slot: slot.into(),
             }]),
         })?;
         let snapshot = watch.current()?;
         Ok(self.mirror.retain(
             Some(watch),
-            documents::FacetRoute {
+            documents::DatumRoute {
                 document: self.binding.document.clone(),
                 branch: self.binding.branch.clone(),
-                key: documents::FacetKey {
+                key: documents::DatumKey {
                     tag: tag.into(),
-                    key_id: key_id.into(),
+                    slot: slot.into(),
                 },
             },
             snapshot,
@@ -269,20 +269,20 @@ impl ConfigDocument {
     pub fn write<T: serde::Serialize>(
         &self,
         tag: &str,
-        key_id: &str,
+        slot: &str,
         value: &T,
     ) -> Result<MirrorOperation, documents::DocumentError> {
         let operation = self.binding.access.mutate(
-            &documents::FacetRoute {
+            &documents::DatumRoute {
                 document: self.binding.document.clone(),
                 branch: self.binding.branch.clone(),
-                key: documents::FacetKey {
+                key: documents::DatumKey {
                     tag: tag.into(),
-                    key_id: key_id.into(),
+                    slot: slot.into(),
                 },
             },
-            &documents::FacetMutation::Update(
-                serde_json::to_string(value).expect("facet value must serialize to JSON"),
+            &documents::DatumMutation::Update(
+                serde_json::to_string(value).expect("datum value must serialize to JSON"),
             ),
         )?;
         let receipt = operation.current()?;
@@ -290,17 +290,17 @@ impl ConfigDocument {
     }
 }
 
-/// A typed handle on one granted facet: reads answer from the retained mirror, writes go
+/// A typed handle on one granted datum: reads answer from the retained mirror, writes go
 /// through the binding's `document-access`. Clones share one watch, so equality is watch
 /// identity — what a Dioxus prop needs to know.
-pub struct Facet<T> {
+pub struct Datum<T> {
     document: ConfigDocument,
-    key: documents::FacetKey,
+    key: documents::DatumKey,
     watch: MirrorWatch,
     _value: PhantomData<fn() -> T>,
 }
 
-impl<T> Clone for Facet<T> {
+impl<T> Clone for Datum<T> {
     fn clone(&self) -> Self {
         Self {
             document: self.document.clone(),
@@ -311,13 +311,13 @@ impl<T> Clone for Facet<T> {
     }
 }
 
-impl<T> PartialEq for Facet<T> {
+impl<T> PartialEq for Datum<T> {
     fn eq(&self, other: &Self) -> bool {
         self.watch == other.watch
     }
 }
 
-impl<T> Facet<T> {
+impl<T> Datum<T> {
     pub fn watch(&self) -> &MirrorWatch {
         &self.watch
     }
@@ -336,17 +336,17 @@ impl<T> Facet<T> {
         self.watch.refresh()
     }
 
-    /// The facet's typed value in `snapshot`. A released or revoked watch reads as
-    /// [`FacetState::Loading`]: the value is gone, and the snapshot's status says why.
-    pub fn state(&self, snapshot: &MirrorSnapshot) -> FacetState<T>
+    /// The datum's typed value in `snapshot`. A released or revoked watch reads as
+    /// [`DatumState::Loading`]: the value is gone, and the snapshot's status says why.
+    pub fn state(&self, snapshot: &MirrorSnapshot) -> DatumState<T>
     where
         T: serde::de::DeserializeOwned,
     {
         match snapshot.status {
-            MirrorStatus::Released | MirrorStatus::Revoked => FacetState::Loading,
+            MirrorStatus::Released | MirrorStatus::Revoked => DatumState::Loading,
             MirrorStatus::Live | MirrorStatus::Lagged => snapshot
-                .value(&self.key.tag, &self.key.key_id)
-                .expect("facet watch must contain its own granted facet"),
+                .value(&self.key.tag, &self.key.slot)
+                .expect("datum watch must contain its own granted datum"),
         }
     }
 
@@ -354,7 +354,7 @@ impl<T> Facet<T> {
     where
         T: serde::Serialize,
     {
-        self.document.write(&self.key.tag, &self.key.key_id, value)
+        self.document.write(&self.key.tag, &self.key.slot, value)
     }
 }
 
@@ -420,7 +420,7 @@ impl PartialEq for MirrorWatch {
 
 struct WatchState {
     id: u64,
-    route: documents::FacetRoute,
+    route: documents::DatumRoute,
     snapshot: RefCell<MirrorSnapshot>,
     remote: RefCell<Option<documents::DocumentWatch>>,
     mirror: Weak<RefCell<MirrorState>>,
@@ -474,7 +474,7 @@ impl MirrorWatch {
         {
             let mut snapshot = self.state.snapshot.borrow_mut();
             snapshot.status = status;
-            snapshot.facets.clear();
+            snapshot.datums.clear();
             snapshot.pending.clear();
             snapshot.refreshing = false;
         }
@@ -585,31 +585,31 @@ impl MirrorWatch {
 
 fn mirror_snapshot(
     snapshot: documents::DocumentSnapshot,
-    route: &documents::FacetRoute,
+    route: &documents::DatumRoute,
 ) -> MirrorSnapshot {
-    let mut facets = BTreeMap::new();
+    let mut datums = BTreeMap::new();
     if !snapshot.revoked {
-        let key = (route.key.tag.clone(), route.key.key_id.clone());
-        facets.insert(key, FacetState::Loading);
-        for entry in snapshot.facets {
+        let key = (route.key.tag.clone(), route.key.slot.clone());
+        datums.insert(key, DatumState::Loading);
+        for entry in snapshot.datums {
             assert!(
                 entry.route.document == route.document
                     && entry.route.branch == route.branch
                     && entry.route.key.tag == route.key.tag
-                    && entry.route.key.key_id == route.key.key_id,
+                    && entry.route.key.slot == route.key.slot,
                 "document snapshot escaped its granted selection"
             );
             let state = match entry.value {
-                documents::FacetValue::Loading => FacetState::Loading,
-                documents::FacetValue::Absent => FacetState::Absent,
-                documents::FacetValue::Present(raw) => FacetState::Present(raw),
+                documents::DatumValue::Loading => DatumState::Loading,
+                documents::DatumValue::Absent => DatumState::Absent,
+                documents::DatumValue::Present(raw) => DatumState::Present(raw),
             };
-            facets.insert((entry.route.key.tag, entry.route.key.key_id), state);
+            datums.insert((entry.route.key.tag, entry.route.key.slot), state);
         }
     }
     MirrorSnapshot {
         revision: snapshot.revision,
-        facets,
+        datums,
         pending: if snapshot.revoked {
             vec![]
         } else {
