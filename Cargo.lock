@@ -4191,6 +4191,7 @@ dependencies = [
  "serde_urlencoded",
  "service_client_core_rs",
  "service_utils_rs",
+ "short_ids",
  "sqlite_rs",
  "tempfile",
  "tokio",

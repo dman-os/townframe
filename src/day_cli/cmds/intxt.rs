@@ -44,6 +44,7 @@
 //! of each.
 
 pub(crate) mod capture;
+pub(crate) mod package;
 mod record;
 
 use crate::client::NodeClient;
@@ -75,6 +76,79 @@ pub enum IntxtCommands {
         #[arg(long)]
         handler: PathBuf,
     },
+    /// Add commits, a branch or a jj change to an intxt, with the sessions that produced them
+    ///
+    /// Run it in the worktree that holds the work. What is named is resolved now, to commits:
+    /// a range is stored as its tip and merge base, never as the text you typed. The objects
+    /// the commits need are carried as a git pack (thin against the base unless `--full`), in
+    /// the node's blob store, and the sessions whose recorded edits produced content in those
+    /// commits come with them. Adding something already in the intxt changes nothing and says
+    /// so. Names the intxt by the short id `show` prints, or by its full drawer id.
+    #[command(
+        group = clap::ArgGroup::new("what").required(true),
+        after_long_help = "Examples:\n  day x intxt add m4 --branch feat/refs\n  day x intxt add m4 --commits main..feat/refs\n  day x intxt add m4 --change kxqoltvm"
+    )]
+    Add {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+        /// Commits: a range `main..feat/x` (its tip and its merge base with `main`), or one
+        /// commit (against its first parent). Brings those commits and the files they touch
+        #[arg(long, group = "what", value_name = "RANGE")]
+        commits: Option<String>,
+        /// A local branch: its commits since its merge base with its upstream, or with `main`
+        /// (`master`) when it has none, and the branch itself, tracked as this clone sees it, so
+        /// commits it moves onto later come in as new revisions. Brings what `--commits` brings
+        #[arg(long, group = "what", value_name = "NAME")]
+        branch: Option<String>,
+        /// A jj change, by its change id, followed through its rewrites: every commit the change
+        /// has had comes in. Needs `jj`
+        #[arg(long, group = "what", value_name = "CHANGE")]
+        change: Option<String>,
+        /// Pack every object, not only what the base does not have
+        ///
+        /// The default pack is thin: it assumes whoever receives the intxt already has the base
+        /// commit. A full pack stands alone and is several times larger.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Create an intxt and remember it, so it has a short id
+    ///
+    /// Prints the new intxt's short id, which names it in `add`, `show` and `rm`.
+    #[command(after_long_help = "Examples:\n  day x intxt new \"Datum refs move to dtxt\"")]
+    New {
+        /// The intxt's title
+        title: String,
+        /// The intxt's description, in Markdown
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Remove entries from an intxt, by the short ids `show` prints
+    ///
+    /// Deletes the entries (commits, jj changes, tracked refs, sessions) and the packs only they
+    /// carried. The documents already shared with the intxt stay shared, and copies synced to
+    /// others stay with them.
+    #[command(after_long_help = "Examples:\n  day x intxt rm m4 k7 v1")]
+    Rm {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+        /// The entries to remove, by short id
+        #[arg(required = true)]
+        items: Vec<String>,
+    },
+    /// Show what an intxt holds: its commits, jj changes, tracked refs and sessions
+    ///
+    /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
+    #[command(after_long_help = "Examples:\n  day x intxt show m4")]
+    Show {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+    },
+    /// Say what is recorded in this worktree and which intxts include it
+    ///
+    /// Run it in a worktree: it lists the ops and sessions capture recorded here, and the
+    /// intxts that include this worktree's commits, its clone's tracked refs or its sessions.
+    #[command(after_long_help = "Examples:\n  day x intxt status")]
+    Status,
     /// Record one Claude Code hook invocation: the hook's JSON on stdin
     ///
     /// Observes the session's transcript and worktrees, puts changed binary files in the node's
@@ -108,6 +182,48 @@ pub enum IntxtCommands {
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
         IntxtCommands::Record { thinking, agent } => record::run(agent, thinking).await,
+        IntxtCommands::Add {
+            intxt,
+            commits,
+            branch,
+            change,
+            full,
+        } => {
+            let named = match (commits, branch, change) {
+                (Some(range), None, None) => package::Named::Commits(range),
+                (None, Some(branch), None) => package::Named::Branch(branch),
+                (None, None, Some(change)) => package::Named::Change(change),
+                _ => unreachable!("clap requires exactly one of --commits, --branch and --change"),
+            };
+            with_packaging(async |packaging| {
+                packaging
+                    .add(&mut std::io::stdout(), &intxt, named, full)
+                    .await
+            })
+            .await
+        }
+        IntxtCommands::New { title, description } => {
+            with_packaging(async |packaging| {
+                packaging
+                    .create(&mut std::io::stdout(), &title, description.as_deref())
+                    .await
+                    .map(|_| ())
+            })
+            .await
+        }
+        IntxtCommands::Rm { intxt, items } => {
+            with_packaging(async |packaging| {
+                packaging.rm(&mut std::io::stdout(), &intxt, &items).await
+            })
+            .await
+        }
+        IntxtCommands::Show { intxt } => {
+            with_packaging(async |packaging| packaging.show(&mut std::io::stdout(), &intxt).await)
+                .await
+        }
+        IntxtCommands::Status => {
+            with_packaging(async |packaging| packaging.status(&mut std::io::stdout()).await).await
+        }
         IntxtCommands::Install { handler } => {
             let client = lazy::node().await?;
             let wasm = std::fs::read(&handler)
@@ -134,6 +250,22 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             }
         }
     }
+}
+
+/// Runs a packaging verb against the node, in the current directory.
+async fn with_packaging(
+    verb: impl AsyncFnOnce(&package::Packaging<'_>) -> Res<()>,
+) -> Res<ExitCode> {
+    let client = lazy::node().await?;
+    let cwd = std::env::current_dir()?;
+    let config = lazy::config().await?;
+    verb(&package::Packaging::new(
+        &client,
+        &cwd,
+        config.node_dir.root(),
+    ))
+    .await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Capture runs against the node's daemon only. Booting the node in the hook's own process costs

@@ -97,6 +97,9 @@ fn every_datum_declares_publishes_and_admits() {
             "org.example.intxt.work.repoEntry",
             "org.example.intxt.work.worktreeEntry",
             "org.example.intxt.work.sessionEntry",
+            "org.example.intxt.work.gitCommitEntry",
+            "org.example.intxt.work.jjChangeEntry",
+            "org.example.intxt.work.gitRefEntry",
         ]
     );
     for datum in &universe.datums {
@@ -256,6 +259,23 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<work::SessionEntry>(
         json!({"session": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.agentSession/main"}),
     );
+    codec_round_trip::<work::GitCommitEntry>(json!({
+        "tip": "org.example.intxt.work.gitCommit/4c1f0a",
+        "base": "org.example.intxt.work.gitCommit/9a0e11",
+        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
+    }));
+    // A range that reaches the root has no base.
+    codec_round_trip::<work::GitCommitEntry>(json!({
+        "tip": "org.example.intxt.work.gitCommit/4c1f0a",
+        "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"
+    }));
+    codec_round_trip::<work::JjChangeEntry>(
+        json!({"pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949"}),
+    );
+    codec_round_trip::<work::GitRefEntry>(json!({
+        "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRef/0193c/refs/heads/feat/refs",
+        "base": "org.example.intxt.work.gitCommit/9a0e11"
+    }));
     codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
 }
 

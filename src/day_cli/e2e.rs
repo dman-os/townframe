@@ -937,6 +937,199 @@ mod library {
         .await;
     }
 
+    /// Packaging a branch of two commits whose content a recorded session's tool calls produced:
+    /// `add --branch` writes one commit entry carrying the pack, tracks the ref on this clone
+    /// and brings the session; `show` lists all three; adding again changes nothing; `status`
+    /// finds the intxt from the worktree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_op() {
+        use crate::cmds::intxt::capture;
+        use crate::cmds::intxt::package::Named;
+        use crate::cmds::intxt::package::Packaging;
+        use std::io::Write;
+
+        with_intxt_node(async |tmp, client| {
+            let node_root = tmp.path().join("node");
+            let base = tmp.path().canonicalize().unwrap();
+            let repo = base.join("repo");
+            std::fs::create_dir(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", "first"]);
+            git(&repo, &["switch", "-q", "-c", "feat/x"]);
+
+            let transcript = base.join("claude/s1.jsonl");
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            let mut file = std::fs::File::create(&transcript).unwrap();
+            for record in [
+                json!({"type": "user", "uuid": "u1", "parentUuid": null, "timestamp": "2026-11-10T10:00:00Z",
+                       "cwd": repo, "sessionId": "s1", "message": {"role": "user", "content": "make two commits"}}),
+                json!({"type": "assistant", "uuid": "a1", "parentUuid": "u1", "timestamp": "2026-11-10T10:00:01Z",
+                       "cwd": repo, "sessionId": "s1",
+                       "message": {"id": "m-t1", "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                   "input": {"command": "first commit"}}]}}),
+                json!({"type": "assistant", "uuid": "a2", "parentUuid": "a1", "timestamp": "2026-11-10T10:00:02Z",
+                       "cwd": repo, "sessionId": "s1",
+                       "message": {"id": "m-t2", "content": [{"type": "tool_use", "id": "t2", "name": "Bash",
+                                   "input": {"command": "second commit"}}]}}),
+            ] {
+                writeln!(file, "{record}").unwrap();
+            }
+            let hook = |event: &str, tool: Option<&str>| {
+                let mut input = json!({
+                    "session_id": "s1",
+                    "transcript_path": transcript,
+                    "cwd": repo,
+                    "hook_event_name": event,
+                });
+                if let Some(tool) = tool {
+                    input["tool_name"] = json!("Bash");
+                    input["tool_use_id"] = json!(tool);
+                    input["tool_input"] = json!({"command": "commit"});
+                }
+                input.to_string().into_bytes()
+            };
+            capture::run(client, &node_root, &hook("SessionStart", None))
+                .await
+                .unwrap();
+            // Each tool call writes a file and commits it, so the content of both commits was
+            // produced by a recorded call.
+            for (tool, path, content) in [("t1", "b.txt", "two\n"), ("t2", "c.txt", "three\n")] {
+                capture::run(client, &node_root, &hook("PreToolUse", Some(tool)))
+                    .await
+                    .unwrap();
+                std::fs::write(repo.join(path), content).unwrap();
+                git(&repo, &["add", "-A"]);
+                git(&repo, &["commit", "-q", "-m", &format!("add {path}")]);
+                let post = capture::run(client, &node_root, &hook("PostToolUse", Some(tool)))
+                    .await
+                    .unwrap();
+                assert_eq!(post.uncaused_tool_calls, 0);
+            }
+            capture::run(client, &node_root, &hook("Stop", None))
+                .await
+                .unwrap();
+
+            let packaging = Packaging::new(client, &repo, &node_root);
+            let mut created = Vec::new();
+            let drawer = packaging
+                .create(&mut created, "Two files", Some("b and c"))
+                .await
+                .unwrap();
+            let created = String::from_utf8(created).unwrap();
+            let short = short_ids::ShortIds::new([drawer.to_string()])
+                .render(&drawer.to_string())
+                .unique;
+            assert!(created.starts_with(&format!("intxt {short} \"Two files\"")), "{created}");
+            assert!(created.contains(&format!("undo: day x intxt drop {short}")), "{created}");
+            let add = async |name: &str| {
+                let mut out = Vec::new();
+                packaging
+                    .add(&mut out, name, Named::Branch("feat/x".to_owned()), false)
+                    .await
+                    .unwrap();
+                String::from_utf8(out).unwrap()
+            };
+            let show = async |name: &str| {
+                let mut out = Vec::new();
+                packaging.show(&mut out, name).await.unwrap();
+                String::from_utf8(out).unwrap()
+            };
+
+            let rev = |spec: &str| {
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["rev-parse", spec])
+                    .output()
+                    .unwrap();
+                String::from_utf8(output.stdout).unwrap().trim().to_owned()
+            };
+            let (tip, merge_base) = (rev("feat/x"), rev("main"));
+            let range = format!("{}..{}", &merge_base[..7], &tip[..7]);
+
+            let added = add(&short).await;
+            assert!(added.starts_with("added to "), "{added}");
+            assert!(added.contains(&format!("commits    feat/x: {range}, 2 commit(s) (thin pack")), "{added}");
+            assert!(added.contains("ref        refs/heads/feat/x (tracked on this clone)"), "{added}");
+            assert!(added.contains("session    claude-code"), "{added}");
+            assert!(added.contains("undo: day x intxt rm"), "{added}");
+
+            let shown = show(&short).await;
+            assert!(shown.contains("\"Two files\""), "{shown}");
+            assert!(shown.contains("b and c"), "{shown}");
+            assert!(shown.contains("commits (1):"), "{shown}");
+            assert!(shown.contains(&range), "{shown}");
+            assert!(shown.contains("tracked refs (1):"), "{shown}");
+            assert!(shown.contains("refs/heads/feat/x"), "{shown}");
+            assert!(shown.contains("sessions (1):"), "{shown}");
+            assert!(shown.contains("s1  claude-code"), "{shown}");
+
+            // The entry's pack is a blob datum in the intxt's own document.
+            let (_, entry) = read_at(
+                client,
+                &drawer,
+                &format!("org.example.intxt.work.gitCommitEntry/{tip}")
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(entry["tip"], format!("org.example.intxt.work.gitCommit/{tip}"));
+            assert_eq!(
+                entry["base"],
+                format!("org.example.intxt.work.gitCommit/{merge_base}")
+            );
+            let pack = entry["pack"].as_str().unwrap();
+            let blob_key = pack
+                .strip_prefix("dtxt:datum:self/")
+                .unwrap_or_else(|| panic!("{pack} names the intxt's own document"));
+            let (_, blob) = read_at(client, &drawer, &blob_key.parse().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(blob["mime"], "application/x-git-pack");
+            assert!(blob["lengthOctets"].as_u64().unwrap() > 0, "{blob}");
+
+            let again = add(&short).await;
+            assert!(again.starts_with("nothing to add to "), "{again}");
+            assert!(again.contains("(already in)"), "{again}");
+            assert!(again.contains("(already tracked)"), "{again}");
+            assert_eq!(show(&short).await, shown, "adding again changed the intxt");
+
+            let mut out = Vec::new();
+            packaging.status(&mut out).await.unwrap();
+            let status = String::from_utf8(out).unwrap();
+            assert!(status.contains("(feat/x)"), "{status}");
+            assert!(status.contains("s1  (current)"), "{status}");
+            assert!(status.contains("in intxts:"), "{status}");
+            assert!(
+                status.contains(&format!("\"Two files\": commits to {}", &tip[..7])),
+                "{status}"
+            );
+            assert!(status.contains("tracks feat/x") || status.contains("tracks refs/heads/feat/x"), "{status}");
+            assert!(status.contains("session s1"), "{status}");
+
+            // `rm` takes the ref entry out by its short id and leaves the rest.
+            let ref_line = shown
+                .lines()
+                .find(|line| line.contains("refs/heads/feat/x"))
+                .unwrap();
+            let ref_id = ref_line.split_whitespace().next().unwrap();
+            let mut out = Vec::new();
+            packaging
+                .rm(&mut out, &short, &[ref_id.to_owned()])
+                .await
+                .unwrap();
+            let removed = String::from_utf8(out).unwrap();
+            assert!(removed.contains("gitRefEntry/"), "{removed}");
+            let after = show(&short).await;
+            assert!(!after.contains("tracked refs"), "{after}");
+            assert!(after.contains("commits (1):") && after.contains("sessions (1):"), "{after}");
+        })
+        .await;
+    }
+
     /// `capture` is for the daemon: with none serving, its entry point refuses, naming the command
     /// that starts one, without booting the node.
     #[tokio::test(flavor = "multi_thread")]

@@ -20,6 +20,7 @@ pub mod host;
 pub mod identity;
 pub mod observe;
 pub mod pack;
+pub mod revisions;
 pub mod snapshot;
 pub mod transcript;
 
@@ -47,6 +48,10 @@ pub enum Error {
     Acp(String),
     #[error(transparent)]
     Transcript(#[from] crate::transcript::ImportError),
+    /// What a person named when packaging work (a range, a branch, a jj change) is not usable:
+    /// the reason is for them.
+    #[error("{0}")]
+    Revision(String),
     /// A state file is not what this version wrote.
     #[error("state file {path}: {reason}")]
     State { path: String, reason: String },

@@ -54,6 +54,9 @@ pub fn declarations() -> Universe {
         Declaration::of::<work::RepoEntry>().expect("RepoEntry declares a valid datum"),
         Declaration::of::<work::WorktreeEntry>().expect("WorktreeEntry declares a valid datum"),
         Declaration::of::<work::SessionEntry>().expect("SessionEntry declares a valid datum"),
+        Declaration::of::<work::GitCommitEntry>().expect("GitCommitEntry declares a valid datum"),
+        Declaration::of::<work::JjChangeEntry>().expect("JjChangeEntry declares a valid datum"),
+        Declaration::of::<work::GitRefEntry>().expect("GitRefEntry declares a valid datum"),
     ])
 }
 
