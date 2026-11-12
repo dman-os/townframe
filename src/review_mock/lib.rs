@@ -12,8 +12,8 @@ mod data;
 
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::WidthClass;
-use data::Comment;
 use data::CHANGES;
+use data::Comment;
 use std::borrow::Cow;
 
 use dioxus::prelude::*;
