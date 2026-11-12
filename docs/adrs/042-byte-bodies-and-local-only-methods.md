@@ -1,6 +1,6 @@
 # ADR 042: Byte bodies and local-only methods
 
-**Status:** Proposed (manager, 2026-11-11), from the operator's review of `org.example.daybook.blobs.*` relayed by intxt. To be reviewed with the operator and intxt.
+**Status:** Accepted (operator, 2026-11-12), except the upload hold's grace period, which the operator is holding. Proposed by the manager 2026-11-11 from the operator's review of `org.example.daybook.blobs.*`.
 
 **Related:**
 - [ADR 026: drawer-native blobs](026-drawer-native-blobs.md)
@@ -110,5 +110,5 @@ Settled in review with intxt (2026-11-11):
 - No path import.
 
 Open for the operator:
-1. The upload hold's grace period. Capture is satisfied with hours, because it puts right before it records.
+1. The upload hold's grace period: held by the operator (2026-11-12, "hard to say"). Until it's decided, an unreferenced upload keeps its hold, as today; capture is satisfied with hours.
 2. Order of work: the dispatch `Body` change first (it has no users besides blobs at first), then the blob methods, then the guest streams.
