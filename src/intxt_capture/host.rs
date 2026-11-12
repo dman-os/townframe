@@ -72,10 +72,22 @@ struct WorktreeHost {
     observed: WorktreeState,
     next_seq: u64,
     docs: WorktreeDocs,
-    /// Snapshots taken before tool calls, by `tool_use_id` (`<session id>/<toolCallId>` for ACP),
-    /// removed by the call's post hook. A
-    /// call that never reports leaves its snapshot here.
-    pre: BTreeMap<String, Snapshot>,
+    /// Windows opened by tool calls, by `tool_use_id` (`<session id>/<toolCallId>` for ACP),
+    /// removed by the call's post hook. A call that never reports leaves its window here.
+    pre: BTreeMap<String, OpenWindow>,
+    /// Counts window openings and observations, to order them: windows (and their parallel
+    /// calls) are cut into segments by when they opened relative to the last observation.
+    clock: u64,
+    /// `clock` at the last observation. A window opened at or before it is no boundary for the
+    /// next diff: the changes up to the last observation are already recorded.
+    observed_at: u64,
+}
+
+/// A tool call's window: the snapshot taken before it ran, and when (`WorktreeHost::clock`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenWindow {
+    snapshot: Snapshot,
+    opened: u64,
 }
 
 /// The state file a caller passes in, per session.
@@ -291,39 +303,105 @@ fn observe_worktree(
     host: &mut WorktreeHost,
 ) -> Result<(Option<WorktreeBatch>, u64), Error> {
     if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
-        host.pre
-            .insert(tool_use_id.to_owned(), Snapshot::take(&found.root)?);
+        host.clock += 1;
+        host.pre.insert(
+            tool_use_id.to_owned(),
+            OpenWindow {
+                snapshot: Snapshot::take(&found.root)?,
+                opened: host.clock,
+            },
+        );
         return Ok((None, 0));
     }
-    if matches!(event, Event::Stop | Event::SessionEnd) {
-        host.pre.clear();
-    }
-    let pre = tool_use_id.and_then(|key| host.pre.remove(key));
+    let ends_session = matches!(event, Event::Stop | Event::SessionEnd);
+    let closing = tool_use_id.filter(|_| !ends_session);
     let cause = tool_cause.filter(|cause| cause.turn.is_some());
-    let (observation, next) = observe::observe(&host.observed, found, pre.as_ref(), import)?;
+
+    // Overlapping windows (parallel tool calls) are cut into segments so the op log stays
+    // linear. The windows that opened after the last observation are boundaries, in opening
+    // order: the diffs run last observation -> boundary 1 -> ... -> now, never backwards. A
+    // window opened at or before the last observation is not a boundary (its changes up to it
+    // are recorded) but is still open across every segment, as is the closing call whose window
+    // was never stored (its post hook came without a pre).
+    let mut boundaries: Vec<(&str, &OpenWindow)> = host
+        .pre
+        .iter()
+        .filter(|(_, window)| window.opened > host.observed_at)
+        .map(|(key, window)| (key.as_str(), window))
+        .collect();
+    boundaries.sort_by_key(|(_, window)| window.opened);
+    let mut open: Vec<&str> = host
+        .pre
+        .iter()
+        .filter(|(_, window)| window.opened <= host.observed_at)
+        .map(|(key, _)| key.as_str())
+        .collect();
+    if let Some(key) = closing.filter(|key| !host.pre.contains_key(*key)) {
+        open.push(key);
+    }
+    // Per segment: whether the closing call is the only window open across it, which is the one
+    // case where the segment has a cause to name. With no window open the edit was nobody's;
+    // with several open, who made it is unknown, so it has no cause either. Naming the several
+    // (or narrowing them by the paths calls report) waits for the operator's decision on
+    // `WorktreeOp` `causes` (docs/scratch/intxt-overlapping-windows.md, open question 1). Only
+    // the closing call's cause is known here: the other windows' turns are not stored.
+    let sole: Vec<bool> = std::iter::once(None)
+        .chain(boundaries.iter().map(|(key, _)| Some(*key)))
+        .map(|opened_here| {
+            open.extend(opened_here);
+            matches!(open[..], [only] if Some(only) == closing)
+        })
+        .collect();
+    let snapshots: Vec<&Snapshot> = boundaries
+        .iter()
+        .map(|(_, window)| &window.snapshot)
+        .collect();
+    let (observation, next) = observe::observe(&host.observed, found, &snapshots, import)?;
     host.observed = next;
+    host.clock += 1;
+    host.observed_at = host.clock;
+    if ends_session {
+        host.pre.clear();
+    } else if let Some(key) = closing {
+        host.pre.remove(key);
+    }
+
     let git = observation.git;
     let mut ops = Vec::new();
-    if !observation.earlier.is_empty() {
+    let mut uncaused = 0;
+    let mut segment_cause = |sole: bool, ops_added: usize| {
+        if !sole {
+            return None;
+        }
+        if tool_cause.is_some() && cause.is_none() {
+            uncaused += ops_added as u64;
+        }
+        cause.cloned()
+    };
+    for (changes, sole) in observation.earlier.into_iter().zip(&sole) {
+        if changes.is_empty() {
+            continue;
+        }
         ops.push(Op {
             at: Timestamp::now(),
             kind: OpKind::Edit,
-            cause: None,
-            changes: observation.earlier,
+            cause: segment_cause(*sole, 1),
+            changes,
             git: None,
             extra: Default::default(),
         });
     }
-    let before_window = ops.len();
-    // A window in which HEAD moved records its file changes on the move that closed it (ADR 039
-    // §3): a checkout is not an edit.
+    // The last segment runs to now. A window in which HEAD moved records its file changes on the
+    // move that closed it (ADR 039 §3): a checkout is not an edit.
+    let last_sole = sole.last().copied().unwrap_or(false);
     let mut changes = Some(observation.changes);
     let last_move = git.moves.len().wrapping_sub(1);
+    let mut last_ops = Vec::new();
     for (index, mv) in git.moves.iter().enumerate() {
-        ops.push(Op {
+        last_ops.push(Op {
             at: mv.at,
             kind: mv.kind.clone(),
-            cause: cause.cloned(),
+            cause: None,
             changes: if index == last_move {
                 changes.take().unwrap_or_default()
             } else {
@@ -334,20 +412,20 @@ fn observe_worktree(
         });
     }
     if let Some(changes) = changes.filter(|changes| !changes.is_empty()) {
-        ops.push(Op {
+        last_ops.push(Op {
             at: Timestamp::now(),
             kind: OpKind::Edit,
-            cause: cause.cloned(),
+            cause: None,
             changes,
             git: None,
             extra: Default::default(),
         });
     }
-    let uncaused = if tool_cause.is_some() && cause.is_none() {
-        (ops.len() - before_window) as u64
-    } else {
-        0
-    };
+    let last_cause = segment_cause(last_sole, last_ops.len());
+    for op in &mut last_ops {
+        op.cause = last_cause.clone();
+    }
+    ops.extend(last_ops);
     // Every blob an op names stays reachable from the worktree's keep ref before the op is
     // recorded, under the worktree lock the caller holds (`Git::keep`).
     let blobs: BTreeSet<&str> = ops

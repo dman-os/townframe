@@ -112,12 +112,12 @@ pub enum Window {
     Boundary,
     /// A tool call began: take the worktrees' pre-snapshot for it. `session` is empty.
     Open(ToolWindow),
-    /// A tool call finished: observe the worktrees against its pre-snapshot, the ops caused by
+    /// A tool call finished: observe the worktrees, the ops caused by
     /// the call. `session` is empty; the call itself is recorded with its turn.
     ///
-    /// Calls that overlap each get the changes between their own open and close, so a change
-    /// made while two calls ran is attributed to every call that was open then, as the hook
-    /// path does for parallel `PreToolUse` and `PostToolUse`.
+    /// Calls that overlap cut the time since the last observation into segments at each
+    /// opening, one op per segment; a segment with several calls open has no cause, as on the
+    /// hook path for parallel `PreToolUse` and `PostToolUse`.
     Close(ToolWindow),
 }
 

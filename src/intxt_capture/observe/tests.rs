@@ -17,7 +17,7 @@ trait Observe {
 impl Observe for Repo {
     fn observe(&self, state: &mut WorktreeState) -> Observation {
         let identity = identity::resolve(&self.root).unwrap().unwrap();
-        let (observation, next) = observe(state, identity, None, &[]).unwrap();
+        let (observation, next) = observe(state, identity, &[], &[]).unwrap();
         *state = next;
         observation
     }
@@ -445,7 +445,7 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
     let (linked, next) = observe(
         &linked_state,
         identity::resolve(&linked_root).unwrap().unwrap(),
-        None,
+        &[],
         &[],
     )
     .unwrap();
@@ -463,7 +463,7 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
     let (linked, _) = observe(
         &linked_state,
         identity::resolve(&linked_root).unwrap().unwrap(),
-        None,
+        &[],
         &[],
     )
     .unwrap();
@@ -558,7 +558,7 @@ fn imported_commits_are_reported_as_commits_and_leave_the_state_alone() {
     let state = WorktreeState::default();
     let identity = || identity::resolve(&repo.root).unwrap().unwrap();
 
-    let (plain, plain_next) = observe(&state, identity(), None, &[]).unwrap();
+    let (plain, plain_next) = observe(&state, identity(), &[], &[]).unwrap();
     assert_eq!(
         plain.git.commits.keys().collect::<Vec<_>>(),
         [&second],
@@ -566,7 +566,7 @@ fn imported_commits_are_reported_as_commits_and_leave_the_state_alone() {
     );
 
     let (imported, imported_next) =
-        observe(&state, identity(), None, &[first.clone(), second.clone()]).unwrap();
+        observe(&state, identity(), &[], &[first.clone(), second.clone()]).unwrap();
     let mut wanted = [first, second];
     wanted.sort();
     assert_eq!(

@@ -293,6 +293,115 @@ fn changes_between_the_last_look_and_a_tool_call_are_not_the_tools() {
     );
 }
 
+/// Drive the hook sequence `steps` ("pre"/"post" of a call id, or a file write) over an
+/// [`Env`] whose transcript shows tool calls `t1` and `t2`, and return what every op changed, as
+/// `(cause call, path, content)` in log order.
+fn overlapping_windows_log(
+    env: &Env,
+    steps: &[(&str, &str, &str)],
+) -> Vec<(Option<String>, String, Option<String>)> {
+    env.append(
+        &env.transcript,
+        &[
+            user("u1", None, "go"),
+            tool_use("a1", "u1", "t1", "Bash", json!({"command": "x"})),
+            tool_use("a2", "a1", "t2", "Bash", json!({"command": "y"})),
+        ],
+    );
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let mut log = Vec::new();
+    let mut next_seq = 0;
+    for (step, id, content) in steps {
+        match *step {
+            "write" => env.repo.write(id, content),
+            event => {
+                let prepared = prepare(
+                    &env.tool_hook(event, "Bash", id, json!({})),
+                    &env.session_state,
+                )
+                .unwrap();
+                for worktree in &prepared.batch.worktrees {
+                    next_seq += worktree.ops.len() as u64;
+                    for op in &worktree.ops {
+                        for change in &op.changes {
+                            log.push((
+                                op.cause.as_ref().map(|cause| cause.tool_use_id.clone()),
+                                change.path.clone(),
+                                change
+                                    .blob
+                                    .as_deref()
+                                    .map(|blob| env.repo.git(&["cat-file", "blob", blob])),
+                            ));
+                        }
+                    }
+                }
+                let recorded = recorded_for(&prepared, next_seq);
+                prepared.commit(recorded).unwrap();
+            }
+        }
+    }
+    log
+}
+
+#[test]
+fn overlapping_windows_keep_the_op_log_linear() {
+    // t0 A opens, t1 B opens, a.txt 0 -> 1 while both are open, t2 A closes, b.txt added,
+    // t3 B closes. B's close must not revert a.txt to its content at B's opening and replay it.
+    let env = Env::new();
+    let log = overlapping_windows_log(
+        &env,
+        &[
+            ("write", "a.txt", "0\n"),
+            ("PreToolUse", "t1", ""),
+            ("PreToolUse", "t2", ""),
+            ("write", "a.txt", "1\n"),
+            ("PostToolUse", "t1", ""),
+            ("write", "b.txt", "2\n"),
+            ("PostToolUse", "t2", ""),
+        ],
+    );
+    let text = |content: &str| Some(content.trim_end().to_owned());
+    assert_eq!(
+        log,
+        [
+            // Before any window opened: nobody's.
+            (None, "a.txt".to_owned(), text("0")),
+            // Both windows were open across the edit: no cause until `causes` is decided.
+            (None, "a.txt".to_owned(), text("1")),
+            // Only B was open when b.txt appeared.
+            (Some("t2".to_owned()), "b.txt".to_owned(), text("2")),
+        ]
+    );
+}
+
+#[test]
+fn sequential_windows_and_edits_before_a_window_keep_their_causes() {
+    let env = Env::new();
+    let log = overlapping_windows_log(
+        &env,
+        &[
+            ("write", "operator.txt", "by hand\n"),
+            ("PreToolUse", "t1", ""),
+            ("write", "one.txt", "1\n"),
+            ("PostToolUse", "t1", ""),
+            ("PreToolUse", "t2", ""),
+            ("write", "two.txt", "2\n"),
+            ("PostToolUse", "t2", ""),
+        ],
+    );
+    let text = |content: &str| Some(content.to_owned());
+    assert_eq!(
+        log,
+        [
+            (None, "operator.txt".to_owned(), text("by hand")),
+            (Some("t1".to_owned()), "one.txt".to_owned(), text("1")),
+            (Some("t2".to_owned()), "two.txt".to_owned(), text("2")),
+        ]
+    );
+}
+
 #[test]
 fn a_session_that_touches_two_worktrees_observes_both() {
     let env = Env::new();

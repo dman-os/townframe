@@ -26,40 +26,50 @@ pub struct WorktreeState {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
     pub identity: Identity,
-    /// What changed in the files in the window being observed, by path. On the first observation
-    /// of a worktree: what differs from the index.
+    /// What changed in the files since the last observation, cut at every boundary snapshot given
+    /// to [`observe`]: one entry per boundary, in order (the changes before it and after the
+    /// previous one), each possibly empty. On the first observation of a worktree these are
+    /// empty and `changes` holds everything that differs from `HEAD`.
+    pub earlier: Vec<Vec<Change>>,
+    /// What changed after the last boundary (or since the last observation, with none).
     pub changes: Vec<Change>,
-    /// What changed between the last observation and the start of the window, when a `pre`
-    /// snapshot was given: changes nothing in the window caused.
-    pub earlier: Vec<Change>,
     pub git: GitObserved,
 }
 
 /// Observe the worktree `identity` names against what was `state` at the last observation.
 ///
-/// `pre` is a snapshot taken when a window opened (before a tool call ran). With it, `changes`
-/// are the window's (`pre` to now) and `earlier` are what happened between the last observation
-/// and `pre`; without it all changes are in `changes`.
+/// `boundaries` are the snapshots taken when windows opened (before tool calls ran) after the
+/// last observation, in the order they were taken. The time since the last observation is cut
+/// there: last observation -> boundary 1 -> ... -> boundary n -> now, one diff per segment, every
+/// diff forward in time. Windows that overlap would otherwise make a diff run backwards (the
+/// last observation can be later than a still-open window's snapshot) and replay changes the
+/// log already holds, so the caller leaves out the snapshots at or before the last observation.
+/// Without boundaries all changes are in `changes`.
 ///
 /// `import` are commits the git observation reports although no reflog move made them
 /// ([`git::observe`]).
 pub fn observe(
     state: &WorktreeState,
     identity: Identity,
-    pre: Option<&Snapshot>,
+    boundaries: &[&Snapshot],
     import: &[String],
 ) -> Result<(Observation, WorktreeState), Error> {
     let snapshot = Snapshot::take(&identity.root)?;
-    let last = state.snapshot.as_ref();
-    // First sight: what already differs from `HEAD` is a change, so every path an op does not
-    // list has its content in `HEAD`'s tree.
-    let head;
-    let (earlier, changes) = match (last, pre) {
-        (Some(last), Some(pre)) => (last.diff(pre), pre.diff(&snapshot)),
-        (Some(last), None) => (Vec::new(), last.diff(&snapshot)),
-        (None, _) => {
-            head = Snapshot::at_head(&identity.root)?;
-            (Vec::new(), head.diff(&snapshot))
+    let mut earlier = Vec::with_capacity(boundaries.len());
+    let changes = match state.snapshot.as_ref() {
+        Some(last) => {
+            let mut from = last;
+            for boundary in boundaries {
+                earlier.push(from.diff(boundary));
+                from = boundary;
+            }
+            from.diff(&snapshot)
+        }
+        None => {
+            // First sight: what already differs from `HEAD` is a change, so every path an op
+            // does not list has its content in `HEAD`'s tree. There is no earlier segment to cut.
+            earlier.resize(boundaries.len(), Vec::new());
+            Snapshot::at_head(&identity.root)?.diff(&snapshot)
         }
     };
     let (git, git_state) = git::observe(
