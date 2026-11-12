@@ -71,7 +71,8 @@ struct WorktreeHost {
     observed: WorktreeState,
     next_seq: u64,
     docs: WorktreeDocs,
-    /// Snapshots taken before tool calls, by `tool_use_id`, removed by the call's post hook. A
+    /// Snapshots taken before tool calls, by `tool_use_id` (`<session id>/<toolCallId>` for ACP),
+    /// removed by the call's post hook. A
     /// call that never reports leaves its snapshot here.
     pre: BTreeMap<String, Snapshot>,
 }
@@ -265,7 +266,7 @@ fn observe_worktree(
     if matches!(event, Event::Stop | Event::SessionEnd) {
         host.pre.clear();
     }
-    let pre = tool_cause.and_then(|cause| host.pre.remove(&cause.tool_use_id));
+    let pre = tool_use_id.and_then(|key| host.pre.remove(key));
     let cause = tool_cause.filter(|cause| cause.turn.is_some());
     let (observation, next) = observe::observe(&host.observed, found, pre.as_ref())?;
     host.observed = next;
@@ -491,9 +492,13 @@ pub fn prepare_acp(
             (Event::PostToolUse, Some(&tool.cause))
         }
     };
+    // Worktree state is shared by every session on the worktree and ACP ids are only unique
+    // within their session, so the pre-snapshot is keyed by both. (A hook's `tool_use_id` is
+    // globally unique, so hooks key by it alone.)
+    let key = cause.map(|cause| format!("{}/{}", session.session_id, cause.tool_use_id));
     let (worktrees, batches, uncaused_tool_calls) = observe_worktrees(
         &event,
-        cause.map(|cause| cause.tool_use_id.as_str()),
+        key.as_deref(),
         cause.filter(|_| matches!(window, Window::Close(_))),
         &candidates,
         known,

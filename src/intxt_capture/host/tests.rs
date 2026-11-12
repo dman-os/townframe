@@ -682,6 +682,54 @@ fn acp_tool_call_windows_give_one_caused_op_each_and_the_rest_goes_to_the_turn_e
     );
 }
 
+#[test]
+fn acp_sessions_reusing_a_tool_call_id_keep_their_own_pre_snapshots() {
+    use crate::acp::ToolWindow;
+    let env = Env::new();
+    let roots = BTreeSet::new();
+    let window = |id: &str| ToolWindow {
+        cause: Cause {
+            agent_id: None,
+            turn: Some("t".to_owned()),
+            tool_use_id: id.to_owned(),
+            extra: Default::default(),
+        },
+        paths: Vec::new(),
+    };
+    let pending = || -> usize {
+        let state: Value = serde_json::from_slice(
+            &std::fs::read(env.repo.root.join(".git/intxt/state.json")).unwrap(),
+        )
+        .unwrap();
+        state["pre"].as_object().unwrap().len()
+    };
+    for session in ["acp1", "acp2"] {
+        let open = prepare_acp(
+            acp_session(session),
+            &env.repo.root,
+            &roots,
+            &Window::Open(window("call")),
+        )
+        .unwrap();
+        open.commit(RecordedIds::default()).unwrap();
+    }
+    assert_eq!(pending(), 2, "one pre-snapshot per session, same call id");
+    let close = prepare_acp(
+        acp_session("acp1"),
+        &env.repo.root,
+        &roots,
+        &Window::Close(window("call")),
+    )
+    .unwrap();
+    let recorded = recorded_for(&close, 0);
+    close.commit(recorded).unwrap();
+    assert_eq!(
+        pending(),
+        1,
+        "closing one session's call leaves the other's"
+    );
+}
+
 /// The blob ids every op of `batch` names.
 fn blobs_of(batch: &Batch) -> BTreeSet<String> {
     batch
