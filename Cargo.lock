@@ -112,6 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "accesskit_xplat"
+version = "0.2.1"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
+dependencies = [
+ "accesskit",
+ "accesskit_macos",
+ "accesskit_windows",
+ "android-activity",
+ "raw-window-handle 0.6.2",
+]
+
+[[package]]
 name = "addr"
 version = "0.15.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -420,7 +432,7 @@ dependencies = [
  "anyrender 0.13.0",
  "ash",
  "ash-window",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "gl",
  "glutin",
  "hashbrown 0.17.1",
@@ -457,7 +469,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1301d68b8d7a9333c242225bb026dc08f70a5b0ab096087866c06ceab227de5"
 dependencies = [
  "anyrender 0.13.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "kurbo",
  "peniko",
@@ -478,7 +490,7 @@ dependencies = [
  "anyrender 0.13.0",
  "bytemuck",
  "color",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "glifo 0.2.0",
  "kurbo",
  "peniko",
@@ -495,7 +507,7 @@ dependencies = [
  "anyrender 0.14.0",
  "bytemuck",
  "color",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "glifo 0.4.0",
  "kurbo",
  "peniko",
@@ -511,7 +523,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acface501bfa9d5b2abf9413ee5728ded41bd7f9c63b24162b9ea54f431d7e4f"
 dependencies = [
  "anyrender 0.13.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "glifo 0.2.0",
  "kurbo",
@@ -532,7 +544,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5139465733e457ebd2dd04efbee5aa6fbc1d8747d0e3fe0f81b8de4f240cb01"
 dependencies = [
  "anyrender 0.14.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "glifo 0.4.0",
  "kurbo",
@@ -710,6 +722,12 @@ dependencies = [
  "serde_derive",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "askama_escape"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df27b8d5ddb458c5fb1bbc1ce172d4a38c614a97d550b0ac89003897fb01de4"
 
 [[package]]
 name = "askama_parser"
@@ -2080,8 +2098,7 @@ dependencies = [
 [[package]]
 name = "blitz-dom"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a814bfd3ad19e6d8d26f99c75188062baca499564f9abe44250230962427d183"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "accesskit",
  "anyrender 0.14.0",
@@ -2092,7 +2109,7 @@ dependencies = [
  "color",
  "cssparser 0.38.0",
  "cursor-icon",
- "debug_timer",
+ "debug_timer 0.1.3 (git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca)",
  "euclid",
  "html-escape",
  "icu_casemap",
@@ -2131,8 +2148,7 @@ dependencies = [
 [[package]]
 name = "blitz-html"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd638e05f3f3efb9f2d37f0406e7834ea023727e1678524488aa70eb639615"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -2143,8 +2159,7 @@ dependencies = [
 [[package]]
 name = "blitz-net"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "966a91d78155df3fd34af4cfcc711e0a998b3bdc0d2967cda40b0087e129deff"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "blitz-traits",
  "data-url",
@@ -2156,8 +2171,7 @@ dependencies = [
 [[package]]
 name = "blitz-paint"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28803328124d7b7ea5f8f41501513ccb005559e9f6baf33fa0c1fb7612654a93"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "anyrender 0.14.0",
  "anyrender_svg",
@@ -2179,11 +2193,10 @@ dependencies = [
 [[package]]
 name = "blitz-shell"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d80b952b007a4bd82012583da8540d95cfd276b3c790ded39299fce728864fdb"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "accesskit",
- "accesskit_xplat",
+ "accesskit_xplat 0.2.1 (git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca)",
  "android-activity",
  "anyrender 0.14.0",
  "arboard",
@@ -2203,8 +2216,7 @@ dependencies = [
 [[package]]
 name = "blitz-traits"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d339c3ff7fe8bed623e27695a4c15dd1ec8faa9bf9158b7475bf180280e4018c"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "atomic_refcell",
  "bitflags 2.13.2",
@@ -2831,7 +2843,18 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "clay_dioxus_kit"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "serde_json",
 ]
 
 [[package]]
@@ -2993,8 +3016,10 @@ dependencies = [
 name = "clay_surface"
 version = "0.1.0"
 dependencies = [
+ "cssparser 0.38.0",
  "dioxus",
  "dioxus-core",
+ "dioxus-core-template",
  "dioxus-html",
  "insta",
  "pastey 0.1.1",
@@ -3292,7 +3317,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 [[package]]
 name = "const-serialize"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const-serialize-macro",
  "dioxus-const-vec",
@@ -3302,7 +3327,7 @@ dependencies = [
 [[package]]
 name = "const-serialize-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4384,6 +4409,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde",
@@ -4397,18 +4424,24 @@ dependencies = [
 name = "dayframe_desktop"
 version = "0.1.0"
 dependencies = [
- "accesskit_xplat",
+ "accesskit_xplat 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "anyrender 0.13.0",
+ "anyrender 0.14.0",
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
+ "anyrender_vello_cpu 0.18.0",
  "anyrender_vello_hybrid 0.10.0",
  "blitz-dom",
+ "blitz-html",
+ "blitz-paint",
+ "blitz-traits",
  "ciborium",
  "clay_dioxus",
  "clay_docs",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
+ "clay_rt_wcmp",
  "clay_store",
  "clay_surface",
  "daybook_types",
@@ -4419,10 +4452,13 @@ dependencies = [
  "dioxus-native",
  "dioxus-native-dom",
  "micro_counter_manifest",
+ "micro_lab_manifest",
  "micro_layout_manifest",
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde",
@@ -4430,6 +4466,8 @@ dependencies = [
  "sqlite_rs",
  "tokio",
  "ui",
+ "wcmp",
+ "wcmp-wasm-core-wasmi",
 ]
 
 [[package]]
@@ -4457,10 +4495,15 @@ dependencies = [
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
+ "clay_dioxus_kit",
  "dioxus",
  "dioxus-native",
+ "dioxus-ssr",
+ "pierre_diffs_dioxus",
+ "review_mock",
  "serde",
  "serde_json",
+ "tokio",
  "ui",
 ]
 
@@ -4482,6 +4525,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde",
@@ -4508,6 +4553,11 @@ name = "debug_timer"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da220af51a1a335e9a930beaaef53d261e41ea9eecfb3d973a3ddae1a7284b9c"
+
+[[package]]
+name = "debug_timer"
+version = "0.1.3"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 
 [[package]]
 name = "debugid"
@@ -4729,7 +4779,7 @@ dependencies = [
 [[package]]
 name = "dioxus"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-asset-resolver",
  "dioxus-cli-config",
@@ -4757,7 +4807,7 @@ dependencies = [
 [[package]]
 name = "dioxus-asset-resolver"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "http",
@@ -4777,7 +4827,7 @@ dependencies = [
 [[package]]
 name = "dioxus-cli-config"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "wasm-bindgen",
 ]
@@ -4785,22 +4835,22 @@ dependencies = [
 [[package]]
 name = "dioxus-config-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-config-macros"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-const-vec"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "const_format",
@@ -4825,7 +4875,7 @@ dependencies = [
 [[package]]
 name = "dioxus-core-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "convert_case 0.8.0",
  "dioxus-rsx",
@@ -4837,7 +4887,7 @@ dependencies = [
 [[package]]
 name = "dioxus-core-template"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-const-vec",
  "serde",
@@ -4847,12 +4897,12 @@ dependencies = [
 [[package]]
 name = "dioxus-core-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-desktop"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4909,7 +4959,7 @@ dependencies = [
 [[package]]
 name = "dioxus-devtools"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
@@ -4926,7 +4976,7 @@ dependencies = [
 [[package]]
 name = "dioxus-devtools-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "serde",
@@ -4936,7 +4986,7 @@ dependencies = [
 [[package]]
 name = "dioxus-document"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-core-macro",
@@ -4954,7 +5004,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5012,7 +5062,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "axum-core",
@@ -5039,7 +5089,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const_format",
  "convert_case 0.8.0",
@@ -5052,7 +5102,7 @@ dependencies = [
 [[package]]
 name = "dioxus-history"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "tracing",
@@ -5061,7 +5111,7 @@ dependencies = [
 [[package]]
 name = "dioxus-hooks"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-signals",
@@ -5076,7 +5126,7 @@ dependencies = [
 [[package]]
 name = "dioxus-html"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5102,7 +5152,7 @@ dependencies = [
 [[package]]
 name = "dioxus-html-internal-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "convert_case 0.8.0",
  "proc-macro2",
@@ -5113,7 +5163,7 @@ dependencies = [
 [[package]]
 name = "dioxus-interpreter-js"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-core-types",
@@ -5132,7 +5182,7 @@ dependencies = [
 [[package]]
 name = "dioxus-logger"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "tracing",
@@ -5143,7 +5193,7 @@ dependencies = [
 [[package]]
 name = "dioxus-native"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "android-activity",
  "anyrender 0.14.0",
@@ -5178,7 +5228,7 @@ dependencies = [
 [[package]]
 name = "dioxus-native-dom"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -5192,7 +5242,7 @@ dependencies = [
 [[package]]
 name = "dioxus-rsx"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core-template",
  "proc-macro2",
@@ -5205,7 +5255,7 @@ dependencies = [
 [[package]]
 name = "dioxus-signals"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "futures-channel",
@@ -5218,9 +5268,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dioxus-ssr"
+version = "0.8.0-alpha.3"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+dependencies = [
+ "askama_escape",
+ "dioxus-core",
+ "dioxus-core-types",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
 name = "dioxus-stores"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-signals",
@@ -5231,7 +5292,7 @@ dependencies = [
 [[package]]
 name = "dioxus-stores-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "convert_case 0.8.0",
  "proc-macro2",
@@ -5242,7 +5303,7 @@ dependencies = [
 [[package]]
 name = "dioxus-web"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
@@ -6528,7 +6589,7 @@ dependencies = [
 [[package]]
 name = "generational-box"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "parking_lot",
  "tracing",
@@ -8885,7 +8946,7 @@ dependencies = [
 [[package]]
 name = "lazy-js-bundle"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "lazy_static"
@@ -9344,7 +9405,7 @@ dependencies = [
 [[package]]
 name = "manganis"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const-serialize",
  "jni 0.21.1",
@@ -9358,7 +9419,7 @@ dependencies = [
 [[package]]
 name = "manganis-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const-serialize",
  "dioxus-cli-config",
@@ -9370,7 +9431,7 @@ dependencies = [
 [[package]]
 name = "manganis-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dunce",
  "macro-string",
@@ -9568,11 +9629,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "micro_layout"
+name = "micro_lab"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "dioxus-core",
+ "micro_lab_manifest",
+ "review_mock",
+]
+
+[[package]]
+name = "micro_lab_manifest"
 version = "0.1.0"
 dependencies = [
  "clay_mdk",
+ "insta",
+ "micro_layout_manifest",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_layout"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
  "dioxus",
+ "dioxus-core",
  "micro_layout_manifest",
 ]
 
@@ -9583,6 +9668,7 @@ dependencies = [
  "ciborium",
  "clay_mdk",
  "insta",
+ "micro_shell_manifest",
  "serde",
  "serde_json",
 ]
@@ -9610,17 +9696,42 @@ name = "micro_settings"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
  "dioxus",
  "micro_settings_manifest",
+ "micro_shell_manifest",
  "serde",
  "tokio",
 ]
 
 [[package]]
 name = "micro_settings_manifest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_mdk",
+ "insta",
+ "micro_shell_manifest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_shell"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "micro_shell_manifest",
+ "tokio",
+]
+
+[[package]]
+name = "micro_shell_manifest"
 version = "0.1.0"
 dependencies = [
  "ciborium",
@@ -9651,6 +9762,7 @@ dependencies = [
  "ciborium",
  "clay_mdk",
  "insta",
+ "micro_shell_manifest",
  "serde",
  "serde_json",
 ]
@@ -12183,6 +12295,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
 
 [[package]]
+name = "pierre_diffs"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
+ "similar 3.2.1",
+]
+
+[[package]]
+name = "pierre_diffs_dioxus"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-html",
+ "dioxus-ssr",
+ "futures",
+ "insta",
+ "pierre_diffs",
+ "serde_json",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12240,7 +12375,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31c2ba47171f8376a1cd74f8d575f1d729c033fc007f59a9da3688c31187264b"
 dependencies = [
  "anyrender 0.14.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "pixels",
 ]
 
@@ -13564,6 +13699,16 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
+]
+
+[[package]]
+name = "review_mock"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "dioxus",
+ "dioxus-ssr",
+ "pierre_diffs_dioxus",
 ]
 
 [[package]]
@@ -15330,8 +15475,7 @@ dependencies = [
 [[package]]
 name = "stylo_taffy"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d932deb3145f9e1c4159d09237f7999a29632fba9125896abb364dab080e0c0"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "bitflags 2.13.2",
  "stylo",
@@ -15490,7 +15634,7 @@ dependencies = [
 [[package]]
 name = "subsecond"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "js-sys",
  "libc",
@@ -15508,7 +15652,7 @@ dependencies = [
 [[package]]
 name = "subsecond-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "serde",
 ]
@@ -18377,7 +18521,7 @@ dependencies = [
 [[package]]
 name = "wcmp"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "js-sys",
@@ -18396,7 +18540,7 @@ dependencies = [
 [[package]]
 name = "wcmp-bindgen"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "heck 0.5.0",
@@ -18409,7 +18553,7 @@ dependencies = [
 [[package]]
 name = "wcmp-macros"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -18420,7 +18564,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "thiserror 2.0.21",
@@ -18431,7 +18575,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-wasmi"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "wasmi",
@@ -18442,7 +18586,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-web"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "js-sys",

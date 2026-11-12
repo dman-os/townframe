@@ -1,9 +1,17 @@
 //! The retained surface arena: ingress validation, the `WriteMutations` stack machine, and
 //! identity/budget bookkeeping for one mounted surface.
+use crate::render::CUSTOM_ELEMENTS;
+use crate::render::DATA_ATTRIBUTES;
+use crate::render::NamesExhausted;
+use crate::render::attribute_value_policy;
+use crate::render::intern_custom_element;
+use crate::render::is_custom_element_name;
+use crate::render::is_data_attribute_name;
 use crate::render::static_attribute;
 use crate::render::supported_listener;
 use crate::render::supported_tag;
 use crate::replay::replay;
+use crate::stylesheet::sanitize_stylesheet;
 use crate::wire::AttributeValue;
 use crate::wire::Mutation;
 use crate::wire::NodeId;
@@ -63,7 +71,20 @@ pub struct SurfaceTree<C = ()> {
     element_to_node: Vec<Option<SurfaceNodeId>>,
     pub(crate) revision: u64,
     retained_bytes: usize,
+    /// The sanitized stylesheet of this mount (empty when the guest sent none). Bounded by the
+    /// per-string limit at ingress and its length is part of `retained_bytes`.
+    pub(crate) stylesheet: String,
+    /// Distinct `data-*` names this surface has used, bounded by [`Self::MAX_DATA_ATTRIBUTE_NAMES`].
+    /// Kept across `clear` so a surface cannot reset its budget by resetting its tree.
+    data_attribute_names: std::collections::BTreeSet<&'static str>,
+    /// Distinct custom element names this surface has used, bounded by
+    /// [`Self::MAX_CUSTOM_ELEMENT_NAMES`]. Kept across `clear` for the same reason.
+    custom_element_names: std::collections::BTreeSet<&'static str>,
     failure: Option<PresentationError>,
+    /// Guest element ids whose element left the tree (removed, replaced, its id taken by another
+    /// node, or the tree cleared) since the last [`Self::take_retired_elements`]. A set, so it
+    /// is bounded by the element id space whether or not anyone drains it.
+    retired_elements: BTreeSet<NodeId>,
 }
 
 impl<C: Clone> Default for SurfaceTree<C> {
@@ -76,6 +97,7 @@ impl<C: PartialEq> PartialEq for SurfaceTree<C> {
     fn eq(&self, other: &Self) -> bool {
         self.revision == other.revision
             && self.nodes == other.nodes
+            && self.stylesheet == other.stylesheet
             && self.failure == other.failure
     }
 }
@@ -92,6 +114,8 @@ impl<C: Clone> SurfaceTree<C> {
     pub const MAX_ATTRIBUTES_PER_NODE: usize = 64;
     pub const MAX_LISTENERS_PER_NODE: usize = 32;
     pub const MAX_BATCH_WORK: usize = 128 * 1024;
+    pub const MAX_DATA_ATTRIBUTE_NAMES: usize = 512;
+    pub const MAX_CUSTOM_ELEMENT_NAMES: usize = 64;
 
     pub fn new() -> Self {
         Self {
@@ -110,7 +134,11 @@ impl<C: Clone> SurfaceTree<C> {
             element_to_node: vec![Some(SurfaceNodeId::ROOT)],
             revision: 0,
             retained_bytes: 0,
+            stylesheet: String::new(),
+            data_attribute_names: std::collections::BTreeSet::new(),
+            custom_element_names: std::collections::BTreeSet::new(),
             failure: None,
+            retired_elements: BTreeSet::new(),
         }
     }
 
@@ -153,6 +181,12 @@ impl<C: Clone> SurfaceTree<C> {
                         element_id: None,
                     });
                 }
+                Mutation::SetStyleSheet(sheet) => {
+                    let sanitized = sanitize_stylesheet(sheet);
+                    self.retained_bytes =
+                        self.retained_bytes - self.stylesheet.len() + sanitized.len();
+                    self.stylesheet = sanitized;
+                }
                 _ => replay(std::slice::from_ref(mutation), self)?,
             }
             if self
@@ -182,10 +216,33 @@ impl<C: Clone> SurfaceTree<C> {
         let revision = self.revision.saturating_add(1);
         let failure = self.failure.take();
         let next_generation = self.next_generation;
+        let mut retired = std::mem::take(&mut self.retired_elements);
+        retired.extend(
+            self.nodes
+                .iter()
+                .flatten()
+                .filter_map(|node| match &node.kind {
+                    SurfaceNodeKind::Element { element_id, .. } => *element_id,
+                    _ => None,
+                })
+                .map(|id| NodeId::try_from(id.raw()).expect("element id fits NodeId")),
+        );
+        let data_attribute_names = std::mem::take(&mut self.data_attribute_names);
+        let custom_element_names = std::mem::take(&mut self.custom_element_names);
         *self = Self::new();
+        self.custom_element_names = custom_element_names;
+        self.retired_elements = retired;
+        self.data_attribute_names = data_attribute_names;
         self.revision = revision;
         self.next_generation = next_generation;
         self.failure = failure;
+    }
+
+    /// The guest element ids that left the tree since the last call. A renderer that keeps
+    /// per-element state (host handles, mounted flags) drops it for these: Dioxus recycles element
+    /// ids, so an entry kept past its element would later address a different or detached node.
+    pub fn take_retired_elements(&mut self) -> BTreeSet<NodeId> {
+        std::mem::take(&mut self.retired_elements)
     }
 
     pub fn revision(&self) -> u64 {
@@ -199,6 +256,46 @@ impl<C: Clone> SurfaceTree<C> {
     pub fn text_content(&self) -> String {
         let mut out = String::new();
         self.collect_text(SurfaceNodeId::ROOT, &mut out);
+        out
+    }
+
+    /// A compact structural summary of the tree: `tag[attribute names](children)` (the root, which has no tag, is just its parenthesized
+    /// children), with `#` for
+    /// a text node and `<slot>` for a component slot. For tests and diagnostics that assert the
+    /// shape of what a host renders without spelling out its contents.
+    pub fn outline(&self) -> String {
+        fn walk<C: Clone>(tree: &SurfaceTree<C>, id: SurfaceNodeId, out: &mut String) {
+            let node = tree.node(id);
+            match &node.kind {
+                SurfaceNodeKind::Root => {}
+                SurfaceNodeKind::Text(_) => out.push('#'),
+                SurfaceNodeKind::Component(_) => out.push_str("<slot>"),
+                SurfaceNodeKind::Element {
+                    tag, attributes, ..
+                } => {
+                    out.push_str(tag);
+                    let names: Vec<&str> =
+                        attributes.keys().map(|(name, _)| name.as_str()).collect();
+                    if !names.is_empty() {
+                        out.push('[');
+                        out.push_str(&names.join(","));
+                        out.push(']');
+                    }
+                }
+            }
+            if !node.children.is_empty() {
+                out.push('(');
+                for (index, &child) in node.children.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    walk(tree, child, out);
+                }
+                out.push(')');
+            }
+        }
+        let mut out = String::new();
+        walk(self, SurfaceNodeId::ROOT, &mut out);
         out
     }
 
@@ -236,6 +333,39 @@ impl<C: Clone> SurfaceTree<C> {
         }
         for &child in &node.children {
             self.collect_text(child, out);
+        }
+    }
+
+    /// Replaces the text of each of `children` that is a text node with its sanitized stylesheet,
+    /// when `parent` is a `<style>` element. The browser (or Blitz) reads a `<style>` element's
+    /// text as a stylesheet, which is the same fetch path (`url()`, `@import`, `@font-face`) as
+    /// `SetStyleSheet`, so it passes through the same sanitizer; the retained tree then never
+    /// holds style text the renderer could fetch through. Text reaches a style element by being
+    /// created and attached, by `SetText`, or by being moved under it, and every one of those
+    /// calls this with the nodes that just arrived. Sanitized text is a sequence of complete
+    /// rules, so sibling text nodes cannot join into a rule the sanitizer never saw.
+    fn sanitize_style_text(&mut self, parent: SurfaceNodeId, children: &[SurfaceNodeId]) {
+        if !matches!(
+            &self.node(parent).kind,
+            SurfaceNodeKind::Element { tag, namespace: None, .. } if tag == "style"
+        ) {
+            return;
+        }
+        for &child in children {
+            let retained = &mut self.retained_bytes;
+            let SurfaceNodeKind::Text(text) = &mut self
+                .nodes
+                .get_mut(child.0)
+                .and_then(Option::as_mut)
+                .filter(|node| node.generation == child.1)
+                .unwrap_or_else(|| panic!("surface node {child:?} does not exist"))
+                .kind
+            else {
+                continue;
+            };
+            let sanitized = sanitize_stylesheet(text);
+            *retained = *retained - text.len() + sanitized.len();
+            *text = sanitized;
         }
     }
 
@@ -305,6 +435,8 @@ impl<C: Clone> SurfaceTree<C> {
             && *element_id == Some(id)
         {
             *element_id = None;
+            self.retired_elements
+                .insert(NodeId::try_from(id.raw()).expect("element id fits NodeId"));
         }
         self.element_to_node[index] = Some(node);
         if let SurfaceNodeKind::Element { element_id, .. } = &mut self.node_mut(node).kind {
@@ -359,6 +491,8 @@ impl<C: Clone> SurfaceTree<C> {
             && *slot == Some(root)
         {
             *slot = None;
+            self.retired_elements
+                .insert(NodeId::try_from(id.raw()).expect("element id fits NodeId"));
         }
         for child in node.children {
             self.drop_subtree(child);

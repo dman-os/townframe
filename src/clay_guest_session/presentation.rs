@@ -12,6 +12,7 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementCommand;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSink;
@@ -166,18 +167,49 @@ impl PresentationHost {
         })
     }
 
+    /// Bound a raw guest batch before it is converted: the ingress budget of
+    /// [`ingress_budget`]. A breach is the guest's own fault and goes through
+    /// [`Self::refuse`].
+    pub fn admit<R>(
+        &self,
+        surface: &Surface,
+        edits: &[Mutation<R>],
+    ) -> Result<(), PresentationError> {
+        ingress_budget(edits)
+            .map_err(|reason| self.refuse(surface, PresentationError::Unsupported(reason.into())))
+    }
+
+    /// A batch the host refuses for breaking the batch contract (over an ingress or tree
+    /// budget, malformed, or naming a component grant of another host) revokes that surface and
+    /// faults the micro, with the refusal as the recorded cause, so the supervisor reports it
+    /// `Faulted` and the other micros keep running. The guest is answered `Revoked`, not the
+    /// refusal: a guest SDK treats `Revoked` as "this surface is gone" and unwinds out of its
+    /// call, where it aborts on any other error, and an abort is no better for the cause: the
+    /// browser's backend reports a guest trap only when its promise settles, after the
+    /// synchronous export's first poll, which `first_poll` takes as a broken contract and
+    /// panics the shell on. The cause is recorded here, where the budget is known, because the
+    /// first fault of an incarnation stands.
+    fn refuse(&self, surface: &Surface, error: PresentationError) -> PresentationError {
+        surface.writer.withdraw();
+        self.host.record_fault(
+            &self.instance,
+            format!("guest presentation batch refused: {error}"),
+        );
+        self.host
+            .close_instance(&self.instance)
+            .expect("a presentation host closes its own instance");
+        PresentationError::Revoked
+    }
+
     /// Apply one converted mutation batch, enforcing the ingress budget and the
-    /// component grants of every `MountComponent` it carries. A budget violation
-    /// withdraws the surface: the guest has broken the batch contract.
+    /// component grants of every `MountComponent` it carries, and the surface tree's
+    /// own limits. A refused batch faults the micro, see [`Self::refuse`].
     pub fn apply(
         &self,
         surface: &Surface,
         edits: &[Mutation<ComponentRef>],
     ) -> Result<u64, PresentationError> {
-        if let Err(reason) = ingress_budget(edits) {
-            surface.writer.withdraw();
-            return Err(PresentationError::Unsupported(reason.into()));
-        }
+        self.admit(surface, edits)?;
         self.check().map_err(|_| PresentationError::Revoked)?;
         if surface.revoked.load(Ordering::Acquire) || !surface.writer.is_live() {
             return Err(PresentationError::Revoked);
@@ -188,13 +220,38 @@ impl PresentationHost {
                     .check_component(*reference)
                     .map_err(|error| match error {
                         AccessError::Revoked => PresentationError::Revoked,
-                        AccessError::Denied => PresentationError::InvalidBatch(
-                            "component grant belongs to another host".into(),
+                        AccessError::Denied => self.refuse(
+                            surface,
+                            PresentationError::InvalidBatch(
+                                "component grant belongs to another host".into(),
+                            ),
                         ),
                     })?;
             }
         }
-        surface.writer.apply(edits)
+        match surface.writer.apply(edits) {
+            Err(
+                error @ (PresentationError::Unsupported(_) | PresentationError::InvalidBatch(_)),
+            ) => Err(self.refuse(surface, error)),
+            applied => applied,
+        }
+    }
+
+    /// Forward an element command to the surface's renderer, under the revocation checks `apply`
+    /// makes. Whether `element` announced `mounted` is the renderer's to decide, and a refusal
+    /// goes back to the caller without faulting the micro: unlike a malformed batch, a command
+    /// for an element that is gone is a race the guest can observe and report.
+    pub fn element_command(
+        &self,
+        surface: &Surface,
+        element: clay_surface::NodeId,
+        command: ElementCommand,
+    ) -> Result<(), PresentationError> {
+        self.check().map_err(|_| PresentationError::Revoked)?;
+        if surface.revoked.load(Ordering::Acquire) || !surface.writer.is_live() {
+            return Err(PresentationError::Revoked);
+        }
+        surface.writer.element_command(element, command)
     }
 
     /// Retain a surface as an additional handle, under the same cap as `open`.
@@ -249,6 +306,7 @@ pub fn map_mutations<R, C, E>(
                 Mutation::InsertBefore(count) => Mutation::InsertBefore(count),
                 Mutation::SetAttribute(attribute) => Mutation::SetAttribute(attribute),
                 Mutation::SetText(text) => Mutation::SetText(text),
+                Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
                 Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
                 Mutation::RemoveEventListener(name) => Mutation::RemoveEventListener(name),
                 Mutation::Remove => Mutation::Remove,
@@ -270,6 +328,7 @@ pub fn ingress_budget<R>(edits: &[Mutation<R>]) -> Result<(), &'static str> {
             Mutation::CreateElement((tag, namespace)) => [Some(tag), namespace.as_deref(), None],
             Mutation::CreateText(text)
             | Mutation::SetText(text)
+            | Mutation::SetStyleSheet(text)
             | Mutation::AddEventListener(text)
             | Mutation::RemoveEventListener(text) => [Some(text), None, None],
             Mutation::SetAttribute((name, namespace, value)) => [

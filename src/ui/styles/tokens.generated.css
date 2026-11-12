@@ -24,6 +24,7 @@
     --df-color-neutral-600: #5c5c6b;
     --df-color-neutral-900: #1f1f29;
     --df-color-neutral-1000: #000000;
+    --df-color-overlay-black-32: rgba(0, 0, 0, 0.32);
     --df-color-blue-100: #dbe8ff;
     --df-color-blue-600: #2952c7;
     --df-color-blue-900: #0f1f61;
@@ -38,6 +39,9 @@
     --df-shadow-sm: 0px 1px 2px 0px #000000;
     --df-shadow-md: 0px 4px 12px 0px #000000;
     --df-shadow-raised: 0px 8px 24px 0px #000000;
+    --df-motion-duration-short: 150ms;
+    --df-motion-duration-medium: 250ms;
+    --df-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
     --df-color-canvas: #fafafc;
     --df-color-surface: #ffffff;
     --df-color-surface-raised: #ffffff;
@@ -53,6 +57,9 @@
     --df-color-on-accent: #ffffff;
     --df-color-accent-container: #dbe8ff;
     --df-color-on-accent-container: #0f1f61;
+    --df-color-selected: #dbe8ff;
+    --df-color-on-selected: #0f1f61;
+    --df-color-scrim: rgba(0, 0, 0, 0.32);
     --df-color-danger: #bd1f1f;
     --df-color-on-danger: #ffffff;
     --df-dimension-spacing: 0.25rem;
@@ -72,6 +79,16 @@
     --df-elevation-sm: 0px 1px 2px 0px #000000;
     --df-elevation-md: 0px 4px 12px 0px #000000;
     --df-elevation-raised: 0px 8px 24px 0px #000000;
+    --df-layer-content: 0;
+    --df-layer-raised: 10;
+    --df-layer-app-bar: 20;
+    --df-layer-drawer: 30;
+    --df-layer-sheet: 40;
+    --df-layer-toast: 50;
+    --df-layer-gesture: 60;
+    --df-motion-duration-enter: 250ms;
+    --df-motion-duration-fade: 150ms;
+    --df-motion-easing-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
     --df-font-family: var(--df-font-family-sans);
   }
 }
@@ -93,6 +110,9 @@
   --color-on-accent: var(--df-color-on-accent);
   --color-accent-container: var(--df-color-accent-container);
   --color-on-accent-container: var(--df-color-on-accent-container);
+  --color-selected: var(--df-color-selected);
+  --color-on-selected: var(--df-color-on-selected);
+  --color-scrim: var(--df-color-scrim);
   --color-danger: var(--df-color-danger);
   --color-on-danger: var(--df-color-on-danger);
   --spacing: var(--df-spacing);

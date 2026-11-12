@@ -5,11 +5,52 @@ use clay_guest_session::capabilities::RowAttachment;
 use clay_host::StartError;
 use clay_mdk::host::factory;
 use clay_mdk::Capability;
+use clay_mdk::CollectionDecl;
+use clay_mdk::ComponentDecl;
 use clay_mdk::Error;
 use micro_settings_manifest::Section;
 use micro_settings_manifest::SECTIONS;
 use std::cell::RefCell;
 use std::future::Future;
+
+/// The contracts the binding probes ask for: `ROWS` is served, `MISSING` is not.
+struct Rows;
+
+impl CollectionDecl for Rows {
+    const NSID: &'static str = ROWS;
+    type Key = String;
+    type Value = String;
+}
+
+struct Missing;
+
+impl CollectionDecl for Missing {
+    const NSID: &'static str = MISSING;
+    type Key = String;
+    type Value = String;
+}
+
+/// The editor's sources collection.
+struct Sources;
+
+impl CollectionDecl for Sources {
+    const NSID: &'static str = SOURCES;
+    type Key = String;
+    type Value = Source;
+}
+
+/// The stand-in counter's one presentation, under the name the real counter publishes.
+struct StubCounterView;
+
+impl ComponentDecl for StubCounterView {
+    const NAME: &'static str = micro_counter_manifest::VIEW;
+}
+
+struct SheetPage;
+
+impl ComponentDecl for SheetPage {
+    const NAME: &'static str = "page";
+}
 
 const COUNTER: &str = micro_counter_manifest::ID;
 
@@ -33,26 +74,119 @@ fn cbor_key(key: &str) -> Vec<u8> {
     bytes
 }
 
-/// Settings (eager, locked) and Sample (eager) as the desktop links them, plus a counter whose
-/// guest is `counter`: a catalog entry like any other.
-fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
-    let settings = InstalledMicro {
+/// The shell (eager, locked) as the launchers link it.
+fn shell_micro() -> InstalledMicro {
+    InstalledMicro {
         eager: true,
         locked: true,
         ..InstalledMicro::new(
+            id(micro_shell_manifest::ID),
+            micro_shell_manifest::sidecar(),
+            |id, resources, bindings| {
+                factory(
+                    resources,
+                    id,
+                    micro_shell_manifest::manifest(),
+                    bindings,
+                    micro_shell::activate,
+                )
+            },
+        )
+    }
+}
+
+/// Settings as the launchers link it: on demand, its panel a declared row, its requirements
+/// satisfied by the shell; `activations` counts how often it starts.
+fn settings_micro(activations: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(
             id(micro_settings_manifest::ID),
             micro_settings_manifest::sidecar(),
-            |id, resources, bindings| {
+            move |id, resources, bindings| {
                 factory(
                     resources,
                     id,
                     micro_settings_manifest::manifest(),
                     bindings,
-                    micro_settings::activate,
+                    move |context| {
+                        activations.set(activations.get() + 1);
+                        micro_settings::activate(context)
+                    },
                 )
             },
         )
-    };
+        .satisfied_by(
+            &id(micro_shell_manifest::ID),
+            &micro_shell_manifest::sidecar(),
+        )
+        .unwrap()
+    }
+}
+
+fn unactivated_settings() -> InstalledMicro {
+    InstalledMicro::new(
+        id(micro_settings_manifest::ID),
+        micro_settings_manifest::sidecar(),
+        |_, _, _| unreachable!("a refused provider never builds the factory"),
+    )
+}
+
+#[test]
+fn a_provider_publishing_a_requirement_under_another_contract_is_refused() {
+    let mut shell = micro_shell_manifest::sidecar();
+    shell
+        .manifest
+        .publications
+        .iter_mut()
+        .find(|publication| publication.name == micro_shell_manifest::OPENED)
+        .unwrap()
+        .contract = Some(Nsid::literal("org.example.test.somethingElse"));
+    let error = unactivated_settings()
+        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains(micro_shell_manifest::OPENED_CONTRACT)
+            && error.contains("org.example.test.somethingElse"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_provider_without_the_required_publication_is_refused() {
+    let mut shell = micro_shell_manifest::sidecar();
+    shell
+        .manifest
+        .publications
+        .retain(|publication| publication.name != micro_shell_manifest::NAV_BUTTON);
+    let error = unactivated_settings()
+        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
+        .err()
+        .unwrap();
+    assert!(error.contains(micro_shell_manifest::NAV_BUTTON), "{error}");
+}
+
+#[test]
+fn the_shell_satisfies_what_settings_requires() {
+    let micro = unactivated_settings()
+        .satisfied_by(
+            &id(micro_shell_manifest::ID),
+            &micro_shell_manifest::sidecar(),
+        )
+        .unwrap();
+    assert_eq!(
+        micro.requirements.keys().collect::<Vec<_>>(),
+        [
+            micro_shell_manifest::NAV_BUTTON,
+            micro_shell_manifest::OPENED
+        ]
+    );
+}
+
+/// The shell (eager), Settings (on demand) and Sample (eager) as the desktop links them, plus a
+/// counter whose guest is `counter`: a catalog entry like any other.
+fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
     let sample = InstalledMicro {
         eager: true,
         enabled_on_admission: true,
@@ -70,7 +204,12 @@ fn catalog(counter: InstalledMicro) -> Vec<InstalledMicro> {
             },
         )
     };
-    vec![settings, sample, counter]
+    vec![
+        shell_micro(),
+        settings_micro(Rc::default()),
+        sample,
+        counter,
+    ]
 }
 
 /// A counter that publishes its declared view without any engine.
@@ -87,7 +226,7 @@ fn stub_counter() -> InstalledMicro {
                     micro_counter_manifest::manifest(),
                     bindings,
                     |context| async move {
-                        context.publish_component(micro_counter_manifest::VIEW, || {
+                        context.publish::<StubCounterView>(|| {
                             rsx! { p { "stub counter" } }
                         })?;
                         Ok(())
@@ -218,23 +357,28 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
     let runtime = memory_runtime(stub_counter()).await;
     served(&runtime, async {
         settle(&runtime, || {
-            runtime.state(&id("dayframe.settings")) == MicroState::Active
+            runtime.state(&id(micro_shell_manifest::ID)) == MicroState::Active
                 && runtime.state(&id(micro_sample::ID)) == MicroState::Active
         })
         .await;
-        // The shell mounts the root through its manifest-declared endpoint.
+        // The frame mounts the shell's root through its manifest-declared endpoint. Settings is
+        // a panel, not a root, and nothing has started it.
         let mut roots = runtime.roots.clone();
         while runtime.roots.rows().unwrap().is_empty() {
             roots.changed().await.unwrap();
         }
         let root = &runtime.roots.rows().unwrap()[0];
-        assert_eq!(root.key, "dayframe.settings");
-        assert_eq!(root.value.title, "Settings");
+        assert_eq!(root.key, micro_shell_manifest::ID);
+        assert_eq!(root.value.title, "Shell");
         let view = root.attachments[root.value.content.index()]
             .redeem_presentation()
             .await
             .unwrap();
         assert!(view.component().is_ok());
+        assert_eq!(
+            runtime.state(&id(micro_settings_manifest::ID)),
+            MicroState::Idle
+        );
 
         let (sections, feed) = section_refs(&runtime);
         tokio::task::spawn_local(feed);
@@ -257,6 +401,35 @@ async fn eager_roots_start_and_a_section_starts_its_micro_only_while_mounted() {
         assert!(sample.attachments[0].redeem_presentation().await.is_ok());
     })
     .await;
+}
+
+// The lifecycle controls are a built-in micro whose declared Settings section is listed before
+// anything runs, locked like the shell (it has no install datum and no toggle of its own).
+#[tokio::test(flavor = "current_thread")]
+async fn the_lifecycle_controls_are_a_locked_settings_section() {
+    let mut micros = catalog(stub_counter());
+    micros.push(lifecycle::micro());
+    let runtime = CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), micros)
+        .await
+        .expect("a memory store does not fail");
+    assert!(runtime.installation_errors.is_empty());
+    let lifecycle = id(lifecycle::ID);
+    assert!(runtime.is_locked(&lifecycle));
+    let row = runtime
+        .collection(&sections())
+        .unwrap()
+        .get(&cbor_key(lifecycle::ID))
+        .unwrap()
+        .value
+        .unwrap();
+    let section: Section = ciborium::from_reader(row.body.as_slice()).unwrap();
+    assert_eq!(section.title, "Micro lifecycle");
+    assert!(matches!(
+        row.attachments.as_slice(),
+        [RowAttachment::Endpoint(endpoint)] if endpoint.micro == supervised(lifecycle::ID)
+    ));
+    assert_eq!(runtime.state(&lifecycle), MicroState::Idle);
+    runtime.host.close();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -305,7 +478,7 @@ async fn an_unfetchable_guest_faults_alone_until_retried() {
             runtime.state(&id(COUNTER)),
             MicroState::Faulted(message) if message.contains("fetched")
         ));
-        assert_eq!(runtime.state(&id("dayframe.settings")), MicroState::Active);
+        assert_eq!(runtime.state(&id("dayframe.shell")), MicroState::Active);
         assert_eq!(runtime.state(&id(micro_sample::ID)), MicroState::Active);
         // Demand does not retry a fault; the retry control does, and it fails again.
         let supervisor = &runtime.supervisor;
@@ -569,10 +742,10 @@ async fn admission_records_a_package_disabled_and_a_built_in_enabled() {
         install_datum_of(&runtime, micro_sample::ID).unwrap()["enabled"],
         true
     );
-    assert_eq!(install_datum_of(&runtime, "dayframe.settings"), None);
+    assert_eq!(install_datum_of(&runtime, "dayframe.shell"), None);
     assert_eq!(runtime.state(&id(COUNTER)), MicroState::Disabled);
     assert_eq!(runtime.state(&id(micro_sample::ID)), MicroState::Idle);
-    assert_eq!(runtime.state(&id("dayframe.settings")), MicroState::Idle);
+    assert_eq!(runtime.state(&id("dayframe.shell")), MicroState::Idle);
     runtime.host.close();
 }
 
@@ -629,8 +802,8 @@ async fn a_disabled_micro_stays_disabled_across_a_reboot() {
         install_datum_of(&second, micro_sample::ID).unwrap()["enabled"],
         false
     );
-    assert_eq!(install_datum_of(&second, "dayframe.settings"), None);
-    assert_eq!(second.state(&id("dayframe.settings")), MicroState::Idle);
+    assert_eq!(install_datum_of(&second, "dayframe.shell"), None);
+    assert_eq!(second.state(&id("dayframe.shell")), MicroState::Idle);
     second.host.close();
 }
 
@@ -686,16 +859,14 @@ fn rows_owner() -> InstalledMicro {
 
 /// An eager micro requesting read access to `BOOK` of `contract`; each activation reports
 /// whether the binding was bound to it.
-fn probe(
-    contract: &str,
+fn probe<C: CollectionDecl>(
     necessity: clay_mdk::Necessity,
 ) -> (InstalledMicro, watch::Receiver<Vec<bool>>) {
-    probe_asking(contract, necessity, clay_mdk::Access::Read)
+    probe_asking::<C>(necessity, clay_mdk::Access::Read)
 }
 
 /// [`probe`] asking for `access`.
-fn probe_asking(
-    contract: &str,
+fn probe_asking<C: CollectionDecl>(
     necessity: clay_mdk::Necessity,
     access: clay_mdk::Access,
 ) -> (InstalledMicro, watch::Receiver<Vec<bool>>) {
@@ -704,7 +875,7 @@ fn probe_asking(
         &[],
         vec![clay_mdk::Request {
             binding: BOOK.into(),
-            contract: Nsid::literal(contract),
+            contract: Nsid::literal(C::NSID),
             access: Some(access),
             necessity,
             resolution: clay_mdk::BindingResolution::Configured,
@@ -718,7 +889,7 @@ fn probe_asking(
         enabled_on_admission: true,
         ..InstalledMicro::new(id(&sidecar.id), sidecar, move |id, resources, bindings| {
             factory(resources, id, manifest, bindings, move |context| {
-                let bound = context.collection::<String, String>(BOOK).is_some();
+                let bound = context.collection::<C>().is_some();
                 activations.send_modify(|seen| seen.push(bound));
                 async { Ok(()) }
             })
@@ -753,20 +924,20 @@ async fn activations(seen: &mut watch::Receiver<Vec<bool>>, count: usize) -> Vec
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_contract_with_one_declared_collection_binds_by_default() {
-    let (probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let (probe, mut seen) = probe::<Rows>(clay_mdk::Necessity::Required);
     let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
     served(&runtime, async {
         assert_eq!(activations(&mut seen, 1).await, [true]);
         // The built-ins resolved their sections binding the same way.
         reaches(&runtime, &id(micro_sample::ID), MicroState::Active).await;
-        reaches(&runtime, &id("dayframe.settings"), MicroState::Active).await;
+        reaches(&runtime, &id("dayframe.shell"), MicroState::Active).await;
     })
     .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_required_binding_that_resolves_to_nothing_is_never_started() {
-    let (probe, seen) = probe(MISSING, clay_mdk::Necessity::Required);
+    let (probe, seen) = probe::<Missing>(clay_mdk::Necessity::Required);
     let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
     let micro = id(PROBE);
     let unconfigured = MicroState::Unconfigured(vec![BOOK.into()]);
@@ -794,7 +965,7 @@ async fn a_required_binding_that_resolves_to_nothing_is_never_started() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn an_optional_binding_that_resolves_to_nothing_starts_with_the_binding_absent() {
-    let (probe, mut seen) = probe(MISSING, clay_mdk::Necessity::Optional);
+    let (probe, mut seen) = probe::<Missing>(clay_mdk::Necessity::Optional);
     let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
     served(&runtime, async {
         assert_eq!(activations(&mut seen, 1).await, [false]);
@@ -805,7 +976,7 @@ async fn an_optional_binding_that_resolves_to_nothing_starts_with_the_binding_ab
 
 #[tokio::test(flavor = "current_thread")]
 async fn changing_the_binding_datum_restarts_the_micro_with_the_new_binding() {
-    let (probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Optional);
+    let (probe, mut seen) = probe::<Rows>(clay_mdk::Necessity::Optional);
     let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
     let micro = id(PROBE);
     served(&runtime, async {
@@ -822,7 +993,7 @@ async fn changing_the_binding_datum_restarts_the_micro_with_the_new_binding() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn configuring_a_required_binding_starts_a_waiting_micro_and_unconfiguring_stops_it() {
-    let (probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let (probe, mut seen) = probe::<Rows>(clay_mdk::Necessity::Required);
     let runtime = probe_runtime(&Arc::new(clay_store::MemoryStore::new()), probe).await;
     let micro = id(PROBE);
     let unconfigured = MicroState::Unconfigured(vec![BOOK.into()]);
@@ -840,7 +1011,7 @@ async fn configuring_a_required_binding_starts_a_waiting_micro_and_unconfiguring
 #[tokio::test(flavor = "current_thread")]
 async fn the_binding_datum_survives_a_reboot() {
     let store = Arc::new(clay_store::MemoryStore::new());
-    let (first_probe, mut seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let (first_probe, mut seen) = probe::<Rows>(clay_mdk::Necessity::Required);
     let first = probe_runtime(&store, first_probe).await;
     let micro = id(PROBE);
     served(&first, async {
@@ -850,7 +1021,7 @@ async fn the_binding_datum_survives_a_reboot() {
     })
     .await;
 
-    let (second_probe, seen) = probe(ROWS, clay_mdk::Necessity::Required);
+    let (second_probe, seen) = probe::<Rows>(clay_mdk::Necessity::Required);
     let second = probe_runtime(&store, second_probe).await;
     assert_eq!(
         second.state(&micro),
@@ -878,7 +1049,7 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
         let store = Arc::clone(&store);
         let micro = micro.clone();
         async move {
-            let (probe, seen) = probe_asking(ROWS, clay_mdk::Necessity::Required, access);
+            let (probe, seen) = probe_asking::<Rows>(clay_mdk::Necessity::Required, access);
             let runtime = probe_runtime(&store, probe).await;
             if configure {
                 served(&runtime, async {
@@ -912,7 +1083,7 @@ async fn a_widened_request_is_unresolved_until_configured_again_and_enablement_i
     );
 
     // Configuring again grants the widened request, and the waiting micro starts.
-    let (probe, mut seen) = probe_asking(ROWS, clay_mdk::Necessity::Required, Access::Write);
+    let (probe, mut seen) = probe_asking::<Rows>(clay_mdk::Necessity::Required, Access::Write);
     let runtime = probe_runtime(&store, probe).await;
     assert_eq!(runtime.state(&micro), unconfigured);
     served(&runtime, async {
@@ -977,7 +1148,12 @@ async fn a_slot_opened_on_a_disabled_micro_mounts_once_it_is_enabled() {
         runtime.set_enabled(&id(COUNTER), false).await;
         reaches(&runtime, &id(COUNTER), MicroState::Disabled).await;
         let (mut dom, mut tree) = counter_slot(&runtime).await;
-        slot_shows(&mut dom, &mut tree, "Section unavailable").await;
+        slot_shows(
+            &mut dom,
+            &mut tree,
+            "Section unavailable: its micro is disabled.",
+        )
+        .await;
         // The same slot, not a remounted one, picks the micro up.
         runtime.set_enabled(&id(COUNTER), true).await;
         slot_shows(&mut dom, &mut tree, "stub counter").await;
@@ -1058,7 +1234,7 @@ async fn a_slot_does_not_redeem_a_faulted_micro_again_until_it_is_retried() {
     .await;
 }
 
-/// The catalog the toolbar scenarios run: Settings, Sample and the Toolbar as the desktop links
+/// The catalog the toolbar scenarios run: the shell, Settings, Sample and the Toolbar as the desktop links
 /// them, and the real counter (its native `ACTIVATE` entry, the same source the Wasm guest is
 /// built from), counting how many times it is activated.
 fn toolbar_catalog(activations: Rc<std::cell::Cell<usize>>) -> Vec<InstalledMicro> {
@@ -1155,18 +1331,31 @@ async fn the_toolbar_renders_the_counters_button_while_it_is_stopped_and_a_press
         serde_json::json!(0),
     );
     served(&runtime, async {
-        // The shell mounts the toolbar through its pinned root row.
-        let mut roots = runtime.roots.clone();
-        while runtime.roots.rows().unwrap().len() < 2 {
-            roots.changed().await.unwrap();
-        }
-        let rows = runtime.roots.rows().unwrap();
-        let root = rows
+        // The shell mounts the toolbar through its sidebar panel row.
+        let (panels, panels_feed) = Collection::<String, micro_shell_manifest::Panel>::observe(
+            &runtime.host,
+            runtime.shell(),
+            runtime.supervisor.activator(),
+            &runtime
+                .collection(&Nsid::literal(micro_shell_manifest::PANELS))
+                .unwrap(),
+        )
+        .unwrap();
+        tokio::task::spawn_local(panels_feed);
+        let mut panel_changes = panels.clone();
+        let rows = loop {
+            let rows = panels.rows().unwrap();
+            if rows.iter().any(|row| row.key == micro_toolbar_manifest::ID) {
+                break rows;
+            }
+            panel_changes.changed().await.unwrap();
+        };
+        let panel = rows
             .iter()
             .find(|row| row.key == micro_toolbar_manifest::ID)
             .unwrap();
-        assert!(root.value.pinned);
-        let toolbar = root.attachments[root.value.content.index()].clone();
+        assert_eq!(panel.value.sockets, [micro_shell_manifest::Socket::Sidebar]);
+        let toolbar = panel.attachments[panel.value.content.index()].clone();
         let mut dom = VirtualDom::new_with_props(
             slot_app,
             SlotApp {
@@ -1274,7 +1463,7 @@ fn editor() -> InstalledMicro {
         ..InstalledMicro::new(id(&sidecar.id), sidecar, |id, resources, bindings| {
             factory(resources, id, manifest, bindings, |context| async move {
                 let sources = context
-                    .collection::<String, Source>("sources")
+                    .collection::<Sources>()
                     .expect("configuration binds the sources collection");
                 let retained = Rc::new(RefCell::new(
                     BTreeMap::<String, Rc<clay_mdk::CallBinding>>::new(),
@@ -1548,6 +1737,229 @@ async fn an_untouched_declared_collection_reads_known_empty_without_starting_its
             None,
             "reading a declared collection starts no incarnation"
         );
+    })
+    .await;
+}
+
+// ── the shell (ADR 032) ───────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Props)]
+struct FrameApp {
+    components: NativeComponents,
+    reference: Capability,
+    width: f64,
+}
+
+/// What `Application` supplies around the shell's root, without the lifecycle section and without
+/// serving the composition (the scenario serves it).
+fn frame_app(props: FrameApp) -> Element {
+    use_context_provider(|| props.components.clone());
+    let width = use_signal(|| props.width).into();
+    let height = use_signal(|| 800.0).into();
+    let insets = use_signal(Insets::default).into();
+    let platform_back = use_signal(|| 0_u64);
+    let can_back = use_signal(|| false);
+    use_context_provider(|| HostInputs {
+        width,
+        height,
+        insets,
+        platform_back,
+        can_back,
+        renderer: Renderer::Blitz,
+        start: None,
+    });
+    rsx! { PresentationSlot { reference: props.reference } }
+}
+
+/// Run the slot's tasks until its rendering no longer contains `text`.
+async fn slot_lacks(dom: &mut VirtualDom, tree: &mut clay_surface::SurfaceTree, text: &str) {
+    loop {
+        dom.render_immediate(tree);
+        if !tree.text_content().contains(text) {
+            return;
+        }
+        dom.wait_for_work().await;
+    }
+}
+
+/// A micro whose only job is to contribute a sheet panel to the shell.
+fn sheet_micro() -> InstalledMicro {
+    let manifest = clay_mdk::MicroManifest {
+        entrypoints: clay_mdk::Entrypoints::micro_client(),
+        publications: vec![clay_mdk::PublicationDeclaration {
+            name: "page".into(),
+            kind: clay_mdk::PublicationKind::Presentation,
+            contract: None,
+        }],
+        requires: vec![],
+        configuration_requests: vec![],
+        collection_contracts: vec![],
+        collection_requests: vec![clay_mdk::Request {
+            binding: "panels".into(),
+            contract: Nsid::literal(micro_shell_manifest::PANELS),
+            access: Some(clay_mdk::Access::Write),
+            necessity: clay_mdk::Necessity::Required,
+            resolution: clay_mdk::BindingResolution::Configured,
+            min_revision: None,
+        }],
+        contributions: vec![clay_mdk::ContributionDeclaration {
+            id: "panel".into(),
+            binding: "panels".into(),
+            key: "tests.sheet".into(),
+            payload: serde_json::json!({
+                "title": "Pick a color",
+                "sockets": ["sheet"],
+                "content": { "$attachment": 0 },
+            }),
+            attachments: vec![clay_mdk::AttachmentDeclaration {
+                index: 0,
+                publication: "page".into(),
+            }],
+        }],
+        extra: BTreeMap::new(),
+    };
+    let sidecar = clay_mdk::Sidecar::new("tests.sheet", 1, manifest.clone())
+        .with_authority("org.example.test");
+    InstalledMicro {
+        enabled_on_admission: true,
+        ..InstalledMicro::new(
+            id("tests.sheet"),
+            sidecar,
+            move |id, resources, bindings| {
+                factory(resources, id, manifest, bindings, |context| async move {
+                    context.publish::<SheetPage>(|| rsx! { p { "sheet body" } })?;
+                    Ok(())
+                })
+            },
+        )
+    }
+}
+
+// Home lists Settings from its declared panel row without starting it; opening it starts it
+// once; opening a section mounts that section's attachment as the details; back returns to the
+// list and then home; a sheet is on the stack, so back dismisses it too. Every step is a call
+// of the shell's contract, which is what a micro's own button makes.
+#[tokio::test(flavor = "current_thread")]
+async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
+    use micro_shell_manifest::NavigateRequest;
+    use micro_shell_manifest::OpenSheetRequest;
+    let activations = Rc::<std::cell::Cell<usize>>::default();
+    let mut micros = catalog(stub_counter());
+    micros[1] = settings_micro(Rc::clone(&activations));
+    micros.push(sheet_micro());
+    let runtime = CompositionRuntime::new(Arc::new(clay_store::MemoryStore::new()), micros)
+        .await
+        .expect("a memory store does not fail");
+    assert!(runtime.installation_errors.is_empty());
+    let settings = id(micro_settings_manifest::ID);
+    let shell = micro_shell_manifest::ID;
+    served(&runtime, async {
+        let mut roots = runtime.roots.clone();
+        while runtime.roots.rows().unwrap().is_empty() {
+            roots.changed().await.unwrap();
+        }
+        let rows = runtime.roots.rows().unwrap();
+        let root = rows.iter().find(|row| row.key == shell).unwrap();
+        // A compact host: the details come over the list.
+        let mut dom = VirtualDom::new_with_props(
+            frame_app,
+            FrameApp {
+                components: runtime.components.clone(),
+                reference: root.attachments[root.value.content.index()].clone(),
+                width: 400.0,
+            },
+        );
+        let mut tree = clay_surface::SurfaceTree::new();
+        dom.rebuild(&mut tree);
+
+        // Home lists Settings from its row; nothing has started it.
+        slot_shows(&mut dom, &mut tree, "Home").await;
+        slot_shows(&mut dom, &mut tree, "Settings").await;
+        assert_eq!(runtime.state(&settings), MicroState::Idle);
+        assert_eq!(activations.get(), 0);
+
+        let navigate = |panel: &str, row: Option<&str>| NavigateRequest {
+            panel: panel.into(),
+            row: row.map(Into::into),
+        };
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::NAVIGATE,
+            &navigate(micro_settings_manifest::ID, None),
+        )
+        .await;
+        slot_shows(&mut dom, &mut tree, "Counter (Wasm)").await;
+        assert_eq!(runtime.state(&settings), MicroState::Active);
+        assert_eq!(activations.get(), 1);
+
+        // The counter's section is the details; its micro starts only now.
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Idle);
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::NAVIGATE,
+            &navigate(micro_settings_manifest::ID, Some(COUNTER)),
+        )
+        .await;
+        slot_shows(&mut dom, &mut tree, "stub counter").await;
+        assert_eq!(runtime.state(&id(COUNTER)), MicroState::Active);
+        assert_eq!(
+            call_publication::<_, Option<String>>(
+                &runtime,
+                shell,
+                micro_shell_manifest::OPENED,
+                &micro_settings_manifest::ID.to_owned(),
+            )
+            .await
+            .as_deref(),
+            Some(COUNTER)
+        );
+
+        // A sheet over the details; back dismisses it, not the details under it.
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::OPEN_SHEET,
+            &OpenSheetRequest {
+                panel: "tests.sheet".into(),
+            },
+        )
+        .await;
+        slot_shows(&mut dom, &mut tree, "sheet body").await;
+        assert!(
+            call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await
+        );
+        slot_lacks(&mut dom, &mut tree, "sheet body").await;
+        assert!(tree.text_content().contains("stub counter"));
+        assert!(
+            !call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::FORWARD, &()).await,
+            "a dismissed sheet is not a forward entry"
+        );
+
+        // Back from the details returns to the list, and then to home, which unmounts Settings.
+        assert!(
+            call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await
+        );
+        slot_lacks(&mut dom, &mut tree, "stub counter").await;
+        assert!(tree.text_content().contains("Counter (Wasm)"));
+        assert!(
+            call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await
+        );
+        slot_lacks(&mut dom, &mut tree, "Counter (Wasm)").await;
+        slot_shows(&mut dom, &mut tree, "Home").await;
+        assert!(
+            !call_publication::<_, bool>(&runtime, shell, micro_shell_manifest::BACK, &()).await,
+            "home is the base of the stack"
+        );
+        settle(&runtime, || runtime.state(&settings) == MicroState::Idle).await;
+        assert_eq!(
+            activations.get(),
+            1,
+            "Settings started once for the whole visit"
+        );
+
+        drop(dom);
     })
     .await;
 }

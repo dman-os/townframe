@@ -14,6 +14,29 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [[example]]
+name = "overbudget"
+path = "overbudget_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
+name = "egress"
+path = "egress_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
+name = "trapper"
+path = "trapper_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
+name = "emit_trapper_manifest"
+path = "emit_trapper_manifest.rs"
+required-features = ["guest"]
+
+[[example]]
 name = "context"
 path = "context_fixture.rs"
 crate-type = ["cdylib"]
@@ -30,7 +53,7 @@ clay_collection = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "async-spawn", "inter-task-wakeup"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"], optional = true }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html", "document"], optional = true }
 dioxus-core = { workspace = true, optional = true }
 dioxus-html = { workspace = true, optional = true }
 clay_host = { workspace = true, optional = true }
@@ -95,4 +118,4 @@ package = ["dep:blake3"]
 # The guest backend: the same `Context` authoring surface over the WIT imports a wasm micro is
 # linked against, the Dioxus guest VirtualDom adapter (GuestDom, WireMutations), and the
 # `export_micro!` entry point.
-guest = ["wit", "contract", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
+guest = ["wit", "contract", "dep:clay_surface", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]

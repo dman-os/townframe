@@ -90,7 +90,9 @@ A guest is one wasm instance. Every host call into it is a component-model task:
 async export, one task per call, and many calls can be suspended in the guest at once while the
 host also drives the synchronous `mount`/`dispatch`/`unmount` exports between them. The MDK's
 `task_hook` (`lib.rs`) keeps that sound: thread-locals are shared by all tasks, and wit-bindgen's
-per-task state is swapped on every suspend and resume. Authors owe these rules in return:
+per-task state is swapped on every suspend and resume, and a task that starts while another is
+suspended in the middle of a callback (blocked in a built-in) runs on a stack of its own. Authors
+owe these rules in return:
 
 - **No `RefCell` borrow, signal read/write guard or Dioxus guard across an `.await`.** Another
   task of the same instance runs while you are suspended, on the same shared thread-locals, and

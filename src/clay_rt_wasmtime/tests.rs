@@ -1051,7 +1051,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let owner = host.start("ingress-budget");
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     let (mut state, _incoming) =
-        WasmStoreState::detached(host.clone(), owner, DocumentLimits::default()).unwrap();
+        WasmStoreState::detached(host.clone(), owner.clone(), DocumentLimits::default()).unwrap();
     let placement = state
         .table
         .push(Placement::new(
@@ -1067,12 +1067,17 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
         .collect::<Vec<_>>();
     *edits.last_mut().unwrap() =
         wit_presentation::Mutation::MountComponent(Resource::new_borrow(u32::MAX));
+    // The guest is answered `Revoked` so it unwinds instead of aborting; the budget is the
+    // micro's recorded fault.
     assert!(matches!(
         HostSurface::apply(&mut state, Resource::new_borrow(surface.rep()), edits).unwrap(),
-        Err(wit_presentation::PresentationError::Unsupported(message))
-            if message == "batch mutation limit"
+        Err(wit_presentation::PresentationError::Revoked)
     ));
     assert!(!writer.is_live());
+    assert!(
+        host.fault(&owner)
+            .is_some_and(|fault| fault.contains("batch mutation limit"))
+    );
     HostSurface::drop(&mut state, surface).unwrap();
     HostMountPoint::drop(&mut state, placement).unwrap();
     host.close();
@@ -1192,6 +1197,13 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     });
     // Trap-equivalent: default response, surface withdrawn, instance closed.
     assert_eq!(response, EventResponse::default());
+    let fault = host
+        .fault(&owner)
+        .expect("a trapped dispatch records its cause");
+    assert!(
+        fault.starts_with("guest trapped during dispatch: ") && fault.len() > 40,
+        "the fault must carry the trap's reason, got: {fault}"
+    );
     assert!(
         !writer.is_live(),
         "a blocked dispatch withdraws the surface"
@@ -1213,6 +1225,132 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
         "wasmtime must fail a blocking sync-typed call with CannotBlock on the first poll, \
          not return Pending"
     );
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
+/// The guest `WasiCtx` grants nothing (`WasmStoreState::new`), although the linker offers all of
+/// WASI p3 including sockets and filesystem. The `egress` fixture tries TCP, UDP, name lookup,
+/// directory listing, absolute and relative file opens when it mounts and renders what each
+/// returned; every channel must fail and the environment must be empty. Adding
+/// `inherit_network()`, `allow_*`, a preopen, or an env var to the context breaks this test.
+#[tokio::test]
+async fn guest_wasi_context_grants_no_network_filesystem_or_environment() {
+    struct CapturingSink(Mutex<Vec<String>>);
+
+    impl SurfaceSink<ComponentRef> for CapturingSink {
+        fn is_live(&self) -> bool {
+            true
+        }
+
+        fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            let mut texts = self.0.lock().unwrap();
+            for edit in edits {
+                if let Mutation::CreateText(text) = edit {
+                    texts.push(text.clone());
+                }
+            }
+            Ok(0)
+        }
+
+        fn withdraw(&self) {}
+    }
+
+    let host = Host::new();
+    let owner = host.start("egress");
+    let package = WasmPackage::from_env("egress")
+        .await
+        .expect("prepared egress component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    let sink = Arc::new(CapturingSink(Mutex::new(Vec::new())));
+    let session = runtime
+        .mount("view", Arc::clone(&sink) as _)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the probe mounts: {error:?}, fault {:?}",
+                host.fault(&owner)
+            )
+        });
+    let reports = sink.0.lock().unwrap().clone();
+    let [report] = reports.as_slice() else {
+        panic!("the probe renders one report, got {reports:?}");
+    };
+    let attempts: std::collections::BTreeMap<&str, &str> = report
+        .split(';')
+        .map(|attempt| attempt.split_once('=').expect("name=outcome"))
+        .collect();
+    for channel in ["tcp", "udp", "dns", "read_dir", "open", "open_relative"] {
+        let outcome = attempts
+            .get(channel)
+            .unwrap_or_else(|| panic!("{channel} missing from {report}"));
+        assert!(
+            outcome.starts_with("err("),
+            "{channel} must fail inside the guest, got {outcome}: {report}"
+        );
+    }
+    assert_eq!(attempts["env"], "0", "{report}");
+    // The program name is the only argument a command-line guest sees; none are granted.
+    assert!(attempts["args"].parse::<usize>().unwrap() <= 1, "{report}");
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
+/// A guest whose `dispatch` commits a batch over the surface mutation budget faults only its own
+/// micro: the surface is withdrawn, the instance closes, and the budget is the recorded cause,
+/// reached through the guest's graceful `Revoked` unwind, not a trap. Pinned by
+/// `overbudget_fixture`.
+#[tokio::test]
+async fn over_budget_batch_faults_the_micro_with_the_budget_as_cause() {
+    let host = Host::new();
+    let owner = host.start("overbudget");
+    let package = WasmPackage::from_env("overbudget")
+        .await
+        .expect("prepared overbudget component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    struct LiveSink(AtomicBool);
+
+    impl SurfaceSink<ComponentRef> for LiveSink {
+        fn is_live(&self) -> bool {
+            !self.0.load(Ordering::Acquire)
+        }
+
+        fn apply(&self, _edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            Ok(0)
+        }
+
+        fn withdraw(&self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let writer = Arc::new(LiveSink(AtomicBool::new(false)));
+    let session = runtime
+        .mount("view", Arc::clone(&writer) as _)
+        .expect("mount stays inside the budget");
+    assert!(writer.is_live());
+
+    let response = session.handler()(Event {
+        revision: 1,
+        element: clay_surface::NodeId::try_from(1_u32).unwrap(),
+        name: "click".into(),
+        bubbles: true,
+        data_json: "{}".into(),
+    });
+    assert_eq!(response, EventResponse::default());
+    assert!(!writer.is_live(), "the breach withdraws the surface");
+    assert_eq!(host.check(&owner), Err(clay_host::AccessError::Revoked));
+    let fault = host
+        .fault(&owner)
+        .expect("the breach is recorded as a fault");
+    assert!(fault.contains("batch mutation limit"), "{fault}");
     drop(session);
     drop(driver);
     host.close();
@@ -1326,6 +1464,13 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     );
     assert_eq!(*ended.borrow(), Some(clay_host::CloseReason::Requested));
     assert_eq!(host.check(&owner), Err(clay_host::AccessError::Revoked));
+    assert!(
+        host.fault(&owner).is_some_and(|fault| fault
+            .contains("guest trapped in a document delivery")
+            && fault.contains("all fuel consumed")),
+        "an event-loop trap records its reason: {:?}",
+        host.fault(&owner)
+    );
     assert!(!writer.is_live());
     drop(surface);
     host.close();

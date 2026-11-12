@@ -1,12 +1,16 @@
 use super::*;
 use crate::Access;
+use crate::Attachment;
 use crate::BindingResolution;
+use crate::CollectionDecl;
+use crate::ComponentDecl;
 use crate::Entrypoints;
 use crate::Necessity;
 use crate::PublicationDeclaration;
 use crate::PublicationKind;
 use crate::Registration;
 use crate::Request;
+use crate::RootRow;
 use crate::SHELL_ROOTS;
 use crate::Sidecar;
 use clay_collection::ReplicaId;
@@ -26,6 +30,33 @@ use std::num::NonZeroUsize;
 
 const ROWS: &str = "org.example.clay.test.rows";
 const INCREMENT: &str = "org.example.clay.test.calls.increment";
+
+/// The test collection as a declaration.
+struct Rows;
+
+impl CollectionDecl for Rows {
+    const NSID: &'static str = ROWS;
+    type Key = String;
+    type Value = String;
+}
+
+struct ViewPub;
+
+impl ComponentDecl for ViewPub {
+    const NAME: &'static str = "view";
+}
+
+struct DetailPub;
+
+impl ComponentDecl for DetailPub {
+    const NAME: &'static str = "detail";
+}
+
+struct UndeclaredPub;
+
+impl ComponentDecl for UndeclaredPub {
+    const NAME: &'static str = "undeclared";
+}
 
 fn rows() -> Nsid {
     Nsid::literal(ROWS)
@@ -189,8 +220,8 @@ async fn declared_presentations_are_published_by_name_and_leased() {
                 ..Spec::default()
             },
             |context| async move {
-                context.publish_component("view", blank)?;
-                context.publish_component("detail", blank)?;
+                context.publish::<ViewPub>(blank)?;
+                context.publish::<DetailPub>(blank)?;
                 Ok(())
             },
         );
@@ -232,8 +263,8 @@ async fn publishing_an_undeclared_name_fails_initialization() {
                     let ran = Rc::clone(&ran);
                     async move {
                         // A mirror task is registered before the rejected publication.
-                        context.collection::<String, String>(ROWS_BINDING).unwrap();
-                        context.publish_component("undeclared", blank)?;
+                        context.collection::<Rows>().unwrap();
+                        context.publish::<UndeclaredPub>(blank)?;
                         ran.set(true);
                         Ok(())
                     }
@@ -270,16 +301,14 @@ async fn registration_rows_reach_a_reader_and_are_retracted_when_the_writer_clos
                 move |context| {
                     let watched = Rc::clone(&watched);
                     async move {
-                        *watched.borrow_mut() = context.collection(ROWS_BINDING);
+                        *watched.borrow_mut() = context.collection::<Rows>();
                         Ok(())
                     }
                 }
             },
         );
         let writer = rig.micro("native.writer", writes_rows(), |context| async move {
-            let registration = context
-                .registration::<String, String>(ROWS_BINDING)
-                .unwrap();
+            let registration = context.registration::<Rows>().unwrap();
             registration
                 .put(&"counter".to_owned(), &"Counter".to_owned(), vec![])
                 .await?;
@@ -311,7 +340,7 @@ async fn rows_are_decoded_once_per_revision_and_rewritten_over_what_the_mirror_s
             move |context| {
                 let written = Rc::clone(&written);
                 async move {
-                    *written.borrow_mut() = context.registration(ROWS_BINDING);
+                    *written.borrow_mut() = context.registration::<Rows>();
                     Ok(())
                 }
             }
@@ -367,10 +396,8 @@ async fn optional_requests_configuration_left_unbound_are_none() {
                     let unbound = Rc::clone(&unbound);
                     async move {
                         unbound.set(
-                            context.collection::<String, String>(ROWS_BINDING).is_none()
-                                && context
-                                    .registration::<String, String>(ROWS_BINDING)
-                                    .is_none(),
+                            context.collection::<Rows>().is_none()
+                                && context.registration::<Rows>().is_none(),
                         );
                         Ok(())
                     }
@@ -402,7 +429,7 @@ async fn each_incarnation_sees_the_binding_resolution_current_when_it_started() 
                 let seen = Rc::clone(&seen);
                 async move {
                     seen.borrow_mut()
-                        .push(context.collection::<String, String>(ROWS_BINDING).is_some());
+                        .push(context.collection::<Rows>().is_some());
                     Ok(())
                 }
             }
@@ -435,7 +462,7 @@ async fn a_requirement_resolves_to_a_live_reference_to_its_provider() {
                 ..Spec::default()
             },
             |context| async move {
-                context.publish_component("view", blank)?;
+                context.publish::<ViewPub>(blank)?;
                 Ok(())
             },
         );
@@ -572,10 +599,8 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
                 ..writes_rows()
             },
             |context| async move {
-                let rows = context
-                    .registration::<String, String>(ROWS_BINDING)
-                    .unwrap();
-                context.publish_component("detail", blank)?;
+                let rows = context.registration::<Rows>().unwrap();
+                context.publish::<DetailPub>(blank)?;
                 // The handler runs long after `activate` returned and its staged handles moved.
                 context.publish_call("attach", move |publication: String| {
                     let rows = rows.clone();
@@ -583,7 +608,7 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
                         rows.put(
                             &"late".to_owned(),
                             &"Late".to_owned(),
-                            vec![crate::RowAttachment::own(publication)],
+                            vec![crate::RowAttachment::by_name(publication)],
                         )
                         .await?;
                         Ok(())
@@ -612,7 +637,7 @@ async fn a_row_written_after_activate_attaches_the_writers_own_declared_publicat
                     let watched = Rc::clone(&watched);
                     let attach = Rc::clone(&attach);
                     async move {
-                        *watched.borrow_mut() = context.collection(ROWS_BINDING);
+                        *watched.borrow_mut() = context.collection::<Rows>();
                         *attach.borrow_mut() = context.require("attach").cloned();
                         Ok(())
                     }
@@ -688,7 +713,7 @@ async fn a_value_captured_by_a_view_is_dropped_inside_the_close() {
                         seen: seen.clone(),
                     };
                     async move {
-                        context.publish_component("view", move || {
+                        context.publish::<ViewPub>(move || {
                             let _ = &probe;
                             blank()
                         })?;
@@ -789,7 +814,6 @@ fn declared_rows_store_endpoints_and_tag_attachment_slots() {
         RootRow {
             title: "Declared".into(),
             content: Attachment::at(0),
-            pinned: false,
         }
     );
     assert_eq!(

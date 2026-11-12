@@ -295,6 +295,12 @@ runtime state separate:
   wit-bindgen without `std`. The MDK supplies the per-task slot, and its hook parks the
   value in component context slot 0 while the task is suspended, as stock wasi-libc
   parks the TLS base.
+- A task can also be suspended in the middle of its callback, inside a blocking built-in,
+  where no hook fires and its frames stay on its stack; an engine may then admit a
+  synchronous export, which the component model lets ignore the instance's entry gate
+  (`wcmp` does; Wasmtime keeps it pending). The hook therefore hands the statically
+  allocated stack to the first task and a heap-allocated one to any task that starts
+  while it is held, and keeps each task's wit-bindgen state beside its own stack.
 - Cross-task wakeups (close signals, channels) require wit-bindgen's `inter-task-wakeup`
   feature.
 

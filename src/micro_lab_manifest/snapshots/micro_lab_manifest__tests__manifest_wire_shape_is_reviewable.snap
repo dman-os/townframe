@@ -1,0 +1,34 @@
+---
+source: src/micro_lab_manifest/lib.rs
+expression: sidecar()
+---
+id: dayframe.lab
+package_version: 1
+authority: org.example.dayframe.lab
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+publications:
+  - name: view
+    kind: presentation
+    contract: ~
+requires: []
+configuration_requests: []
+collection_contracts: []
+collection_requests:
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: write
+    necessity: optional
+contributions:
+  - id: layout-panel
+    binding: panels
+    key: dayframe.lab
+    payload:
+      content:
+        $attachment: 0
+      title: Lab
+    attachments:
+      - index: 0
+        publication: view

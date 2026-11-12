@@ -23,16 +23,22 @@ use clay_guest_session::capabilities::GuestCall;
 use clay_guest_session::capabilities::InFlightCall;
 use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
-use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementAction;
+use clay_surface::ElementCommand;
+use clay_surface::ElementRead;
 use clay_surface::Event;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
+use clay_surface::ScrollAlign;
+use clay_surface::ScrollBehavior;
+use clay_surface::ScrollIntoView;
+use clay_surface::ScrollOffsets;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
 use tokio::sync::oneshot;
@@ -69,6 +75,18 @@ use wasmtime_wasi::WasiView;
 #[derive(Debug, thiserror::Error)]
 #[error("guest presentation call suspended on its first poll")]
 pub(crate) struct Suspended;
+
+/// Why a guest entry failed, for the fault the supervisor reports. Wasmtime's error is a chain:
+/// the outermost link is only the context `error while executing at wasm backtrace:` (whose
+/// text holds the guest frames) and the root cause is the trap itself (`all fuel consumed by
+/// WebAssembly`, `wasm trap: unreachable`, or a host error the guest called into). `{:#}` of
+/// the error prints just the outermost link, which is how a trap used to read as no reason at
+/// all, so the chain is walked here, root cause first.
+pub(crate) fn trap_reason(error: &wasmtime::Error) -> String {
+    let mut links = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+    links.reverse();
+    links.join("; ")
+}
 
 /// Test probe: how many presentation calls hit [`Suspended`] (i.e. returned `Pending`)
 /// rather than completing or failing on the first poll. The W2 spike asserts a guest that
@@ -272,7 +290,8 @@ impl wasmtime::component::AccessorTask<WasmStoreState> for GuestCallTask {
             }
             Err(trap) => {
                 drop(reply.send(Err(CallError::Provider(format!(
-                    "guest trapped during call: {trap:#}"
+                    "guest trapped during call: {}",
+                    trap_reason(&trap)
                 )))));
                 Err(trap)
             }
@@ -404,11 +423,47 @@ fn convert_mutation(mutation: wit_presentation::Mutation) -> Mutation<Resource<W
             Mutation::SetAttribute((name, ns, convert_attribute_value(value)))
         }
         wit_presentation::Mutation::SetText(value) => Mutation::SetText(value),
+        wit_presentation::Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
         wit_presentation::Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
         wit_presentation::Mutation::RemoveEventListener(name) => {
             Mutation::RemoveEventListener(name)
         }
         wit_presentation::Mutation::Remove => Mutation::Remove,
+    }
+}
+
+fn convert_element_command(command: wit_presentation::ElementCommand) -> ElementCommand {
+    use wit_presentation::ElementAction as Wire;
+    let behavior = |behavior| match behavior {
+        wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
+        wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
+    };
+    let align = |align| match align {
+        wit_presentation::ScrollAlign::Start => ScrollAlign::Start,
+        wit_presentation::ScrollAlign::Center => ScrollAlign::Center,
+        wit_presentation::ScrollAlign::End => ScrollAlign::End,
+        wit_presentation::ScrollAlign::Nearest => ScrollAlign::Nearest,
+    };
+    ElementCommand {
+        request: command.request,
+        action: match command.action {
+            Wire::Scroll(to) => ElementAction::Scroll(ScrollOffsets {
+                left: to.left,
+                top: to.top,
+                behavior: behavior(to.behavior),
+            }),
+            Wire::ScrollIntoView(view) => ElementAction::ScrollIntoView(ScrollIntoView {
+                behavior: behavior(view.behavior),
+                vertical: align(view.vertical),
+                horizontal: align(view.horizontal),
+            }),
+            Wire::SetFocus(focus) => ElementAction::SetFocus(focus),
+            Wire::Read(what) => ElementAction::Read(match what {
+                wit_presentation::ElementRead::ClientRect => ElementRead::ClientRect,
+                wit_presentation::ElementRead::ScrollOffset => ElementRead::ScrollOffset,
+                wit_presentation::ElementRead::ScrollSize => ElementRead::ScrollSize,
+            }),
+        },
     }
 }
 
@@ -459,19 +514,29 @@ impl wit_presentation::HostSurface for WasmStoreState {
         edits: Vec<wit_presentation::Mutation>,
     ) -> wasmtime::Result<Result<u64, wit_presentation::PresentationError>> {
         let edits: Vec<_> = edits.into_iter().map(convert_mutation).collect();
-        if let Err(reason) = ingress_budget(&edits) {
-            self.table.get(&surface)?.writer().withdraw();
-            return Ok(Err(wit_presentation::PresentationError::Unsupported(
-                reason.into(),
-            )));
+        let surface = self.table.get(&surface)?.clone();
+        if let Err(error) = self.presentation.admit(&surface, &edits) {
+            return Ok(Err(convert_error(error)));
         }
         let converted = map_mutations(edits, |reference| {
             self.table.get(&reference).map(|component| component.0)
         })?;
+        Ok(self
+            .presentation
+            .apply(&surface, &converted)
+            .map_err(convert_error))
+    }
+
+    fn element_command(
+        &mut self,
+        surface: Resource<Surface>,
+        element: u32,
+        command: wit_presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), wit_presentation::PresentationError>> {
         let surface = self.table.get(&surface)?;
         Ok(self
             .presentation
-            .apply(surface, &converted)
+            .element_command(surface, element, convert_element_command(command))
             .map_err(convert_error))
     }
 
@@ -790,12 +855,17 @@ impl WasmIncarnation {
             })
             .await
             .and_then(|trapped| trapped)
-            .map_err(|trap| format!("guest trapped while closing: {trap:#}"));
+            .map_err(|trap| format!("guest trapped while closing: {}", trap_reason(&trap)));
         self.refuel();
         let dropped = root
             .resource_drop_async(&mut self.store)
             .await
-            .map_err(|trap| format!("guest trapped dropping its instance root: {trap:#}"));
+            .map_err(|trap| {
+                format!(
+                    "guest trapped dropping its instance root: {}",
+                    trap_reason(&trap)
+                )
+            });
         self.publications.clear();
         closed??;
         dropped
@@ -888,13 +958,17 @@ impl WasmRuntime {
                             let Some(active) = guard.as_mut() else {
                                 return;
                             };
-                            let trapped = active.tick().await.is_err();
-                            if trapped {
+                            let trapped = active.tick().await.err();
+                            if trapped.is_some() {
                                 guard.take();
                             }
                             trapped
                         };
-                        if trapped {
+                        if let Some(trap) = trapped {
+                            pump_host.record_fault(
+                                &pump_instance,
+                                format!("guest trapped in its event loop: {}", trap_reason(&trap)),
+                            );
                             if pump_host.check(&pump_instance).is_ok() {
                                 pump_host.close_instance(&pump_instance).unwrap();
                             }
@@ -1016,8 +1090,12 @@ impl WasmRuntime {
                         prevent_default: response.prevent_default,
                         stop_propagation: response.stop_propagation,
                     },
-                    Err(_trap) => {
+                    Err(trap) => {
                         dispatch_writer.withdraw();
+                        dispatch_host.record_fault(
+                            &dispatch_instance,
+                            format!("guest trapped during dispatch: {}", trap_reason(&trap)),
+                        );
                         dispatch_host.close_instance(&dispatch_instance).unwrap();
                         EventResponse::default()
                     }
@@ -1043,23 +1121,27 @@ impl WasmRuntime {
                     } else {
                         Ok(())
                     };
-                    if outcome.is_err() {
+                    if let Err(trap) = outcome {
                         guard.take();
-                        true
+                        Some(format!(
+                            "guest trapped during unmount: {}",
+                            trap_reason(&trap)
+                        ))
                     } else {
                         wit_presentation::HostSurface::drop(
                             active.store.data_mut(),
                             Resource::new_own(surface_rep),
                         )
                         .expect("mounted surface must remain in the host resource table");
-                        false
+                        None
                     }
                 } else {
-                    false
+                    None
                 };
                 drop(guard);
                 drop_writer.withdraw();
-                if trapped {
+                if let Some(cause) = trapped {
+                    drop_host.record_fault(&drop_instance, cause);
                     drop_host.close_instance(&drop_instance).unwrap();
                 }
             },
@@ -1141,10 +1223,14 @@ impl WasmRuntime {
                     }
                 })
             }
-            Err(_trap) => {
+            Err(trap) => {
                 guard.take();
                 drop(guard);
                 writer.withdraw();
+                self.host.record_fault(
+                    instance,
+                    format!("guest trapped during mount: {}", trap_reason(&trap)),
+                );
                 self.host.close_instance(instance).unwrap();
                 Err(PresentationError::Revoked)
             }

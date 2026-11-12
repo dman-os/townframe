@@ -1,9 +1,13 @@
-//! Settings owns its section vocabulary and navigation; the host owns storage and authority.
-//! Authored against the MDK only (ADR 015 §5): activation receives a [`Context`], never the
-//! registry, renderer, or host kernel.
+//! Settings owns its section vocabulary; the shell owns navigation, layout and the back button
+//! (ADR 032 §8), and the host owns storage and authority. Settings contributes a list panel
+//! whose rows are its sections: opening a row asks the shell to show that section's attachment
+//! as the panel's details. Authored against the MDK only (ADR 015 §5): activation receives a
+//! [`Context`], never the registry, renderer, or host kernel.
 mod view;
-pub use view::SettingsView;
+pub use view::SettingsList;
+pub use view::SettingsSection;
 
+use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
 use clay_mdk::Error;
@@ -14,36 +18,29 @@ use clay_mdk::Instance;
 use clay_mdk::Operation;
 use contract::Section;
 pub use micro_settings_manifest as contract;
-use serde::Deserialize;
-use serde::Serialize;
-use std::collections::BTreeSet;
 
-/// The viewer's own preferences, kept in its configuration document: which sections are hidden
-/// and which come first, by contributing micro id.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SettingsConfig {
-    #[serde(default)]
-    pub hidden: BTreeSet<String>,
-    #[serde(default)]
-    pub order: Vec<String>,
+pub use contract::SettingsConfig;
+
+/// What the shell lets Settings use, each required under the name of the shell publication it
+/// binds. Opening a section is not among them: a row opens itself through the list scaffold
+/// (`clay_dioxus_kit::ListRow`).
+#[derive(Clone)]
+pub struct ShellHandles {
+    /// Which row of the Settings list the shell has open (`String` panel key in, `Option<String>`
+    /// out). The section presentation takes no parameters, so it asks.
+    pub opened: Capability,
+    /// The sidebar/back button presentation, mounted in the list's app bar.
+    pub nav_button: Capability,
 }
 
-impl SettingsConfig {
-    pub fn rank(&self, micro: &str) -> usize {
-        self.order
-            .iter()
-            .position(|name| name == micro)
-            .unwrap_or(usize::MAX)
-    }
-}
-
-/// What the Settings view reads: the sections collection, its preferences, and the instance
-/// that identifies this activation (two views of one activation are equal).
+/// What the Settings views read: the sections collection, its preferences, the shell, and the
+/// instance that identifies this activation (two views of one activation are equal).
 #[derive(Clone)]
 pub struct SettingsMicro {
     pub instance: Instance,
     pub sections: Collection<String, Section>,
     pub config: Facet<SettingsConfig>,
+    pub shell: ShellHandles,
 }
 
 impl PartialEq for SettingsMicro {
@@ -73,21 +70,37 @@ impl SettingsMicro {
 }
 
 /// Settings reads the declared sections collection (its configuration binds it) and publishes
-/// its view, which the shell mounts as a root.
+/// its list and section presentations, which the shell mounts as its panel.
 pub async fn activate(context: Context) -> Result<(), Error> {
+    let required = |binding: &str| {
+        context
+            .require(binding)
+            .unwrap_or_else(|| panic!("a required binding {binding:?} is always resolved"))
+            .clone()
+    };
     let micro = SettingsMicro {
         instance: context.instance(),
         sections: context
-            .collection(contract::SECTIONS_BINDING)
+            .collection::<contract::SettingsSections>()
             .expect("configuration binds the sections collection"),
         config: context
-            .config(contract::CONFIG_NAME)
-            .expect("manifest declares Settings configuration")
-            .facet::<SettingsConfig>(contract::CONFIG_TAG, contract::CONFIG_KEY)?,
+            .config::<contract::SettingsPreferences>()?
+            .expect("manifest declares Settings configuration"),
+        shell: ShellHandles {
+            opened: required(contract::SHELL_OPENED),
+            nav_button: required(contract::SHELL_NAV_BUTTON),
+        },
     };
-    context.publish_component(contract::VIEW, move || {
+    context.publish::<contract::SettingsListView>({
+        let micro = micro.clone();
+        move || {
+            use dioxus::prelude::*;
+            rsx! { SettingsList { micro: micro.clone() } }
+        }
+    })?;
+    context.publish::<contract::SettingsSectionView>(move || {
         use dioxus::prelude::*;
-        rsx! { SettingsView { micro: micro.clone() } }
+        rsx! { SettingsSection { micro: micro.clone() } }
     })?;
     Ok(())
 }
@@ -101,9 +114,11 @@ mod tests {
     use clay_host::ConfiguredMicro;
     use clay_host::Host;
     use clay_host::MicroId;
+    use clay_host::Requirement;
     use clay_host::Supervisor;
     use clay_mdk::Nsid;
     use clay_mdk::host::BoundCollection;
+    use clay_mdk::host::CapabilityPublication;
     use clay_mdk::host::CollectionBindings;
     use clay_mdk::host::CollectionRegistry;
     use clay_mdk::host::DocumentService;
@@ -111,6 +126,7 @@ mod tests {
     use clay_mdk::host::Resources;
     use clay_mdk::host::factory;
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::num::NonZeroUsize;
 
     #[test]
@@ -123,8 +139,64 @@ mod tests {
         assert!(config.rank("a") < config.rank("unlisted"));
     }
 
+    /// Stands in for the shell: the publications Settings requires, with the shell's real
+    /// contracts, answering "nothing is open".
+    fn shell_stub(resources: Resources) -> ConfiguredMicro<CapabilityPublication> {
+        use clay_mdk::PublicationDeclaration;
+        use clay_mdk::PublicationKind;
+        let call = |name: &str, contract: &str| PublicationDeclaration {
+            name: name.into(),
+            kind: PublicationKind::Call,
+            contract: Some(Nsid::literal(contract)),
+        };
+        let manifest = clay_mdk::MicroManifest {
+            entrypoints: clay_mdk::Entrypoints::micro_client(),
+            publications: vec![
+                PublicationDeclaration {
+                    name: micro_shell_manifest::NAV_BUTTON.into(),
+                    kind: PublicationKind::Presentation,
+                    contract: None,
+                },
+                call(
+                    micro_shell_manifest::OPENED,
+                    micro_shell_manifest::OPENED_CONTRACT,
+                ),
+            ],
+            requires: vec![],
+            configuration_requests: vec![],
+            collection_contracts: vec![],
+            collection_requests: vec![],
+            contributions: vec![],
+            extra: Default::default(),
+        };
+        let id = clay_mdk::MicroId::local(micro_shell_manifest::ID);
+        ConfiguredMicro {
+            identity: MicroId::from(&id),
+            eager: false,
+            enabled: true,
+            requirements: BTreeMap::new(),
+            unresolved_bindings: Vec::new(),
+            factory: factory(
+                resources,
+                id,
+                manifest,
+                CollectionBindings::new([]),
+                |context| async move {
+                    use dioxus::prelude::*;
+                    context.publish::<micro_shell_manifest::ShellNavButton>(|| {
+                        rsx! { button { "back" } }
+                    })?;
+                    context.publish_call(micro_shell_manifest::OPENED, |_: String| async {
+                        Ok(None::<String>)
+                    })?;
+                    Ok(())
+                },
+            ),
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
-    async fn activation_publishes_the_declared_view() {
+    async fn activation_publishes_the_declared_list_and_section() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let host = Host::new();
@@ -149,11 +221,23 @@ mod tests {
                     "settings-config".into(),
                     "main".into(),
                 );
+                let shell = shell_stub(resources.clone());
+                let shell_id = shell.identity.clone();
                 let settings = ConfiguredMicro {
                     identity: MicroId::from(&clay_mdk::MicroId::local(contract::ID)),
                     eager: false,
                     enabled: true,
-                    requirements: BTreeMap::new(),
+                    requirements: [contract::SHELL_OPENED, contract::SHELL_NAV_BUTTON]
+                        .map(|publication| {
+                            (
+                                publication.to_owned(),
+                                Requirement {
+                                    provider: shell_id.clone(),
+                                    publication: publication.to_owned(),
+                                },
+                            )
+                        })
+                        .into(),
                     unresolved_bindings: Vec::new(),
                     factory: factory(
                         resources,
@@ -166,16 +250,12 @@ mod tests {
                         activate,
                     ),
                 };
-                let supervisor = Supervisor::new(host.clone(), [settings]);
-                let view = supervisor
-                    .acquire(
-                        &MicroId::from(&clay_mdk::MicroId::local(contract::ID)),
-                        contract::VIEW,
-                    )
-                    .await
-                    .unwrap();
-                assert!(view.component().is_some());
-                drop(view);
+                let supervisor = Supervisor::new(host.clone(), [shell, settings]);
+                let settings = MicroId::from(&clay_mdk::MicroId::local(contract::ID));
+                for publication in [contract::LIST, contract::SECTION] {
+                    let view = supervisor.acquire(&settings, publication).await.unwrap();
+                    assert!(view.component().is_some(), "{publication}");
+                }
                 supervisor.shutdown().await.unwrap();
                 host.close();
             })

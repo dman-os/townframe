@@ -4,15 +4,17 @@
 //! mounts other micros' presentations through capabilities it redeems itself, so what that
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
+use super::composed;
+use super::press_platform_back;
 use super::HeadlessDom;
-use super::SETTINGS;
+use super::Launch;
+use crate::composition::assemble;
 use crate::composition::desktop_runtime;
-use crate::composition::Application;
 use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
-use dioxus::prelude::*;
+use dayframe_composition::HostInputs;
 
 const COUNTER_PANEL: &str = "section[aria-label=\"Counter (Wasm) panel\"]";
 const SAMPLE_PANEL: &str = "section[aria-label=\"Sample micro panel\"]";
@@ -22,9 +24,9 @@ const SAMPLE_FLAG: &str =
     "section[aria-label=\"Sample micro panel\"] button[aria-label$=\"sample configuration flag\"]";
 const SHOW_COUNTER: &str = "button[aria-label=\"Show Counter (Wasm) panel\"]";
 const HIDE_COUNTER: &str = "button[aria-label=\"Hide Counter (Wasm) panel\"]";
+const HIDE_SAMPLE: &str = "button[aria-label=\"Hide Sample micro panel\"]";
 const SHOW_SAMPLE: &str = "button[aria-label=\"Show Sample micro panel\"]";
-const ENABLE_COUNTER: &str = "button[aria-label=\"Enable dayframe.counter micro\"]";
-const DISABLE_COUNTER: &str = "button[aria-label=\"Disable dayframe.counter micro\"]";
+const OPEN_LAYOUT: &str = "button[aria-label=\"Open Layout\"]";
 
 fn arrangement_route() -> FacetRoute {
     FacetRoute {
@@ -43,47 +45,81 @@ fn stored_arrangement(runtime: &CompositionRuntime) -> Option<serde_json::Value>
         .get(&arrangement_route())
 }
 
+/// What the lifecycle section's toggle does (it is not on screen beside the layout, which fills
+/// the main position): write the counter's install datum, which the reconciler applies.
+fn enable_counter(runtime: &CompositionRuntime, enabled: bool) {
+    // The acknowledgement resolves once the datum is stored; the scenarios wait on the UI.
+    drop(runtime.set_enabled(&MicroId::local(micro_counter_manifest::ID), enabled));
+}
+
 struct Layout {
     runtime: CompositionRuntime,
     ui: HeadlessDom,
     counter: MicroId,
+    host: std::rc::Rc<std::cell::RefCell<Option<HostInputs>>>,
 }
 
 impl Layout {
-    /// Boot the shell with the layout enabled and `visible` as the stored arrangement, Settings
-    /// folded (its counter section would be a second mount of the counter's view, and a second
-    /// holder of the guest). The counter package stays disabled, as discovered.
+    /// Boot the shell with the layout enabled and `visible` as the stored arrangement, and open
+    /// the Layout panel from home. Settings' counter section is not mounted (it would be a second
+    /// mount of the counter's view, and a second holder of the guest). The counter package stays
+    /// disabled, as discovered.
     async fn start(visible: &[&str]) -> Self {
-        fn composed(runtime: CompositionRuntime) -> Element {
-            let runtime = use_signal(move || runtime);
-            rsx! { Application { runtime } }
-        }
-
         let runtime = desktop_runtime(std::sync::Arc::new(clay_store::MemoryStore::new()))
             .await
             .unwrap();
+        Self::start_on(runtime, visible).await
+    }
+
+    /// [`Self::start`] over a runtime the caller assembled.
+    async fn start_on(runtime: CompositionRuntime, visible: &[&str]) -> Self {
         // Before serving, nothing drives the persister, so the acknowledgement is dropped.
         drop(runtime.set_enabled(&MicroId::local(micro_layout_manifest::ID), true));
         runtime.documents().mock_documents().seed(
             arrangement_route(),
             serde_json::json!({ "visible": visible }),
         );
-        let mut ui = HeadlessDom::new(composed, runtime.clone());
+        let launch = Launch::new(runtime.clone(), super::WIDE_PX);
+        let host = launch.host.clone();
+        let mut ui = HeadlessDom::new(composed, launch);
+        ui.wait_until("home offers the layout", |ui| {
+            ui.find(OPEN_LAYOUT).is_some()
+        })
+        .await;
+        ui.click(OPEN_LAYOUT);
         // The toggles list the installed panels, which the guest reads from its mirror of the
         // collection: they appear once the layout is running and bootstrapped.
         ui.wait_until("the layout lists the installed panels", |ui| {
             ui.find(SHOW_SAMPLE).is_some() || ui.find(SAMPLE_PANEL).is_some()
         })
         .await;
-        ui.click("button[aria-label=\"Close Settings\"]");
-        ui.wait_until("Settings folded", |ui| ui.find(SETTINGS).is_none())
-            .await;
         Self {
             runtime,
             ui,
             counter: MicroId::local(micro_counter_manifest::ID),
+            host,
         }
     }
+}
+
+/// The desktop composition with its packages on `wcmp` over Wasmi, the engine the browser
+/// build runs (over the page's own `WebAssembly` instead of Wasmi).
+async fn wasmi_runtime() -> CompositionRuntime {
+    assemble(
+        std::sync::Arc::new(clay_store::MemoryStore::new()),
+        |resources, id, manifest, bindings, bytes| {
+            clay_mdk::host::wcmp_factory(resources, id, manifest, bindings, move || {
+                let bytes = bytes.clone();
+                async move {
+                    let engine = wcmp::Engine::with_backend(wcmp_wasm_core_wasmi::Wasmi::new())
+                        .map_err(|error| error.to_string())?;
+                    clay_rt_wcmp::WcmpPackage::load(engine, &bytes).await
+                }
+            })
+        },
+    )
+    .await
+    .unwrap()
 }
 
 // Showing a panel is what starts its provider: a panel that is installed but not shown is only a
@@ -101,15 +137,16 @@ async fn a_hidden_panel_never_activates_its_provider_until_it_is_shown() {
         runtime,
         mut ui,
         counter,
+        ..
     } = Layout::start(&["dayframe.sample"]).await;
     ui.wait_until("the sample panel is mounted", |ui| {
         ui.find(SAMPLE_FLAG).is_some()
     })
     .await;
     assert_eq!(runtime.state(&counter), MicroState::Disabled);
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("the counter is enabled and its panel is offered", |ui| {
-        ui.find(DISABLE_COUNTER).is_some() && ui.find(SHOW_COUNTER).is_some()
+        ui.find(SHOW_COUNTER).is_some()
     })
     .await;
     ui.wait_until("an enabled counter nothing holds is idle", |_| {
@@ -148,6 +185,47 @@ async fn a_hidden_panel_never_activates_its_provider_until_it_is_shown() {
     );
 }
 
+// The same walk on `wcmp` (Wasmi here, the page's `WebAssembly` in the browser), leaving the
+// layout and opening it again. A task the guest spawns from a synchronous entry (a panel's slot
+// created while the layout renders inside `mount`) is only polled once the engine's driver
+// ticks the store, and nothing but the entry itself knew it had to: each of the two mounts
+// waited out the feed's long poll (30 virtual seconds) before its panels appeared. The clock is
+// paused, so it advances only when every task is parked on a timer.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn returning_to_the_wcmp_layout_mounts_its_panels_without_waiting_for_a_timer() {
+    let started = tokio::time::Instant::now();
+    let Layout {
+        runtime,
+        mut ui,
+        counter,
+        host,
+    } = Layout::start_on(
+        wasmi_runtime().await,
+        &["dayframe.sample", "dayframe.counter"],
+    )
+    .await;
+    enable_counter(&runtime, true);
+    ui.wait_until("the first incarnation mounted both panels", |ui| {
+        ui.find(SAMPLE_FLAG).is_some() && ui.find(COUNTER_INCREMENT).is_some()
+    })
+    .await;
+    press_platform_back(&host);
+    ui.wait_until("home again with the layout's guest released", |ui| {
+        ui.find(OPEN_LAYOUT).is_some() && runtime.state(&counter) == MicroState::Idle
+    })
+    .await;
+    ui.click(OPEN_LAYOUT);
+    ui.wait_until("the new incarnation mounted both panels", |ui| {
+        ui.find(SAMPLE_FLAG).is_some() && ui.find(COUNTER_INCREMENT).is_some()
+    })
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "returning to the layout waited for a timer: {:?}",
+        started.elapsed()
+    );
+}
+
 // An arrangement outlives what it names: an id nothing is registered under, and an id whose
 // provider is unavailable, each show a placeholder and neither edits the stored arrangement.
 #[tokio::test(flavor = "current_thread")]
@@ -176,7 +254,7 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
 
     // Enabling the provider mounts its panel where the placeholder was; the unregistered id
     // stays a placeholder.
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("the counter's panel replaced its placeholder", |ui| {
         ui.find(COUNTER_INCREMENT).is_some()
     })
@@ -195,8 +273,9 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
         runtime,
         mut ui,
         counter,
+        ..
     } = Layout::start(&["dayframe.counter", "dayframe.sample"]).await;
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("both panels mounted", |ui| {
         ui.find(COUNTER_INCREMENT).is_some() && ui.find(SAMPLE_FLAG).is_some()
     })
@@ -210,7 +289,7 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
     })
     .await;
 
-    ui.click(DISABLE_COUNTER);
+    enable_counter(&runtime, false);
     ui.wait_until("the counter's panel is a placeholder", |ui| {
         ui.find(COUNTER_INCREMENT).is_none()
             && ui
@@ -230,10 +309,379 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
     })
     .await;
 
-    ui.click(ENABLE_COUNTER);
+    enable_counter(&runtime, true);
     ui.wait_until("the counter's panel is back on a new incarnation", |ui| {
         ui.find(COUNTER_INCREMENT).is_some()
     })
     .await;
     assert_eq!(ui.text(COUNTER_INCREMENT), (before + 1).to_string());
+}
+
+// Hiding a panel withdraws its section and releases its provider, which closes the provider when
+// nothing else holds it. That must leave the layout, which does not depend on the sample's
+// lifetime, mounted and interactive: the panel can be shown and hidden again, round after round.
+// Found by the Bombadil exploration of the browser build (`src/dayframe_web/bombadil/shell.ts`):
+// the layout's whole region became "Component withdrawn." when the sample's panel was hidden,
+// because a guest task of the layout was suspended in the middle of its callback when the host
+// delivered a document change, and the task hook gave both the same stack (`clay_mdk`'s
+// `task_stacks`). Whether the two overlap depends on how the host's tasks interleave, so each
+// round is another chance to see it; the unit tests of `task_stacks` pin the hook's side.
+#[tokio::test(flavor = "current_thread")]
+async fn hiding_a_native_panel_leaves_the_layout_mounted() {
+    let Layout { mut ui, .. } = Layout::start_on(wasmi_runtime().await, &["dayframe.sample"]).await;
+    ui.wait_until("the sample's panel is mounted", |ui| {
+        ui.find(SAMPLE_FLAG).is_some()
+    })
+    .await;
+    for _round in 0..6 {
+        ui.click(HIDE_SAMPLE);
+        ui.wait_until("the sample's panel is gone", |ui| {
+            ui.find(SAMPLE_PANEL).is_none()
+        })
+        .await;
+        ui.wait_until("the layout offers the panel again", |ui| {
+            ui.find(SHOW_SAMPLE).is_some()
+        })
+        .await;
+        ui.click(SHOW_SAMPLE);
+        ui.wait_until("the sample's panel is mounted again", |ui| {
+            ui.find(SAMPLE_FLAG).is_some()
+        })
+        .await;
+    }
+}
+
+// The lab (a Wasm guest) mounts as a layout panel and lists its experiments; opening the mock
+// review and walking its journeys down to a file renders the diff (`FileDiffView`, an ordinary
+// Dioxus component) with the file's annotation thread inside the micro. This is the stress test
+// of the guest surface: every tag, attribute and stylesheet rule the diff emits crosses it.
+#[tokio::test(flavor = "current_thread")]
+async fn the_lab_panel_lists_its_experiments_and_the_mock_review_renders_a_diff() {
+    const PANEL: &str = "section[aria-label=\"Lab panel\"]";
+    let Layout {
+        runtime, mut ui, ..
+    } = Layout::start(&["dayframe.lab"]).await;
+    drop(runtime.set_enabled(&MicroId::local(micro_lab_manifest::ID), true));
+    let inside = |selector: &str| format!("{PANEL} {selector}");
+    let open_review = inside("button[aria-label=\"Open Mock review\"]");
+    ui.wait_until("the lab lists its experiments", |ui| {
+        ui.find(&open_review).is_some()
+    })
+    .await;
+    ui.click(&open_review);
+    let open_change = inside("button[aria-label=\"Open change Cap the retry backoff\"]");
+    ui.wait_until("the mock review lists its changes", |ui| {
+        ui.find(&open_change).is_some()
+    })
+    .await;
+    ui.click(&open_change);
+    let open_file = inside("button[aria-label=\"Open file src/retry.rs\"]");
+    ui.wait_until("the overview lists the change's files", |ui| {
+        ui.find(&open_file).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&open_file).contains("+5 -2"),
+        "{}",
+        ui.text(&open_file)
+    );
+    ui.click(&open_file);
+    let open_thread = inside("button[aria-label=\"Open thread on line 6\"]");
+    // A refused batch faults the guest and withdraws its panel, so fail on the fault (which
+    // names the refusal) instead of waiting for a thread that can no longer appear.
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    ui.wait_until("the diff renders with its annotation thread", |ui| {
+        if let MicroState::Faulted(fault) = runtime.state(&lab) {
+            panic!("the lab faulted rendering the diff: {fault}");
+        }
+        ui.find(&open_thread).is_some()
+    })
+    .await;
+    ui.click(&open_thread);
+    ui.wait_until("the thread opens", |ui| {
+        ui.find(&inside("ol[aria-label=\"Comments\"]")).is_some()
+    })
+    .await;
+}
+
+/// The lab's mock review down to the file diff of `src/retry.rs`, the panel's selector prefix
+/// returned for scoping.
+async fn open_lab_file() -> (Layout, String) {
+    const PANEL: &str = "section[aria-label=\"Lab panel\"]";
+    let mut layout = Layout::start(&["dayframe.lab"]).await;
+    drop(
+        layout
+            .runtime
+            .set_enabled(&MicroId::local(micro_lab_manifest::ID), true),
+    );
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    for (checkpoint, button) in [
+        ("the lab lists its experiments", "Open Mock review"),
+        (
+            "the mock review lists its changes",
+            "Open change Cap the retry backoff",
+        ),
+        (
+            "the overview lists the change's files",
+            "Open file src/retry.rs",
+        ),
+    ] {
+        let button = format!("{PANEL} button[aria-label=\"{button}\"]");
+        let Layout { runtime, ui, .. } = &mut layout;
+        ui.wait_until(checkpoint, |ui| {
+            if let MicroState::Faulted(fault) = runtime.state(&lab) {
+                panic!("the lab faulted: {fault}");
+            }
+            ui.find(&button).is_some()
+        })
+        .await;
+        ui.click(&button);
+    }
+    (layout, PANEL.to_owned())
+}
+
+// J4 and J5 through the surface. In the seeded thread: reply, resolve (the diff then shows one
+// summary line) and reopen. In the diff: a selected line opens a draft annotation row, a dragged
+// range one headed with the range; the typed text is submitted into a new thread under the
+// range's last line, which resolves and reopens from its inline row.
+#[tokio::test(flavor = "current_thread")]
+async fn the_mock_review_annotates_a_line_and_replies_and_resolves_a_thread() {
+    let (
+        Layout {
+            runtime, mut ui, ..
+        },
+        panel,
+    ) = open_lab_file().await;
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    let inside = |selector: &str| format!("{panel} {selector}");
+    let new_number =
+        |line: usize| inside(&format!("[data-additions] [data-column-number=\"{line}\"]"));
+    let draft = inside("aside[aria-label=\"Draft annotation\"]");
+    let draft_text = format!("{draft} textarea[aria-label=\"Annotation text\"]");
+    let faulted = |runtime: &CompositionRuntime| {
+        if let MicroState::Faulted(fault) = runtime.state(&lab) {
+            panic!("the lab faulted: {fault}");
+        }
+    };
+    let selected = |ui: &HeadlessDom, line: usize| {
+        ui.attribute(&new_number(line), "data-selected-line")
+            .is_some()
+    };
+
+    // J4: the seeded thread takes a reply and resolves.
+    let open_seeded = inside("button[aria-label=\"Open thread on line 6\"]");
+    ui.wait_until("the diff renders with the seeded thread", |ui| {
+        faulted(&runtime);
+        ui.find(&open_seeded).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&open_seeded).contains("2 comments, open"),
+        "{}",
+        ui.text(&open_seeded)
+    );
+    ui.click(&open_seeded);
+    let reply = inside("textarea[aria-label=\"Reply\"]");
+    ui.wait_until("the thread opens", |ui| ui.find(&reply).is_some())
+        .await;
+    let status = inside("p[role=\"status\"]");
+    assert!(
+        ui.text(&status).contains("line 6, open"),
+        "{}",
+        ui.text(&status)
+    );
+    let submit_reply = inside("button[aria-label=\"Submit reply\"]");
+    assert!(
+        ui.attribute(&submit_reply, "disabled").is_some(),
+        "an empty reply cannot be submitted"
+    );
+    ui.input(&reply, "Done in the next push.");
+    ui.wait_until("typing enables reply", |ui| {
+        ui.attribute(&submit_reply, "disabled").is_none()
+    })
+    .await;
+    ui.click(&submit_reply);
+    let comments = inside("ol[aria-label=\"Comments\"]");
+    ui.wait_until("the reply is appended and the box is empty again", |ui| {
+        faulted(&runtime);
+        ui.text(&comments).contains("Done in the next push.")
+            && ui.attribute(&submit_reply, "disabled").is_some()
+    })
+    .await;
+    ui.click(&inside("button[aria-label=\"Resolve thread\"]"));
+    ui.wait_until("the thread resolves", |ui| {
+        ui.find(&inside("button[aria-label=\"Reopen thread\"]"))
+            .is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&status).contains("resolved"),
+        "{}",
+        ui.text(&status)
+    );
+    // Back in the diff the resolved thread is one summary line, which reopens it.
+    ui.click(&inside("button[aria-label=\"Back\"]"));
+    let reopen = inside("button[aria-label=\"Reopen thread on line 6\"]");
+    ui.wait_until("the diff shows the thread resolved", |ui| {
+        faulted(&runtime);
+        ui.find(&reopen).is_some()
+    })
+    .await;
+    let seeded_row = inside("aside[aria-label=\"Thread on line 6\"]");
+    assert!(
+        ui.text(&seeded_row).contains("resolved") && ui.text(&seeded_row).contains("3 comments"),
+        "{}",
+        ui.text(&seeded_row)
+    );
+    ui.click(&reopen);
+    ui.wait_until("the inline row reopens the thread", |ui| {
+        ui.find(&open_seeded).is_some() && ui.text(&open_seeded).contains("3 comments, open")
+    })
+    .await;
+
+    // J5: a press on a line number selects the line; the release (once the micro's render has
+    // delivered the document-level listeners, as a finger's lift takes a moment) opens the draft.
+    ui.pointer(&new_number(8), "pointerdown", 5.0);
+    ui.wait_until("the press selects the line", |ui| {
+        faulted(&runtime);
+        selected(ui, 8)
+    })
+    .await;
+    ui.pointer(&new_number(8), "pointerup", 5.0);
+    ui.wait_until("selecting a line opens a draft annotation", |ui| {
+        faulted(&runtime);
+        ui.find(&draft_text).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&draft).contains("New annotation on line 8"),
+        "{}",
+        ui.text(&draft)
+    );
+    // Focus on the draft's textarea (`onmounted` then `MountedData::set_focus`) is not asserted:
+    // `HeadlessDom` mounts the host tree through a bare `DioxusState`, whose queue of `mounted`
+    // events only a `DioxusDocument` flushes, so no `onmounted` ever reaches the micro here.
+    ui.click(&format!("{draft} button[aria-label=\"Cancel annotation\"]"));
+    ui.wait_until("cancel removes the draft and its selection", |ui| {
+        ui.find(&draft).is_none() && !selected(ui, 8)
+    })
+    .await;
+
+    // A drag from line 7 to line 9 selects the range; its draft names the range, and submitting
+    // the typed text adds a thread there.
+    ui.pointer(&new_number(7), "pointerdown", 5.0);
+    ui.wait_until("the press selects line 7", |ui| {
+        faulted(&runtime);
+        selected(ui, 7)
+    })
+    .await;
+    ui.pointer(&new_number(9), "pointermove", 5.0);
+    ui.wait_until("the drag reaches line 9", |ui| {
+        faulted(&runtime);
+        selected(ui, 9)
+    })
+    .await;
+    ui.pointer(&new_number(9), "pointerup", 5.0);
+    ui.wait_until("the drag opens a draft for the range", |ui| {
+        faulted(&runtime);
+        ui.find(&draft_text).is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&draft).contains("New annotation on lines 7-9"),
+        "{}",
+        ui.text(&draft)
+    );
+    let submit = format!("{draft} button[aria-label=\"Submit annotation\"]");
+    assert!(
+        ui.attribute(&submit, "disabled").is_some(),
+        "an empty draft cannot be submitted"
+    );
+    ui.input(&draft_text, "Why 30 seconds?");
+    ui.wait_until("typing enables submit", |ui| {
+        ui.attribute(&submit, "disabled").is_none()
+    })
+    .await;
+    ui.click(&submit);
+    let open_new = inside("button[aria-label=\"Open thread on lines 7-9\"]");
+    ui.wait_until("the submitted draft becomes a thread", |ui| {
+        faulted(&runtime);
+        ui.find(&draft).is_none() && ui.find(&open_new).is_some()
+    })
+    .await;
+    ui.wait_until("submitting clears the range's selection", |ui| {
+        faulted(&runtime);
+        (7..=9).all(|line| !selected(ui, line))
+    })
+    .await;
+    let new_row = inside("aside[aria-label=\"Thread on lines 7-9\"]");
+    assert!(
+        ui.text(&new_row).contains("Why 30 seconds?"),
+        "{}",
+        ui.text(&new_row)
+    );
+    assert!(
+        ui.text(&open_new).contains("1 comment, open"),
+        "{}",
+        ui.text(&open_new)
+    );
+    // The new thread resolves and reopens from its inline row.
+    ui.click(&inside(
+        "button[aria-label=\"Resolve thread on lines 7-9\"]",
+    ));
+    ui.wait_until("the new thread resolves", |ui| {
+        faulted(&runtime);
+        ui.find(&inside("button[aria-label=\"Reopen thread on lines 7-9\"]"))
+            .is_some()
+    })
+    .await;
+    assert!(
+        ui.text(&new_row).contains("resolved"),
+        "{}",
+        ui.text(&new_row)
+    );
+}
+
+// Leaving a file after annotating a range: the diff view's `InteractionManager::clean_up` used to
+// clear attributes on row nodes a render had since replaced (`stale NodeKey`, a panic that faulted
+// the micro). Opening a thread from the diff right after a range draft must reach the thread.
+#[tokio::test(flavor = "current_thread")]
+async fn opening_a_thread_from_the_diff_after_a_range_draft_leaves_the_micro_live() {
+    let (
+        Layout {
+            runtime, mut ui, ..
+        },
+        panel,
+    ) = open_lab_file().await;
+    let lab = MicroId::local(micro_lab_manifest::ID);
+    let number = |line: usize| format!("{panel} [data-additions] [data-column-number=\"{line}\"]");
+    ui.wait_until("the diff renders with its lines", |ui| {
+        ui.find(&number(8)).is_some()
+    })
+    .await;
+    ui.pointer(&number(8), "pointerdown", 5.0);
+    ui.wait_until("the press selects line 8", |ui| {
+        ui.attribute(&number(8), "data-selected-line").is_some()
+    })
+    .await;
+    ui.pointer(&number(9), "pointermove", 5.0);
+    ui.wait_until("the drag reaches line 9", |ui| {
+        ui.attribute(&number(9), "data-selected-line").is_some()
+    })
+    .await;
+    ui.pointer(&number(9), "pointerup", 5.0);
+    let draft = format!("{panel} textarea[aria-label=\"Annotation text\"]");
+    ui.wait_until("the range opens a draft", |ui| ui.find(&draft).is_some())
+        .await;
+    ui.click(&format!(
+        "{panel} button[aria-label=\"Open thread on line 6\"]"
+    ));
+    let reply = format!("{panel} textarea[aria-label=\"Reply\"]");
+    ui.wait_until("the thread opens", |ui| {
+        if let MicroState::Faulted(fault) = runtime.state(&lab) {
+            panic!("the lab faulted leaving the diff: {fault}");
+        }
+        ui.find(&reply).is_some()
+    })
+    .await;
 }

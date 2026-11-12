@@ -1,0 +1,21 @@
+[package]
+name = "review_mock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clay_dioxus_kit = { workspace = true }
+pierre_diffs_dioxus = { workspace = true }
+# Spelled out (not `dioxus.workspace = true`) so default features stay off: the wasip3 guest
+# build has no renderer or launcher to link, like `clay_dioxus_kit`.
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+
+[dev-dependencies]
+dioxus-ssr = { workspace = true }

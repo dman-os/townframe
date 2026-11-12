@@ -4,23 +4,46 @@
 pub use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
 
+use clay_host::Factory;
 use clay_mdk::host::factory;
+use clay_mdk::host::CapabilityPublication;
+use clay_mdk::host::CollectionBindings;
+use clay_mdk::host::Resources;
 use clay_store::OrderedStore;
 use dayframe_composition::InstalledMicro;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
-/// The shell's native built-ins. Settings is the one root: eager, and locked because the shell
-/// is unusable without it. Toolbar is on-demand: its pinned root row starts it when the shell
-/// mounts it. Sample is eager so its section is written at boot. Collection access
-/// is resolved by the composition from each manifest's requests and configuration, not
-/// hand-written here.
+/// The shell's native built-ins. The shell micro is the frame: eager, and locked because nothing
+/// is usable without it. Settings is an on-demand panel: home lists its declared row, and
+/// opening it starts it. Toolbar is on-demand: its sidebar panel row starts it when the sidebar
+/// mounts it. Sample is eager so its section is written at boot. The lifecycle controls are the
+/// composition's own Settings section. Collection access is resolved
+/// by the composition from each manifest's requests and configuration, not hand-written here.
 fn native_micros() -> Vec<InstalledMicro> {
+    let shell = clay_mdk::MicroId::local(micro_shell_manifest::ID);
     vec![
         InstalledMicro {
             eager: true,
             locked: true,
+            ..InstalledMicro::new(
+                shell.clone(),
+                micro_shell_manifest::sidecar(),
+                |id, resources, bindings| {
+                    factory(
+                        resources,
+                        id,
+                        micro_shell_manifest::manifest(),
+                        bindings,
+                        micro_shell::activate,
+                    )
+                },
+            )
+        },
+        InstalledMicro {
+            enabled_on_admission: true,
             ..InstalledMicro::new(
                 clay_mdk::MicroId::local(micro_settings_manifest::ID),
                 micro_settings_manifest::sidecar(),
@@ -34,6 +57,8 @@ fn native_micros() -> Vec<InstalledMicro> {
                     )
                 },
             )
+            .satisfied_by(&shell, &micro_shell_manifest::sidecar())
+            .expect("the shell publishes what Settings requires")
         },
         InstalledMicro {
             enabled_on_admission: true,
@@ -68,6 +93,7 @@ fn native_micros() -> Vec<InstalledMicro> {
                 },
             )
         },
+        dayframe_composition::lifecycle::micro(),
     ]
 }
 
@@ -126,7 +152,20 @@ fn manifest_package_name(path: &Path) -> Option<&str> {
 ///
 /// STAND-IN until `big_cartridges` delivers manifests: a package is the sibling files
 /// `<name>.manifest.json` and `<name>.component.wasm`, discovered by the manifest.
-fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
+///
+/// `engine` turns a package's identity, manifest and bytes into a supervisor factory: the
+/// engine the packages run on is the composition root's choice.
+pub(crate) fn package_micros(
+    engine: impl Fn(
+            Resources,
+            clay_mdk::MicroId,
+            clay_mdk::MicroManifest,
+            CollectionBindings,
+            Vec<u8>,
+        ) -> Rc<dyn Factory<CapabilityPublication>>
+        + Clone
+        + 'static,
+) -> (Vec<InstalledMicro>, Vec<String>) {
     let Some(directory) = package_directory() else {
         return (Vec::new(), Vec::new());
     };
@@ -167,22 +206,24 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
             Ok(package) => {
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
-                installed.push(InstalledMicro::new(
+                let engine = engine.clone();
+                let micro = InstalledMicro::new(
                     package.id().clone(),
                     sidecar.clone(),
                     move |id, resources, bindings| {
-                        clay_mdk::host::wasm_factory(
-                            resources,
-                            id,
-                            sidecar.manifest,
-                            bindings,
-                            move || {
-                                let bytes = bytes.clone();
-                                async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
-                            },
-                        )
+                        engine(resources, id, sidecar.manifest, bindings, bytes)
                     },
-                ));
+                )
+                // A package may require the shell's publications (the layout's app bar
+                // button); the shell is the only provider a package can name today.
+                .satisfied_by(
+                    &clay_mdk::MicroId::local(micro_shell_manifest::ID),
+                    &micro_shell_manifest::sidecar(),
+                );
+                match micro {
+                    Ok(micro) => installed.push(micro),
+                    Err(error) => errors.push(error),
+                }
             }
             Err(error) => errors.push(error),
         }
@@ -195,8 +236,30 @@ fn package_micros() -> (Vec<InstalledMicro>, Vec<String>) {
 pub async fn desktop_runtime<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
+    assemble(store, |resources, id, manifest, bindings, bytes| {
+        clay_mdk::host::wasm_factory(resources, id, manifest, bindings, move || {
+            let bytes = bytes.clone();
+            async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
+        })
+    })
+    .await
+}
+
+/// The composition with its packages run by `engine`.
+pub(crate) async fn assemble<St: OrderedStore + Send + Sync + 'static>(
+    store: Arc<St>,
+    engine: impl Fn(
+            Resources,
+            clay_mdk::MicroId,
+            clay_mdk::MicroManifest,
+            CollectionBindings,
+            Vec<u8>,
+        ) -> Rc<dyn Factory<CapabilityPublication>>
+        + Clone
+        + 'static,
+) -> Result<CompositionRuntime, clay_store::StoreError> {
     let mut installed = native_micros();
-    let (packages, errors) = package_micros();
+    let (packages, errors) = package_micros(engine);
     installed.extend(packages);
     let mut runtime = CompositionRuntime::new(store, installed).await?;
     runtime.installation_errors.extend(errors);

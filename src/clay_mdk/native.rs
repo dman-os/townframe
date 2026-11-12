@@ -37,7 +37,6 @@ use clay_host::Instance;
 use clay_host::RendererRegistry;
 
 use crate::Access;
-use crate::Attachment;
 use crate::Capability;
 use crate::Collection;
 use crate::Config;
@@ -50,6 +49,7 @@ use crate::manifest::FacetAccess;
 use crate::manifest::MicroManifest;
 use crate::manifest::PublicationDeclaration;
 use crate::manifest::PublicationKind;
+use crate::manifest::Request;
 use crate::rows::Feed;
 use crate::rows::Minter;
 use crate::rows::Stored;
@@ -150,17 +150,6 @@ impl CollectionBindings {
     pub fn snapshot(&self) -> BTreeMap<String, BoundCollection> {
         self.0.borrow().clone()
     }
-}
-
-/// One [`crate::SHELL_ROOTS`] row, keyed by the registering micro's id: a title and the root
-/// presentation (an attachment of the row). A `pinned` root stays on screen however the shell
-/// folds its other roots (Settings can be closed; a toolbar cannot); an absent field is `false`.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct RootRow {
-    pub title: String,
-    pub content: Attachment,
-    #[serde(default)]
-    pub pinned: bool,
 }
 
 /// Local tasks an incarnation owns. Dropping them aborts them, so a failed initialization
@@ -426,6 +415,9 @@ pub(crate) struct Granted {
     pub(crate) configs: BTreeMap<String, Config>,
     pub(crate) requirements: BTreeMap<String, Option<Capability>>,
     pub(crate) collections: BTreeMap<String, Option<CollectionSlot>>,
+    /// The manifest's collection requests, which resolve a declared collection type to its
+    /// binding.
+    pub(crate) requests: Vec<Request>,
     pub(crate) declared: BTreeMap<String, DeclaredPublication>,
     /// Counts the incarnation's running call handlers; the supervisor's factory has no reader
     /// for it, the conformance run does.
@@ -449,6 +441,7 @@ impl Granted {
             configs,
             requirements,
             collections,
+            requests,
             declared,
             calls,
         } = self;
@@ -466,6 +459,7 @@ impl Granted {
         let context = Context(Rc::new(Shared {
             configs,
             requirements,
+            requests,
             backend: Backend::InProcess(Rc::clone(&activation)),
         }));
         activate(context)
@@ -642,6 +636,7 @@ impl Factory<CapabilityPublication> for NativeFactory {
                 configs,
                 requirements,
                 collections,
+                requests: manifest.collection_requests.clone(),
                 declared: declared.clone(),
                 calls: InFlightCalls::default(),
             }

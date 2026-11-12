@@ -15,6 +15,8 @@
 //! resyncs do.
 pub use dom::GuestDom;
 pub(crate) use dom::Slots;
+#[cfg(test)]
+pub(crate) use dom::settle;
 
 use crate::Access;
 use crate::Capability;
@@ -386,6 +388,7 @@ impl Runtime {
                     )
                 })
                 .collect(),
+            requests: manifest.collection_requests.clone(),
             backend: Backend::Guest(Rc::clone(&runtime)),
         }));
         RUNTIME.with_borrow_mut(|slot| {

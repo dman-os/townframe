@@ -28,17 +28,18 @@ collection_requests:
   - binding: buttons
     contract: org.example.dayframe.toolbar.buttons
     access: read
-  - binding: roots
-    contract: org.example.clay.shell.roots
+  - binding: panels
+    contract: org.example.dayframe.shell.panels
     access: write
 contributions:
-  - id: root
-    binding: roots
+  - id: panel
+    binding: panels
     key: dayframe.toolbar
     payload:
       content:
         $attachment: 0
-      pinned: true
+      sockets:
+        - sidebar
       title: Toolbar
     attachments:
       - index: 0
