@@ -238,11 +238,6 @@ impl DioxusHost {
         self.registrations.borrow().visible.contains(&node)
     }
 
-    #[cfg(test)]
-    pub(crate) fn geometry_probe_height(&self, node: NodeKey) -> f64 {
-        self.geometry.borrow().height(&self.document, node)
-    }
-
     pub(crate) fn wants_scroll(&self, node: NodeKey) -> bool {
         self.registrations.borrow().scroll.contains_key(&node)
     }
