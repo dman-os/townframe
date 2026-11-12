@@ -1214,7 +1214,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                     origin_doc_id: first_origin.clone(),
                     origin_datum_key: key("main"),
                     path: "/link".to_owned(),
-                    target_doc_id: selector.clone(),
+                    target_doc_id: Some(selector.clone()),
                     target_datum_key: key("main"),
                     ref_heads: Vec::new(),
                 }]

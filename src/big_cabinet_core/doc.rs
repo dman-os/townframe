@@ -267,6 +267,14 @@ pub enum DocsError {
     #[error("datum {datum_key} value is invalid: {reason}")]
     InvalidValue { datum_key: DatumKey, reason: String },
     #[error(
+        "datum {datum_key} is not content-addressed: its kind does not declare its slot a hash of its value"
+    )]
+    NotContentAddressed { datum_key: DatumKey },
+    #[error("datum {datum_key} does not hash to its key: {reason}")]
+    ContentHashMismatch { datum_key: DatumKey, reason: String },
+    #[error("no document the caller can read holds a copy of {datum_key} that hashes to its key")]
+    KeyRefUnresolved { datum_key: DatumKey },
+    #[error(
         "datum {datum_key} value is too large: it needs {observed} {limit} and the limit is {maximum}"
     )]
     ValueTooLarge {
@@ -410,6 +418,9 @@ pub enum DatumRefSelector {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         datum_key: Option<DatumKey>,
     },
+    /// Every `#keyRef` naming `key` (ADR 035 §2.9), whichever document holds the referrer. A key
+    /// reference names no document, so it has no `Target` to select by.
+    Key { key: DatumKey },
 }
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -427,11 +438,37 @@ pub struct QueriedDatumRef {
     pub origin_doc_id: DocId,
     pub origin_datum_key: DatumKey,
     pub path: String,
-    pub target_doc_id: DocId,
+    /// The document the reference names; absent for a `#keyRef`, which names a datum by its key
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_doc_id: Option<DocId>,
     pub target_datum_key: DatumKey,
     #[serde(with = "crate::reference::head_list")]
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<ChangeHash>,
+}
+
+/// Resolve a `#keyRef` (ADR 035 §2.9): read the content-addressed datum `key` names from some
+/// document the caller can read that holds a copy hashing to the key.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveKeyRef {
+    pub capability: CapId,
+    pub key: DatumKey,
+}
+
+/// The copy [`ResolveKeyRef`] found: which document it was read from, at which heads, and the value,
+/// which hashes to the key.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedKeyRef {
+    pub doc_id: DocId,
+    #[serde(with = "crate::reference::head_list")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
+    pub heads: Vec<ChangeHash>,
+    pub value: Json,
 }
 
 /// The result of [`QueryDatumRefs`].
@@ -531,6 +568,7 @@ method_core::methods! {
     ListDatums => DatumListing, procedure, "listDatums";
     PollDatums => DatumPage, procedure, "pollDatums";
     QueryDatumRefs => QueriedDatumRefs, procedure, "queryDatumRefs";
+    ResolveKeyRef => ResolvedKeyRef, procedure, "resolveKeyRef";
     UnsafeInspectDatum => UnsafeDatumInspection, procedure, "unsafeInspectDatum";
     InspectDatumClaims => DatumClaimsInspection, procedure, "inspectDatumClaims";
     GetDocAvailability => DocAvailability, query, "getDocAvailability";
@@ -548,6 +586,7 @@ declare_service_protocol! {
             ListDatums(ListDatums),
             PollDatums(PollDatums),
             QueryDatumRefs(QueryDatumRefs),
+            ResolveKeyRef(ResolveKeyRef),
             UnsafeInspectDatum(UnsafeInspectDatum),
             InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)
