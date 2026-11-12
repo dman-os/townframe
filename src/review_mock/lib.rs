@@ -9,11 +9,15 @@
 //! surface exists. Two embedders render [`MockReview`]: the lab micro (a Clay guest) and the theme
 //! lab's Diffs tab (a plain Dioxus desktop app), so a difference between the two is the runtime's.
 mod data;
+mod large;
 
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::WidthClass;
-use data::Comment;
 use data::CHANGES;
+use data::Comment;
+pub use large::LARGE_DIFF_BLOCKS;
+pub use large::LargeDiff;
+pub use large::large_pair;
 use std::borrow::Cow;
 
 use dioxus::prelude::*;

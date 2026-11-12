@@ -206,7 +206,7 @@ fn Specimens(options: DiffOptions, expand_unchanged: bool, virtualized: Virtuali
     // Built once: the props compare the input by content, so making it again on every render
     // would re-render the diff each time.
     let large = use_hook(|| {
-        let (old_file, new_file) = diff_fixtures::large_pair(LARGE_DIFF_BLOCKS);
+        let (old_file, new_file) = review_mock::large_pair(review_mock::LARGE_DIFF_BLOCKS);
         DiffInput::Files { old_file, new_file }
     });
     // The latest selection, shown above the diffs so a click is visibly a result and not only a
@@ -292,9 +292,6 @@ fn Specimens(options: DiffOptions, expand_unchanged: bool, virtualized: Virtuali
         }
     }
 }
-
-/// 500 six-line functions: about three thousand lines on each side.
-const LARGE_DIFF_BLOCKS: usize = 500;
 
 #[cfg(test)]
 mod tests {

@@ -11,6 +11,9 @@ use clay_mdk::Context;
 use clay_mdk::Error;
 use dioxus::prelude::*;
 use micro_lab_manifest::LabView;
+use pierre_diffs_dioxus::PtrEq;
+use pierre_diffs_dioxus::Virtualization;
+use std::rc::Rc;
 
 /// One experiment of the lab: what the list says about it and the component it opens.
 struct Experiment {
@@ -23,12 +26,36 @@ struct Experiment {
 }
 
 /// The lab's experiments, in list order. Add one by appending an entry.
-const EXPERIMENTS: &[Experiment] = &[Experiment {
-    id: "mock-review",
-    title: "Mock review",
-    summary: "The review loop's journeys over mock data: changes, an overview, a file diff with annotation threads, a thread.",
-    open: |close| rsx! { review_mock::MockReview { close } },
-}];
+const EXPERIMENTS: &[Experiment] = &[
+    Experiment {
+        id: "mock-review",
+        title: "Mock review",
+        summary: "The review loop's journeys over mock data: changes, an overview, a file diff with annotation threads, a thread.",
+        open: |close| rsx! { review_mock::MockReview { close } },
+    },
+    Experiment {
+        id: "large-diff",
+        title: "Large diff",
+        summary: "About three thousand lines in a virtualized unified diff, the theme lab's large specimen run in the micro.",
+        open: |close| rsx! { LargeDiff { close } },
+    },
+];
+
+/// The large diff with the micro's virtualization. A micro has no timer yet, and only the split
+/// view's scroll sync sets one (the unified view only stores the function when it mounts), so the
+/// timer is unimplemented until the MDK gives guests a clock.
+#[component]
+fn LargeDiff(close: Callback<()>) -> Element {
+    // Built once: the view compares the sleep function by identity, and a new one would remount
+    // the diff on every render.
+    let virtualized = use_hook(|| Virtualization {
+        height: "32rem".to_owned(),
+        sleep: PtrEq::new(Rc::new(|_| {
+            unimplemented!("micros have no timer; only the split view's scroll sync needs one")
+        })),
+    });
+    rsx! { review_mock::LargeDiff { close, virtualized } }
+}
 
 /// Publish the lab's one presentation. The lab needs no capability from the composition.
 async fn activate(context: Context) -> Result<(), Error> {
