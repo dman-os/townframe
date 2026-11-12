@@ -372,6 +372,21 @@ fn a_fling_with_no_height_changes_issues_no_programmatic_scroll() {
 }
 
 #[test]
+fn drift_probe() {
+    for height in [20.0, 20.5, 19.0] {
+        let mut rig = Rig::new(3000);
+        rig.boot();
+        let mut measured = std::collections::HashSet::new();
+        rig.measure_new_rows(height, &mut measured);
+        for step in 1..=60 {
+            rig.scroll_to(f64::from(step) * 700.0);
+            rig.measure_new_rows(height, &mut measured);
+        }
+        eprintln!("PROBE height={height} programmatic={:?}", rig.root.log.borrow().len());
+    }
+}
+
+#[test]
 fn only_the_window_around_the_viewport_is_rendered_and_it_follows_scrolling() {
     let mut rig = Rig::new(3000);
     // `setup` and `connect` queued the virtualizer's pass; no event has ended a dispatch yet.
