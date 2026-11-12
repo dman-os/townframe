@@ -5,6 +5,7 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
@@ -58,7 +59,10 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..DocScope::default()
     };
     // The authorization's `authority` decides the new handle's scope and rights and its subject
@@ -79,7 +83,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
     assert_ne!(bound.issuer_id, owner.actor.actor_id);
     assert_ne!(bound.issuer_id, node.docs_actor.actor.actor_id);
     let object: Value =
-        serde_json::from_str(bound.object.strip_prefix("DocsRepo/scope/v2/").unwrap()).unwrap();
+        serde_json::from_str(bound.object.strip_prefix("DocsRepo/scope/v3/").unwrap()).unwrap();
     assert_eq!(
         object,
         json!({
@@ -264,6 +268,145 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
     node.stop().await;
 }
 
+#[tokio::test]
+async fn a_document_capability_limits_set_and_remove_to_its_datum_kinds() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("before"))])
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &owner,
+            DocScope {
+                write: BTreeMap::from([(
+                    created.doc_id.clone(),
+                    DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+                )]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: created.doc_id.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(key("main"), note("after"))]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await)
+        .is_ok()
+    );
+    let other_key: DatumKey = format!("{TEXT_NOTE}/main").parse().unwrap();
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: created.doc_id.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(other_key.clone(), note("denied"))]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: created.doc_id,
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::new(),
+                    remove: BTreeSet::from([other_key]),
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn datum_kind_capabilities_can_only_be_narrowed() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("before"))])
+        .await
+        .unwrap();
+    let limited = mint(
+        &node,
+        Authorization::identity(owner.capability),
+        DocScope {
+            write: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
+            ..DocScope::default()
+        },
+        Rights::USE | Rights::NARROW,
+    )
+    .await;
+    let narrowed = mint(
+        &node,
+        Authorization {
+            authority: limited.capability_id,
+            signer: owner.capability,
+        },
+        DocScope {
+            write: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
+            ..DocScope::default()
+        },
+        Rights::USE,
+    )
+    .await;
+    assert_ne!(narrowed.capability_id, limited.capability_id);
+    assert_eq!(
+        op(node
+            .client()
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: limited.capability_id,
+                    signer: owner.capability,
+                }
+                .metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        write: BTreeMap::from([(created.doc_id, DatumKinds::All,)]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
 /// The regression ADR 037 question 2 rules out: a holder of a DELEGATE handle naming any actor it
 /// likes as the subject of a new handle, then writing through it so the datum is signed as that
 /// actor. A handle is trusted for its own subject and that subject's descendants, nothing else.
@@ -302,7 +445,10 @@ async fn a_delegate_handle_cannot_be_rebound_to_another_actor_nor_sign_as_one() 
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..DocScope::default()
     };
     let delegate = mint(
@@ -445,7 +591,10 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
         &node,
         Authorization::identity(owner.capability),
         DocScope {
-            write: BTreeSet::from([created.doc_id.clone()]),
+            write: std::collections::BTreeMap::from([(
+                created.doc_id.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             create: BTreeSet::from([PLACEMENT.into()]),
             ..DocScope::default()
         },
@@ -486,9 +635,12 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 parent: None,
                 dependencies: Vec::new(),
                 object: format!(
-                    "DocsRepo/scope/v2/{}",
+                    "DocsRepo/scope/v3/{}",
                     serde_json::to_string(&DocScope {
-                        write: BTreeSet::from([created.doc_id.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            created.doc_id.clone(),
+                            big_cabinet_core::doc::DatumKinds::All
+                        )]),
                         create: BTreeSet::from([PLACEMENT.into()]),
                         ..DocScope::default()
                     })
@@ -802,7 +954,10 @@ async fn bound_creation_requests(
         datums: BTreeMap::from([(key("main"), note("content"))]),
     };
     let branch_scope = DocScope {
-        write: BTreeSet::from([origin.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            origin.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         ..create_scope.clone()
     };
     let branch_cap = mint(
@@ -1318,7 +1473,10 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     let write_doc = DocId::new([72; 32]);
     let scope = DocScope {
         read: BTreeSet::from([read_doc.clone()]),
-        write: BTreeSet::from([write_doc.clone()]),
+        write: std::collections::BTreeMap::from([(
+            write_doc.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         create: BTreeSet::from([PLACEMENT.into()]),
         ..DocScope::default()
     };
@@ -1596,7 +1754,10 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
         .await
         .unwrap();
     let scope = DocScope {
-        write: BTreeSet::from([created.doc_id.clone()]),
+        write: std::collections::BTreeMap::from([(
+            created.doc_id.clone(),
+            big_cabinet_core::doc::DatumKinds::All,
+        )]),
         create: BTreeSet::from([PLACEMENT.into()]),
         ..DocScope::default()
     };
@@ -2072,7 +2233,10 @@ async fn a_document_id_that_is_not_32_bytes_is_refused_and_the_node_keeps_servin
                 ..DocScope::default()
             },
             DocScope {
-                write: BTreeSet::from([bad.clone()]),
+                write: std::collections::BTreeMap::from([(
+                    bad.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..DocScope::default()
             },
             DocScope {
