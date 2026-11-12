@@ -2539,6 +2539,7 @@ dependencies = [
 name = "method_core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "serde",
  "thiserror 2.0.20",

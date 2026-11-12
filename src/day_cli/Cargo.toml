@@ -39,6 +39,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "sync",
 axum = { workspace = true }
 http.workspace = true
 reqwest.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
+futures.workspace = true
 serde_urlencoded = "0.7"
 tower = { workspace = true, features = ["util"] }
 

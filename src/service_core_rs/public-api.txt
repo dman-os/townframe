@@ -55,9 +55,12 @@ pub impl service_core_rs::context::TraceContext::fn traceparent (& self) -> Opti
 pub impl service_core_rs::context::TraceContext::fn tracestate (& self) -> Option < & str >
 pub impl service_core_rs::operation::ClientError < E >::fn transport (error : impl fmt :: Display , outcome_unknown : bool) -> Self
 pub impl service_core_rs::operation::Envelope < P >::fn for_receiver (mut self) -> Self
+pub impl service_core_rs::operation::Envelope < P >::fn has_body (& self) -> bool
 pub impl service_core_rs::operation::Envelope < P >::fn new (context : RequestContext , params : P) -> Self
 pub impl service_core_rs::operation::Envelope < P >::fn set_transport (& mut self , transport : TransportContext)
+pub impl service_core_rs::operation::Envelope < P >::fn take_body (& mut self) -> Option < ByteBody >
 pub impl service_core_rs::operation::Envelope < P >::fn transport (& self) -> & TransportContext
+pub impl service_core_rs::operation::Envelope < P >::fn with_body (mut self , body : ByteBody) -> Self
 pub impl service_core_rs::operation::Envelope < P >::fn with_metadata (context : RequestContext , metadata : HttpMetadata , params : P) -> Self
 pub impl service_core_rs::xrpc::XrpcErrorEnvelope::fn details (& self) -> & BTreeMap < String , Value >
 pub impl service_core_rs::xrpc::XrpcErrorEnvelope::fn error (& self) -> & str
@@ -67,7 +70,7 @@ pub impl service_core_rs::xrpc::XrpcErrorEnvelope::fn new (error : String , mess
 pub impl service_core_rs::xrpc::crate :: ResponseMetadata::fn read_headers (headers : & HeaderMap) -> Result < Self , String >
 pub impl service_core_rs::xrpc::crate :: ResponseMetadata::fn write_headers (& self , headers : & mut HeaderMap)
 pub macro service_core_rs::declare_service_protocol! { ($ vis : vis enum $ protocol : ident => $ message : ident { unary { $ ($ variant : ident ($ params : ty)) ,* $ (,) ? } stream { $ ($ stream_variant : ident ($ stream_params : ty)) ,* $ (,) ? } }) }
-pub macro service_core_rs::service_method! { ($ params : ty => $ output : ty , $ error : ty , $ kind : ident ($ nsid : literal)); ($ params : ty => stream $ event : ty , $ error : ty , $ nsid : literal) }
+pub macro service_core_rs::service_method! { ($ params : ty => $ output : ty , $ error : ty , $ kind : ident ($ nsid : literal) $ (, $ attribute : ident) *); ($ params : ty => stream $ event : ty , $ error : ty , $ nsid : literal) }
 pub mod service_core_rs::cancellation
 pub mod service_core_rs::context
 pub mod service_core_rs::operation
@@ -85,7 +88,7 @@ pub struct service_core_rs::cancellation::CancellationRegistration  {  }
 pub struct service_core_rs::cancellation::CancellationRequestGuard  {  }
 pub struct service_core_rs::cancellation::CancellationSignal  {  }
 pub struct service_core_rs::cancellation::CancellationTransport  {  }
-pub struct service_core_rs::context::HttpMetadata  { authorization: Option < String >, idempotency_key: Option < String > }
+pub struct service_core_rs::context::HttpMetadata  { authorization: Option < String >, idempotency_key: Option < String >, range: Option < method_core :: ByteRange > }
 pub struct service_core_rs::context::RequestContext  { request_id: Uuid, trace: TraceContext, command_id: Option < Uuid >, cancellation: CancellationSignal }
 pub struct service_core_rs::context::TraceContext  {  }
 pub struct service_core_rs::operation::Envelope< P >  { context: RequestContext, metadata: HttpMetadata, params: P }

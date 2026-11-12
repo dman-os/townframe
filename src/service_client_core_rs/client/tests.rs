@@ -154,6 +154,7 @@ async fn xrpc_transport_encodes_the_envelope_and_decodes_the_response() {
     let metadata = HttpMetadata {
         authorization: Some("Bearer token".into()),
         idempotency_key: Some("key-1".into()),
+        range: None,
     };
     assert_eq!(
         client

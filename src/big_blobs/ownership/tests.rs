@@ -384,6 +384,63 @@ async fn staging_holds_are_independent_idempotent_and_never_reused() -> Res<()> 
     Ok(())
 }
 
+/// An upload nothing references is kept for its grace period and then released (ADR 042 §6); a
+/// re-put takes a fresh hold, which is the renewal, so the bytes stay while any hold is in its
+/// grace; and a hold that expired is released once, never twice.
+#[tokio::test]
+async fn upload_holds_expire_after_their_grace_period_and_a_re_put_renews() -> Res<()> {
+    let h = Harness::new().await?;
+    let (first_tag, id) = h.blob(b"abandoned upload").await?;
+    let first = ImportedBlob::new(BlobInfo {
+        blob_id: id,
+        length_octets: 16,
+    });
+    h.ownership.stage(first, first_tag).await?;
+    let now = unix_now();
+    // Inside the grace period nothing expires.
+    assert_eq!(
+        h.ownership
+            .expire_uploads(now - UPLOAD_HOLD_GRACE_SECS)
+            .await?,
+        0
+    );
+    assert!(h.ownership.contains(&id).await?);
+
+    // A later put of the same bytes is a second hold, which a cutoff between the two keeps.
+    h.sql
+        .execute(
+            "UPDATE big_blobs_upload_receipts SET held_at = ?",
+            (now - 2 * UPLOAD_HOLD_GRACE_SECS,),
+        )
+        .await?;
+    let (second_tag, _) = h.blob(b"abandoned upload").await?;
+    let second = ImportedBlob::new(BlobInfo {
+        blob_id: id,
+        length_octets: 16,
+    });
+    h.ownership.stage(second, second_tag).await?;
+    assert_eq!(
+        h.ownership
+            .expire_uploads(now - UPLOAD_HOLD_GRACE_SECS)
+            .await?,
+        1,
+        "only the old hold expired"
+    );
+    assert!(
+        h.ownership.contains(&id).await?,
+        "the re-put's hold keeps the bytes"
+    );
+
+    // Once that one is past its grace too, nothing keeps them.
+    assert_eq!(h.ownership.expire_uploads(now + 1).await?, 1);
+    assert!(!h.ownership.contains(&id).await?);
+    assert!(!h.rooted("owned", &id).await?);
+    assert_eq!(h.ownership.expire_uploads(now + 1).await?, 0);
+    h.stop.stop().await;
+    h.store.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn upload_release_uses_durable_identity_not_supplied_blob_metadata() -> Res<()> {
     let h = Harness::new().await?;

@@ -212,6 +212,102 @@ mod library {
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
     }
 
+    /// A file put and read back, whole and by `Range`, is the same bytes whichever way the node
+    /// is reached: streamed from and to files (ADR 042), never as JSON, so the in-process router
+    /// and the daemon's socket carry the raw bodies alike.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_daemon() {
+        use crate::client::Raw;
+        use method_core::HttpMethod::Get;
+        use method_core::HttpMethod::Post;
+        const MINT: &str = "org.example.daybook.blobs.mintCapability";
+        const PUT: &str = "org.example.daybook.blobs.put";
+        const READ: &str = "org.example.daybook.blobs.read";
+        let (tmp, dir) = new_node();
+        let upload = tmp.path().join("upload.bin");
+        // Over the 64 KiB chunks a read yields, so it is several chunks long.
+        let content: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+        std::fs::write(&upload, &content).unwrap();
+        let rights = serde_json::to_value(big_cabinet_core::authority::Rights::USE).unwrap();
+        let round_trip = async |client: &NodeClient, name: &str| {
+            let mint = async |scope: serde_json::Value| {
+                let reply = client
+                    .call(MINT, Post, &json!({ "scope": scope, "rights": rights }))
+                    .await
+                    .unwrap();
+                assert_eq!(reply.status, 200, "{reply:?}");
+                reply.body["capabilityId"].as_str().unwrap().to_owned()
+            };
+            let put = mint(json!({ "put": true })).await;
+            let stored = client
+                .call_raw(
+                    PUT,
+                    Post,
+                    &json!({ "capability": put }),
+                    Raw {
+                        upload: Some(&upload),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stored.status, 200, "{stored:?}");
+            assert_eq!(stored.body["lengthOctets"], content.len());
+            let blob_id = stored.body["blobId"].as_str().unwrap().to_owned();
+            let read = mint(json!({ "read": [blob_id] })).await;
+            let params = json!({ "capability": read, "blobId": blob_id });
+            let whole = tmp.path().join(format!("{name}-whole.bin"));
+            let reply = client
+                .call_raw(
+                    READ,
+                    Get,
+                    &params,
+                    Raw {
+                        download: Some(&whole),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 200, "{reply:?}");
+            assert_eq!(reply.body["octets"], content.len());
+            assert!(std::fs::read(&whole).unwrap() == content);
+            let part = tmp.path().join(format!("{name}-part.bin"));
+            let reply = client
+                .call_raw(
+                    READ,
+                    Get,
+                    &params,
+                    Raw {
+                        range: Some("bytes=70000-70099"),
+                        download: Some(&part),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 206, "{reply:?}");
+            assert_eq!(
+                reply.body["contentRange"],
+                format!("bytes 70000-70099/{}", content.len())
+            );
+            assert_eq!(std::fs::read(&part).unwrap(), &content[70_000..70_100]);
+            stored.body
+        };
+        let in_process = connect(&dir).await.unwrap();
+        let local = round_trip(&in_process, "in-process").await;
+        in_process.stop().await.unwrap();
+
+        let daemon = TestDaemon::start(&dir).await;
+        let over_socket = connect(&dir).await.unwrap();
+        assert_eq!(over_socket.mode(), Mode::Daemon);
+        let remote = round_trip(&over_socket, "socket").await;
+        over_socket.stop().await.unwrap();
+        daemon.stop().await;
+        // The node's answer is the content's own id, however the bytes arrived.
+        assert_eq!(local, remote);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stale_socket_is_detected_then_replaced_by_the_next_daemon() {
         let (_tmp, dir) = new_node();
