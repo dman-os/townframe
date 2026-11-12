@@ -32,13 +32,6 @@ mod queries {
     include!("datum_ref/sqlite/gen.rs");
 }
 
-/// The `target_doc` an edge table row stores for a key reference. A `#keyRef` names no document,
-/// and no document id is empty, so the empty string marks the row as one whose `target_datum` is
-/// the key itself. Sharing the table keeps "what references this" one indexed query on
-/// `(target_doc, target_datum)` for both kinds of reference, and no join on a document id can
-/// match a key reference's row.
-pub(super) const KEY_REF_TARGET_DOC: &str = "";
-
 /// What a recorded reference addresses.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DatumRefTarget {
@@ -51,24 +44,6 @@ pub enum DatumRefTarget {
     },
     /// A content-addressed datum named by its key alone (`#keyRef`, ADR 035 §2.9).
     Key(DatumKey),
-}
-
-impl DatumRefTarget {
-    /// The `(target_doc, target_datum, ref_heads)` columns of the edge row for this target.
-    pub(super) fn columns(&self) -> Res<(String, String, Vec<u8>)> {
-        Ok(match self {
-            Self::Route { route, heads } => (
-                route.doc_id.to_string(),
-                route.datum_key.to_string(),
-                serde_json::to_vec(heads)?,
-            ),
-            Self::Key(key) => (
-                KEY_REF_TARGET_DOC.to_owned(),
-                key.to_string(),
-                serde_json::to_vec(&Vec::<ChangeHash>::new())?,
-            ),
-        })
-    }
 }
 
 /// One recorded reference: a position in one datum's value that addresses another datum.
@@ -108,42 +83,69 @@ impl DatumRefStore {
     }
 
     pub async fn query(&self, selector: DatumRefQuery) -> Res<Vec<DatumRefEdge>> {
-        let mut query = Sql::new(
-            r#"SELECT origin_doc
+        // Document references and key references live in two tables, because a key reference has
+        // no target document. Both are read through the same seven columns: a key reference's
+        // `target_doc` and `ref_heads` are NULL, which is how a row tells the two apart.
+        const EDGES: &str = r#"SELECT origin_doc
                  , origin_datum
                  , origin_path
                  , target_doc
                  , target_datum
                  , ref_heads
               FROM big_cabinet_datum_ref_edges
-             WHERE "#,
-        );
+             WHERE "#;
+        const KEY_EDGES: &str = r#"SELECT origin_doc
+                 , origin_datum
+                 , origin_path
+                 , NULL AS target_doc
+                 , target_key AS target_datum
+                 , NULL AS ref_heads
+              FROM big_cabinet_datum_ref_key_edges
+             WHERE "#;
+        let mut query = Sql::new("");
         match &selector {
             DatumRefQuery::Origin(route) => {
                 query
+                    .push(EDGES)
+                    .push("origin_doc = ")
+                    .bind(route.doc_id.to_string())
+                    .push(" AND origin_datum = ")
+                    .bind(route.datum_key.to_string())
+                    .push(" UNION ALL ")
+                    .push(KEY_EDGES)
                     .push("origin_doc = ")
                     .bind(route.doc_id.to_string())
                     .push(" AND origin_datum = ")
                     .bind(route.datum_key.to_string());
             }
             DatumRefQuery::OriginDoc(doc_id) => {
-                query.push("origin_doc = ").bind(doc_id.to_string());
+                query
+                    .push(EDGES)
+                    .push("origin_doc = ")
+                    .bind(doc_id.to_string())
+                    .push(" UNION ALL ")
+                    .push(KEY_EDGES)
+                    .push("origin_doc = ")
+                    .bind(doc_id.to_string());
             }
             DatumRefQuery::Target(route) => {
                 query
+                    .push(EDGES)
                     .push("target_doc = ")
                     .bind(route.doc_id.to_string())
                     .push(" AND target_datum = ")
                     .bind(route.datum_key.to_string());
             }
             DatumRefQuery::TargetDoc(doc_id) => {
-                query.push("target_doc = ").bind(doc_id.to_string());
+                query
+                    .push(EDGES)
+                    .push("target_doc = ")
+                    .bind(doc_id.to_string());
             }
             DatumRefQuery::Key(key) => {
                 query
-                    .push("target_doc = ")
-                    .bind(KEY_REF_TARGET_DOC)
-                    .push(" AND target_datum = ")
+                    .push(KEY_EDGES)
+                    .push("target_key = ")
                     .bind(key.to_string());
             }
         }
@@ -151,18 +153,16 @@ impl DatumRefStore {
         let rows = query.query(&self.sql).await?.rows;
         rows.into_iter()
             .map(|row| {
-                let target_doc = row.get::<String>("target_doc")?;
                 let target_datum = row.get::<String>("target_datum")?.parse()?;
-                let target = if target_doc == KEY_REF_TARGET_DOC {
-                    DatumRefTarget::Key(target_datum)
-                } else {
-                    DatumRefTarget::Route {
+                let target = match row.get::<Option<String>>("target_doc")? {
+                    Some(doc_id) => DatumRefTarget::Route {
                         route: DatumRoute {
-                            doc_id: target_doc.parse()?,
+                            doc_id: doc_id.parse()?,
                             datum_key: target_datum,
                         },
                         heads: serde_json::from_slice(&row.get::<Vec<u8>>("ref_heads")?)?,
-                    }
+                    },
+                    None => DatumRefTarget::Key(target_datum),
                 };
                 Ok(DatumRefEdge {
                     origin: DatumRoute {
