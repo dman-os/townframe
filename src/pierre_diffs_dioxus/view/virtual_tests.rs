@@ -292,6 +292,44 @@ fn Empty() -> Element {
     rsx! {}
 }
 
+/// A fast scroll (dragging the scrollbar) frees rows while their `onresize` and `onvisible` are
+/// still in flight. Upstream's observers stop reporting a removed row; here those late events
+/// reach the dispatch with a key the document freed, and must be dropped, not read.
+#[test]
+fn events_in_flight_for_rows_a_scroll_freed_are_dropped() {
+    let mut rig = Rig::new(3000);
+    rig.boot();
+    let early_rows = {
+        let document = super::host_document(&rig.view.host);
+        let shadow = document
+            .shadow_root(rig.view.host.container())
+            .expect("a rendered diff");
+        document.query_by_attribute(shadow, "data-line-index", None)
+    };
+    assert!(!early_rows.is_empty());
+
+    rig.scroll_to(30_000.0);
+    {
+        let document = super::host_document(&rig.view.host);
+        assert!(
+            early_rows.iter().any(|row| !document.exists(*row)),
+            "scrolling away freed none of the first window's rows"
+        );
+    }
+
+    rig.deliver(|rig| {
+        for row in &early_rows {
+            rig.dispatch().resized(*row, 20.0, 760.0);
+            rig.dispatch().visible(*row, false);
+        }
+    });
+    let middle = rig.rendered_lines();
+    assert!(
+        middle.first().is_some_and(|first| *first > 1000),
+        "{middle:?}"
+    );
+}
+
 #[test]
 fn only_the_window_around_the_viewport_is_rendered_and_it_follows_scrolling() {
     let mut rig = Rig::new(3000);

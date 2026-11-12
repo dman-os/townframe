@@ -74,6 +74,13 @@ impl Dispatch {
     /// `ResizeObserver`'s callback: `border_height` is `borderBoxSize.blockSize` and
     /// `content_width` is `contentBoxSize.inlineSize`.
     pub(crate) fn resized(&self, node: NodeKey, border_height: f64, content_width: f64) {
+        // Upstream's ResizeObserver stops reporting a row the moment the row is removed. A Dioxus
+        // `onresize` already in flight can still arrive after the render that freed the row (a
+        // fast scroll swaps rows out every frame), so an event for a node the document no longer
+        // holds is dropped before anything reads it.
+        if !host_document(&self.host).exists(node) {
+            return;
+        }
         let previous = self.host.record_size(node, border_height);
         // A static view's rows, and any view's hunk separators, are measured for geometry only:
         // the port reads no separator height (its metrics carry the estimate) and nothing is
@@ -109,6 +116,11 @@ impl Dispatch {
 
     /// `IntersectionObserver`'s callback.
     pub(crate) fn visible(&self, node: NodeKey, is_intersecting: bool) {
+        // As in `resized`: upstream's IntersectionObserver stops reporting a removed row, while
+        // an `onvisible` in flight can outlive the render that freed it.
+        if !host_document(&self.host).exists(node) {
+            return;
+        }
         self.managers()
             .virtualizer
             .handle_intersection_change(&[IntersectionEntry {
