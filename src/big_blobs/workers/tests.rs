@@ -146,9 +146,9 @@ fn metadata_scope(document: DocId, write: bool) -> DocScope {
     DocScope {
         read: BTreeSet::from([document.clone()]),
         write: if write {
-            BTreeSet::from([document])
+            std::collections::BTreeMap::from([(document, big_cabinet_core::doc::DatumKinds::All)])
         } else {
-            BTreeSet::new()
+            std::collections::BTreeMap::new()
         },
         ..Default::default()
     }

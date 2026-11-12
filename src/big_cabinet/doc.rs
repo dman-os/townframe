@@ -139,6 +139,7 @@ use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumClaimEvidence;
 use big_cabinet_core::doc::DatumClaimsInspection;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DatumListing;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumRefSelector;
@@ -397,11 +398,13 @@ impl DocsService {
             DomainAuthority::Scoped(scope) => {
                 let (document, needed) = match request {
                     AccessRequest::Read(doc)
-                        if scope.read.contains(doc) || scope.write.contains(doc) =>
+                        if scope.read.contains(doc) || scope.write.contains_key(doc) =>
                     {
                         return Ok(true);
                     }
-                    AccessRequest::Write(doc) if scope.write.contains(doc) => return Ok(true),
+                    AccessRequest::Write(_) => unreachable!(
+                        "writes go through authorize_write so datum kinds are enforced there"
+                    ),
                     AccessRequest::Create { placement } => {
                         return Ok(scope.create.contains(placement)
                             || crate::drawer::parse_placement(placement).is_some_and(|drawer| {
@@ -411,9 +414,6 @@ impl DocsService {
                             }));
                     }
                     AccessRequest::Read(doc) => (doc, big_cabinet_core::drawer::DrawerAccess::Read),
-                    AccessRequest::Write(doc) => {
-                        (doc, big_cabinet_core::drawer::DrawerAccess::Write)
-                    }
                 };
                 let documents = BTreeSet::from([document.clone()]);
                 Ok(
@@ -440,7 +440,7 @@ impl DocsService {
         let mut allowed: BTreeSet<_> = documents
             .iter()
             .filter(|doc| {
-                scope.write.contains(*doc)
+                scope.write.contains_key(*doc)
                     || (needed == DrawerAccess::Read && scope.read.contains(*doc))
             })
             .cloned()
@@ -467,6 +467,71 @@ impl DocsService {
         }
         Ok(allowed)
     }
+    async fn authorize_write(
+        &self,
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
+        document: &DocId,
+    ) -> Result<DatumKinds, DocsError> {
+        DocsError::ensure_doc_id(document)?;
+        match authority {
+            DomainAuthority::Identity(actor) => {
+                if self
+                    .access
+                    .check(context, *actor, AccessRequest::Write(document))
+                    .await
+                    .map_err(access_error)?
+                {
+                    Ok(DatumKinds::All)
+                } else {
+                    Err(DocsError::Denied)
+                }
+            }
+            DomainAuthority::Scoped(scope) => {
+                if let Some(kinds) = scope.write.get(document) {
+                    return Ok(kinds.clone());
+                }
+                let documents = BTreeSet::from([document.clone()]);
+                if Self::allowed_docs(
+                    self.access.as_ref(),
+                    context,
+                    authority,
+                    &documents,
+                    big_cabinet_core::drawer::DrawerAccess::Write,
+                )
+                .await?
+                .contains(document)
+                {
+                    Ok(DatumKinds::All)
+                } else {
+                    Err(DocsError::Denied)
+                }
+            }
+        }
+    }
+
+    fn require_all(kinds: DatumKinds) -> Result<(), DocsError> {
+        if matches!(kinds, DatumKinds::All) {
+            Ok(())
+        } else {
+            Err(DocsError::Denied)
+        }
+    }
+
+    fn require_wholesale_source(
+        authority: &DomainAuthority<DocScope>,
+        document: &DocId,
+    ) -> Result<(), DocsError> {
+        if let DomainAuthority::Scoped(scope) = authority
+            && scope
+                .write
+                .get(document)
+                .is_some_and(|kinds| !matches!(kinds, DatumKinds::All))
+        {
+            return Err(DocsError::Denied);
+        }
+        Ok(())
+    }
 
     async fn authorize(
         &self,
@@ -474,7 +539,11 @@ impl DocsService {
         authority: &DomainAuthority<DocScope>,
         request: AccessRequest<'_>,
     ) -> Result<(), DocsError> {
-        if Self::allowed(self.access.as_ref(), context, authority, request).await? {
+        if let AccessRequest::Write(document) = request {
+            self.authorize_write(context, authority, document)
+                .await
+                .and_then(Self::require_all)
+        } else if Self::allowed(self.access.as_ref(), context, authority, request).await? {
             Ok(())
         } else {
             Err(DocsError::Denied)
@@ -621,7 +690,7 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         capabilities: DomainCapabilities::new(
             config.authority.clone(),
             config.namespace,
-            "DocsRepo/scope/v2/",
+            "DocsRepo/scope/v3/",
         ),
         inspection_capabilities: DomainCapabilities::new(
             config.authority.clone(),
