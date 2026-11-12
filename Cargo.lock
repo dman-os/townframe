@@ -9659,6 +9659,7 @@ dependencies = [
  "dioxus 0.8.0-alpha.3 (git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2)",
  "dioxus-core 0.8.0-alpha.3 (git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2)",
  "micro_lab_manifest",
+ "pierre_diffs_dioxus",
  "review_mock",
 ]
 
