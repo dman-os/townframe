@@ -1037,6 +1037,18 @@ mod library {
                 String::from_utf8(out).unwrap()
             };
 
+            let list = async || {
+                let mut out = Vec::new();
+                packaging.list(&mut out).await.unwrap();
+                String::from_utf8(out).unwrap()
+            };
+
+            let listed_before_add = list().await;
+            assert!(listed_before_add.contains("\"Two files\""), "{listed_before_add}");
+            assert!(
+                listed_before_add.contains("commits: 0, refs: 0, sessions: 0"),
+                "{listed_before_add}"
+            );
             let rev = |spec: &str| {
                 let output = std::process::Command::new("git")
                     .arg("-C")
@@ -1096,6 +1108,19 @@ mod library {
             assert!(again.contains("(already in)"), "{again}");
             assert!(again.contains("(already tracked)"), "{again}");
             assert_eq!(show(&short).await, shown, "adding again changed the intxt");
+
+            let mut out = Vec::new();
+            packaging.drop(&mut out, &short).await.unwrap();
+            let dropped = String::from_utf8(out).unwrap();
+            assert!(dropped.starts_with("dropped "), "{dropped}");
+            assert!(dropped.contains(&format!("undo: day x intxt show {drawer}")), "{dropped}");
+            let listed_after_drop = list().await;
+            assert!(!listed_after_drop.contains("Two files"), "{listed_after_drop}");
+
+            let restored = show(&drawer.to_string()).await;
+            assert!(restored.contains("\"Two files\""), "{restored}");
+            let listed_after_restore = list().await;
+            assert!(listed_after_restore.contains("\"Two files\""), "{listed_after_restore}");
 
             let mut out = Vec::new();
             packaging.status(&mut out).await.unwrap();

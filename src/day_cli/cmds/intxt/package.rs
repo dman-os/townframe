@@ -31,6 +31,7 @@ use big_cabinet_core::drawer::listing::KnownDrawers;
 use big_cabinet_core::drawer::protocol::CreateMetaDoc;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::ForgetDrawer;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::RememberDrawer;
@@ -54,6 +55,7 @@ use service_utils_rs::RequestContext;
 use short_ids::ShortIds;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::io::IsTerminal;
 use std::io::Write;
 
 /// Files over this size are recorded by blob id and left out of the pack (ADR 040 §4, D45).
@@ -197,9 +199,14 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
-/// The shortest unique prefix of `id` among `ids`.
+/// The shortest unique prefix of `id` among `ids`, with its remainder dimmed on a terminal.
 fn shown(ids: &ShortIds<String>, id: &str) -> String {
-    ids.render(&id.to_owned()).unique
+    let rendered = ids.render(&id.to_owned());
+    if std::io::stdout().is_terminal() && !rendered.rest.is_empty() {
+        format!("{}\x1b[2m{}\x1b[22m", rendered.unique, rendered.rest)
+    } else {
+        rendered.unique
+    }
 }
 
 /// The sessions whose ops produced content in `written`, as their documents (ledger D61): an op
@@ -346,6 +353,61 @@ impl<'a> Packaging<'a> {
             })?
             .parse()?;
         Ok((found, short))
+    }
+
+    /// `day x intxt list`: lists the intxts remembered by this node, with their entry counts.
+    ///
+    /// Drawer creation timestamps are not part of the known-drawers listing, so titles provide the
+    /// deterministic fallback ordering promised by the command.
+    pub(crate) async fn list(&self, out: &mut impl Write) -> Res<()> {
+        let live = self.live_intxts().await?;
+        let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
+        let mut listed = Vec::with_capacity(live.len());
+        for drawer in live {
+            let view = self.load(&drawer).await?;
+            listed.push((drawer, view));
+        }
+        listed.sort_by(|(left_drawer, left), (right_drawer, right)| {
+            left.title
+                .title
+                .cmp(&right.title.title)
+                .then_with(|| left_drawer.cmp(right_drawer))
+        });
+
+        for (drawer, view) in listed {
+            let (mut commits, mut refs, mut sessions) = (0, 0, 0);
+            for (entry, _) in view.entries {
+                match entry.tag().as_str() {
+                    work::GitCommitEntry::ID => commits += 1,
+                    work::GitRefEntry::ID => refs += 1,
+                    work::SessionEntry::ID => sessions += 1,
+                    _ => {}
+                }
+            }
+            writeln!(
+                out,
+                "{}  \"{}\"  commits: {commits}, refs: {refs}, sessions: {sessions}",
+                shown(&ids, &drawer.to_string()),
+                view.title.title,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `day x intxt drop`: forgets an intxt on this node without changing its drawer or shared data.
+    pub(crate) async fn drop(&self, out: &mut impl Write, intxt: &str) -> Res<()> {
+        let (drawer, intxts) = self.resolve(intxt).await?;
+        let view = self.load(&drawer).await?;
+        let short = shown(&intxts, &drawer.to_string());
+        self.caller
+            .call(ForgetDrawer {
+                capability: self.known_drawers().await?,
+                drawer_id: drawer.clone(),
+            })
+            .await?;
+        writeln!(out, "dropped {short} \"{}\"", view.title.title)?;
+        writeln!(out, "undo: day x intxt show {drawer}")?;
+        Ok(())
     }
 
     /// `day x intxt new`: creates an intxt, remembers it, and says its short id. Answers its

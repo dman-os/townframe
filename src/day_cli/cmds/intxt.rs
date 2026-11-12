@@ -86,7 +86,7 @@ pub enum IntxtCommands {
     /// so. Names the intxt by the short id `show` prints, or by its full drawer id.
     #[command(
         group = clap::ArgGroup::new("what").required(true),
-        after_long_help = "Examples:\n  day x intxt add m4 --branch feat/refs\n  day x intxt add m4 --commits main..feat/refs\n  day x intxt add m4 --change kxqoltvm"
+        after_long_help = "Examples:\n  day x intxt add qx --branch feat/refs\n  day x intxt add qx --commits main..feat/refs\n  day x intxt add qx --change kxqoltvm"
     )]
     Add {
         /// The intxt: its short id, or its full drawer id
@@ -127,7 +127,7 @@ pub enum IntxtCommands {
     /// Deletes the entries (commits, jj changes, tracked refs, sessions) and the packs only they
     /// carried. The documents already shared with the intxt stay shared, and copies synced to
     /// others stay with them.
-    #[command(after_long_help = "Examples:\n  day x intxt rm m4 k7 v1")]
+    #[command(after_long_help = "Examples:\n  day x intxt rm qx kq vx")]
     Rm {
         /// The intxt: its short id, or its full drawer id
         intxt: String,
@@ -135,10 +135,24 @@ pub enum IntxtCommands {
         #[arg(required = true)]
         items: Vec<String>,
     },
+    /// List every intxt remembered by this node, with counts of its commits, refs and sessions
+    ///
+    #[command(
+        after_long_help = "Examples:\n  day x intxt list\n  day x intxt list --node ~/.local/share/day/node"
+    )]
+    List,
+    /// Forget an intxt on this node
+    ///
+    /// The drawer and anything already shared stay; it only stops being listed here, and naming it by its full id brings it back.
+    #[command(after_long_help = "Examples:\n  day x intxt drop qx\n  day x intxt drop qy")]
+    Drop {
+        /// The intxt: its short id, or its full drawer id
+        intxt: String,
+    },
     /// Show what an intxt holds: its commits, jj changes, tracked refs and sessions
     ///
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
-    #[command(after_long_help = "Examples:\n  day x intxt show m4")]
+    #[command(after_long_help = "Examples:\n  day x intxt show qx")]
     Show {
         /// The intxt: its short id, or its full drawer id
         intxt: String,
@@ -219,6 +233,13 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
         }
         IntxtCommands::Show { intxt } => {
             with_packaging(async |packaging| packaging.show(&mut std::io::stdout(), &intxt).await)
+                .await
+        }
+        IntxtCommands::List => {
+            with_packaging(async |packaging| packaging.list(&mut std::io::stdout()).await).await
+        }
+        IntxtCommands::Drop { intxt } => {
+            with_packaging(async |packaging| packaging.drop(&mut std::io::stdout(), &intxt).await)
                 .await
         }
         IntxtCommands::Status => {

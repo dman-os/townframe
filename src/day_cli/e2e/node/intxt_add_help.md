@@ -36,9 +36,61 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  day x intxt add m4 --branch feat/refs
-  day x intxt add m4 --commits main..feat/refs
-  day x intxt add m4 --change kxqoltvm
+  day x intxt add qx --branch feat/refs
+  day x intxt add qx --commits main..feat/refs
+  day x intxt add qx --change kxqoltvm
+
+```
+
+# `day x intxt list --help`
+
+```console
+$ day x intxt list --help
+List every intxt remembered by this node, with counts of its commits, refs and sessions
+
+Usage: day exec intxt list [OPTIONS]
+
+Options:
+      --node <DIR>
+          The node's directory
+          
+          [env: DAY_NODE=[..]]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  day x intxt list
+  day x intxt list --node ~/.local/share/day/node
+
+```
+
+# `day x intxt drop --help`
+
+```console
+$ day x intxt drop --help
+Forget an intxt on this node
+
+The drawer and anything already shared stay; it only stops being listed here, and naming it by its full id brings it back.
+
+Usage: day exec intxt drop [OPTIONS] <INTXT>
+
+Arguments:
+  <INTXT>
+          The intxt: its short id, or its full drawer id
+
+Options:
+      --node <DIR>
+          The node's directory
+          
+          [env: DAY_NODE=[..]]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  day x intxt drop qx
+  day x intxt drop qy
 
 ```
 
@@ -66,7 +118,7 @@ Options:
           Print help (see a summary with '-h')
 
 Examples:
-  day x intxt show m4
+  day x intxt show qx
 
 ```
 
