@@ -11,7 +11,6 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
-use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::ListDatums;
@@ -287,6 +286,7 @@ fn datum_key<D: TypedDatum>(slot: impl Into<Vec<u8>>) -> Result<DatumKey, Error>
 mod tests {
     use super::*;
     use big_cabinet_core::doc::DatumPage;
+    use big_cabinet_core::doc::DatumVersion;
     use big_cabinet_core::doc::ObservedDatum;
     use serde::Deserialize;
     use service_core_rs::Envelope;
@@ -549,6 +549,12 @@ mod tests {
                 .unwrap(),
             vec![key(NOTE_TAG, "one")]
         );
+
+        let requests = transport.requests.lock().unwrap();
+        let RecordedRequest::List(request) = &requests[0] else {
+            panic!("expected list request");
+        };
+        assert_eq!(request.capability, capability());
     }
 
     #[tokio::test]
