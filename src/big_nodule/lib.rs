@@ -625,7 +625,10 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
             MintDocCapability {
                 scope: DocScope {
                     read: BTreeSet::from([config_doc.clone()]),
-                    write: BTreeSet::from([config_doc.clone()]),
+                    write: std::collections::BTreeMap::from([(
+                        config_doc.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )]),
                     // The registry's documents are only read, at the heads installs pin. The
                     // shared config drawer holds the cartridge config documents, which are
                     // created, read and written.

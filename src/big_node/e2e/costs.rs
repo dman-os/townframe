@@ -721,7 +721,10 @@ async fn dispatch_costs(table: &mut Table) {
     let write_capability = capability(
         &node,
         DocScope {
-            write: BTreeSet::from([note.doc_id.clone()]),
+            write: std::collections::BTreeMap::from([(
+                note.doc_id.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             ..DocScope::default()
         },
     )
