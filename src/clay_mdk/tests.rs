@@ -1008,7 +1008,7 @@ fn sdk_colliding_element_ids_dispatch_only_to_the_selected_target_scope() {
 
 /// P8 evidence: moving a node to another parent (what the diff view's gutter utility does when
 /// the hovered row changes) crosses the guest wire as a `Remove` of the old element and a
-/// `CreateElement` of a new one, never as a move. Dioxus has no cross-parent move, so this is the
+/// clone of a new one from its template, never as a move. Dioxus has no cross-parent move, so this is the
 /// same in the theme lab; what differs in a micro is that the host renderer sees two element
 /// lifetimes (see the `clay_surface` tree test on a node moved across parents). A move within one
 /// batch keeps the remove and the create together, so the host never presents the gap between
@@ -1046,9 +1046,17 @@ fn sdk_moving_a_node_to_another_parent_is_one_batch_of_remove_and_create() {
     assert_eq!(creates(&initial), 1);
     sdk_click(&mut dom, target);
     let moved = dom.edits.get_mut(&target).unwrap().take();
-    // One batch holds both halves of the move: the utility leaves row 0 and a new one is created
-    // in row 1.
-    assert_eq!(creates(&moved), 1, "{moved:?}");
+    // One batch holds both halves of the move: the utility leaves row 0 and a new one is cloned
+    // from its template (Dioxus clones templates instead of creating elements one by one) into
+    // row 1, under the recycled element id.
+    assert_eq!(
+        moved
+            .iter()
+            .filter(|edit| matches!(edit, Wire::CloneNode))
+            .count(),
+        1,
+        "{moved:?}"
+    );
     assert_eq!(
         moved
             .iter()
