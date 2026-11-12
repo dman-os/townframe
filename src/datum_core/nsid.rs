@@ -12,6 +12,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::is_nsid;
+
 /// A validated NSID. Cloning shares the text.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -21,87 +23,23 @@ pub struct Nsid(Arc<str>);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvalidNsid {
     text: String,
-    reason: &'static str,
 }
 
 impl fmt::Display for InvalidNsid {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{:?} is not a valid NSID: {}",
-            self.text, self.reason
-        )
+        write!(formatter, "{:?} is not a valid NSID", self.text)
     }
 }
 
 impl std::error::Error for InvalidNsid {}
 
 impl Nsid {
-    const MAX_LENGTH: usize = 317;
-    const MAX_AUTHORITY_LENGTH: usize = 253;
-    const MAX_SEGMENT_LENGTH: usize = 63;
-
-    /// Validate `text` per the AT Protocol NSID grammar: at most 317 characters in at least
-    /// three dot-separated segments. The authority segments (all but the last) are 1 to 63
-    /// ASCII letters, digits or hyphens that neither start nor end with a hyphen, the first
-    /// starting with a letter, and together at most 253 characters. The name segment (the last)
-    /// is 1 to 63 ASCII letters and digits starting with a letter.
+    /// Validate `text` with [`is_nsid`] (the AT Protocol NSID grammar) and keep the text.
     pub fn parse(text: &str) -> Result<Self, InvalidNsid> {
-        let invalid = |reason| InvalidNsid {
-            text: text.to_owned(),
-            reason,
-        };
-        if text.len() > Self::MAX_LENGTH {
-            return Err(invalid("longer than 317 characters"));
-        }
-        let segments: Vec<&str> = text.split('.').collect();
-        let [authority @ .., name] = segments.as_slice() else {
-            unreachable!("splitting always yields a segment");
-        };
-        if authority.len() < 2 {
-            return Err(invalid(
-                "needs an authority of two or more segments and a name",
-            ));
-        }
-        if authority
-            .iter()
-            .map(|segment| segment.len() + 1)
-            .sum::<usize>()
-            - 1
-            > Self::MAX_AUTHORITY_LENGTH
-        {
-            return Err(invalid("authority longer than 253 characters"));
-        }
-        for (position, segment) in authority.iter().enumerate() {
-            let bytes = segment.as_bytes();
-            if bytes.is_empty() || bytes.len() > Self::MAX_SEGMENT_LENGTH {
-                return Err(invalid("authority segments are 1 to 63 characters"));
-            }
-            if !bytes
-                .iter()
-                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
-            {
-                return Err(invalid(
-                    "authority segments are letters, digits and hyphens",
-                ));
-            }
-            if bytes[0] == b'-' || bytes[bytes.len() - 1] == b'-' {
-                return Err(invalid(
-                    "authority segments do not start or end with a hyphen",
-                ));
-            }
-            if position == 0 && !bytes[0].is_ascii_alphabetic() {
-                return Err(invalid("the first segment starts with a letter"));
-            }
-        }
-        let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > Self::MAX_SEGMENT_LENGTH {
-            return Err(invalid("the name segment is 1 to 63 characters"));
-        }
-        if !bytes.iter().all(u8::is_ascii_alphanumeric) || !bytes[0].is_ascii_alphabetic() {
-            return Err(invalid(
-                "the name segment is letters and digits, starting with a letter",
-            ));
+        if !is_nsid(text) {
+            return Err(InvalidNsid {
+                text: text.to_owned(),
+            });
         }
         Ok(Self(text.into()))
     }

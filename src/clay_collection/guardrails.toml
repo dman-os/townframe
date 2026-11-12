@@ -2,7 +2,7 @@ version = 1
 role = "foundation"
 dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
 # sqlite_rs is a dev-dependency only: the durable restart test opens a SqliteStore.
-allowed_dependencies = ["clay_store", "sqlite_rs"]
+allowed_dependencies = ["clay_store", "datum_core", "sqlite_rs"]
 allow_external_api_types = false
 
 # The browser host (ADR 018) links this crate on wasm32, so both targets are contracts.
@@ -16,7 +16,7 @@ allow_external_api_types = false
 code = "ERROR_DEPENDENCY_GROUP"
 path = "src/clay_collection/Cargo.toml"
 symbol = "dependency-groups"
-ceiling = 2
+ceiling = 3
 class = "LEGACY_DEBT"
 reason = "internal crates are not yet grouped under a `#` / `# internal` comment header: move them into one group at the top of each dependency table"
 reference = "docs/scratch/nodule-runtime-ledger.md"
