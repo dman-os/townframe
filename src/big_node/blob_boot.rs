@@ -8,6 +8,7 @@ use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use service_client_native_rs::Client;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[expect(
     clippy::too_many_arguments,
@@ -138,7 +139,8 @@ pub(super) fn metadata_capability(
             {
                 return Err(service_utils_rs::ClientError::Method(DocsError::Denied));
             }
-            for document in scope.read.union(&scope.write) {
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
+            for document in scope.read.union(&write_docs) {
                 let known = sql.query(
                     "SELECT EXISTS (
                          SELECT 1 FROM big_cabinet_drawers
