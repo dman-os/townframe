@@ -244,6 +244,8 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
 
   The full-pack cost is the first whole copy of large touched files (Cargo.lock about 100 KB, the ledgers 40–70 KB).
 
+- **F28 (2026-11-12) overlapping tool-call windows corrupt the op log.** With windows A and B overlapping, A's close attributes B's edit to A, and B's close records `earlier` = last observation → pre_B, which runs backwards (reverts a.txt to its pre-window content), then replays the edit under B. Reproduced with `observe` directly (a.txt `0`→`1` inside both windows: A close `changes a.txt=1`; B close `earlier a.txt=0`, `changes a.txt=1, b.txt=2`). End state is right; content at intermediate ops is wrong. Proposal: `docs/scratch/intxt-overlapping-windows.md`.
+
 ## In flight
 
 (2026-11-10, end of session) Anyone resuming: refresh on AGENTS.md and the docs it links, then this ledger, ADRs 035, 036, 039, 040, 041 and FDRs 006, 007.
