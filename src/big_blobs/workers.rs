@@ -98,9 +98,12 @@ impl MetadataCapabilities {
             let capability = (self.mint)(big_cabinet_core::doc::DocScope {
                 read: BTreeSet::from([document.clone()]),
                 write: if write {
-                    BTreeSet::from([document.clone()])
+                    std::collections::BTreeMap::from([(
+                        document.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )])
                 } else {
-                    BTreeSet::new()
+                    std::collections::BTreeMap::new()
                 },
                 ..Default::default()
             })

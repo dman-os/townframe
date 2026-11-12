@@ -513,7 +513,10 @@ async fn self_doc_child_uses_containing_drawer_inventories() {
                 capability: capability(
                     &node,
                     DocScope {
-                        write: BTreeSet::from([child.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            child.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..Default::default()
                     },
                 )

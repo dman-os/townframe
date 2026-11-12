@@ -372,7 +372,10 @@ async fn a_config_change_reconciles_once_and_a_change_from_elsewhere_reconciles_
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    write: BTreeSet::from([config_doc.clone()]),
+                    write: std::collections::BTreeMap::from([(
+                        config_doc.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -482,7 +485,10 @@ async fn handler_artifacts_are_referenced_from_the_config_document_through_the_n
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    write: BTreeSet::from([config_doc.clone()]),
+                    write: std::collections::BTreeMap::from([(
+                        config_doc.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,

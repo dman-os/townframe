@@ -19,12 +19,17 @@ impl DocsService {
             .signing_invocation(context, metadata, params.capability)
             .await?;
         let actor = &caller.signer;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Write(&params.doc_id),
-        )
-        .await?;
+        let kinds = self
+            .authorize_write(context, &caller.authority, &params.doc_id)
+            .await?;
+        if params
+            .set
+            .keys()
+            .chain(params.remove.iter())
+            .any(|key| !kinds.allows(key))
+        {
+            return Err(DocsError::Denied);
+        }
         let request_digest = digest(&(
             "write",
             actor.actor_id,

@@ -30,13 +30,12 @@ impl DocsService {
             AccessRequest::Read(&params.doc_id),
         )
         .await?;
+        Self::require_wholesale_source(&caller.authority, &params.doc_id)?;
         if !params.stealth {
-            self.authorize(
-                context,
-                &caller.authority,
-                AccessRequest::Write(&params.doc_id),
-            )
-            .await?;
+            let kinds = self
+                .authorize_write(context, &caller.authority, &params.doc_id)
+                .await?;
+            Self::require_all(kinds)?;
         }
         self.authorize(
             context,

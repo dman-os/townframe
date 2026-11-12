@@ -167,14 +167,15 @@ impl DocAccess for LedgerAccess {
                     "drawers are not configured on this repository".into(),
                 ));
             }
+            let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             let objects: Vec<_> = scope
                 .read
-                .union(&scope.write)
+                .union(&write_docs)
                 .map(|document| Self::object(AccessRequest::Read(document)))
                 .chain(
                     scope
                         .write
-                        .iter()
+                        .keys()
                         .map(|document| Self::object(AccessRequest::Write(document))),
                 )
                 .chain(
@@ -270,13 +271,18 @@ impl DocsService {
                 .await
                 .map_err(super::access_error)?,
             DomainAuthority::Scoped(scope) => {
-                for doc in request.scope.read.union(&request.scope.write) {
+                let write_docs: BTreeSet<_> = request.scope.write.keys().cloned().collect();
+                for doc in request.scope.read.union(&write_docs) {
                     self.authorize(context, &caller.authority, AccessRequest::Read(doc))
                         .await?;
                 }
-                for doc in &request.scope.write {
-                    self.authorize(context, &caller.authority, AccessRequest::Write(doc))
+                for (doc, requested) in &request.scope.write {
+                    let held = self
+                        .authorize_write(context, &caller.authority, doc)
                         .await?;
+                    if !held.covers(requested) {
+                        return Err(DocsError::Denied);
+                    }
                 }
                 for placement in &request.scope.create {
                     self.authorize(
@@ -409,7 +415,10 @@ mod tests {
         };
         let mut scope = DocScope {
             read: BTreeSet::from([read.clone()]),
-            write: BTreeSet::from([write.clone()]),
+            write: std::collections::BTreeMap::from([(
+                write.clone(),
+                big_cabinet_core::doc::DatumKinds::All,
+            )]),
             drawers,
             ..Default::default()
         };
@@ -487,7 +496,11 @@ mod tests {
         assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
         let read_only = DomainAuthority::Scoped(DocScope {
             read: BTreeSet::from([read]),
-            write: writable.clone(),
+            write: writable
+                .clone()
+                .into_iter()
+                .map(|doc| (doc, big_cabinet_core::doc::DatumKinds::All))
+                .collect(),
             drawers: BTreeMap::from([(first, DrawerAccess::Read)]),
             ..Default::default()
         });
