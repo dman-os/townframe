@@ -112,6 +112,13 @@ Scope: Decisions, open questions and work in flight for the intxt lane (datums, 
     - A collaborative worktree that checks out another commit is a new worktree.
     - A secret is removed by replacing a document with a squash replay that starts after it.
 - **D58 (2026-11-12, operator)** intxt sits on top of git: a merge request stays a git merge request, and the intxt records how the work happened. Commits, with their hunks, are part of the intxt's data. Comments attach to commit content and are never retargeted; the intxt never loses a commit because it isn't ref-based (the complaint about GitHub). Whether a comment matters to a PR is a view or a cut. ADR 040 §3's worktree op log is the oplog mirror for git; sessions correlate to edits by the tool-call cause, or by timestamp when none is known. A CRDT on a POSIX filesystem that doesn't cooperate is the hard part. The experiment in `intxt-file-docs.md` goes ahead.
+- **Open thread (2026-11-12, operator): uncommitted work on another device.** Under D59, ops name blobs that only the recording machine's `.git` holds, so another device can't see or check out intermediate work before it is committed or packaged (a live intxt, review from a phone). Pre-D59 file docs covered this; nothing does now. Deferred: the VCS built later should solve it, but the operator wants more than that. A possible approach, for when we pick it up: bring file documents back for this use case only, shaped to match the git/jj view:
+  - a file document always starts from a git commit: its first change (its genesis) is the path's blob at that commit, and edits on top accumulate;
+  - checking out another commit starts a new file document;
+  - a stash or a reset abandons the working state. Going back to the same commit can reuse the old document as a branch that starts from its genesis change, instead of a new document;
+  - so a document carries only one working copy's edits since one commit, never unrelated history (the granularity concern), and it corresponds to jj's working-copy commit on top of that commit.
+
+  Hard parts to work out then: how a branch from the genesis change is named and found, and keeping documents consistent with what git and jj report.
 - **D60 (2026-11-12, operator)** The recorder keeps the uncommitted objects it writes (`git hash-object -w`) reachable under its own ref, as jj does with `refs/jj/keep/*`, so `git gc` doesn't prune them before an intxt packs them (ADR 040 §9 Q2).
 - **D59 (2026-11-12, operator)** C is accepted (`docs/scratch/intxt-file-docs.md`, F25–F27). Filesystem worktrees are recorded without file documents:
   - the worktree op log (ADR 040 §3) has one op per observed tool-call window, with the git blob id of each changed path;
