@@ -371,6 +371,55 @@ fn a_fling_with_no_height_changes_issues_no_programmatic_scroll() {
     );
 }
 
+/// A jump swaps the whole window, and the engine reports every new row's size and visibility in
+/// the same frame. Upstream's observers deliver those entries in one callback each, so the pass
+/// that reads them runs once; one pass per row (200 rows, 400 events) is what made a jump
+/// blank for a long time under an IPC-bound renderer.
+#[test]
+fn a_jump_costs_a_handful_of_dispatch_rounds_not_one_per_row() {
+    let mut rig = Rig::new(3000);
+    rig.boot();
+    let mut measured = std::collections::HashSet::new();
+    rig.measure_new_rows(20.0, &mut measured);
+    for (from, to) in [(0.0, 20_000.0), (20_000.0, 40_000.0)] {
+        rig.scroll_to(from);
+        rig.measure_new_rows(20.0, &mut measured);
+        let (flushes, scrolls) = (rig.view.host.flush_count(), rig.root.log.borrow().len());
+        rig.scroll_to(to);
+        let lines = rig.rendered_lines();
+        let first_visible = (to / 20.0) as usize + 1;
+        assert!(
+            lines.first().is_some_and(|first| *first <= first_visible)
+                && lines.last().is_some_and(|last| *last >= first_visible + 25),
+            "the first dispatch left the viewport without rows: {:?}..{:?}",
+            lines.first(),
+            lines.last()
+        );
+        let rendered = lines.len();
+        rig.measure_new_rows(20.0, &mut measured);
+        let rows_visible: Vec<NodeKey> = {
+            let document = super::host_document(&rig.view.host);
+            let shadow = document.shadow_root(rig.view.host.container()).unwrap();
+            document.query_by_attribute(shadow, "data-line-index", None)
+        };
+        rig.deliver(|rig| {
+            for row in rows_visible {
+                rig.dispatch().visible(row, true);
+            }
+        });
+        let used = rig.view.host.flush_count() - flushes;
+        assert!(
+            rendered >= 150 && used <= 10,
+            "a jump of {rendered} rows took {used} dispatch rounds"
+        );
+        assert_eq!(
+            rig.root.log.borrow().len(),
+            scrolls,
+            "a jump wrote the scroll position"
+        );
+    }
+}
+
 #[test]
 fn only_the_window_around_the_viewport_is_rendered_and_it_follows_scrolling() {
     let mut rig = Rig::new(3000);
