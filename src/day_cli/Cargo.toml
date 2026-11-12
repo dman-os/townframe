@@ -27,8 +27,8 @@ big_repo.workspace = true
 big_blobs_core.workspace = true
 big_cabinet.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
-intxt_capture = { path = "../intxt_capture" }
-intxt_core = { path = "../intxt_core", features = ["cartridge", "client"] }
+intxt_capture.workspace = true
+intxt_core = { workspace = true, features = ["cartridge", "client"] }
 
 #
 # cli

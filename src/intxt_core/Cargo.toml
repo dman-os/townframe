@@ -26,24 +26,32 @@ cartridge = ["schemars", "dep:big_cartridges_core", "big_cartridges_core/test-su
 client = ["dep:blake3", "dep:service_client_core_rs", "dep:service_core_rs"]
 
 [dependencies]
-big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
-macros = { path = "../macros" }
+#
+# internal
+big_cabinet_core = { workspace = true, features = ["schemars"] }
+macros.workspace = true
+method_core.workspace = true
+service_client_core_rs = { workspace = true, optional = true }
+service_core_rs = { workspace = true, optional = true }
+#
+# external
 automerge.workspace = true
 blake3 = { workspace = true, optional = true }
 jiff.workspace = true
-method_core.workspace = true
 schemars = "1.2"
 serde.workspace = true
-service_client_core_rs = { workspace = true, optional = true }
-service_core_rs = { workspace = true, optional = true }
 serde_json.workspace = true
 thiserror.workspace = true
 
 # The cartridge builder is host-only (`cartridge` feature); a wasm guest never links it.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-big_cartridges_core = { path = "../big_cartridges_core", default-features = false, optional = true }
-big_nodule_core = { path = "../big_nodule_core", default-features = false, optional = true }
+#
+# internal
+big_cartridges_core = { workspace = true, optional = true }
+big_nodule_core = { workspace = true, optional = true }
+method_lexicon = { workspace = true, optional = true }
+#
+# external
 indexmap = { version = "2", features = ["serde"], optional = true }
-method_lexicon = { path = "../method_lexicon", optional = true }
 
 [dev-dependencies]

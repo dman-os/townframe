@@ -10,8 +10,12 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-big_cabinet_core = { path = "../big_cabinet_core", default-features = false, features = ["schemars"] }
-intxt_core = { path = "../intxt_core" }
+#
+# internal
+big_cabinet_core = { workspace = true, features = ["schemars"] }
+intxt_core.workspace = true
+#
+# external
 jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,4 +24,6 @@ thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+#
+# external
 tempfile.workspace = true
