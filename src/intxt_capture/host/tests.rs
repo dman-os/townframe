@@ -377,6 +377,34 @@ fn overlapping_windows_keep_the_op_log_linear() {
 }
 
 #[test]
+fn a_segment_with_one_other_call_open_is_that_calls() {
+    // A opens, x appears (A alone), B opens, y appears (both), B closes: x is A's although B's
+    // close observed it. After B's close A is alone again: z is A's at A's close.
+    let env = Env::new();
+    let log = overlapping_windows_log(
+        &env,
+        &[
+            ("PreToolUse", "t1", ""),
+            ("write", "x.txt", "x\n"),
+            ("PreToolUse", "t2", ""),
+            ("write", "y.txt", "y\n"),
+            ("PostToolUse", "t2", ""),
+            ("write", "z.txt", "z\n"),
+            ("PostToolUse", "t1", ""),
+        ],
+    );
+    let text = |content: &str| Some(content.to_owned());
+    assert_eq!(
+        log,
+        [
+            (Some("t1".to_owned()), "x.txt".to_owned(), text("x")),
+            (None, "y.txt".to_owned(), text("y")),
+            (Some("t1".to_owned()), "z.txt".to_owned(), text("z")),
+        ]
+    );
+}
+
+#[test]
 fn sequential_windows_and_edits_before_a_window_keep_their_causes() {
     let env = Env::new();
     let log = overlapping_windows_log(
