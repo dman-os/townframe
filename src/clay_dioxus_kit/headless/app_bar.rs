@@ -105,11 +105,12 @@ mod storm {
     use dioxus_storm::Storm;
 
     fn bar() -> Element {
+        let mut presses = use_signal(|| 0u32);
         rsx! {
             AppBar {
                 title: "Settings",
-                leading: Some(rsx! { button { "Menu" } }),
-                trailing: Some(rsx! { button { "More" } }),
+                leading: Some(rsx! { button { onclick: move |_| presses += 1, "Menu {presses}" } }),
+                trailing: Some(rsx! { button { onclick: move |_| presses.set(0), "More" } }),
             }
         }
     }

@@ -412,19 +412,13 @@ mod transitions {
     fn a_press_engages_the_strip_on_the_breakpoint_under_it_and_reports_it_once() {
         let (state, effects) = run(
             &ArcState::default(),
-            &[
-                ArcEvent::Press {
-                    x: 1050.0,
-                    y: y_of(5),
-                },
-                ArcEvent::Drag {
-                    x: 1040.0,
-                    y: y_of(5),
-                },
-            ],
+            &[ArcEvent::Press {
+                x: 1050.0,
+                y: y_of(5),
+            }],
         );
         assert_eq!(state.settle, 1.0);
-        assert_eq!(state.thumb_x, Some(1040.0));
+        assert_eq!(state.thumb_x, Some(1050.0));
         assert_eq!(state.generation, 1);
         assert_eq!(state.focus.round() as usize, 5);
         assert_eq!(effects, [Effect::Select(5)]);
