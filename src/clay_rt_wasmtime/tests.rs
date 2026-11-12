@@ -1561,7 +1561,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
                 document: route.document.clone(),
                 branch: route.branch.clone(),
                 datums: vec![clay_docs::DatumAccess {
-                    tag: route.tag.clone().into(),
+                    tag: route.tag.clone(),
                     slot: Some(route.slot.clone()),
                     read: true,
                     write: true,
