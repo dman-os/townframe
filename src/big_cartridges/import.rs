@@ -8,17 +8,26 @@
 
 use big_blobs::BlobService;
 use big_cabinet_core::authority::Authorization;
-use big_cartridges_core::Artifact;
+use big_cabinet_core::reference::DatumKey;
+use big_cabinet_core::reference::DatumPin;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::Location;
+use big_cabinet_core::reference::ReferenceDocId;
+
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
-use big_cartridges_core::Contribution;
+
+use big_cartridges_core::Component;
 use big_cartridges_core::Digest;
 use big_cartridges_core::MicroContribution;
+use big_cartridges_core::WasmComponent;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::CartridgesProtocol;
 use big_cartridges_core::protocol::GetPublisher;
 use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
+use big_cartridges_core::protocol::ResolveCartridgeVersion;
+use big_cartridges_core::protocol::StageCartridgeVersion;
 use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -128,23 +137,99 @@ pub async fn micro_pair(
         .import_stream(futures::stream::iter([Ok(bytes::Bytes::from(component))]))
         .await
         .map_err(|error| ImportError::Blob(error.to_string()))?;
-    let mut envelope = Cartridge::new(cartridge_id, version);
-    envelope.authority = authority;
-    envelope.artifacts.push(Artifact {
-        key: MICRO_COMPONENT_ARTIFACT.into(),
-        digest: Digest(imported.info.blob_id.to_bytes32()),
-        size: Some(size),
-        media_type: Some(WASM_MEDIA_TYPE.into()),
-        extra: Default::default(),
-    });
-    envelope
-        .contributions
-        .push(Contribution::Micro(MicroContribution {
-            component: MICRO_COMPONENT_ARTIFACT.into(),
-            schema: CLAY_MICRO_MANIFEST_SCHEMA.into(),
-            description: manifest.into_iter().collect(),
-            extra: Default::default(),
-        }));
+    let component_pin = DatumPin::new(
+        Location::new(
+            DatumReference::new(
+                ReferenceDocId::SelfDoc,
+                DatumKey::new("staged", b"component".to_vec()).expect("a valid datum key"),
+            ),
+            None,
+        )
+        .expect("a valid location"),
+    );
+    let envelope = stage_then_publish(
+        cartridges,
+        &authorization,
+        StageCartridgeVersion {
+            id: cartridge_id,
+            version,
+            lexicons: Default::default(),
+            sidecars: Default::default(),
+            components: std::collections::BTreeMap::from([(
+                MICRO_COMPONENT_ARTIFACT.into(),
+                Component::Wasm(WasmComponent {
+                    bytes: component_pin,
+                    digest: Digest(imported.info.blob_id.to_bytes32()),
+                    size,
+                    media_type: WASM_MEDIA_TYPE.into(),
+                    extra: Default::default(),
+                }),
+            )]),
+        },
+        move |envelope| {
+            envelope.authority = authority;
+            envelope.micro = Some(MicroContribution {
+                component: MICRO_COMPONENT_ARTIFACT.into(),
+                schema: CLAY_MICRO_MANIFEST_SCHEMA.into(),
+                description: manifest.into_iter().collect(),
+                extra: Default::default(),
+            });
+        },
+    )
+    .await?;
+    Ok(envelope)
+}
+
+async fn stage_then_publish<F>(
+    cartridges: &Client<CartridgesProtocol>,
+    authorization: &Authorization,
+    params: StageCartridgeVersion,
+    decorate: F,
+) -> Result<PublishedCartridgeVersion, ImportError>
+where
+    F: FnOnce(&mut Cartridge),
+{
+    let wanted = params.clone();
+    let staged = cartridges
+        .call_with(RequestContext::root(), authorization.metadata(), params)
+        .await;
+    let envelope = match staged {
+        Ok(mut envelope) => {
+            decorate(&mut envelope);
+            envelope
+        }
+        // Staging refuses a published version. Importing the same package again is not an
+        // error: it publishes what is already there, which the registry answers as unchanged.
+        Err(ClientError::Method(CartridgesError::AlreadyPublished { id, version })) => {
+            let resolved = cartridges
+                .call_with(
+                    RequestContext::root(),
+                    authorization.metadata(),
+                    ResolveCartridgeVersion {
+                        id,
+                        version: *version,
+                    },
+                )
+                .await
+                .map_err(registry_error)?;
+            let existing = resolved.cartridge.clone();
+            let same_payloads = resolved.lexicons == wanted.lexicons
+                && resolved.sidecars == wanted.sidecars
+                && same_components(&resolved.components, &wanted.components);
+            let mut incoming = existing.clone();
+            decorate(&mut incoming);
+            if !same_payloads || incoming.revision() != existing.revision() {
+                return Err(ImportError::Registry(CartridgesError::VersionExists {
+                    id: existing.id.clone(),
+                    version: Box::new(existing.version.clone()),
+                    existing: existing.revision(),
+                    incoming: incoming.revision(),
+                }));
+            }
+            existing
+        }
+        Err(error) => return Err(registry_error(error)),
+    };
     cartridges
         .call_with(
             RequestContext::root(),
@@ -153,4 +238,22 @@ pub async fn micro_pair(
         )
         .await
         .map_err(registry_error)
+}
+
+/// Whether two sets of components hold the same bytes under the same keys; where each pins its
+/// bytes in the registry is no part of what they are.
+fn same_components(
+    stored: &std::collections::BTreeMap<String, Component>,
+    wanted: &std::collections::BTreeMap<String, Component>,
+) -> bool {
+    stored.len() == wanted.len()
+        && stored
+            .iter()
+            .all(|(key, stored)| match (stored, wanted.get(key)) {
+                (Component::Wasm(stored), Some(Component::Wasm(wanted))) => {
+                    (stored.digest, stored.size, &stored.media_type)
+                        == (wanted.digest, wanted.size, &wanted.media_type)
+                }
+                _ => false,
+            })
 }
