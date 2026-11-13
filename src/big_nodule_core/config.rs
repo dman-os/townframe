@@ -23,6 +23,7 @@
 //! independently for the reconciler.
 
 use crate::Nodule;
+use crate::NoduleAdmission;
 use crate::inventory::FilledBy;
 use crate::inventory::InstalledNodule;
 use crate::inventory::InventoryError;
@@ -43,6 +44,7 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
 use big_cartridges_core::config::CartridgeConfigIdentity;
@@ -284,15 +286,10 @@ pub enum Admission {
     Admitted {
         version: Version,
         revision: Revision,
+        resolved: ResolvedCartridge,
         nodule: Nodule,
         admitted: crate::Admitted,
-        artifacts: BTreeMap<
-            String,
-            (
-                big_cartridges_core::Artifact,
-                crate::inventory::ArtifactState,
-            ),
-        >,
+        artifacts: BTreeMap<String, (crate::inventory::Artifact, crate::inventory::ArtifactState)>,
     },
     /// The version cannot be installed as a nodule, or could not be read; `version` and `revision`
     /// are what is known of it for the refusal record.
@@ -308,9 +305,10 @@ impl Admission {
     pub fn of(cartridge: &Cartridge) -> Self {
         let revision = cartridge.revision();
         match admit_cartridge_nodule(cartridge) {
-            Ok((nodule, admitted, artifacts)) => Self::Admitted {
+            Ok((resolved, nodule, admitted, artifacts)) => Self::Admitted {
                 version: cartridge.version.clone(),
                 revision,
+                resolved,
                 nodule,
                 admitted,
                 artifacts,
@@ -891,7 +889,7 @@ impl NoduleConfig {
             raw: None,
         };
         entry.artifacts = match nodule {
-            Some((_, _, artifacts)) => artifact_slots(&entry.artifacts, &artifacts),
+            Some((_, _, _, artifacts)) => artifact_slots(&entry.artifacts, &artifacts),
             None => BTreeMap::new(),
         };
         // A cartridge installed disabled holds nothing yet; an upgrade of an enabled one must not
@@ -1274,13 +1272,7 @@ fn diff_slot<T: PartialEq + Serialize>(
 /// that did not decode is replaced, which is how it is repaired.
 fn artifact_slots(
     stored: &BTreeMap<String, DatumSlot<Blob>>,
-    artifacts: &BTreeMap<
-        String,
-        (
-            big_cartridges_core::Artifact,
-            crate::inventory::ArtifactState,
-        ),
-    >,
+    artifacts: &BTreeMap<String, (crate::inventory::Artifact, crate::inventory::ArtifactState)>,
 ) -> BTreeMap<String, DatumSlot<Blob>> {
     artifacts
         .iter()
@@ -1410,7 +1402,7 @@ fn lexicon_conflicts(
             continue;
         }
         let authority = installed.admitted.authority.as_deref();
-        for file in &installed.nodule.lexicons {
+        for file in installed.resolved.lexicons.values() {
             let nsid = file
                 .get("id")
                 .and_then(Value::as_str)
@@ -1419,7 +1411,7 @@ fn lexicon_conflicts(
                 cartridge_id,
                 held: authority
                     .is_some_and(|authority| DispatchScope::authority_owns(authority, nsid)),
-                revision: installed.nodule.lexicon_revision(nsid),
+                revision: installed.resolved.lexicon_revision(nsid),
                 file,
             });
         }
@@ -1514,15 +1506,30 @@ fn filler<'a>(
 /// the slot's own code and never silently stretches to the filler's additions (ADR 028 §3), so
 /// granting one means naming it. This is computed, never written back: the stored grants are
 /// untouched, and clearing the takeover restores exactly what was granted.
-fn substituted_grants(own: &Nodule, filler: &Nodule, granted: &DispatchScope) -> DispatchScope {
+fn substituted_grants(
+    own: &ResolvedCartridge,
+    filler: &ResolvedCartridge,
+    granted: &DispatchScope,
+) -> DispatchScope {
     DispatchScope {
         operations: filler
             .operation_requests()
+            .into_iter()
             .filter(|request| {
-                let shared = own.requires.iter().any(|own| {
-                    (&own.binding, &own.contract, &own.access)
-                        == (&request.binding, &request.contract, &request.access)
+                let shared = own.operation_requests().iter().any(|own| {
+                    (
+                        &own.binding,
+                        &own.contract,
+                        &own.necessity,
+                        &own.min_revision,
+                    ) == (
+                        &request.binding,
+                        &request.contract,
+                        &request.necessity,
+                        &request.min_revision,
+                    )
                 });
+
                 if shared {
                     granted.permits(&request.contract)
                 } else {
@@ -1597,7 +1604,7 @@ fn resolve_entry(
             return Some(refuse(None, own.revision(), reason));
         }
     };
-    let (version, revision, nodule, admitted, artifacts) = match &*admission {
+    let (version, revision, resolved, nodule, admitted, artifacts) = match &*admission {
         Admission::Refused {
             version,
             revision,
@@ -1607,11 +1614,13 @@ fn resolve_entry(
             version,
             revision,
             nodule,
+            resolved,
             admitted,
             artifacts,
         } => (
             version.clone(),
             *revision,
+            resolved.clone(),
             nodule.clone(),
             admitted.clone(),
             artifacts.clone(),
@@ -1626,17 +1635,18 @@ fn resolve_entry(
         },
     };
     if filled_from.is_some() {
-        let Admission::Admitted { nodule: own, .. } = &*cache.admission(cartridge_id, install)
+        let Admission::Admitted { resolved: own, .. } = &*cache.admission(cartridge_id, install)
         else {
             unreachable!("code_source admitted the slot's own install while checking the filler");
         };
-        desired_operations = substituted_grants(own, &nodule, &desired_operations);
+        desired_operations = substituted_grants(own, &resolved, &desired_operations);
     }
 
     let mut installed = InstalledNodule::new(
         cartridge_id.clone(),
         version.clone(),
         revision,
+        resolved,
         nodule,
         admitted,
         artifacts,
