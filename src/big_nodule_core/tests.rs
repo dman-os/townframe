@@ -1091,23 +1091,47 @@ mod admission_tests {
     use big_dispatch_core::Readiness;
     use std::sync::Arc;
 
+    /// A resolved cartridge as the registry hands it over, which reads as its envelope so a test
+    /// can edit the envelope in place and still carry the resolved payloads beside it.
+    pub(super) struct Fixture {
+        pub(super) resolved: ResolvedCartridge,
+    }
+
+    impl Fixture {
+        /// `cartridge` with nothing resolved: no Lexicons, sidecars or components.
+        pub(super) fn bare(cartridge: Cartridge) -> Self {
+            Self {
+                resolved: ResolvedCartridge::new(
+                    cartridge,
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                    BTreeMap::new(),
+                ),
+            }
+        }
+    }
+
+    impl std::ops::Deref for Fixture {
+        type Target = Cartridge;
+        fn deref(&self) -> &Cartridge {
+            &self.resolved.cartridge
+        }
+    }
+
+    impl std::ops::DerefMut for Fixture {
+        fn deref_mut(&mut self) -> &mut Cartridge {
+            &mut self.resolved.cartridge
+        }
+    }
+
     /// An envelope holding the photo browser's authority; a test that holds another overwrites
     /// `authority`.
-    fn cartridge_with(id: &str, version: &str, nodule: Nodule) -> Cartridge {
-        let resolved = nodule.resolved(Some(PHOTOS));
-        let mut cartridge = resolved.cartridge;
-        cartridge.id = id.parse().unwrap();
-        cartridge.version = version.parse().unwrap();
-        cartridge.authority = Some(PHOTOS.into());
-        cartridge.extra.insert(
-            "_resolvedLexicons".into(),
-            serde_json::to_value(resolved.lexicons).unwrap(),
-        );
-        cartridge.extra.insert(
-            "_resolvedComponents".into(),
-            serde_json::to_value(resolved.components).unwrap(),
-        );
-        cartridge
+    fn cartridge_with(id: &str, version: &str, nodule: Nodule) -> Fixture {
+        let mut resolved = nodule.resolved(Some(PHOTOS));
+        resolved.cartridge.id = id.parse().unwrap();
+        resolved.cartridge.version = version.parse().unwrap();
+        resolved.cartridge.authority = Some(PHOTOS.into());
+        Fixture { resolved }
     }
 
     /// The pin of `cartridge` in a registry document of its own, at heads derived from its
@@ -1125,9 +1149,9 @@ mod admission_tests {
     pub(super) fn install(
         config: &mut NoduleConfig,
         cache: &AdmissionCache,
-        cartridge: &Cartridge,
+        fixture: &Fixture,
     ) -> std::result::Result<(), InventoryError> {
-        config.install(cache, cartridge, pin_of(cartridge), DocId::random())
+        config.install(cache, &fixture.resolved, pin_of(fixture), DocId::random())
     }
 
     /// The installed nodule `config` currently resolves for `id`, as the runtime would see it.
@@ -1276,7 +1300,7 @@ mod admission_tests {
             "1.0.0".parse().unwrap(),
         );
         micro(&mut only_micro);
-        install(&mut config, &cache, &only_micro).unwrap();
+        install(&mut config, &cache, &Fixture::bare(only_micro)).unwrap();
         let panel: CartridgeId = example_cartridge!("panel").parse().unwrap();
         let row = &config.installs()[0].install;
         assert!(row.nodule.is_none());
@@ -1322,7 +1346,7 @@ mod admission_tests {
             "0.1.0".parse().unwrap(),
         );
         assert!(matches!(
-            install(&mut config, &cache, &empty),
+            install(&mut config, &cache, &Fixture::bare(empty)),
             Err(InventoryError::NothingToInstall(_))
         ));
     }
@@ -1477,7 +1501,7 @@ mod admission_tests {
         assert!(reason.contains("not available yet"), "{reason}");
 
         // Once read it is settled and the same pin resolves.
-        cache.insert(&id, pin.clone(), Admission::of(&v1), true);
+        cache.insert(&id, pin.clone(), Admission::of(&v1.resolved), true);
         assert!(!cache.needs_read(&id, &pin));
         assert_eq!(resolved(&config, &cache, &id).revision, v1.revision());
     }
@@ -1495,7 +1519,7 @@ mod admission_tests {
             micro: None,
             extra: Default::default(),
         };
-        cache.insert(&id, pin.clone(), Admission::of(&v1), true);
+        cache.insert(&id, pin.clone(), Admission::of(&v1.resolved), true);
         let first = cache.admission(&id, &install(&pin));
         assert!(matches!(&*first, Admission::Admitted { .. }));
         assert!(
@@ -1534,7 +1558,12 @@ mod admission_tests {
             let mut cartridge = cartridge_with(cartridge_id, "1.0.0", Nodule::default());
             cartridge.authority = Some(authority.into());
             let pin = pin_of(&cartridge);
-            cache.insert(&cartridge.id, pin.clone(), Admission::of(&cartridge), true);
+            cache.insert(
+                &cartridge.id,
+                pin.clone(),
+                Admission::of(&cartridge.resolved),
+                true,
+            );
             read.datums.insert(
                 install_key(&cartridge.id),
                 DatumRead::Accepted {
@@ -1657,12 +1686,12 @@ mod admission_tests {
             "0.1.0".parse().unwrap(),
         );
         assert!(matches!(
-            install(&mut config, &cache, &empty),
+            install(&mut config, &cache, &Fixture::bare(empty)),
             Err(InventoryError::NothingToInstall(_))
         ));
 
         let mut no_component = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        no_component.extra.shift_remove("_resolvedComponents");
+        no_component.resolved.components.clear();
         let result = install(&mut config, &cache, &no_component);
         assert!(
             matches!(&result, Err(InventoryError::Nodule(_))),
@@ -1799,6 +1828,7 @@ mod declaration {
 }
 
 mod config_tests {
+    use super::admission_tests::Fixture;
     use super::admission_tests::install;
     use super::*;
     use crate::config::AdmissionCache;
@@ -1816,7 +1846,6 @@ mod config_tests {
     use big_cabinet_core::doc::DatumsRead;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::EntryAccess;
-    use big_cartridges_core::Cartridge;
     use big_cartridges_core::CartridgeId;
     use big_cartridges_core::Digest;
     use big_cartridges_core::config::CartridgeConfigIdentity;
@@ -1830,21 +1859,12 @@ mod config_tests {
     use big_cartridges_core::config::install_key;
     use big_cartridges_core::example_cartridge;
 
-    fn sample_cartridge(id: &str, version: &str) -> Cartridge {
-        let resolved = photos().resolved(Some(PHOTOS));
-        let mut cartridge = resolved.cartridge;
-        cartridge.id = id.parse().unwrap();
-        cartridge.version = version.parse().unwrap();
-        cartridge.authority = Some(PHOTOS.into());
-        cartridge.extra.insert(
-            "_resolvedLexicons".into(),
-            serde_json::to_value(resolved.lexicons).unwrap(),
-        );
-        cartridge.extra.insert(
-            "_resolvedComponents".into(),
-            serde_json::to_value(resolved.components).unwrap(),
-        );
-        cartridge
+    fn sample_cartridge(id: &str, version: &str) -> Fixture {
+        let mut resolved = photos().resolved(Some(PHOTOS));
+        resolved.cartridge.id = id.parse().unwrap();
+        resolved.cartridge.version = version.parse().unwrap();
+        resolved.cartridge.authority = Some(PHOTOS.into());
+        Fixture { resolved }
     }
 
     fn accepted(value: Value) -> DatumRead {
@@ -1856,7 +1876,7 @@ mod config_tests {
     }
 
     /// The install datum of `cartridge` as the node document stores it.
-    fn stored_install(cartridge: &Cartridge, enabled: bool) -> Value {
+    fn stored_install(cartridge: &Fixture, enabled: bool) -> Value {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
         install(&mut config, &cache, cartridge).unwrap();
@@ -1997,7 +2017,7 @@ mod config_tests {
         cache.insert(
             &photos_id,
             pin,
-            crate::config::Admission::of(&photos_cartridge),
+            crate::config::Admission::of(&photos_cartridge.resolved),
             true,
         );
         let resolved = before.resolve(&cache);
@@ -2151,11 +2171,10 @@ mod config_tests {
     }
 
     /// The `Blob` datum stored for `cartridge`'s handler artifact, as the document holds it.
-    fn stored_artifact(cartridge: &Cartridge) -> Value {
-        let components: BTreeMap<String, big_cartridges_core::Component> =
-            serde_json::from_value(cartridge.extra.get("_resolvedComponents").unwrap().clone())
-                .unwrap();
-        let big_cartridges_core::Component::Wasm(artifact) = &components["handler"] else {
+    fn stored_artifact(cartridge: &Fixture) -> Value {
+        let big_cartridges_core::Component::Wasm(artifact) =
+            &cartridge.resolved.components["handler"]
+        else {
             panic!("handler component is not wasm")
         };
         json!({
@@ -2305,27 +2324,27 @@ mod config_tests {
             .cartridge
             .clone();
         let doc = stored.config_docs()[&id].clone();
-        cache.insert(&id, pin.clone(), crate::config::Admission::of(&v1), true);
+        cache.insert(
+            &id,
+            pin.clone(),
+            crate::config::Admission::of(&v1.resolved),
+            true,
+        );
         let mut again = stored.clone();
-        again.install(&cache, &v1, pin, doc).unwrap();
+        again.install(&cache, &v1.resolved, pin, doc).unwrap();
         let patch = NoduleConfig::diff(&stored, &again).unwrap();
         assert!(patch.set.is_empty(), "{:?}", patch.set);
         assert_eq!(patch.remove, BTreeSet::from([stale.clone()]));
 
         // Upgrading to a revision with another handler swaps the reference in place.
         let mut v2 = sample_cartridge(example_cartridge!("photos"), "1.1.0");
-        let mut components: BTreeMap<String, big_cartridges_core::Component> =
-            serde_json::from_value(v2.extra.get("_resolvedComponents").unwrap().clone()).unwrap();
-        let big_cartridges_core::Component::Wasm(artifact) = components.get_mut("handler").unwrap()
+        let big_cartridges_core::Component::Wasm(artifact) =
+            v2.resolved.components.get_mut("handler").unwrap()
         else {
             panic!("handler component is not wasm")
         };
         artifact.digest = Digest::of(b"other-wasm-bytes");
         artifact.size = 16;
-        v2.extra.insert(
-            "_resolvedComponents".into(),
-            serde_json::to_value(components).unwrap(),
-        );
         let mut upgraded = stored.clone();
         install(&mut upgraded, &cache, &v2).unwrap();
         let patch = NoduleConfig::diff(&stored, &upgraded).unwrap();
