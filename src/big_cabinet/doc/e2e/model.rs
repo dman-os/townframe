@@ -502,7 +502,10 @@ impl Request {
                 actor,
                 &mut request.capability,
                 DocScope {
-                    write: BTreeSet::from([request.doc_id.clone()]),
+                    write: std::collections::BTreeMap::from([(
+                        request.doc_id.clone(),
+                        big_cabinet_core::doc::DatumKinds::All,
+                    )]),
                     ..DocScope::default()
                 },
             ),
@@ -573,7 +576,10 @@ async fn run(
                     DocScope::default()
                 } else {
                     DocScope {
-                        write: BTreeSet::from([model.document.clone()]),
+                        write: std::collections::BTreeMap::from([(
+                            model.document.clone(),
+                            big_cabinet_core::doc::DatumKinds::All,
+                        )]),
                         ..DocScope::default()
                     }
                 };

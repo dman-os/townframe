@@ -734,7 +734,10 @@ impl Core {
             context,
             self.issuer,
             DocScope {
-                write: [drawer.clone()].into(),
+                write: std::collections::BTreeMap::from([(
+                    drawer.clone(),
+                    big_cabinet_core::doc::DatumKinds::All,
+                )]),
                 ..Default::default()
             },
             |Authorization {

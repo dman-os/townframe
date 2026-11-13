@@ -23,12 +23,12 @@ impl DocsService {
             AccessRequest::Read(&params.source_id),
         )
         .await?;
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Write(&params.target_id),
-        )
-        .await?;
+        let target_kinds = self
+            .authorize_write(context, &caller.authority, &params.target_id)
+            .await?;
+        if !matches!(target_kinds, DatumKinds::All) {
+            return Err(DocsError::Denied);
+        }
         let request_digest = digest(&(
             "merge",
             actor.actor_id,
