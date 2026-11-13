@@ -2,21 +2,19 @@
 //! e2e (`src/big_node/e2e/nodule_wasm.rs`): the same contract, observed through the same real
 //! node, with the native executor in place of the wasm one.
 
-use big_cabinet_core::datum::DatumMember;
-use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
-use big_cartridges_core::request::Necessity;
-use big_cartridges_core::request::Request;
+use big_cartridges_core::ComponentExport;
+use big_cartridges_core::Nodule;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindMethod;
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Handler;
-use big_nodule_core::Nodule;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
@@ -88,79 +86,102 @@ fn procedure(nsid: &str, input: Value) -> Value {
     })
 }
 
-/// The cartridge declaring `spec`'s echo and relay, with a handler artifact whose digest is a
-/// placeholder (its bytes are never put), requesting each of `calls`.
-fn cartridge(spec: &Spec, calls: &[String]) -> Cartridge {
+/// The cartridge declaring `spec`'s echo and relay, with a handler component of placeholder bytes
+/// (the native executor never reads them), requesting each of `calls`.
+fn cartridge(spec: &Spec, calls: &[String]) -> FixtureCartridge {
     cartridge_with_echo_input(spec, calls, json!({ "type": "object", "properties": {} }))
 }
 
 /// [`cartridge`] with `echo_input` as the input schema its `echo` declares.
-fn cartridge_with_echo_input(spec: &Spec, calls: &[String], echo_input: Value) -> Cartridge {
-    let mut nodule = Nodule {
-        requires: calls
-            .iter()
-            .map(|nsid| {
-                let mut request = Request::new(nsid, nsid);
-                request.necessity = Necessity::Optional;
-                request
-            })
-            .collect(),
-        ..Default::default()
-    };
+fn cartridge_with_echo_input(spec: &Spec, calls: &[String], echo_input: Value) -> FixtureCartridge {
     let operations = [spec.echo(), spec.relay(), spec.ask()];
+    let mut nodule = Nodule::default();
+    let mut lexicons = Vec::new();
     for nsid in &operations {
         let input = if *nsid == spec.echo() {
             echo_input.clone()
         } else {
             json!({ "type": "object", "properties": {} })
         };
-        nodule
-            .lexicons
-            .push(serde_json::from_value(procedure(nsid, input)).unwrap());
+        lexicons.push(serde_json::from_value(procedure(nsid, input)).unwrap());
+        nodule.routines.insert(
+            nsid.clone(),
+            Routine {
+                r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                    component: "handler".into(),
+                    export: "handle".into(),
+                    extra: Default::default(),
+                }),
+                implements: nsid.parse().unwrap(),
+                uses: Default::default(),
+                extra: Default::default(),
+            },
+        );
     }
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.lexicons.push(
-        serde_json::from_value(json!({
-            "lexicon": 1,
-            "id": spec.peek(),
-            "defs": { "main": {
-                "type": "query",
-                "parameters": {
-                    "type": "params",
-                    "required": ["n", "label"],
-                    "properties": {
-                        "n": { "type": "integer" },
-                        "label": { "type": "string" }
-                    }
-                },
-                "output": {
-                    "encoding": "application/json",
-                    "schema": { "type": "object", "properties": {} }
+    let peek = spec.peek();
+    let peek_file = serde_json::from_value(json!({
+        "lexicon": 1,
+        "id": peek,
+        "defs": { "main": {
+            "type": "query",
+            "parameters": {
+                "type": "params",
+                "required": ["n", "label"],
+                "properties": {
+                    "n": { "type": "integer" },
+                    "label": { "type": "string" }
                 }
-            }}
-        }))
-        .unwrap(),
-    );
-    nodule.implements = operations.into_iter().chain([spec.peek()]).collect();
-    let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
-    cartridge.authority = Some(spec.authority.to_owned());
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest::of(b"placeholder: the native executor never reads the handler"),
-        size: Some(1),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
+            },
+            "output": {
+                "encoding": "application/json",
+                "schema": { "type": "object", "properties": {} }
+            }
+        }}
+    }))
+    .unwrap();
+    lexicons.push(peek_file);
+    nodule.routines.insert(
+        peek.clone(),
+        Routine {
+            r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                component: "handler".into(),
+                export: "handle".into(),
+                extra: Default::default(),
+            }),
+            implements: peek.parse().unwrap(),
+            uses: Default::default(),
             extra: Default::default(),
-        }));
+        },
+    );
+
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        spec.cartridge.clone(),
+        "1.0.0".parse().unwrap(),
+    ));
+    cartridge.authority = Some(spec.authority.to_owned());
+    cartridge.nodule = Some(nodule);
+    for file in lexicons {
+        cartridge.with_lexicon(file);
+    }
+    cartridge.with_wasm(
+        "handler",
+        b"placeholder: the native executor never reads the handler",
+    );
+    cartridge.permbinds = calls
+        .iter()
+        .map(|nsid| {
+            (
+                nsid.clone(),
+                Permbind::Method(PermbindMethod {
+                    nsid: nsid.parse().unwrap(),
+                    description: nsid.clone(),
+                    necessity: big_cartridges_core::Necessity::Optional,
+                    min_revision: None,
+                    extra: Default::default(),
+                }),
+            )
+        })
+        .collect();
     cartridge
 }
 
@@ -304,13 +325,13 @@ async fn relay(
 }
 
 #[tokio::test]
-async fn admit_accepts_a_placeholder_handler_digest_whose_bytes_were_never_put() {
+async fn admit_accepts_a_placeholder_handler_whose_bytes_are_never_read() {
     let spec = caller();
     let node = super::node()
         .with_nodule(cartridge(&spec, &[]), Fixture)
         .boot()
         .await;
-    // Admitted at boot with a digest no blob has: the native executor never reads it, so the
+    // Admitted at boot with placeholder bytes: the native executor never reads them, so the
     // nodule is ready the moment it is enabled.
     let enabled = node.enable(&spec.cartridge).await;
     assert_eq!(enabled.readiness, Readiness::Ready);
@@ -385,7 +406,9 @@ async fn a_native_handler_is_served_the_production_delivery_contract() {
     assert_ne!(echoed["requestId"], outer.request_id.to_string());
     assert_eq!(echoed["requestId"].as_str().unwrap().len(), 36, "a uuid");
     assert_continues_trace(echoed["traceparent"].as_str().unwrap());
-    assert_eq!(echoed["noduleCapability"], Value::Null);
+    // No operations are granted, but the nodule's settings capability (docs read and write on its
+    // config document) is a dispatch capability of its own, so it is told one.
+    assert!(echoed["noduleCapability"].is_string());
 
     // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
     let budgeted = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
@@ -473,7 +496,9 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         json!(format!("Bearer {granted}"))
     );
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
-    assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
+    // B has its own settings capability, but it was not handed A's dispatch capability.
+    assert!(relayed["body"]["noduleCapability"].is_string());
+    assert_ne!(relayed["body"]["noduleCapability"], json!(granted));
 
     // The nested call is a hop of its own: a new request id, the outer trace under a new span
     // and a budget within the outer one.
@@ -529,7 +554,7 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         },
     )
     .await;
-    assert_eq!(own_capability(&node, &a).await, None);
+    assert!(own_capability(&node, &a).await.is_some());
     let stale = relay(&node, &a, &target, Some(&granted), context).await;
     assert_eq!(stale["status"], 403, "{stale}");
     node.stop().await;
@@ -543,11 +568,11 @@ async fn a_handlers_domain_error_reaches_the_caller_typed() {
         .boot()
         .await;
     node.enable(&spec.cartridge).await;
-    // No authority and no capability of its own (nothing granted): the fixture's own
-    // `InvalidRequest` domain error, which must not be flattened into a dispatch input refusal.
+    // No operation to relay: the fixture's own `InvalidRequest` domain error, which must not be
+    // flattened into a dispatch input refusal.
     let refused = node
         .call(CallRelay {
-            operation: "org.example.callee.echo".into(),
+            operation: String::new(),
             authority: None,
             input: None,
         })
@@ -555,7 +580,7 @@ async fn a_handlers_domain_error_reaches_the_caller_typed() {
     assert_eq!(
         refused,
         Err(crate::CallError::Method(RelayError::InvalidRequest(
-            "no authority and no nodule capability".into()
+            "no operation to relay".into()
         )))
     );
     node.stop().await;

@@ -3,21 +3,18 @@
 //! router's own admission, built-in providers and deadlines are tested in `big_dispatch`.
 
 use super::Node;
+use super::add_routine;
 use super::id;
 use super::lexicon;
 use async_trait::async_trait;
 use big_cabinet_core::authority::Authorization;
-use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
-use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::UninstallCartridge;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -27,9 +24,6 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Handler;
-use big_nodule_core::Nodule;
-use method_core::ByteBody;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
@@ -83,7 +77,7 @@ impl Provider for Echo {
 
 /// A package serving `serves` through a handler component. `serves` is declared in its own
 /// Lexicons when it lives under `org.example.<name>`, otherwise it is a foreign operation.
-pub(super) fn serving_cartridge(cartridge_id: &str, serves: &str) -> Cartridge {
+pub(super) fn serving_cartridge(cartridge_id: &str, serves: &str) -> FixtureCartridge {
     serving_cartridge_of(
         cartridge_id,
         "1.0.0",
@@ -92,18 +86,23 @@ pub(super) fn serving_cartridge(cartridge_id: &str, serves: &str) -> Cartridge {
     )
 }
 
-/// [`serving_cartridge`] at `version`, whose handler artifact is `handler_bytes`.
+/// [`serving_cartridge`] at `version`, whose component bytes are `handler_bytes`.
 pub(super) fn serving_cartridge_of(
     cartridge_id: &str,
     version: &str,
     serves: &str,
     handler_bytes: &str,
-) -> Cartridge {
+) -> FixtureCartridge {
     let name = cartridge_id.rsplit('/').next().unwrap();
     let nodule_id = format!("org.example.{name}");
-    let mut nodule = Nodule::default();
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        cartridge_id.parse().unwrap(),
+        version.parse().unwrap(),
+    ));
+    cartridge.authority = Some(nodule_id.clone());
+    cartridge.nodule = Some(Default::default());
     if serves.starts_with(&format!("{nodule_id}.")) {
-        nodule.lexicons.push(lexicon(json!({
+        cartridge.with_lexicon(lexicon(json!({
             "lexicon": 1,
             "id": serves,
             "defs": { "main": {
@@ -116,27 +115,15 @@ pub(super) fn serving_cartridge_of(
             }}
         })));
     }
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.implements = vec![serves.to_owned()];
-    let mut cartridge = Cartridge::new(cartridge_id.parse().unwrap(), version.parse().unwrap());
-    cartridge.authority = Some(nodule_id);
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest::of(handler_bytes.as_bytes()),
-        size: Some(handler_bytes.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: lexicon(serde_json::to_value(nodule).unwrap()),
-            extra: Default::default(),
-        }));
+    cartridge.with_wasm("handler", handler_bytes.as_bytes());
+    add_routine(
+        &mut cartridge,
+        serves,
+        serves,
+        "handler",
+        "handle",
+        Default::default(),
+    );
     cartridge
 }
 

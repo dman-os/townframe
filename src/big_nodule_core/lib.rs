@@ -87,7 +87,7 @@ impl Request {
 }
 
 impl Request {
-    fn is_operation_call(&self) -> bool {
+    pub fn is_operation_call(&self) -> bool {
         self.access.is_none()
     }
 }
@@ -154,6 +154,11 @@ type Implemented = BTreeMap<String, Option<OperationKind>>;
 
 pub trait NoduleAdmission {
     fn operation_requests(&self) -> Vec<Request>;
+    /// Every request resolved against providers: the operations the cartridge calls, then the
+    /// datums it reads or writes, one request per access a datum permbind declares (bound as the
+    /// permbind's key, or `key#access` when it declares several). `min_revision` is a method
+    /// permbind's alone (ADR 047 §5), so a datum request never carries one.
+    fn provider_requests(&self) -> Vec<Request>;
     fn bind_operations(&self, grants: &DispatchScope) -> (DispatchScope, DispatchScope);
     fn unmet_requests(&self, granted: &DispatchScope) -> Vec<Request>;
     fn missing_providers(
@@ -199,6 +204,38 @@ impl NoduleAdmission for ResolvedCartridge {
                 _ => None,
             })
             .collect()
+    }
+
+    fn provider_requests(&self) -> Vec<Request> {
+        let mut requests = self.operation_requests();
+        for (binding, permbind) in &self.cartridge.permbinds {
+            let Permbind::Datum(datum) = permbind else {
+                continue;
+            };
+            let declared: Vec<(&str, &big_cartridges_core::Necessity)> = [
+                ("read", &datum.read),
+                ("write", &datum.write),
+                ("create", &datum.create),
+                ("delete", &datum.delete),
+            ]
+            .into_iter()
+            .filter_map(|(access, necessity)| Some((access, necessity.as_ref()?)))
+            .collect();
+            let single = declared.len() == 1;
+            requests.extend(declared.into_iter().map(|(access, necessity)| Request {
+                binding: if single {
+                    binding.clone()
+                } else {
+                    format!("{binding}#{access}")
+                },
+                access: Some(access.to_owned()),
+                resolution: big_cartridges_core::Resolution::Configured,
+                contract: datum.nsid.to_string(),
+                necessity: necessity.clone(),
+                min_revision: None,
+            }));
+        }
+        requests
     }
 
     /// Splits operation `grants` into what may take effect and what may not. The manifest bounds
@@ -265,7 +302,7 @@ impl NoduleAdmission for ResolvedCartridge {
         &self,
         statuses: &BTreeMap<String, providers::RequestStatus>,
     ) -> Vec<Request> {
-        self.operation_requests()
+        self.provider_requests()
             .into_iter()
             .filter(|request| {
                 request.necessity.is_required() && statuses[&request.binding].unresolved.is_some()
