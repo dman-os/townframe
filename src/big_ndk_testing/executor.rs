@@ -34,7 +34,6 @@ use big_nodule::wire::provider_result;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
-use method_core::ByteBody;
 use serde_json::Value;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
@@ -208,7 +207,7 @@ impl Provider for NativeProvider {
 
 struct Running {
     revision: Revision,
-    handler: Digest,
+    components: BTreeMap<String, Digest>,
     provider: Arc<NativeProvider>,
     stop: oneshot::Sender<()>,
     thread: JoinHandle<()>,
@@ -263,12 +262,21 @@ impl NoduleExecutor for NativeExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
+        let components = spec
+            .components
+            .iter()
+            .map(|(key, component)| {
+                let big_cartridges_core::Component::Wasm(wasm) = component else {
+                    unreachable!("admission accepts wasm components only")
+                };
+                (key.clone(), wasm.digest)
+            })
+            .collect::<BTreeMap<_, _>>();
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
             match hosted.get(&spec.cartridge_id) {
                 Some(running)
-                    if running.revision == spec.revision
-                        && running.handler == spec.handler.digest =>
+                    if running.revision == spec.revision && running.components == components =>
                 {
                     // The grants may have changed since the last ensure: the nodule is told
                     // the capability that is live now, on its next request.
@@ -314,7 +322,7 @@ impl NoduleExecutor for NativeExecutor {
             spec.cartridge_id.clone(),
             Running {
                 revision: spec.revision,
-                handler: spec.handler.digest,
+                components: components.clone(),
                 provider: Arc::clone(&provider),
                 stop: started.stop,
                 thread: started.thread,

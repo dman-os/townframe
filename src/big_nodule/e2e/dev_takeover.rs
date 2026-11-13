@@ -11,12 +11,12 @@ use super::init::init_cartridge;
 use super::init::necessity;
 use super::init::with_requests;
 use big_cabinet_core::datum::operation::OperationKind;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::Digest;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::request::Necessity;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderKind;
@@ -41,7 +41,7 @@ const BETA_PING: &str = "org.example.beta.ping";
 const SYNC: &str = "org.example.remote.sync";
 const MORE: &str = "org.example.remote.more";
 
-fn beta(version: &str) -> Cartridge {
+fn beta(version: &str) -> FixtureCartridge {
     with_requests(
         init_cartridge("beta", version, &[BETA_PING], &[], &[]),
         vec![necessity(SYNC, Necessity::Required)],
@@ -50,7 +50,7 @@ fn beta(version: &str) -> Cartridge {
 
 /// A fork of beta: its own cartridge id but beta's authority, serving beta's operation, requesting
 /// `requests` (as required).
-fn fork(version: &str, requests: &[&str]) -> Cartridge {
+fn fork(version: &str, requests: &[&str]) -> FixtureCartridge {
     let mut cartridge = with_requests(
         init_cartridge("fork", version, &[BETA_PING], &[], &[]),
         requests
@@ -82,7 +82,7 @@ impl Node {
 /// A node hosting every handler, with native providers of the operations beta and the fork
 /// request, beta enabled and granted everything under `org.example.remote`, and the fork
 /// installed beside it, disabled.
-async fn node_with_beta_and(fork: Cartridge) -> (Node, Arc<FakeExecutor>) {
+async fn node_with_beta_and(fork: FixtureCartridge) -> (Node, Arc<FakeExecutor>) {
     let executor = FakeExecutor::hosting(Probe::new(), true);
     let node = super::node_with_takeover(Some(Arc::clone(&executor) as _), true).await;
     node.dispatch

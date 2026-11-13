@@ -6,13 +6,15 @@
 //! `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p test_nodule_guest --target wasm32-wasip3 --release`.
 
 use super::*;
-use big_cabinet_core::datum::DatumMember;
-use big_cartridges_core::Artifact;
+use big_cabinet_core::DatumPin;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::ComponentExport;
+use big_cartridges_core::Nodule;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindMethod;
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
@@ -23,17 +25,14 @@ use big_cartridges_core::protocol::InstallCartridge;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
 use big_cartridges_core::registry::version_pin;
-use big_cartridges_core::request::Necessity;
-use big_cartridges_core::request::Request;
-use big_cartridges_core::test_support::sign_as_example;
+use big_cartridges_core::test_support::FixtureCartridge;
+
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Handler;
-use big_nodule_core::Nodule;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::NoduleRecord;
 use method_core::ByteBody;
@@ -128,67 +127,82 @@ fn setting(nsid: &str) -> Value {
 }
 
 /// The cartridge whose nodule declares `spec.authority`'s three operations, implements them through
-/// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
+/// the component `bytes`, and requests each of `calls` (operations of another nodule it
 /// relays to). The requests are optional: the nodule runs before its grant, and the tests
 /// exercise what the grant then permits.
-pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> Cartridge {
+pub(super) fn cartridge(spec: &Spec, bytes: &[u8], calls: &[String]) -> FixtureCartridge {
     cartridge_requiring(
         spec,
         bytes,
         calls
             .iter()
-            .map(|nsid| {
-                let mut request = Request::new(nsid, nsid);
-                request.necessity = Necessity::Optional;
-                request
+            .map(|nsid| FixtureRequest {
+                nsid: nsid.clone(),
+                necessity: big_cartridges_core::Necessity::Optional,
             })
             .collect(),
     )
 }
 
-/// [`cartridge`] with the nodule's `requires` given as they are, so a test can make a request
+struct FixtureRequest {
+    nsid: String,
+    necessity: big_cartridges_core::Necessity,
+}
+
+/// [`cartridge`] with the nodule's method bindings given as they are, so a test can make a request
 /// required.
-fn cartridge_requiring(spec: &Spec, bytes: &[u8], requires: Vec<Request>) -> Cartridge {
-    let mut nodule = Nodule {
-        requires,
-        ..Default::default()
-    };
-    let operations = [spec.echo(), spec.relay(), spec.absent()];
-    let config = spec.config();
+fn cartridge_requiring(
+    spec: &Spec,
+    bytes: &[u8],
+    requires: Vec<FixtureRequest>,
+) -> FixtureCartridge {
+    let operations = [spec.echo(), spec.relay(), spec.absent(), spec.config()];
+    let mut nodule = Nodule::default();
+    let mut lexicons = Vec::new();
     for nsid in &operations {
-        nodule
-            .lexicons
-            .push(serde_json::from_value(procedure(nsid)).unwrap());
+        lexicons.push(serde_json::from_value(procedure(nsid)).unwrap());
+        nodule.routines.insert(
+            nsid.clone(),
+            Routine {
+                r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                    component: "handler".into(),
+                    export: "handle".into(),
+                    extra: Default::default(),
+                }),
+                implements: nsid.parse().unwrap(),
+                uses: Default::default(),
+                extra: Default::default(),
+            },
+        );
     }
-    nodule
-        .lexicons
-        .push(serde_json::from_value(procedure(&config)).unwrap());
-    nodule
-        .lexicons
-        .push(serde_json::from_value(setting(&format!("{}.settings", spec.authority))).unwrap());
-    nodule.settings = vec![format!("{}.settings", spec.authority)];
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.implements = operations.into();
-    nodule.implements.push(config);
-    let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
+    let settings = format!("{}.settings", spec.authority);
+    lexicons.push(serde_json::from_value(setting(&settings)).unwrap());
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        spec.cartridge.clone(),
+        "1.0.0".parse().unwrap(),
+    ));
     cartridge.authority = Some(spec.authority.to_owned());
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest::of(bytes),
-        size: Some(bytes.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
-            extra: Default::default(),
-        }));
+    cartridge.nodule = Some(nodule);
+    cartridge.settings.insert(settings.parse().unwrap());
+    for file in lexicons {
+        cartridge.with_lexicon(file);
+    }
+    cartridge.with_wasm("handler", bytes);
+    cartridge.permbinds = requires
+        .into_iter()
+        .map(|request| {
+            (
+                request.nsid.clone(),
+                Permbind::Method(PermbindMethod {
+                    nsid: request.nsid.parse().unwrap(),
+                    description: request.nsid,
+                    necessity: request.necessity,
+                    min_revision: None,
+                    extra: Default::default(),
+                }),
+            )
+        })
+        .collect();
     cartridge
 }
 
@@ -203,20 +217,20 @@ pub(super) async fn put(node: &BigNode, bytes: &[u8]) {
         .unwrap();
 }
 
-/// Publishes `cartridge` through the registry (signed as the example namespace when it is
-/// unsigned; the handler bytes must be in the blob store already) and installs the pin of the
-/// version just published.
-pub(super) async fn admit(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
-    let cartridge = if cartridge.signature.is_some() {
-        cartridge
-    } else {
-        sign_as_example(cartridge)
-    };
-    let (id, version) = (cartridge.id.clone(), cartridge.version.clone());
+/// Publishes `cartridge` through the registry (signed as the example namespace; its component
+/// bytes are put in the blob store) and installs the pin of the version just published.
+pub(super) async fn admit(node: &BigNode, cartridge: FixtureCartridge) -> NoduleRecord {
+    let pin = node.publish_fixture(&cartridge).await;
+    install(node, pin, &cartridge.id).await
+}
+
+/// Installs the version of `id` the registry serves, which was published here or imported.
+pub(super) async fn install_version(
+    node: &BigNode,
+    id: &CartridgeId,
+    version: &big_cartridges_core::Version,
+) -> NoduleRecord {
     let operator = super::cartridges::operator(node);
-    super::cartridges::publish(node, operator, cartridge)
-        .await
-        .unwrap();
     let doc_id = node
         .cartridges
         .client
@@ -229,79 +243,50 @@ pub(super) async fn admit(node: &BigNode, cartridge: Cartridge) -> NoduleRecord 
         .unwrap()
         .doc_id;
     let heads = blobs::all_datums(node, &doc_id).await.heads;
-    node.nodules
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator.metadata(),
-            InstallCartridge {
-                cartridge: version_pin(doc_id, &version, heads),
-            },
-        )
-        .await
-        .unwrap();
-    record_of(node, &id).await
+    install(node, version_pin(doc_id, version, heads), id).await
 }
 
-/// Installs `cartridge` whose handler bytes are not in the blob store yet. The registry service
-/// refuses a version whose artifacts it cannot find, so this writes the version datum of a registry
-/// document itself, as the operator, and installs the pin of it: the nodule then waits for its
-/// bytes (`ArtifactsUnavailable`) instead of being refused.
-pub(super) async fn admit_before_its_bytes(node: &BigNode, cartridge: Cartridge) -> NoduleRecord {
-    use big_cabinet_core::authority::Rights;
-    use big_cabinet_core::doc::CommandId;
-    use big_cabinet_core::doc::DocScope;
-    use big_cartridges_core::registry::version_key;
-    let cartridge = sign_as_example(cartridge);
-    let operator = Authorization::identity(node.authority.root);
-    let placement = format!("drawer {}", node.registry_drawer);
-    let capability = node
-        .docs
-        .client
-        .call_with(
-            RequestContext::root(),
-            operator.metadata(),
-            big_cabinet_core::doc::MintDocCapability {
-                scope: DocScope {
-                    create: [placement.clone()].into(),
-                    ..DocScope::default()
-                },
-                rights: Rights::USE,
-                subject: None,
-            },
-        )
-        .await
-        .unwrap()
-        .capability_id;
-    let receipt = node
-        .docs
-        .client
-        .call(
-            RequestContext::root(),
-            CreateDoc {
-                capability,
-                command: CommandId::try_from("version before its bytes".to_owned()).unwrap(),
-                placement,
-                datums: BTreeMap::from([(
-                    version_key(&cartridge.version),
-                    serde_json::to_value(&cartridge).unwrap(),
-                )]),
-            },
-        )
-        .await
-        .unwrap();
+async fn install(node: &BigNode, pin: DatumPin, id: &CartridgeId) -> NoduleRecord {
     node.nodules
         .client
         .call_with(
             RequestContext::root(),
-            operator.metadata(),
-            InstallCartridge {
-                cartridge: version_pin(receipt.doc_id, &cartridge.version, receipt.heads),
-            },
+            super::cartridges::operator(node).metadata(),
+            InstallCartridge { cartridge: pin },
         )
         .await
         .unwrap();
-    record_of(node, &cartridge.id).await
+    record_of(node, id).await
+}
+
+/// Installs `fixture` whose component bytes are not in the blob store yet. The registry service
+/// refuses to stage a version whose components it cannot find, so this writes the registry
+/// document itself, as the operator and in the order staging does (the payload datums, the typed
+/// components pinning the blob datums, then the envelope pinning both), and installs the pin of
+/// the version: the nodule then waits for its bytes (`ArtifactsUnavailable`) instead of being
+/// refused.
+pub(super) async fn admit_before_its_bytes(
+    node: &BigNode,
+    fixture: FixtureCartridge,
+) -> NoduleRecord {
+    let operator = Authorization::identity(node.authority.root);
+    let present = node.drawers.local().present_id;
+    // Authored in the local drawer and imported, which is the registry's own way of taking a
+    // document it did not stage: once the import returns, the registry serves the version.
+    let (doc, _) = super::cartridges::write_registry_doc(
+        node,
+        format!("drawer {present}"),
+        "version before its bytes",
+        &fixture.id.to_string(),
+        std::slice::from_ref(&fixture),
+        |_, envelope| big_cartridges_core::test_support::sign_as_example(envelope),
+    )
+    .await;
+    super::cartridges::import_document(node, operator, &present, &doc)
+        .await
+        .unwrap();
+    let heads = blobs::all_datums(node, &doc).await.heads;
+    install(node, version_pin(doc, &fixture.version, heads), &fixture.id).await
 }
 
 pub(super) async fn set_enabled(node: &BigNode, spec: &Spec, enabled: bool) -> NoduleRecord {
@@ -898,12 +883,10 @@ async fn install_a_cartridge_published_on_another_node(
 ) {
     use super::cartridges::import_document;
     use super::cartridges::operator;
-    use super::cartridges::publish;
     use super::harness::Cluster;
     use super::harness::Topology;
     use big_cartridges_core::protocol::GetCartridge;
     use big_cartridges_core::protocol::GetCartridgeVersion;
-    use big_cartridges_core::test_support::sign_as_example;
 
     let bytes = guest_bytes();
     let spec = caller();
@@ -913,10 +896,23 @@ async fn install_a_cartridge_published_on_another_node(
 
     let publisher = cluster.node(alice);
     put(publisher, &bytes).await;
-    let envelope = sign_as_example(cartridge(&spec, &bytes, &[]));
-    publish(publisher, operator(publisher), envelope.clone())
+    publisher
+        .publish_fixture(&cartridge(&spec, &bytes, &[]))
+        .await;
+    let envelope = publisher
+        .cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(publisher).metadata(),
+            GetCartridgeVersion {
+                id: spec.cartridge.clone(),
+                version: "1.0.0".parse().unwrap(),
+            },
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .envelope;
     let document = publisher
         .cartridges
         .client
@@ -959,7 +955,7 @@ async fn install_a_cartridge_published_on_another_node(
         .envelope;
     assert_eq!(served, envelope);
 
-    admit(node, served).await;
+    install_version(node, &spec.cartridge, &served.version).await;
     set_enabled(node, &spec, true).await;
     // There is no signal for "reconciled" to subscribe to (see the late-bytes test above): the
     // record is looked at until the synced handler bytes have made the nodule ready.
@@ -1025,7 +1021,10 @@ async fn a_nodule_requiring_built_in_methods_is_ready_after_a_restart() {
             &bytes,
             required
                 .iter()
-                .map(|nsid| Request::new(*nsid, *nsid))
+                .map(|nsid| FixtureRequest {
+                    nsid: (*nsid).to_owned(),
+                    necessity: big_cartridges_core::Necessity::Required,
+                })
                 .collect(),
         ),
     )

@@ -1,10 +1,10 @@
-//! Nodule admission over [`Cartridge`] envelopes (ADR 027 §2–4, §6–8).
+//! Nodule admission over [`big_cartridges_core::Cartridge`] envelopes (ADR 027 §2–4, §6–8).
 //!
-//! [`admit_cartridge_nodule`] validates the carrying [`Cartridge`] envelope, extracts its [`Nodule`]
-//! contribution, checks the contribution schema and nodule admission rules, and verifies that
-//! every artifact the handler names is declared in the envelope. [`InstalledNodule`] is the admitted
-//! result that [`crate::config::NoduleConfig`] resolves, with its enablement, artifact availability,
-//! and readiness.
+//! [`admit_resolved_cartridge`] validates the carrying [`big_cartridges_core::Cartridge`] envelope, extracts its
+//! [`Nodule`] contribution, checks the contribution schema and nodule admission rules, and
+//! verifies that every component a routine names is resolved. [`InstalledNodule`] is the admitted result that
+//! [`crate::config::NoduleConfig`] resolves, with its enablement, artifact availability, and
+//! readiness.
 
 use crate::Admitted;
 use crate::Nodule;
@@ -12,7 +12,6 @@ use crate::NoduleAdmission;
 use crate::NoduleError;
 
 use big_cabinet_core::dmeta::DocId;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Component as ManifestComponent;
@@ -27,7 +26,7 @@ use serde::Serialize;
 
 use std::collections::BTreeMap;
 
-/// Availability of an artifact declared in the carrying [`Cartridge`] envelope.
+/// Availability of an artifact declared in the carrying [`big_cartridges_core::Cartridge`] envelope.
 ///
 /// Admission records every artifact the handler references as [`Self::Unavailable`] from the
 /// envelope metadata alone. Only a node's executor, which loads the bytes, can establish
@@ -239,28 +238,4 @@ pub(crate) fn admit_resolved_cartridge(
         );
     }
     Ok((resolved.clone(), nodule, admitted, artifacts))
-}
-
-/// Transitional internal entry point until the registry supplies a resolved view.
-pub(crate) fn admit_cartridge_nodule(cartridge: &Cartridge) -> Result<AdmittedContribution> {
-    let lexicons = cartridge
-        .extra
-        .get("_resolvedLexicons")
-        .map(|value| {
-            serde_json::from_value(value.clone()).expect("test resolved lexicons are valid")
-        })
-        .unwrap_or_default();
-    let components = cartridge
-        .extra
-        .get("_resolvedComponents")
-        .map(|value| {
-            serde_json::from_value(value.clone()).expect("test resolved components are valid")
-        })
-        .unwrap_or_default();
-    admit_resolved_cartridge(&ResolvedCartridge::new(
-        cartridge.clone(),
-        lexicons,
-        BTreeMap::new(),
-        components,
-    ))
 }

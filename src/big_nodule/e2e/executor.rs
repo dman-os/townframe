@@ -28,6 +28,7 @@ use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Digest;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::InstallCartridge;
@@ -66,7 +67,7 @@ pub(super) struct FakeExecutor {
 #[derive(Default)]
 struct FakeState {
     ready: bool,
-    hosted: BTreeMap<CartridgeId, Digest>,
+    hosted: BTreeMap<CartridgeId, BTreeMap<String, ManifestComponent>>,
     /// Every `ensure` call, which the reconciler makes once per reconcile of a hosted nodule.
     ensures: usize,
     log: Vec<String>,
@@ -131,15 +132,24 @@ impl NoduleExecutor for FakeExecutor {
         tokio::time::sleep(takes).await;
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
-        if state.hosted.get(&spec.cartridge_id) != Some(&spec.handler.digest) {
+        let components = spec.components.clone();
+        if state.hosted.get(&spec.cartridge_id) != Some(&components) {
+            let digest = components
+                .values()
+                .map(|component| {
+                    let ManifestComponent::Wasm(component) = component else {
+                        panic!("a fixture component is not wasm")
+                    };
+                    component.digest
+                })
+                .next()
+                .expect("a hosted fixture has a component");
+            state.hosted.insert(spec.cartridge_id.clone(), components);
             state
-                .hosted
-                .insert(spec.cartridge_id.clone(), spec.handler.digest);
-            state.log.push(format!(
-                "host {} {}",
-                spec.cartridge_id, spec.handler.digest
-            ));
+                .log
+                .push(format!("host {} {}", spec.cartridge_id, digest));
         }
+
         state
             .reensure
             .insert(spec.cartridge_id.clone(), spec.reensure.clone());
