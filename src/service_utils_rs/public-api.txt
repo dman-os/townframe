@@ -123,6 +123,7 @@ pub use service_utils_rs::middleware :: Identity
 pub use service_utils_rs::middleware :: Layer
 pub use service_utils_rs::middleware :: ServiceBuilder
 pub use service_utils_rs::middleware :: Stack
+pub use service_utils_rs::operation :: Body
 pub use service_utils_rs::operation :: ClientError
 pub use service_utils_rs::operation :: Envelope
 pub use service_utils_rs::operation :: EventFrame
@@ -131,6 +132,7 @@ pub use service_utils_rs::operation :: Reply
 pub use service_utils_rs::operation :: ResponseEnvelope
 pub use service_utils_rs::operation :: ResponseMetadata
 pub use service_utils_rs::operation :: TransportContext
+pub use service_utils_rs::operation::service_core_rs :: operation :: Body
 pub use service_utils_rs::operation::service_core_rs :: operation :: ClientError
 pub use service_utils_rs::operation::service_core_rs :: operation :: Envelope
 pub use service_utils_rs::operation::service_core_rs :: operation :: EventFrame
@@ -159,6 +161,7 @@ pub use service_utils_rs::sample::service :: SampleHandler
 pub use service_utils_rs::sample::service :: SampleService
 pub use service_utils_rs::sample::service :: boot
 pub use service_utils_rs::service_client_native_rs as __client_native
+pub use service_utils_rs::service_core_rs :: descriptor
 pub use service_utils_rs::service_core_rs :: Protocol
 pub use service_utils_rs::service_core_rs :: ProtocolMethods
 pub use service_utils_rs::service_core_rs :: UnaryVisitor

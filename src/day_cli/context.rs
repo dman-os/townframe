@@ -252,6 +252,23 @@ impl NodeDir {
         Ok(socket)
     }
 
+    /// The native descriptor socket paired with [`Self::socket_path`].
+    #[cfg(unix)]
+    pub fn fd_socket_path(&self) -> Res<PathBuf> {
+        let socket = self.socket_path()?;
+        let stem = socket
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| eyre::eyre!("the node socket has no UTF-8 stem"))?;
+        let fd_socket = socket.with_file_name(format!("{stem}.fd.sock"));
+        eyre::ensure!(
+            fd_socket.as_os_str().len() <= MAX_SOCKET_PATH_BYTES,
+            "the descriptor socket path {} is longer than a Unix socket path can be ({MAX_SOCKET_PATH_BYTES} bytes); use a shorter XDG_RUNTIME_DIR",
+            fd_socket.display()
+        );
+        Ok(fd_socket)
+    }
+
     pub fn log_path(&self) -> PathBuf {
         self.run_dir().join("daemon.log")
     }

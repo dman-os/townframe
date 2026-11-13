@@ -160,6 +160,12 @@ pub async fn call(
                 "NotImplemented",
                 "the method answers bytes, which reach guests with wasi:http streams",
             ),
+            #[cfg(unix)]
+            Body::Descriptors(_) => bad(
+                StatusCode::NOT_IMPLEMENTED,
+                "NotImplemented",
+                "descriptor bodies are native-only",
+            ),
         },
         Err(ClientError::Method(error)) => dispatch_error_response(error),
         Err(ClientError::Transport { message, .. }) => {

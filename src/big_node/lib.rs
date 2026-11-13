@@ -7,6 +7,8 @@ pub mod peers;
 
 pub use info::GET_NODE_INFO;
 pub use info::NodeInfo;
+#[cfg(unix)]
+pub use listeners::FdClients;
 use listeners::Listener;
 pub use listeners::Listeners;
 pub use listeners::UnixClients;
@@ -216,6 +218,9 @@ pub struct BigNode {
     /// to serve its own command drains them before it stops the node, so it never closes a
     /// client that is still connected.
     pub unix_clients: Option<UnixClients>,
+    /// The descriptor socket's connections, when the node serves the native import transport.
+    #[cfg(unix)]
+    pub fd_clients: Option<FdClients>,
     /// The network attachment, when the config asked for one.
     pub peers: Option<peers::Peers>,
 }
@@ -264,7 +269,7 @@ impl BigNode {
             );
         }
         stop.stages.push(self.register_late_built_ins());
-        (self.listeners, self.unix_clients) =
+        (self.listeners, self.unix_clients, self.fd_clients) =
             attach_listeners(self, attachments.listeners, stop).await?;
         Ok(())
     }
@@ -290,8 +295,8 @@ impl BigNode {
     {
         let mut stop = StopToken::default();
         let attachments = Attachments::of(&config);
-        // Boxed: booting every service inline makes this future large enough (in debug builds)
-        // that a caller awaiting it, such as a test that reboots a node, overflows its stack.
+        // Boxed: booting every service inline makes this future large enough (in debug builds); a caller awaiting it, such as a test that reboots a node, overflows its stack.
+
         let boot: Res<Self> = Box::pin(async {
             let schemas = Arc::new(config.schemas.with_groups([
                 big_blobs::schema::registration(),
@@ -350,8 +355,8 @@ impl BigNode {
             .await?;
             stop.stages.push(Stage::Service(docs_stop));
             let drawers = start_drawers(provider, &docs, &mut stop).await?;
-            // The blob workers are configured with the drawers they maintain blobs for, so the
-            // registry drawer is created (or found) there, before they start.
+            // The blob workers are configured with the drawers they maintain blobs for, so the registry is created (or found) before they start; the registry reads artifact bytes from the blob service and keeps them pinned through the workers, so it boots after both and stops before dispatch and nodules.
+
             let (blob_workers, registry_drawer) = blob_boot::boot(
                 config.sql.clone(),
                 &blobs,
@@ -366,9 +371,6 @@ impl BigNode {
                 &mut stop,
             )
             .await?;
-            // The registry reads artifact bytes from the blob service and keeps them pinned
-            // through the workers, so it boots after both and stops before either. Dispatch and
-            // the nodule service, its future consumers, boot after it.
             let cartridges = boot_cartridges(
                 &authority,
                 &docs,
@@ -433,6 +435,8 @@ impl BigNode {
                 registry_drawer,
                 listeners: Listeners::default(),
                 unix_clients: None,
+                #[cfg(unix)]
+                fd_clients: None,
                 peers: None,
             };
             node.attach(attachments, &mut stop).await?;
@@ -655,9 +659,11 @@ async fn attach_listeners(
     node: &BigNode,
     requested: Listeners,
     stop: &mut StopToken,
-) -> Res<(Listeners, Option<UnixClients>)> {
+) -> Res<(Listeners, Option<UnixClients>, Option<FdClients>)> {
     let mut bound = Listeners::default();
     let mut clients = None;
+    #[cfg(unix)]
+    let mut fd_clients = None;
     if let Some(path) = requested.unix_socket {
         let (listener, connections) = Listener::unix(
             &path,
@@ -666,15 +672,32 @@ async fn attach_listeners(
         )
         .await?;
         stop.stages.push(Stage::Listener(listener));
-        bound.unix_socket = Some(path);
+        bound.unix_socket = Some(path.clone());
         clients = Some(connections);
+        #[cfg(unix)]
+        {
+            let stem = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("node");
+            let fd_path = path.with_file_name(format!("{stem}.fd.sock"));
+            let (listener, connections) = Listener::fd(
+                &fd_path,
+                node.dispatch.client.clone(),
+                Authorization::identity(node.authority.root),
+            )
+            .await?;
+            stop.stages.push(Stage::Listener(listener));
+            bound.fd_socket = Some(fd_path);
+            fd_clients = Some(connections);
+        }
     }
     if let Some(address) = requested.tcp {
         let (listener, address) = Listener::tcp(address, node.dispatch.client.clone()).await?;
         stop.stages.push(Stage::Listener(listener));
         bound.tcp = Some(address);
     }
-    Ok((bound, clients))
+    Ok((bound, clients, fd_clients))
 }
 
 /// Starts the peers service. It is the last attachment, so it stops first: no connection is
