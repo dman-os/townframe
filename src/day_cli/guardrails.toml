@@ -5,6 +5,7 @@ allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",
     "big_dispatch",
+    "big_dispatch_core",
     "big_node",
     "big_nodule_core",
     "big_repo",

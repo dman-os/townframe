@@ -97,6 +97,7 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+rustix = { version = "1.1.6", features = ["fs", "net"] }
 getrandom = { version = "0.4" }
 getrandom03 = { package = "getrandom", version = "0.3" }
 #

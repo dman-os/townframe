@@ -15,7 +15,7 @@ impl schemars :: JsonSchema for method_core::ByteBody
 pub enum method_core::ByteRange { # [doc = " `bytes=<start>-`: from `start` to the end."] From (u64), # [doc = " `bytes=<start>-<end>`: `end` is inclusive, as HTTP spells it."] Between { start : u64 , end : u64 }, # [doc = " `bytes=-<len>`: the last `len` octets."] Suffix (u64) }
 pub enum method_core::CollectError { # [error ("the body is longer than the {limit} octet limit")] TooLarge { limit : u64 }, # [error ("the body failed while it was read: {0}")] Io (# [from] io :: Error) }
 pub enum method_core::ContextError { # [error ("request context is missing a request id")] MissingRequestId, # [error ("request was cancelled")] Cancelled, # [error ("request cancellation key is already admitted")] CancellationAlreadyAdmitted, # [error ("request cancellation scope capacity exhausted (limit {limit})")] CancellationCapacityExceeded { limit : usize }, # [error ("subscription capacity exhausted (limit {limit})")] StreamCapacityExceeded { limit : usize }, # [error ("request exceeded its time budget")] DeadlineExceeded, # [error ("request carries no valid Authorization credential")] Unauthenticated }
-pub enum method_core::Encoding { # [doc = " `application/json`: the body is one JSON value, the only case before ADR 042."] Json, # [doc = " Raw octets, never a value that lands whole in memory. `mime` is the media type the"] # [doc = " method declares, `None` for `*/*` (any)."] Bytes { mime : Option < & 'static str > } }
+pub enum method_core::Encoding { # [doc = " File descriptors passed by the native descriptor socket; the body has no wire serialization."] Descriptors, # [doc = " `application/json`: the body is one JSON value, the only case before ADR 042."] Json, # [doc = " Raw octets, never a value that lands whole in memory. `mime` is the media type the"] # [doc = " method declares, `None` for `*/*` (any)."] Bytes { mime : Option < & 'static str > } }
 pub enum method_core::HttpInput { Query, JsonBody }
 pub enum method_core::HttpMethod { Get, Post }
 pub enum method_core::MethodKind { Query, Procedure, Subscription }
@@ -31,6 +31,7 @@ pub impl method_core::Encoding::const fn is_bytes (self) -> bool
 pub impl method_core::MethodKind::const fn transport_outcome_unknown (self) -> bool
 pub impl method_core::XrpcMethod::const fn bytes_input (mut self) -> Self
 pub impl method_core::XrpcMethod::const fn bytes_output (mut self) -> Self
+pub impl method_core::XrpcMethod::const fn descriptors_input (mut self) -> Self
 pub impl method_core::XrpcMethod::const fn local_only (mut self) -> Self
 pub impl method_core::XrpcMethod::const fn long_poll (mut self) -> Self
 pub impl method_core::XrpcMethod::const fn privileged (mut self) -> Self

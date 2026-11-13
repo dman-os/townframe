@@ -62,7 +62,7 @@ impl Provider for Echo {
         _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-        _body: Option<ByteBody>,
+        _body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         if let Some(reason) = input.get("invalid") {
             return Err(ProviderError::InvalidInput(reason.to_string()));
@@ -612,7 +612,7 @@ impl Provider for Canned {
         _: &RequestContext,
         _: &InvocationContext,
         input: Value,
-        _: Option<ByteBody>,
+        _: Option<Body>,
     ) -> Result<Body, ProviderError> {
         self.seen.lock().unwrap().push(input);
         Ok(Body::Json(self.output.clone()))
@@ -902,11 +902,14 @@ impl Provider for Chunks {
         _: &RequestContext,
         _: &InvocationContext,
         input: Value,
-        body: Option<ByteBody>,
+        body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         match operation {
             INGEST => {
-                let mut body = body.expect("a bytes-input method is called with its body");
+                let mut body = match body.expect("a bytes-input method is called with its body") {
+                    Body::Bytes(body) => body,
+                    _ => panic!("a bytes-input method is called with bytes"),
+                };
                 let mime = body.mime.clone();
                 while let Some(chunk) = body.next().await {
                     self.seen.send(chunk.expect("the chunk")).unwrap();

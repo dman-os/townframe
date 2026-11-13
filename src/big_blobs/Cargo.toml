@@ -36,6 +36,7 @@ rand.workspace = true
 bytes.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+rustix = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true
 tracing.workspace = true
 iroh.workspace = true

@@ -170,7 +170,7 @@ impl Provider for NativeProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-        body: Option<ByteBody>,
+        body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         if body.is_some() {
             return Err(big_nodule::wire::byte_body_refused());
