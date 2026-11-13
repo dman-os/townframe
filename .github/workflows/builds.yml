@@ -44,6 +44,8 @@ env:
 
 jobs:
   resolve-release-meta:
+    # Draft PRs skip CI; marking one ready for review runs it.
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 90
     outputs:
