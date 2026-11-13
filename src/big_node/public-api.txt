@@ -27,7 +27,7 @@ pub impl big_node::peers::Peers::fn ticket (& self) -> String
 pub mod big_node::peers
 pub struct big_node::BigNode  { node_id: String, repo: SharedBigRepo, authority: Authority, docs_actor: OpenedActor, docs_namespace: Namespace, drawers_actor: OpenedActor, drawers_namespace: Namespace, blobs_actor: OpenedActor, blobs_namespace: Namespace, blobs: big_blobs :: Blobs, blob_workers: big_blobs :: workers :: BlobWorkers, nodules_actor: OpenedActor, cartridges_actor: OpenedActor, dispatch_actor: OpenedActor, indexes: Arc < Indexes >, drawer_access: Arc < DrawerAccess >, docs: DocsRepo, drawers: Drawers, dispatch: Dispatch, executor: Arc < dyn NoduleExecutor >, nodules: Nodules, cartridges: Cartridges, registry_drawer: DrawerId, listeners: Listeners, peers: Option < peers :: Peers > }
 pub struct big_node::Bindings  { sql: Database, repo: big_repo :: Storage, blobs: big_blobs :: Storage }
-pub struct big_node::Config  { repo: big_repo :: Config, sql: Database, schemas: Arc < SchemaRepo >, secrets: Arc < SecretStore >, index_concurrency: NonZeroUsize, blob_storage: big_blobs :: Storage, listeners: Listeners, peers: Option < peers :: PeersConfig > }
+pub struct big_node::Config  { repo: big_repo :: Config, sql: Database, schemas: Arc < SchemaRepo >, secrets: Arc < SecretStore >, index_concurrency: NonZeroUsize, blob_storage: big_blobs :: Storage, listeners: Listeners, peers: Option < peers :: PeersConfig >, allow_slot_takeover: bool }
 pub struct big_node::ExecutorDeps  { blobs: Arc < BlobService >, dispatch: service_client_native_rs :: Client < DispatchProtocol > }
 pub struct big_node::StopToken  {  }
 pub struct big_node::peers::Peers  {  }

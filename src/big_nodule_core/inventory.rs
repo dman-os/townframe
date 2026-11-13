@@ -36,7 +36,7 @@ pub enum ArtifactState {
     Available,
 }
 
-/// The cartridge whose code fills a slot under a substitution, and the version of it that does.
+/// The cartridge whose code fills a slot under a dev takeover, and the version of it that does.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,7 +56,7 @@ pub struct InstalledNodule {
     pub artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
     pub enabled: bool,
     pub config: Option<IndexMap<String, Value>>,
-    /// Set when a substitution fills this slot: `cartridge_id` is the slot, while `version`,
+    /// Set when a dev takeover fills this slot: `cartridge_id` is the slot, while `version`,
     /// `revision`, `nodule`, `admitted` and `artifacts` are the filler's.
     pub filled_by: Option<FilledBy>,
     configured: bool,
@@ -167,8 +167,10 @@ pub enum InventoryError {
         nsid: String,
         other: Box<CartridgeId>,
     },
-    #[error("cannot substitute for `{id}`: {reason}")]
-    InvalidSubstitution { id: CartridgeId, reason: String },
+    #[error("cannot take over `{id}`: {reason}")]
+    InvalidDevTakeover { id: CartridgeId, reason: String },
+    #[error("invalid method route `{pattern}`: {reason}")]
+    InvalidRoute { pattern: String, reason: String },
     #[error("nodule for cartridge `{0}` is not installed")]
     UnknownCartridge(CartridgeId),
     #[error("nodule for cartridge `{0}` declares no config schema")]
