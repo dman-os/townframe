@@ -14,7 +14,7 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
-use method_core::ByteBody;
+
 use method_core::ByteRange;
 use method_core::ContextError;
 use serde::Deserialize;
@@ -219,69 +219,10 @@ pub enum HttpForm {
     Get { query: String },
 }
 
-/// The body of one call or answer (ADR 042 §2): one JSON value, or a pull-based byte stream the
-/// receiver reads chunk by chunk, so nothing lands whole in memory. Which case a method takes
-/// each way is its declared [`method_core::Encoding`], which dispatch checks.
-///
-/// A byte body has no serialized form (see [`ByteBody`]); a JSON body serializes as the value
-/// itself.
-#[derive(Debug)]
-pub enum Body {
-    Json(Value),
-    Bytes(ByteBody),
-}
-
-impl Body {
-    /// The JSON value, for a caller that knows its method's encoding is JSON: the other case is
-    /// that caller's bug, not a condition to handle.
-    pub fn into_json(self) -> Value {
-        match self {
-            Self::Json(value) => value,
-            Self::Bytes(_) => panic!("expected a JSON body, found bytes"),
-        }
-    }
-
-    /// The case's name, for refusals.
-    pub fn case(&self) -> &'static str {
-        match self {
-            Self::Json(_) => "JSON",
-            Self::Bytes(_) => "bytes",
-        }
-    }
-}
-
-impl Serialize for Body {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Json(value) => value.serialize(serializer),
-            Self::Bytes(bytes) => bytes.serialize(serializer),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Body {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Value::deserialize(deserializer).map(Self::Json)
-    }
-}
+pub use service_core_rs::Body;
 
 /// Any JSON value, spelled in place as `serde_json::Value` is: the other cases have no schema, as
 /// they have no serialized form.
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for Body {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Body".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!(true)
-    }
-}
-
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

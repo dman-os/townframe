@@ -280,6 +280,7 @@ fn builtin_list() -> &'static [Builtin] {
             nodules::ListNodules,
             blobs::MintBlobsCapability,
             blobs::PutBlob,
+            blobs::ImportFile,
             blobs::ReadBlob,
             blobs::StatBlob,
             cartridges::MintCartridgesCapability,
@@ -430,6 +431,9 @@ pub fn lexicon<M: MethodSchema>() -> Result<Value, MethodLexiconError> {
     let encoding = |encoding: method_core::Encoding| match encoding {
         method_core::Encoding::Json => None,
         method_core::Encoding::Bytes { mime } => Some(json!({ "encoding": mime.unwrap_or("*/*") })),
+        method_core::Encoding::Descriptors => {
+            Some(json!({ "encoding": "application/x-descriptors" }))
+        }
     };
     match kind {
         OperationKind::Procedure => match encoding(M::XRPC.input_encoding) {
