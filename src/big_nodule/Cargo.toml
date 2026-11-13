@@ -10,10 +10,11 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
 # internal
 utils_rs.workspace = true
-big_cabinet = { path = "../big_cabinet" }
-big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+big_cabinet.workspace = true
+big_cabinet_core = { workspace = true, features = ["manifest", "schemars"] }
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
@@ -23,18 +24,21 @@ service_client_native_rs.workspace = true
 service_core_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
+method_core.workspace = true
 
+#
 # identity
 blake3.workspace = true
-method_core.workspace = true
 http.workspace = true
 
+#
 # encoding
 automerge.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 
+#
 # errors and state
 futures.workspace = true
 thiserror.workspace = true
@@ -43,10 +47,15 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+#
+# internal
 big_cartridges_core = { workspace = true, features = ["test-support"] }
-big_blobs_core = { path = "../big_blobs_core" }
+big_blobs_core.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
+
+#
+# misc
 irpc.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

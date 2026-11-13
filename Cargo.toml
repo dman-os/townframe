@@ -127,6 +127,13 @@ wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 datum_core = { path = "./src/datum_core", default-features = false }
 big_cartridges_core = { path = "./src/big_cartridges_core/", default-features = false }
+big_cabinet = { path = "./src/big_cabinet/" }
+# `default = ["manifest"]` is an empty marker feature; members that want it ask for it explicitly.
+big_cabinet_core = { path = "./src/big_cabinet_core/", default-features = false }
+big_blobs = { path = "./src/big_blobs/" }
+big_blobs_core = { path = "./src/big_blobs_core/" }
+macros = { path = "./src/macros/" }
+method_lexicon = { path = "./src/method_lexicon/" }
 big_cartridges = { path = "./src/big_cartridges/" }
 big_dispatch_core = { path = "./src/big_dispatch_core/" }
 big_dispatch = { path = "./src/big_dispatch/" }
@@ -161,6 +168,7 @@ micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 dayframe_composition = { path = "./src/dayframe_composition" }
+ui = { path = "./src/ui" }
 
 #
 # meta
@@ -363,7 +371,6 @@ dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7df
 dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 blitz-dom = "=0.3.0-beta.4"
-ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
 #
 

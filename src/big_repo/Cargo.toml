@@ -10,7 +10,6 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-blake3.workspace = true
 #
 # internal
 utils_rs = { workspace = true, features = ["hash"] }
@@ -18,6 +17,7 @@ secrets_rs.workspace = true
 big_sync_core.workspace = true
 big_sync.workspace = true
 am_utils_rs.workspace = true
+sqlite_rs.workspace = true
 
 #
 # ds
@@ -42,8 +42,8 @@ autosurgeon = { workspace = true }
 #
 # encoding
 serde.workspace = true
+blake3.workspace = true
 serde_json = { workspace = true }
-sqlite_rs.workspace = true
 rand.workspace = true
 rand_08 = { version = "0.8", package = "rand", default-features = false }
 tempfile.workspace = true
@@ -81,7 +81,12 @@ pretty_assertions = "1.4.1"
 test-support = []
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+#
+# internal
 big_sync = { workspace = true, features = ["test-support"] }
 # Enables the `secrets_rs` keyring mock store for the keyhive storage tests.
 secrets_rs = { workspace = true, features = ["test-support"] }
+
+#
+# misc
+tokio = { workspace = true, features = ["test-util"] }

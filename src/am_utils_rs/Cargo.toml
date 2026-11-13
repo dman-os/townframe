@@ -10,6 +10,8 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
+#
+# internal
 utils_rs = { workspace = true, features = ["hash"] }
 
 #
@@ -22,6 +24,3 @@ autosurgeon = { workspace = true }
 serde.workspace = true
 data-encoding.workspace = true
 camino = "1.2.2"
-
-#
-# log
