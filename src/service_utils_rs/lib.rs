@@ -63,6 +63,7 @@ pub use middleware::Identity;
 pub use middleware::Layer;
 pub use middleware::ServiceBuilder;
 pub use middleware::Stack;
+pub use operation::Body;
 pub use operation::ClientError;
 pub use operation::Envelope;
 pub use operation::EventFrame;
@@ -76,6 +77,8 @@ pub use service_core_rs::Protocol;
 pub use service_core_rs::ProtocolMethods;
 pub use service_core_rs::UnaryVisitor;
 pub use service_core_rs::declare_service_protocol;
+#[cfg(unix)]
+pub use service_core_rs::descriptor;
 pub use service_core_rs::service_method;
 pub use xrpc::XrpcRouter;
 

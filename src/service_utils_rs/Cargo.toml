@@ -45,6 +45,7 @@ serde_urlencoded = "0.7"
 uuid = { version = "1", features = ["serde", "v7"] }
 tracing-opentelemetry = "0.32"
 
+
 #
 # error and log
 thiserror.workspace = true

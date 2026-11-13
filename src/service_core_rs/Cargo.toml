@@ -9,6 +9,9 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+default = []
+schemars = ["dep:schemars", "method_core/schemars"]
 [dependencies]
 #
 # internal
@@ -26,11 +29,15 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+schemars = { version = "1.2", optional = true }
 uuid = { version = "1", features = ["serde", "v7"] }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
 tracing-opentelemetry = "0.32"
 http.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -2,6 +2,7 @@
 //! The docs call goes through the typed `Client<DocsProtocol>::xrpc`, the nodule call through
 //! plain HTTP, since a nodule's operations have no Rust request type.
 
+use super::cartridges::operator;
 use super::dispatch::narrowed;
 use super::dispatch::operations;
 use super::nodule_wasm::Spec;
@@ -14,27 +15,75 @@ use super::nodule_wasm::relay;
 use super::nodule_wasm::set_enabled;
 use super::nodule_wasm::set_operations;
 use super::*;
+use big_blobs_core::BlobId;
+use big_blobs_core::MAX_PUT_OCTETS;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::GetDocAvailability;
+use big_cartridges_core::Digest;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
 use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
 use big_dispatch_core::Body;
+use big_dispatch_core::DispatchError;
 use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
 use big_dispatch_core::Origin;
 use method_core::Method;
 use service_client_native_rs::Client;
+use service_client_native_rs::DescriptorClient;
 use service_client_native_rs::Transport;
 use service_client_native_rs::XrpcClient;
 use service_utils_rs::Envelope;
 use service_utils_rs::HttpMetadata;
+use service_utils_rs::descriptor;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
+use tokio::io::AsyncReadExt;
+use tokio::io::Interest;
+use tokio::net::UnixStream;
 
 pub(super) const MAX_RESPONSE: usize = 1 << 20;
+
+#[cfg(unix)]
+async fn send_descriptor_part(
+    stream: &UnixStream,
+    bytes: &[u8],
+    descriptors: &[OwnedFd],
+) -> std::io::Result<()> {
+    stream
+        .async_io(Interest::WRITABLE, || {
+            descriptor::send_part(stream, bytes, descriptors)
+        })
+        .await
+        .map(|_| ())
+}
+
+#[cfg(unix)]
+async fn assert_descriptor_connection_refused(label: &str, mut stream: UnixStream) {
+    let mut response = [0; 1];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read(&mut response),
+    )
+    .await
+    .expect("descriptor connection did not close")
+    .unwrap_or_else(|error| {
+        if error.kind() == std::io::ErrorKind::ConnectionReset {
+            return 0;
+        }
+        panic!("reading refused descriptor connection failed: {error}");
+    });
+    assert_eq!(
+        read, 0,
+        "{label}: refused descriptor connection returned a response"
+    );
+}
 
 /// A node with the echo nodule enabled, listening as `listeners` says.
 async fn boot_listening(
@@ -227,6 +276,185 @@ async fn a_token_narrows_a_socket_connection_to_its_scope() {
     shutdown(node, stop).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn import_file_batches_descriptors_over_the_native_socket() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, _) = boot_listening(&secrets, unix(&socket)).await;
+    let first_path = directory.path().join("first.txt");
+    let second_path = directory.path().join("second.txt");
+    let first_bytes = b"first descriptor";
+    let second_bytes = b"second descriptor";
+    std::fs::write(&first_path, first_bytes).unwrap();
+    std::fs::write(&second_path, second_bytes).unwrap();
+
+    let mut first_file = std::fs::File::open(&first_path).unwrap();
+    first_file.seek(SeekFrom::Start(5)).unwrap();
+    let first_fd: OwnedFd = first_file.try_clone().unwrap().into();
+    let (_pipe_read, pipe_write) = rustix::pipe::pipe().unwrap();
+    let second_fd: OwnedFd = std::fs::File::open(&second_path).unwrap().into();
+    let capability = super::blobs::put_cap(&node).await;
+    let parameters = serde_json::json!({ "capability": capability });
+    let results: Vec<serde_json::Value> = DescriptorClient::unix(
+        node.listeners
+            .fd_socket
+            .as_ref()
+            .expect("descriptor listener is attached"),
+    )
+    .call(
+        "org.example.daybook.blobs.importFile",
+        &parameters,
+        vec![first_fd, pipe_write, second_fd],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["kind"], "imported");
+    assert_eq!(results[1]["kind"], "refused");
+
+    assert!(
+        results[1]["error"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("descriptor is not a regular file")
+    );
+    assert_eq!(results[2]["kind"], "imported");
+    assert_eq!(first_file.stream_position().unwrap(), 5);
+
+    for (result, bytes) in [
+        (&results[0], first_bytes.as_slice()),
+        (&results[2], second_bytes.as_slice()),
+    ] {
+        let info: big_blobs_core::BlobInfo =
+            serde_json::from_value(result["info"].clone()).unwrap();
+        assert_eq!(info.blob_id, BlobId::new(Digest::of(bytes).0));
+        let body = node
+            .blobs
+            .read(
+                RequestContext::root(),
+                super::blobs::read_cap(&node, &info.blob_id).await,
+                info.blob_id,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(body.collect(MAX_PUT_OCTETS).await.unwrap().as_ref(), bytes);
+    }
+
+    shutdown(node, stop).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn import_file_refuses_an_oversized_item_but_imports_the_rest() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, _) = boot_listening(&secrets, unix(&socket)).await;
+    let oversized_path = directory.path().join("oversized");
+    let normal_path = directory.path().join("normal");
+    std::fs::File::create(&oversized_path)
+        .unwrap()
+        .set_len(MAX_PUT_OCTETS + 1)
+        .unwrap();
+    std::fs::write(&normal_path, b"after oversized").unwrap();
+    let capability = super::blobs::put_cap(&node).await;
+    let parameters = serde_json::json!({ "capability": capability });
+    let results: Vec<serde_json::Value> = DescriptorClient::unix(
+        node.listeners
+            .fd_socket
+            .as_ref()
+            .expect("descriptor listener is attached"),
+    )
+    .call_files(
+        "org.example.daybook.blobs.importFile",
+        &parameters,
+        &[oversized_path, normal_path],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    assert_eq!(results[0]["kind"], "refused");
+    assert_eq!(results[0]["error"]["code"], "tooLarge");
+    assert_eq!(results[0]["error"]["limitOctets"], MAX_PUT_OCTETS);
+    assert_eq!(results[1]["kind"], "imported");
+    shutdown(node, stop).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn descriptor_socket_rejects_late_descriptors_and_second_frames() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, _) = boot_listening(&secrets, unix(&socket)).await;
+    let fd_socket = node.listeners.fd_socket.as_ref().unwrap().clone();
+    let capability = super::blobs::put_cap(&node).await;
+    let parameters = serde_json::json!({ "capability": capability });
+    let frame =
+        descriptor::encode_request("org.example.daybook.blobs.importFile", &parameters, 1).unwrap();
+
+    let late = UnixStream::connect(&fd_socket).await.unwrap();
+    send_descriptor_part(&late, &frame[..4], &[]).await.unwrap();
+    let late_fd: OwnedFd = std::fs::File::open("/etc/hosts").unwrap().into();
+    send_descriptor_part(&late, &frame[4..], &[late_fd])
+        .await
+        .unwrap();
+    assert_descriptor_connection_refused("late descriptor", late).await;
+
+    let second = UnixStream::connect(&fd_socket).await.unwrap();
+    let first_fd: OwnedFd = std::fs::File::open("/etc/hosts").unwrap().into();
+    send_descriptor_part(
+        &second,
+        &[frame.as_slice(), frame.as_slice()].concat(),
+        &[first_fd],
+    )
+    .await
+    .unwrap();
+    assert_descriptor_connection_refused("second frame", second).await;
+
+    shutdown(node, stop).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn descriptor_import_is_refused_from_a_remote_origin() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, _) = boot_listening(&secrets, unix(&socket)).await;
+    let capability = super::blobs::put_cap(&node).await;
+    let descriptor: OwnedFd = std::fs::File::open("/etc/hosts").unwrap().into();
+    let result = node
+        .dispatch
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator(&node).metadata(),
+            Invoke {
+                operation: "org.example.daybook.blobs.importFile".into(),
+                parameters: serde_json::json!({ "capability": capability }),
+                body: Body::Descriptors(descriptor::DescriptorBody::from_fds(vec![descriptor])),
+                context: InvocationContext {
+                    origin: Origin::Remote,
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(service_utils_rs::ClientError::Method(
+            DispatchError::LocalOnly
+        ))
+    ));
+    shutdown(node, stop).await;
+}
 #[tokio::test]
 async fn tcp_admits_only_the_capability_each_request_presents() {
     let secrets = secrets().await;
@@ -349,6 +577,7 @@ async fn stopping_closes_both_listeners_and_removes_the_socket() {
         &secrets,
         Listeners {
             unix_socket: Some(socket.clone()),
+            fd_socket: None,
             tcp: Some("127.0.0.1:0".parse().unwrap()),
         },
     )
@@ -474,6 +703,35 @@ async fn draining_closes_the_listener_first_and_keeps_the_clients_it_had_accepte
     shutdown(node, stop).await;
 }
 
+/// The descriptor socket follows the HTTP socket's lifecycle: draining closes its listener and
+/// removes its file, but the serving task stays until it is stopped, so stopping afterwards is the
+/// clean stop it asks for (a task that ended on drain made `stop` panic).
+#[tokio::test]
+async fn a_drained_descriptor_socket_still_stops_cleanly() {
+    let secrets = secrets().await;
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("run/node.sock");
+    let (node, stop, _spec) = boot_listening(&secrets, unix(&socket)).await;
+    let fd_socket = node.listeners.fd_socket.as_ref().unwrap().clone();
+    let fd_clients = node
+        .fd_clients
+        .as_ref()
+        .expect("the descriptor listener runs");
+
+    fd_clients.drain().await.unwrap();
+    let refused = UnixStream::connect(&fd_socket).await.unwrap_err();
+    assert!(
+        matches!(
+            refused.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+        "{refused:?}"
+    );
+    // The next daemon replaces the socket file; stopping this node must not need the old task
+    // to have ended on its own.
+    shutdown(node, stop).await;
+}
+
 /// Answers `{"ok": true}` to whatever it is asked.
 struct AlwaysOk;
 
@@ -486,7 +744,7 @@ impl Provider for AlwaysOk {
         _: &RequestContext,
         _: &InvocationContext,
         _: Value,
-        _: Option<method_core::ByteBody>,
+        _: Option<Body>,
     ) -> Result<Body, big_dispatch::ProviderError> {
         Result::Ok(Body::Json(json!({ "ok": true })))
     }

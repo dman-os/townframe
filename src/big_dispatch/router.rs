@@ -18,7 +18,7 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_dispatch_core::Route;
-use method_core::ByteBody;
+
 use method_core::Encoding;
 use method_lexicon::MethodContract;
 use serde_json::Value;
@@ -70,7 +70,7 @@ pub trait Provider: Send + Sync {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-        body: Option<ByteBody>,
+        body: Option<Body>,
     ) -> Result<Body, ProviderError>;
 }
 
@@ -491,7 +491,7 @@ mod tests {
             _: &RequestContext,
             _: &InvocationContext,
             input: Value,
-            _: Option<ByteBody>,
+            _: Option<Body>,
         ) -> Result<Body, ProviderError> {
             Ok(Body::Json(input))
         }
