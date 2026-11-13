@@ -201,6 +201,12 @@ pub fn write_context_headers(
             HeaderValue::from_str(value).map_err(|error| error.to_string())?,
         );
     }
+    if let Some(range) = &metadata.range {
+        headers.insert(
+            "range",
+            HeaderValue::from_str(&range.to_string()).map_err(|error| error.to_string())?,
+        );
+    }
     if let Some(remaining) = context.remaining_budget() {
         headers.insert(
             TIMEOUT_HEADER,

@@ -226,6 +226,7 @@ impl Authorization {
         HttpMetadata {
             authorization: Some(self.header_value()),
             idempotency_key: None,
+            range: None,
         }
     }
 
