@@ -23,14 +23,19 @@
 //! prefix: a Lexicon file under it is the nodule's own, and one outside it is a vendored copy that
 //! must be the contract of a request or an operation the nodule implements.
 
-use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::GrammarError;
+use big_cabinet_core::datum::Nsid;
 use big_cabinet_core::datum::is_nsid;
 use big_cabinet_core::datum::operation;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::parse_ref;
-use big_cartridges_core::CartridgeError;
-use big_cartridges_core::request::Request;
+
+use big_cartridges_core::Nodule;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::ResolvedCartridge;
+use big_cartridges_core::RunMode;
+use big_cartridges_core::StateKind;
+use big_cartridges_core::StoreMode;
 use big_dispatch_core::DispatchScope;
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -46,169 +51,57 @@ pub mod providers;
 
 pub const AUTHORITY: &str = "org.example.daybook";
 
-/// `org.example.daybook.nodule/main`: what a package contributes to a node. It carries no
-/// identity or authority: the envelope's `CartridgeId` names the package and its `authority` is the NSID
-/// prefix the package holds. An NSID in the description is *held* when it is under that prefix and
-/// declared in `lexicons`; every other NSID it uses must be implemented or requested.
-#[macros::datum(authority = AUTHORITY)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// A method permbind projected into the provider-resolution surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Nodule {
-    /// Lexicon files as published: datum Lexicons for the datum compiler, operation Lexicons for
-    /// [`big_cabinet_core::datum::operation`]. Carried opaque because a Lexicon is already its own
-    /// schema language.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lexicons: Vec<IndexMap<String, Value>>,
-    /// Per record this nodule holds, keyed by its NSID: the record's sidecar JSON Schema document,
-    /// which carries what its Lexicon cannot say, the `x-automerge` storage forms above all (ADR 021
-    /// §3), in the form `big_cabinet_core`'s `Bundle::document` renders. Without one, a held record
-    /// keeps the plain JSON kind its Lexicon states at every position: no collaborative text, no
-    /// counter, no declared reference. Admission checks that each key is a held record; the
-    /// document itself is checked against the record's Lexicon when the record is registered.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub sidecar: IndexMap<String, Value>,
-    /// What the nodule uses that it does not hold, in the shared request shape: foreign
-    /// operations it calls (a request without `access`), datum contracts it reads or writes.
-    /// Strictness: any NSID the description references outside the envelope's authority that it
-    /// does not implement must be a `contract` here, and an initializer may only target a foreign operation listed
-    /// here. The runtime binds a provider for each.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requires: Vec<Request>,
-    /// The one HTTP-shaped XRPC handler component serving `/xrpc/<nsid>` for every operation in
-    /// [`Self::implements`]. It is handed all of [`Self::private_state`].
+pub struct Request {
+    pub binding: String,
+    pub contract: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handler: Option<Handler>,
-    /// Operation NSIDs the handler serves. One whose Lexicon this description declares must be a
-    /// query, procedure or subscription. One with no Lexicon here (a provider for a contract
-    /// another nodule declares) is only checked to be an NSID; a non-empty list needs a
-    /// [`Self::handler`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub implements: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub revisioned_stores: Vec<RevisionedStore>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub initialization: Vec<Initializer>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub private_state: Vec<PrivateState>,
-    /// The NSIDs of the datums that are this cartridge's settings (ADR 044 §3): each is a record
-    /// the nodule declares under its own authority, written as an ordinary datum in the
-    /// cartridge's config document under its own NSID and slot, admitted against its Lexicon like
-    /// any datum. Settings are always optional: an absent datum means the nodule's own default,
-    /// which lives in its code, and nothing writes one on its behalf. A cartridge with no settings
-    /// declares none.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub settings: Vec<String>,
-    /// Binding sections (commands, views, processors, ...) keyed by section tag, for example
-    /// `org.example.daybook.nodule.commands`. The runtime carries them verbatim and never
-    /// validates them: an unknown section or unknown content inside a known one does not refuse
-    /// admission.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    pub bindings: IndexMap<String, Value>,
-    #[serde(flatten)]
-    pub extra: Extra,
+    pub access: Option<String>,
+    pub necessity: big_cartridges_core::Necessity,
+    #[serde(default, skip_serializing_if = "crate::resolution_is_default")]
+    pub resolution: big_cartridges_core::Resolution,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_revision: Option<u32>,
 }
 
-/// The XRPC handler component: a WASI HTTP-shaped component from an envelope artifact that
-/// serves `/xrpc/<nsid>` for the nodule's implemented operations (ADR 027 §3).
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Handler {
-    /// Key of an artifact in the envelope that carries this description.
-    pub artifact: String,
-    #[serde(flatten)]
-    pub extra: Extra,
+fn resolution_is_default(value: &big_cartridges_core::Resolution) -> bool {
+    *value == big_cartridges_core::Resolution::Configured
 }
 
-/// A nodule's datum Lexicons split for the schema registry: see [`Nodule::registrable_datums`].
+#[cfg(test)]
+impl Request {
+    fn new(binding: impl Into<String>, contract: impl Into<String>) -> Self {
+        Self {
+            binding: binding.into(),
+            contract: contract.into(),
+            access: None,
+            necessity: big_cartridges_core::Necessity::Required,
+            resolution: big_cartridges_core::Resolution::Configured,
+            min_revision: None,
+        }
+    }
+}
+
+impl Request {
+    fn is_operation_call(&self) -> bool {
+        self.access.is_none()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RegistrableDatums<'a> {
-    /// `(nsid, file, sidecar)` of each datum the nodule holds: a `main` that is a record or an
-    /// object, under its authority; see [`Nodule::sidecar`].
-    pub held: Vec<(&'a str, &'a IndexMap<String, Value>, Option<&'a Value>)>,
-    /// Every other datum file: a type library (no `main`), or a datum outside the authority.
+    #[expect(
+        clippy::type_complexity,
+        reason = "public split preserves the registry's borrowed datum tuple shape"
+    )]
+    pub held: Vec<(
+        &'a str,
+        &'a IndexMap<String, Value>,
+        Option<&'a IndexMap<String, Value>>,
+    )>,
     pub carried: Vec<&'a IndexMap<String, Value>>,
-}
-
-/// An ordered, replayable revision stream (ADR 027 §7). `selector` and `entry` are Lexicon
-/// references; `source`, when stated, is the implemented operation whose handler writes it, else
-/// the host does.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevisionedStore {
-    pub key: String,
-    pub selector: String,
-    pub entry: String,
-    pub mode: StoreMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// What a revisioned store retains: the latest entry per key, or every entry in order.
-#[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum StoreMode {
-    Frontier,
-    Log,
-    #[datum(other)]
-    Unknown(String),
-}
-
-/// An operation the runtime invokes on the nodule's behalf each time it starts. Registration is
-/// intent; whether it ran is the node's record (`NoduleRecord::init`), not this description's.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Initializer {
-    /// Names this initializer within the nodule: unique and not empty. A node records that a
-    /// [`RunMode::Once`] initializer ran under this key and the cartridge revision, and derives the
-    /// idempotency key of each invocation from it, so renaming one makes it a new initializer.
-    pub key: String,
-    pub target: String,
-    pub mode: RunMode,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// When an initializer runs on a node. Initializers must be idempotent either way: the node
-/// has no synced record of what ran, so a mirrored node or a new revision runs them again.
-#[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum RunMode {
-    /// Once per node per cartridge revision: not again on restart or re-enable, again on a new revision.
-    Once,
-    /// Each time the nodule starts: node boot, and enabling it.
-    EveryStart,
-    #[datum(other)]
-    Unknown(String),
-}
-
-/// Named storage private to the nodule, handed to its handler.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PrivateState {
-    pub key: String,
-    pub kind: StateKind,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-#[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum StateKind {
-    Sqlite,
-    Kv,
-    #[datum(other)]
-    Unknown(String),
 }
 
 /// What admission established about a description: the operations it serves, the authority it
@@ -257,12 +150,38 @@ type Result<T> = std::result::Result<T, NoduleError>;
 /// Implemented operations by NSID; the kind is `None` for a foreign operation.
 type Implemented = BTreeMap<String, Option<OperationKind>>;
 
-impl Nodule {
+pub trait NoduleAdmission {
+    fn operation_requests(&self) -> Vec<Request>;
+    fn bind_operations(&self, grants: &DispatchScope) -> (DispatchScope, DispatchScope);
+    fn unmet_requests(&self, granted: &DispatchScope) -> Vec<Request>;
+    fn missing_providers(
+        &self,
+        statuses: &BTreeMap<String, providers::RequestStatus>,
+    ) -> Vec<Request>;
+    fn lexicon_revision(&self, nsid: &str) -> Option<u32>;
+
+    fn datum_lexicons(&self) -> Box<dyn Iterator<Item = &IndexMap<String, Value>> + '_>;
+    fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_>;
+    fn admit(&self, authority: Option<&str>) -> Result<Admitted>;
+}
+impl NoduleAdmission for ResolvedCartridge {
     /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
-    pub fn operation_requests(&self) -> impl Iterator<Item = &Request> {
-        self.requires
+    fn operation_requests(&self) -> Vec<Request> {
+        self.cartridge
+            .permbinds
             .iter()
-            .filter(|request| request.is_operation_call())
+            .filter_map(|(binding, permbind)| match permbind {
+                Permbind::Method(method) => Some(Request {
+                    binding: binding.clone(),
+                    access: None,
+                    resolution: big_cartridges_core::Resolution::Configured,
+                    contract: method.nsid.to_string(),
+                    necessity: method.necessity.clone(),
+                    min_revision: method.min_revision,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Splits operation `grants` into what may take effect and what may not. The manifest bounds
@@ -270,16 +189,17 @@ impl Nodule {
     /// it covers, so an authority-prefix grant never widens beyond what the nodule asked for, and
     /// "can X ever reach Y" is answerable from the manifest alone. The second scope is the
     /// entries that cover no requested operation, which the record reports instead of applying.
-    pub fn bind_operations(&self, grants: &DispatchScope) -> (DispatchScope, DispatchScope) {
-        let requested: BTreeSet<&str> = self
+    fn bind_operations(&self, grants: &DispatchScope) -> (DispatchScope, DispatchScope) {
+        let requested: BTreeSet<String> = self
             .operation_requests()
-            .map(|request| request.contract.as_str())
+            .into_iter()
+            .map(|request| request.contract)
             .collect();
         let applied = DispatchScope {
             operations: requested
                 .iter()
                 .filter(|nsid| grants.permits(nsid))
-                .map(|nsid| (*nsid).to_owned())
+                .cloned()
                 .collect(),
             authorities: BTreeSet::new(),
             // Privilege is not narrowed by the manifest (a request names a method, not its
@@ -291,7 +211,7 @@ impl Nodule {
             operations: grants
                 .operations
                 .iter()
-                .filter(|nsid| !requested.contains(nsid.as_str()))
+                .filter(|nsid| !requested.contains(*nsid))
                 .cloned()
                 .collect(),
             authorities: grants
@@ -300,7 +220,7 @@ impl Nodule {
                 .filter(|authority| {
                     !requested
                         .iter()
-                        .any(|nsid| DispatchScope::authority_owns(authority, nsid))
+                        .any(|nsid| DispatchScope::authority_owns(authority, nsid.as_str()))
                 })
                 .cloned()
                 .collect(),
@@ -311,52 +231,49 @@ impl Nodule {
 
     /// The required operation requests that `granted` does not permit: while any exists the
     /// nodule needs configuration. An optional request never appears.
-    pub fn unmet_requests<'a>(
-        &'a self,
-        granted: &'a DispatchScope,
-    ) -> impl Iterator<Item = &'a Request> {
-        self.operation_requests().filter(|request| {
-            request.necessity.is_required() && !granted.permits(&request.contract)
-        })
+    fn unmet_requests(&self, granted: &DispatchScope) -> Vec<Request> {
+        self.operation_requests()
+            .into_iter()
+            .filter(|request| {
+                request.necessity.is_required() && !granted.permits(&request.contract)
+            })
+            .collect()
     }
 
     /// The required requests, operation or data, whose `statuses` (by binding, see
     /// [`providers::RequestStatus::evaluate`]) say no provider satisfies them: while any exists
     /// the nodule is held at [`big_dispatch_core::Readiness::ProviderMissing`]. An optional request
     /// never appears.
-    pub fn missing_providers<'a>(
-        &'a self,
-        statuses: &'a BTreeMap<String, providers::RequestStatus>,
-    ) -> impl Iterator<Item = &'a Request> {
-        self.requires.iter().filter(|request| {
-            // An enabled nodule has a status for every request, which is the only case this is
-            // asked in.
-            request.necessity.is_required() && statuses[&request.binding].unresolved.is_some()
-        })
+    fn missing_providers(
+        &self,
+        statuses: &BTreeMap<String, providers::RequestStatus>,
+    ) -> Vec<Request> {
+        self.operation_requests()
+            .into_iter()
+            .filter(|request| {
+                request.necessity.is_required() && statuses[&request.binding].unresolved.is_some()
+            })
+            .collect()
     }
 
     /// The `revision` the Lexicon file defining `nsid` declares, if this nodule carries that
     /// file and it declares one. Admission checked every declared revision, so a malformed one
     /// cannot reach here.
-    pub fn lexicon_revision(&self, nsid: &str) -> Option<u32> {
-        let file = self
-            .lexicons
-            .iter()
-            .find(|file| file.get("id").and_then(Value::as_str) == Some(nsid))?;
+    fn lexicon_revision(&self, nsid: &str) -> Option<u32> {
+        let id = nsid.parse::<Nsid>().ok()?;
+        let file = self.lexicons.get(&id)?;
         let revision = file.get("revision")?;
-        Some(
-            revision
-                .as_u64()
-                .and_then(|revision| u32::try_from(revision).ok())
-                .expect("admission checked the Lexicon revision"),
-        )
+        revision
+            .as_u64()
+            .and_then(|revision| u32::try_from(revision).ok())
     }
 
-    /// The Lexicon files that declare datums rather than operations, for the datum compiler.
-    pub fn datum_lexicons(&self) -> impl Iterator<Item = &IndexMap<String, Value>> {
-        self.lexicons
-            .iter()
-            .filter(|file| operation_kind(file).is_none())
+    fn datum_lexicons(&self) -> Box<dyn Iterator<Item = &IndexMap<String, Value>> + '_> {
+        Box::new(
+            self.lexicons
+                .values()
+                .filter(|file| operation_kind(file).is_none()),
+        )
     }
 
     /// The datum Lexicons this nodule brings to the node's schema registry, split for
@@ -366,13 +283,14 @@ impl Nodule {
     /// libraries, but is never registered by this nodule. A Lexicon without a `main` datum is a
     /// type library and is always carried. A vendored copy of a datum is the holder's to register,
     /// so registering it here would shadow the holder's.
-    pub fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_> {
+    fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'_> {
         let mut split = RegistrableDatums::default();
-        for file in self.datum_lexicons() {
-            let id = file
-                .get("id")
-                .and_then(Value::as_str)
-                .expect("admission checked every Lexicon states its NSID");
+        for (nsid, file) in self
+            .lexicons
+            .iter()
+            .filter(|(_, file)| operation_kind(file).is_none())
+        {
+            let id = nsid.as_str();
             // Rust-declared datums publish an `object` main (their stored values carry no
             // `$type`, which a Lexicon `record` would require); hand-written ones may state a
             // `record`. Either is a datum; a file with no `main` is a type library.
@@ -386,7 +304,7 @@ impl Nodule {
             if is_datum
                 && authority.is_some_and(|authority| DispatchScope::authority_owns(authority, id))
             {
-                split.held.push((id, file, self.sidecar.get(id)));
+                split.held.push((id, file, self.sidecars.get(nsid)));
             } else {
                 split.carried.push(file);
             }
@@ -400,16 +318,24 @@ impl Nodule {
     /// reference outside the authority is implemented or requested; the handler serves only
     /// operations declared here; nothing this build cannot serve is accepted. Bindings are not
     /// read.
-    pub fn admit(&self, authority: Option<&str>) -> Result<Admitted> {
-        Request::validate_all(&self.requires, "requires").map_err(|error| match error {
-            CartridgeError::Invalid { path, reason } => NoduleError::invalid(path, reason),
-            other => unreachable!("request validation only reports invalid fields: {other}"),
-        })?;
+    fn admit(&self, authority: Option<&str>) -> Result<Admitted> {
+        self.cartridge
+            .validate()
+            .map_err(|error| NoduleError::invalid("cartridge", error.to_string()))?;
+        let nodule =
+            self.cartridge.nodule.as_ref().ok_or_else(|| {
+                NoduleError::invalid("nodule", "a cartridge must contain a nodule")
+            })?;
         let admission = Admission {
-            nodule: self,
+            nodule,
+            resolved: self,
             authority,
-            lexicons: self.lexicons()?,
-            implemented: self.implements.iter().map(String::as_str).collect(),
+            lexicons: parse_lexicons(self)?,
+            implemented: nodule
+                .routines
+                .values()
+                .map(|routine| routine.implements.as_str())
+                .collect(),
         };
         admission.requests()?;
         admission.lexicon_files()?;
@@ -426,65 +352,61 @@ impl Nodule {
             artifacts,
         })
     }
+}
 
-    /// Reads every Lexicon file's frame and admits the operation ones, indexed by id.
-    fn lexicons(&self) -> Result<BTreeMap<&str, LexiconFile<'_>>> {
-        let mut lexicons = BTreeMap::new();
-        for (index, file) in self.lexicons.iter().enumerate() {
-            let path = format!("lexicons[{index}]");
-            if file.get("lexicon") != Some(&Value::from(1)) {
-                return Err(NoduleError::invalid(
-                    format!("{path}.lexicon"),
-                    "the language version must be 1",
-                ));
-            }
-            let id = file
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| is_nsid(id))
-                .ok_or_else(|| {
-                    NoduleError::invalid(format!("{path}.id"), "a Lexicon file states its NSID")
-                })?;
-            let defs = file
-                .get("defs")
-                .and_then(Value::as_object)
-                .filter(|defs| !defs.is_empty())
-                .ok_or_else(|| {
-                    NoduleError::invalid(
-                        format!("{path}.defs"),
-                        "non-empty definitions are required",
-                    )
-                })?;
-            if let Some(revision) = file.get("revision")
-                && !revision
-                    .as_u64()
-                    .is_some_and(|revision| (1..=u64::from(u32::MAX)).contains(&revision))
-            {
-                return Err(NoduleError::invalid(
-                    format!("{path}.revision"),
-                    "a Lexicon revision is an integer starting at 1",
-                ));
-            }
-            let operation = operation_kind(file);
-            let refs = match operation {
-                Some(kind) => operation::validate(kind, defs, &format!("{path}.defs"))?,
-                None => Vec::new(),
-            };
-            let lexicon = LexiconFile {
-                id,
-                defs,
-                operation,
-                refs,
-            };
-            if lexicons.insert(id, lexicon).is_some() {
-                return Err(NoduleError::invalid(
-                    format!("{path}.id"),
-                    format!("Lexicon `{id}` is declared twice"),
-                ));
-            }
+fn parse_lexicons(resolved: &ResolvedCartridge) -> Result<BTreeMap<&str, LexiconFile<'_>>> {
+    let mut lexicons = BTreeMap::new();
+    for (index, (key, file)) in resolved.lexicons.iter().enumerate() {
+        let path = format!("lexicons[{index}]");
+        if file.get("lexicon") != Some(&Value::from(1)) {
+            return Err(NoduleError::invalid(
+                format!("{path}.lexicon"),
+                "the language version must be 1",
+            ));
         }
-        Ok(lexicons)
+        let id = key.as_str();
+        if !is_nsid(id) || file.get("id").and_then(Value::as_str) != Some(id) {
+            return Err(NoduleError::invalid(
+                format!("{path}.id"),
+                "a Lexicon file states the NSID named by its pin",
+            ));
+        }
+        let defs = file
+            .get("defs")
+            .and_then(Value::as_object)
+            .filter(|defs| !defs.is_empty())
+            .ok_or_else(|| {
+                NoduleError::invalid(format!("{path}.defs"), "non-empty definitions are required")
+            })?;
+        if let Some(revision) = file.get("revision")
+            && !revision
+                .as_u64()
+                .is_some_and(|revision| (1..=u64::from(u32::MAX)).contains(&revision))
+        {
+            return Err(NoduleError::invalid(
+                format!("{path}.revision"),
+                "a Lexicon revision is an integer starting at 1",
+            ));
+        }
+        let operation = operation_kind(file);
+        let refs = match operation {
+            Some(kind) => operation::validate(kind, defs, &format!("{path}.defs"))?,
+            None => Vec::new(),
+        };
+        let lexicon = LexiconFile {
+            id,
+            defs,
+            operation,
+            refs,
+        };
+        if lexicons.insert(id, lexicon).is_some() {
+            return Err(NoduleError::invalid(
+                format!("{path}.id"),
+                format!("Lexicon `{id}` is declared twice"),
+            ));
+        }
     }
+    Ok(lexicons)
 }
 
 /// One admission in progress: the description plus what its Lexicons established, which every
@@ -492,6 +414,7 @@ impl Nodule {
 /// their own check so a reference may name one.
 struct Admission<'a> {
     nodule: &'a Nodule,
+    resolved: &'a ResolvedCartridge,
     /// The envelope's NSID authority.
     authority: Option<&'a str>,
     lexicons: BTreeMap<&'a str, LexiconFile<'a>>,
@@ -514,7 +437,7 @@ impl<'a> Admission<'a> {
     /// A request names a contract another cartridge holds: one under this nodule's own authority
     /// would be a self-edge.
     fn requests(&self) -> Result<()> {
-        for (index, request) in self.nodule.requires.iter().enumerate() {
+        for (index, request) in self.resolved.operation_requests().into_iter().enumerate() {
             if self.owns(&request.contract) {
                 return Err(NoduleError::invalid(
                     format!("requires[{index}].contract"),
@@ -532,7 +455,7 @@ impl<'a> Admission<'a> {
     /// contract, so it must be requested or an operation this nodule implements. (A file under
     /// the authority is the nodule's own.)
     fn lexicon_files(&self) -> Result<()> {
-        for (index, file) in self.nodule.lexicons.iter().enumerate() {
+        for (index, file) in self.resolved.lexicons.values().enumerate() {
             let id = file
                 .get("id")
                 .and_then(Value::as_str)
@@ -568,11 +491,11 @@ impl<'a> Admission<'a> {
     /// A sidecar document belongs to a record this nodule holds: a vendored copy is the holder's
     /// to describe, and a document for a record nothing declares would never be read.
     fn sidecar(&self) -> Result<()> {
-        let held = self.nodule.registrable_datums(self.authority).held;
-        for nsid in self.nodule.sidecar.keys() {
-            if !held.iter().any(|(id, _, _)| id == nsid) {
+        let held = self.resolved.registrable_datums(self.authority).held;
+        for nsid in self.resolved.sidecars.keys() {
+            if !held.iter().any(|(id, _, _)| id == &nsid.to_string()) {
                 return Err(NoduleError::invalid(
-                    format!("sidecar.{nsid}"),
+                    format!("sidecars.{nsid}"),
                     format!("`{nsid}` is not a record this cartridge holds"),
                 ));
             }
@@ -593,13 +516,16 @@ impl<'a> Admission<'a> {
 
     /// Private state: unique keys and a kind this build serves.
     fn private_state(&self) -> Result<()> {
-        let state = keyed(&self.nodule.private_state, "privateState", |state| {
-            &state.key
-        })?;
-        for (key, state) in &state {
+        for (key, state) in &self.nodule.local_state {
+            if key.is_empty() {
+                return Err(NoduleError::invalid(
+                    "localState",
+                    "a local state key is not empty",
+                ));
+            }
             if let StateKind::Unknown(kind) = &state.kind {
                 return Err(NoduleError::invalid(
-                    format!("privateState[{key}].kind"),
+                    format!("localState[{key}].kind"),
                     format!("this runtime has no `{kind}` state"),
                 ));
             }
@@ -613,54 +539,55 @@ impl<'a> Admission<'a> {
     fn services(&self) -> Result<(Implemented, BTreeSet<String>)> {
         let nodule = self.nodule;
         let mut artifacts = BTreeSet::new();
-        if let Some(handler) = &nodule.handler {
-            if handler.artifact.is_empty() {
+        let mut operations = BTreeMap::new();
+        for (routine_key, routine) in &nodule.routines {
+            let path = format!("nodule.routines.{routine_key}");
+            let component = match &routine.r#impl {
+                big_cartridges_core::RoutineImpl::ComponentExport(export) => export,
+                big_cartridges_core::RoutineImpl::Unknown(_) => {
+                    return Err(NoduleError::invalid(
+                        format!("{path}.impl"),
+                        "this runtime does not understand the routine implementation",
+                    ));
+                }
+            };
+            let Some(component_datum) = self.resolved.components.get(&component.component) else {
                 return Err(NoduleError::invalid(
-                    "handler.artifact",
-                    "the handler names the artifact it runs from",
+                    format!("{path}.impl.component"),
+                    format!("`{}` is not a resolved component", component.component),
+                ));
+            };
+            if !matches!(component_datum, big_cartridges_core::Component::Wasm(_)) {
+                return Err(NoduleError::invalid(
+                    format!("{path}.impl.component"),
+                    "the routine component must be a wasm component",
                 ));
             }
-            artifacts.insert(handler.artifact.clone());
-        } else if !nodule.implements.is_empty() {
-            return Err(NoduleError::invalid(
-                "implements",
-                "implemented operations need a `handler` to serve them",
-            ));
-        }
-        let mut operations = BTreeMap::new();
-        for (index, nsid) in nodule.implements.iter().enumerate() {
-            let path = format!("implements[{index}]");
+            artifacts.insert(component.component.clone());
+
+            let nsid = routine.implements.as_str();
             if !is_nsid(nsid) {
                 return Err(NoduleError::invalid(
-                    path,
+                    format!("{path}.implements"),
                     format!("`{nsid}` is not an NSID"),
                 ));
             }
-            // A request names operations provided by others; one this nodule also implements
-            // would be a self-edge in the runtime dependency graph.
-            if nodule
-                .requires
-                .iter()
-                .any(|request| &request.contract == nsid)
+            if self
+                .resolved
+                .operation_requests()
+                .into_iter()
+                .any(|request| request.contract == nsid)
             {
                 return Err(NoduleError::invalid(
-                    path,
-                    format!(
-                        "`{nsid}` is both requested and implemented; `requires` lists contracts other nodules provide"
-                    ),
+                    format!("{path}.implements"),
+                    format!("`{nsid}` is both requested and implemented"),
                 ));
             }
-            // An operation under this cartridge's authority must be declared here as an operation. A
-            // foreign one is checked against its vendored Lexicon when this description carries
-            // one, and admitted on syntax alone otherwise: its contract lives in another
-            // nodule's Lexicons, which admission cannot see. Resolving it is a bind-time
-            // concern, and dispatch reports this service unavailable until the contract is known
-            // (per-service readiness, ledger D4).
-            let kind = match self.lexicons.get(nsid.as_str()) {
+            let kind = match self.lexicons.get(nsid) {
                 Some(lexicon) => {
                     let Some(kind) = lexicon.operation else {
                         return Err(NoduleError::invalid(
-                            path,
+                            format!("{path}.implements"),
                             format!("`{nsid}` is declared here but is not an operation"),
                         ));
                     };
@@ -668,17 +595,15 @@ impl<'a> Admission<'a> {
                 }
                 None if self.owns(nsid) => {
                     return Err(NoduleError::invalid(
-                        path,
-                        format!(
-                            "`{nsid}` is under this cartridge's authority but is not a declared operation"
-                        ),
+                        format!("{path}.implements"),
+                        format!("`{nsid}` is under this cartridge's authority but is not declared"),
                     ));
                 }
                 None => None,
             };
-            if operations.insert(nsid.clone(), kind).is_some() {
+            if operations.insert(nsid.to_owned(), kind).is_some() {
                 return Err(NoduleError::invalid(
-                    path,
+                    format!("{path}.implements"),
                     format!("`{nsid}` is implemented twice"),
                 ));
             }
@@ -689,10 +614,16 @@ impl<'a> Admission<'a> {
     /// Revisioned stores: schemas that resolve, a mode this build serves, and a source that is
     /// an implemented operation.
     fn stores(&self) -> Result<()> {
-        for (index, store) in self.nodule.revisioned_stores.iter().enumerate() {
+        for (index, (key, store)) in self.nodule.revisioned_stores.iter().enumerate() {
             let path = format!("revisionedStores[{index}]");
-            self.resolve_ref(None, &store.selector, &format!("{path}.selector"))?;
-            self.resolve_ref(None, &store.entry, &format!("{path}.entry"))?;
+            if key.is_empty() {
+                return Err(NoduleError::invalid(
+                    format!("{path}.key"),
+                    "a key is not empty",
+                ));
+            }
+            self.resolve_ref(None, store.selector.as_str(), &format!("{path}.selector"))?;
+            self.resolve_ref(None, store.entry.as_str(), &format!("{path}.entry"))?;
             if let StoreMode::Unknown(mode) = &store.mode {
                 return Err(NoduleError::invalid(
                     format!("{path}.mode"),
@@ -708,23 +639,26 @@ impl<'a> Admission<'a> {
                 ));
             }
         }
-        keyed(
-            &self.nodule.revisioned_stores,
-            "revisionedStores",
-            |store| &store.key,
-        )?;
+
         Ok(())
     }
 
     /// Initializers: each has a unique key and invokes an implemented or required query or
     /// procedure, in a run mode this build has.
     fn initializers(&self, implemented: &Implemented) -> Result<()> {
-        keyed(&self.nodule.initialization, "initialization", |init| {
-            &init.key
-        })?;
-        for (index, initializer) in self.nodule.initialization.iter().enumerate() {
+        for (index, (key, initializer)) in self.nodule.initialization.iter().enumerate() {
             let path = format!("initialization[{index}]");
-            self.invocation_target(&initializer.target, implemented, &format!("{path}.target"))?;
+            if key.is_empty() {
+                return Err(NoduleError::invalid(
+                    format!("{path}.key"),
+                    "a key is not empty",
+                ));
+            }
+            self.invocation_target(
+                initializer.target.as_str(),
+                implemented,
+                &format!("{path}.target"),
+            )?;
             if let RunMode::Unknown(mode) = &initializer.mode {
                 return Err(NoduleError::invalid(
                     format!("{path}.mode"),
@@ -740,7 +674,7 @@ impl<'a> Admission<'a> {
     /// leave the settings to another cartridge's Lexicon, which this nodule could not register.
     fn settings(&self) -> Result<()> {
         let mut seen = BTreeSet::new();
-        for (index, nsid) in self.nodule.settings.iter().enumerate() {
+        for (index, nsid) in self.resolved.cartridge.settings.iter().enumerate() {
             let path = format!("settings[{index}]");
             if !seen.insert(nsid.as_str()) {
                 return Err(NoduleError::invalid(
@@ -748,7 +682,7 @@ impl<'a> Admission<'a> {
                     format!("`{nsid}` is listed twice"),
                 ));
             }
-            if !self.holds(nsid) {
+            if !self.holds(nsid.as_str()) {
                 return Err(NoduleError::invalid(
                     path,
                     format!("`{nsid}` is not a Lexicon under this cartridge's authority"),
@@ -836,10 +770,16 @@ impl<'a> Admission<'a> {
     }
 
     fn is_requested(&self, nsid: &str) -> bool {
-        self.nodule
-            .requires
+        self.resolved
+            .cartridge
+            .permbinds
             .iter()
-            .any(|request| request.contract == nsid)
+            .any(|(binding, permbind)| match permbind {
+                Permbind::Method(method) => method.nsid.as_str() == nsid,
+                Permbind::Datum(datum) => datum.nsid.as_str() == nsid,
+                Permbind::Drawers(_) => binding == nsid,
+                Permbind::Unknown(_) => false,
+            })
     }
 
     /// An operation an initializer invokes: one this nodule implements (local, or foreign with
@@ -859,18 +799,15 @@ impl<'a> Admission<'a> {
             )),
             Some(_) => Ok(()),
             None => match self
-                .nodule
-                .requires
-                .iter()
+                .resolved
+                .operation_requests()
+                .into_iter()
                 .find(|request| request.contract == nsid)
             {
                 Some(request) if request.is_operation_call() => Ok(()),
-                Some(request) => Err(NoduleError::invalid(
+                Some(_request) => Err(NoduleError::invalid(
                     path,
-                    format!(
-                        "`{nsid}` is requested with `{}` access; an initializer calls an operation",
-                        request.access.as_deref().unwrap_or_default()
-                    ),
+                    format!("`{nsid}` is requested by a non-method permbind"),
                 )),
                 None if self.lexicons.contains_key(nsid) => Err(NoduleError::invalid(
                     path,
@@ -906,31 +843,6 @@ fn operation_kind(file: &IndexMap<String, Value>) -> Option<OperationKind> {
         .get("type")?
         .as_str()
         .and_then(OperationKind::parse)
-}
-
-/// Indexes a keyed contribution list, refusing an empty or repeated key.
-fn keyed<'a, T>(
-    items: &'a [T],
-    field: &str,
-    key: impl Fn(&T) -> &String,
-) -> Result<BTreeMap<&'a str, &'a T>> {
-    let mut index = BTreeMap::new();
-    for (position, item) in items.iter().enumerate() {
-        let key = key(item);
-        if key.is_empty() {
-            return Err(NoduleError::invalid(
-                format!("{field}[{position}].key"),
-                "a key is not empty",
-            ));
-        }
-        if index.insert(key.as_str(), item).is_some() {
-            return Err(NoduleError::invalid(
-                format!("{field}[{position}].key"),
-                format!("`{key}` is declared twice"),
-            ));
-        }
-    }
-    Ok(index)
 }
 
 #[cfg(test)]

@@ -14,12 +14,15 @@
 
 use big_cabinet_core::datum::DatumShape;
 use big_cabinet_core::datum::Extra;
+use big_cabinet_core::datum::Nsid;
 use big_cabinet_core::datum::Shape;
-use big_cabinet_core::datum::is_nsid;
+
 use big_cabinet_core::datum::is_nsid_authority;
+use big_cabinet_core::reference::DatumPin;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
@@ -29,9 +32,31 @@ pub mod config;
 pub mod protocol;
 pub mod registry;
 pub mod request;
+pub use request::Necessity;
+pub use request::Resolution;
+
 pub mod signature;
 
 pub const AUTHORITY: &str = "org.example.daybook";
+
+mod manifest;
+pub use manifest::Component;
+pub use manifest::ComponentExport;
+pub use manifest::Initializer;
+pub use manifest::LocalState;
+pub use manifest::Nodule;
+pub use manifest::Permbind;
+pub use manifest::PermbindDatum;
+pub use manifest::PermbindDrawers;
+pub use manifest::PermbindMethod;
+pub use manifest::RevisionedStore;
+pub use manifest::Routine;
+pub use manifest::RoutineImpl;
+pub use manifest::RoutineUse;
+pub use manifest::RunMode;
+pub use manifest::StateKind;
+pub use manifest::StoreMode;
+pub use manifest::WasmComponent;
 
 /// `org.example.daybook.cartridge/main`: one package revision. The revision is not a field, it is the
 /// content hash of the envelope ([`Cartridge::revision`]), so a pin names exactly these bytes and two
@@ -43,31 +68,31 @@ pub const AUTHORITY: &str = "org.example.daybook";
 pub struct Cartridge {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub id: CartridgeId,
-    /// The semver label a release is discovered and depended upon by. Not an operation or
-    /// contract identity: a contract that changes meaning takes a new NSID (ADR 027 §6).
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub version: Version,
-    /// The NSID authority prefix this cartridge holds, for example `org.example.photos`: the schema
-    /// namespace its contributions declare under (ADR 028 §5). It is the cartridge's, not any one
-    /// runtime's, so every kind of contribution reads the same field. Identity stays `id`: this
-    /// says which NSIDs the package is the authority over, and a node refuses two enabled cartridges
-    /// holding the same or nested prefixes. Absent for a cartridge that declares no schemas of its own;
-    /// a runtime refuses a contribution that declares under a prefix the envelope does not hold.
-    /// Part of the signed revision like every other member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dependencies: Vec<Dependency>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<Artifact>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contributions: Vec<Contribution>,
-    /// The publisher's signature over [`Cartridge::revision`] (see [`signature`]). Absent on an
-    /// envelope that has not been signed yet; the registry accepts only signed ones.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dependencies: BTreeMap<CartridgeId, VersionReq>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lexicons: BTreeMap<Nsid, DatumPin>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sidecars: BTreeMap<Nsid, DatumPin>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, DatumPin>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub permbinds: BTreeMap<String, Permbind>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub settings: BTreeSet<Nsid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodule: Option<Nodule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub micro: Option<MicroContribution>,
+    /// The publisher's signature over [`Cartridge::revision`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<signature::CartridgeSignature>,
     #[serde(flatten)]
@@ -82,19 +107,21 @@ impl Cartridge {
             authority: None,
             title: None,
             description: None,
-            dependencies: Vec::new(),
-            artifacts: Vec::new(),
-            contributions: Vec::new(),
+            dependencies: BTreeMap::new(),
+            lexicons: BTreeMap::new(),
+            sidecars: BTreeMap::new(),
+            components: BTreeMap::new(),
+            permbinds: BTreeMap::new(),
+            settings: BTreeSet::new(),
+            nodule: None,
+            micro: None,
             signature: None,
             extra: Default::default(),
         }
     }
 
     /// The immutable revision this envelope is: blake3 over its canonical JSON, including every
-    /// member this build does not know about, so a peer that added a field produced a different
-    /// revision and a pin never silently means newer bytes. The signature is the one member left
-    /// out: it signs the revision, so it cannot be part of it, and a version's identity must not
-    /// change when it is signed or re-signed.
+    /// member this build does not know about. The signature is excluded because it signs the revision.
     pub fn revision(&self) -> Revision {
         let mut value = serde_json::to_value(self).expect("an envelope serializes");
         value
@@ -105,8 +132,6 @@ impl Cartridge {
         Revision(*blake3::hash(&canonical).as_bytes())
     }
 
-    /// The distribution checks the catalog owns. Contribution payloads are not read: a nodule or
-    /// micro description is checked by the runtime that admits it.
     pub fn validate(&self) -> Result<(), CartridgeError> {
         if let Some(authority) = &self.authority
             && !is_nsid_authority(authority)
@@ -116,172 +141,151 @@ impl Cartridge {
                 format!("`{authority}` is not an NSID authority (two or more reverse-DNS labels)"),
             ));
         }
-        let mut dependencies = BTreeSet::new();
-        for (index, dependency) in self.dependencies.iter().enumerate() {
-            let path = format!("dependencies[{index}]");
-            if dependency.id == self.id {
+        for id in self.dependencies.keys() {
+            if id == &self.id {
                 return Err(CartridgeError::invalid(
-                    path,
+                    "dependencies",
                     "a package cannot depend on itself",
                 ));
             }
-            if !dependencies.insert(&dependency.id) {
+        }
+        if let Some(micro) = &self.micro {
+            if micro.component.is_empty() {
                 return Err(CartridgeError::invalid(
-                    path,
-                    format!("`{}` is depended upon twice", dependency.id),
+                    "micro.component",
+                    "a micro names the component key of its component",
+                ));
+            }
+            if !self.components.contains_key(&micro.component) {
+                return Err(CartridgeError::invalid(
+                    "micro.component",
+                    format!("`{}` is not a component of this cartridge", micro.component),
                 ));
             }
         }
-        let mut artifacts = BTreeSet::new();
-        for (index, artifact) in self.artifacts.iter().enumerate() {
-            let path = format!("artifacts[{index}]");
-            if artifact.key.is_empty() {
+        self.validate_routine_uses()
+    }
+
+    fn validate_routine_uses(&self) -> Result<(), CartridgeError> {
+        let Some(nodule) = &self.nodule else {
+            return Ok(());
+        };
+        let mut names = BTreeSet::new();
+        for name in self.permbinds.keys() {
+            names.insert(name.as_str());
+        }
+        for name in nodule
+            .local_state
+            .keys()
+            .chain(nodule.revisioned_stores.keys())
+        {
+            if !names.insert(name.as_str()) {
                 return Err(CartridgeError::invalid(
-                    path,
-                    "an artifact key is not empty",
-                ));
-            }
-            if !artifacts.insert(artifact.key.as_str()) {
-                return Err(CartridgeError::invalid(
-                    path,
-                    format!("artifact key `{}` is declared twice", artifact.key),
+                    format!("nodule.{name}"),
+                    "permbind, local state and revisioned store keys must be unique",
                 ));
             }
         }
-        let mut nodules = 0;
-        let mut micros = 0;
-        for (index, contribution) in self.contributions.iter().enumerate() {
-            let path = format!("contributions[{index}]");
-            match contribution {
-                Contribution::Nodule(nodule) => {
-                    nodules += 1;
-                    if nodules > 1 {
+        for (routine_key, routine) in &nodule.routines {
+            if !routine.implements.as_str().is_empty() {
+                for use_key in routine.uses.keys() {
+                    if !names.contains(use_key.as_str()) {
                         return Err(CartridgeError::invalid(
-                            path,
-                            "a cartridge has one node-facing nodule; its routines and operations are \
-                             contributions inside it, not further nodules",
+                            format!("nodule.routines.{routine_key}.uses.{use_key}"),
+                            "use must name a permbind, local state entry or revisioned store",
                         ));
                     }
-                    check_schema(&path, &nodule.schema)?;
-                }
-                Contribution::Micro(micro) => {
-                    micros += 1;
-                    if micros > 1 {
-                        return Err(CartridgeError::invalid(
-                            path,
-                            "a cartridge has one micro; its micro id is the cartridge id it is installed as, \
-                             so a second micro is a second cartridge",
-                        ));
-                    }
-                    check_schema(&path, &micro.schema)?;
-                    if micro.component.is_empty() {
-                        return Err(CartridgeError::invalid(
-                            format!("{path}.component"),
-                            "a micro names the artifact key of its component",
-                        ));
-                    }
-                    if self.artifact(&micro.component).is_none() {
-                        return Err(CartridgeError::invalid(
-                            format!("{path}.component"),
-                            format!("`{}` is not an artifact of this cartridge", micro.component),
-                        ));
+                    if let Some(permbind) = self.permbinds.get(use_key) {
+                        Self::validate_routine_use(
+                            routine_key,
+                            use_key,
+                            &routine.uses[use_key],
+                            permbind,
+                        )?;
                     }
                 }
-                Contribution::Unknown(_) => {}
             }
         }
         Ok(())
     }
 
-    pub fn nodule(&self) -> Option<&NoduleContribution> {
-        self.contributions
+    fn validate_routine_use(
+        routine_key: &str,
+        use_key: &str,
+        usage: &RoutineUse,
+        permbind: &Permbind,
+    ) -> Result<(), CartridgeError> {
+        let allowed = match permbind {
+            Permbind::Datum(value) => [
+                (usage.read, value.read.as_ref()),
+                (usage.write, value.write.as_ref()),
+                (usage.create, value.create.as_ref()),
+                (usage.delete, value.delete.as_ref()),
+            ],
+            Permbind::Drawers(value) => [
+                (usage.read, value.read.as_ref()),
+                (usage.write, value.write.as_ref()),
+                (usage.create, value.create.as_ref()),
+                (usage.delete, value.delete.as_ref()),
+            ],
+            Permbind::Method(_) | Permbind::Unknown(_) => [
+                (usage.read, None),
+                (usage.write, None),
+                (usage.create, None),
+                (usage.delete, None),
+            ],
+        };
+        if allowed
             .iter()
-            .find_map(|contribution| match contribution {
-                Contribution::Nodule(nodule) => Some(nodule),
-                _ => None,
-            })
+            .any(|(requested, declared)| *requested && declared.is_none())
+        {
+            return Err(CartridgeError::invalid(
+                format!("nodule.routines.{routine_key}.uses.{use_key}"),
+                "routine use asks for access the permbind does not declare",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn nodule(&self) -> Option<&Nodule> {
+        self.nodule.as_ref()
     }
 
     pub fn micro(&self) -> Option<&MicroContribution> {
-        self.contributions
-            .iter()
-            .find_map(|contribution| match contribution {
-                Contribution::Micro(micro) => Some(micro),
-                _ => None,
-            })
+        self.micro.as_ref()
     }
 
-    pub fn artifact(&self, key: &str) -> Option<&Artifact> {
-        self.artifacts.iter().find(|artifact| artifact.key == key)
+    pub fn component(&self, key: &str) -> Option<&DatumPin> {
+        self.components.get(key)
     }
 }
 
-fn check_schema(path: &str, schema: &str) -> Result<(), CartridgeError> {
-    if !is_nsid(schema) {
-        return Err(CartridgeError::invalid(
-            format!("{path}.schema"),
-            format!("`{schema}` is not the NSID of a description datum"),
-        ));
-    }
-    Ok(())
-}
-
-/// A distribution dependency: the package has to be present for this one to be complete. Which
-/// of its operations are consumed, and by whom, is stated by the contribution that consumes them.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Dependency {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub id: CartridgeId,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub version: VersionReq,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// Bytes the package ships, named inside the package and pinned by digest. A contribution refers
-/// to an artifact by key; a dispatch pins the digest the key resolved to at that revision.
-#[macros::datum]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Artifact {
-    pub key: String,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub digest: Digest,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
-    #[serde(flatten)]
-    pub extra: Extra,
-}
-
-/// What the package contributes, each member tagged by the consumer it is for. Open: a kind this
-/// catalog build does not know is carried for a consumer that does.
-#[macros::datum]
+/// A cartridge envelope together with the datums named by its pins.
+///
+/// Registry resolution is deliberately outside this type. The constructor accepts the resolved
+/// payloads directly so admission can validate the complete manifest without performing I/O.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Contribution {
-    Nodule(NoduleContribution),
-    Micro(MicroContribution),
-    #[datum(other)]
-    Unknown(big_cabinet_core::datum::UnknownMember),
+pub struct ResolvedCartridge {
+    pub cartridge: Cartridge,
+    pub lexicons: BTreeMap<Nsid, IndexMap<String, serde_json::Value>>,
+    pub sidecars: BTreeMap<Nsid, IndexMap<String, serde_json::Value>>,
+    pub components: BTreeMap<String, Component>,
 }
 
-/// `org.example.daybook.cartridge.nodule`: the package's one node-facing facet. `schema` is the id of
-/// the description datum the payload conforms to, so the nodule runtime can tell a description
-/// it understands from one it must carry; the catalog reads neither.
-#[macros::datum(authority = Cartridge::ID, name = "nodule")]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NoduleContribution {
-    pub schema: String,
-    pub description: IndexMap<String, serde_json::Value>,
-    #[serde(flatten)]
-    pub extra: Extra,
+impl ResolvedCartridge {
+    pub fn new(
+        cartridge: Cartridge,
+        lexicons: BTreeMap<Nsid, IndexMap<String, serde_json::Value>>,
+        sidecars: BTreeMap<Nsid, IndexMap<String, serde_json::Value>>,
+        components: BTreeMap<String, Component>,
+    ) -> Self {
+        Self {
+            cartridge,
+            lexicons,
+            sidecars,
+            components,
+        }
+    }
 }
 
 /// `org.example.daybook.cartridge.micro`: the package's one GUI contribution. It has no key of its own:

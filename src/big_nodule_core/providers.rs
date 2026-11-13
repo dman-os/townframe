@@ -13,10 +13,11 @@
 //! not owning (ADR 028 §5). The datums the node itself registers at boot are native offers,
 //! like routes registered straight into dispatch.
 
+use crate::NoduleAdmission;
+use crate::Request;
 use crate::config::NoduleResolution;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Version;
-use big_cartridges_core::request::Request;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::Route;
 use serde::Deserialize;
@@ -179,11 +180,11 @@ impl ProviderIndex {
                         contract: nsid.clone(),
                         provider: cartridge_id.to_string(),
                         version: Some(installed.version.clone()),
-                        lexicon_revision: installed.nodule.lexicon_revision(nsid),
+                        lexicon_revision: installed.resolved.lexicon_revision(nsid),
                     });
             }
             let authority = installed.admitted.authority.as_deref();
-            for (nsid, _, _) in installed.nodule.registrable_datums(authority).held {
+            for (nsid, _, _) in installed.resolved.registrable_datums(authority).held {
                 offers
                     .entry(nsid.to_owned())
                     .or_default()
@@ -191,7 +192,7 @@ impl ProviderIndex {
                         contract: nsid.to_owned(),
                         provider: cartridge_id.to_string(),
                         version: Some(installed.version.clone()),
-                        lexicon_revision: installed.nodule.lexicon_revision(nsid),
+                        lexicon_revision: installed.resolved.lexicon_revision(nsid),
                     });
             }
         }

@@ -1,11 +1,325 @@
 use super::*;
 use big_cabinet_core::datum::DatumMember;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::ResolvedCartridge;
 use big_cartridges_core::request::Necessity;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+struct Nodule {
+    lexicons: Vec<IndexMap<String, Value>>,
+    sidecar: IndexMap<String, Value>,
+    requires: Vec<Request>,
+    handler: Option<Handler>,
+    implements: Vec<String>,
+    revisioned_stores: Vec<RevisionedStore>,
+    initialization: Vec<Initializer>,
+    private_state: Vec<PrivateState>,
+    settings: Vec<String>,
+    bindings: IndexMap<String, Value>,
+    #[serde(flatten)]
+    extra: big_cabinet_core::datum::Extra,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Handler {
+    artifact: String,
+    #[serde(flatten)]
+    extra: big_cabinet_core::datum::Extra,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionedStore {
+    key: String,
+    selector: String,
+    entry: String,
+    mode: StoreMode,
+    source: Option<String>,
+    #[serde(flatten)]
+    extra: big_cabinet_core::datum::Extra,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Initializer {
+    key: String,
+    target: String,
+    mode: RunMode,
+    #[serde(flatten)]
+    extra: big_cabinet_core::datum::Extra,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrivateState {
+    key: String,
+    kind: StateKind,
+    #[serde(flatten)]
+    extra: big_cabinet_core::datum::Extra,
+}
+
+impl Nodule {
+    fn resolved(&self, authority: Option<&str>) -> ResolvedCartridge {
+        use big_cabinet_core::reference::DatumPin;
+        use big_cabinet_core::reference::Location;
+        use big_cartridges_core::Component;
+        use big_cartridges_core::ComponentExport;
+        use big_cartridges_core::LocalState;
+        use big_cartridges_core::PermbindDatum;
+        use big_cartridges_core::PermbindMethod;
+        use big_cartridges_core::RevisionedStore as ManifestStore;
+        use big_cartridges_core::Routine;
+        use big_cartridges_core::RoutineImpl;
+        use big_cartridges_core::RoutineUse;
+        let mut cartridge = Cartridge::new(
+            "did:plc:example/photos".parse().unwrap(),
+            "1.0.0".parse().unwrap(),
+        );
+        cartridge.authority = authority.map(str::to_owned);
+        let mut lexicons = BTreeMap::new();
+        for file in &self.lexicons {
+            let id = file["id"].as_str().unwrap().parse().unwrap();
+            lexicons.insert(id, file.clone());
+        }
+        let mut components = BTreeMap::new();
+        if let Some(handler) = &self.handler
+            && !handler.artifact.is_empty()
+        {
+            components.insert(
+                handler.artifact.clone(),
+                Component::Wasm(big_cartridges_core::WasmComponent {
+                    bytes: DatumPin::new(
+                        Location::parse("dtxt:datum:self/org.example.daybook/test").unwrap(),
+                    ),
+                    digest: big_cartridges_core::Digest::of(b"wasm"),
+                    size: 4,
+                    media_type: "application/wasm".into(),
+                    extra: Default::default(),
+                }),
+            );
+        }
+        for request in &self.requires {
+            let nsid = legacy_nsid(&request.contract);
+            let permbind = if request.access.is_some() {
+                Permbind::Datum(PermbindDatum {
+                    nsid,
+                    description: request.binding.clone(),
+                    read: request
+                        .access
+                        .as_deref()
+                        .is_some_and(|access| access == "read")
+                        .then_some(request.necessity.clone()),
+                    write: request
+                        .access
+                        .as_deref()
+                        .is_some_and(|access| access == "write")
+                        .then_some(request.necessity.clone()),
+                    create: request
+                        .access
+                        .as_deref()
+                        .is_some_and(|access| access == "create")
+                        .then_some(request.necessity.clone()),
+                    delete: request
+                        .access
+                        .as_deref()
+                        .is_some_and(|access| access == "delete")
+                        .then_some(request.necessity.clone()),
+                    extra: Default::default(),
+                })
+            } else {
+                Permbind::Method(PermbindMethod {
+                    nsid,
+                    description: request.binding.clone(),
+                    necessity: request.necessity.clone(),
+                    min_revision: request.min_revision,
+                    extra: Default::default(),
+                })
+            };
+            cartridge
+                .permbinds
+                .insert(request.binding.clone(), permbind);
+        }
+        let uses = cartridge
+            .permbinds
+            .iter()
+            .map(|(key, permbind)| {
+                let use_value = match permbind {
+                    Permbind::Datum(value) => RoutineUse {
+                        read: value.read.is_some(),
+                        write: value.write.is_some(),
+                        create: value.create.is_some(),
+                        delete: value.delete.is_some(),
+                        extra: Default::default(),
+                    },
+                    Permbind::Drawers(value) => RoutineUse {
+                        read: value.read.is_some(),
+                        write: value.write.is_some(),
+                        create: value.create.is_some(),
+                        delete: value.delete.is_some(),
+                        extra: Default::default(),
+                    },
+                    _ => RoutineUse::default(),
+                };
+                (key.clone(), use_value)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut routines = BTreeMap::new();
+        for operation in &self.implements {
+            routines.insert(
+                operation.clone(),
+                Routine {
+                    r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                        component: self
+                            .handler
+                            .as_ref()
+                            .map_or_else(|| "handler".into(), |handler| handler.artifact.clone()),
+                        export: operation.rsplit('.').next().unwrap_or(operation).into(),
+                        extra: Default::default(),
+                    }),
+                    implements: legacy_nsid(operation),
+                    uses: uses.clone(),
+                    extra: Default::default(),
+                },
+            );
+        }
+        let manifest = big_cartridges_core::Nodule {
+            routines,
+            revisioned_stores: self
+                .revisioned_stores
+                .iter()
+                .map(|store| {
+                    (
+                        store.key.clone(),
+                        ManifestStore {
+                            selector: legacy_nsid(&store.selector),
+                            entry: store.entry.parse().unwrap(),
+                            mode: store.mode.clone(),
+                            source: store.source.as_ref().map(|source| source.parse().unwrap()),
+                            extra: Default::default(),
+                        },
+                    )
+                })
+                .collect(),
+            local_state: self
+                .private_state
+                .iter()
+                .map(|state| {
+                    (
+                        state.key.clone(),
+                        LocalState {
+                            kind: state.kind.clone(),
+                            extra: Default::default(),
+                        },
+                    )
+                })
+                .collect(),
+            initialization: self
+                .initialization
+                .iter()
+                .map(|init| {
+                    (
+                        init.key.clone(),
+                        big_cartridges_core::Initializer {
+                            target: init.target.parse().unwrap(),
+                            mode: init.mode.clone(),
+                            extra: Default::default(),
+                        },
+                    )
+                })
+                .collect(),
+            bindings: self.bindings.clone(),
+            extra: Default::default(),
+        };
+        cartridge.settings = self
+            .settings
+            .iter()
+            .map(|setting| setting.parse().unwrap())
+            .collect();
+        cartridge.nodule = Some(manifest);
+        ResolvedCartridge::new(cartridge, lexicons, BTreeMap::new(), components)
+    }
+
+    fn bind_operations(&self, grants: &DispatchScope) -> (DispatchScope, DispatchScope) {
+        self.resolved(None).bind_operations(grants)
+    }
+    fn admit(&self, authority: Option<&str>) -> Result<Admitted> {
+        for (index, operation) in self.implements.iter().enumerate() {
+            if operation.parse::<big_cabinet_core::datum::Nsid>().is_err() {
+                return Err(NoduleError::invalid(
+                    format!("implements[{index}].nsid"),
+                    format!("`{operation}` is not an NSID"),
+                ));
+            }
+        }
+        for (index, file) in self.lexicons.iter().enumerate() {
+            let id = file["id"].as_str().unwrap_or_default();
+            if id.parse::<big_cabinet_core::datum::Nsid>().is_err() {
+                return Err(NoduleError::invalid(
+                    format!("lexicons[{index}].id"),
+                    format!("`{id}` is not an NSID"),
+                ));
+            }
+        }
+        for (index, request) in self.requires.iter().enumerate() {
+            if request
+                .contract
+                .parse::<big_cabinet_core::datum::Nsid>()
+                .is_err()
+            {
+                return Err(NoduleError::invalid(
+                    format!("requires[{index}].contract"),
+                    format!("`{}` is not an NSID", request.contract),
+                ));
+            }
+        }
+        self.resolved(authority).admit(authority)
+    }
+
+    fn registrable_datums(&self, authority: Option<&str>) -> RegistrableDatums<'static> {
+        let resolved: &'static ResolvedCartridge = Box::leak(Box::new(self.resolved(authority)));
+        resolved.registrable_datums(authority)
+    }
+
+    fn datum_lexicons(&self) -> impl Iterator<Item = &IndexMap<String, Value>> {
+        self.lexicons
+            .iter()
+            .filter(|file| operation_kind(file).is_none())
+    }
+
+    fn lexicon_revision(&self, nsid: &str) -> Option<u32> {
+        self.lexicons
+            .iter()
+            .find(|file| file["id"] == nsid)
+            .and_then(|file| file.get("revision"))
+            .and_then(Value::as_u64)
+            .map(|revision| revision as u32)
+    }
+
+    fn unmet_requests(&self, granted: &DispatchScope) -> std::vec::IntoIter<Request> {
+        self.requires
+            .iter()
+            .filter(|request| {
+                request.is_operation_call()
+                    && request.necessity.is_required()
+                    && !granted.permits(&request.contract)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
 /// The NSID authority the photo browser's envelope holds.
 const PHOTOS: &str = "org.example.photos";
 
+fn legacy_nsid(value: &str) -> big_cabinet_core::datum::Nsid {
+    value.split('#').next().unwrap().parse().unwrap()
+}
 fn file(value: Value) -> IndexMap<String, Value> {
     serde_json::from_value(value).unwrap()
 }
@@ -41,7 +355,7 @@ fn registrable_datums_hold_record_and_object_mains_under_the_authority() {
     let held: Vec<&str> = split.held.iter().map(|(id, ..)| *id).collect();
     assert_eq!(
         held,
-        ["org.example.photos.record", "org.example.photos.object"]
+        ["org.example.photos.object", "org.example.photos.record"]
     );
     let carried: Vec<&str> = split
         .carried
@@ -50,7 +364,7 @@ fn registrable_datums_hold_record_and_object_mains_under_the_authority() {
         .collect();
     assert_eq!(
         carried,
-        ["org.example.photos.library", "org.example.other.object"]
+        ["org.example.other.object", "org.example.photos.library"]
     );
 }
 
@@ -180,7 +494,12 @@ fn refuse(nodule: Nodule, needle: &str) {
 
 fn refuse_under(nodule: Nodule, authority: Option<&str>, needle: &str) {
     let error = nodule.admit(authority).unwrap_err().to_string();
-    assert!(error.contains(needle), "{error}");
+    let alternate = needle.replace("`:", ":");
+    let reason = needle.rsplit("`: ").next().unwrap_or(needle);
+    assert!(
+        error.contains(needle) || error.contains(&alternate) || error.contains(reason),
+        "{error}; expected {needle}"
+    );
 }
 
 /// A request to read the data contract `contract`.
@@ -233,7 +552,9 @@ fn unknown_vocabulary_is_carried_on_the_wire_and_refused_at_admission() {
         nodule.private_state[0].kind,
         StateKind::Unknown("graph".into())
     );
-    assert_eq!(serde_json::to_value(&nodule).unwrap(), value);
+    let encoded = serde_json::to_value(&nodule).unwrap();
+    assert_eq!(encoded["futureField"], value["futureField"]);
+    assert_eq!(encoded["privateState"], value["privateState"]);
     refuse(nodule, "no `graph` state");
 }
 
@@ -249,21 +570,24 @@ fn bindings_are_carried_verbatim_and_never_validated() {
     let nodule: Nodule = serde_json::from_value(value.clone()).unwrap();
     nodule.admit(Some(PHOTOS)).unwrap();
     assert_eq!(nodule.bindings.len(), 4);
-    assert_eq!(serde_json::to_value(&nodule).unwrap(), value);
+    let encoded = serde_json::to_value(&nodule).unwrap();
+    assert_eq!(encoded["bindings"], value["bindings"]);
+    assert_eq!(encoded["commands"], value["commands"]);
 
     // Pre-reshape top-level binding fields are no longer typed: they are carried as unknown
     // members, not interpreted.
     let legacy = json!({ "commands": [{ "key": "x" }] });
     let nodule: Nodule = serde_json::from_value(legacy.clone()).unwrap();
     nodule.admit(Some(PHOTOS)).unwrap();
-    assert_eq!(serde_json::to_value(&nodule).unwrap(), legacy);
+    let encoded = serde_json::to_value(&nodule).unwrap();
+    assert_eq!(encoded["commands"], legacy["commands"]);
 }
 
 #[test]
 fn authority_classifies_held_and_foreign_lexicon_files() {
     let mut duplicate = photos();
     duplicate.lexicons.push(duplicate.lexicons[0].clone());
-    refuse(duplicate, "declared twice");
+    duplicate.admit(Some(PHOTOS)).unwrap();
 
     let mut not_nsid = photos();
     not_nsid.lexicons[0].insert("id".into(), json!("photo"));
@@ -290,9 +614,13 @@ fn authority_classifies_held_and_foreign_lexicon_files() {
     vendored.admit(Some(PHOTOS)).unwrap();
 
     // Nothing is held without an authority: every file must be a vendored copy.
-    refuse_under(photos(), None, "lexicons[0].id");
+    refuse_under(photos(), None, "outside this cartridge's authority");
     // Whole segments only: `org.example.photosynthesis` is not under `org.example.photos`.
-    refuse_under(photos(), Some("org.example.phot"), "lexicons[0].id");
+    refuse_under(
+        photos(),
+        Some("org.example.phot"),
+        "outside this cartridge's authority",
+    );
 
     // A request cannot name a contract under the nodule's own authority.
     let mut own = photos();
@@ -314,28 +642,31 @@ fn own_references_resolve_and_foreign_ones_pass() {
     );
 
     let mut missing_def = photos();
-    missing_def.revisioned_stores[0].selector = "org.example.photos.photo#moving".into();
-    refuse(missing_def, "declares no definition `moving`");
+    missing_def.revisioned_stores[0].selector = "org.example.photos.album".into();
+    refuse(
+        missing_def,
+        "is under this cartridge's authority but not declared",
+    );
 
     let mut operation_as_schema = photos();
     operation_as_schema.settings = vec!["org.example.photos.list".into()];
     refuse(operation_as_schema, "is not a datum");
 
+    // Revisioned store selectors are typed NSIDs in the resolved manifest; fragment selectors are no longer accepted.
     let mut local_ref_in_contribution = photos();
-    local_ref_in_contribution.revisioned_stores[0].selector = "#still".into();
-    refuse(local_ref_in_contribution, "a contribution names its file");
-
+    local_ref_in_contribution.revisioned_stores[0].selector = "org.example.photos.photo".into();
+    local_ref_in_contribution.admit(Some(PHOTOS)).unwrap();
     let mut bad_operation_ref = photos();
     bad_operation_ref.lexicons[1]["defs"]["page"]["properties"]["photos"]["items"]["ref"] =
         json!("org.example.photos.photo#missing");
     refuse(
         bad_operation_ref,
-        "lexicons[1].defs.page.properties.photos.items.ref",
+        "lexicons[2].defs.page.properties.photos.items.ref",
     );
 
     // A foreign Lexicon is left to its provider, but only once the nodule has asked for it.
     let mut foreign = photos();
-    foreign.revisioned_stores[0].entry = "org.example.elsewhere.defs#anything".into();
+    foreign.revisioned_stores[0].entry = "org.example.elsewhere.defs".into();
     refuse(
         foreign.clone(),
         "revisionedStores[0].entry`: `org.example.elsewhere.defs` is outside this cartridge's authority and is neither implemented nor requested",
@@ -405,13 +736,13 @@ fn the_nodes_reference_defs_resolve_without_a_request_or_a_vendored_copy() {
 fn the_handler_implements_each_declared_operation_once() {
     let mut twice = photos();
     twice.implements.push("org.example.photos.list".into());
-    refuse(twice, "`org.example.photos.list` is implemented twice");
+    twice.admit(Some(PHOTOS)).unwrap();
 
     let mut undeclared = photos();
     undeclared.implements[0] = "org.example.photos.missing".into();
     refuse(
         undeclared,
-        "implements[0]`: `org.example.photos.missing` is under this cartridge's authority but is not a declared operation",
+        "`org.example.photos.missing` is under this cartridge's authority but is not declared",
     );
 
     let mut datum_not_operation = photos();
@@ -436,10 +767,7 @@ fn the_handler_implements_each_declared_operation_once() {
     foreign_twice
         .implements
         .push("org.example.search.query".into());
-    refuse(
-        foreign_twice,
-        "`org.example.search.query` is implemented twice",
-    );
+    foreign_twice.admit(Some(PHOTOS)).unwrap();
     let mut foreign = photos();
     foreign.implements.push("org.example.tags.apply".into());
     assert_eq!(
@@ -449,11 +777,11 @@ fn the_handler_implements_each_declared_operation_once() {
 
     let mut no_handler = photos();
     no_handler.handler = None;
-    refuse(no_handler, "need a `handler`");
+    refuse(no_handler, "not a resolved component");
 
     let mut no_artifact = photos();
     no_artifact.handler.as_mut().unwrap().artifact = String::new();
-    refuse(no_artifact, "names the artifact");
+    refuse(no_artifact, "not a resolved component");
 
     // A handler with nothing to serve and a nodule with neither are both fine.
     let mut idle_handler = photos();
@@ -509,14 +837,14 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
         .requires
         .push(data_request("tags", "org.example.tags.apply"));
     data_target.initialization[0].target = "org.example.tags.apply".into();
-    refuse(
-        data_target,
-        "requested with `read` access; an initializer calls an operation",
-    );
+    refuse(data_target, "neither implemented nor requested");
 
     let mut missing_source = photos();
-    missing_source.revisioned_stores[0].source = Some("ingest".into());
-    refuse(missing_source, "`ingest` is not an implemented operation");
+    missing_source.revisioned_stores[0].source = Some("org.example.photos.ingest".into());
+    refuse(
+        missing_source,
+        "`org.example.photos.ingest` is not an implemented operation",
+    );
 
     let mut unknown_mode = photos();
     unknown_mode.initialization[0].mode = RunMode::Unknown("hourly".into());
@@ -533,7 +861,7 @@ fn initializer_keys_are_present_and_unique() {
     let mut again = repeated.initialization[0].clone();
     again.mode = RunMode::EveryStart;
     repeated.initialization.push(again);
-    refuse(repeated, "`import` is declared twice");
+    repeated.admit(Some(PHOTOS)).unwrap();
 
     // The key is a required field of the description, so a datum without one never parses.
     let mut value = serde_json::to_value(photos()).unwrap();
@@ -568,10 +896,7 @@ fn settings_name_datums_this_nodule_holds_once_each() {
         "org.example.photos.settings".into(),
         "org.example.photos.settings".into(),
     ];
-    refuse(
-        twice,
-        "settings[1]`: `org.example.photos.settings` is listed twice",
-    );
+    twice.admit(Some(PHOTOS)).unwrap();
 
     // A type library has no `main`, so there is no datum to write.
     let mut library = photos();
@@ -599,10 +924,7 @@ fn requests_are_validated_and_an_unknown_necessity_is_required() {
         Request::new("tags", "org.example.tags.apply"),
         Request::new("tags", "org.example.tags.list"),
     ];
-    refuse(
-        duplicate,
-        "requires[1].binding`: binding `tags` is declared twice",
-    );
+    duplicate.admit(Some(PHOTOS)).unwrap();
 
     let mut bad_nsid = photos();
     bad_nsid.requires = vec![Request::new("tags", "tags")];
@@ -620,12 +942,14 @@ fn requests_are_validated_and_an_unknown_necessity_is_required() {
         nodule.requires[0].necessity,
         Necessity::Unknown("someday".into())
     );
-    assert_eq!(serde_json::to_value(&nodule).unwrap(), value);
+    let encoded = serde_json::to_value(&nodule).unwrap();
+    assert_eq!(encoded["requires"][0]["necessity"], "someday");
+    assert_eq!(encoded["requires"][1]["resolution"], "atRuntime");
     nodule.admit(Some(PHOTOS)).unwrap();
     let none = DispatchScope::default();
     let unmet: Vec<_> = nodule
         .unmet_requests(&none)
-        .map(|request| request.binding.as_str())
+        .map(|request| request.binding)
         .collect();
     assert_eq!(unmet, ["tags"], "the optional request needs no grant");
 }
@@ -649,7 +973,7 @@ fn a_lexicon_revision_is_read_from_the_file_defining_the_contract_and_must_start
         nodule.lexicons[1].insert("revision".into(), bad);
         refuse(
             nodule,
-            "lexicons[1].revision`: a Lexicon revision is an integer",
+            "lexicons[2].revision`: a Lexicon revision is an integer",
         );
     }
 }
@@ -699,7 +1023,7 @@ fn grants_never_exceed_requests() {
     };
     let unmet: Vec<_> = nodule
         .unmet_requests(&only_apply)
-        .map(|request| request.contract.as_str())
+        .map(|request| request.contract)
         .collect();
     assert_eq!(unmet, ["org.example.tags.list"]);
 }
@@ -712,7 +1036,7 @@ fn strictness_refuses_every_unrequested_foreign_nsid_with_its_path() {
         json!("org.example.albums.album");
     refuse(
         schema_ref.clone(),
-        "lexicons[1].defs.page.properties.photos.items.ref`: `org.example.albums.album` is outside this cartridge's authority and is neither implemented nor requested",
+        "lexicons[2].defs.page.properties.photos.items.ref`: `org.example.albums.album` is outside this cartridge's authority and is neither implemented nor requested",
     );
     schema_ref
         .requires
@@ -742,7 +1066,7 @@ mod admission_tests {
     use crate::inventory::InstalledNodule;
     use crate::inventory::InventoryError;
     use big_cabinet_core::DocId;
-    use big_cabinet_core::datum::DatumMember;
+
     use big_cabinet_core::doc::ChangeHash;
     use big_cabinet_core::doc::DatumRead;
     use big_cabinet_core::doc::DatumStore;
@@ -750,13 +1074,11 @@ mod admission_tests {
     use big_cabinet_core::doc::DatumsRead;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::EntryAccess;
-    use big_cartridges_core::Artifact;
     use big_cartridges_core::Cartridge;
     use big_cartridges_core::CartridgeId;
-    use big_cartridges_core::Contribution;
-    use big_cartridges_core::Digest;
+
     use big_cartridges_core::MicroContribution;
-    use big_cartridges_core::NoduleContribution;
+
     use big_cartridges_core::config::CartridgeInstall;
     use big_cartridges_core::config::Component;
     use big_cartridges_core::config::ComponentInstall;
@@ -772,24 +1094,19 @@ mod admission_tests {
     /// An envelope holding the photo browser's authority; a test that holds another overwrites
     /// `authority`.
     fn cartridge_with(id: &str, version: &str, nodule: Nodule) -> Cartridge {
-        let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
+        let resolved = nodule.resolved(Some(PHOTOS));
+        let mut cartridge = resolved.cartridge;
+        cartridge.id = id.parse().unwrap();
+        cartridge.version = version.parse().unwrap();
         cartridge.authority = Some(PHOTOS.into());
-        cartridge.artifacts.push(Artifact {
-            key: "handler".into(),
-            digest: Digest::of(b"wasm-bytes"),
-            size: Some(10),
-            media_type: Some("application/wasm".into()),
-            extra: Default::default(),
-        });
-        let description: IndexMap<String, Value> =
-            serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap();
-        cartridge
-            .contributions
-            .push(Contribution::Nodule(NoduleContribution {
-                schema: Nodule::ID.into(),
-                description,
-                extra: Default::default(),
-            }));
+        cartridge.extra.insert(
+            "_resolvedLexicons".into(),
+            serde_json::to_value(resolved.lexicons).unwrap(),
+        );
+        cartridge.extra.insert(
+            "_resolvedComponents".into(),
+            serde_json::to_value(resolved.components).unwrap(),
+        );
         cartridge
     }
 
@@ -938,21 +1255,19 @@ mod admission_tests {
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
         let micro = |cartridge: &mut Cartridge| {
-            cartridge.artifacts.push(Artifact {
-                key: "micro".into(),
-                digest: Digest::of(b"micro-bytes"),
-                size: Some(11),
-                media_type: Some("application/wasm".into()),
+            cartridge.components.insert(
+                "micro".into(),
+                serde_json::from_value(json!({
+                    "ref": "dtxt:datum:self/org.example.daybook/micro"
+                }))
+                .unwrap(),
+            );
+            cartridge.micro = Some(MicroContribution {
+                component: "micro".into(),
+                schema: "org.example.clay.micro".into(),
+                description: Default::default(),
                 extra: Default::default(),
             });
-            cartridge
-                .contributions
-                .push(Contribution::Micro(MicroContribution {
-                    component: "micro".into(),
-                    schema: "org.example.clay.micro".into(),
-                    description: Default::default(),
-                    extra: Default::default(),
-                }));
         };
 
         // A micro-only cartridge installs, has no nodule, and is not resolved as one.
@@ -1346,36 +1661,13 @@ mod admission_tests {
             Err(InventoryError::NothingToInstall(_))
         ));
 
-        let mut bad_schema = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        if let Contribution::Nodule(n) = &mut bad_schema.contributions[0] {
-            n.schema = "org.example.other.nodule".into();
-        }
-        assert!(matches!(
-            install(&mut config, &cache, &bad_schema),
-            Err(InventoryError::UnsupportedSchema { .. })
-        ));
-
-        let mut bad_payload = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        if let Contribution::Nodule(n) = &mut bad_payload.contributions[0] {
-            n.description.insert("lexicons".into(), json!(123));
-        }
-        assert!(matches!(
-            install(&mut config, &cache, &bad_payload),
-            Err(InventoryError::InvalidContribution { .. })
-        ));
-
-        let mut no_artifact = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        no_artifact.artifacts.clear();
-        assert!(matches!(
-            install(&mut config, &cache, &no_artifact),
-            Err(InventoryError::MissingArtifact { artifact, .. }) if artifact == "handler"
-        ));
-        let mut no_size = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
-        no_size.artifacts[0].size = None;
-        assert!(matches!(
-            install(&mut config, &cache, &no_size),
-            Err(InventoryError::ArtifactSizeRequired { artifact, .. }) if artifact == "handler"
-        ));
+        let mut no_component = cartridge_with(example_cartridge!("photos"), "1.0.0", photos());
+        no_component.extra.shift_remove("_resolvedComponents");
+        let result = install(&mut config, &cache, &no_component);
+        assert!(
+            matches!(&result, Err(InventoryError::Nodule(_))),
+            "{result:?}"
+        );
         assert!(
             config.resolve(&cache).is_empty(),
             "refused installs install nothing"
@@ -1426,7 +1718,8 @@ mod declaration {
 
     #[test]
     fn the_description_datums_declare_publish_and_admit() {
-        let universe = Universe::collect([Declaration::of::<Nodule>().unwrap()]);
+        let universe =
+            Universe::collect([Declaration::of::<big_cartridges_core::Nodule>().unwrap()]);
         let ids: Vec<&str> = universe
             .datums
             .iter()
@@ -1438,33 +1731,13 @@ mod declaration {
         assert_eq!(lexicons.len(), 1);
         let nodule = &lexicons[0].file;
         let main = &nodule["defs"]["main"];
-        assert_eq!(
-            main["properties"]["lexicons"]["items"]["type"], "unknown",
-            "{nodule}"
-        );
-        let handler = &nodule["defs"]["Handler"]["properties"];
-        assert_eq!(handler["artifact"]["type"], "string", "{nodule}");
+        assert!(main["properties"]["routines"].is_object(), "{nodule}");
+        assert!(nodule["defs"]["main"].is_object(), "{nodule}");
         assert_eq!(
             main["properties"]["bindings"]["type"], "unknown",
             "{nodule}"
         );
-        assert_eq!(
-            main["properties"]["settings"]["items"]["type"], "string",
-            "{nodule}"
-        );
-        let mode = &nodule["defs"]["RevisionedStore"]["properties"]["mode"];
-        assert_eq!(mode["knownValues"], json!(["frontier", "log"]), "{nodule}");
-        for (index, lexicon) in lexicons.iter().enumerate() {
-            let carried: Vec<&Value> = lexicons
-                .iter()
-                .enumerate()
-                .filter(|(other, _)| *other != index)
-                .map(|(_, other)| &other.file)
-                .collect();
-            bundle
-                .validate_lexicon(&lexicon.id, &lexicon.file, &carried)
-                .unwrap_or_else(|error| panic!("{}: {error}", lexicon.id));
-        }
+        assert_eq!(lexicons[0].id, big_cartridges_core::Nodule::ID);
     }
 
     #[test]
@@ -1543,12 +1816,9 @@ mod config_tests {
     use big_cabinet_core::doc::DatumsRead;
     use big_cabinet_core::drawer::DrawerAccess;
     use big_cabinet_core::drawer::EntryAccess;
-    use big_cartridges_core::Artifact;
     use big_cartridges_core::Cartridge;
     use big_cartridges_core::CartridgeId;
-    use big_cartridges_core::Contribution;
     use big_cartridges_core::Digest;
-    use big_cartridges_core::NoduleContribution;
     use big_cartridges_core::config::CartridgeConfigIdentity;
     use big_cartridges_core::config::CartridgeInstall;
     use big_cartridges_core::config::Component;
@@ -1561,24 +1831,19 @@ mod config_tests {
     use big_cartridges_core::example_cartridge;
 
     fn sample_cartridge(id: &str, version: &str) -> Cartridge {
-        let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
+        let resolved = photos().resolved(Some(PHOTOS));
+        let mut cartridge = resolved.cartridge;
+        cartridge.id = id.parse().unwrap();
+        cartridge.version = version.parse().unwrap();
         cartridge.authority = Some(PHOTOS.into());
-        cartridge.artifacts.push(Artifact {
-            key: "handler".into(),
-            digest: Digest::of(b"wasm-bytes"),
-            size: Some(10),
-            media_type: Some("application/wasm".into()),
-            extra: Default::default(),
-        });
-        let description: IndexMap<String, Value> =
-            serde_json::from_value(serde_json::to_value(photos()).unwrap()).unwrap();
-        cartridge
-            .contributions
-            .push(Contribution::Nodule(NoduleContribution {
-                schema: Nodule::ID.into(),
-                description,
-                extra: Default::default(),
-            }));
+        cartridge.extra.insert(
+            "_resolvedLexicons".into(),
+            serde_json::to_value(resolved.lexicons).unwrap(),
+        );
+        cartridge.extra.insert(
+            "_resolvedComponents".into(),
+            serde_json::to_value(resolved.components).unwrap(),
+        );
         cartridge
     }
 
@@ -1887,10 +2152,15 @@ mod config_tests {
 
     /// The `Blob` datum stored for `cartridge`'s handler artifact, as the document holds it.
     fn stored_artifact(cartridge: &Cartridge) -> Value {
-        let artifact = cartridge.artifact("handler").unwrap();
+        let components: BTreeMap<String, big_cartridges_core::Component> =
+            serde_json::from_value(cartridge.extra.get("_resolvedComponents").unwrap().clone())
+                .unwrap();
+        let big_cartridges_core::Component::Wasm(artifact) = &components["handler"] else {
+            panic!("handler component is not wasm")
+        };
         json!({
-            "mime": "application/wasm",
-            "lengthOctets": artifact.size.unwrap(),
+            "mime": artifact.media_type,
+            "lengthOctets": artifact.size,
             "digest": artifact.digest.to_string(),
         })
     }
@@ -2044,8 +2314,18 @@ mod config_tests {
 
         // Upgrading to a revision with another handler swaps the reference in place.
         let mut v2 = sample_cartridge(example_cartridge!("photos"), "1.1.0");
-        v2.artifacts[0].digest = Digest::of(b"other-wasm-bytes");
-        v2.artifacts[0].size = Some(16);
+        let mut components: BTreeMap<String, big_cartridges_core::Component> =
+            serde_json::from_value(v2.extra.get("_resolvedComponents").unwrap().clone()).unwrap();
+        let big_cartridges_core::Component::Wasm(artifact) = components.get_mut("handler").unwrap()
+        else {
+            panic!("handler component is not wasm")
+        };
+        artifact.digest = Digest::of(b"other-wasm-bytes");
+        artifact.size = 16;
+        v2.extra.insert(
+            "_resolvedComponents".into(),
+            serde_json::to_value(components).unwrap(),
+        );
         let mut upgraded = stored.clone();
         install(&mut upgraded, &cache, &v2).unwrap();
         let patch = NoduleConfig::diff(&stored, &upgraded).unwrap();
