@@ -5,7 +5,7 @@
 
 pub big_cartridges::async fn boot (config : CartridgesConfig) -> Res < (Cartridges , StopToken) >
 pub big_cartridges::async fn ensure_registry_drawer (config : RegistryDrawerConfig < '_ >) -> Res < DrawerId >
-pub big_cartridges::fn schema_group () -> SchemaRegistrationGroup < 'static >
+pub big_cartridges::fn schema_groups () -> [SchemaRegistrationGroup < 'static > ; 2]
 pub big_cartridges::import::async fn micro_pair (cartridges : & Client < CartridgesProtocol > , blobs : & BlobService , authorization : Authorization , component : Vec < u8 > , manifest_json : & [u8] ,) -> Result < PublishedCartridgeVersion , ImportError >
 pub const big_cartridges::import::CLAY_MICRO_MANIFEST_SCHEMA: & str
 pub const big_cartridges::import::MICRO_COMPONENT_ARTIFACT: & str
