@@ -78,18 +78,57 @@ pub struct Cartridge {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<CartridgeId, VersionReq>,
+    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
+    // open map in the schema, and the real fix is in the overlay.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "BTreeMap<Nsid, serde_json::Value>")
+    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lexicons: BTreeMap<Nsid, DatumPin>,
+    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
+    // open map in the schema, and the real fix is in the overlay.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "BTreeMap<Nsid, serde_json::Value>")
+    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sidecars: BTreeMap<Nsid, DatumPin>,
+    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
+    // open map in the schema, and the real fix is in the overlay.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "BTreeMap<String, serde_json::Value>")
+    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub components: BTreeMap<String, DatumPin>,
+    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
+    // open map in the schema, and the real fix is in the overlay.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "BTreeMap<String, serde_json::Value>")
+    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub permbinds: BTreeMap<String, Permbind>,
+    /// Held as a set so a repeated NSID cannot appear twice; the datum schema describes it as a
+    /// plain array because its admission refuses `uniqueItems`, which a set's schema carries.
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<Nsid>"))]
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub settings: BTreeSet<Nsid>,
+    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
+    // open map in the schema, and the real fix is in the overlay.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<BTreeMap<String, serde_json::Value>>")
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nodule: Option<Nodule>,
+    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
+    // open map in the schema, and the real fix is in the overlay.
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<BTreeMap<String, serde_json::Value>>")
+    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub micro: Option<MicroContribution>,
     /// The publisher's signature over [`Cartridge::revision`].
@@ -264,7 +303,8 @@ impl Cartridge {
 ///
 /// Registry resolution is deliberately outside this type. The constructor accepts the resolved
 /// payloads directly so admission can validate the complete manifest without performing I/O.
-#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedCartridge {
     pub cartridge: Cartridge,
     pub lexicons: BTreeMap<Nsid, IndexMap<String, serde_json::Value>>,

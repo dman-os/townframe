@@ -385,6 +385,23 @@ fn keys_name_the_version_and_its_artifacts() {
     assert!(sidecars.contains_key("org.example.photos.sidecar"));
     assert!(components.contains_key("handler"));
 }
+#[test]
+fn registry_payload_keys_include_version_and_identity() {
+    let version: Version = "1.2.3".parse().unwrap();
+    let nsid = Nsid::literal("org.example.photos.album");
+    assert_eq!(
+        registry::lexicon_key(&version, &nsid).slot_bytes(),
+        b"1.2.3/org.example.photos.album"
+    );
+    assert_eq!(
+        registry::sidecar_key(&version, &nsid).slot_bytes(),
+        b"1.2.3/org.example.photos.album"
+    );
+    assert_eq!(
+        registry::component_key(&version, "handler").slot_bytes(),
+        b"1.2.3/handler"
+    );
+}
 
 #[cfg(feature = "schemars")]
 #[test]
