@@ -10,6 +10,50 @@ fn file(value: Value) -> IndexMap<String, Value> {
     serde_json::from_value(value).unwrap()
 }
 
+/// A datum whose `main` is a record or an object under the authority is held; a Lexicon with no
+/// `main` (a type library) and a datum outside the authority are carried.
+#[test]
+fn registrable_datums_hold_record_and_object_mains_under_the_authority() {
+    let mut nodule = Nodule::default();
+    for (id, defs) in [
+        (
+            "org.example.photos.record",
+            json!({"main": {"type": "record", "key": "any", "record": {"type": "object", "properties": {}}}}),
+        ),
+        (
+            "org.example.photos.object",
+            json!({"main": {"type": "object", "properties": {}}}),
+        ),
+        (
+            "org.example.photos.library",
+            json!({"shared": {"type": "object", "properties": {}}}),
+        ),
+        (
+            "org.example.other.object",
+            json!({"main": {"type": "object", "properties": {}}}),
+        ),
+    ] {
+        nodule
+            .lexicons
+            .push(file(json!({"lexicon": 1, "id": id, "defs": defs})));
+    }
+    let split = nodule.registrable_datums(Some(PHOTOS));
+    let held: Vec<&str> = split.held.iter().map(|(id, ..)| *id).collect();
+    assert_eq!(
+        held,
+        ["org.example.photos.record", "org.example.photos.object"]
+    );
+    let carried: Vec<&str> = split
+        .carried
+        .iter()
+        .map(|file| file["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        carried,
+        ["org.example.photos.library", "org.example.other.object"]
+    );
+}
+
 /// The photo browser of ADR 027 §3: declares its own datum, query and subscription, requires
 /// the search vocabulary, and carries a command, view and processor binding it never interprets.
 fn photos() -> Nodule {
@@ -310,6 +354,61 @@ fn own_references_resolve_and_foreign_ones_pass() {
     foreign.admit(Some(PHOTOS)).unwrap();
 }
 
+/// The node's reference defs resolve for any cartridge without a request or a vendored copy; a
+/// vendored copy is accepted only when it is the node's own, and a def the library lacks is
+/// refused.
+#[test]
+fn the_nodes_reference_defs_resolve_without_a_request_or_a_vendored_copy() {
+    let tagging = |reference: &str| {
+        let mut nodule = Nodule::default();
+        nodule.lexicons.push(file(json!({
+            "lexicon": 1,
+            "id": "org.example.photos.tag",
+            "defs": { "main": {
+                "type": "procedure",
+                "input": {
+                    "encoding": "application/json",
+                    "schema": {
+                        "type": "object",
+                        "properties": { "part": { "type": "ref", "ref": reference } },
+                    },
+                },
+            }},
+        })));
+        nodule.handler = Some(Handler {
+            artifact: "handler".into(),
+            extra: Default::default(),
+        });
+        nodule.implements = ["org.example.photos.tag".to_owned()].into();
+        nodule
+    };
+    for reference in [
+        "org.example.daybook.defs#datumRef",
+        "org.example.daybook.defs#datumLocation",
+        "org.example.daybook.defs#datumPin",
+    ] {
+        tagging(reference).admit(Some(PHOTOS)).unwrap();
+    }
+    refuse(
+        tagging("org.example.daybook.defs#datumNope"),
+        "declares no definition `datumNope`",
+    );
+
+    let mut vendored = tagging("org.example.daybook.defs#datumRef");
+    let copy = big_cabinet_core::reference::defs_lexicon();
+    vendored.lexicons.push(file(copy.clone()));
+    vendored.admit(Some(PHOTOS)).unwrap();
+
+    let mut conflicting = tagging("org.example.daybook.defs#datumRef");
+    let mut altered = copy;
+    altered["defs"]["datumRef"]["description"] = json!("a different datumRef");
+    conflicting.lexicons.push(file(altered));
+    refuse(
+        conflicting,
+        "`org.example.daybook.defs` is a type library the node provides; a vendored copy must equal the node's",
+    );
+}
+
 #[test]
 fn the_handler_implements_each_declared_operation_once() {
     let mut twice = photos();
@@ -607,6 +706,7 @@ fn grants_never_exceed_requests() {
         authorities: ["org.example.tags", "org.example.search"]
             .map(String::from)
             .into(),
+        privileged: false,
     };
     let (applied, unrequested) = nodule.bind_operations(&grants);
     // The `org.example.tags` prefix is applied as the two requested operations it covers, not as
@@ -630,6 +730,7 @@ fn grants_never_exceed_requests() {
     let only_apply = DispatchScope {
         operations: ["org.example.tags.apply".to_owned()].into(),
         authorities: Default::default(),
+        privileged: false,
     };
     let unmet: Vec<_> = nodule
         .unmet_requests(&only_apply)
@@ -870,7 +971,7 @@ mod admission_tests {
     }
 
     #[test]
-    fn operation_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
+    fn method_grants_resolve_beside_drawer_grants_and_revoke_to_absence() {
         use big_dispatch_core::DispatchScope;
         let mut config = NoduleConfig::new();
         let cache = AdmissionCache::new();
@@ -886,8 +987,9 @@ mod admission_tests {
         let scope = DispatchScope {
             operations: ["org.example.search.query".to_owned()].into(),
             authorities: ["org.example.callee".to_owned()].into(),
+            privileged: false,
         };
-        config.set_operation_grants(&id, scope.clone()).unwrap();
+        config.set_method_grants(&id, scope.clone()).unwrap();
         let resolved = |config: &NoduleConfig| {
             let Some(NoduleResolution::Admitted {
                 desired_grants,
@@ -907,7 +1009,7 @@ mod admission_tests {
             )
         );
 
-        // Rewriting the drawer grants keeps the operations, and emptying the operations keeps the
+        // Rewriting the drawer grants keeps the methods, and emptying the methods keeps the
         // drawer grants; with nothing left the datum is absent.
         config.set_drawer_grants(&id, BTreeMap::new()).unwrap();
         assert_eq!(resolved(&config).1.authorities.len(), 1);
@@ -915,7 +1017,7 @@ mod admission_tests {
             .set_drawer_grants(&id, BTreeMap::from([(drawer.clone(), DrawerAccess::Write)]))
             .unwrap();
         config
-            .set_operation_grants(&id, DispatchScope::default())
+            .set_method_grants(&id, DispatchScope::default())
             .unwrap();
         assert_eq!(
             resolved(&config),

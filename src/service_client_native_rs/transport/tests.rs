@@ -76,7 +76,6 @@ async fn protocol_and_direct_client_need_no_server_dependencies() {
     assert_eq!(Protocol::METHODS.stream, &[SubscribeEvents::XRPC]);
     assert_eq!(Echo::XRPC.output_schema, "String");
     assert_eq!(SubscribeEvents::XRPC.output_schema, "SampleEvent");
-    assert_eq!(Echo::XRPC.error_schema, "ContextError");
     assert_eq!(
         client
             .call_with_metadata(Envelope::with_metadata(

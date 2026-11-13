@@ -56,8 +56,12 @@ pub struct XrpcMethod {
     pub method: HttpMethod,
     pub input: HttpInput,
     pub output_schema: &'static str,
-    pub error_schema: &'static str,
     pub long_poll: bool,
+    /// Whether the method confers authority its caller does not already hold, or manages the
+    /// nodules that run on the node. A dispatch scope reaches a privileged method only when it
+    /// says so (`DispatchScope::privileged`), so a scope that names every authority still cannot
+    /// reach it. Methods that only narrow the presented handle are not privileged.
+    pub privileged: bool,
 }
 
 impl XrpcMethod {
@@ -68,8 +72,8 @@ impl XrpcMethod {
             method: HttpMethod::Get,
             input: HttpInput::Query,
             output_schema: "",
-            error_schema: "",
             long_poll: false,
+            privileged: false,
         }
     }
 
@@ -80,8 +84,8 @@ impl XrpcMethod {
             method: HttpMethod::Post,
             input: HttpInput::JsonBody,
             output_schema: "",
-            error_schema: "",
             long_poll: false,
+            privileged: false,
         }
     }
 
@@ -92,18 +96,13 @@ impl XrpcMethod {
             method: HttpMethod::Get,
             input: HttpInput::Query,
             output_schema: "",
-            error_schema: "",
             long_poll: false,
+            privileged: false,
         }
     }
 
-    pub const fn with_schemas(
-        mut self,
-        output_schema: &'static str,
-        error_schema: &'static str,
-    ) -> Self {
+    pub const fn with_output_schema(mut self, output_schema: &'static str) -> Self {
         self.output_schema = output_schema;
-        self.error_schema = error_schema;
         self
     }
 
@@ -112,6 +111,12 @@ impl XrpcMethod {
     /// pool instead of consuming an ordinary unary slot.
     pub const fn long_poll(mut self) -> Self {
         self.long_poll = true;
+        self
+    }
+
+    /// Marks the method as privileged: see [`Self::privileged`].
+    pub const fn privileged(mut self) -> Self {
+        self.privileged = true;
         self
     }
 }
@@ -210,14 +215,15 @@ macro_rules! __method_schema {
 macro_rules! methods {
     (
         error = $error:ty, nsid_prefix = $prefix:literal;
-        $($request:ident => $output:ty, $kind:ident, $nsid:literal;)*
+        $($request:ident => $output:ty, $kind:ident, $nsid:literal $(, $attribute:ident)*;)*
     ) => {$(
         impl $crate::Method for $request {
             type Output = $output;
             type Error = $error;
             const XRPC: $crate::XrpcMethod =
                 $crate::XrpcMethod::$kind(concat!($prefix, $nsid))
-                    .with_schemas(stringify!($output), stringify!($error));
+                    .with_output_schema(stringify!($output))
+                    $(.$attribute())*;
         }
         $crate::__method_schema!($request, $output, $error);
     )*};

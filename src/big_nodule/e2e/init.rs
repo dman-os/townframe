@@ -39,7 +39,7 @@ use big_nodule_core::protocol::NoduleInitStatus;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleOperationGrants;
+use big_nodule_core::protocol::SetNoduleMethodGrants;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
@@ -316,9 +316,9 @@ impl Node {
     ) -> NoduleRecord {
         self.call(
             self.operator(),
-            SetNoduleOperationGrants {
+            SetNoduleMethodGrants {
                 cartridge_id: id(cartridge_id),
-                operations: DispatchScope {
+                methods: DispatchScope {
                     authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
                     ..Default::default()
                 },
@@ -544,7 +544,7 @@ async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operation
     assert!(remote.calls().is_empty());
 
     let record = node.grant_operations(ALPHA, &["org.example.remote"]).await;
-    assert!(record.operations.unwrap().granted);
+    assert!(record.methods.unwrap().granted);
     node.until(ALPHA, Readiness::Ready).await;
     assert_eq!(
         remote.calls(),
@@ -735,21 +735,22 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     let record = node
         .call(
             operator,
-            SetNoduleOperationGrants {
+            SetNoduleMethodGrants {
                 cartridge_id: id(ALPHA),
-                operations: DispatchScope {
+                methods: DispatchScope {
                     operations: ["org.example.mail.send".to_owned()].into(),
                     authorities: [
                         "org.example.remote".to_owned(),
                         "org.example.other".to_owned(),
                     ]
                     .into(),
+                    ..Default::default()
                 },
             },
         )
         .await
         .unwrap();
-    let operations = record.operations.unwrap();
+    let operations = record.methods.unwrap();
     assert!(operations.granted);
     // The prefix is applied as the one requested operation it covers, not as the prefix.
     assert_eq!(
@@ -757,6 +758,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
         DispatchScope {
             operations: [REMOTE.to_owned()].into(),
             authorities: BTreeSet::new(),
+            privileged: false,
         }
     );
     assert_eq!(
@@ -764,6 +766,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
         DispatchScope {
             operations: ["org.example.mail.send".to_owned()].into(),
             authorities: ["org.example.other".to_owned()].into(),
+            privileged: false,
         }
     );
 
@@ -778,11 +781,59 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     .await
     .unwrap();
     let record = node.get(operator, ALPHA).await.unwrap();
-    let operations = record.operations.unwrap();
+    let operations = record.methods.unwrap();
     assert!(!operations.granted);
     assert!(operations.desired.is_empty());
     assert_eq!(operations.unrequested.operations.len(), 1);
     assert_eq!(operations.unrequested.authorities.len(), 2);
+    node.shutdown().await;
+}
+
+/// The nodule service holds every authority but no privilege, so a grant of every authority is
+/// applied while one that asks for privileged methods is refused at the mint and reported on the
+/// record, whatever it names.
+#[tokio::test]
+async fn a_privileged_grant_is_not_applied_though_every_authority_is() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    node.admit(
+        operator,
+        with_requests(
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
+            vec![necessity(REMOTE, Necessity::Optional)],
+        ),
+    )
+    .await
+    .unwrap();
+    node.set_enabled(ALPHA, true).await;
+    let grant = |privileged| {
+        node.call(
+            operator,
+            SetNoduleMethodGrants {
+                cartridge_id: id(ALPHA),
+                methods: DispatchScope {
+                    authorities: [DispatchScope::ALL_AUTHORITIES.to_owned()].into(),
+                    privileged,
+                    ..Default::default()
+                },
+            },
+        )
+    };
+    let status = grant(false).await.unwrap().methods.unwrap();
+    assert!(status.granted, "{status:?}");
+    assert!(!status.desired.privileged);
+
+    let status = grant(true).await.unwrap().methods.unwrap();
+    assert!(!status.granted, "{status:?}");
+    assert!(
+        status
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("exceeds the dispatch authority"),
+        "{status:?}"
+    );
     node.shutdown().await;
 }
 

@@ -88,7 +88,7 @@ impl Bundle<'_> {
             .find(|datum| datum.id == tag)
             .map(|datum| {
                 serde_json::to_value(
-                    self.document(&datum.name)
+                    Self::document_over(&datum.name, self.defs_in_scope())
                         .expect("validated datum definition"),
                 )
                 .expect("schema serializes")
@@ -302,17 +302,23 @@ impl Compiler<'_> {
             }
             let mut compiled = self.position(&id, definition, &format!("{id}#{name}"), 0)?;
             compiled[DEF] = Value::from(identity(&id, &name));
-            if matches!(
-                compiled[DEF].as_str(),
-                Some(crate::reference::DATUM_REF | crate::reference::DATUM_LOCATION)
-            ) && let Some(constraints) = compiled.get_mut(KEYWORD).and_then(Value::as_object_mut)
+            if !self.open_external
+                && matches!(
+                    compiled[DEF].as_str(),
+                    Some(crate::reference::DATUM_REF | crate::reference::DATUM_LOCATION)
+                )
+                && let Some(constraints) = compiled.get_mut(KEYWORD).and_then(Value::as_object_mut)
             {
-                // The carried string constraint would otherwise refuse a malformed address as a
-                // bare `format: "uri"` violation (or, under a nullable union, as no branch
-                // accepting it, which surfaces as an ambiguity) before the write walk reads it as
-                // the reference form its def states. `ReferenceForm::read` is stricter than the
-                // format and is the authority at these positions: it refuses the value, naming
-                // the path and why the address does not parse.
+                // A datum Lexicon's values are walked by the write path, so the carried string
+                // constraint would otherwise refuse a malformed address as a bare `format: "uri"`
+                // violation (or, under a nullable union, as no branch accepting it, which
+                // surfaces as an ambiguity) before the write walk reads it as the reference form
+                // its def states. `ReferenceForm::read` is stricter than the format and is the
+                // authority at these positions: it refuses the value, naming the path and why
+                // the address does not parse. An operation's Lexicon (`open_external`) is
+                // compiled by this same compiler but has no such walk: dispatch checks its input
+                // and output against the JSON schema alone, so the `format: "uri"` constraint
+                // stays and is what refuses a malformed address there.
                 constraints.remove("format");
             }
             self.definitions.insert(key.clone(), compiled.clone());
