@@ -15,6 +15,8 @@ use service_client_core_rs::xrpc::write_context_headers;
 use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
 use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
+use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
+use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
@@ -49,6 +51,8 @@ pub fn delivery_headers(
     caller: &Caller,
     request: &RequestContext,
     context: &InvocationContext,
+    config_doc: &big_cabinet_core::dmeta::DocId,
+    config_capability: Option<CapId>,
     nodule_capability: Option<CapId>,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -71,6 +75,21 @@ pub fn delivery_headers(
             Authorization::id_text(capability)
                 .parse()
                 .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = config_capability {
+        headers.insert(
+            NODULE_CONFIG_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+        headers.insert(
+            NODULE_CONFIG_DOC_HEADER,
+            config_doc
+                .to_string()
+                .parse()
+                .expect("a document id is a valid header value"),
         );
     }
     headers
