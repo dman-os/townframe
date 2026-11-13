@@ -5,6 +5,10 @@ use crate::Shape;
 use indexmap::IndexMap;
 use serde_json::Value;
 
+impl<T: DatumShape> DatumShape for std::collections::BTreeSet<T> {
+    const SHAPE: Shape = Shape::Value;
+}
+
 /// The members of an object that its declaration does not name.
 ///
 /// An open object carries one of these as its `#[serde(flatten)]` field, and that field is the only
