@@ -40,6 +40,7 @@ mod observe;
 pub(crate) mod pipeline;
 mod query;
 mod read;
+mod resolve;
 #[cfg_attr(
     not(test),
     expect(
@@ -108,6 +109,8 @@ use big_cabinet_core::authority::Rights;
 use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::datum::ReferenceTarget;
+use big_cabinet_core::datum::declared_references;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::datum::reconcile_json_atomic;
 use big_cabinet_core::dmeta::ActorMetadata;
@@ -159,6 +162,7 @@ use big_cabinet_core::doc::QueriedDatumRef;
 use big_cabinet_core::doc::QueriedDatumRefs;
 use big_cabinet_core::doc::QueryDatumRefs;
 use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::ResolveKeyRef;
 use big_cabinet_core::doc::SignatureEvidence;
 use big_cabinet_core::doc::Unaccepted;
 use big_cabinet_core::doc::UnsafeDatumInspection;
@@ -373,6 +377,18 @@ impl DocsService {
         authority: &DomainAuthority<DocScope>,
         request: AccessRequest<'_>,
     ) -> Result<bool, DocsError> {
+        // Every read, write and create names its document or drawer here, before the policy
+        // derives a key from it: a request id of any other width is refused, not looked up.
+        match &request {
+            AccessRequest::Read(doc) | AccessRequest::Write(doc) => {
+                DocsError::ensure_doc_id(doc)?;
+            }
+            AccessRequest::Create { placement } => {
+                if let Some(drawer) = crate::drawer::parse_placement(placement) {
+                    DocsError::ensure_doc_id(&drawer)?;
+                }
+            }
+        }
         match authority {
             DomainAuthority::Identity(actor) => access_policy
                 .check(context, *actor, request)
@@ -417,6 +433,7 @@ impl DocsService {
         needed: big_cabinet_core::drawer::DrawerAccess,
     ) -> Result<BTreeSet<DocId>, DocsError> {
         use big_cabinet_core::drawer::DrawerAccess;
+        documents.iter().try_for_each(DocsError::ensure_doc_id)?;
         let DomainAuthority::Scoped(scope) = authority else {
             return Err(DocsError::Denied);
         };
@@ -501,6 +518,7 @@ service_utils_rs::bind_service_protocol! {
             ListDatums(ListDatums),
             PollDatums(PollDatums),
             QueryDatumRefs(QueryDatumRefs),
+            ResolveKeyRef(ResolveKeyRef),
             UnsafeInspectDatum(UnsafeInspectDatum),
             InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)

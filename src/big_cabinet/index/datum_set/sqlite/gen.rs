@@ -7,6 +7,7 @@ pub const MIGRATION_TABLE: &str = "_big_cabinet_index_datum_set_migrations";
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
     Migration { version: 2, name: "002_ref_tags.sql", sql: include_str!("migrations/002_ref_tags.sql") },
+    Migration { version: 3, name: "003_key_edges.sql", sql: include_str!("migrations/003_key_edges.sql") },
 ];
 
 pub const DELETE_EDGES_SQL: &str = include_str!("queries/delete_edges.sql");
@@ -17,6 +18,11 @@ pub async fn delete_edges(db: &impl crate::sqlite_rs_alias::Executor, origin_doc
 pub const DELETE_ENTRY_SQL: &str = include_str!("queries/delete_entry.sql");
 pub async fn delete_entry(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, datum_key: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(DELETE_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(datum_key)]).await
+}
+
+pub const DELETE_KEY_EDGES_SQL: &str = include_str!("queries/delete_key_edges.sql");
+pub async fn delete_key_edges(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_KEY_EDGES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum)]).await
 }
 
 pub const DOC_KEYS_SQL: &str = include_str!("queries/doc_keys.sql");
@@ -34,6 +40,11 @@ pub async fn doc_state(db: &impl crate::sqlite_rs_alias::QueryExecutor, doc_id: 
 pub const INSERT_EDGE_SQL: &str = include_str!("queries/insert_edge.sql");
 pub async fn insert_edge(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String, origin_path: String, target_doc: String, target_datum: String, ref_heads: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(INSERT_EDGE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum), crate::sqlite_rs_alias::IntoValue::into_value(origin_path), crate::sqlite_rs_alias::IntoValue::into_value(target_doc), crate::sqlite_rs_alias::IntoValue::into_value(target_datum), crate::sqlite_rs_alias::IntoValue::into_value(ref_heads)]).await
+}
+
+pub const INSERT_KEY_EDGE_SQL: &str = include_str!("queries/insert_key_edge.sql");
+pub async fn insert_key_edge(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String, origin_path: String, target_key: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_KEY_EDGE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum), crate::sqlite_rs_alias::IntoValue::into_value(origin_path), crate::sqlite_rs_alias::IntoValue::into_value(target_key)]).await
 }
 
 pub const PUT_DOC_SQL: &str = include_str!("queries/put_doc.sql");

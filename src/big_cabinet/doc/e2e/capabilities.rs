@@ -5,6 +5,7 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::MintCapability;
 use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 
@@ -1214,7 +1215,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                     origin_doc_id: first_origin.clone(),
                     origin_datum_key: key("main"),
                     path: "/link".to_owned(),
-                    target_doc_id: selector.clone(),
+                    target_doc_id: Some(selector.clone()),
                     target_datum_key: key("main"),
                     ref_heads: Vec::new(),
                 }]
@@ -2041,4 +2042,76 @@ async fn a_held_document_poll_acquires_interest_in_an_absent_document() {
     .expect("the held poll never put the document in the sync demand set");
     drop(page);
     node.stop().await;
+}
+
+/// A client-chosen document id of any width other than 32 bytes used to reach the repository
+/// and kill its hub, and with it the node. It is refused as a typed error where the request
+/// names it, on every path that names one, and the node keeps serving.
+#[tokio::test]
+async fn a_document_id_that_is_not_32_bytes_is_refused_and_the_node_keeps_serving() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let created = node
+        .create(&owner, "create", [(key("main"), note("kept"))])
+        .await
+        .unwrap();
+    let malformed = [
+        DocId::new(Vec::<u8>::new()),
+        DocId::new(b"z"),
+        DocId::new([5; 31]),
+        DocId::new([5; 33]),
+    ];
+    for bad in &malformed {
+        let refused = DocsError::InvalidDocId {
+            doc_id: bad.clone(),
+        };
+        // Minting a scope that names the id, as a document it reads or writes or as a drawer.
+        for scope in [
+            DocScope {
+                read: BTreeSet::from([bad.clone()]),
+                ..DocScope::default()
+            },
+            DocScope {
+                write: BTreeSet::from([bad.clone()]),
+                ..DocScope::default()
+            },
+            DocScope {
+                drawers: BTreeMap::from([(bad.clone(), DrawerAccess::Read)]),
+                ..DocScope::default()
+            },
+        ] {
+            assert_eq!(node.capability(&owner, scope).await.unwrap_err(), refused);
+        }
+        // Naming it in a request made with a valid handle.
+        let handle = node
+            .capability(
+                &owner,
+                DocScope {
+                    read: BTreeSet::from([created.doc_id.clone()]),
+                    ..DocScope::default()
+                },
+            )
+            .await
+            .unwrap();
+        let read = node
+            .client()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability: handle,
+                    doc_id: bad.clone(),
+                    at: At::Current,
+                    datums: None,
+                    optimistic: false,
+                },
+            )
+            .await;
+        assert_eq!(op(read).unwrap_err(), refused);
+    }
+    // The hub that would have crashed is still serving.
+    let read = node
+        .read(&owner, &created.doc_id, At::Current, false)
+        .await
+        .unwrap();
+    assert_eq!(accepted(&read.datums[&key("main")]).0, &note("kept"));
 }

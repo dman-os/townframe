@@ -17,6 +17,7 @@ pub use reference::DatumPin;
 pub use reference::DatumReference;
 pub use reference::DatumTag;
 pub use reference::DocId;
+pub use reference::KeyReference;
 pub use reference::Location;
 pub use reference::REFERENCE_SCHEME;
 pub use reference::ReferenceDocId;

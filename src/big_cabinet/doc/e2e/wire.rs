@@ -385,6 +385,12 @@ fn docs_error_wire() {
         ),
         ("error_invalid_command", DocsError::InvalidCommand),
         (
+            "error_invalid_doc_id",
+            DocsError::InvalidDocId {
+                doc_id: DocId::new([2; 5]),
+            },
+        ),
+        (
             "error_command_in_flight",
             DocsError::CommandInFlight {
                 command: command("cmd-1"),
