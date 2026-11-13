@@ -4,7 +4,7 @@ The raw dispatch porcelain: the answer is the operation's JSON output. `x` is th
 spelling of `exec`.
 
 ```console
-$ day init
+$ day node init
 initialized node [..] at [..]/node
 
 $ day exec --get org.example.daybook.nodules.listNodules
