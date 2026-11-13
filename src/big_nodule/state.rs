@@ -73,7 +73,6 @@ use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::ProviderIndex;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
-use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::Value;
 use service_client_native_rs::Client;
@@ -389,11 +388,7 @@ impl State {
             .watch()
             .await
             .map_err(crate::store_error)?;
-        let initial = stores
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
+        let initial = stores.config().await?;
 
         let (commands, mut inbox) = mpsc::channel(64);
         let (init_results, mut finished_inits) = mpsc::channel(16);
@@ -456,11 +451,7 @@ impl State {
                             state.hosted.contains_key(cartridge_id) || state.inits.contains_key(cartridge_id)
                         }) {
                             let snapshot = state
-                                .stores
-                                .datum_store
-                                .snapshot()
-                                .await
-                                .map_err(crate::store_error)?;
+                                .stores.config().await?;
                             drop(
                                 state
                                     .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
@@ -476,29 +467,28 @@ impl State {
                         Some(command) => state.run(command).await,
                         None => break,
                     },
-                    event = watch.next() => match event {
+                    changed = watch.changed() => {
+                        // The watch only says the config moved. Read the current snapshot here: one
+                        // taken when the event was produced can predate the change a command of this
+                        // actor made while the actor was blocked (an enable waiting on its workload),
+                        // and reconciling to it would withdraw what that command just served.
+                        // Shutdown stops this task before the datum store it watches, so a closed
+                        // watch while we are still running is a lifecycle break.
+                        changed.expect("nodule config watch closed while the state actor was running");
                         // Revoke failures come back as a map of per-cartridge outcomes that
                         // `reconcile` already folded into the refused records, so only
                         // an `Err` (storage, actor or capability failure) is fatal.
                         // A change this actor made itself (`mutate_config` reconciles it before
                         // its own watch event arrives) is already applied at these heads; only
                         // a change from elsewhere, such as a synced config edit, has others.
-                        Some(Ok(snapshot)) => {
-                            if snapshot.heads != state.observed_heads {
-                                drop(
-                                    state
-                                        .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
-                                        .await?,
-                                );
-                            }
-                        }
-                        Some(Err(err)) => return Err(crate::store_error(err)),
-                        // Shutdown stops this task before the datum store it watches, so a
-                        // closed watch while we are still running is a lifecycle break.
-                        None => {
-                            return Err(NodulesError::Storage(
-                                "nodule config watch closed while the state actor was running".into(),
-                            ));
+                        let snapshot = state
+                            .stores.config().await?;
+                        if snapshot.heads != state.observed_heads {
+                            drop(
+                                state
+                                    .reconcile(&RequestContext::root(), snapshot, Trigger::Change)
+                                    .await?,
+                            );
                         }
                     },
                 }
@@ -623,12 +613,7 @@ impl State {
             }
             return Err(crate::store_error(err));
         }
-        let snapshot = self
-            .stores
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
+        let snapshot = self.stores.config().await?;
         drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         Ok(())
     }
@@ -764,12 +749,7 @@ impl State {
                  provider"
             )));
         };
-        let snapshot = self
-            .stores
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
+        let snapshot = self.stores.config().await?;
         // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
         // change is still what the offers say, and the one offer is the cartridge to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
@@ -842,12 +822,7 @@ impl State {
             }
             return Err(crate::store_error(err));
         }
-        let snapshot = self
-            .stores
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
+        let snapshot = self.stores.config().await?;
         let revoke_errors = self.reconcile(context, snapshot, Trigger::Change).await?;
         if let Some(err) = revoke_errors.get(cartridge_id) {
             return Err(err.clone());
@@ -856,12 +831,7 @@ impl State {
     }
 
     async fn refresh_if_needed(&mut self, context: &RequestContext) -> Res<()> {
-        let snapshot = self
-            .stores
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
+        let snapshot = self.stores.config().await?;
         let has_unapplied = self
             .records
             .values()
@@ -1159,6 +1129,24 @@ impl State {
     /// frame and references, but only the validator compiler knows whether a position can be
     /// checked at all. A nodule whose contract cannot be enforced is not served: it is refused,
     /// as if admission had refused it, and the state registered is that refusal.
+    /// Keeps `installed`'s operations routed to `provider_id` while it cannot serve them, so
+    /// callers get the retryable not-ready answer instead of an unknown operation.
+    fn register_not_ready(
+        &self,
+        provider_id: &str,
+        installed: &InstalledNodule,
+        readiness: Readiness,
+    ) {
+        self.stores
+            .dispatch
+            .register(
+                provider_id,
+                unchecked_claims(&installed.admitted.operations),
+                ProviderState::NotReady(readiness),
+            )
+            .expect("claims without a Lexicon compile nothing");
+    }
+
     fn register_claims(
         &self,
         provider_id: &str,
@@ -1248,14 +1236,7 @@ impl State {
         // until it is granted, and callers get the retryable not-ready.
         if installed.nodule.unmet_requests(granted).next().is_some() {
             self.retire(&cartridge_id).await;
-            self.stores
-                .dispatch
-                .register(
-                    &provider_id,
-                    unchecked_claims(&installed.admitted.operations),
-                    ProviderState::NotReady(Readiness::NeedsConfiguration),
-                )
-                .expect("claims without a Lexicon compile nothing");
+            self.register_not_ready(&provider_id, installed, Readiness::NeedsConfiguration);
             return Readiness::NeedsConfiguration;
         }
         // Likewise a required operation nobody (or more than one, or the wrong cartridge) provides:
@@ -1270,14 +1251,7 @@ impl State {
             .is_some()
         {
             self.retire(&cartridge_id).await;
-            self.stores
-                .dispatch
-                .register(
-                    &provider_id,
-                    unchecked_claims(&installed.admitted.operations),
-                    ProviderState::NotReady(Readiness::ProviderMissing),
-                )
-                .expect("claims without a Lexicon compile nothing");
+            self.register_not_ready(&provider_id, installed, Readiness::ProviderMissing);
             return Readiness::ProviderMissing;
         }
         let Some((executor, artifact_key)) = hosting else {
@@ -1293,25 +1267,21 @@ impl State {
                     .await
                     .unwrap_or(readiness);
             }
-            self.stores
-                .dispatch
-                .register(
-                    &provider_id,
-                    unchecked_claims(&installed.admitted.operations),
-                    ProviderState::NotReady(readiness),
-                )
-                .expect("claims without a Lexicon compile nothing");
+            self.register_not_ready(&provider_id, installed, readiness);
             return readiness;
         };
         // Upgrading to another revision replaces the workload: the old one stops being routed
-        // to (the registration below swaps it in one step) and is retired before the new one
-        // is ensured.
+        // to and is retired before the new one is ensured (an executor hosts one workload per
+        // cartridge, so the two cannot overlap). Ensuring can take as long as compiling the
+        // new handler, so the operations stay registered meanwhile, not ready, and callers get
+        // the retryable answer instead of an unknown operation; the registration after
+        // `ensure` replaces it in one step.
         if self
             .hosted
             .get(&cartridge_id)
             .is_some_and(|hosted| *hosted != installed.revision)
         {
-            self.stores.dispatch.unbind(&provider_id);
+            self.register_not_ready(&provider_id, installed, Readiness::Initializing);
             self.retire(&cartridge_id).await;
         }
         let (handler, _) = installed
@@ -1633,12 +1603,7 @@ impl State {
                 run.error = Some(error);
             }
         }
-        let snapshot = self
-            .stores
-            .datum_store
-            .snapshot()
-            .await
-            .map_err(crate::store_error)?;
+        let snapshot = self.stores.config().await?;
         drop(
             self.reconcile(&RequestContext::root(), snapshot, Trigger::InitResult)
                 .await?,
@@ -2001,6 +1966,14 @@ impl State {
 }
 
 impl Stores {
+    /// The nodule config as it is now: what every reconcile starts from.
+    async fn config(&self) -> Res<StoreSnapshot<NoduleConfig>> {
+        self.datum_store
+            .snapshot()
+            .await
+            .map_err(crate::store_error)
+    }
+
     async fn open_actor(
         &self,
         context: &RequestContext,

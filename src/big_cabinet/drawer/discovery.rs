@@ -193,12 +193,10 @@ impl Core {
                 .big_repo
                 .local_peer_id()
                 .to_bytes32()
-                .map_err(keyhive_error)?,
+                .expect("a local peer id is a 32-byte Ed25519 key"),
         )
-        .map_err(keyhive_error)?;
-        let document =
-            ed25519_dalek::VerifyingKey::from_bytes(&root.to_bytes32().map_err(keyhive_error)?)
-                .map_err(keyhive_error)?;
+        .expect("a local peer id is a valid Ed25519 point");
+        let document = keyhive_key(root)?;
         if !self
             .big_repo
             .keyhive()
