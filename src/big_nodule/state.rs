@@ -29,11 +29,14 @@ use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
+
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DocsProtocol;
+use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::doc::StoreSnapshot;
 use big_cabinet_core::drawer::DrawerAccess;
@@ -346,6 +349,8 @@ pub(crate) struct State {
     /// The dispatch handle minted for each nodule from its method grants, with the scope it
     /// was minted for.
     applied_operations: BTreeMap<CartridgeId, (DispatchScope, CapId)>,
+    /// The per-nodule config capabilities, scoped to declared settings datums.
+    applied_settings: BTreeMap<CartridgeId, (DocId, DatumKinds, CapId)>,
     /// The resolution lockfile: the provider each enabled nodule's operation request is pinned
     /// to, by binding (see [`LockedProvider`]). Mirrors SQLite.
     locks: BTreeMap<CartridgeId, BTreeMap<String, LockedProvider>>,
@@ -425,6 +430,214 @@ async fn answer<T>(mut reply: oneshot::Sender<T>, operation: impl Future<Output 
     drop(reply.send(result));
 }
 
+async fn collect_apply_errors(
+    state: &mut State,
+    context: &RequestContext,
+    cartridge_id: &CartridgeId,
+    desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
+    operations_error: &Option<String>,
+    settings_error: &Option<String>,
+) -> Res<Vec<String>> {
+    let mut errors = operations_error
+        .iter()
+        .map(|error| format!("operations: {error}"))
+        .chain(
+            settings_error
+                .iter()
+                .map(|error| format!("settings: {error}")),
+        )
+        .collect::<Vec<_>>();
+    if let Err(error) = state
+        .revoke_grants_for_cartridge(context, cartridge_id, desired_grants)
+        .await
+    {
+        errors.push(error.to_string());
+    }
+    Ok(errors)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "serving a nodule needs its resolved capability and readiness inputs"
+)]
+async fn serve_nodule(
+    state: &mut State,
+    installed: &mut InstalledNodule,
+    actor: &OpenedActor,
+    capability: Option<CapId>,
+    settings_capability: Option<CapId>,
+    granted: &DispatchScope,
+    requests: &BTreeMap<String, RequestStatus>,
+    trigger: Trigger,
+) -> Readiness {
+    state
+        .serve(
+            installed,
+            actor,
+            capability,
+            settings_capability,
+            granted,
+            requests,
+            trigger,
+        )
+        .await
+}
+
+async fn load_applied_settings(
+    sql: &Database,
+) -> Res<BTreeMap<CartridgeId, (DocId, DatumKinds, CapId)>> {
+    Ok(store::applied_settings(sql)
+        .await?
+        .into_iter()
+        .map(|row| (row.cartridge_id, (row.doc_id, row.kinds, row.capability_id)))
+        .collect())
+}
+
+async fn load_applied_operations(
+    sql: &Database,
+) -> Res<BTreeMap<CartridgeId, (DispatchScope, CapId)>> {
+    Ok(store::applied_operations(sql)
+        .await?
+        .into_iter()
+        .map(|row| (row.cartridge_id, (row.scope, row.capability_id)))
+        .collect())
+}
+
+async fn apply_nodule_capabilities(
+    state: &mut State,
+    context: &RequestContext,
+    cartridge_id: &CartridgeId,
+    actor: &OpenedActor,
+    installed: &InstalledNodule,
+    effective_operations: &DispatchScope,
+) -> Res<(
+    Option<CapId>,
+    Option<String>,
+    Option<CapId>,
+    Option<String>,
+    DispatchScope,
+)> {
+    let settings_kinds = installed.resolved.settings_kinds();
+    let (settings_capability, settings_error) = apply_settings(
+        state,
+        context,
+        cartridge_id,
+        actor,
+        &installed.config_doc,
+        &settings_kinds,
+        installed.enabled,
+    )
+    .await?;
+
+    let mut dispatch_operations = effective_operations.clone();
+    if settings_capability.is_some() {
+        dispatch_operations
+            .operations
+            .insert("org.example.daybook.docs.readDatums".to_owned());
+        dispatch_operations
+            .operations
+            .insert("org.example.daybook.docs.writeDatums".to_owned());
+    }
+    let (capability, operations_error) = state
+        .apply_operations(context, cartridge_id, actor, &dispatch_operations)
+        .await?;
+    let granted_operations =
+        capability.map_or_else(DispatchScope::default, |_| effective_operations.clone());
+    Ok((
+        capability,
+        operations_error,
+        settings_capability,
+        settings_error,
+        granted_operations,
+    ))
+}
+
+async fn apply_settings(
+    state: &mut State,
+    context: &RequestContext,
+    cartridge_id: &CartridgeId,
+    actor: &OpenedActor,
+    doc_id: &DocId,
+    kinds: &DatumKinds,
+    enabled: bool,
+) -> Res<(Option<CapId>, Option<String>)> {
+    if let Some((applied_doc, applied_kinds, capability)) =
+        state.applied_settings.get(cartridge_id).cloned()
+    {
+        if enabled
+            && applied_doc == *doc_id
+            && applied_kinds == *kinds
+            && state.stores.is_cap_live(context, capability).await?
+        {
+            return Ok((Some(capability), None));
+        }
+        revoke_settings_for_cartridge(state, context, cartridge_id, None).await?;
+    }
+    if !enabled {
+        return Ok((None, None));
+    }
+
+    // ADR 047 §6 will fold this into each routine's capability; this is the per-nodule interim.
+
+    let capability = match state
+        .stores
+        .docs
+        .call_with(
+            context.child(),
+            Authorization {
+                authority: state.stores.docs_capability,
+                signer: state.stores.parent.capability,
+            }
+            .metadata(),
+            MintDocCapability {
+                scope: big_cabinet_core::doc::DocScope {
+                    read: BTreeSet::from([doc_id.clone()]),
+                    write: BTreeMap::from([(doc_id.clone(), kinds.clone())]),
+                    ..Default::default()
+                },
+                rights: Rights::USE,
+                subject: Some(actor.actor.actor_id),
+            },
+        )
+        .await
+    {
+        Ok(capability) => capability.capability_id,
+        Err(error) => return Ok((None, Some(crate::docs_error(error).to_string()))),
+    };
+
+    if let Err(error) =
+        store::upsert_applied_settings(&state.stores.sql, cartridge_id, doc_id, kinds, capability)
+            .await
+    {
+        state.stores.retract_grant_cap(context, capability).await?;
+        return Err(error);
+    }
+    state.applied_settings.insert(
+        cartridge_id.clone(),
+        (doc_id.clone(), kinds.clone(), capability),
+    );
+    Ok((Some(capability), None))
+}
+
+async fn revoke_settings_for_cartridge(
+    state: &mut State,
+    context: &RequestContext,
+    cartridge_id: &CartridgeId,
+    keep: Option<(&DocId, &DatumKinds)>,
+) -> Res<()> {
+    let Some((doc_id, kinds, capability)) = state.applied_settings.get(cartridge_id).cloned()
+    else {
+        return Ok(());
+    };
+
+    if keep.is_some_and(|(keep_doc, keep_kinds)| doc_id == *keep_doc && kinds == *keep_kinds) {
+        return Ok(());
+    }
+    state.stores.retract_grant_cap(context, capability).await?;
+    store::delete_applied_settings(&state.stores.sql, cartridge_id).await?;
+    state.applied_settings.remove(cartridge_id);
+    Ok(())
+}
 impl State {
     pub(crate) async fn recover(stores: Stores) -> Res<(Handle, StopToken)> {
         let mut persisted_actors = BTreeMap::new();
@@ -440,11 +653,9 @@ impl State {
                 .insert(row.drawer_id, (row.access, row.capability_id));
         }
 
-        let applied_operations = store::applied_operations(&stores.sql)
-            .await?
-            .into_iter()
-            .map(|row| (row.cartridge_id, (row.scope, row.capability_id)))
-            .collect();
+        let applied_settings = load_applied_settings(&stores.sql).await?;
+
+        let applied_operations = load_applied_operations(&stores.sql).await?;
         let init_done = store::init_done(&stores.sql).await?;
         let locks = store::resolution_locks(&stores.sql).await?;
 
@@ -476,6 +687,7 @@ impl State {
             actors: BTreeMap::new(),
             applied_grants,
             applied_operations,
+            applied_settings,
             locks,
             applied_heads: BTreeMap::new(),
             registered_schemas: BTreeMap::new(),
@@ -1105,6 +1317,7 @@ impl State {
             .applied_grants
             .keys()
             .chain(self.applied_operations.keys())
+            .chain(self.applied_settings.keys())
             .cloned()
             .collect();
         for cartridge_id in active_cartridges {
@@ -1124,7 +1337,9 @@ impl State {
                         &DispatchScope::default(),
                     )
                     .await;
-                if let Err(err) = drawers.and(operations) {
+                let settings =
+                    revoke_settings_for_cartridge(self, context, &cartridge_id, None).await;
+                if let Err(err) = drawers.and(operations).and(settings) {
                     revoke_errors.insert(cartridge_id.clone(), err);
                 }
                 if !resolved.contains_key(&cartridge_id) {
@@ -1412,11 +1627,16 @@ impl State {
     ///
     /// Registering is a no-op when nothing changed and `ensure` is idempotent, so every
     /// reconcile may call this.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the hosted nodule's distinct capability and readiness inputs"
+    )]
     async fn serve(
         &mut self,
         installed: &mut InstalledNodule,
         actor: &OpenedActor,
         capability: Option<CapId>,
+        settings_capability: Option<CapId>,
         granted: &DispatchScope,
         requests: &BTreeMap<String, RequestStatus>,
         trigger: Trigger,
@@ -1505,6 +1725,8 @@ impl State {
             handler: handler.clone(),
             actor: actor.clone(),
             capability,
+            config_doc: installed.config_doc.clone(),
+            config_capability: settings_capability,
             operations: installed.admitted.operations.clone(),
             reensure: self.reensure.handle(cartridge_id.clone()),
         };
@@ -1937,35 +2159,37 @@ impl State {
         } else {
             DispatchScope::default()
         };
-        let (capability, operations_error) = self
-            .apply_operations(context, &cartridge_id, &actor, &effective_operations)
-            .await?;
-        // A grant that failed to mint covers nothing, so it cannot satisfy a request.
-        let granted_operations =
-            capability.map_or_else(DispatchScope::default, |_| effective_operations);
-        let requests = self.resolve_requests(&installed, providers).await?;
-        let readiness = self
-            .serve(
-                &mut installed,
+        let (capability, operations_error, settings_capability, settings_error, granted_operations) =
+            apply_nodule_capabilities(
+                self,
+                context,
+                &cartridge_id,
                 &actor,
-                capability,
-                &granted_operations,
-                &requests,
-                trigger,
+                &installed,
+                &effective_operations,
             )
-            .await;
-
-        let mut apply_errors = Vec::new();
-        if let Some(error) = &operations_error {
-            apply_errors.push(format!("operations: {error}"));
-        }
-        if let Err(err) = self
-            .revoke_grants_for_cartridge(context, &cartridge_id, &desired_grants)
-            .await
-        {
-            apply_errors.push(err.to_string());
-        }
-
+            .await?;
+        let requests = self.resolve_requests(&installed, providers).await?;
+        let readiness = serve_nodule(
+            self,
+            &mut installed,
+            &actor,
+            capability,
+            settings_capability,
+            &granted_operations,
+            &requests,
+            trigger,
+        )
+        .await;
+        let mut apply_errors = collect_apply_errors(
+            self,
+            context,
+            &cartridge_id,
+            &desired_grants,
+            &operations_error,
+            &settings_error,
+        )
+        .await?;
         let mut drawer_statuses = BTreeMap::new();
         let granted = |desired| NoduleGrantStatus {
             desired,
@@ -2046,6 +2270,7 @@ impl State {
             }
         }
 
+        let operations_granted = capability.is_some() && !bound_operations.is_empty();
         let error = if apply_errors.is_empty() {
             self.applied_heads
                 .insert(cartridge_id.clone(), heads.to_vec());
@@ -2064,10 +2289,10 @@ impl State {
             readiness,
             artifacts: installed.artifact_states(),
             drawers: drawer_statuses,
-            methods: (!desired_operations.is_empty()).then(|| NoduleMethodGrantStatus {
+            methods: (!desired_operations.is_empty()).then_some(NoduleMethodGrantStatus {
                 desired: bound_operations,
                 unrequested: unrequested_operations,
-                granted: capability.is_some(),
+                granted: operations_granted,
                 error: operations_error,
             }),
             requests,

@@ -9,7 +9,7 @@ pub big_nodule::async fn ensure_shared_config_drawer (config : SharedConfigDrawe
 pub big_nodule::egress::async fn call (dispatch : & Client < DispatchProtocol > , signer : Option < CapId > , method : & Method , path : & str , headers : & HeaderMap , body : & [u8] ,) -> (StatusCode , Value)
 pub big_nodule::fn schema_group () -> SchemaRegistrationGroup < 'static >
 pub big_nodule::wire::fn byte_body_refused () -> ProviderError
-pub big_nodule::wire::fn delivery_headers (caller : & Caller , request : & RequestContext , context : & InvocationContext , nodule_capability : Option < CapId > ,) -> HeaderMap
+pub big_nodule::wire::fn delivery_headers (caller : & Caller , request : & RequestContext , context : & InvocationContext , config_doc : & big_cabinet_core :: dmeta :: DocId , config_capability : Option < CapId > , nodule_capability : Option < CapId > ,) -> HeaderMap
 pub big_nodule::wire::fn gateway_error (message : impl std :: fmt :: Display) -> ProviderError
 pub big_nodule::wire::fn provider_result (status : StatusCode , body : & [u8]) -> Result < Value , ProviderError >
 pub enum big_nodule::executor::Hosted { # [doc = " The handler can be called now through this provider."] Ready (Arc < dyn Provider >), # [doc = " It cannot, for this reason: [`Readiness::ArtifactsUnavailable`] when the handler bytes"] # [doc = " are not in the store yet, [`Readiness::ExecutorUnavailable`] when they are but the host"] # [doc = " cannot run them. Any other readiness is a programming error in the executor."] NotReady (Readiness) }
@@ -21,7 +21,7 @@ pub struct big_nodule::NoduleService  {  }
 pub struct big_nodule::Nodules  { host: Arc < Host < NodulesHandler > >, client: Client < NodulesProtocol > }
 pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, drawers: Client < DrawersProtocol >, config_drawer: DrawerId, registry_drawer: DrawerId, shared_config_drawer: DrawerId, actor: OpenedActor, actor_path: String, namespace: Namespace, operator: Uuid7, dispatch: Arc < big_dispatch :: Router >, dispatch_client: Client < DispatchProtocol >, dispatch_authority: CapId, executor: Option < Arc < dyn executor :: NoduleExecutor > >, schemas: Arc < SchemaRepo >, allow_slot_takeover: bool, sql: Database }
 pub struct big_nodule::SharedConfigDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a OpenedActor, access: & 'a DrawerAccess, sql: Database }
-pub struct big_nodule::executor::HandlerSpec  { cartridge_id: CartridgeId, revision: Revision, handler: Artifact, actor: OpenedActor, capability: Option < CapId >, operations: BTreeMap < String , Option < OperationKind > >, reensure: Reensure }
+pub struct big_nodule::executor::HandlerSpec  { cartridge_id: CartridgeId, revision: Revision, handler: Artifact, config_doc: big_cabinet_core :: dmeta :: DocId, config_capability: Option < CapId >, actor: OpenedActor, capability: Option < CapId >, operations: BTreeMap < String , Option < OperationKind > >, reensure: Reensure }
 pub struct big_nodule::executor::Reensure  {  }
 pub trait big_nodule::executor::NoduleExecutor { fn kind (& self) -> & 'static str; async fn ensure (& self , spec : & HandlerSpec) -> Hosted; fn hosts (& self , cartridge_id : & CartridgeId) -> bool; async fn retire (& self , cartridge_id : & CartridgeId) }
 pub type big_nodule::NodulesHandler = Arc < NoduleService >

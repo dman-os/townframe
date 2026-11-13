@@ -79,7 +79,7 @@ pub struct big_nodule_core::config::NoduleDevTakeover  { by: CartridgeId, extra:
 pub struct big_nodule_core::config::NoduleEntry  { install: DatumSlot < CartridgeInstall >, dev_takeover: DatumSlot < NoduleDevTakeover >, artifacts: BTreeMap < String , DatumSlot < Blob > > }
 pub struct big_nodule_core::inventory::Artifact  { digest: big_cartridges_core :: Digest, size: Option < u64 >, media_type: Option < String > }
 pub struct big_nodule_core::inventory::FilledBy  { cartridge_id: CartridgeId, version: Version }
-pub struct big_nodule_core::inventory::InstalledNodule  { cartridge_id: CartridgeId, version: Version, revision: Revision, resolved: ResolvedCartridge, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, filled_by: Option < FilledBy > }
+pub struct big_nodule_core::inventory::InstalledNodule  { cartridge_id: CartridgeId, config_doc: DocId, version: Version, revision: Revision, resolved: ResolvedCartridge, nodule: Nodule, admitted: Admitted, artifacts: BTreeMap < String , (Artifact , ArtifactState) >, enabled: bool, filled_by: Option < FilledBy > }
 pub struct big_nodule_core::protocol::ConfirmNoduleResolution  { cartridge_id: CartridgeId, binding: String }
 pub struct big_nodule_core::protocol::GetNodule  { cartridge_id: CartridgeId }
 pub struct big_nodule_core::protocol::ListNodules  {  }

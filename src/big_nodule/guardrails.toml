@@ -38,3 +38,4 @@ features = []
 "src/big_nodule/sqlite/migrations/006_cartridge_rename.sql" = "f8022c215c96f10255367d40f07d80abb8ae8a9b680ca92491f4eb69e07ed905"
 "src/big_nodule/sqlite/migrations/007_shared_config_drawer.sql" = "f06f59c83a646f2d6537f6679eb658c5f45b399f3af5c358330aed5dd3389216"
 "src/big_nodule/sqlite/migrations/008_config_docs.sql" = "10beeb316daa81707733a4e3333c08a69e30d7b85e77b8ad884b522ddc141d35"
+"src/big_nodule/sqlite/migrations/009_applied_settings.sql" = "e50671918abcb1eed09a299173da1f83c44adcc18bff24f7095f230b17863bb2"
