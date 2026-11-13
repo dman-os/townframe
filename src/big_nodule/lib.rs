@@ -638,7 +638,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
                     ]),
                     ..DocScope::default()
                 },
-                rights: Rights::USE,
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
                 subject: None,
             },
         )
