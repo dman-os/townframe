@@ -19,7 +19,7 @@ use big_dispatch::ProviderState;
 use big_dispatch::Router;
 use big_dispatch_core::Body;
 use big_dispatch_core::InvocationContext;
-use method_core::ByteBody;
+
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -94,7 +94,7 @@ impl Provider for NodeInfoProvider {
         _request: &RequestContext,
         _context: &InvocationContext,
         _input: Value,
-        _body: Option<ByteBody>,
+        _body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         assert_eq!(
             operation, GET_NODE_INFO,

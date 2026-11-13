@@ -55,6 +55,62 @@ pub struct PutBlob {
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "code")]
+pub enum ImportFileRefusal {
+    TooLarge {
+        #[serde(rename = "limitOctets")]
+        limit_octets: u64,
+    },
+    Unreadable {
+        reason: String,
+    },
+    InvalidInput {
+        reason: String,
+    },
+    Storage {
+        reason: String,
+    },
+}
+
+impl From<BlobsError> for ImportFileRefusal {
+    fn from(error: BlobsError) -> Self {
+        match error {
+            BlobsError::TooLarge { limit_octets } => Self::TooLarge { limit_octets },
+            BlobsError::Unreadable { reason } => Self::Unreadable { reason },
+            BlobsError::Storage { reason } => Self::Storage { reason },
+            error => Self::InvalidInput {
+                reason: error.to_string(),
+            },
+        }
+    }
+}
+
+/// One item in an `importFile` batch. Refusals are values so a bad descriptor never aborts
+/// neighboring imports.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum ImportFileResult {
+    Imported { info: BlobInfo },
+    Refused { error: ImportFileRefusal },
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFileOutput {
+    pub results: Vec<ImportFileResult>,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportFile {
+    pub capability: CapId,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadBlob {
     pub capability: CapId,
@@ -111,6 +167,7 @@ service_core_rs::service_method!(MintBlobsCapability => Capability, BlobsError, 
 // returns the same `BlobInfo` (ADR 042 §6). `capability` is a parameter, on the query string over
 // HTTP.
 service_core_rs::service_method!(PutBlob => BlobInfo, BlobsError, procedure("org.example.daybook.blobs.put"), bytes_input);
+service_core_rs::service_method!(ImportFile => ImportFileOutput, BlobsError, procedure("org.example.daybook.blobs.importFile"), descriptors_input, local_only);
 // A read answers the blob's raw bytes; `Range` selects part of them (`206 Partial Content`).
 service_core_rs::service_method!(ReadBlob => ByteBody, BlobsError, query("org.example.daybook.blobs.read"), bytes_output);
 /// The result of [`StatBlob`]: `info` is absent when the blob is not held locally.
@@ -129,6 +186,7 @@ service_core_rs::declare_service_protocol! {
         unary {
             MintBlobsCapability(MintBlobsCapability),
             PutBlob(PutBlob),
+            ImportFile(ImportFile),
             ReadBlob(ReadBlob),
             StatBlob(StatBlob)
         }

@@ -23,14 +23,20 @@ use bytes::Bytes;
 use fs4::fs_std::FileExt;
 use futures::Stream;
 use futures::StreamExt;
+use futures::stream;
 use iroh_blobs::Hash;
 use iroh_blobs::api::Store;
 use iroh_blobs::api::TempTag;
 use iroh_blobs::api::proto::BlobStatus;
 use method_core::ByteBody;
 use method_core::ByteSpan;
+#[cfg(unix)]
+use rustix::fs::FileType;
+#[cfg(unix)]
+use rustix::fs::fstat;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
+use service_utils_rs::Body;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -191,6 +197,7 @@ service_utils_rs::bind_service_protocol! {
         unary {
             MintBlobsCapability(MintBlobsCapability),
             PutBlob(PutBlob),
+            ImportFile(ImportFile),
             ReadBlob(ReadBlob),
             StatBlob(StatBlob)
         }
@@ -213,9 +220,30 @@ impl Blobs {
         body: ByteBody,
     ) -> Result<BlobInfo, ClientError<BlobsError>> {
         self.client
-            .call_with_metadata(Envelope::new(context, PutBlob { capability }).with_body(body))
+            .call_with_metadata(
+                Envelope::new(context, PutBlob { capability }).with_body(Body::Bytes(body)),
+            )
             .await
             .map(|response| response.output)
+    }
+
+    /// Imports descriptors through the in-process descriptor body. The native fd socket uses the
+    /// same method contract and dispatch path, but constructs this body at the edge.
+    #[cfg(unix)]
+    pub async fn import_file(
+        &self,
+        context: RequestContext,
+        capability: CapId,
+        descriptors: Vec<std::os::fd::OwnedFd>,
+    ) -> Result<Vec<ImportFileResult>, ClientError<BlobsError>> {
+        self.client
+            .call_with_metadata(Envelope::new(context, ImportFile { capability }).with_body(
+                Body::Descriptors(service_utils_rs::descriptor::DescriptorBody::from_fds(
+                    descriptors,
+                )),
+            ))
+            .await
+            .map(|response| response.output.results)
     }
 
     /// [`ReadBlob`] through the in-process client: the blob's bytes as a stream, or the part of
@@ -436,6 +464,55 @@ impl BlobService {
         Ok(imported)
     }
 
+    #[cfg(unix)]
+    async fn import_descriptor(
+        &self,
+        descriptor: std::os::fd::OwnedFd,
+    ) -> Result<BlobInfo, BlobsError> {
+        let stat = fstat(&descriptor).map_err(|error| BlobsError::Unreadable {
+            reason: error.to_string(),
+        })?;
+        if !FileType::from_raw_mode(stat.st_mode).is_file() {
+            return Err(BlobsError::InvalidInput {
+                reason: "descriptor is not a regular file".to_owned(),
+            });
+        }
+        let length = u64::try_from(stat.st_size).map_err(|_| BlobsError::Unreadable {
+            reason: "descriptor has a negative length".to_owned(),
+        })?;
+        if length > MAX_PUT_OCTETS {
+            return Err(BlobsError::TooLarge {
+                limit_octets: MAX_PUT_OCTETS,
+            });
+        }
+        let body = ByteBody::new(stream::unfold(
+            Some((descriptor, 0_u64)),
+            |state| async move {
+                let (descriptor, offset) = state?;
+
+                let read = tokio::task::spawn_blocking(move || {
+                    let mut buffer = vec![0_u8; 64 * 1024];
+                    let count = rustix::io::pread(&descriptor, &mut buffer, offset)?;
+                    buffer.truncate(count);
+                    Ok::<_, std::io::Error>((descriptor, offset + count as u64, buffer))
+                })
+                .await
+                .expect("descriptor reader task panicked");
+                match read {
+                    Ok((_descriptor, _offset, buffer)) if buffer.is_empty() => None,
+                    Ok((descriptor, offset, buffer)) => {
+                        Some((Ok(Bytes::from(buffer)), Some((descriptor, offset))))
+                    }
+                    Err(error) => Some((Err(error), None)),
+                }
+            },
+        ));
+        // The stat size is only an early bound. The file may change before or during the
+        // positional reads, so leave the body length unknown and let `put` count the bytes
+        // actually streamed; a stale declared length must not affect the stored result.
+        self.put(body, MAX_PUT_OCTETS).await
+    }
+
     /// Reads `body` into the store, whatever it is, and returns what the store now holds: the id
     /// is the one this hashes, never one the caller says, and putting what the store already
     /// holds is a cheap no-op that returns the same [`BlobInfo`] and adds an upload hold (the
@@ -574,8 +651,42 @@ impl Handler<PutBlob> for BlobService {
         .await?;
         let body = request
             .take_body()
-            .expect("a method with a byte input is called with its body");
+            .and_then(|body| match body {
+                Body::Bytes(body) => Some(body),
+                _ => None,
+            })
+            .expect("a bytes-input method is called with its byte body");
         Ok(self.put(body, MAX_PUT_OCTETS).await?.into())
+    }
+}
+
+#[cfg(unix)]
+impl Handler<ImportFile> for BlobService {
+    async fn call(
+        &self,
+        mut request: Envelope<ImportFile>,
+    ) -> Result<ResponseEnvelope<ImportFileOutput>, BlobsError> {
+        self.authorize(&request.context, request.params.capability, |scope| {
+            scope.put
+        })
+        .await?;
+        let body = request
+            .take_body()
+            .and_then(|body| match body {
+                Body::Descriptors(body) => Some(body),
+                _ => None,
+            })
+            .expect("a descriptor-input method is called with its descriptor body");
+        let mut results = Vec::with_capacity(body.len());
+        for descriptor in body.into_fds() {
+            results.push(match self.import_descriptor(descriptor).await {
+                Ok(info) => ImportFileResult::Imported { info },
+                Err(error) => ImportFileResult::Refused {
+                    error: error.into(),
+                },
+            });
+        }
+        Ok(ImportFileOutput { results }.into())
     }
 }
 
