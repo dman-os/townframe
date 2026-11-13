@@ -98,12 +98,24 @@ pub fn artifact_slot_version(key: &DatumKey) -> Option<String> {
 /// identity. The `Blob` Lexicon is registered by big_blobs.
 #[cfg(feature = "schemars")]
 pub fn registry_universe() -> big_cabinet_core::datum::Universe {
+    use crate::Cartridge;
+    use crate::ComponentExport;
     use crate::MicroContribution;
-    use crate::NoduleContribution;
+    use crate::Nodule;
+    use crate::PermbindDatum;
+    use crate::PermbindDrawers;
+    use crate::PermbindMethod;
+    use crate::WasmComponent;
+
     use big_cabinet_core::datum::Declaration;
     big_cabinet_core::datum::Universe::collect([
         Declaration::of::<Cartridge>().expect("Cartridge declaration is valid"),
-        Declaration::of::<NoduleContribution>().expect("NoduleContribution declaration is valid"),
+        Declaration::of::<PermbindDatum>().expect("PermbindDatum declaration is valid"),
+        Declaration::of::<PermbindMethod>().expect("PermbindMethod declaration is valid"),
+        Declaration::of::<PermbindDrawers>().expect("PermbindDrawers declaration is valid"),
+        Declaration::of::<ComponentExport>().expect("ComponentExport declaration is valid"),
+        Declaration::of::<WasmComponent>().expect("WasmComponent declaration is valid"),
+        Declaration::of::<Nodule>().expect("Nodule declaration is valid"),
         Declaration::of::<MicroContribution>().expect("MicroContribution declaration is valid"),
         Declaration::of::<CartridgeIdentity>().expect("CartridgeIdentity declaration is valid"),
     ])
