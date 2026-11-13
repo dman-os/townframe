@@ -12,7 +12,7 @@ pub const big_cartridges::import::MICRO_COMPONENT_ARTIFACT: & str
 pub enum big_cartridges::import::ImportError { # [error ("the manifest is not importable: {0}")] Manifest (String), # [error ("the component is not importable: {0}")] Component (String), # [error ("importing the component into the blob store failed: {0}")] Blob (String), # [error ("the registry refused the version: {0}")] Registry (# [from] CartridgesError), # [error ("the registry could not be reached: {0}")] Transport (String) }
 pub mod big_cartridges::import
 pub struct big_cartridges::CartridgeService  {  }
-pub struct big_cartridges::Cartridges  { host: Arc < Host < CartridgesHandler > >, client: Client < CartridgesProtocol >, publisher: String }
+pub struct big_cartridges::Cartridges  { host: Arc < Host < CartridgesHandler > >, client: Client < CartridgesProtocol >, publisher: String, registry_drawer: DrawerId }
 pub struct big_cartridges::CartridgesConfig  { authority: Client < AuthorityProtocol >, docs: Client < DocsProtocol >, registry_drawer: DrawerId, actor: OpenedActor, namespace: Namespace, operator: Uuid7, blobs: Arc < BlobService >, drawers: Client < DrawersProtocol >, node_key: NodeKey, sql: Database }
 pub struct big_cartridges::NodeKey  { public_key: [u8 ; 32], sign: NodeSigner }
 pub struct big_cartridges::RegistryDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a OpenedActor, access: & 'a DrawerAccess, sql: Database }

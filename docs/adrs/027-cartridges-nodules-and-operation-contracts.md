@@ -825,7 +825,11 @@ ensures the four local drawers (`present_id`, `originated_id`, `known_drawers_id
 `config_id`. Portable desired configuration lives as independently addressed datums in
 that config drawer (`org.example.daybook.nodule.install/<cartridge_id>`,
 `org.example.daybook.nodule.settings/<cartridge_id>`, and
-`org.example.daybook.nodule.grants/<cartridge_id>` in `big_nodule_core::config`), projected
+`org.example.daybook.nodule.grants/<cartridge_id>` in `big_nodule_core::config`; ADR 044
+replaced these with a pinned `cartridges.install` datum here and a config document per
+cartridge for its settings and one grant datum per grant, and replaced the
+`admitNodule`, `configureNodule`, `setNoduleEnabled`, `setNoduleDrawerGrants` and
+`uninstallNodule` calls below with the cartridge-level install methods), projected
 through [`DatumStoreHandle`](../../src/big_cabinet/datum_store.rs) (`AtHeads` mutations,
 single-frontier hydration, and invalidation-driven partial refresh without touching
 unowned keys or discarding unknown/invalid entries). Admitting a package writes its

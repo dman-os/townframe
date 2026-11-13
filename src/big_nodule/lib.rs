@@ -1,9 +1,12 @@
 //! The nodule service: the node-side runtime management surface of ADR 027 §4, §6, and §8,
 //! without an executor.
 //!
-//! Portable desired state (installed envelopes, enablement, settings, and local drawer grants)
-//! lives in the node's config drawer document and is projected through
-//! [`big_cabinet::DatumStoreHandle`] over [`big_nodule_core::config::NoduleConfig`].
+//! Portable desired state lives in two kinds of document (ADR 044), each projected through
+//! [`big_cabinet::DatumStoreHandle`]: the node's config drawer document holds the installs (a pin
+//! of the published version, and enablement on this node) over
+//! [`big_nodule_core::config::NoduleConfig`], and each cartridge's config document in the shared
+//! config drawer holds its settings and its grants over
+//! [`big_nodule_core::config::CartridgeConfig`].
 //! Host-specific state (each nodule's durable local actor, the service-owned drawer grant
 //! capabilities and the dispatch handles minted from method grants applied on this node)
 //! lives in SQLite.
@@ -15,6 +18,7 @@ use sqlite_rs as sqlite_rs_alias;
 mod sqlite {
     include!("sqlite/gen.rs");
 }
+mod cartridge_docs;
 pub mod egress;
 pub mod executor;
 mod state;
@@ -25,6 +29,8 @@ pub mod wire;
 mod e2e;
 
 use big_cabinet::DatumStoreHandle;
+use big_cabinet::DrawerAccess;
+use big_cabinet::Drawers;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::SchemaRepo;
@@ -43,19 +49,34 @@ use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
+use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::protocol::CartridgeInstallRecord;
+use big_cartridges_core::protocol::CartridgeInstalls;
+use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::InstallCartridge;
+use big_cartridges_core::protocol::ListCartridgeInstalls;
+use big_cartridges_core::protocol::ObserveCartridgeInstalls;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::SetCartridgeGrant;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_dispatch_core::DispatchProtocol;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::config_universe;
-use big_nodule_core::protocol::AdmitNodule;
-use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::ConfirmNoduleResolution;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::ListNodules;
@@ -68,10 +89,7 @@ use big_nodule_core::protocol::NodulesMessage;
 use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetMethodRoute;
 use big_nodule_core::protocol::SetNoduleDevTakeover;
-use big_nodule_core::protocol::SetNoduleDrawerGrants;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::SetNoduleMethodGrants;
-use big_nodule_core::protocol::UninstallNodule;
+use method_core::EventStream;
 use service_client_native_rs::Client;
 use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
@@ -83,6 +101,7 @@ use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
 use sqlite_rs::Database;
 use state::Command;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -105,8 +124,9 @@ pub fn schema_group() -> SchemaRegistrationGroup<'static> {
 }
 
 /// What the embedder hands the service: the authority it provisions actors from, the docs and
-/// drawers services it reads config from and applies grants through, the node's config drawer,
-/// the subsystem actor it provisions nodule actors under and that actor's registry path, the
+/// drawers services it reads config from and applies grants through, the node's config drawer, the
+/// registry drawer whose documents installs pin and the shared config drawer (from
+/// [`ensure_shared_config_drawer`]) that holds each cartridge's config document, the subsystem actor it provisions nodule actors under and that actor's registry path, the
 /// namespace it mints management handles in, the operator whose identity administers nodules,
 /// the dispatch router it registers each admitted nodule's implemented operations in, the dispatch
 /// client and dispatch handle it mints every nodule's own handle from (a
@@ -119,6 +139,10 @@ pub struct NodulesConfig {
     pub docs: Client<DocsProtocol>,
     pub drawers: Client<DrawersProtocol>,
     pub config_drawer: DrawerId,
+    /// The nodules actor must hold Read on the registry drawer and Admin on the shared config
+    /// drawer.
+    pub registry_drawer: DrawerId,
+    pub shared_config_drawer: DrawerId,
     pub actor: OpenedActor,
     pub actor_path: String,
     pub namespace: Namespace,
@@ -212,20 +236,6 @@ impl NoduleService {
         }
     }
 
-    /// A scoped handle admits only the cartridge ids in its `cartridges`, and only with `admit` set.
-    fn require_admit(
-        &self,
-        caller: &Invocation<NoduleScope>,
-        cartridge_id: &CartridgeId,
-    ) -> Res<()> {
-        match self.scope_of(caller)? {
-            Some(scope) if !(scope.admit && scope.cartridges.contains(cartridge_id)) => {
-                Err(NodulesError::Denied)
-            }
-            _ => Ok(()),
-        }
-    }
-
     fn require_manage(
         &self,
         caller: &Invocation<NoduleScope>,
@@ -262,50 +272,34 @@ impl NoduleService {
             .map_err(authority_error)
     }
 
-    async fn admit(
+    /// Installs the published version `params.cartridge` pins. A scoped handle installs only the
+    /// cartridge ids in its `cartridges`, and only with `admit` set, which the state actor
+    /// checks once it has read the id out of the pin.
+    async fn install(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: AdmitNodule,
-    ) -> Res<NoduleRecord> {
+        params: InstallCartridge,
+    ) -> Res<CartridgeInstallRecord> {
         let caller = self.caller(context, authorization).await?;
-        self.require_admit(&caller, &params.cartridge.id)?;
+        let scope = self.scope_of(&caller)?.cloned();
         let context = context.clone();
         self.state
-            .ask(|reply| Command::Admit {
+            .ask(|reply| Command::Install {
                 context,
-                cartridge: Box::new(params.cartridge),
-                drawers: params.drawers,
+                scope,
+                pin: params.cartridge,
                 reply,
             })
             .await
     }
 
-    async fn configure(
+    async fn set_cartridge_enabled(
         &self,
         context: &RequestContext,
         authorization: Authorization,
-        params: ConfigureNodule,
-    ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.cartridge_id)?;
-        let context = context.clone();
-        self.state
-            .ask(|reply| Command::Configure {
-                context,
-                cartridge_id: params.cartridge_id,
-                settings: params.settings,
-                reply,
-            })
-            .await
-    }
-
-    async fn set_enabled(
-        &self,
-        context: &RequestContext,
-        authorization: Authorization,
-        params: SetNoduleEnabled,
-    ) -> Res<NoduleRecord> {
+        params: SetCartridgeEnabled,
+    ) -> Res<CartridgeInstallRecord> {
         let caller = self.caller(context, authorization).await?;
         self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
@@ -313,10 +307,113 @@ impl NoduleService {
             .ask(|reply| Command::SetEnabled {
                 context,
                 cartridge_id: params.cartridge_id,
+                component: params.component,
                 enabled: params.enabled,
                 reply,
             })
             .await
+    }
+
+    async fn set_cartridge_grant(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: SetCartridgeGrant,
+    ) -> Res<()> {
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::SetGrant {
+                context,
+                cartridge_id: params.cartridge_id,
+                component: params.component,
+                grant: params.grant,
+                value: params.value,
+                reply,
+            })
+            .await
+    }
+
+    async fn clear_cartridge_config(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: ClearCartridgeConfig,
+    ) -> Res<()> {
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::ClearConfig {
+                context,
+                cartridge_id: params.cartridge_id,
+                reply,
+            })
+            .await
+    }
+
+    async fn uninstall_cartridge(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: UninstallCartridge,
+    ) -> Res<()> {
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
+        let context = context.clone();
+        self.state
+            .ask(|reply| Command::Uninstall {
+                context,
+                cartridge_id: params.cartridge_id,
+                reply,
+            })
+            .await
+    }
+
+    async fn list_installs(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        _: ListCartridgeInstalls,
+    ) -> Res<CartridgeInstalls> {
+        let caller = self.caller(context, authorization).await?;
+        let scope = self.scope_of(&caller)?.cloned();
+        let context = context.clone();
+        let installs = self
+            .state
+            .ask(|reply| Command::ListInstalls { context, reply })
+            .await?;
+        Ok(CartridgeInstalls {
+            installs: visible_installs(installs, scope.as_ref()),
+        })
+    }
+
+    /// The install rows now, and again after each change, for the rows the caller may read.
+    async fn observe_installs(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+    ) -> Res<EventStream<CartridgeInstalls, CartridgesError>> {
+        let caller = self.caller(context, authorization).await?;
+        let scope = self.scope_of(&caller)?.cloned();
+        let rows = self.state.installs.clone();
+        Ok(Box::pin(futures::stream::unfold(
+            (rows, true),
+            move |(mut rows, first)| {
+                let scope = scope.clone();
+                async move {
+                    if !first {
+                        // The sender lives as long as the state actor, so the feed ends with the
+                        // service.
+                        rows.changed().await.ok()?;
+                    }
+                    let installs =
+                        visible_installs(rows.borrow_and_update().clone(), scope.as_ref());
+                    Some((Ok(CartridgeInstalls { installs }), (rows, false)))
+                }
+            },
+        )))
     }
 
     async fn confirm_resolution(
@@ -383,62 +480,6 @@ impl NoduleService {
             .await
     }
 
-    async fn set_drawer_grants(
-        &self,
-        context: &RequestContext,
-        authorization: Authorization,
-        params: SetNoduleDrawerGrants,
-    ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.cartridge_id)?;
-        let context = context.clone();
-        self.state
-            .ask(|reply| Command::SetDrawerGrants {
-                context,
-                cartridge_id: params.cartridge_id,
-                drawers: params.drawers,
-                reply,
-            })
-            .await
-    }
-
-    async fn set_method_grants(
-        &self,
-        context: &RequestContext,
-        authorization: Authorization,
-        params: SetNoduleMethodGrants,
-    ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.cartridge_id)?;
-        let context = context.clone();
-        self.state
-            .ask(|reply| Command::SetMethodGrants {
-                context,
-                cartridge_id: params.cartridge_id,
-                methods: params.methods,
-                reply,
-            })
-            .await
-    }
-
-    async fn uninstall(
-        &self,
-        context: &RequestContext,
-        authorization: Authorization,
-        params: UninstallNodule,
-    ) -> Res<()> {
-        let caller = self.caller(context, authorization).await?;
-        self.require_manage(&caller, &params.cartridge_id)?;
-        let context = context.clone();
-        self.state
-            .ask(|reply| Command::Uninstall {
-                context,
-                cartridge_id: params.cartridge_id,
-                reply,
-            })
-            .await
-    }
-
     async fn get(
         &self,
         context: &RequestContext,
@@ -478,13 +519,25 @@ impl NoduleService {
     }
 }
 
+/// The install rows a caller may read: all of them for the operator, the cartridges named by a
+/// scoped handle for that handle.
+fn visible_installs(
+    installs: Vec<CartridgeInstallRecord>,
+    scope: Option<&NoduleScope>,
+) -> Vec<CartridgeInstallRecord> {
+    installs
+        .into_iter()
+        .filter(|record| scope.is_none_or(|scope| scope.cartridges.contains(&record.cartridge_id)))
+        .collect()
+}
+
 macro_rules! handlers {
-    ($($request:ident => $method:ident : $output:ty;)*) => {$(
+    ($error:ty; $($request:ident => $method:ident : $output:ty;)*) => {$(
         impl Handler<$request> for NoduleService {
             async fn call(
                 &self,
                 request: Envelope<$request>,
-            ) -> Res<ResponseEnvelope<$output>> {
+            ) -> Result<ResponseEnvelope<$output>, $error> {
                 let authorization = Authorization::from_metadata(&request.metadata)?;
                 Ok(self
                     .$method(&request.context, authorization, request.params)
@@ -495,37 +548,59 @@ macro_rules! handlers {
     )*};
 }
 handlers! {
+    NodulesError;
     MintNoduleCapability => mint: Capability;
-    AdmitNodule => admit: NoduleRecord;
-    ConfigureNodule => configure: NoduleRecord;
-    SetNoduleEnabled => set_enabled: NoduleRecord;
-    SetNoduleDrawerGrants => set_drawer_grants: NoduleRecord;
-    SetNoduleMethodGrants => set_method_grants: NoduleRecord;
     ConfirmNoduleResolution => confirm_resolution: NoduleRecord;
     SetNoduleDevTakeover => set_dev_takeover: NoduleRecord;
     SetMethodRoute => set_method_route: ();
-    UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
     ListNodules => list: NoduleList;
+}
+// The cartridge-level methods fail with the cartridges service's error (see
+// `big_cartridges_core::protocol`); the service's own errors convert into it.
+handlers! {
+    CartridgesError;
+    InstallCartridge => install: CartridgeInstallRecord;
+    SetCartridgeEnabled => set_cartridge_enabled: CartridgeInstallRecord;
+    UninstallCartridge => uninstall_cartridge: ();
+    SetCartridgeGrant => set_cartridge_grant: ();
+    ClearCartridgeConfig => clear_cartridge_config: ();
+    ListCartridgeInstalls => list_installs: CartridgeInstalls;
+}
+
+impl Handler<ObserveCartridgeInstalls> for NoduleService {
+    async fn call(
+        &self,
+        request: Envelope<ObserveCartridgeInstalls>,
+    ) -> Result<ResponseEnvelope<EventStream<CartridgeInstalls, CartridgesError>>, CartridgesError>
+    {
+        let authorization = Authorization::from_metadata(&request.metadata)?;
+        Ok(self
+            .observe_installs(&request.context, authorization)
+            .await?
+            .into())
+    }
 }
 
 service_utils_rs::bind_service_protocol! {
     pub struct NodulesBinding for NodulesProtocol => NodulesMessage {
         unary {
             MintNoduleCapability(MintNoduleCapability),
-            AdmitNodule(AdmitNodule),
-            ConfigureNodule(ConfigureNodule),
-            SetNoduleEnabled(SetNoduleEnabled),
-            SetNoduleDrawerGrants(SetNoduleDrawerGrants),
-            SetNoduleMethodGrants(SetNoduleMethodGrants),
+            InstallCartridge(InstallCartridge),
+            SetCartridgeEnabled(SetCartridgeEnabled),
+            UninstallCartridge(UninstallCartridge),
+            SetCartridgeGrant(SetCartridgeGrant),
+            ClearCartridgeConfig(ClearCartridgeConfig),
+            ListCartridgeInstalls(ListCartridgeInstalls),
             ConfirmNoduleResolution(ConfirmNoduleResolution),
             SetNoduleDevTakeover(SetNoduleDevTakeover),
             SetMethodRoute(SetMethodRoute),
-            UninstallNodule(UninstallNodule),
             GetNodule(GetNodule),
             ListNodules(ListNodules)
         }
-        stream {}
+        stream {
+            ObserveCartridgeInstalls(ObserveCartridgeInstalls)
+        }
     }
 }
 
@@ -551,6 +626,13 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
                 scope: DocScope {
                     read: BTreeSet::from([config_doc.clone()]),
                     write: BTreeSet::from([config_doc.clone()]),
+                    // The registry's documents are only read, at the heads installs pin. The
+                    // shared config drawer holds the cartridge config documents, which are
+                    // created, read and written.
+                    drawers: BTreeMap::from([
+                        (config.registry_drawer.clone(), Access::Read),
+                        (config.shared_config_drawer.clone(), Access::Write),
+                    ]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
@@ -561,7 +643,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         .map_err(docs_error)?;
     let (datum_store, store_stop) = DatumStoreHandle::<NoduleConfig>::load(
         &RequestContext::root(),
-        config.docs,
+        config.docs.clone(),
         doc_cap.capability_id,
         config_doc,
     )
@@ -575,6 +657,9 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         authority: config.authority,
         drawers: config.drawers,
         datum_store,
+        docs: config.docs,
+        docs_capability: doc_cap.capability_id,
+        shared_config_drawer: config.shared_config_drawer,
         parent: config.actor,
         parent_path: config.actor_path,
         dispatch: config.dispatch,
@@ -606,4 +691,93 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
             .then(store_stop)
             .then(domain_stop),
     ))
+}
+
+/// What [`ensure_shared_config_drawer`] needs: the drawers service, the nodules actor (it holds
+/// Admin on the drawer afterwards, being its creator), the drawer access policy it is granted
+/// creation through, and the node's database.
+pub struct SharedConfigDrawerConfig<'a> {
+    pub drawers: &'a Drawers,
+    pub actor: &'a OpenedActor,
+    pub access: &'a DrawerAccess,
+    pub sql: Database,
+}
+
+/// The shared config drawer's id, created on the first boot and read back from SQLite on every
+/// later one (ADR 044 §1). It is the cartridge config documents' home: one document per
+/// installed cartridge, holding its settings and grants. It is ADR 038's configuration drawer,
+/// local until sister nodes exist; its sync policy is theirs to decide, and nothing here depends
+/// on it. The nodules actor creates it, so it holds Admin on it.
+///
+/// A crash between the drawer's creation and the stored id replays the creation under its fixed
+/// command, which the drawer ledger answers with the same drawer while its row is retained; past
+/// that, the first drawer is leaked as an unreferenced empty drawer and a second one made.
+pub async fn ensure_shared_config_drawer(
+    config: SharedConfigDrawerConfig<'_>,
+) -> Result<DrawerId, NodulesError> {
+    store::migrate(&config.sql).await?;
+    if let Some(drawer) = store::shared_config_drawer(&config.sql).await? {
+        return Ok(drawer);
+    }
+    let storage = |error: &dyn std::fmt::Display| NodulesError::Storage(error.to_string());
+    let context = RequestContext::root();
+    config
+        .access
+        .grants()
+        .grant(
+            &context,
+            config.actor.actor.actor_id,
+            CREATE_DRAWER_OBJECT.into(),
+            Rights::USE,
+            None,
+        )
+        .await
+        .map_err(|error| storage(&error))?;
+    let create = config
+        .drawers
+        .client
+        .call_with(
+            context.child(),
+            Authorization::identity(config.actor.capability).metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: BTreeMap::new(),
+                    create: true,
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .map_err(|error| storage(&error))?;
+    let drawer = config
+        .drawers
+        .client
+        .call(
+            context.child(),
+            CreateDrawer {
+                capability: create.capability_id,
+                command: CommandId::try_from("shared config drawer".to_owned())
+                    .expect("the shared config drawer command is within bounds"),
+                layout: CreateLayout::SingleGroup,
+            },
+        )
+        .await
+        .map_err(|error| storage(&error))?
+        .drawer_id;
+    store::set_shared_config_drawer(&config.sql, &drawer).await?;
+    // Creating the one shared config drawer is the only use of this right, so it is revoked once
+    // the drawer is recorded rather than left standing (least privilege). Admin on the drawer
+    // comes from being its creator and is unaffected.
+    config
+        .access
+        .grants()
+        .revoke(
+            &context,
+            config.actor.actor.actor_id,
+            &[CREATE_DRAWER_OBJECT.into()],
+        )
+        .await
+        .map_err(|error| storage(&error))?;
+    Ok(drawer)
 }
