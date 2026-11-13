@@ -36,20 +36,20 @@ pub const big_cartridges_core::signature::SIGNING_DOMAIN: & [u8]
 pub const big_cartridges_core::test_support::EXAMPLE_NAMESPACE: & str
 pub const big_cartridges_core::test_support::EXAMPLE_SEED: [u8 ; 32]
 pub enum big_cartridges_core::CartridgeError { # [error ("cartridge envelope invalid at `{path}`: {reason}")] Invalid { path : String , reason : String }, # [doc = " One version of a package names one revision. A second envelope claiming the same version is"] # [doc = " a republish under an existing label, which would make the label mean two different byte"] # [doc = " strings; the catalog refuses it instead of picking one."] # [error ("cartridge `{id}` {version} is already catalogued at revision {existing}; this envelope is \ {incoming}")] Conflict { id : CartridgeId , version : Box < Version > , existing : Revision , incoming : Revision , } }
-pub enum big_cartridges_core::Contribution { Nodule (NoduleContribution), Micro (MicroContribution), # [datum (other)] Unknown (big_cabinet_core :: datum :: UnknownMember) }
 pub enum big_cartridges_core::config::Component { Nodule, Micro }
 pub enum big_cartridges_core::config::GrantKey { # [doc = " `drawer:<drawerId>`: access to a local drawer."] Drawer (DrawerId), # [doc = " `method:<nsid>`: one operation the component may invoke through dispatch."] Method (String), # [doc = " `authority:<prefix>`: every operation under an NSID authority prefix, or `*`."] Authority (String) }
 pub enum big_cartridges_core::protocol::CartridgesError { # [error ("request context failed: {0}")] Context (# [from] ContextError), # [error ("the presented capability does not permit this operation")] Denied, # [error ("authority failed: {0}")] Authority (AuthorityServiceError), # [error ("authority transport failed: {0}")] AuthorityUnavailable (String), # [error ("registry state failed: {0}")] Storage (String), # [error ("the envelope was refused: {0}")] Rejected (String), # [doc = " A published version never changes content: the label is taken by another envelope."] # [error ("cartridge `{id}` {version} is already published at revision {existing}; this envelope is \ {incoming}")] VersionExists { id : CartridgeId , version : Box < Version > , existing : Revision , incoming : Revision , }, # [doc = " The envelope's signature is missing or does not verify against its namespace DID, or the"] # [doc = " DID's method cannot be verified without resolution (fail closed)."] # [error ("the envelope's signature was refused: {0}")] Signature (# [from] SignatureError), # [doc = " An unsigned envelope can be signed by the node only for the node's own DID."] # [error ("the envelope is unsigned and `{namespace}` is not this node's publisher DID, so the node \ cannot sign it")] UnsignedForeignNamespace { namespace : String }, # [doc = " A new label must order after every label the cartridge has or had, so a validly signed older"] # [doc = " version cannot be published as new (a downgrade attack). Taking an older version is an"] # [doc = " explicit runtime action, not a registry one."] # [error ("cartridge `{id}` {version} does not order after {newest}, the newest version it has had")] Downgrade { id : CartridgeId , version : Box < Version > , newest : Box < Version > , }, # [doc = " The handle's namespace scope does not include the cartridge's namespace."] # [error ("the presented capability may not publish under `{namespace}`")] NamespaceNotPermitted { namespace : String }, # [doc = " The version exists in the drawer but its signature did not verify, so it is not served."] # [error ("cartridge `{id}` {version} is not served: {reason}")] Unverified { id : CartridgeId , version : Box < Version > , reason : String , }, # [doc = " An artifact's bytes are not in the local blob store, so the registry would pin bytes it"] # [doc = " cannot serve."] # [error ("artifact `{artifact}` of cartridge `{id}` is not in the local blob store")] ArtifactUnavailable { id : CartridgeId , artifact : String }, # [error ("cartridge `{0}` is not in the registry")] UnknownCartridge (CartridgeId), # [error ("cartridge `{id}` has no version {version}")] UnknownVersion { id : CartridgeId , version : Box < Version > , } }
 pub enum big_cartridges_core::request::Necessity { # [default] Required, Optional, # [datum (other)] Unknown (String) }
-pub enum big_cartridges_core::request::Resolution { # [doc = " Configuration binds it, with defaults derived from the manifest."] # [default] Configured, # [doc = " Bound later by the user's consent through a picker, issuing the same handle."] AtRuntime, # [datum (other)] Unknown (String) }
+pub enum big_cartridges_core::request::Resolution { # [default] Configured, AtRuntime, # [datum (other)] Unknown (String) }
 pub enum big_cartridges_core::signature::SignatureError { # [error ("the envelope carries no signature")] Missing, # [error ("unsupported DID method for verification: `{0}`")] UnsupportedMethod (String), # [error ("unsupported did:key key type (only Ed25519 is verifiable): {0}")] UnsupportedKey (String), # [error ("unsupported signature algorithm `{0}`")] UnsupportedAlgorithm (String), # [error ("malformed signature or key: {0}")] Malformed (String), # [error ("the signature does not verify against `{0}`")] Invalid (String) }
-pub impl big_cartridges_core::Cartridge::fn artifact (& self , key : & str) -> Option < & Artifact >
+pub impl big_cartridges_core::Cartridge::fn component (& self , key : & str) -> Option < & DatumPin >
 pub impl big_cartridges_core::Cartridge::fn micro (& self) -> Option < & MicroContribution >
 pub impl big_cartridges_core::Cartridge::fn new (id : CartridgeId , version : Version) -> Self
-pub impl big_cartridges_core::Cartridge::fn nodule (& self) -> Option < & NoduleContribution >
+pub impl big_cartridges_core::Cartridge::fn nodule (& self) -> Option < & Nodule >
 pub impl big_cartridges_core::Cartridge::fn revision (& self) -> Revision
 pub impl big_cartridges_core::Cartridge::fn validate (& self) -> Result < () , CartridgeError >
 pub impl big_cartridges_core::CartridgeId::fn new (namespace : & str , name : & str) -> Result < Self , InvalidCartridgeId >
+pub impl big_cartridges_core::ResolvedCartridge::fn new (cartridge : Cartridge , lexicons : BTreeMap < Nsid , IndexMap < String , serde_json :: Value > > , sidecars : BTreeMap < Nsid , IndexMap < String , serde_json :: Value > > , components : BTreeMap < String , Component > ,) -> Self
 pub impl big_cartridges_core::catalog::Catalog::fn cartridge (& self , revision : & Revision) -> Option < & Cartridge >
 pub impl big_cartridges_core::catalog::Catalog::fn import (& mut self , cartridge : Cartridge) -> Result < Revision , CartridgeError >
 pub impl big_cartridges_core::catalog::Catalog::fn new () -> Self
@@ -66,9 +66,6 @@ pub impl big_cartridges_core::config::GrantKey::fn from_slot (slot : & [u8]) -> 
 pub impl big_cartridges_core::protocol::CartridgesScope::fn covers (& self , other : & Self) -> bool
 pub impl big_cartridges_core::protocol::CartridgesScope::fn may_publish_under (& self , namespace : & str) -> bool
 pub impl big_cartridges_core::request::Necessity::fn is_required (& self) -> bool
-pub impl big_cartridges_core::request::Request::fn is_operation_call (& self) -> bool
-pub impl big_cartridges_core::request::Request::fn new (binding : impl Into < String > , contract : impl Into < String >) -> Self
-pub impl big_cartridges_core::request::Request::fn validate_all (requests : & [Self] , field : & str) -> Result < () , CartridgeError >
 pub impl big_cartridges_core::signature::Cartridge::fn sign_with (& mut self , sign : impl FnOnce (& [u8]) -> [u8 ; 64])
 pub impl big_cartridges_core::signature::Cartridge::fn signing_message (& self) -> Vec < u8 >
 pub impl big_cartridges_core::signature::Cartridge::fn verify_signature (& self) -> Result < () , SignatureError >
@@ -81,13 +78,11 @@ pub mod big_cartridges_core::registry
 pub mod big_cartridges_core::request
 pub mod big_cartridges_core::signature
 pub mod big_cartridges_core::test_support
-pub struct big_cartridges_core::Artifact  { key: String, digest: Digest, size: Option < u64 >, media_type: Option < String >, extra: Extra }
-pub struct big_cartridges_core::Cartridge  { id: CartridgeId, version: Version, authority: Option < String >, title: Option < String >, description: Option < String >, dependencies: Vec < Dependency >, artifacts: Vec < Artifact >, contributions: Vec < Contribution >, signature: Option < signature :: CartridgeSignature >, extra: Extra }
+pub struct big_cartridges_core::Cartridge  { id: CartridgeId, version: Version, authority: Option < String >, title: Option < String >, description: Option < String >, dependencies: BTreeMap < CartridgeId , VersionReq >, lexicons: BTreeMap < Nsid , DatumPin >, sidecars: BTreeMap < Nsid , DatumPin >, components: BTreeMap < String , DatumPin >, permbinds: BTreeMap < String , Permbind >, settings: BTreeSet < Nsid >, nodule: Option < Nodule >, micro: Option < MicroContribution >, signature: Option < signature :: CartridgeSignature >, extra: Extra }
 pub struct big_cartridges_core::CartridgeId  { namespace: String, name: String }
-pub struct big_cartridges_core::Dependency  { id: CartridgeId, version: VersionReq, extra: Extra }
 pub struct big_cartridges_core::InvalidCartridgeId  { 0: String }
 pub struct big_cartridges_core::MicroContribution  { component: String, schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
-pub struct big_cartridges_core::NoduleContribution  { schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
+pub struct big_cartridges_core::ResolvedCartridge  { cartridge: Cartridge, lexicons: BTreeMap < Nsid , IndexMap < String , serde_json :: Value > >, sidecars: BTreeMap < Nsid , IndexMap < String , serde_json :: Value > >, components: BTreeMap < String , Component > }
 pub struct big_cartridges_core::Version  { 0: semver :: Version }
 pub struct big_cartridges_core::VersionReq  { 0: semver :: VersionReq }
 pub struct big_cartridges_core::catalog::Catalog  {  }
@@ -117,8 +112,24 @@ pub struct big_cartridges_core::protocol::RemoveCartridge  { id: CartridgeId }
 pub struct big_cartridges_core::protocol::RemoveCartridgeVersion  { id: CartridgeId, version: Version }
 pub struct big_cartridges_core::protocol::WatchCartridges  { after: Option < CartridgesCursor >, limit: u32, hold_ms: u32 }
 pub struct big_cartridges_core::registry::CartridgeIdentity  { id: CartridgeId, extra: Extra }
-pub struct big_cartridges_core::request::Request  { binding: String, contract: String, access: Option < String >, necessity: Necessity, resolution: Resolution, min_revision: Option < u32 >, extra: Extra }
 pub struct big_cartridges_core::signature::CartridgeSignature  { alg: String, value: String, extra: Extra }
+pub use big_cartridges_core::manifest :: Component
+pub use big_cartridges_core::manifest :: ComponentExport
+pub use big_cartridges_core::manifest :: Initializer
+pub use big_cartridges_core::manifest :: LocalState
+pub use big_cartridges_core::manifest :: Nodule
+pub use big_cartridges_core::manifest :: Permbind
+pub use big_cartridges_core::manifest :: PermbindDatum
+pub use big_cartridges_core::manifest :: PermbindDrawers
+pub use big_cartridges_core::manifest :: PermbindMethod
+pub use big_cartridges_core::manifest :: RevisionedStore
+pub use big_cartridges_core::manifest :: Routine
+pub use big_cartridges_core::manifest :: RoutineImpl
+pub use big_cartridges_core::manifest :: RoutineUse
+pub use big_cartridges_core::manifest :: RunMode
+pub use big_cartridges_core::manifest :: StateKind
+pub use big_cartridges_core::manifest :: StoreMode
+pub use big_cartridges_core::manifest :: WasmComponent
 pub use big_cartridges_core::protocol::installs :: CartridgeInstallRecord
 pub use big_cartridges_core::protocol::installs :: CartridgeInstalls
 pub use big_cartridges_core::protocol::installs :: ClearCartridgeConfig
@@ -128,3 +139,5 @@ pub use big_cartridges_core::protocol::installs :: ObserveCartridgeInstalls
 pub use big_cartridges_core::protocol::installs :: SetCartridgeEnabled
 pub use big_cartridges_core::protocol::installs :: SetCartridgeGrant
 pub use big_cartridges_core::protocol::installs :: UninstallCartridge
+pub use big_cartridges_core::request :: Necessity
+pub use big_cartridges_core::request :: Resolution
