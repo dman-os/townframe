@@ -1635,6 +1635,7 @@ fn resolve_entry(
 
     let mut installed = InstalledNodule::new(
         cartridge_id.clone(),
+        install.config_doc.clone(),
         version.clone(),
         revision,
         nodule,

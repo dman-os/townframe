@@ -159,6 +159,8 @@ struct NativeProvider {
     jobs: mpsc::UnboundedSender<Job>,
     /// The nodule's own dispatch capability, replaced in place when its grants change.
     capability: Mutex<Option<CapId>>,
+    config_doc: Mutex<big_cabinet_core::dmeta::DocId>,
+    config_capability: Mutex<Option<CapId>>,
 }
 
 #[async_trait]
@@ -182,6 +184,11 @@ impl Provider for NativeProvider {
                 caller,
                 request,
                 context,
+                &self.config_doc.lock().expect("config doc lock").clone(),
+                *self
+                    .config_capability
+                    .lock()
+                    .expect("config capability lock"),
                 *self.capability.lock().expect("capability lock"),
             ),
             body: serde_json::to_vec(&input).expect("a JSON value serializes"),
@@ -266,6 +273,13 @@ impl NoduleExecutor for NativeExecutor {
                     // The grants may have changed since the last ensure: the nodule is told
                     // the capability that is live now, on its next request.
                     *running.provider.capability.lock().expect("capability lock") = spec.capability;
+                    *running
+                        .provider
+                        .config_capability
+                        .lock()
+                        .expect("config capability lock") = spec.config_capability;
+                    *running.provider.config_doc.lock().expect("config doc lock") =
+                        spec.config_doc.clone();
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
                 Some(_) => hosted.remove(&spec.cartridge_id),
@@ -293,6 +307,8 @@ impl NoduleExecutor for NativeExecutor {
         let provider = Arc::new(NativeProvider {
             jobs: started.jobs,
             capability: Mutex::new(spec.capability),
+            config_doc: Mutex::new(spec.config_doc.clone()),
+            config_capability: Mutex::new(spec.config_capability),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),

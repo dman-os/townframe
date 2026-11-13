@@ -1,5 +1,6 @@
 use method_core::ContextError;
 use method_core::Unary;
+use serde_json::Value;
 use service_client_core_rs::Client;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
@@ -10,9 +11,13 @@ use service_core_rs::ClientError;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
+use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
+use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_core_rs::xrpc::bearer_token;
 use service_core_rs::xrpc::request_context;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -64,6 +69,8 @@ pub struct Cx {
     pub(crate) caller: Option<String>,
     pub(crate) nodule: Option<String>,
     pub(crate) idempotency_key: Option<String>,
+    pub(crate) config_doc: Option<String>,
+    pub(crate) config_capability: Option<String>,
     pub(crate) transport: HttpHandle,
 }
 
@@ -92,6 +99,24 @@ impl Cx {
                 })
             })
             .transpose()?;
+        let config_doc = headers
+            .get(NODULE_CONFIG_DOC_HEADER)
+            .map(|value| {
+                let value = value.to_str().map_err(|_| {
+                    format!("{NODULE_CONFIG_DOC_HEADER} must be valid UTF-8 HTTP text")
+                })?;
+                Ok::<_, String>(value.to_owned())
+            })
+            .transpose()?;
+        let config_capability = headers
+            .get(NODULE_CONFIG_CAPABILITY_HEADER)
+            .map(|value| {
+                let value = value.to_str().map_err(|_| {
+                    format!("{NODULE_CONFIG_CAPABILITY_HEADER} must be valid UTF-8 HTTP text")
+                })?;
+                Ok::<_, String>(value.to_owned())
+            })
+            .transpose()?;
         Ok(Self {
             request,
             caller: metadata
@@ -101,6 +126,8 @@ impl Cx {
                 .map(str::to_owned),
             nodule,
             idempotency_key: metadata.idempotency_key,
+            config_doc,
+            config_capability,
             transport,
         })
     }
@@ -122,6 +149,117 @@ impl Cx {
     /// Absent when the nodule was granted nothing.
     pub fn nodule_capability(&self) -> Option<&str> {
         self.nodule.as_deref()
+    }
+
+    /// The cartridge config document delivered for this nodule.
+    pub fn config_doc_id(&self) -> Option<&str> {
+        self.config_doc.as_deref()
+    }
+
+    /// The capability scoped to this nodule's config document and declared settings.
+    pub fn config_capability(&self) -> Option<&str> {
+        self.config_capability.as_deref()
+    }
+
+    /// Reads the cartridge config document through the capability delivered with this request.
+    pub async fn read_config(
+        &self,
+        datums: Option<BTreeSet<String>>,
+    ) -> Result<Value, ClientError<Value>> {
+        let (Some(doc_id), Some(capability), Some(_nodule)) = (
+            &self.config_doc,
+            &self.config_capability,
+            self.nodule_capability(),
+        ) else {
+            return Err(ClientError::Method(
+                serde_json::json!({ "error": "Denied" }),
+            ));
+        };
+        let mut body = serde_json::json!({
+            "capability": capability,
+            "docId": doc_id,
+            "at": { "at": "current" },
+            "optimistic": false,
+        });
+        if let Some(datums) = datums {
+            body["datums"] = serde_json::to_value(datums).expect("a set of strings serializes");
+        }
+        self.config_call("org.example.daybook.docs.readDatums", body)
+            .await
+    }
+
+    /// Writes settings datums in the cartridge config document at its current heads.
+    pub async fn write_config(
+        &self,
+        set: BTreeMap<String, Value>,
+        remove: BTreeSet<String>,
+    ) -> Result<Value, ClientError<Value>> {
+        let (Some(doc_id), Some(capability), Some(_nodule)) = (
+            &self.config_doc,
+            &self.config_capability,
+            self.nodule_capability(),
+        ) else {
+            return Err(ClientError::Method(
+                serde_json::json!({ "error": "Denied" }),
+            ));
+        };
+        self.config_call(
+            "org.example.daybook.docs.writeDatums",
+            serde_json::json!({
+                "capability": capability,
+                "docId": doc_id,
+                "mode": { "mode": "atCurrent" },
+                "set": set,
+                "remove": remove,
+            }),
+        )
+        .await
+    }
+
+    async fn config_call(&self, operation: &str, body: Value) -> Result<Value, ClientError<Value>> {
+        let nodule = self
+            .nodule_capability()
+            .ok_or_else(|| ClientError::Method(serde_json::json!({ "error": "Denied" })))?;
+        let context = self.next_hop();
+        let mut headers = http::HeaderMap::new();
+        service_client_core_rs::xrpc::write_context_headers(
+            &mut headers,
+            &context,
+            &HttpMetadata {
+                authorization: Some(bearer_header_value(nodule)),
+                idempotency_key: None,
+                range: None,
+            },
+        )
+        .expect("context headers are valid HTTP");
+        headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        let response = service_client_core_rs::xrpc::HttpTransport::send(
+            &self.transport,
+            XrpcRequest {
+                method: http::Method::POST,
+                path: format!("xrpc/{operation}"),
+                headers,
+                body: serde_json::to_vec(&body).expect("a JSON value serializes"),
+            },
+        )
+        .await
+        .map_err(|error| ClientError::Transport {
+            message: error.message,
+            outcome_unknown: true,
+        })?;
+        let value =
+            serde_json::from_slice(&response.body).map_err(|error| ClientError::Transport {
+                message: format!("invalid JSON response: {error}"),
+                outcome_unknown: true,
+            })?;
+        if response.status.is_success() {
+            Ok(value)
+        } else {
+            Err(ClientError::Method(value))
+        }
     }
 
     pub fn idempotency_key(&self) -> Option<&str> {

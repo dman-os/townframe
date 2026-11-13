@@ -23,12 +23,15 @@
 //! prefix: a Lexicon file under it is the nodule's own, and one outside it is a vendored copy that
 //! must be the contract of a request or an operation the nodule implements.
 
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::datum::Extra;
+
 use big_cabinet_core::datum::GrammarError;
 use big_cabinet_core::datum::is_nsid;
 use big_cabinet_core::datum::operation;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::parse_ref;
+use big_cabinet_core::doc::DatumKinds;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::request::Request;
 use big_dispatch_core::DispatchScope;
@@ -259,6 +262,18 @@ type Implemented = BTreeMap<String, Option<OperationKind>>;
 
 impl Nodule {
     /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
+    /// The datum tags this nodule declares as settings. Admission validates each NSID before a nodule is hosted.
+    pub fn settings_kinds(&self) -> DatumKinds {
+        DatumKinds::Only(
+            self.settings
+                .iter()
+                .map(|nsid| {
+                    DatumTag::new(nsid.clone()).expect("admission validated settings NSIDs")
+                })
+                .collect(),
+        )
+    }
+
     pub fn operation_requests(&self) -> impl Iterator<Item = &Request> {
         self.requires
             .iter()
