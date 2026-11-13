@@ -44,6 +44,71 @@ impl<T> From<T> for ResponseEnvelope<T> {
     }
 }
 
+/// The body carried by an in-process invocation. Descriptor bodies have no serialized form and
+/// can only be supplied by the native descriptor transport.
+#[derive(Debug)]
+pub enum Body {
+    Json(serde_json::Value),
+    Bytes(ByteBody),
+    #[cfg(unix)]
+    Descriptors(crate::descriptor::DescriptorBody),
+}
+
+impl Body {
+    pub fn case(&self) -> &'static str {
+        match self {
+            Self::Json(_) => "JSON",
+            Self::Bytes(_) => "bytes",
+            #[cfg(unix)]
+            Self::Descriptors(_) => "descriptors",
+        }
+    }
+
+    /// The JSON value, for a caller whose method declares a JSON body.
+    pub fn into_json(self) -> serde_json::Value {
+        match self {
+            Self::Json(value) => value,
+            Self::Bytes(_) => panic!("expected a JSON body, found bytes"),
+            #[cfg(unix)]
+            Self::Descriptors(_) => panic!("expected a JSON body, found descriptors"),
+        }
+    }
+}
+
+impl Serialize for Body {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Json(value) => value.serialize(serializer),
+            Self::Bytes(body) => body.serialize(serializer),
+            #[cfg(unix)]
+            Self::Descriptors(_) => Err(serde::ser::Error::custom(
+                "a descriptor body has no serialized form",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Body {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde_json::Value::deserialize(deserializer).map(Self::Json)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Body {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Body".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!(true)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Envelope<P> {
     pub context: RequestContext,
@@ -55,18 +120,18 @@ pub struct Envelope<P> {
     /// with the envelope, so it exists only in process. The wire forms carry it as the raw HTTP
     /// request body instead, which is why a transport that cannot stream refuses such a method.
     #[serde(skip)]
-    body: Option<ByteBody>,
+    body: Option<Body>,
 }
 
 impl<P> Envelope<P> {
     /// Attaches the byte request body of a method that takes one.
-    pub fn with_body(mut self, body: ByteBody) -> Self {
+    pub fn with_body(mut self, body: Body) -> Self {
         self.body = Some(body);
         self
     }
 
     /// Takes the byte request body: a handler of a bytes-input method calls this once.
-    pub fn take_body(&mut self) -> Option<ByteBody> {
+    pub fn take_body(&mut self) -> Option<Body> {
         self.body.take()
     }
 

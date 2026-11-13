@@ -58,4 +58,5 @@ big_cartridges_core = { workspace = true, features = ["test-support"] }
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 rand.workspace = true
+rustix = { workspace = true, features = ["pipe"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
