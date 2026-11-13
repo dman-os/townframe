@@ -12,12 +12,12 @@
 
 use super::blob_discovery::collection;
 use super::blob_discovery::invite;
-use super::blobs::blob_cap;
 use super::blobs::inventory;
+use super::blobs::put_cap;
+use super::blobs::read_cap;
 use super::*;
 use crate::peers::PeersConfig;
 use crate::peers::PolicyChoice;
-use big_blobs::BlobService;
 use big_blobs::InventorySelection;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
@@ -634,7 +634,7 @@ impl Cluster {
         bytes: &[u8],
     ) -> BlobId {
         let node = self.node(index);
-        let put = blob_cap(node, BlobService::put_object().into(), Vec::new()).await;
+        let put = put_cap(node).await;
         let info = node
             .blobs
             .client
@@ -642,7 +642,7 @@ impl Cluster {
                 RequestContext::root(),
                 PutBlob {
                     capability: put,
-                    bytes: bytes.to_vec(),
+                    bytes: bytes.to_vec().into(),
                 },
             )
             .await
@@ -740,8 +740,7 @@ impl Cluster {
     /// stored there.
     pub(super) async fn read_blob(&self, index: usize, blob: BlobId) -> Option<Vec<u8>> {
         let node = self.node(index);
-        let put = blob_cap(node, BlobService::put_object().into(), Vec::new()).await;
-        let read = blob_cap(node, BlobService::read_object(&blob), vec![put]).await;
+        let read = read_cap(node, &blob).await;
         let stat = node
             .blobs
             .client
@@ -772,7 +771,7 @@ impl Cluster {
             )
             .await
             .unwrap();
-        Some(range.bytes)
+        Some(range.bytes.as_slice().to_vec())
     }
 
     /// Waits until `condition` holds, re-checking it whenever a node reports a peers event or

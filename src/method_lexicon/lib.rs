@@ -270,6 +270,7 @@ pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
                 nodules::UninstallNodule,
                 nodules::GetNodule,
                 nodules::ListNodules,
+                blobs::MintBlobsCapability,
                 blobs::PutBlob,
                 blobs::ReadBlob,
                 blobs::StatBlob,

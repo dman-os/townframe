@@ -502,6 +502,18 @@ impl OwnershipTransaction {
             if owner.starts_with("document:retention:") || owner.starts_with("writer:retention:") {
                 sqlite::queries::insert_pin_root(&self.tx, id.to_string()).await?;
             }
+            // A standalone upload hold exists only to keep the bytes until something references
+            // them. Once a document retains the digest, the document claim carries the bytes, so
+            // every upload hold for that digest is released in this same transaction (the bytes
+            // are never unowned). An upload nothing ever references keeps its hold.
+            if owner.starts_with("document:retention:") {
+                let released =
+                    sqlite::queries::release_uploads_by_digest(&self.tx, id.to_string()).await?;
+                if released.rows_affected != 0 {
+                    sqlite::queries::delete_upload_owners_by_digest(&self.tx, id.to_string())
+                        .await?;
+                }
+            }
             self.dirty(id).await?;
         }
         Ok(())
