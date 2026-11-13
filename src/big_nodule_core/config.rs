@@ -27,7 +27,7 @@ use crate::NoduleAdmission;
 use crate::inventory::FilledBy;
 use crate::inventory::InstalledNodule;
 use crate::inventory::InventoryError;
-use crate::inventory::admit_cartridge_nodule;
+use crate::inventory::admit_resolved_cartridge;
 use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumPin;
@@ -41,7 +41,6 @@ use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::ResolvedCartridge;
@@ -301,10 +300,12 @@ pub enum Admission {
 }
 
 impl Admission {
-    /// What admitting `cartridge`'s nodule contribution establishes.
-    pub fn of(cartridge: &Cartridge) -> Self {
+    /// What admitting the nodule contribution of `resolved` (the registry's resolution of the
+    /// version, which does not run nodule admission itself) establishes.
+    pub fn of(resolved: &ResolvedCartridge) -> Self {
+        let cartridge = &resolved.cartridge;
         let revision = cartridge.revision();
-        match admit_cartridge_nodule(cartridge) {
+        match admit_resolved_cartridge(resolved) {
             Ok((resolved, nodule, admitted, artifacts)) => Self::Admitted {
                 version: cartridge.version.clone(),
                 revision,
@@ -823,17 +824,18 @@ impl NoduleConfig {
     pub fn install(
         &mut self,
         cache: &AdmissionCache,
-        cartridge: &Cartridge,
+        resolved: &ResolvedCartridge,
         pin: DatumPin,
         config_doc: DocId,
     ) -> Result<(), InventoryError> {
+        let cartridge = &resolved.cartridge;
         let has_nodule = cartridge.nodule().is_some();
         let has_micro = cartridge.micro().is_some();
         if !has_nodule && !has_micro {
             return Err(InventoryError::NothingToInstall(cartridge.id.clone()));
         }
         let nodule = has_nodule
-            .then(|| admit_cartridge_nodule(cartridge))
+            .then(|| admit_resolved_cartridge(resolved))
             .transpose()?;
         let existing = self
             .entries
@@ -880,7 +882,7 @@ impl NoduleConfig {
         let displaced = cache.insert(
             &cartridge.id,
             install.cartridge.clone(),
-            Admission::of(cartridge),
+            Admission::of(resolved),
             true,
         );
         let entry = self.entries.entry(cartridge.id.clone()).or_default();

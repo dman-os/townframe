@@ -9,7 +9,7 @@
 //! principle 6): no node outside a test is built with it.
 //!
 //! ```ignore
-//! let cartridge = my_cartridge_manifest(); // declares a nodule with a `handler` artifact
+//! let cartridge = my_cartridge_fixture(); // routines served by a `handler` component
 //! let node = big_ndk_testing::node()
 //!     .with_nodule(cartridge.clone(), MyNodule::default())
 //!     .boot()
@@ -19,11 +19,12 @@
 //! node.stop().await;
 //! ```
 //!
-//! The cartridge needs a `handler` artifact entry for the node to host the nodule, but the harness
-//! never reads its bytes, so a placeholder digest is fine. For the same reason the cartridge does not
-//! go through the registry service, which would insist on the bytes: the harness writes it as the
-//! version datum of a registry document itself, signing it as the example namespace when it is
-//! unsigned (`example_cartridge!` ids), and installs the pin of that datum.
+//! The cartridge is a [`FixtureCartridge`]: its routines name a component the node must be able to
+//! host, but the harness never reads the component's bytes, so placeholder bytes are fine. They are
+//! put in the node's blob store because the registry service stages a version's components from
+//! there; the harness then publishes the fixture through the registry (signing it as the example
+//! namespace when it is unsigned, `example_cartridge!` ids) and installs the pin of that version,
+//! which the nodule service resolves through the registry as in production.
 
 #![recursion_limit = "256"]
 
@@ -33,14 +34,7 @@ mod executor;
 mod smoke;
 
 use big_cabinet::SchemaRepo;
-use big_cabinet_core::DatumPin;
 use big_cabinet_core::authority::Authorization;
-use big_cabinet_core::authority::Rights;
-use big_cabinet_core::doc::CommandId;
-use big_cabinet_core::doc::CreateDoc;
-use big_cabinet_core::doc::DocScope;
-use big_cabinet_core::doc::MintDocCapability;
-use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
@@ -48,9 +42,7 @@ use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::protocol::InstallCartridge;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
-use big_cartridges_core::registry::version_key;
-use big_cartridges_core::registry::version_pin;
-use big_cartridges_core::test_support::sign_as_example;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
@@ -86,7 +78,7 @@ pub fn node() -> TestNodeBuilder {
 }
 
 pub struct TestNodeBuilder {
-    nodules: Vec<(Cartridge, Box<dyn Registered>)>,
+    nodules: Vec<(FixtureCartridge, Box<dyn Registered>)>,
 }
 
 impl TestNodeBuilder {
@@ -94,7 +86,7 @@ impl TestNodeBuilder {
     /// a handler, and `nodule` is what serves it. Every request is served by a clone of
     /// `nodule`, as the wasm component serves each from a fresh value, so state does not
     /// carry from one call to the next.
-    pub fn with_nodule<N>(mut self, cartridge: Cartridge, nodule: N) -> Self
+    pub fn with_nodule<N>(mut self, cartridge: FixtureCartridge, nodule: N) -> Self
     where
         N: big_ndk::Nodule + Clone + Send + 'static,
     {
@@ -146,12 +138,7 @@ impl TestNodeBuilder {
             _runtime: runtime,
         };
         for cartridge in cartridges {
-            let cartridge = if cartridge.signature.is_some() {
-                cartridge
-            } else {
-                sign_as_example(cartridge)
-            };
-            let pin = node.register_version(&cartridge).await;
+            let pin = node.node.publish_fixture(&cartridge).await;
             node.nodules(InstallCartridge { cartridge: pin }).await;
         }
         node
@@ -298,47 +285,6 @@ impl TestNode {
             cartridge_id: cartridge_id.clone(),
         })
         .await
-    }
-
-    /// Writes `cartridge` as the version datum of a new document in the node's registry drawer
-    /// and returns the pin of it at the heads it was written at.
-    async fn register_version(&self, cartridge: &Cartridge) -> DatumPin {
-        let docs = &self.node.docs.client;
-        let operator = Authorization::identity(self.node.authority.root);
-        let placement = format!("drawer {}", self.node.registry_drawer);
-        let capability = docs
-            .call_with(
-                RequestContext::root(),
-                operator.metadata(),
-                MintDocCapability {
-                    scope: DocScope {
-                        create: [placement.clone()].into(),
-                        ..DocScope::default()
-                    },
-                    rights: Rights::USE,
-                    subject: None,
-                },
-            )
-            .await
-            .expect("a capability to create registry documents")
-            .capability_id;
-        let receipt = docs
-            .call(
-                RequestContext::root(),
-                CreateDoc {
-                    capability,
-                    command: CommandId::try_from(format!("test version {}", cartridge.id))
-                        .expect("a command id within bounds"),
-                    placement,
-                    datums: BTreeMap::from([(
-                        version_key(&cartridge.version),
-                        serde_json::to_value(cartridge).expect("an envelope serializes"),
-                    )]),
-                },
-            )
-            .await
-            .expect("a registry document for the version");
-        version_pin(receipt.doc_id, &cartridge.version, receipt.heads)
     }
 
     /// Stops the node: the nodules, then the services behind them.
