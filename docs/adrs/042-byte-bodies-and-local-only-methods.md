@@ -1,6 +1,6 @@
 # ADR 042: Byte bodies and local-only methods
 
-**Status:** Proposed (manager, 2026-11-11), from the operator's review of `org.example.daybook.blobs.*` relayed by intxt. To be reviewed with the operator and intxt.
+**Status:** Accepted (operator, 2026-11-12); the grace period was delegated to the manager (24 hours, §6). Proposed by the manager 2026-11-11 from the operator's review of `org.example.daybook.blobs.*`.
 
 **Related:**
 - [ADR 026: drawer-native blobs](026-drawer-native-blobs.md)
@@ -110,5 +110,5 @@ Settled in review with intxt (2026-11-11):
 - No path import.
 
 Open for the operator:
-1. The upload hold's grace period. Capture is satisfied with hours, because it puts right before it records.
+1. Settled (manager, delegated by the operator 2026-11-12): **24 hours**. Capture claims its uploads within seconds, but a client that goes offline between put and record (a laptop closed mid-capture) should still find its uploads the next working day. Storage held for a day is cheap next to re-uploading. atproto likewise keeps unreferenced uploads temporarily and garbage-collects them later. Expiry runs in big_blobs' existing retention pass, not a new timer task; a re-put renews the hold.
 2. Order of work: the dispatch `Body` change first (it has no users besides blobs at first), then the blob methods, then the guest streams.

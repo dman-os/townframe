@@ -6,6 +6,13 @@ use super::commands::Row;
 use super::commands::State;
 use super::*;
 
+/// What the real pass of a write stages from the dry pass: the claims it derived and the
+/// signatures over them.
+pub(super) type Signed<'a> = (
+    &'a BTreeMap<DatumKey, DatumClaim>,
+    &'a BTreeMap<DatumKey, SignatureBytes>,
+);
+
 /// What a write intends, fixed before its first transaction so that the transaction it signs and
 /// the transaction it commits are built from identical inputs.
 pub(super) struct Plan<'a> {
@@ -45,6 +52,32 @@ impl Failure {
         match self {
             Self::Refused(error) | Self::Ambiguous(error) => error,
         }
+    }
+}
+
+/// The refusal for a value the write could not read back: one over the read budget says which
+/// limit and how far over, so a client can act on it. The write reads under the default budget,
+/// so the maximum is the default's, and the read stopped at the first step that did not fit, so
+/// the observed amount is what the limit had already spent plus that step's need.
+fn native_read_refusal(key: &DatumKey, error: NativeReadError) -> DocsError {
+    match error {
+        NativeReadError::ResourceLimit {
+            limit,
+            needed,
+            available,
+        } => {
+            let maximum = limit.default_maximum();
+            DocsError::ValueTooLarge {
+                datum_key: key.clone(),
+                limit,
+                observed: (maximum - available + needed) as u64,
+                maximum: maximum as u64,
+            }
+        }
+        error => DocsError::InvalidValue {
+            datum_key: key.clone(),
+            reason: format!("{error:?}"),
+        },
     }
 }
 
@@ -105,6 +138,13 @@ impl DocsService {
                     .map_err(|_| DocsError::UnknownSchema {
                         datum_tag: key.tag().to_string(),
                     })?;
+                // The write reads each value back under the default budget after reconciling it,
+                // and reconciling a text costs per character. Refusing here, before the command
+                // row is begun or any transaction opened, charges the incoming JSON the same
+                // budget so an oversized value is refused with the same error in microseconds.
+                NativeReadBudget::default()
+                    .charge_json(&value)
+                    .map_err(|error| native_read_refusal(&key, error))?;
                 Ok((key, (schema, value)))
             })
             .collect()
@@ -114,13 +154,15 @@ impl DocsService {
     ///
     /// The value a claim covers is read back from the transaction after the content mutation, not
     /// taken from the caller's JSON, and the alias it names is the smallest one visible in the
-    /// transaction. `signatures: None` stages with placeholder signatures so that every refusal —
-    /// including dmeta's — surfaces before anything is signed; the caller then rolls back.
+    /// transaction. `signed: None` is the dry pass: it stages with placeholder signatures so that
+    /// every refusal — including dmeta's — surfaces before anything is signed, and the caller then
+    /// discards the transaction. `signed: Some((claims, signatures))` is the real pass: the claims
+    /// are the dry pass's, whose value is not read and hashed again, and the signatures cover them.
     pub(super) fn stage<'t>(
         &self,
         mut tx: Transaction<'t>,
         plan: &mut Plan<'_>,
-        signatures: Option<&BTreeMap<DatumKey, SignatureBytes>>,
+        signed: Option<Signed<'_>>,
     ) -> Result<(Transaction<'t>, BTreeMap<DatumKey, DatumClaim>), DocsError> {
         let datums = match tx.get(automerge::ROOT, "datums").map_err(repository)? {
             Some((Value::Object(ObjType::Map), datums)) => datums,
@@ -177,47 +219,44 @@ impl DocsService {
             .expect("a freshly minted document UUID is unbound");
         let mut claims = BTreeMap::new();
         for key in touched.iter().cloned() {
-            let visible = dmeta
-                .datum_uuids
-                .iter()
-                .filter(|(_, alias)| **alias == key)
-                .map(|(uuid, _)| *uuid)
-                .min();
-            let chosen = match visible {
-                Some(chosen) => chosen,
+            // `hydrate_for` already unioned `uuids` across every concurrent copy of the entry, so
+            // this is the smallest alias any creator visible to this transaction gave the datum.
+            let mut uuids = dmeta
+                .datums
+                .get(&key)
+                .map(|metadata| metadata.uuids.clone())
+                .unwrap_or_default();
+            let chosen = match uuids.keys().next() {
+                Some(chosen) => *chosen,
                 None => {
                     let alias = *plan.aliases.entry(key.clone()).or_default();
-                    dmeta
-                        .record_datum_alias(alias, key.clone())
-                        .expect("a freshly minted alias is unbound");
+                    uuids.insert(alias, true);
                     alias
                 }
             };
-            let native = NativeValue::read_at(&tx, &datums, key.to_string()).map_err(|error| {
-                DocsError::InvalidValue {
-                    datum_key: key.clone(),
-                    reason: format!("{error:?}"),
+            let claim = match signed {
+                // The real pass stages the same plan at the same base as the dry pass, so the value
+                // it writes is the one the dry pass read back and hashed: reading and hashing the
+                // whole value again would only repeat that cost. What can differ is cheap to
+                // re-check: the claim is derived again only in debug builds, where every test
+                // thereby asserts that what is signed is what is stored.
+                Some((claimed, _)) => {
+                    let claim = claimed[&key].clone();
+                    if cfg!(debug_assertions) {
+                        assert_eq!(
+                            Self::derive_claim(&tx, &datums, plan, &key, chosen)?,
+                            claim,
+                            "a plan stages the same claims twice"
+                        );
+                    }
+                    claim
                 }
-            })?;
-            let removed = native.is_none();
-            claims.insert(
-                key.clone(),
-                DatumClaim {
-                    origin_document: plan.document.clone(),
-                    datum_key: key.clone(),
-                    chosen_uuid: chosen,
-                    actor_uuid: plan.actor.actor_id,
-                    operation: if removed {
-                        ClaimOperation::Remove
-                    } else {
-                        ClaimOperation::Set
-                    },
-                    value_cid: native.map(|native| cid_of(&encode_native(&native))),
-                    predecessors: plan.predecessors.get(&key).cloned().unwrap_or_default(),
-                },
-            );
-            let signature = match signatures {
-                Some(signatures) => signatures[&key].clone(),
+                None => Self::derive_claim(&tx, &datums, plan, &key, chosen)?,
+            };
+            let removed = claim.operation == ClaimOperation::Remove;
+            claims.insert(key.clone(), claim);
+            let signature = match signed {
+                Some((_, signatures)) => signatures[&key].clone(),
                 None => SignatureBytes::try_from([0_u8; 64].as_slice())
                     .expect("64 bytes are a signature"),
             };
@@ -229,6 +268,7 @@ impl DocsService {
             dmeta.datums.insert(
                 key,
                 DatumMetadata {
+                    uuids,
                     extra,
                     updated_at: vec![plan.now],
                     deleted_at: if removed { vec![plan.now] } else { Vec::new() },
@@ -253,9 +293,8 @@ impl DocsService {
                 actor_url: plan.actor.url.clone(),
                 delegation: Some(plan.actor.certificate.clone()),
             });
-        dmeta.updated_at = vec![plan.now];
         // Only what this write changed is validated and written back: its datums' metadata, the
-        // bindings it relies on and `updatedAt`. The rest of the hydrated dmeta only informed the
+        // bindings it relies on. The rest of the hydrated dmeta only informed the
         // alias and `docUuid` choices above.
         let tx = dmeta
             .write_atomic(
@@ -319,6 +358,52 @@ impl DocsService {
             (key, heads)
         })
         .collect()
+    }
+
+    /// The claim a datum's signature covers: its value read back from the transaction after the
+    /// content mutation, hashed.
+    fn derive_claim(
+        tx: &Transaction<'_>,
+        datums: &automerge::ObjId,
+        plan: &Plan<'_>,
+        key: &DatumKey,
+        chosen: Uuid7,
+    ) -> Result<DatumClaim, DocsError> {
+        let native = NativeValue::read_at(tx, datums, key.to_string())
+            .map_err(|error| native_read_refusal(key, error))?;
+        Ok(DatumClaim {
+            origin_document: plan.document.clone(),
+            datum_key: key.clone(),
+            chosen_uuid: chosen,
+            actor_uuid: plan.actor.actor_id,
+            operation: if native.is_none() {
+                ClaimOperation::Remove
+            } else {
+                ClaimOperation::Set
+            },
+            value_cid: native.map(|native| cid_of(&encode_native(&native))),
+            predecessors: plan.predecessors.get(key).cloned().unwrap_or_default(),
+        })
+    }
+
+    /// Begin the transaction a write stages in, isolated at `base`.
+    ///
+    /// When `base` is the document's current heads the transaction is a plain one, which is
+    /// observably the same: it reads and writes the same state and its change depends on the same
+    /// heads. The difference is cost. `transaction_at` scopes every read and every index seek to
+    /// a clock, and Automerge answers a clock-scoped seek with a linear walk over the object's
+    /// ops where an unscoped one uses its index. For a Text that makes each deleted character
+    /// cost O(text) (a 36-character cut in a 216 KB text took ~2.7 s per staging pass) and a
+    /// whole-value read ~20x slower; a plain transaction takes the indexed path. A write at a
+    /// historical base (an `AtHeads` behind the current heads) still takes the scoped slow path:
+    /// each character it deletes from a Text is O(text).
+    pub(super) fn begin<'d>(doc: &'d mut Automerge, base: &[ChangeHash]) -> Transaction<'d> {
+        if sorted(doc.get_heads()) == base {
+            doc.transaction()
+        } else {
+            doc.transaction_at(PatchLog::null(), base)
+                .expect("a null patch log matches any document")
+        }
     }
 
     /// Check a write's condition against the document as it is now and return the base to write
@@ -470,11 +555,13 @@ impl DocsService {
                     let Some(handle) = self.target_handle(&row.command, &target).await? else {
                         continue;
                     };
+                    // Metadata, not `get_change_by_hash`, which re-encodes the change by scanning
+                    // every operation in the document just to say it exists.
                     let merged = handle
                         .with_document_read(|doc| {
                             heads
                                 .iter()
-                                .all(|head| doc.get_change_by_hash(head).is_some())
+                                .all(|head| doc.get_change_meta_by_hash(head).is_some())
                                 .then(|| sorted(doc.get_heads()))
                         })
                         .await;

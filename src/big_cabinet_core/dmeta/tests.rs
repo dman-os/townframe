@@ -16,7 +16,6 @@ fn datum_key(value: &str) -> DatumKey {
 
 const PORTABLE_PROOF: &str = r#"{
         "createdAt": "1970-01-01T00:00:00Z",
-        "updatedAt": [],
         "actors": {
             "01890f3e-1234-7000-8000-000000000002": {
                 "createdAt": [],
@@ -28,17 +27,13 @@ const PORTABLE_PROOF: &str = r#"{
         "docUuids": {
             "01890f3e-1234-7000-8000-000000000009": "zajdk"
         },
-        "datumUuids": {
-            "01890f3e-1234-7000-8000-000000000001": "org.example.note/main"
-        },
         "datums": {
             "org.example.note/main": {
+                "uuids": {"01890f3e-1234-7000-8000-000000000001": true},
                 "updatedAt": [],
                 "deletedAt": [],
                 "signatures": [{
-                    "actorUuid": "01890f3e-1234-7000-8000-000000000002",
-                    "docUuid": "01890f3e-1234-7000-8000-000000000009",
-                    "signature": {"$bytes": "WcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="},
+                    "signature": {"$bytes": "AQGJDz4SNHAAgAAAAAAAAAIBiQ8+EjRwAIAAAAAAAAAJWcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="},
                     "message": {"$bytes": "ZGF5Ym9vay5kYXR1bS1jbGFpbS52MQCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
                 }]
             }
@@ -104,22 +99,24 @@ fn signature_id_with(byte: u8) -> SignatureId {
 }
 
 #[test]
-fn aliases_retain_concurrency_without_a_reverse_index() {
+fn aliases_retain_concurrency_under_their_datum() {
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
     let key = datum_key("org.example.note/main");
-    dmeta.record_datum_alias(uuid7(2), key.clone()).unwrap();
+    let mut metadata = DatumMetadata {
+        uuids: BTreeMap::from([(uuid7(2), true)]),
+        extra: Default::default(),
+        updated_at: Vec::new(),
+        deleted_at: Vec::new(),
+        signatures: Vec::new(),
+    };
+    dmeta.datums.insert(key.clone(), metadata.clone());
     assert!(!dmeta.has_concurrent_creation(&key));
-    dmeta.record_datum_alias(uuid7(1), key.clone()).unwrap();
+    metadata.uuids.insert(uuid7(1), true);
+    dmeta.datums.insert(key.clone(), metadata);
     assert!(dmeta.has_concurrent_creation(&key));
     assert!(!dmeta.has_concurrent_creation(&datum_key("org.example.note/other")));
-    // The chosen alias is the smallest one visible, and it falls out of the index order.
-    let chosen = dmeta
-        .datum_uuids
-        .iter()
-        .filter(|(_, alias)| **alias == key)
-        .map(|(uuid, _)| *uuid)
-        .min()
-        .unwrap();
+    // The chosen alias is the smallest one, and it falls out of the map order.
+    let chosen = *dmeta.datums[&key].uuids.keys().next().unwrap();
     assert_eq!(chosen, uuid7(1));
     assert_eq!(
         serde_json::from_value::<Dmeta>(serde_json::to_value(&dmeta).unwrap()).unwrap(),
@@ -147,8 +144,16 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
     assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
     #[cfg(feature = "schemars")]
     {
+        // The declared position holds the ordinary entry, one bytes value; the carried map form
+        // (message, witness, unknown members) is outside it until compaction defines how the
+        // position widens, since Lexicon has no bytes-or-map type.
         let schema = serde_json::to_value(schemars::schema_for!(Dmeta)).unwrap();
-        assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&wire));
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(!validator.is_valid(&wire));
+        let mut ordinary = wire.clone();
+        ordinary["datums"][key]["signatures"][0] =
+            wire["datums"][key]["signatures"][0]["signature"].clone();
+        assert!(validator.is_valid(&ordinary));
     }
 
     let reference =
@@ -173,21 +178,6 @@ fn nested_metadata_and_branch_origins_preserve_unknown_members() {
                 .is_valid(&branch)
         );
     }
-}
-
-#[test]
-fn a_datum_alias_can_be_repeated_but_never_rebound() {
-    let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
-    let key = datum_key("org.example.note/main");
-    dmeta.record_datum_alias(uuid7(1), key.clone()).unwrap();
-    let original = dmeta.clone();
-    dmeta.record_datum_alias(uuid7(1), key).unwrap();
-    assert_eq!(dmeta, original);
-    assert!(matches!(
-        dmeta.record_datum_alias(uuid7(1), datum_key("org.example.note/other")),
-        Err(DmetaError::ReboundAlias)
-    ));
-    assert_eq!(dmeta, original);
 }
 
 #[test]
@@ -216,29 +206,43 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
             Err(DmetaError::InvalidUuidVersion)
         ));
         assert!(serde_json::from_value::<Uuid7>(serde_json::json!(invalid)).is_err());
-        for member in ["actors", "datumUuids"] {
+        for path in [
+            ["actors"].as_slice(),
+            ["datums", "org.example.note/main", "uuids"].as_slice(),
+        ] {
             let mut malformed = fixture.clone();
-            let map = malformed[member].as_object_mut().unwrap();
+            let map = path
+                .iter()
+                .fold(&mut malformed, |value, member| &mut value[*member])
+                .as_object_mut()
+                .unwrap();
             let valid_key = map.keys().next().unwrap().clone();
             let value = map.remove(&valid_key).unwrap();
             assert!(map.insert(invalid.into(), value).is_none());
             assert!(serde_json::from_value::<Dmeta>(malformed).is_err());
         }
-        let mut malformed = fixture["datums"]["org.example.note/main"]["signatures"][0].clone();
-        malformed["actorUuid"] = serde_json::json!(invalid);
-        assert!(serde_json::from_value::<DatumSignature>(malformed).is_err());
+        // A packed entry names its actor in raw bytes, and a peer's wrong-version UUID there is
+        // refused like any other malformed entry.
+        let (_, entry) = signed_entry(&claim_for(&native_value()));
+        let mut packed = entry.packed();
+        packed[1..17].copy_from_slice(Uuid::parse_str(invalid).unwrap().as_bytes());
+        assert!(matches!(
+            DatumSignature::from_packed(&packed),
+            Err(DmetaError::InvalidUuidVersion)
+        ));
     }
 }
 
 #[test]
 fn deleted_at_is_a_required_list_even_when_empty() {
     let metadata = DatumMetadata {
+        uuids: BTreeMap::new(),
         extra: Default::default(),
         updated_at: Vec::new(),
         deleted_at: Vec::new(),
         signatures: Vec::new(),
     };
-    let json = serde_json::json!({"updatedAt": [], "deletedAt": [], "signatures": []});
+    let json = serde_json::json!({"uuids": {}, "updatedAt": [], "deletedAt": [], "signatures": []});
     assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
     assert_eq!(
         serde_json::from_value::<DatumMetadata>(json).unwrap(),
@@ -293,8 +297,7 @@ fn actor_keys_are_multibase_but_signatures_are_fixed_length_bytes() {
     assert!(text[..text.len() - 1].parse::<MultibaseKey>().is_err());
     assert!(format!("{text}1").parse::<MultibaseKey>().is_err());
 
-    let fixture: serde_json::Value = serde_json::from_str(PORTABLE_PROOF).unwrap();
-    let json = fixture["datums"]["org.example.note/main"]["signatures"][0]["signature"].clone();
+    let json = serde_json::json!({"$bytes": "WcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="});
     let signature: SignatureBytes = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(signature.as_bytes().len(), 64);
     assert_eq!(serde_json::to_value(&signature).unwrap(), json);
@@ -324,6 +327,71 @@ fn actor_keys_are_multibase_but_signatures_are_fixed_length_bytes() {
     ] {
         assert!(serde_json::from_value::<SignatureBytes>(malformed).is_err());
     }
+}
+
+/// ADR 020, the dmeta cut, item 2: an ordinary entry is one bytes value, `0x01`, the actor UUID, the
+/// document UUID and the 64 signature bytes, and a peer's entry that is anything else is refused.
+#[test]
+fn an_ordinary_signature_entry_is_one_packed_bytes_value() {
+    let (_, entry) = signed_entry(&claim_for(&native_value()));
+    let packed = entry.packed();
+    assert_eq!(packed.len(), 97);
+    assert_eq!(packed[0], 0x01);
+    assert_eq!(&packed[1..17], entry.actor_uuid.as_uuid().as_bytes());
+    assert_eq!(&packed[17..33], entry.doc_uuid.as_uuid().as_bytes());
+    assert_eq!(&packed[33..], entry.signature.as_bytes());
+    assert_eq!(DatumSignature::from_packed(&packed).unwrap(), entry);
+    // It is the bare bytes object on the wire, and reads back the same.
+    let wire = serde_json::to_value(&entry).unwrap();
+    assert_eq!(
+        wire,
+        serde_json::json!({"$bytes": data_encoding::BASE64.encode(&packed)})
+    );
+    assert_eq!(
+        serde_json::from_value::<DatumSignature>(wire).unwrap(),
+        entry
+    );
+
+    // A wrong length or an unknown format byte is malformed, never decoded as another entry.
+    for length in [0, 1, 32, 96, 98] {
+        assert!(matches!(
+            DatumSignature::from_packed(&vec![1; length]),
+            Err(DmetaError::MalformedSignatureEntry)
+        ));
+    }
+    for format in [0x00, 0x02, 0xff] {
+        let mut wrong = packed;
+        wrong[0] = format;
+        assert!(matches!(
+            DatumSignature::from_packed(&wrong),
+            Err(DmetaError::MalformedSignatureEntry)
+        ));
+        assert!(
+            serde_json::from_value::<DatumSignature>(
+                serde_json::json!({"$bytes": data_encoding::BASE64.encode(&wrong)})
+            )
+            .is_err()
+        );
+    }
+}
+
+/// An entry that carries a message or an inherited witness stays a map whose `signature` member is
+/// the same packed value; an ordinary entry never is one.
+#[test]
+fn a_carried_signature_entry_is_a_map_around_the_packed_value() {
+    let claim = claim_for(&native_value());
+    let (_, mut entry) = signed_entry(&claim);
+    entry.carry_message(&claim).unwrap();
+    let wire = serde_json::to_value(&entry).unwrap();
+    assert_eq!(
+        wire["signature"],
+        serde_json::json!({"$bytes": data_encoding::BASE64.encode(&entry.packed())})
+    );
+    assert!(wire.get("actorUuid").is_none() && wire.get("docUuid").is_none());
+    assert_eq!(
+        serde_json::from_value::<DatumSignature>(wire).unwrap(),
+        entry
+    );
 }
 
 #[test]
@@ -623,7 +691,7 @@ fn a_static_openssl_proof_round_trips_and_verifies_without_document_history() {
     assert_eq!(restored, fixture);
     let value = native_value();
     let claim = claim_for(&value);
-    assert_eq!(restored.datum_uuids[&claim.chosen_uuid], claim.datum_key);
+    assert!(restored.datums[&claim.datum_key].uuids[&claim.chosen_uuid]);
     let entry = &restored.datums[&claim.datum_key].signatures[0];
     let actor = &restored.actors[&entry.actor_uuid];
     assert_eq!(actor.delegation, Some(Bytes::from(vec![1, 2, 3, 255])));
@@ -718,7 +786,7 @@ utils_rs::table_tests! {
         match missing {
             "none" => {}
             "actor" => { dmeta.actors.remove(&claim.actor_uuid).unwrap(); }
-            "alias" => { dmeta.datum_uuids.remove(&claim.chosen_uuid).unwrap(); }
+            "alias" => { dmeta.datums.get_mut(&claim.datum_key).unwrap().uuids.remove(&claim.chosen_uuid).unwrap(); }
             "document" => { dmeta.doc_uuids.remove(&uuid7(9)).unwrap(); }
             "rebound document" => { dmeta.doc_uuids.insert(uuid7(9), DocId::new(b"other")).unwrap(); }
             "certificate" => dmeta.actors.get_mut(&claim.actor_uuid).unwrap().delegation = None,
@@ -789,15 +857,13 @@ fn a_corrupted_other_datum_does_not_poison_a_valid_datum() {
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
     assert!(dmeta.actors.insert(claim.actor_uuid, actor).is_none());
     for (datum_claim, entry) in [(&claim, valid), (&other_claim, corrupt)] {
-        dmeta
-            .record_datum_alias(datum_claim.chosen_uuid, datum_claim.datum_key.clone())
-            .unwrap();
         assert!(
             dmeta
                 .datums
                 .insert(
                     datum_claim.datum_key.clone(),
                     DatumMetadata {
+                        uuids: BTreeMap::from([(datum_claim.chosen_uuid, true)]),
                         extra: Default::default(),
                         updated_at: Vec::new(),
                         deleted_at: Vec::new(),

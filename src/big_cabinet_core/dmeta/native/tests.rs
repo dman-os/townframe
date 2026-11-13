@@ -44,7 +44,60 @@ fn historical_reads_use_one_shared_budget_and_preserve_native_kinds() {
     );
     assert!(matches!(
         NativeValue::read_at_heads(&doc, &map, "counter", &heads, &mut budget),
-        Err(NativeReadError::ResourceLimit("nodes"))
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Nodes,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn an_incoming_json_value_is_charged_as_its_stored_form_will_be_read() {
+    let budget = |bytes, nodes| NativeReadBudget {
+        bytes,
+        nodes,
+        ..NativeReadBudget::default()
+    };
+    // The envelope charges its keys, the `$type` string and the value: 5 + 3 + 4 + 8 bytes over
+    // three nodes (the map and its two strings).
+    let value = serde_json::json!({"$type": "abc", "text": "12345678"});
+    budget(20, 3).charge_json(&value).unwrap();
+    assert!(matches!(
+        budget(19, 3).charge_json(&value),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Bytes,
+            needed: 8,
+            available: 7,
+        })
+    ));
+    assert!(matches!(
+        budget(20, 2).charge_json(&value),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Nodes,
+            ..
+        })
+    ));
+    // A string is its UTF-8 length, not its character count.
+    assert!(budget(5, 1).charge_json(&serde_json::json!("ééé")).is_err());
+    budget(6, 1).charge_json(&serde_json::json!("ééé")).unwrap();
+    // The bytes object is one node of its decoded length, padded or not, and its key is free.
+    for encoded in ["AQIDBA==", "AQIDBA"] {
+        let value = serde_json::json!({"$bytes": encoded});
+        budget(4, 1).charge_json(&value).unwrap();
+        assert!(budget(3, 1).charge_json(&value).is_err());
+    }
+    // Nesting past the depth limit is refused rather than descended.
+    let mut nested = serde_json::json!(null);
+    for _ in 0..NativeReadBudget::MAX_DEPTH - 1 {
+        nested = serde_json::json!([nested]);
+    }
+    NativeReadBudget::default().charge_json(&nested).unwrap();
+    assert!(matches!(
+        NativeReadBudget::default().charge_json(&serde_json::json!([nested])),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Depth,
+            ..
+        })
     ));
 }
 
@@ -659,7 +712,10 @@ fn read_at_depth_limit_has_an_exact_boundary() {
     doc.put(&nested, "child", ScalarValue::Null).unwrap();
     assert!(matches!(
         NativeValue::read_at(&doc, &automerge::ROOT, "datum"),
-        Err(NativeReadError::ResourceLimit("depth"))
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Depth,
+            ..
+        })
     ));
     assert_eq!(
         NativeValue::read_at(&doc, &nested, "child").unwrap(),
@@ -694,17 +750,73 @@ fn read_at_node_budget_is_shared_across_siblings() {
     doc.insert(&left, 0, ScalarValue::Null).unwrap();
     assert!(matches!(
         NativeValue::read_at(&doc, &automerge::ROOT, "datum"),
-        Err(NativeReadError::ResourceLimit("nodes"))
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Nodes,
+            ..
+        })
     ));
 }
 
 #[test]
-fn read_at_text_elements_share_the_node_budget() {
+fn read_at_plain_text_is_charged_its_bytes_not_a_node_per_character() {
     let mut doc = AutoCommit::new();
     let text = doc
         .put_object(automerge::ROOT, "text", ObjType::Text)
         .unwrap();
-    let content = "x".repeat(NativeReadBudget::MAX_NODES - 1);
+    // Far past the node budget, which a character-per-node charge would refuse.
+    let content = "caf\u{e9}\n".repeat(10_000);
+    assert!(content.chars().count() > NativeReadBudget::MAX_NODES);
+    assert!(content.len() < NativeReadBudget::MAX_BYTES);
+    doc.splice_text(&text, 0, 0, &content).unwrap();
+    let read = NativeValue::read_at(&doc, &automerge::ROOT, "text")
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, NativeValue::Text(content.clone()));
+    assert_eq!(
+        crate::dmeta::cid_of(&encode_native(&read)),
+        crate::dmeta::cid_of(&encode_native(&NativeValue::Text(content)))
+    );
+}
+
+#[test]
+fn read_at_text_larger_than_the_byte_budget_is_refused() {
+    let mut doc = AutoCommit::new();
+    let text = doc
+        .put_object(automerge::ROOT, "text", ObjType::Text)
+        .unwrap();
+    // The default budget is 16 MiB, too many Automerge operations to splice in a test, so the
+    // budget is lowered: the refusal is the same comparison.
+    doc.splice_text(&text, 0, 0, &"x".repeat(1000)).unwrap();
+    let heads = doc.get_heads();
+    let read_under = |bytes| {
+        let mut budget = NativeReadBudget {
+            bytes,
+            ..NativeReadBudget::default()
+        };
+        NativeValue::read_at_heads(&doc, &automerge::ROOT, "text", &heads, &mut budget)
+    };
+    assert_eq!(
+        read_under(1000).unwrap(),
+        Some(NativeValue::Text("x".repeat(1000)))
+    );
+    assert!(matches!(
+        read_under(999),
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Bytes,
+            needed: 1000,
+            available: 999,
+        })
+    ));
+}
+
+#[test]
+fn read_at_text_with_the_placeholder_character_charges_a_node_per_element() {
+    let mut doc = AutoCommit::new();
+    let text = doc
+        .put_object(automerge::ROOT, "text", ObjType::Text)
+        .unwrap();
+    // The text node plus one node per element fill the budget exactly.
+    let content = "x".repeat(NativeReadBudget::MAX_NODES - 2) + "\u{fffc}";
     doc.splice_text(&text, 0, 0, &content).unwrap();
     assert_eq!(
         NativeValue::read_at(&doc, &automerge::ROOT, "text").unwrap(),
@@ -713,7 +825,10 @@ fn read_at_text_elements_share_the_node_budget() {
     doc.splice_text(&text, 0, 0, "x").unwrap();
     assert!(matches!(
         NativeValue::read_at(&doc, &automerge::ROOT, "text"),
-        Err(NativeReadError::ResourceLimit("nodes"))
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Nodes,
+            ..
+        })
     ));
 }
 
@@ -733,7 +848,10 @@ fn read_at_byte_budget_counts_keys_and_payloads_across_siblings() {
         .unwrap();
     assert!(matches!(
         NativeValue::read_at(&doc, &automerge::ROOT, "datum"),
-        Err(NativeReadError::ResourceLimit("bytes"))
+        Err(NativeReadError::ResourceLimit {
+            limit: ResourceLimit::Bytes,
+            ..
+        })
     ));
 }
 
@@ -829,5 +947,53 @@ fn automerge_equal_value_put_does_not_change_a_stored_zero_sign() {
             panic!("stored value must remain a float");
         };
         assert_eq!(value.to_bits(), initial.to_bits());
+    }
+}
+
+#[test]
+fn text_read_is_byte_identical_to_the_element_walk_for_multiline_non_ascii_text() {
+    // The literal U+FFFC also exercises the element-walk path taken for a text that contains
+    // the placeholder character.
+    let content = "first line\nsecond ligne: caf\u{e9} \u{65e5}\u{672c}\u{8a9e}\n\u{1f980} crab\n";
+    for content in [
+        content.to_owned(),
+        format!("{content}\u{fffc} literal placeholder\n"),
+    ] {
+        let mut doc = AutoCommit::new();
+        let text = doc
+            .put_object(automerge::ROOT, "text", ObjType::Text)
+            .unwrap();
+        doc.splice_text(&text, 0, 0, &content).unwrap();
+        // What the reader built before it read the text in one call: every element's string
+        // concatenated.
+        let walked: String = doc
+            .list_range(&text, ..)
+            .map(|item| match item.value {
+                automerge::ValueRef::Scalar(automerge::ScalarValueRef::Str(value)) => {
+                    value.into_owned()
+                }
+                other => panic!("unexpected element {other:?}"),
+            })
+            .collect();
+        assert_eq!(walked, content);
+        let read = NativeValue::read_at(&doc, &automerge::ROOT, "text")
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, NativeValue::Text(walked.clone()));
+        assert_eq!(
+            encode_native(&read),
+            encode_native(&NativeValue::Text(walked))
+        );
+        let heads = doc.get_heads();
+        let at_heads = NativeValue::read_at_heads(
+            &doc,
+            &automerge::ROOT,
+            "text",
+            &heads,
+            &mut NativeReadBudget::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(at_heads, read);
     }
 }

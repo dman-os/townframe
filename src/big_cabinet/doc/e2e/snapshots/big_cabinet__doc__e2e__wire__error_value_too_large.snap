@@ -1,0 +1,12 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: error
+---
+{
+  "ValueTooLarge": {
+    "datum_key": "org.example.note/main",
+    "limit": "bytes",
+    "observed": 16777217,
+    "maximum": 16777216
+  }
+}

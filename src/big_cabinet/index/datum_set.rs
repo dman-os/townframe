@@ -687,8 +687,8 @@ impl<'a> DocView<'a> {
         }
         let clock = heads
             .iter()
-            .filter_map(|head| self.doc.get_change_by_hash(head))
-            .map(|change| change.max_op())
+            .filter_map(|head| self.doc.get_change_meta_by_hash(head))
+            .map(|change| change.max_op)
             .max()
             .unwrap_or(0);
         let datum_heads = heads.into_iter().collect();

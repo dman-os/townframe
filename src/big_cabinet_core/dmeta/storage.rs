@@ -1,4 +1,5 @@
 use super::ActorMetadata;
+use super::DatumMetadata;
 use super::Dmeta;
 use super::DocId;
 use super::Uuid7;
@@ -52,7 +53,6 @@ impl From<CodecError> for StorageError {
 pub struct DmetaSchema {
     root: CompiledSchema,
     created_at: CompiledSchema,
-    updated_at: CompiledSchema,
     datum: CompiledSchema,
     actor: CompiledSchema,
 }
@@ -61,7 +61,6 @@ impl DmetaSchema {
     pub fn new(root: CompiledSchema) -> Result<Self, CodecError> {
         Ok(Self {
             created_at: root.member(&["createdAt"])?,
-            updated_at: root.member(&["updatedAt"])?,
             // `datums` and `actors` are keyed maps: every member shares one declaration.
             datum: root.member(&["datums", ""])?,
             actor: root.member(&["actors", ""])?,
@@ -105,18 +104,15 @@ impl Dmeta {
     /// every other field of the result at its empty value.
     ///
     /// What comes back is: `createdAt`; the `docUuids` bindings that name `read.document`; the
-    /// `datumUuids` bindings that name a touched datum; each touched datum's metadata, each
-    /// hydrated against its own member schema; and the writing actor's binding. That is exactly
+    /// each touched datum's metadata, each hydrated against its own member schema, with `uuids`
+    /// unioned across every concurrent copy of the datum's entry; and the writing actor's binding. That is exactly
     /// what a write needs to pick its aliases and `docUuid`, to carry the touched datums' `extra`
     /// forward and to see whether its actor is already bound, and exactly what
     /// [`Dmeta::write_atomic`] then writes back, so a write's read cost does not depend on how many
     /// datums the document holds in its metadata.
     ///
-    /// `datumUuids` is keyed by alias, with the datum key as the value, so there is no direct
-    /// lookup from a key to its aliases: finding them is one pass over the index that compares
-    /// each stored string with the touched keys and parses nothing else. That pass is still linear
-    /// in the number of aliases the document has ever bound; only a reverse index (key to aliases)
-    /// would make it constant.
+    /// A datum's aliases live under its own entry (`datums[key].uuids`), so finding them is a read
+    /// of that entry, whatever the number of datums the document holds.
     ///
     /// Like [`Dmeta::hydrate`], a conflicted container is read through its winning copy.
     pub fn hydrate_for<D: ReadDoc>(
@@ -153,28 +149,17 @@ impl Dmeta {
                 }
             }
         }
-        if let Some((_, bindings)) = doc.get(&map, "datumUuids")? {
-            let touched: BTreeMap<String, &DatumKey> = read
-                .datums
-                .iter()
-                .map(|key| (key.to_string(), key))
-                .collect();
-            for binding in doc.map_range(&bindings, ..) {
-                if let Some(key) = value_str(&binding.value).and_then(|text| touched.get(text)) {
-                    dmeta
-                        .datum_uuids
-                        .insert(uuid7(&binding.key)?, (*key).clone());
-                }
-            }
-        }
         if let Some((_, datums)) = doc.get(&map, "datums")? {
             for key in read.datums {
                 let name = key.to_string();
                 if doc.get(&datums, name.as_str())?.is_some() {
                     let json = hydrate_value(doc, &datums, name.as_str().into(), &schema.datum)?;
-                    dmeta
-                        .datums
-                        .insert(key.clone(), serde_json::from_value(json)?);
+                    let mut metadata: DatumMetadata = serde_json::from_value(json)?;
+                    metadata.uuids = datum_aliases(doc, object, native.clone(), &name)?
+                        .into_iter()
+                        .map(|uuid| (uuid, true))
+                        .collect();
+                    dmeta.datums.insert(key.clone(), metadata);
                 }
             }
         }
@@ -200,7 +185,7 @@ impl Dmeta {
         schema: &CompiledSchema,
     ) -> Result<Self, StorageError> {
         let mut json = hydrate_value(doc, object, prop.clone(), schema)?;
-        for (uuid, timestamps) in actor_created_at(doc, object, prop)? {
+        for (uuid, timestamps) in actor_created_at(doc, object, prop.clone())? {
             let Some(created_at) = json
                 .get_mut("actors")
                 .and_then(|actors| actors.get_mut(&uuid))
@@ -220,14 +205,22 @@ impl Dmeta {
                 })
                 .collect();
         }
-        Ok(serde_json::from_value(json)?)
+        let mut dmeta: Dmeta = serde_json::from_value(json)?;
+        // The winning copy of a datum's entry shows only its own aliases; the rest are unioned in.
+        for (key, metadata) in &mut dmeta.datums {
+            metadata.uuids = datum_aliases(doc, object, native_prop(&prop), &key.to_string())?
+                .into_iter()
+                .map(|uuid| (uuid, true))
+                .collect();
+        }
+        Ok(dmeta)
     }
 
     /// Write the parts of this dmeta that `write` names over the dmeta stored at `object`/`prop`,
     /// preserving the identity of every signature entry it retains.
     ///
     /// Only the named parts are validated and reconciled, each against its own member schema:
-    /// dmeta's `updatedAt`, each named datum's metadata, and the bindings the write needs (the
+    /// each named datum's metadata, and the bindings the write needs (the
     /// actor, the `docUuid`, and the named datums' aliases). A binding is immutable, so one already
     /// stored is checked against this dmeta's and never rewritten, and one this dmeta adds must not
     /// collide with what any concurrent copy of the index holds. The rest of the stored dmeta is
@@ -274,7 +267,7 @@ impl Dmeta {
         let actor = &self.actors[&write.actor];
         let prepared = (|| -> Result<_, StorageError> {
             let copies = maps(&tx, object, native.clone())?;
-            let map = ensure_object(&mut tx, object, native, ObjType::Map)?;
+            let map = ensure_object(&mut tx, object, native.clone(), ObjType::Map)?;
             let doc_uuid = self.doc_uuids[&write.doc_uuid].to_string();
             bind_string(
                 &mut tx,
@@ -284,29 +277,10 @@ impl Dmeta {
                 write.doc_uuid,
                 &doc_uuid,
             )?;
-            for (uuid, key) in &self.datum_uuids {
-                if write.datums.contains(key) {
-                    bind_string(
-                        &mut tx,
-                        &copies,
-                        &map,
-                        "datumUuids",
-                        *uuid,
-                        &key.to_string(),
-                    )?;
-                }
-            }
             let actors = ensure_object(&mut tx, &map, "actors".into(), ObjType::Map)?;
             let new_actor = !bound(&tx, &copies, &actors, "actors", write.actor, |held, id| {
                 actor_matches(&tx, held, id, actor)
             })?;
-            let mut updated_at =
-                serde_json::to_value(&self.updated_at).expect("timestamps serialize to JSON");
-            let base = tx
-                .get(&map, "updatedAt")?
-                .map(|_| hydrate_value(&tx, &map, "updatedAt".into(), &schema.updated_at))
-                .transpose()?;
-            reconcile_set(&mut tx, &map, "updatedAt", &mut updated_at, base.as_ref())?;
             let datums = ensure_object(&mut tx, &map, "datums".into(), ObjType::Map)?;
             let mut entries = Vec::with_capacity(write.datums.len());
             for datum_key in write.datums {
@@ -319,6 +293,23 @@ impl Dmeta {
                     .transpose()?;
                 let datum = ensure_object(&mut tx, &datums, key.as_str().into(), ObjType::Map)?;
                 retire_losing_signatures(&mut tx, &datums, &key, &datum)?;
+                // Aliases are immutable and a write only adds: one held by any copy of the
+                // entry (under any copy of `datums`) stays where it is, and the rest go into the
+                // winning copy's `uuids`. `submitted` then names exactly what the winning copy
+                // holds, so reconciling the entry below neither removes an alias nor copies a
+                // losing copy's into it.
+                let held = datum_aliases(&tx, object, native.clone(), &key)?;
+                let uuids = ensure_object(&mut tx, &datum, "uuids".into(), ObjType::Map)?;
+                for uuid in self.datums[datum_key].uuids.keys() {
+                    if !held.contains(uuid) {
+                        tx.put(&uuids, uuid.to_string(), true)?;
+                    }
+                }
+                submitted["uuids"] = Value::Object(
+                    tx.map_range(&uuids, ..)
+                        .map(|binding| (binding.key.to_string(), Value::Bool(true)))
+                        .collect(),
+                );
                 for field in ["updatedAt", "deletedAt", "signatures"] {
                     reconcile_set(
                         &mut tx,
@@ -430,6 +421,36 @@ fn actor_created_at<D: ReadDoc>(
     Ok(created_at)
 }
 
+/// The aliases bound to the datum at `key`: the union of `uuids` across every copy of dmeta at
+/// `object`/`prop`, every copy of `datums` in each, and every copy of the datum's entry in each.
+/// Concurrent creators of a datum, or of the containers above it, leave several copies and
+/// Automerge shows one, so a reader must not stop at the visible one.
+///
+/// The writer's choice of alias (here, through `hydrate_for` and `write_atomic`) and the verifier's
+/// reconstruction (`Reconstruction::datum_metas` in big_cabinet's `claim_history`) must read this
+/// same union: if either saw a narrower set, the writer could choose an alias that is not the
+/// smallest the verifier reconstructs and a genuine signature would be rejected.
+fn datum_aliases<D: ReadDoc>(
+    doc: &D,
+    object: &ObjId,
+    prop: automerge::Prop,
+    key: &str,
+) -> Result<BTreeSet<Uuid7>, StorageError> {
+    let mut aliases = BTreeSet::new();
+    for (_, dmeta) in doc.get_all(object, prop)? {
+        for (_, datums) in doc.get_all(&dmeta, "datums")? {
+            for (_, entry) in doc.get_all(&datums, key)? {
+                for (_, index) in doc.get_all(&entry, "uuids")? {
+                    for binding in doc.map_range(&index, ..) {
+                        aliases.insert(uuid7(&binding.key)?);
+                    }
+                }
+            }
+        }
+    }
+    Ok(aliases)
+}
+
 /// Empty every signature list under `key` other than the winning list of the winning metadata map.
 fn retire_losing_signatures(
     tx: &mut Transaction<'_>,
@@ -521,7 +542,7 @@ fn bound(
     Ok(tx.get(winner, uuid.as_str())?.is_some())
 }
 
-/// Bind `uuid` to `wanted` in one of the string indexes (`docUuids`, `datumUuids`).
+/// Bind `uuid` to `wanted` in one of the string indexes (`docUuids`).
 fn bind_string(
     tx: &mut Transaction<'_>,
     copies: &[ObjId],
@@ -652,7 +673,15 @@ fn reconcile_set(
             continue;
         }
         if field == "signatures" {
-            tx.insert_object(&list, retained.len(), ObjType::Map)?;
+            // An ordinary entry is one bytes scalar (ADR 020, the dmeta cut, item 2): its identity
+            // is its own bytes, so inserting it is one operation. A write never produces the
+            // carried map form, and the declared schema holds only the bytes form.
+            let packed = value
+                .get("$bytes")
+                .and_then(Value::as_str)
+                .and_then(|text| data_encoding::BASE64.decode(text.as_bytes()).ok())
+                .expect("an ordinary signature entry is a bytes object");
+            tx.insert(&list, retained.len(), ScalarValue::Bytes(packed))?;
         } else {
             let instant: jiff::Timestamp = value
                 .as_str()

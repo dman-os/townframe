@@ -1,6 +1,6 @@
 # ADR 044: Cartridge configuration documents
 
-**Status:** Proposed (manager, 2026-11-11). It implements the operator's ledger decision D42 ("Config datums"). The shape of the datums and documents is the manager's proposal, to review with the operator.
+**Status:** Accepted (operator, 2026-11-12; questions settled in §7). Proposed by the manager 2026-11-11. It implements the operator's ledger decision D42 ("Config datums"). The shape of the datums and documents is the manager's proposal, to review with the operator.
 
 **Related:**
 - [ADR 027: cartridges, nodules and operation contracts](027-cartridges-nodules-and-operation-contracts.md) §4, §6 (today's config datums)
@@ -69,11 +69,38 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 ### 6. Writes
 
 - Writing `install` and grant datums is privileged (the existing nodule-managing methods: `admitNodule`, `setNoduleEnabled`, and the grant setters, which become per grant).
-- Settings writes are ordinary datum writes. Who may write a cartridge's settings is decided by the capability on its cartridge config document. Whether the nodule itself may write its own settings is open question 1.
+- Settings writes are ordinary datum writes, and the nodule may write its own settings (operator, 2026-11-12): it is the one that knows their shape. So a nodule gets read and write on its own cartridge config document's settings datums, but not on its grant datums, which stay privileged. Editors are the nodule's own micro (a settings panel), or generic editing UX over the declared settings Lexicons in the CLI or a GUI, the way VS Code edits extension settings from their declared schema. Either way the write goes through the same datum API.
 
 ### 7. Substitution is out of scope
 
 `nodule.substitution` is replaced by the routing/dev-hook split decided in D42, in its own change. Until then it stays in the node config document unchanged.
+
+### 7. Settled with the operator (2026-11-12)
+
+- **Settings datums are always optional; nothing auto-populates them.** An absent datum means the nodule's own default, which lives in the nodule's code. That matches daybook's config, whose store held only the user's overrides and whose reads fell back to the plug's declared defaults (`daybook_core/config.rs`, `get_facet_display_hint` then `plug_repo.get_display_hint`). A nodule that wants a datum present from the start writes it from an init routine (D7: `Initializer { key, target, mode: Once }`, run once per node per revision). A generic editor may show a Lexicon's `default` as a placeholder, but showing it doesn't write it.
+- **Uninstall keeps the cartridge config document**, so a reinstall, or the same cartridge on a sister node, finds its settings and grants. Clearing it is an explicit act: a privileged "clear a cartridge's config" operation (`clearCartridgeConfig`) that deletes the settings and grant datums, offered in the config UX.
+- **The shared config drawer is ADR 038's synced configuration drawer**, the same one that will hold orientations and preferences.
+
+### 8. Micros join the same documents (with the Clay lane, 2026-11-12)
+
+A cartridge can contribute a nodule, a micro, or both (`docs/scratch/clay-on-the-node.md`). The micro runs as its own actor under a `micros` subsystem actor, parallel to `nodules`.
+
+- **One install per cartridge, not one per component.** The nodule and micro ship in one envelope and must run the same revision, so there is one pin. The install datum replaces `nodule.install` (§2):
+  `org.example.daybook.cartridges.install/<cartridgeId>`: `{ cartridge: #datumPin, configDoc: docUrl, nodule?: { enabled }, micro?: { enabled } }`.
+  A component's member is present exactly when the pinned envelope contributes it, and each is enabled independently (the shell can disable a micro while its nodule runs). The nodule service reconciles the `nodule` part and the micro host reconciles the `micro` part, both from the same datum.
+- **Grants name their subsystem**, because the two run as different actors: `nodule.grant/<grant>` and `micro.grant/<grant>`, each with the §4 grant keys (`drawer:<drawerId>` → `{ access }`, `method:<nsid or authority>` → `{ privileged? }`, the bit refused at mint for both).
+- **Settings are the cartridge's**, shared by its nodule and its micro, and both may write them (§6/§7). The Clay manifest's settings sections declare the same settings NSIDs.
+- **Not in these documents:** per-device UI state stays in Clay's device-local documents, and manifest-declared collections (ADR 031) live in user drawers reached through drawer grants.
+
+**Methods.** These are one cartridge-level set, not a parallel set per subsystem (AGENTS.md: no symbol proliferation). They live on the cartridges service. The `*` ones are privileged:
+- `cartridges.install*` (pins a published version and creates or reuses its cartridge config document);
+- `cartridges.setEnabled* { cartridgeId, component: nodule|micro, enabled }`;
+- `cartridges.uninstall*` (removes the install, keeps the config, per §7);
+- `cartridges.setGrant* { cartridgeId, subsystem: nodule|micro, grant, access? }`, where `access` absent revokes;
+- `cartridges.clearConfig*` (deletes the settings and every grant datum, nodule and micro);
+- `cartridges.listInstalls` and `cartridges.observeInstalls`, a subscription with the same rows, so the shell reacts live to enable and disable.
+
+These replace the nodule service's `admitNodule`/`setNoduleEnabled`/`setNoduleDrawerGrants`/`setNoduleMethodGrants`/`uninstallNodule`. The nodule service keeps reconciling, resolution and its records (`listNodules`/`getNodule`, `confirmNoduleResolution`, `setNoduleDevTakeover`, `setMethodRoute`).
 
 ## Consequences
 
@@ -84,7 +111,4 @@ Grant keys use only portable ids (drawer ids, NSIDs), never per-node actors, so 
 
 ## Open questions
 
-1. May a nodule write its own settings (an app saving its preferences), or only read them?
-2. Default values: are settings with no datum the Lexicon's defaults, as with atproto's `default`, or does admission write an initial datum?
-3. Uninstall: does deleting the node's `install` leave the cartridge config document (so reinstalling or a sister keeps the settings), with deletion as a separate, explicit act? The proposal is yes.
-4. The shared config drawer's name and its relation to ADR 038's "synced configuration drawer" for orientations and preferences. Probably the same drawer.
+None. §8 records the micro side, agreed with the Clay lane.

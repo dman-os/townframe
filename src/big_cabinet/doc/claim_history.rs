@@ -16,7 +16,6 @@ use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeReadError;
 use big_cabinet_core::dmeta::NativeValue;
-use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::SignatureId;
 use big_cabinet_core::dmeta::SignedDatumClaim;
 use big_cabinet_core::dmeta::Uuid7;
@@ -73,7 +72,7 @@ impl From<NativeReadError> for ClaimHistoryError {
         match error {
             NativeReadError::Automerge(error) => error.into(),
             NativeReadError::Unsupported(kind) => Self::Unsupported(kind),
-            NativeReadError::ResourceLimit(limit) => Self::ResourceRefused(limit),
+            NativeReadError::ResourceLimit { limit, .. } => Self::ResourceRefused(limit.name()),
         }
     }
 }
@@ -178,13 +177,13 @@ pub fn reconstruct_current_claims(
     for entry in entries {
         let result = (|| {
             let hash = entry.hash;
-            if !entry.is_map {
+            if matches!(entry.form, EntryForm::Other) {
                 return Err(ClaimHistoryError::MalformedWitness(
-                    "signature entry is not a map",
+                    "signature entry is neither bytes nor a map",
                 ));
             }
             let claim = state.claim_for_entry(hash, entry.marker.clone())?;
-            if state.read_signature(&entry.marker, heads)? != claim.signature {
+            if state.read_signature(&entry, heads)? != claim.signature {
                 return Err(ClaimHistoryError::MalformedWitness(
                     "signature entry changed after introduction",
                 ));
@@ -209,7 +208,18 @@ struct SignatureKey {
 struct SignatureEntry {
     marker: ObjId,
     hash: ChangeHash,
-    is_map: bool,
+    form: EntryForm,
+}
+
+/// What an element of a datum's `signatures` list holds. An ordinary entry is one bytes scalar
+/// (ADR 020, the dmeta cut, item 2), whose value is kept here so reading it again costs nothing;
+/// an entry that carries a message or an inherited witness is a map whose members are read at the
+/// heads the entry is read at. Anything else is not a signature entry.
+#[derive(Clone)]
+enum EntryForm {
+    Packed(Vec<u8>),
+    Carried,
+    Other,
 }
 
 struct Reconstruction<'a> {
@@ -341,12 +351,12 @@ impl Reconstruction<'_> {
             .ok_or(ClaimHistoryError::MalformedWitness(
                 "marker outside target signature set",
             ))?;
-        if !entry.is_map || entry.hash != hash {
+        if matches!(entry.form, EntryForm::Other) || entry.hash != hash {
             return Err(ClaimHistoryError::MalformedWitness(
                 "signature marker introduction",
             ));
         }
-        let signature = self.read_signature(&marker, &resulting_heads)?;
+        let signature = self.read_signature(&entry, &resulting_heads)?;
         let (actor_public_key, actor_url, certificate) =
             self.actor_binding(signature.actor_uuid, &resulting_heads)?;
         let aliases = self.aliases(&resulting_heads)?;
@@ -431,7 +441,7 @@ impl Reconstruction<'_> {
     ) -> Result<Vec<SignatureId>, ClaimHistoryError> {
         let mut ids = Vec::new();
         for entry in self.entries(heads)? {
-            if !entry.is_map {
+            if matches!(entry.form, EntryForm::Other) {
                 continue;
             }
             let resulting_heads = [entry.hash];
@@ -444,10 +454,12 @@ impl Reconstruction<'_> {
                 Err(error) if !error.pending() => continue,
                 Err(error) => return Err(error),
             };
-            if !introduced.is_some_and(|item| item.is_map && item.hash == entry.hash) {
+            let Some(introduced) = introduced
+                .filter(|item| !matches!(item.form, EntryForm::Other) && item.hash == entry.hash)
+            else {
                 continue;
-            }
-            let signature = match self.read_signature(&entry.marker, &resulting_heads) {
+            };
+            let signature = match self.read_signature(&introduced, &resulting_heads) {
                 Ok(signature) => signature,
                 Err(error) if !error.pending() => continue,
                 Err(error) => return Err(error),
@@ -506,7 +518,14 @@ impl Reconstruction<'_> {
                                 .hash_for_opid(&marker)
                                 .expect("an observed operation belongs to an applied change"),
                             marker,
-                            is_map: value == Value::Object(ObjType::Map),
+                            form: match value {
+                                Value::Scalar(scalar) => match scalar.as_ref() {
+                                    ScalarValue::Bytes(packed) => EntryForm::Packed(packed.clone()),
+                                    _ => EntryForm::Other,
+                                },
+                                Value::Object(ObjType::Map) => EntryForm::Carried,
+                                Value::Object(_) => EntryForm::Other,
+                            },
                         });
                     }
                 }
@@ -624,47 +643,52 @@ impl Reconstruction<'_> {
             .map_err(|_| ClaimHistoryError::MalformedWitness("UUID version"))
     }
 
+    /// The entry as a signature: an ordinary one is decoded from its packed bytes, which a peer
+    /// wrote, so a wrong length or format byte is malformed evidence and never a panic; a carried
+    /// one is a map whose `signature` member is the same packed value, beside its message and
+    /// witness.
     fn read_signature(
         &mut self,
-        marker: &ObjId,
+        entry: &SignatureEntry,
         heads: &[ChangeHash],
     ) -> Result<DatumSignature, ClaimHistoryError> {
-        let actor_uuid = Self::uuid(&self.text(marker, "actorUuid", heads)?)?;
-        let bytes = self
-            .bytes(marker, "signature", heads)?
-            .ok_or(ClaimHistoryError::MalformedWitness("signature bytes"))?;
-        let signature = SignatureBytes::try_from(bytes.as_slice())
-            .map_err(|_| ClaimHistoryError::MalformedWitness("signature length"))?;
-        let message = self.bytes(marker, "message", heads)?;
-        let inherited = self.maps(marker, "inherited", heads)?;
-        let inherited = match inherited.as_slice() {
-            [] => None,
-            [witness] => Some(InheritedWitness {
-                extra: Default::default(),
-                origin_doc: self
-                    .text(witness, "originDoc", heads)?
-                    .parse()
-                    .map_err(|_| ClaimHistoryError::MalformedWitness("origin document"))?,
-                message: self
-                    .bytes(witness, "message", heads)?
-                    .ok_or(ClaimHistoryError::MalformedWitness("inherited message"))?,
-                value: self.bytes(witness, "value", heads)?,
-            }),
-            _ => {
-                return Err(ClaimHistoryError::MalformedWitness(
-                    "conflicting inherited witnesses",
-                ));
+        let malformed = |_| ClaimHistoryError::MalformedWitness("signature entry");
+        let marker = &entry.marker;
+        match &entry.form {
+            EntryForm::Packed(packed) => DatumSignature::from_packed(packed).map_err(malformed),
+            EntryForm::Other => Err(ClaimHistoryError::MalformedWitness(
+                "signature entry is neither bytes nor a map",
+            )),
+            EntryForm::Carried => {
+                let packed = self
+                    .bytes(marker, "signature", heads)?
+                    .ok_or(ClaimHistoryError::MalformedWitness("signature bytes"))?;
+                let mut signature =
+                    DatumSignature::from_packed(packed.as_slice()).map_err(malformed)?;
+                signature.message = self.bytes(marker, "message", heads)?;
+                let inherited = self.maps(marker, "inherited", heads)?;
+                signature.inherited = match inherited.as_slice() {
+                    [] => None,
+                    [witness] => Some(InheritedWitness {
+                        extra: Default::default(),
+                        origin_doc: self
+                            .text(witness, "originDoc", heads)?
+                            .parse()
+                            .map_err(|_| ClaimHistoryError::MalformedWitness("origin document"))?,
+                        message: self
+                            .bytes(witness, "message", heads)?
+                            .ok_or(ClaimHistoryError::MalformedWitness("inherited message"))?,
+                        value: self.bytes(witness, "value", heads)?,
+                    }),
+                    _ => {
+                        return Err(ClaimHistoryError::MalformedWitness(
+                            "conflicting inherited witnesses",
+                        ));
+                    }
+                };
+                Ok(signature)
             }
-        };
-        let doc_uuid = Self::uuid(&self.text(marker, "docUuid", heads)?)?;
-        Ok(DatumSignature {
-            extra: Default::default(),
-            actor_uuid,
-            signature,
-            doc_uuid,
-            message,
-            inherited,
-        })
+        }
     }
 
     fn actor_binding(
@@ -727,43 +751,27 @@ impl Reconstruction<'_> {
         bound.ok_or(ClaimHistoryError::MalformedWitness("unbound document UUID"))
     }
 
+    /// The aliases bound to this datum at `heads`: the union of `uuids` across every copy of its
+    /// metadata map. Concurrent creators of the datum each created `datums[key]`, so Automerge
+    /// keeps several maps there and shows one; reading only the visible one would drop the
+    /// other creators' aliases. This is a read of the datum's own entries, never a scan of the
+    /// document, and each entry read is charged to the frontier budget, which bounds what a
+    /// hostile document can make a verifier read.
     fn aliases(&mut self, heads: &[ChangeHash]) -> Result<Vec<Uuid7>, ClaimHistoryError> {
         let mut aliases = Vec::new();
         let doc = self.doc;
-        let target = self.datum_key.to_string();
-        for dmeta in self.dmeta_maps(heads)? {
-            for index in self.maps(&dmeta, "datumUuids", heads)? {
+        for meta in self.datum_metas(heads)? {
+            for index in self.maps(&meta, "uuids", heads)? {
                 let length = doc.length_at(&index, heads);
                 self.account(heads, length)?;
                 for item in doc.map_range_at(&index, .., heads) {
-                    if !item.conflict {
-                        self.account(heads, 1)?;
-                        if matches!(
-                            item.value,
-                            automerge::ValueRef::Scalar(automerge::ScalarValueRef::Str(ref text))
-                                if text.as_ref() == target.as_str()
-                        ) {
-                            aliases.push(Self::uuid(item.key.as_ref())?);
-                        }
-                        continue;
+                    if !matches!(
+                        item.value,
+                        automerge::ValueRef::Scalar(automerge::ScalarValueRef::Boolean(true))
+                    ) {
+                        return Err(ClaimHistoryError::MalformedWitness("datum UUID alias"));
                     }
-                    let values = doc.get_all_at(&index, item.key.as_ref(), heads)?;
-                    self.account(heads, values.len())?;
-                    let mut matches = false;
-                    let mut other = false;
-                    for (value, _) in values {
-                        if value.to_str() == Some(target.as_str()) {
-                            matches = true;
-                        } else {
-                            other = true;
-                        }
-                    }
-                    if matches && other {
-                        return Err(ClaimHistoryError::MalformedWitness("rebound datum UUID"));
-                    }
-                    if matches {
-                        aliases.push(Self::uuid(item.key.as_ref())?);
-                    }
+                    aliases.push(Self::uuid(item.key.as_ref())?);
                 }
             }
         }

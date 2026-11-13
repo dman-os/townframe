@@ -14,6 +14,7 @@ mod model;
 mod observe;
 mod peer;
 mod wire;
+mod text_profile;
 mod write_costs;
 mod writes;
 
@@ -33,6 +34,7 @@ use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::DatumDecl;
 use big_cabinet_core::datum::Universe;
 use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::ResourceLimit;
 use big_cabinet_core::doc::ObservedDatum;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;

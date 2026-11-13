@@ -751,6 +751,24 @@ impl Node {
             .map_err(op)
     }
 
+    async fn list_doc_drawers(
+        &self,
+        authorization: Authorization,
+        doc: &DocId,
+    ) -> Result<Vec<DocDrawer>, DrawersError> {
+        self.drawers()
+            .call_with(
+                RequestContext::root(),
+                authorization.metadata(),
+                ListDocDrawers {
+                    doc_id: doc.clone(),
+                },
+            )
+            .await
+            .map(|listed| listed.drawers)
+            .map_err(op)
+    }
+
     async fn remember(&self, actor: &OpenedActor, drawer: &DrawerId, mirror: bool) {
         self.drawers()
             .call(
