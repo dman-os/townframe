@@ -54,6 +54,10 @@ impl Spec {
         format!("{}.echo", self.authority)
     }
 
+    pub(super) fn config(&self) -> String {
+        format!("{}.config", self.authority)
+    }
+
     fn relay(&self) -> String {
         format!("{}.relay", self.authority)
     }
@@ -110,6 +114,18 @@ fn procedure(nsid: &str) -> Value {
         }}
     })
 }
+fn setting(nsid: &str) -> Value {
+    json!({
+        "lexicon": 1,
+        "id": nsid,
+        "defs": {
+            "main": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    })
+}
 
 /// The cartridge whose nodule declares `spec.authority`'s three operations, implements them through
 /// the handler artifact `bytes`, and requests each of `calls` (operations of another nodule it
@@ -138,16 +154,25 @@ fn cartridge_requiring(spec: &Spec, bytes: &[u8], requires: Vec<Request>) -> Car
         ..Default::default()
     };
     let operations = [spec.echo(), spec.relay(), spec.absent()];
+    let config = spec.config();
     for nsid in &operations {
         nodule
             .lexicons
             .push(serde_json::from_value(procedure(nsid)).unwrap());
     }
+    nodule
+        .lexicons
+        .push(serde_json::from_value(procedure(&config)).unwrap());
+    nodule
+        .lexicons
+        .push(serde_json::from_value(setting(&format!("{}.settings", spec.authority))).unwrap());
+    nodule.settings = vec![format!("{}.settings", spec.authority)];
     nodule.handler = Some(Handler {
         artifact: "handler".into(),
         extra: Default::default(),
     });
     nodule.implements = operations.into();
+    nodule.implements.push(config);
     let mut cartridge = Cartridge::new(spec.cartridge.clone(), "1.0.0".parse().unwrap());
     cartridge.authority = Some(spec.authority.to_owned());
     cartridge.artifacts.push(Artifact {
@@ -415,6 +440,98 @@ fn assert_continues_trace(traceparent: &str) {
 }
 
 #[tokio::test]
+async fn a_guest_can_write_only_its_declared_settings() {
+    let bytes = guest_bytes();
+    let secrets = secrets().await;
+    let (node, stop) = boot_node(&secrets).await;
+    let spec = caller();
+    put(&node, &bytes).await;
+    admit(&node, cartridge(&spec, &bytes, &[])).await;
+    set_enabled(&node, &spec, true).await;
+
+    let initial = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "read"}),
+        Default::default(),
+    )
+    .await
+    .expect("the config document is readable before writing");
+    assert!(initial.get("org.example.test.settings/main").is_none());
+
+    let setting = json!({"enabled": true});
+    invoke(
+        &node,
+        &spec.config(),
+        json!({
+            "action": "write",
+            "tag": "org.example.test.settings",
+            "slot": "main",
+            "value": setting,
+        }),
+        Default::default(),
+    )
+    .await
+    .expect("the declared setting is writable");
+    let read = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "read"}),
+        Default::default(),
+    )
+    .await
+    .expect("the config document is readable");
+    assert!(read.get("org.example.test.settings/main").is_some());
+
+    fn assert_config_denied(result: Result<Value, DispatchError>) {
+        match result {
+            Err(DispatchError::Provider { status: 400, body }) => {
+                assert_eq!(body["error"], "Config");
+                let message = body["message"].as_str().unwrap_or_default();
+                assert!(
+                    message.contains("Denied")
+                        && message
+                            .contains("the presented capability does not permit this operation"),
+                    "unexpected config denial: {body}"
+                );
+            }
+            other => panic!("expected the docs Denied error through the guest, got {other:?}"),
+        }
+    }
+
+    assert_config_denied(
+        invoke(
+            &node,
+            &spec.config(),
+            json!({
+                "action": "write",
+                "tag": "org.example.daybook.nodule.grant",
+                "slot": "method:org.example.other.ping",
+                "value": {"privileged": false},
+            }),
+            Default::default(),
+        )
+        .await,
+    );
+    assert_config_denied(
+        invoke(
+            &node,
+            &spec.config(),
+            json!({
+                "action": "write",
+                "tag": "org.example.test.other",
+                "slot": "main",
+                "value": {"enabled": false},
+            }),
+            Default::default(),
+        )
+        .await,
+    );
+
+    shutdown(node, stop).await;
+}
+
+#[tokio::test]
 async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     let bytes = guest_bytes();
     let secrets = secrets().await;
@@ -427,9 +544,19 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     assert_eq!(enabled.readiness, Readiness::Ready);
     assert!(node.executor.hosts(&spec.cartridge));
 
+    let old_config = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "capability"}),
+        Default::default(),
+    )
+    .await
+    .expect("the initial settings capability is delivered");
+    let old_doc_id = old_config["docId"].as_str().unwrap().to_owned();
+    let old_capability = old_config["capability"].as_str().unwrap().to_owned();
     // The echo returns the input, and the headers the host built for the guest: the operator's
     // capability as a bare `Bearer` token (no signer), the idempotency key, the request id and
-    // no budget. No operations are granted, so the nodule is told no capability of its own.
+    // no budget. The declared settings also grant docs operations, so a nodule capability is present.
     let operator_cap = serde_json::to_value(node.authority.root).unwrap();
     let context = InvocationContext {
         idempotency_key: Some("key-1".into()),
@@ -452,7 +579,7 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
     assert_ne!(echoed["requestId"], outer.request_id.to_string());
     assert_eq!(echoed["requestId"].as_str().unwrap().len(), 36, "a uuid");
     assert_continues_trace(echoed["traceparent"].as_str().unwrap());
-    assert_eq!(echoed["noduleCapability"], Value::Null);
+    assert!(echoed["noduleCapability"].is_string());
 
     // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
     let budgeted = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
@@ -491,8 +618,55 @@ async fn a_wasm_handler_serves_dispatched_operations_until_disabled() {
         Err(DispatchError::UnknownOperation)
     );
     assert!(!node.executor.hosts(&spec.cartridge));
+    let revoked = invoke(
+        &node,
+        "org.example.daybook.docs.writeDatums",
+        json!({
+            "capability": old_capability,
+            "docId": old_doc_id,
+            "mode": {"mode": "atCurrent"},
+            "set": {"org.example.test.settings/main": {"enabled": false}},
+            "remove": [],
+        }),
+        Default::default(),
+    )
+    .await;
+    match revoked {
+        Err(DispatchError::Provider { status: 400, body }) => {
+            assert_eq!(body["error"], "Denied");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("presented capability")),
+                "unexpected revoked-capability response: {body}"
+            );
+        }
+        other => panic!("expected the retracted settings capability to be denied, got {other:?}"),
+    }
     set_enabled(&node, &spec, true).await;
     assert!(node.executor.hosts(&spec.cartridge));
+    let new_config = invoke(
+        &node,
+        &spec.config(),
+        json!({"action": "capability"}),
+        Default::default(),
+    )
+    .await
+    .expect("re-enabling mints settings capability");
+    assert_ne!(new_config["capability"].as_str().unwrap(), old_capability);
+    invoke(
+        &node,
+        &spec.config(),
+        json!({
+            "action": "write",
+            "tag": "org.example.test.settings",
+            "slot": "main",
+            "value": {"enabled": true},
+        }),
+        Default::default(),
+    )
+    .await
+    .expect("the re-enabled settings capability is usable");
     assert_eq!(
         invoke(&node, &echo, json!({ "n": 2 }), Default::default())
             .await
@@ -591,8 +765,9 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
         json!(format!("Bearer {granted}"))
     );
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
-    // B has no grants of its own, so it was handed no capability to confuse with A's.
-    assert_eq!(relayed["body"]["noduleCapability"], Value::Null);
+    // B has its own settings grant, but it was not handed A's dispatch capability.
+    assert!(relayed["body"]["noduleCapability"].is_string());
+    assert_ne!(relayed["body"]["noduleCapability"], json!(granted));
 
     // The nested call is a hop of its own: a new request id (the id is the admission key and
     // the outer call is still in flight), the outer trace under a new span, and a budget
@@ -641,11 +816,11 @@ async fn a_nodule_calls_another_through_dispatch_only_with_its_own_live_grant() 
     let own = relay(&node, &b, &a.echo(), None, context.clone()).await;
     assert_eq!(own["status"], 200, "{own}");
 
-    // Revoking by a config change takes effect: the handler is told no capability, and the one
-    // it remembered is dead.
+    // Revoking the dispatch grant takes effect while the separate settings capability remains;
+    // the capability A remembered for dispatch is dead.
     let revoked = set_operations(&node, &a, DispatchScope::default()).await;
     assert!(revoked.methods.is_none());
-    assert_eq!(own_capability(&node, &a).await, None);
+    assert!(own_capability(&node, &a).await.is_some());
     let stale = relay(&node, &a, &target, Some(&granted), context.clone()).await;
     assert_eq!(stale["status"], 403, "{stale}");
 

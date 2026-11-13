@@ -48,6 +48,14 @@ pub(crate) struct AppliedOperationsRow {
     pub(crate) capability_id: CapId,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct AppliedSettingsRow {
+    pub(crate) cartridge_id: CartridgeId,
+    pub(crate) doc_id: DocId,
+    pub(crate) kinds: big_cabinet_core::doc::DatumKinds,
+    pub(crate) capability_id: CapId,
+}
+
 fn storage(error: impl std::fmt::Display) -> NodulesError {
     NodulesError::Storage(error.to_string())
 }
@@ -223,6 +231,83 @@ pub(crate) async fn applied_operations(
             })
         })
         .collect()
+}
+
+pub(crate) async fn applied_settings(
+    database: &Database,
+) -> Result<Vec<AppliedSettingsRow>, NodulesError> {
+    let transaction = database.begin_read().await.map_err(storage)?;
+    let rows = sqlite::applied_settings(&transaction)
+        .await
+        .map_err(storage)?;
+    rows.into_iter()
+        .map(|row| {
+            let cartridge_id = row.cartridge_id.parse().map_err(|error| {
+                storage(format!(
+                    "applied settings cartridge_id `{}` is invalid: {error}",
+                    row.cartridge_id
+                ))
+            })?;
+            let doc_id = row.doc_id.parse().map_err(|error| {
+                storage(format!(
+                    "applied settings doc_id `{}` is invalid: {error}",
+                    row.doc_id
+                ))
+            })?;
+            let kinds = serde_json::from_str(&row.kinds).map_err(|error| {
+                storage(format!(
+                    "applied settings kinds for `{}` are invalid: {error}",
+                    row.cartridge_id
+                ))
+            })?;
+
+            let capability_id: [u8; 16] =
+                row.capability_id.try_into().map_err(|bytes: Vec<u8>| {
+                    storage(format!(
+                        "applied settings capability_id for `{}` has length {}, expected 16",
+                        row.cartridge_id,
+                        bytes.len()
+                    ))
+                })?;
+            Ok(AppliedSettingsRow {
+                cartridge_id,
+                doc_id,
+                kinds,
+                capability_id: CapId::from_bytes(capability_id),
+            })
+        })
+        .collect()
+}
+
+pub(crate) async fn upsert_applied_settings(
+    database: &Database,
+    cartridge_id: &CartridgeId,
+    doc_id: &DocId,
+    kinds: &big_cabinet_core::doc::DatumKinds,
+    capability_id: CapId,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::upsert_applied_settings(
+        &transaction,
+        cartridge_id.to_string(),
+        doc_id.to_string(),
+        serde_json::to_string(kinds).expect("datum kinds serialize"),
+        capability_id.as_bytes().to_vec(),
+    )
+    .await
+    .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+pub(crate) async fn delete_applied_settings(
+    database: &Database,
+    cartridge_id: &CartridgeId,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::delete_applied_settings(&transaction, cartridge_id.to_string())
+        .await
+        .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
 }
 
 pub(crate) async fn upsert_applied_operations(
