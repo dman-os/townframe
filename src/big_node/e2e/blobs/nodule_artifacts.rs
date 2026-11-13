@@ -9,15 +9,14 @@ use big_blobs_core::BlobId;
 use big_blobs_core::CipherBlob;
 use big_blobs_core::Jwk;
 use big_cabinet_core::datum::DatumMember;
-use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::ComponentExport;
+use big_cartridges_core::Nodule;
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::UninstallCartridge;
-use big_nodule_core::Handler;
-use big_nodule_core::Nodule;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_nodule_core::config::artifact_key;
 use method_core::ByteBody;
 use std::time::Duration;
@@ -63,29 +62,27 @@ async fn the_blob_workers_retain_a_nodules_handler_artifact_through_the_config_d
         )
         .await
         .unwrap();
-    let nodule = Nodule {
-        handler: Some(Handler {
-            artifact: "handler".into(),
+    let mut nodule = Nodule::default();
+    nodule.routines.insert(
+        "org.example.other.ping".into(),
+        Routine {
+            r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                component: "handler".into(),
+                export: "handle".into(),
+                extra: Default::default(),
+            }),
+            implements: "org.example.other.ping".parse().unwrap(),
+            uses: Default::default(),
             extra: Default::default(),
-        }),
-        implements: vec!["org.example.other.ping".into()],
-        ..Default::default()
-    };
-    let mut cartridge = Cartridge::new(CARTRIDGE.parse().unwrap(), "1.0.0".parse().unwrap());
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest(info.blob_id.to_bytes32()),
-        size: Some(bytes.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: serde_json::from_value(serde_json::to_value(nodule).unwrap()).unwrap(),
-            extra: Default::default(),
-        }));
+        },
+    );
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        CARTRIDGE.parse().unwrap(),
+        "1.0.0".parse().unwrap(),
+    ));
+    cartridge.nodule = Some(nodule);
+    cartridge.with_wasm("handler", bytes);
+
     let operator = Authorization::identity(node.authority.root);
     super::super::nodule_wasm::admit(&node, cartridge).await;
 

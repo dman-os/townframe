@@ -3,25 +3,27 @@
 //! executor with gated providers (no Wasm, no sleeps).
 
 use super::Node;
+use super::add_method;
+use super::add_routine;
 use super::dispatch::not_ready;
 use super::executor::FakeExecutor;
 use super::id;
 use super::lexicon;
+use super::nodule_mut;
 use async_trait::async_trait;
-use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
-use big_cartridges_core::Artifact;
 use big_cartridges_core::Cartridge;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::Digest;
-use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::Initializer;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindDatum;
+use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::request::Necessity;
-use big_cartridges_core::request::Request;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch::Caller;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
@@ -34,10 +36,8 @@ use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Handler;
-use big_nodule_core::Initializer;
-use big_nodule_core::Nodule;
-use big_nodule_core::RunMode;
+use indexmap::IndexMap;
+
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::NoduleInitStatus;
 use big_nodule_core::protocol::NoduleRecord;
@@ -130,7 +130,7 @@ impl Provider for Probe {
         _request: &RequestContext,
         context: &InvocationContext,
         _input: Value,
-        _body: Option<method_core::ByteBody>,
+        _body: Option<Body>,
     ) -> Result<Body, ProviderError> {
         self.calls.lock().unwrap().push(Call {
             operation: operation.to_owned(),
@@ -179,56 +179,44 @@ pub(super) fn init_cartridge(
     serves: &[&str],
     requires: &[&str],
     inits: &[(&str, &str, RunMode)],
-) -> Cartridge {
-    let mut nodule = Nodule::default();
+) -> FixtureCartridge {
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        big_cartridges_core::test_support::cartridge_id(name),
+        version.parse().unwrap(),
+    ));
+    cartridge.authority = Some(format!("org.example.{name}"));
+    cartridge.nodule = Some(Default::default());
+
     for nsid in serves {
-        nodule.lexicons.push(lexicon(Value::Object(query(nsid))));
+        cartridge.with_lexicon(lexicon(Value::Object(query(nsid))));
+        add_routine(
+            &mut cartridge,
+            nsid,
+            nsid,
+            "handler",
+            "handle",
+            Default::default(),
+        );
     }
-    nodule.handler = Some(Handler {
-        artifact: "handler".into(),
-        extra: Default::default(),
-    });
-    nodule.implements = serves.iter().map(|nsid| (*nsid).to_owned()).collect();
+    let bytes = format!("{name}-{version}");
+    cartridge.with_wasm("handler", bytes.as_bytes());
+
     // Optional, so the nodule stays runnable before its grant: these tests exercise how an
     // initializer waits on and calls a provider, including the dispatch refusal without a grant.
     // A required request holds the nodule at `NeedsConfiguration` instead (see `requests`).
-    nodule.requires = requires
-        .iter()
-        .map(|nsid| {
-            let mut request = Request::new(*nsid, *nsid);
-            request.necessity = Necessity::Optional;
-            request
-        })
-        .collect();
-    nodule.initialization = inits
-        .iter()
-        .map(|(key, target, mode)| Initializer {
-            key: (*key).to_owned(),
-            target: (*target).to_owned(),
-            mode: mode.clone(),
-            extra: Default::default(),
-        })
-        .collect();
-    let bytes = format!("{name}-{version}");
-    let mut cartridge = Cartridge::new(
-        big_cartridges_core::test_support::cartridge_id(name),
-        version.parse().unwrap(),
-    );
-    cartridge.authority = Some(format!("org.example.{name}"));
-    cartridge.artifacts.push(Artifact {
-        key: "handler".into(),
-        digest: Digest::of(bytes.as_bytes()),
-        size: Some(bytes.len() as u64),
-        media_type: Some("application/wasm".into()),
-        extra: Default::default(),
-    });
-    cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: lexicon(serde_json::to_value(nodule).unwrap()),
-            extra: Default::default(),
-        }));
+    for request in requires {
+        add_method(&mut cartridge, request, request, Necessity::Optional, None);
+    }
+    for (key, target, mode) in inits {
+        nodule_mut(&mut cartridge).initialization.insert(
+            (*key).to_owned(),
+            Initializer {
+                target: (*target).parse().unwrap(),
+                mode: mode.clone(),
+                extra: Default::default(),
+            },
+        );
+    }
     cartridge
 }
 
@@ -696,22 +684,74 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
     node.shutdown().await;
 }
 
-/// `cartridge` with its nodule's requests replaced by `requests`, for tests of what a request does
-/// to the nodule (`init_cartridge` states its requests as optional).
-pub(super) fn with_requests(mut cartridge: Cartridge, requests: Vec<Request>) -> Cartridge {
-    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
-        panic!("init cartridges carry a nodule");
-    };
-    nodule
-        .description
-        .insert("requires".into(), serde_json::to_value(requests).unwrap());
+/// `cartridge` with its nodule's method bindings replaced by `requests`, for tests of what a
+/// request does (`init_cartridge` states its requests as optional).
+#[derive(Clone, Copy)]
+pub(super) enum FixtureRequestKind {
+    Method,
+    DatumRead,
+}
+pub(super) struct FixtureRequest {
+    pub(super) nsid: String,
+    pub(super) necessity: Necessity,
+    pub(super) kind: FixtureRequestKind,
+    pub(super) min_revision: Option<u32>,
+}
+
+pub(super) fn with_requests(
+    mut cartridge: FixtureCartridge,
+    requests: Vec<FixtureRequest>,
+) -> FixtureCartridge {
+    cartridge.permbinds.clear();
+    for request in requests {
+        match request.kind {
+            FixtureRequestKind::Method => add_method(
+                &mut cartridge,
+                &request.nsid,
+                &request.nsid,
+                request.necessity,
+                request.min_revision,
+            ),
+            FixtureRequestKind::DatumRead => {
+                cartridge.permbinds.insert(
+                    request.nsid.clone(),
+                    Permbind::Datum(PermbindDatum {
+                        nsid: request.nsid.parse().unwrap(),
+                        description: request.nsid.clone(),
+                        read: Some(request.necessity),
+                        write: None,
+                        create: None,
+                        delete: None,
+                        extra: request
+                            .min_revision
+                            .map(|revision| {
+                                IndexMap::from([("minRevision".into(), json!(revision))])
+                            })
+                            .unwrap_or_default(),
+                    }),
+                );
+            }
+        }
+    }
     cartridge
 }
 
-pub(super) fn necessity(nsid: &str, necessity: Necessity) -> Request {
-    let mut request = Request::new(nsid, nsid);
-    request.necessity = necessity;
-    request
+pub(super) fn necessity(nsid: &str, necessity: Necessity) -> FixtureRequest {
+    FixtureRequest {
+        nsid: nsid.into(),
+        necessity,
+        kind: FixtureRequestKind::Method,
+        min_revision: None,
+    }
+}
+
+pub(super) fn datum_read(nsid: &str, min_revision: Option<u32>) -> FixtureRequest {
+    FixtureRequest {
+        nsid: nsid.into(),
+        necessity: Necessity::Required,
+        kind: FixtureRequestKind::DatumRead,
+        min_revision,
+    }
 }
 
 #[tokio::test]

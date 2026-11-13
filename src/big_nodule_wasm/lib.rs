@@ -1,8 +1,9 @@
 //! The Wasm executor for nodule handlers: the [`NoduleExecutor`] of kind `"wasm"`.
 //!
-//! One wash-runtime [`Host`] runs every nodule handler as a workload of its own: one
-//! `wasi:http/handler@0.3.0` component per (cartridge, revision). A call enters the workload through
-//! [`Ingress::dispatch_request`], the in-process entry point of our wash-runtime fork, so
+//! One wash-runtime [`Host`] runs each declared nodule component as its own workload: one
+//! `wasi:http/handler@0.3.0` component per (cartridge, revision, component key). A call enters
+//! the selected workload through [`Ingress::dispatch_request`], the in-process entry point of our
+//! wash-runtime fork, so
 //! nothing here is reachable over the network:
 //!
 //! - the ingress still binds a loopback listener (the host requires one) but its [`Router`]
@@ -29,6 +30,9 @@ use big_blobs::BlobService;
 use big_blobs_core::BlobId;
 use big_cabinet_core::authority::CapId;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component as ManifestComponent;
+use big_cartridges_core::Digest;
+use big_cartridges_core::Revision;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
@@ -96,6 +100,13 @@ const AUTHORITY: &str = "nodule.local";
 /// generous 64 MiB bounds a hostile or mistaken envelope without constraining real handlers.
 const MAX_HANDLER_OCTETS: u64 = 64 * 1024 * 1024;
 
+fn component_digest(component: &ManifestComponent) -> Digest {
+    let ManifestComponent::Wasm(component) = component else {
+        panic!("a nodule component is not wasm")
+    };
+    component.digest
+}
+
 /// Message bodies larger than this fail the call, in both directions: a handler's response and a
 /// guest's outgoing request into dispatch. Either is a JSON value held in memory (several times
 /// its encoded size once parsed) and carried over a service call, so it is capped at 4 MiB;
@@ -120,9 +131,14 @@ pub struct WasmExecutor {
     arrivals: Arc<Mutex<BTreeMap<BlobId, BTreeMap<CartridgeId, Reensure>>>>,
 }
 
-struct Running {
+struct RunningComponent {
     workload_id: String,
-    handler: BlobId,
+    artifact: BlobId,
+}
+
+struct Running {
+    revision: Revision,
+    components: BTreeMap<String, RunningComponent>,
     provider: Arc<WasmProvider>,
 }
 
@@ -217,10 +233,36 @@ pub async fn boot(
 }
 
 impl WasmExecutor {
+    /// The workload each admitted operation is served by: that of the component its routine
+    /// names, which routines sharing a component share.
+    fn route_table(
+        spec: &HandlerSpec,
+        components: &BTreeMap<String, RunningComponent>,
+    ) -> BTreeMap<String, RoutineTarget> {
+        spec.routines
+            .iter()
+            .map(|(operation, routine)| {
+                let component = components
+                    .get(&routine.component)
+                    .expect("admission resolved every routine component");
+                (
+                    operation.clone(),
+                    RoutineTarget {
+                        workload_id: component.workload_id.clone(),
+                        // The current nodule guest exposes one `wasi:http/handler#handle` entry
+                        // point; every fixture routine names that export. Keep the declared export
+                        // beside the route so a future component ABI can call it directly.
+                        export: routine.export.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     /// The signer is forgotten only once the workload is stopped, so its in-flight requests keep
     /// their identity while it drains; [`Egress`] answers any call that still outlives it as a
     /// gone upstream.
-    async fn stop_workload(&self, running: &Running) {
+    async fn stop_workload(&self, running: &RunningComponent) {
         self.host
             .workload_stop(WorkloadStopRequest {
                 workload_id: running.workload_id.clone(),
@@ -241,116 +283,144 @@ impl NoduleExecutor for WasmExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
-        let workload_id = format!("nodule/{}/{}", spec.cartridge_id, spec.revision);
-        let handler = BlobId::new(spec.handler.digest.0);
         let stale = {
             let mut hosted = self.hosted.lock().expect("hosted lock");
             match hosted.get(&spec.cartridge_id) {
                 Some(running)
-                    if running.workload_id == workload_id && running.handler == handler =>
+                    if running.revision == spec.revision
+                        && running.components.len() == spec.components.len()
+                        && running.components.iter().all(|(key, running)| {
+                            spec.components.get(key).is_some_and(|artifact| {
+                                running.artifact == BlobId::new(component_digest(artifact).0)
+                            })
+                        }) =>
                 {
-                    // The grants may have changed since the last ensure: the handler is told
-                    // the capability that is live now, on its next request.
+                    // Grants may change without recompiling a component: every routine provider
+                    // sees the capability that is live now on its next request.
                     running.provider.set_capability(spec.capability);
                     running
                         .provider
                         .set_config(spec.config_doc.clone(), spec.config_capability);
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
-                // Another revision (or handler) of the cartridge: the reconciler retires first, but
-                // an executor does not rely on that to keep one workload per cartridge.
                 Some(_) => hosted.remove(&spec.cartridge_id),
                 None => None,
             }
         };
         if let Some(stale) = stale {
-            self.stop_workload(&stale).await;
+            for component in stale.components.values() {
+                self.stop_workload(component).await;
+            }
         }
 
-        // Register for the arrival before looking, so a blob announced in between wakes us.
-        self.arrivals
-            .lock()
-            .expect("arrivals lock")
-            .entry(handler)
-            .or_default()
-            .insert(spec.cartridge_id.clone(), spec.reensure.clone());
-        let Some(info) = self.blobs.stat(&handler).await.expect("blob store stat") else {
-            return Hosted::NotReady(Readiness::ArtifactsUnavailable);
-        };
-        if info.length_octets > MAX_HANDLER_OCTETS {
-            tracing::warn!(cartridge = %spec.cartridge_id, octets = info.length_octets, "handler artifact over the size cap");
-            return Hosted::NotReady(Readiness::ExecutorUnavailable);
+        // Register every component before looking for its bytes, so an announcement racing this
+        // check wakes the reconcile rather than leaving one routine permanently unavailable.
+        let mut bytes = BTreeMap::new();
+        for (key, artifact) in &spec.components {
+            let blob = BlobId::new(component_digest(artifact).0);
+            self.arrivals
+                .lock()
+                .expect("arrivals lock")
+                .entry(blob)
+                .or_default()
+                .insert(spec.cartridge_id.clone(), spec.reensure.clone());
+            let Some(info) = self.blobs.stat(&blob).await.expect("blob store stat") else {
+                return Hosted::NotReady(Readiness::ArtifactsUnavailable);
+            };
+            if info.length_octets > MAX_HANDLER_OCTETS {
+                tracing::warn!(
+                    cartridge = %spec.cartridge_id,
+                    component = key,
+                    octets = info.length_octets,
+                    "nodule component over the size cap"
+                );
+                return Hosted::NotReady(Readiness::ExecutorUnavailable);
+            }
+            let Some(component_bytes) = self
+                .blobs
+                .read_all(&blob, MAX_HANDLER_OCTETS)
+                .await
+                .expect("blob store read")
+            else {
+                return Hosted::NotReady(Readiness::ArtifactsUnavailable);
+            };
+            assert_eq!(
+                blake3::hash(&component_bytes).as_bytes(),
+                &blob.to_bytes32(),
+                "the blob store returned bytes that do not hash to their id"
+            );
+            bytes.insert(key.clone(), (blob, component_bytes));
         }
-        let Some(bytes) = self
-            .blobs
-            .read_all(&handler, MAX_HANDLER_OCTETS)
-            .await
-            .expect("blob store read")
-        else {
-            // The blob was complete a moment ago and is not now: retention released it.
-            return Hosted::NotReady(Readiness::ArtifactsUnavailable);
-        };
-        assert_eq!(
-            blake3::hash(&bytes).as_bytes(),
-            &handler.to_bytes32(),
-            "the blob store returned bytes that do not hash to their id"
-        );
 
-        // `pool_size: 0` is wash's `Ephemeral` instance policy: a fresh store and instance per
-        // request, no warm pool, which is the one-instance-per-dispatch rule. The default
-        // `LocalResources` allow no outgoing hosts.
-        // Registered before the workload can make a call: [`Egress`] finds its signer by id.
-        self.signers
-            .lock()
-            .expect("signers lock")
-            .insert(workload_id.clone(), spec.actor.capability);
-        let started = self
-            .host
-            .workload_start(WorkloadStartRequest {
-                workload_id: workload_id.clone(),
-                workload: Workload {
-                    namespace: spec.cartridge_id.to_string(),
-                    name: spec.revision.to_string(),
-                    annotations: Default::default(),
-                    service: None,
-                    components: vec![Component {
-                        name: "handler".into(),
-                        bytes: bytes.into(),
-                        pool_size: 0,
-                        ..Default::default()
-                    }],
-                    host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
-                    volumes: vec![],
-                },
-            })
-            .await;
-        if let Err(error) = started {
-            // The bytes are what the envelope declared but are not a component this host can
-            // run (not a component, or imports it does not provide): a property of the
-            // artifact, reported as readiness rather than crashing the node.
+        let mut components = BTreeMap::new();
+        for (key, (artifact, component_bytes)) in bytes {
+            let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
             self.signers
                 .lock()
                 .expect("signers lock")
-                .remove(&workload_id);
-            tracing::warn!(cartridge = %spec.cartridge_id, revision = %spec.revision, "handler workload failed to start: {error:#}");
-            return Hosted::NotReady(Readiness::ExecutorUnavailable);
+                .insert(workload_id.clone(), spec.actor.capability);
+            let started = self
+                .host
+                .workload_start(WorkloadStartRequest {
+                    workload_id: workload_id.clone(),
+                    workload: Workload {
+                        namespace: spec.cartridge_id.to_string(),
+                        name: format!("{}-{key}", spec.revision),
+                        annotations: Default::default(),
+                        service: None,
+                        components: vec![Component {
+                            name: key.clone(),
+                            bytes: component_bytes.into(),
+                            pool_size: 0,
+                            ..Default::default()
+                        }],
+                        host_interfaces: vec![WitInterface::from("wasi:http/handler@0.3.0")],
+                        volumes: vec![],
+                    },
+                })
+                .await;
+            if let Err(error) = started {
+                self.signers
+                    .lock()
+                    .expect("signers lock")
+                    .remove(&workload_id);
+                for component in components.values() {
+                    self.stop_workload(component).await;
+                }
+                tracing::warn!(
+                    cartridge = %spec.cartridge_id,
+                    revision = %spec.revision,
+                    component = key,
+                    "nodule component workload failed to start: {error:#}"
+                );
+                return Hosted::NotReady(Readiness::ExecutorUnavailable);
+            }
+            self.arrivals
+                .lock()
+                .expect("arrivals lock")
+                .get_mut(&artifact)
+                .map(|waiting| waiting.remove(&spec.cartridge_id));
+            components.insert(
+                key,
+                RunningComponent {
+                    workload_id,
+                    artifact,
+                },
+            );
         }
-        self.arrivals
-            .lock()
-            .expect("arrivals lock")
-            .get_mut(&handler)
-            .map(|waiting| waiting.remove(&spec.cartridge_id));
+
+        let routines = Self::route_table(spec, &components);
         let provider = Arc::new(WasmProvider {
             ingress: Arc::clone(&self.ingress),
-            workload_id: workload_id.clone(),
+            routines,
             capability: Mutex::new(spec.capability),
             config: Mutex::new((spec.config_doc.clone(), spec.config_capability)),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),
             Running {
-                workload_id,
-                handler,
+                revision: spec.revision,
+                components,
                 provider: Arc::clone(&provider),
             },
         );
@@ -371,7 +441,9 @@ impl NoduleExecutor for WasmExecutor {
             .expect("hosted lock")
             .remove(cartridge_id);
         if let Some(running) = running {
-            self.stop_workload(&running).await;
+            for component in running.components.values() {
+                self.stop_workload(component).await;
+            }
         }
         let mut arrivals = self.arrivals.lock().expect("arrivals lock");
         arrivals.retain(|_, waiting| {
@@ -381,10 +453,18 @@ impl NoduleExecutor for WasmExecutor {
     }
 }
 
-/// Calls one running handler workload over in-process `wasi:http`.
+/// Routes an operation to the workload for its routine's component. The current guest ABI exposes
+/// one HTTP entry point (`wasi:http/handler#handle`) for all routines; the declared export remains
+/// attached to each route so a component-specific ABI can use it without changing dispatch.
+struct RoutineTarget {
+    workload_id: String,
+    export: String,
+}
+
+/// Calls one running routine component workload over in-process `wasi:http`.
 struct WasmProvider {
     ingress: Arc<Ingress<Sealed, Egress>>,
-    workload_id: String,
+    routines: BTreeMap<String, RoutineTarget>,
     /// The nodule's own dispatch capability, delivered in [`NODULE_CAPABILITY_HEADER`]. Replaced in
     /// place when the nodule's grants change.
     capability: Mutex<Option<CapId>>,
@@ -419,6 +499,15 @@ impl Provider for WasmProvider {
         }
         // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
         let (config_doc, config_capability) = self.config.lock().expect("config lock").clone();
+        let routine = self
+            .routines
+            .get(operation)
+            .expect("dispatch routed an operation without an admitted routine");
+        let workload_id = &routine.workload_id;
+        assert_eq!(
+            routine.export, "handle",
+            "the nodule HTTP ABI uses the shared handle export"
+        );
         let headers = delivery_headers(
             caller,
             request,
@@ -443,7 +532,7 @@ impl Provider for WasmProvider {
 
         let response = self
             .ingress
-            .dispatch_request(&self.workload_id, request)
+            .dispatch_request(workload_id, request)
             .await
             .map_err(gateway_error)?;
         let status = response.status();
