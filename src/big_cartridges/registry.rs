@@ -32,9 +32,11 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
@@ -53,9 +55,17 @@ use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
+use big_cabinet_core::reference::DatumPin;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::Location;
+use big_cabinet_core::reference::ReferenceDocId;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Component;
+use big_cartridges_core::ResolvedCartridge;
+use big_cartridges_core::Revision;
 use big_cartridges_core::Version;
+
 use big_cartridges_core::protocol::CartridgeChange;
 use big_cartridges_core::protocol::CartridgeChanges;
 use big_cartridges_core::protocol::CartridgeRecord;
@@ -64,10 +74,14 @@ use big_cartridges_core::protocol::CartridgeVersionSummary;
 use big_cartridges_core::protocol::CartridgesCursor;
 use big_cartridges_core::protocol::CartridgesError;
 use big_cartridges_core::protocol::PublishedCartridgeVersion;
+use big_cartridges_core::protocol::StageCartridgeVersion;
 use big_cartridges_core::registry::CartridgeIdentity;
 use big_cartridges_core::registry::artifact_key;
 use big_cartridges_core::registry::artifact_slot_version;
+use big_cartridges_core::registry::component_key;
 use big_cartridges_core::registry::identity_key;
+use big_cartridges_core::registry::lexicon_key;
+use big_cartridges_core::registry::sidecar_key;
 use big_cartridges_core::registry::version_key;
 use serde_json::Value as Json;
 use service_client_native_rs::Client;
@@ -102,6 +116,14 @@ struct VersionState {
     envelope: Cartridge,
     conflict: Option<String>,
     unverified: Option<String>,
+    resolved: Option<ResolvedCartridge>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CachedResolution {
+    Resolved(Box<ResolvedCartridge>),
+    Unreadable(String),
+    Invalid(String),
 }
 
 /// What one registry document says, after comparing it with the first-seen record.
@@ -118,6 +140,7 @@ pub(crate) struct State {
     sql: Database,
     first_seen: FirstSeenMap,
     views: BTreeMap<DocId, DocView>,
+    resolution_cache: BTreeMap<(DocId, Revision), (Vec<ChangeHash>, CachedResolution)>,
     /// The documents claiming each cartridge id. Two nodes can each create a document for one id
     /// before they sync, so the first (lowest) is served and the rest reported as duplicates.
     claims: BTreeMap<CartridgeId, BTreeSet<DocId>>,
@@ -194,6 +217,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
                             envelope: envelope.clone(),
                             conflict: None,
                             unverified: None,
+                            resolved: None,
                         },
                     );
                     fresh.push(envelope);
@@ -205,6 +229,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
                             envelope,
                             conflict: None,
                             unverified: Some(error.to_string()),
+                            resolved: None,
                         },
                     );
                 }
@@ -223,6 +248,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
                         envelope: pin.envelope.clone(),
                         conflict,
                         unverified: None,
+                        resolved: None,
                     },
                 );
             }
@@ -233,6 +259,7 @@ fn fold_doc(read: &DatumsRead, first_seen: &FirstSeenMap) -> Option<(DocView, Ve
                         envelope: pin.envelope.clone(),
                         conflict: Some(reason),
                         unverified: None,
+                        resolved: None,
                     },
                 );
             }
@@ -301,6 +328,98 @@ impl State {
         })
     }
 
+    fn resolved_version(
+        &self,
+        id: &CartridgeId,
+        version: &Version,
+    ) -> Result<ResolvedCartridge, CartridgesError> {
+        let doc_id = self
+            .primary_doc(id)
+            .ok_or_else(|| CartridgesError::UnknownCartridge(id.clone()))?;
+        let state = self.views[doc_id].versions.get(version).ok_or_else(|| {
+            CartridgesError::UnknownVersion {
+                id: id.clone(),
+                version: Box::new(version.clone()),
+            }
+        })?;
+        state.resolved.clone().ok_or_else(|| {
+            CartridgesError::Rejected(
+                state
+                    .conflict
+                    .clone()
+                    .unwrap_or_else(|| "the cartridge version has no resolved payload".into()),
+            )
+        })
+    }
+
+    async fn cached_resolution(
+        &mut self,
+        doc: &DocId,
+        heads: &[ChangeHash],
+        envelope: &Cartridge,
+    ) -> CachedResolution {
+        let key = (doc.clone(), envelope.revision());
+        // Pins name fixed heads, so a resolved or invalid result never changes for this
+        // envelope revision. An unreadable one only means the pinned heads had not arrived at
+        // the document heads it was tried at, so it is retried once the document moves on.
+        if let Some((cached_heads, cached)) = self.resolution_cache.get(&key)
+            && (!matches!(cached, CachedResolution::Unreadable(_))
+                || cached_heads.as_slice() == heads)
+        {
+            return cached.clone();
+        }
+        let resolution = match resolve_envelope(&self.docs, self.capability, doc, envelope).await {
+            Ok(resolved) => CachedResolution::Resolved(Box::new(resolved)),
+            Err(error @ CartridgesError::PinnedDatumUnreadable { .. }) => {
+                CachedResolution::Unreadable(error.to_string())
+            }
+            Err(error) => CachedResolution::Invalid(error.to_string()),
+        };
+        self.resolution_cache
+            .insert(key, (heads.to_vec(), resolution.clone()));
+        resolution
+    }
+
+    async fn fold_doc_resolved(
+        &mut self,
+        doc: &DocId,
+        read: &DatumsRead,
+    ) -> Option<(DocView, Vec<Cartridge>)> {
+        let (mut view, fresh) = fold_doc(read, &self.first_seen)?;
+        let mut unreadable = Vec::new();
+        let mut invalid_fresh = BTreeSet::new();
+        for (version, state) in &mut view.versions {
+            if state.unverified.is_some() {
+                continue;
+            }
+            match self
+                .cached_resolution(doc, &read.heads, &state.envelope)
+                .await
+            {
+                CachedResolution::Resolved(resolved) => state.resolved = Some(*resolved),
+                CachedResolution::Unreadable(reason) => unreadable.push((version.clone(), reason)),
+                CachedResolution::Invalid(reason) => {
+                    state.conflict = Some(reason);
+                    invalid_fresh.insert(version.clone());
+                }
+            }
+        }
+        for (version, reason) in &unreadable {
+            view.versions.remove(version);
+            view.unreadable.insert(version.to_string(), reason.clone());
+        }
+        let fresh = fresh
+            .into_iter()
+            .filter(|envelope| {
+                !invalid_fresh.contains(&envelope.version)
+                    && !unreadable
+                        .iter()
+                        .any(|(version, _)| version == &envelope.version)
+            })
+            .collect();
+        Some((view, fresh))
+    }
+
     /// Re-reads `doc` from the drawer at its current heads and folds it in.
     async fn refresh(&mut self, doc: &DocId) -> Result<(), CartridgesError> {
         let read = read_doc(&self.docs, self.capability, doc).await?;
@@ -315,7 +434,10 @@ impl State {
         doc: DocId,
         read: Option<&DatumsRead>,
     ) -> Result<(), CartridgesError> {
-        let folded = read.and_then(|read| fold_doc(read, &self.first_seen));
+        let folded = match read {
+            Some(read) => self.fold_doc_resolved(&doc, read).await,
+            None => None,
+        };
         let previous = self.views.get(&doc).map(|view| view.id.clone());
         let next = folded.as_ref().map(|(view, _)| view.id.clone());
         let affected: BTreeSet<CartridgeId> = previous.iter().chain(next.iter()).cloned().collect();
@@ -430,6 +552,12 @@ async fn read_doc(
     .map_err(docs_error)
 }
 
+fn pin_for(doc: &DocId, key: DatumKey, heads: &[ChangeHash]) -> DatumPin {
+    let reference = DatumReference::new(ReferenceDocId::Concrete(doc.clone()), key)
+        .pinned(heads.iter().copied());
+    DatumPin::new(Location::new(reference, None).expect("a location without a fragment is valid"))
+}
+
 /// What the state-owning task is asked to do.
 enum Command {
     /// Run a closure against the state; the closure sends its own reply.
@@ -489,6 +617,7 @@ impl Registry {
             sql,
             first_seen,
             views: BTreeMap::new(),
+            resolution_cache: BTreeMap::new(),
             claims: BTreeMap::new(),
             epoch: Uuid7::new(),
             seq: 0,
@@ -591,6 +720,15 @@ impl Registry {
         let (id, version) = (id.clone(), version.clone());
         self.query(move |state| state.version(&id, &version)).await
     }
+    pub(crate) async fn resolved(
+        &self,
+        id: &CartridgeId,
+        version: &Version,
+    ) -> Result<ResolvedCartridge, CartridgesError> {
+        let (id, version) = (id.clone(), version.clone());
+        self.query(move |state| state.resolved_version(&id, &version))
+            .await
+    }
 
     pub(crate) async fn changes_after(
         &self,
@@ -618,6 +756,378 @@ impl Registry {
         }
     }
 
+    pub(crate) async fn stage(
+        &self,
+        params: StageCartridgeVersion,
+    ) -> Result<Cartridge, CartridgesError> {
+        let _gate = self
+            .gate
+            .acquire()
+            .await
+            .expect("the registry's gate is never closed");
+        let id = params.id.clone();
+        let version = params.version.clone();
+        // Refuse a component whose bytes are not here before any document is made for it.
+        self.check_components(&id, &params.components).await?;
+        let doc = self
+            .query({
+                let id = id.clone();
+                let version = version.clone();
+                move |state| {
+                    if state
+                        .first_seen
+                        .contains_key(&(id.clone(), version.clone()))
+                    {
+                        return Err(CartridgesError::AlreadyPublished {
+                            id: id.clone(),
+                            version: Box::new(version.clone()),
+                        });
+                    }
+                    let Some(doc) = state.primary_doc(&id).cloned() else {
+                        return Ok(None);
+                    };
+                    if state.views[&doc].versions.contains_key(&version)
+                        || state.views[&doc]
+                            .unreadable
+                            .contains_key(&version.to_string())
+                    {
+                        return Err(CartridgesError::AlreadyPublished {
+                            id,
+                            version: Box::new(version),
+                        });
+                    }
+                    Ok(Some(doc))
+                }
+            })
+            .await?;
+        let (doc, current_heads) = match doc {
+            Some(doc) => {
+                let read = read_doc(&self.docs, self.capability, &doc).await?;
+                (doc, read.heads)
+            }
+            None => {
+                let receipt = self
+                    .create(BTreeMap::from([(
+                        identity_key(),
+                        serde_json::to_value(CartridgeIdentity {
+                            id: id.clone(),
+                            extra: Default::default(),
+                        })
+                        .expect("an identity serializes"),
+                    )]))
+                    .await?;
+                // The registry's projection follows its drawer: wait until it serves the new
+                // document, so a publish that follows this stage finds its cartridge.
+                let created = id.clone();
+                self.settled(move |state| state.primary_doc(&created).is_some())
+                    .await;
+                (receipt.doc_id, receipt.heads)
+            }
+        };
+
+        let blob_heads = self
+            .stage_blobs(&doc, &version, &params.components, current_heads)
+            .await?;
+
+        let lexicon_keys: Vec<_> = params.lexicons.keys().cloned().collect();
+        let sidecar_keys: Vec<_> = params.sidecars.keys().cloned().collect();
+        let component_keys: Vec<_> = params.components.keys().cloned().collect();
+        let mut payload = BTreeMap::new();
+        for (nsid, lexicon) in params.lexicons {
+            payload.insert(
+                lexicon_key(&version, &nsid),
+                serde_json::to_value(lexicon).expect("a Lexicon serializes"),
+            );
+        }
+        for (nsid, sidecar) in params.sidecars {
+            payload.insert(
+                sidecar_key(&version, &nsid),
+                serde_json::to_value(sidecar).expect("a sidecar serializes"),
+            );
+        }
+        for (key, component) in params.components {
+            let Component::Wasm(mut wasm) = component else {
+                unreachable!("unknown components were rejected above")
+            };
+            wasm.bytes = pin_for(&doc, artifact_key(&version, &key), &blob_heads);
+            payload.insert(
+                component_key(&version, &key),
+                serde_json::to_value(Component::Wasm(wasm)).expect("a component serializes"),
+            );
+        }
+        let payload_heads = if payload.is_empty() {
+            blob_heads
+        } else {
+            self.write(&doc, payload, BTreeSet::new()).await?.heads
+        };
+        let mut envelope = Cartridge::new(id, version.clone());
+        envelope.lexicons = lexicon_keys
+            .into_iter()
+            .map(|nsid| {
+                (
+                    nsid.clone(),
+                    pin_for(&doc, lexicon_key(&version, &nsid), &payload_heads),
+                )
+            })
+            .collect();
+        envelope.sidecars = sidecar_keys
+            .into_iter()
+            .map(|nsid| {
+                (
+                    nsid.clone(),
+                    pin_for(&doc, sidecar_key(&version, &nsid), &payload_heads),
+                )
+            })
+            .collect();
+        envelope.components = component_keys
+            .into_iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    pin_for(&doc, component_key(&version, &key), &payload_heads),
+                )
+            })
+            .collect();
+        Ok(envelope)
+    }
+
+    /// Each component is a wasm component whose bytes the blob store holds, at the size it states.
+    async fn check_components(
+        &self,
+        id: &CartridgeId,
+        components: &BTreeMap<String, Component>,
+    ) -> Result<(), CartridgesError> {
+        for (key, component) in components {
+            let Component::Wasm(wasm) = component else {
+                return Err(CartridgesError::Rejected(format!(
+                    "component `{key}` is not a known publishable component"
+                )));
+            };
+            let info = self
+                .blobs
+                .stat(&BlobId::new(wasm.digest.0))
+                .await
+                .map_err(|error| CartridgesError::Storage(error.to_string()))?
+                .ok_or_else(|| CartridgesError::ArtifactUnavailable {
+                    id: id.clone(),
+                    artifact: key.clone(),
+                })?;
+            if info.length_octets != wasm.size {
+                return Err(CartridgesError::Rejected(format!(
+                    "component `{key}` declares {} octets, the stored blob has {}",
+                    wasm.size, info.length_octets
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    async fn stage_blobs(
+        &self,
+        doc: &DocId,
+        version: &Version,
+        components: &BTreeMap<String, Component>,
+        current_heads: Vec<ChangeHash>,
+    ) -> Result<Vec<ChangeHash>, CartridgesError> {
+        let mut datums = BTreeMap::new();
+        for (key, component) in components {
+            let Component::Wasm(wasm) = component else {
+                unreachable!("check_components rejected every other component")
+            };
+            let blob = Blob {
+                mime: wasm.media_type.clone(),
+                length_octets: wasm.size,
+                digest: wasm.digest.to_string(),
+                inline: None,
+                urls: None,
+                extra: Default::default(),
+            };
+            let mut raw = serde_json::to_value(&blob).expect("a blob serializes");
+            raw.as_object_mut()
+                .expect("a blob serializes as an object")
+                .retain(|_, value| !value.is_null());
+            datums.insert(artifact_key(version, key), raw);
+        }
+        if datums.is_empty() {
+            Ok(current_heads)
+        } else {
+            Ok(self.write(doc, datums, BTreeSet::new()).await?.heads)
+        }
+    }
+}
+
+async fn read_pinned(
+    docs: &Client<DocsProtocol>,
+    capability: CapId,
+    envelope: &Cartridge,
+    doc: &DocId,
+    key: &DatumKey,
+    pin: &DatumPin,
+) -> Result<Json, CartridgesError> {
+    let reference = pin.location().reference();
+    let actual = reference.document().resolve(doc);
+    if actual != *doc {
+        return Err(CartridgesError::PinnedDocumentMismatch {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            actual,
+            expected: doc.clone(),
+        });
+    }
+    if reference.key() != key {
+        return Err(CartridgesError::PinnedDatumInvalid {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: format!("the pin names `{}`", reference.key()),
+        });
+    }
+    let heads = reference.heads().to_vec();
+    if heads.is_empty() {
+        return Err(CartridgesError::PinnedDatumUnreadable {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: "the pin has no document heads".into(),
+        });
+    }
+    let read = docs
+        .call(
+            RequestContext::root(),
+            ReadDatums {
+                capability,
+                doc_id: doc.clone(),
+                at: At::Heads(heads),
+                datums: Some(BTreeSet::from([key.clone()])),
+                optimistic: false,
+            },
+        )
+        .await
+        .map_err(|error| CartridgesError::PinnedDatumUnreadable {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: docs_error(error).to_string(),
+        })?;
+    match read.datums.get(key) {
+        Some(DatumRead::Accepted { value, .. }) => Ok(value.clone()),
+        Some(DatumRead::Pending { reason, .. }) => Err(CartridgesError::PinnedDatumUnreadable {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: reason.clone(),
+        }),
+        Some(DatumRead::Rejected { reason }) => Err(CartridgesError::PinnedDatumInvalid {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: reason.clone(),
+        }),
+        Some(DatumRead::Undecodable { reason, .. }) => Err(CartridgesError::PinnedDatumInvalid {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: reason.clone(),
+        }),
+        Some(DatumRead::Absent { .. }) | None => Err(CartridgesError::PinnedDatumInvalid {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason: "the datum is absent at the pinned heads".into(),
+        }),
+    }
+}
+
+async fn resolve_envelope(
+    docs: &Client<DocsProtocol>,
+    capability: CapId,
+    doc: &DocId,
+    envelope: &Cartridge,
+) -> Result<ResolvedCartridge, CartridgesError> {
+    envelope.verify_signature()?;
+    let mut lexicons = BTreeMap::new();
+    for (nsid, pin) in &envelope.lexicons {
+        let key = lexicon_key(&envelope.version, nsid);
+        let value = read_pinned(docs, capability, envelope, doc, &key, pin).await?;
+        let file: big_cabinet_core::datum::Extra =
+            serde_json::from_value(value).map_err(|error| CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: key.to_string(),
+                reason: error.to_string(),
+            })?;
+        if file.get("id").and_then(Json::as_str) != Some(nsid.as_str()) {
+            return Err(CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: key.to_string(),
+                reason: "the Lexicon id does not match the envelope key".into(),
+            });
+        }
+        lexicons.insert(nsid.clone(), file);
+    }
+    let mut sidecars = BTreeMap::new();
+    for (nsid, pin) in &envelope.sidecars {
+        let key = sidecar_key(&envelope.version, nsid);
+        let value = read_pinned(docs, capability, envelope, doc, &key, pin).await?;
+        let file: big_cabinet_core::datum::Extra =
+            serde_json::from_value(value).map_err(|error| CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: key.to_string(),
+                reason: error.to_string(),
+            })?;
+        sidecars.insert(nsid.clone(), file);
+    }
+    let mut components = BTreeMap::new();
+    for (name, pin) in &envelope.components {
+        let key = component_key(&envelope.version, name);
+        let value = read_pinned(docs, capability, envelope, doc, &key, pin).await?;
+        let component: Component =
+            serde_json::from_value(value).map_err(|error| CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: key.to_string(),
+                reason: error.to_string(),
+            })?;
+        let Component::Wasm(wasm) = &component else {
+            return Err(CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: key.to_string(),
+                reason: "the component kind is not supported".into(),
+            });
+        };
+        let blob_key = artifact_key(&envelope.version, name);
+        let blob_value =
+            read_pinned(docs, capability, envelope, doc, &blob_key, &wasm.bytes).await?;
+        let blob: Blob = serde_json::from_value(blob_value).map_err(|error| {
+            CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: blob_key.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        if blob.digest != wasm.digest.to_string() || blob.length_octets != wasm.size {
+            return Err(CartridgesError::PinnedDatumInvalid {
+                id: envelope.id.clone(),
+                version: Box::new(envelope.version.clone()),
+                key: blob_key.to_string(),
+                reason: "the blob metadata does not match the component".into(),
+            });
+        }
+        components.insert(name.clone(), component);
+    }
+    Ok(ResolvedCartridge::new(
+        envelope.clone(),
+        lexicons,
+        sidecars,
+        components,
+    ))
+}
+impl Registry {
     pub(crate) async fn publish(
         &self,
         envelope: Cartridge,
@@ -625,128 +1135,73 @@ impl Registry {
         envelope
             .validate()
             .map_err(|error| CartridgesError::Rejected(error.to_string()))?;
-        // Signature checking is CPU work with no registry state in it, so it runs before the gate.
-        // It also runs for an envelope the service just signed for the node: acceptance never
-        // assumes who produced the signature.
         envelope.verify_signature()?;
         let _gate = self
             .gate
             .acquire()
             .await
             .expect("the registry's gate is never closed");
+        let id = envelope.id.clone();
+        let version = envelope.version.clone();
         let revision = envelope.revision();
-        let (id, version) = (envelope.id.clone(), envelope.version.clone());
-        let checked = {
-            let (id, version) = (id.clone(), version.clone());
-            self.query(move |state| {
-                match state.first_seen.get(&(id.clone(), version.clone())) {
-                    Some(seen) if seen.revision != revision => {
-                        return Err(CartridgesError::VersionExists {
-                            id,
-                            version: Box::new(version),
-                            existing: seen.revision,
-                            incoming: revision,
-                        });
-                    }
-                    // An existing or tombstoned label with identical content is a republish,
-                    // which is allowed whatever its position in the version order.
-                    Some(_) => {}
-                    // A new label must order after every label this cartridge has or had, tombstones
-                    // included (the first-seen record outlives removal), so a validly signed
-                    // older version cannot be published as if it were an upgrade.
-                    None => {
-                        // `0.0.0-0` is the lowest semver precedence, so the range starts at the
-                        // cartridge's first possible version.
-                        let lowest: Version = "0.0.0-0".parse().expect("a valid semver");
-                        let newest = state
-                            .first_seen
-                            .range((id.clone(), lowest)..)
-                            .take_while(|((seen, _), _)| *seen == id)
-                            .map(|((_, seen), _)| seen)
-                            .last();
-                        if let Some(newest) = newest
-                            && version <= *newest
-                        {
-                            return Err(CartridgesError::Downgrade {
+        let doc = self
+            .query({
+                let id = id.clone();
+                let version = version.clone();
+                move |state| {
+                    let doc = state
+                        .primary_doc(&id)
+                        .cloned()
+                        .ok_or_else(|| CartridgesError::UnknownCartridge(id.clone()))?;
+                    match state.first_seen.get(&(id.clone(), version.clone())) {
+                        Some(seen) if seen.revision != revision => {
+                            return Err(CartridgesError::VersionExists {
                                 id,
                                 version: Box::new(version),
-                                newest: Box::new(newest.clone()),
+                                existing: seen.revision,
+                                incoming: revision,
                             });
                         }
+                        Some(_) => {}
+                        None => {
+                            let lowest: Version = "0.0.0-0".parse().expect("a valid semver");
+                            let newest = state
+                                .first_seen
+                                .range((id.clone(), lowest)..)
+                                .take_while(|((seen, _), _)| *seen == id)
+                                .map(|((_, seen), _)| seen)
+                                .last();
+                            if let Some(newest) = newest
+                                && version <= *newest
+                            {
+                                return Err(CartridgesError::Downgrade {
+                                    id,
+                                    version: Box::new(version),
+                                    newest: Box::new(newest.clone()),
+                                });
+                            }
+                        }
                     }
+                    Ok(doc)
                 }
-                if let Ok(record) = state.version(&id, &version)
-                    && record.revision == revision
-                    && record.conflict.is_none()
-                {
-                    return Ok(Err(PublishedCartridgeVersion {
-                        record,
-                        unchanged: true,
-                    }));
-                }
-                Ok(Ok(state.primary_doc(&id).cloned()))
             })
-            .await
-        };
-        let doc = match checked? {
-            Ok(doc) => doc,
-            Err(unchanged) => return Ok(unchanged),
-        };
-        let mut set = BTreeMap::new();
-        for artifact in &envelope.artifacts {
-            let info = self
-                .blobs
-                .stat(&BlobId::new(artifact.digest.0))
-                .await
-                .map_err(|error| CartridgesError::Storage(error.to_string()))?
-                .ok_or_else(|| CartridgesError::ArtifactUnavailable {
-                    id: id.clone(),
-                    artifact: artifact.key.clone(),
-                })?;
-            if let Some(size) = artifact.size
-                && size != info.length_octets
-            {
-                return Err(CartridgesError::Rejected(format!(
-                    "artifact `{}` declares {size} octets, the stored blob has {}",
-                    artifact.key, info.length_octets
-                )));
-            }
-            let blob = Blob {
-                mime: artifact
-                    .media_type
-                    .clone()
-                    .unwrap_or_else(|| "application/octet-stream".to_owned()),
-                length_octets: info.length_octets,
-                digest: artifact.digest.to_string(),
-                inline: None,
-                urls: None,
-                extra: Default::default(),
-            };
-            // The datum wire form omits an unset option rather than writing `null`.
-            let mut raw = serde_json::to_value(&blob).expect("a blob serializes");
-            raw.as_object_mut()
-                .expect("a blob serializes as an object")
-                .retain(|_, value| !value.is_null());
-            set.insert(artifact_key(&version, &artifact.key), raw);
+            .await?;
+        resolve_envelope(&self.docs, self.capability, &doc, &envelope).await?;
+        if let Ok(record) = self.version(&id, &version).await
+            && record.revision == revision
+            && record.conflict.is_none()
+        {
+            return Ok(PublishedCartridgeVersion {
+                record,
+                unchanged: true,
+            });
         }
+        let mut set = BTreeMap::new();
         set.insert(
             version_key(&version),
             serde_json::to_value(&envelope).expect("an envelope serializes"),
         );
-        match doc {
-            Some(doc) => self.write(&doc, set, BTreeSet::new()).await?,
-            None => {
-                set.insert(
-                    identity_key(),
-                    serde_json::to_value(CartridgeIdentity {
-                        id: id.clone(),
-                        extra: Default::default(),
-                    })
-                    .expect("an identity serializes"),
-                );
-                self.create(set).await?;
-            }
-        }
+        self.write(&doc, set, BTreeSet::new()).await?;
         let waited = (id.clone(), version.clone());
         self.settled(move |state| {
             state
@@ -971,7 +1426,8 @@ impl Registry {
         if remove.is_empty() {
             return Ok(());
         }
-        self.write(doc, BTreeMap::new(), remove).await
+        self.write(doc, BTreeMap::new(), remove).await?;
+        Ok(())
     }
 
     async fn write(
@@ -979,7 +1435,7 @@ impl Registry {
         doc: &DocId,
         set: BTreeMap<DatumKey, Json>,
         remove: BTreeSet<DatumKey>,
-    ) -> Result<(), CartridgesError> {
+    ) -> Result<big_cabinet_core::doc::WriteReceipt, CartridgesError> {
         self.docs
             .call(
                 RequestContext::root(),
@@ -993,13 +1449,15 @@ impl Registry {
                 },
             )
             .await
-            .map_err(docs_error)?;
-        Ok(())
+            .map_err(docs_error)
     }
 
     /// A new document in the registry drawer carrying `datums`: its placement enters it in the
     /// drawer, so it is part of the registry from its first write.
-    async fn create(&self, datums: BTreeMap<DatumKey, Json>) -> Result<(), CartridgesError> {
+    async fn create(
+        &self,
+        datums: BTreeMap<DatumKey, Json>,
+    ) -> Result<big_cabinet_core::doc::WriteReceipt, CartridgesError> {
         self.docs
             .call(
                 RequestContext::root(),
@@ -1012,8 +1470,7 @@ impl Registry {
                 },
             )
             .await
-            .map_err(docs_error)?;
-        Ok(())
+            .map_err(docs_error)
     }
 
     /// Follows the registry drawer: scans it from cursor 0, signals `ready` once the scan has
@@ -1108,173 +1565,5 @@ impl Registry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use big_cabinet_core::doc::DatumVersion;
-    use big_cartridges_core::test_support::cartridge_id;
-    use big_cartridges_core::test_support::sign_as_example;
-    use big_cartridges_core::test_support::sign_with_seed;
-    use serde_json::json;
-
-    fn accepted(value: Json) -> DatumRead {
-        DatumRead::Accepted {
-            value,
-            version: DatumVersion::default(),
-            authors: Vec::new(),
-        }
-    }
-
-    fn cartridge(version: &str, title: &str) -> Cartridge {
-        let mut cartridge = Cartridge::new(cartridge_id("photos"), version.parse().unwrap());
-        cartridge.title = Some(title.into());
-        sign_as_example(cartridge)
-    }
-
-    /// A registry document for `photos` holding `versions` as `(slot, datum)`.
-    fn document(versions: Vec<(&str, DatumRead)>) -> DatumsRead {
-        let mut datums = BTreeMap::from([(
-            identity_key(),
-            accepted(json!({ "id": cartridge_id("photos").to_string() })),
-        )]);
-        for (slot, datum) in versions {
-            datums.insert(DatumKey::from_text(Cartridge::ID, slot).unwrap(), datum);
-        }
-        DatumsRead {
-            heads: Vec::new(),
-            datums,
-        }
-    }
-
-    fn pins(cartridges: &[&Cartridge]) -> FirstSeenMap {
-        cartridges
-            .iter()
-            .map(|cartridge| {
-                (
-                    (cartridge.id.clone(), cartridge.version.clone()),
-                    FirstSeen {
-                        revision: cartridge.revision(),
-                        envelope: (*cartridge).clone(),
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn datum(cartridge: &Cartridge) -> DatumRead {
-        accepted(serde_json::to_value(cartridge).unwrap())
-    }
-
-    #[test]
-    fn an_unseen_version_is_first_seen_and_a_document_without_identity_is_no_cartridge() {
-        let v1 = cartridge("1.0.0", "Photos");
-        let (view, fresh) = fold_doc(&document(vec![("1.0.0", datum(&v1))]), &pins(&[])).unwrap();
-        assert_eq!(fresh, std::slice::from_ref(&v1));
-        assert_eq!(view.versions[&v1.version].conflict, None);
-        let anonymous = DatumsRead {
-            heads: Vec::new(),
-            datums: BTreeMap::new(),
-        };
-        assert!(fold_doc(&anonymous, &pins(&[])).is_none());
-    }
-
-    #[test]
-    fn a_changed_datum_is_conflicted_and_the_first_seen_envelope_is_served() {
-        let seen = cartridge("1.0.0", "Photos");
-        let rewritten = cartridge("1.0.0", "Rewritten");
-        let (view, fresh) = fold_doc(
-            &document(vec![("1.0.0", datum(&rewritten))]),
-            &pins(&[&seen]),
-        )
-        .unwrap();
-        assert!(fresh.is_empty());
-        let state = &view.versions[&seen.version];
-        assert_eq!(state.envelope, seen);
-        assert!(state.conflict.as_deref().unwrap().contains("first seen"));
-        // The same revision is the version, unconflicted.
-        let (view, _) =
-            fold_doc(&document(vec![("1.0.0", datum(&seen))]), &pins(&[&seen])).unwrap();
-        assert_eq!(view.versions[&seen.version].conflict, None);
-    }
-
-    #[test]
-    fn unreadable_slots_are_reported_and_an_unreadable_pinned_version_is_conflicted() {
-        let seen = cartridge("1.0.0", "Photos");
-        let mislabelled = cartridge("2.0.0", "Photos");
-        let view = fold_doc(
-            &document(vec![
-                ("1.0", datum(&seen)),
-                ("1.1.0", datum(&mislabelled)),
-                ("1.2.0", accepted(json!({ "nonsense": true }))),
-                (
-                    "1.0.0",
-                    DatumRead::Rejected {
-                        reason: "bad".into(),
-                    },
-                ),
-            ]),
-            &pins(&[&seen]),
-        )
-        .unwrap()
-        .0;
-        assert_eq!(
-            view.unreadable
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            ["1.0", "1.1.0", "1.2.0"]
-        );
-        assert_eq!(
-            view.versions[&seen.version].conflict.as_deref(),
-            Some("rejected: bad")
-        );
-    }
-
-    #[test]
-    fn an_unseen_version_with_a_bad_signature_is_listed_unverified_and_never_pinned() {
-        let genuine = cartridge("1.0.0", "Photos");
-        let forged = sign_with_seed(cartridge("1.1.0", "Photos"), &[9; 32]);
-        let mut unsigned = cartridge("1.2.0", "Photos");
-        unsigned.signature = None;
-        let mut web = cartridge("1.3.0", "Photos");
-        web.id = big_cartridges_core::CartridgeId::new("did:web:example.com", "photos").unwrap();
-        let (view, fresh) = fold_doc(
-            &document(vec![
-                ("1.0.0", datum(&genuine)),
-                ("1.1.0", datum(&forged)),
-                ("1.2.0", datum(&unsigned)),
-            ]),
-            &pins(&[]),
-        )
-        .unwrap();
-        // Only the verified version is pinned as first-seen, so a bad copy cannot reserve a label.
-        assert_eq!(fresh, std::slice::from_ref(&genuine));
-        assert_eq!(view.versions[&genuine.version].unverified, None);
-        for (version, reason) in [
-            (&forged.version, "does not verify"),
-            (&unsigned.version, "no signature"),
-        ] {
-            let reason_found = view.versions[version].unverified.as_deref().unwrap();
-            assert!(reason_found.contains(reason), "{reason_found}");
-        }
-        // A version already pinned stays served from the pin even if the drawer's copy lost its
-        // signature: the revision is the same content, and the pin was verified when it was taken.
-        let (view, _) = fold_doc(
-            &document(vec![(
-                "1.0.0",
-                datum(&{
-                    let mut stripped = genuine.clone();
-                    stripped.signature = None;
-                    stripped
-                }),
-            )]),
-            &pins(&[&genuine]),
-        )
-        .unwrap();
-        let state = &view.versions[&genuine.version];
-        assert_eq!(
-            (state.conflict.as_deref(), state.unverified.as_deref()),
-            (None, None)
-        );
-        assert_eq!(state.envelope, genuine);
-    }
-}
+#[path = "registry_tests.rs"]
+mod tests;
