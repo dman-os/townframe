@@ -1,6 +1,8 @@
 #![recursion_limit = "256"]
 
 mod blob_boot;
+#[cfg(any(test, feature = "test-support"))]
+mod fixture;
 mod info;
 mod listeners;
 pub mod peers;
@@ -40,6 +42,8 @@ use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges::Cartridges;
 use big_cartridges::CartridgesConfig;
 use big_cartridges::RegistryDrawerConfig;
+use big_cartridges_core::protocol::CartridgesScope;
+use big_cartridges_core::protocol::MintCartridgesCapability;
 use big_dispatch::Dispatch;
 use big_dispatch::DispatchConfig;
 use big_dispatch::ServiceProvider;
@@ -298,11 +302,7 @@ impl BigNode {
         // Boxed: booting every service inline makes this future large enough (in debug builds); a caller awaiting it, such as a test that reboots a node, overflows its stack.
 
         let boot: Res<Self> = Box::pin(async {
-            let schemas = Arc::new(config.schemas.with_groups([
-                big_blobs::schema::registration(),
-                big_nodule::schema_group(),
-                big_cartridges::schema_group(),
-            ])?);
+            let schemas = Arc::new(config.schemas.with_groups(node_schema_groups())?);
             let node_id = node_id(&config.repo.node_identity_seed);
             let authority = boot_authority(&config, &node_id, &mut stop).await?;
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
@@ -596,6 +596,16 @@ async fn boot_cartridges(
     Ok(cartridges)
 }
 
+/// The schema groups the node's own services declare: blobs, nodules and the cartridge registry.
+fn node_schema_groups() -> impl Iterator<Item = big_cabinet::SchemaRegistrationGroup<'static>> {
+    [
+        big_blobs::schema::registration(),
+        big_nodule::schema_group(),
+    ]
+    .into_iter()
+    .chain(big_cartridges::schema_groups())
+}
+
 /// Opens the drawer access policy the docs service consults, as the drawers actor. The
 /// authority's root identity is handed to it as the operator, the cabinet's superuser: it reaches
 /// every drawer on this node without a standing grant, so it can lend a handle on a drawer that
@@ -817,6 +827,21 @@ where
             sql: sql.clone(),
         })
         .await?;
+    // The nodule service resolves the versions its installs pin through the cartridges service,
+    // presenting a read-only handle the operator introduces to it, bound to its own actor.
+    let cartridges_handle = cartridges
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            MintCartridgesCapability {
+                scope: CartridgesScope::default(),
+                rights: Rights::USE,
+                subject: Some(nodules_actor.actor.actor_id),
+            },
+        )
+        .await?
+        .capability_id;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -831,6 +856,11 @@ where
         dispatch: Arc::clone(&dispatch.router),
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
+        cartridges: cartridges.client.clone(),
+        cartridges_authorization: Authorization {
+            authority: cartridges_handle,
+            signer: nodules_actor.capability,
+        },
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,

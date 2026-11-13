@@ -9,6 +9,10 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[features]
+# Publishing cartridge fixtures through a booted node (`BigNode::publish_fixture`).
+test-support = ["big_cartridges_core/test-support"]
+
 [dependencies]
 #
 # internal

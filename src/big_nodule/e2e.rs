@@ -6,6 +6,8 @@ use crate::Nodules;
 use crate::NodulesConfig;
 use crate::boot;
 use crate::executor::NoduleExecutor;
+use big_blobs_core::BlobsScope;
+use big_blobs_core::MintBlobsCapability;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
 use big_cabinet::DocsConfig;
@@ -47,8 +49,16 @@ use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::Cartridge;
 use big_cartridges_core::CartridgeId;
-use big_cartridges_core::Contribution;
-use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::ComponentExport;
+use big_cartridges_core::MicroContribution;
+use big_cartridges_core::Necessity;
+use big_cartridges_core::Nodule as ManifestNodule;
+use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindMethod;
+
+use big_cartridges_core::Routine;
+use big_cartridges_core::RoutineImpl;
+use big_cartridges_core::RoutineUse;
 use big_cartridges_core::config::CartridgeInstall;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
@@ -56,22 +66,26 @@ use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
 use big_cartridges_core::protocol::CartridgesError;
+use big_cartridges_core::protocol::CartridgesScope;
 use big_cartridges_core::protocol::ClearCartridgeConfig;
+use big_cartridges_core::protocol::GetCartridge;
+use big_cartridges_core::protocol::GetCartridgeVersion;
 use big_cartridges_core::protocol::InstallCartridge;
 use big_cartridges_core::protocol::ListCartridgeInstalls;
+use big_cartridges_core::protocol::MintCartridgesCapability;
 use big_cartridges_core::protocol::ObserveCartridgeInstalls;
+use big_cartridges_core::protocol::PublishCartridgeVersion;
 use big_cartridges_core::protocol::SetCartridgeEnabled;
 use big_cartridges_core::protocol::SetCartridgeGrant;
 use big_cartridges_core::protocol::UninstallCartridge;
-use big_cartridges_core::registry::version_key;
 use big_cartridges_core::registry::version_pin;
-use big_cartridges_core::test_support::sign_as_example;
+use big_cartridges_core::test_support::FixtureCartridge;
 use big_dispatch::Dispatch;
 use big_dispatch::DispatchConfig;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::Readiness;
-use big_nodule_core::Nodule;
+
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::MintNoduleCapability;
@@ -119,10 +133,9 @@ const NOTE: &str = "org.example.note";
 
 /// A package whose nodule declares one record lexicon and, when `settings` is set, one settings
 /// datum with a boolean `thumbnails` member.
-fn cartridge(id: &str, version: &str, settings: bool) -> Cartridge {
+fn cartridge(id: &str, version: &str, settings: bool) -> FixtureCartridge {
     let nodule_id = format!("org.example.{}", id.rsplit('/').next().unwrap());
-    let mut nodule = Nodule::default();
-    nodule.lexicons.push(lexicon(json!({
+    let item = lexicon(json!({
         "lexicon": 1,
         "id": format!("{nodule_id}.item"),
         "defs": {
@@ -132,11 +145,14 @@ fn cartridge(id: &str, version: &str, settings: bool) -> Cartridge {
                 "record": { "type": "object", "properties": {} }
             }
         }
-    })));
+    }));
+    let mut lexicons = vec![item];
+    let nodule = ManifestNodule::default();
     if settings {
-        nodule.lexicons.push(lexicon(json!({
+        let settings_id = format!("{nodule_id}.settings");
+        lexicons.push(lexicon(json!({
             "lexicon": 1,
-            "id": format!("{nodule_id}.settings"),
+            "id": settings_id,
             "defs": {
                 "main": {
                     "type": "object",
@@ -144,18 +160,71 @@ fn cartridge(id: &str, version: &str, settings: bool) -> Cartridge {
                 }
             }
         })));
-        nodule.settings = vec![format!("{nodule_id}.settings")];
     }
-    let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
+    let mut cartridge = FixtureCartridge::new(Cartridge::new(
+        id.parse().unwrap(),
+        version.parse().unwrap(),
+    ));
     cartridge.authority = Some(nodule_id);
+    cartridge.nodule = Some(nodule);
+    cartridge.settings = settings
+        .then(|| {
+            format!("org.example.{}.settings", id.rsplit('/').next().unwrap())
+                .parse()
+                .unwrap()
+        })
+        .into_iter()
+        .collect();
+    for file in lexicons {
+        cartridge.with_lexicon(file);
+    }
     cartridge
-        .contributions
-        .push(Contribution::Nodule(NoduleContribution {
-            schema: Nodule::ID.into(),
-            description: lexicon(serde_json::to_value(nodule).unwrap()),
+}
+
+fn nodule_mut(cartridge: &mut FixtureCartridge) -> &mut ManifestNodule {
+    cartridge.nodule.as_mut().expect("fixture carries a nodule")
+}
+
+fn add_routine(
+    cartridge: &mut FixtureCartridge,
+    key: &str,
+    operation: &str,
+    component: &str,
+    export: &str,
+    uses: BTreeMap<String, RoutineUse>,
+) {
+    nodule_mut(cartridge).routines.insert(
+        key.into(),
+        Routine {
+            r#impl: RoutineImpl::ComponentExport(ComponentExport {
+                component: component.into(),
+                export: export.into(),
+                extra: Default::default(),
+            }),
+            implements: operation.parse().unwrap(),
+            uses,
             extra: Default::default(),
-        }));
-    cartridge
+        },
+    );
+}
+
+fn add_method(
+    cartridge: &mut FixtureCartridge,
+    binding: &str,
+    operation: &str,
+    necessity: Necessity,
+    min_revision: Option<u32>,
+) {
+    cartridge.permbinds.insert(
+        binding.into(),
+        Permbind::Method(PermbindMethod {
+            nsid: operation.parse().unwrap(),
+            description: binding.into(),
+            necessity,
+            min_revision,
+            extra: Default::default(),
+        }),
+    );
 }
 
 fn lexicon(value: Value) -> IndexMap<String, Value> {
@@ -165,27 +234,30 @@ fn lexicon(value: Value) -> IndexMap<String, Value> {
 /// The schemas the nodule config document and its test notes need.
 fn test_schemas() -> Arc<SchemaRepo> {
     Arc::new(
-        SchemaRepo::open([
-            crate::schema_group(),
-            big_cartridges::schema_group(),
-            blob_schemas(),
-            SchemaRegistrationGroup::new(
-                None,
-                [SchemaRegistration::new(
-                    NOTE,
-                    json!({
-                        "lexicon": 1,
-                        "id": NOTE,
-                        "defs": {"main": {"type": "record", "key": "tid", "record": {
-                            "type": "object",
-                            "required": ["value"],
-                            "properties": {"value": {"type": "string"}}
-                        }}}
-                    }),
-                )],
-                Vec::new(),
-            ),
-        ])
+        SchemaRepo::open(
+            [crate::schema_group()]
+                .into_iter()
+                .chain(big_cartridges::schema_groups())
+                .chain([
+                    Node::blob_schemas(),
+                    SchemaRegistrationGroup::new(
+                        None,
+                        [SchemaRegistration::new(
+                            NOTE,
+                            json!({
+                                "lexicon": 1,
+                                "id": NOTE,
+                                "defs": {"main": {"type": "record", "key": "tid", "record": {
+                                    "type": "object",
+                                    "required": ["value"],
+                                    "properties": {"value": {"type": "string"}}
+                                }}}
+                            }),
+                        )],
+                        Vec::new(),
+                    ),
+                ]),
+        )
         .expect("schemas"),
     )
 }
@@ -238,6 +310,15 @@ struct Node {
     /// the cartridge config documents live (the shared config drawer the service creates).
     registry_drawer: DrawerId,
     shared_config_drawer: DrawerId,
+    /// The blob store the registry stages component bytes from, and the registry service the
+    /// nodule service resolves pinned versions through, booted as `big_node` boots them.
+    blobs: big_blobs::Blobs,
+    blobs_stop: StopToken,
+    cartridges: big_cartridges::Cartridges,
+    cartridges_stop: StopToken,
+    /// The read-only handle the nodule service presents to the registry (see
+    /// [`NodulesConfig::cartridges_authorization`]).
+    cartridges_authorization: Authorization,
     docs: DocsRepo,
     drawers: Drawers,
     sql: TestDb,
@@ -251,18 +332,6 @@ struct Node {
     executor: Option<Arc<dyn NoduleExecutor>>,
     allow_slot_takeover: bool,
     stop: Option<StopToken>,
-}
-
-/// The `Blob` datum Lexicon, which the nodule config document's artifact references need and the
-/// embedder (big_node, through big_blobs) registers beside [`crate::schema_group`].
-fn blob_schemas() -> SchemaRegistrationGroup<'static> {
-    let bundle = big_cabinet_core::datum::Bundle::new(&big_blobs_core::UNIVERSE, Vec::new());
-    let registrations = bundle
-        .lexicons()
-        .expect("blob declarations publish lexicons")
-        .into_iter()
-        .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
-    SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
 }
 
 async fn node() -> Node {
@@ -303,16 +372,7 @@ async fn node_with_takeover(
     let drawers_actor = open("drawers").await.expect("drawers actor");
     let nodules_actor = open(NODULES_PATH).await.expect("nodules actor");
     let dispatch_actor = open("dispatch").await.expect("dispatch actor");
-    let dispatch_namespace = authority
-        .service
-        .open_namespace(dispatch_actor.actor.actor_id)
-        .await
-        .expect("dispatch namespace");
-    let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
-        authority: authority.client.clone(),
-        namespace: dispatch_namespace,
-        operator: authority.service.operator_uuid(),
-    });
+    let (dispatch, dispatch_stop) = Node::boot_dispatch(&authority, &dispatch_actor).await;
     let docs_namespace = authority
         .service
         .open_namespace(docs_actor.actor.actor_id)
@@ -381,6 +441,17 @@ async fn node_with_takeover(
         &sql,
     )
     .await;
+    let (blobs, blobs_stop, cartridges, cartridges_stop, cartridges_authorization) =
+        Node::boot_registry(
+            &authority,
+            &docs,
+            &drawers,
+            &drawers_actor,
+            &registry_drawer,
+            &nodules_actor,
+            &sql,
+        )
+        .await;
     let dispatch_authority =
         grant_nodule_dispatch(&authority, &dispatch, nodules_actor.actor.actor_id).await;
     let (nodules, stop) = boot_nodules(
@@ -392,6 +463,8 @@ async fn node_with_takeover(
         &shared_config_drawer,
         &dispatch,
         dispatch_authority,
+        &cartridges,
+        cartridges_authorization,
         &sql,
         &schemas,
         executor.clone(),
@@ -413,6 +486,11 @@ async fn node_with_takeover(
         nodules_actor,
         registry_drawer,
         shared_config_drawer,
+        blobs,
+        blobs_stop,
+        cartridges,
+        cartridges_stop,
+        cartridges_authorization,
         docs,
         drawers,
         sql,
@@ -526,6 +604,8 @@ async fn boot_nodules(
     shared_config_drawer: &DrawerId,
     dispatch: &Dispatch,
     dispatch_authority: CapId,
+    cartridges: &big_cartridges::Cartridges,
+    cartridges_authorization: Authorization,
     sql: &TestDb,
     schemas: &Arc<SchemaRepo>,
     executor: Option<Arc<dyn NoduleExecutor>>,
@@ -550,6 +630,8 @@ async fn boot_nodules(
         dispatch: Arc::clone(&dispatch.router),
         dispatch_client: dispatch.client.clone(),
         dispatch_authority,
+        cartridges: cartridges.client.clone(),
+        cartridges_authorization,
         executor,
         schemas: Arc::clone(schemas),
         allow_slot_takeover,
@@ -559,6 +641,146 @@ async fn boot_nodules(
 }
 
 impl Node {
+    /// Boots dispatch under its own actor's namespace.
+    async fn boot_dispatch(
+        authority: &Authority,
+        dispatch_actor: &OpenedActor,
+    ) -> (Dispatch, StopToken) {
+        let namespace = authority
+            .service
+            .open_namespace(dispatch_actor.actor.actor_id)
+            .await
+            .expect("dispatch namespace");
+        big_dispatch::boot(DispatchConfig {
+            authority: authority.client.clone(),
+            namespace,
+            operator: authority.service.operator_uuid(),
+        })
+    }
+
+    /// The `Blob` datum Lexicon, which the nodule config document's artifact references need and the
+    /// embedder (big_node, through big_blobs) registers beside [`crate::schema_group`].
+    fn blob_schemas() -> SchemaRegistrationGroup<'static> {
+        let bundle = big_cabinet_core::datum::Bundle::new(&big_blobs_core::UNIVERSE, Vec::new());
+        let registrations = bundle
+            .lexicons()
+            .expect("blob declarations publish lexicons")
+            .into_iter()
+            .map(|lexicon| SchemaRegistration::new(lexicon.id, lexicon.file));
+        SchemaRegistrationGroup::new(Some(bundle), registrations, Vec::new())
+    }
+
+    /// Boots the blob store and the registry service over `registry_drawer`, as `big_node` does,
+    /// and mints the read-only handle the nodule service presents to the registry.
+    async fn boot_registry(
+        authority: &Authority,
+        docs: &DocsRepo,
+        drawers: &Drawers,
+        drawers_actor: &OpenedActor,
+        registry_drawer: &DrawerId,
+        nodules_actor: &OpenedActor,
+        sql: &TestDb,
+    ) -> (
+        big_blobs::Blobs,
+        StopToken,
+        big_cartridges::Cartridges,
+        StopToken,
+        Authorization,
+    ) {
+        let open = |path: &str| {
+            authority.client.call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: authority.root,
+                    path: path.into(),
+                    rights: Rights::all(),
+                },
+            )
+        };
+        let cartridges_actor = open("cartridges").await.expect("cartridges actor");
+        let blobs_actor = open("blobs").await.expect("blobs actor");
+        let blobs_namespace = authority
+            .service
+            .open_namespace(blobs_actor.actor.actor_id)
+            .await
+            .expect("blobs namespace");
+        let (blobs, blobs_stop) = big_blobs::boot(big_blobs::Config {
+            storage: big_blobs::Storage::memory().expect("blob storage"),
+            sql: (*sql).clone(),
+            authority: authority.client.clone(),
+            namespace: blobs_namespace,
+            operator: authority.service.operator_uuid(),
+        })
+        .await
+        .expect("blobs boot");
+        grant_drawer(
+            drawers,
+            drawers_actor,
+            registry_drawer,
+            cartridges_actor.actor.actor_id,
+            DrawerAccess::Admin,
+        )
+        .await;
+        let cartridges_namespace = authority
+            .service
+            .open_namespace(cartridges_actor.actor.actor_id)
+            .await
+            .expect("cartridges namespace");
+        let (cartridges, cartridges_stop) =
+            big_cartridges::boot(big_cartridges::CartridgesConfig {
+                authority: authority.client.clone(),
+                docs: docs.client.clone(),
+                drawers: drawers.client.clone(),
+                registry_drawer: registry_drawer.clone(),
+                actor: cartridges_actor,
+                namespace: cartridges_namespace,
+                operator: authority.service.operator_uuid(),
+                blobs: Arc::clone(&blobs.service),
+                node_key: big_cartridges::NodeKey {
+                    public_key: authority.service.node_public_key(),
+                    sign: Arc::new({
+                        let service = Arc::clone(&authority.service);
+                        move |message: &[u8]| {
+                            let payload = message
+                                .strip_prefix(big_cartridges_core::signature::SIGNING_DOMAIN)
+                                .expect("the registry only signs cartridge signing messages");
+                            service.sign_as_node(
+                                big_cartridges_core::signature::SIGNING_DOMAIN,
+                                payload,
+                            )
+                        }
+                    }),
+                },
+                sql: (*sql).clone(),
+            })
+            .await
+            .expect("cartridges boot");
+        let cartridges_authorization = Authorization {
+            authority: cartridges
+                .client
+                .call_with(
+                    RequestContext::root(),
+                    Authorization::identity(authority.root).metadata(),
+                    MintCartridgesCapability {
+                        scope: CartridgesScope::default(),
+                        rights: Rights::USE,
+                        subject: Some(nodules_actor.actor.actor_id),
+                    },
+                )
+                .await
+                .expect("a read-only registry handle")
+                .capability_id,
+            signer: nodules_actor.capability,
+        };
+        (
+            blobs,
+            blobs_stop,
+            cartridges,
+            cartridges_stop,
+            cartridges_authorization,
+        )
+    }
+
     /// Writes `set` straight into the node's config drawer document, as any client holding a
     /// capability on it can, bypassing the nodule service's own validation.
     async fn write_config_datums(&self, set: BTreeMap<DatumKey, Value>) -> WriteReceipt {
@@ -675,6 +897,8 @@ impl Node {
             &self.shared_config_drawer,
             &self.dispatch,
             self.dispatch_authority,
+            &self.cartridges,
+            self.cartridges_authorization,
             &self.sql,
             &self.schemas,
             self.executor.clone(),
@@ -690,6 +914,8 @@ impl Node {
         if let Some(stop) = self.stop.take() {
             stop.stop().await;
         }
+        self.cartridges_stop.stop().await;
+        self.blobs_stop.stop().await;
         self.drawers_stop.stop().await;
         self.worker_stop.stop().await;
         drop(self.worker.take());
@@ -722,63 +948,97 @@ impl Node {
             })
     }
 
-    /// Writes `cartridge` (signed as the example namespace when unsigned) as the version datum
-    /// of a new document in the registry drawer, past the registry service, and returns the pin
-    /// of it at the heads it was written at.
-    async fn publish(&self, cartridge: Cartridge) -> DatumPin {
-        let cartridge = if cartridge.signature.is_some() {
-            cartridge
-        } else {
-            sign_as_example(cartridge)
-        };
-        let placement = format!("drawer {}", self.registry_drawer);
-        let capability = self
-            .docs
+    /// Publishes `cartridge` through the registry as the operator, the way a publisher does:
+    /// its component bytes go into the blob store, its payloads are staged into the registry
+    /// document, and the envelope (signed as the example namespace when unsigned) carrying the
+    /// staged pins is published. Returns the pin of the version at the heads it was published at.
+    async fn publish(&self, cartridge: FixtureCartridge) -> DatumPin {
+        let put = self
+            .blobs
             .client
             .call_with(
                 RequestContext::root(),
                 self.operator().metadata(),
-                MintDocCapability {
-                    scope: DocScope {
-                        create: BTreeSet::from([placement.clone()]),
-                        ..DocScope::default()
+                MintBlobsCapability {
+                    scope: BlobsScope {
+                        put: true,
+                        ..Default::default()
                     },
                     rights: Rights::USE,
                     subject: None,
                 },
             )
             .await
-            .expect("a capability to create registry documents")
+            .expect("a blob put handle")
             .capability_id;
-        let receipt = self
-            .docs
+        for bytes in cartridge.blobs.values() {
+            self.blobs
+                .put(
+                    RequestContext::root(),
+                    put,
+                    method_core::ByteBody::from_bytes(bytes.clone()),
+                )
+                .await
+                .expect("a component's bytes");
+        }
+        // A version is published once: the registry refuses another envelope under its label, so a
+        // test that installs the same fixture again (after a refusal at install, say) reuses it.
+        let existing = self
+            .cartridges
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
-                CreateDoc {
-                    capability,
-                    command: CommandId::try_from(format!(
-                        "version {}",
-                        big_cabinet_core::dmeta::Uuid7::new()
-                    ))
-                    .unwrap(),
-                    placement,
-                    datums: BTreeMap::from([(
-                        version_key(&cartridge.version),
-                        serde_json::to_value(&cartridge).unwrap(),
-                    )]),
+                self.operator().metadata(),
+                GetCartridgeVersion {
+                    id: cartridge.id.clone(),
+                    version: cartridge.version.clone(),
+                },
+            )
+            .await;
+        if existing.is_err() {
+            let staged = self
+                .cartridges
+                .client
+                .call_with(
+                    RequestContext::root(),
+                    self.operator().metadata(),
+                    cartridge.stage_request(),
+                )
+                .await
+                .expect("the version's payloads stage");
+            self.cartridges
+                .client
+                .call_with(
+                    RequestContext::root(),
+                    self.operator().metadata(),
+                    PublishCartridgeVersion {
+                        envelope: cartridge.publishable(staged),
+                    },
+                )
+                .await
+                .expect("the version publishes");
+        }
+        let record = self
+            .cartridges
+            .client
+            .call_with(
+                RequestContext::root(),
+                self.operator().metadata(),
+                GetCartridge {
+                    id: cartridge.id.clone(),
                 },
             )
             .await
-            .expect("a registry document for the version");
-        version_pin(receipt.doc_id, &cartridge.version, receipt.heads)
+            .expect("the published cartridge");
+        let heads = self.read_doc(record.doc_id.clone()).await.heads;
+        version_pin(record.doc_id, &cartridge.version, heads)
     }
 
     /// Installs `cartridge` as `authorization`.
     async fn install_cartridge(
         &self,
         authorization: Authorization,
-        cartridge: Cartridge,
+        cartridge: FixtureCartridge,
     ) -> Result<CartridgeInstallRecord, CartridgesError> {
         let pin = self.publish(cartridge).await;
         self.call(authorization, InstallCartridge { cartridge: pin })
@@ -789,7 +1049,7 @@ impl Node {
     async fn admit(
         &self,
         authorization: Authorization,
-        cartridge: Cartridge,
+        cartridge: FixtureCartridge,
     ) -> Result<NoduleRecord, CartridgesError> {
         let installed = self.install_cartridge(authorization, cartridge).await?;
         // The caller may not read the nodule it just installed (a handle minted with `admit` only).
@@ -1148,17 +1408,11 @@ async fn an_enabled_cartridge_holds_its_authority_against_equal_and_nested_prefi
         ("parent", "org.example"),
     ] {
         // A nodule that declares nothing, so only its authority is in question.
-        let mut rival = Cartridge::new(
+        let mut rival = FixtureCartridge::new(Cartridge::new(
             big_cartridges_core::test_support::cartridge_id(name),
             "1.0.0".parse().unwrap(),
-        );
-        rival
-            .contributions
-            .push(Contribution::Nodule(NoduleContribution {
-                schema: Nodule::ID.into(),
-                description: lexicon(serde_json::to_value(Nodule::default()).unwrap()),
-                extra: Default::default(),
-            }));
+        ));
+        rival.nodule = Some(Default::default());
         rival.authority = Some(authority.into());
         // Installing a rival is not holding: the prefix is refused at enablement, which is what
         // lets a dev build for a cartridge be installed beside it.
@@ -1430,12 +1684,11 @@ async fn an_admit_scoped_handle_admits_only_its_own_cartridges() {
 
 /// A package whose nodule lists a settings NSID its Lexicons do not declare, which admission
 /// refuses.
-fn cartridge_with_undeclared_settings(id: &str, version: &str) -> Cartridge {
+fn cartridge_with_undeclared_settings(id: &str, version: &str) -> FixtureCartridge {
     let mut cartridge = cartridge(id, version, true);
-    let Some(Contribution::Nodule(contribution)) = cartridge.contributions.first_mut() else {
-        panic!("test cartridges carry a nodule contribution");
-    };
-    contribution.description["settings"] = json!(["org.example.photos.missing"]);
+    cartridge
+        .settings
+        .insert("org.example.photos.missing".parse().unwrap());
     cartridge
 }
 
@@ -1489,11 +1742,11 @@ async fn an_upgrade_that_fails_admission_is_rejected_and_a_good_one_keeps_actor_
     let upgraded = node
         .admit(
             operator,
-            cartridge(example_cartridge!("photos"), "2.0.0", true),
+            cartridge(example_cartridge!("photos"), "2.1.0", true),
         )
         .await
         .unwrap();
-    assert_eq!(upgraded.version, Some("2.0.0".parse().unwrap()));
+    assert_eq!(upgraded.version, Some("2.1.0".parse().unwrap()));
     assert_eq!(upgraded.actor, v1.actor, "the durable actor is kept");
     assert_eq!(upgraded.error, None);
     assert!(upgraded.drawers[&present].granted);
@@ -1832,23 +2085,15 @@ async fn invalid_imported_grants_are_refused_per_nodule_and_repairable() {
 
 /// `cartridge(.., true)` that also contributes a micro (its component is a second artifact), so
 /// the install has a member for each component, under one pin.
-fn cartridge_with_micro(id: &str, version: &str) -> Cartridge {
+fn cartridge_with_micro(id: &str, version: &str) -> FixtureCartridge {
     let mut cartridge = cartridge(id, version, true);
-    cartridge.artifacts.push(big_cartridges_core::Artifact {
-        key: "micro".into(),
-        digest: big_cartridges_core::Digest::of(b"micro component"),
-        size: Some(15),
-        media_type: Some("application/wasm".into()),
+    cartridge.with_wasm("micro", b"micro component");
+    cartridge.micro = Some(MicroContribution {
+        component: "micro".into(),
+        schema: "org.example.clay.micro".into(),
+        description: Default::default(),
         extra: Default::default(),
     });
-    cartridge.contributions.push(Contribution::Micro(
-        big_cartridges_core::MicroContribution {
-            component: "micro".into(),
-            schema: "org.example.clay.micro".into(),
-            description: Default::default(),
-            extra: Default::default(),
-        },
-    ));
     cartridge
 }
 
@@ -2256,13 +2501,13 @@ async fn a_nodule_and_its_micro_share_one_pin_and_are_enabled_independently() {
     assert_eq!(row.cartridge, install.cartridge);
 
     // A micro-only cartridge installs and is no nodule at all.
-    let mut micro_only = Cartridge::new(
+    let mut micro_only = FixtureCartridge::new(Cartridge::new(
         example_cartridge!("panel").parse().unwrap(),
         "1.0.0".parse().unwrap(),
-    );
+    ));
     let with_micro = cartridge_with_micro(photos, "1.0.0");
-    micro_only.artifacts = with_micro.artifacts.clone();
-    micro_only.contributions = with_micro.contributions[1..].to_vec();
+    micro_only.with_wasm("micro", b"micro component");
+    micro_only.micro = with_micro.micro.clone();
     node.install_cartridge(operator, micro_only).await.unwrap();
     assert_eq!(
         node.install_of(example_cartridge!("panel")).await.nodule,
