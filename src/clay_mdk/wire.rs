@@ -11,6 +11,10 @@ use dioxus_core::BorrowedAttributeValue;
 use dioxus_core::ElementId;
 use dioxus_core::WriteMutations;
 
+/// The name of the event the host answers an element read with. It must equal
+/// `clay_surface::ELEMENT_REPLY`, which this guest-side crate cannot depend on.
+pub const ELEMENT_REPLY: &str = "element-reply";
+
 /// The attribute a slot element carries (an integer slot id). Dioxus has no way to write a
 /// `mount-component` mutation, so a slot is an element whose creation ends with this attribute
 /// and [`WireMutations`] turns the attribute write into the mutation (see

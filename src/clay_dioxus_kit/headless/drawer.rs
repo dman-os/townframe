@@ -17,10 +17,10 @@
 //!
 //! The drawer slides in from the leading edge (a skin animation, `KIT-108`) but does not slide
 //! out: an exit would keep the closed drawer mounted until its animation ends, and neither Blitz
-//! nor the guest wire reports that, so a closed drawer is gone at once. Dismissal is the scrim button (every renderer), Escape (where the
-//! renderer delivers key events inside the drawer: not on Blitz today) and whatever the owner
+//! nor the guest wire reports that, so a closed drawer is gone at once. Dismissal is the scrim button (every renderer), Escape (the panel
+//! takes focus on mount, `focus_on_mount`) and whatever the owner
 //! wires to `on_dismiss`, such as the platform back gesture. Focus is neither trapped nor
-//! restored, for the reason documented on `Sheet`; the web build needs both before it ships
+//! restored yet (see `Sheet`); the web build needs both before it ships
 //! (`KIT-052`). A swipe from the screen edge is not handled: Blitz touch drags become scroll pans
 //! and Android reserves the edge for the system back gesture (the Android findings in the shell
 //! ledger).
@@ -52,12 +52,26 @@ pub fn Drawer(
             class: skin.root,
             "data-state": "open",
             "data-value": "leading",
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:row;justify-content:flex-start",
+            position: "absolute",
+            top: "0",
+            right: "0",
+            bottom: "0",
+            left: "0",
+            z_index: "{layer}",
+            display: "flex",
+            flex_direction: "row",
+            justify_content: "flex-start",
             button {
                 class: skin.scrim,
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
-                style: "position:absolute;top:0;right:0;bottom:0;left:0;border:0;padding:0",
+                position: "absolute",
+                top: "0",
+                right: "0",
+                bottom: "0",
+                left: "0",
+                border: "0",
+                padding: "0",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
@@ -65,7 +79,11 @@ pub fn Drawer(
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
-                style: "position:relative;min-height:0;min-width:0",
+                position: "relative",
+                min_height: "0",
+                min_width: "0",
+                tabindex: "-1",
+                onmounted: super::focus_on_mount,
                 onkeydown: move |event| {
                     if event.key() == Key::Named(NamedKey::Escape) {
                         event.prevent_default();
@@ -158,6 +176,19 @@ mod tests {
         assert_eq!(*dismissals.borrow(), 0);
         page.key(dialog, Key::Named(NamedKey::Escape));
         assert_eq!(*dismissals.borrow(), 1);
+    }
+
+    #[test]
+    fn the_panel_takes_focus_on_mount_so_escape_works_with_no_focusable_child() {
+        fn text_only() -> Element {
+            rsx! {
+                Drawer { name: "Sidebar", open: true, on_dismiss: |_| {}, p { "Nothing to focus" } }
+            }
+        }
+        let mut page = Page::with_props(|()| text_only(), ());
+        let dialog = page.by_role("dialog", "Sidebar");
+        assert_eq!(page.attr(dialog, "tabindex").as_deref(), Some("-1"));
+        assert_eq!(page.mount(dialog).get(), Some(true));
     }
 }
 

@@ -14,8 +14,8 @@
 //! The sheet rises (bottom) or slides in (side) with a skin animation (`KIT-108`) but has no
 //! exit animation: that would keep the dismissed sheet mounted until the animation ends, and
 //! neither Blitz nor the guest wire reports it. Dismissal paths are the scrim button (every renderer) and Escape (where the renderer
-//! delivers key events to the sheet, which needs focus inside it: not on Blitz today). Focus is
-//! neither trapped nor restored, because Blitz has no focus API to build either on; the web
+//! delivers key events to the sheet). The panel takes focus on mount (`focus_on_mount`, so Escape
+//! works with no focusable child) but focus is neither trapped nor restored; the web
 //! build needs both before it ships (`KIT-052`).
 use crate::Layer;
 use crate::WidthClass;
@@ -72,12 +72,26 @@ pub fn Sheet(
             class: skin.root,
             "data-state": "open",
             "data-value": placement.value(),
-            style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{layer};display:flex;flex-direction:{direction};justify-content:flex-end",
+            position: "absolute",
+            top: "0",
+            right: "0",
+            bottom: "0",
+            left: "0",
+            z_index: "{layer}",
+            display: "flex",
+            flex_direction: "{direction}",
+            justify_content: "flex-end",
             button {
                 class: skin.scrim,
                 r#type: "button",
                 "aria-label": "Dismiss {name}",
-                style: "position:absolute;top:0;right:0;bottom:0;left:0;border:0;padding:0",
+                position: "absolute",
+                top: "0",
+                right: "0",
+                bottom: "0",
+                left: "0",
+                border: "0",
+                padding: "0",
                 onclick: move |_| on_dismiss.call(()),
             }
             div {
@@ -85,7 +99,11 @@ pub fn Sheet(
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-label": "{name}",
-                style: "position:relative;min-height:0;min-width:0",
+                position: "relative",
+                min_height: "0",
+                min_width: "0",
+                tabindex: "-1",
+                onmounted: super::focus_on_mount,
                 onkeydown: move |event| {
                     if event.key() == Key::Named(NamedKey::Escape) {
                         event.prevent_default();
@@ -198,6 +216,25 @@ mod tests {
         assert_eq!(*dismissals.borrow(), 0);
         page.key(dialog, Key::Named(NamedKey::Escape));
         assert_eq!(*dismissals.borrow(), 1);
+    }
+
+    #[test]
+    fn the_panel_takes_focus_on_mount_so_escape_works_with_no_focusable_child() {
+        // The shape of the lab's specimen: a panel holding only text.
+        fn text_only() -> Element {
+            rsx! {
+                Sheet {
+                    name: "Pick a file",
+                    placement: SheetPlacement::Side,
+                    on_dismiss: |_| {},
+                    p { "Nothing to focus in here" }
+                }
+            }
+        }
+        let mut page = Page::with_props(|()| text_only(), ());
+        let dialog = page.by_role("dialog", "Pick a file");
+        assert_eq!(page.attr(dialog, "tabindex").as_deref(), Some("-1"));
+        assert_eq!(page.mount(dialog).get(), Some(true));
     }
 }
 

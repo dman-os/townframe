@@ -1,4 +1,5 @@
 use super::*;
+use clay_surface::ElementAction;
 type SurfaceTree = clay_surface::SurfaceTree<ComponentRef>;
 type Mutation = clay_surface::Mutation<ComponentRef>;
 use clay_surface::AttributeValue;
@@ -569,4 +570,484 @@ fn surface_mount_renders_in_host_vdom_dispatches_reentrantly_and_revokes_on_inst
     );
     drop(host_dom);
     assert!(dropped.get());
+}
+
+/// What a host renderer's `onmounted` hands out, in these tests: it logs every call that reaches
+/// it, so the order in which element commands arrive is observable. Scroll offsets and
+/// `set_focus` are supported; the client rect is left at Dioxus's default `NotSupported`, which is
+/// what a renderer that cannot measure answers.
+#[derive(Clone)]
+struct RecordingElement(Rc<RefCell<Vec<String>>>);
+
+impl dioxus_html::RenderedElementBacking for RecordingElement {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn get_scroll_offset(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn Future<Output = dioxus_html::MountedResult<dioxus_html::geometry::PixelsVector2D>>>,
+    > {
+        self.0.borrow_mut().push("get_scroll_offset".into());
+        Box::pin(async { Ok(dioxus_html::geometry::PixelsVector2D::new(1.0, 2.0)) })
+    }
+
+    fn scroll(
+        &self,
+        coordinates: dioxus_html::geometry::PixelsVector2D,
+        _behavior: dioxus_html::ScrollBehavior,
+    ) -> std::pin::Pin<Box<dyn Future<Output = dioxus_html::MountedResult<()>>>> {
+        self.0
+            .borrow_mut()
+            .push(format!("scroll({}, {})", coordinates.x, coordinates.y));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn set_focus(
+        &self,
+        focus: bool,
+    ) -> std::pin::Pin<Box<dyn Future<Output = dioxus_html::MountedResult<()>>>> {
+        self.0.borrow_mut().push(format!("set_focus({focus})"));
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// `SerializedHtmlEventConverter` for every event but `mounted`, which unpacks a
+/// [`RecordingElement`] the way a real renderer unpacks its platform handle.
+struct RecordingConverter;
+
+macro_rules! delegate_to_serialized {
+    (
+        enum Event {
+            $(
+                #[convert = $converter:ident]
+                #[events = [$($events:tt)*]]
+                $(#[raw = [$($raw:ident),* $(,)?]])?
+                $group:ident($data:ident),
+            )*
+        }
+    ) => {
+        impl dioxus_html::HtmlEventConverter for RecordingConverter {
+            $( delegate_to_serialized!(@one $converter, $data); )*
+        }
+    };
+    (@one convert_mounted_data, MountedData) => {
+        fn convert_mounted_data(
+            &self,
+            event: &dioxus_html::PlatformEventData,
+        ) -> dioxus_html::MountedData {
+            dioxus_html::MountedData::new(event.downcast::<RecordingElement>().unwrap().clone())
+        }
+    };
+    (@one $converter:ident, $data:ident) => {
+        fn $converter(&self, event: &dioxus_html::PlatformEventData) -> dioxus_html::$data {
+            dioxus_html::SerializedHtmlEventConverter.$converter(event)
+        }
+    };
+}
+
+dioxus_html::with_html_event_groups!(delegate_to_serialized);
+
+#[tokio::test]
+async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_replies() {
+    use clay_surface::ElementRead;
+    use clay_surface::ScrollBehavior;
+    use clay_surface::ScrollOffsets;
+    use clay_surface::SurfaceSink;
+    dioxus_html::set_event_converter(Box::new(RecordingConverter));
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let host_calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
+    let slot = Rc::new(RefCell::new(None));
+    let factory = SurfaceFactory(Rc::new({
+        let (slot, replies, host_calls) = (slot.clone(), replies.clone(), host_calls.clone());
+        move |_mount, writer| {
+            writer.apply(&[
+                Mutation::PushId(0),
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetId(1),
+                Mutation::AddEventListener("mounted".into()),
+                Mutation::AppendChildren(1),
+                Mutation::Pop,
+            ])?;
+            *slot.borrow_mut() = Some(writer.clone());
+            let (replies, host_calls) = (replies.clone(), host_calls.clone());
+            Ok(SurfaceSession::new(move |event| {
+                if event.name == ELEMENT_REPLY {
+                    replies
+                        .borrow_mut()
+                        .push(serde_json::from_str(&event.data_json).unwrap());
+                    return EventResponse::default();
+                }
+                assert_eq!(event.name, "mounted");
+                // What a guest's `onmounted` handler does with its `MountedData`: scroll, read,
+                // focus, and read what the renderer cannot measure, all within one dispatch.
+                let offsets = ScrollOffsets {
+                    left: 0.0,
+                    top: 40.0,
+                    behavior: ScrollBehavior::Instant,
+                };
+                for (request, action) in [
+                    (6, ElementAction::Scroll(offsets)),
+                    (7, ElementAction::Read(ElementRead::ScrollOffset)),
+                    (8, ElementAction::SetFocus(true)),
+                    (9, ElementAction::Read(ElementRead::ClientRect)),
+                ] {
+                    writer
+                        .element_command(event.element, ElementCommand { request, action })
+                        .unwrap();
+                }
+                // The host runs nothing until the dispatch has returned.
+                assert!(host_calls.borrow().is_empty());
+                EventResponse::default()
+            }))
+        }
+    }));
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+    }
+    fn app(props: Props) -> Element {
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+        },
+    );
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    // A command for an element that has not announced `mounted` is refused at the boundary.
+    let writer = slot.borrow().clone().unwrap();
+    assert!(matches!(
+        writer.element_command(
+            1,
+            ElementCommand {
+                request: 1,
+                action: ElementAction::SetFocus(true),
+            }
+        ),
+        Err(PresentationError::InvalidBatch(_))
+    ));
+    let element = host_tree.listener_id("div", "mounted").unwrap();
+    dom.runtime().handle_event_for_target(
+        RenderTargetId::ROOT,
+        "mounted",
+        dioxus_core::Event::new(
+            Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                RecordingElement(host_calls.clone()),
+            ))) as Rc<dyn std::any::Any>,
+            false,
+        ),
+        element,
+    );
+    while replies.borrow().len() < 4 {
+        dom.wait_for_work().await;
+        dom.render_immediate(&mut host_tree);
+    }
+    assert_eq!(
+        &*host_calls.borrow(),
+        &["scroll(0, 40)", "get_scroll_offset", "set_focus(true)"]
+    );
+    let replies = replies.borrow();
+    // Every command is answered, in order: the ones that answer nothing with `null`.
+    assert_eq!(replies[0], serde_json::json!({"request": 6, "value": null}));
+    assert_eq!(
+        replies[1],
+        serde_json::json!({"request": 7, "value": {"x": 1.0, "y": 2.0}})
+    );
+    assert_eq!(replies[2], serde_json::json!({"request": 8, "value": null}));
+    // The renderer cannot measure, so the guest gets an error reply it surfaces as a
+    // `MountedError`; the micro is not faulted and the surface stays live.
+    assert_eq!(replies[3]["request"], 9);
+    assert!(replies[3]["error"].is_string());
+    assert!(writer.is_live());
+}
+
+/// A virtualized list mounts and unmounts rows forever. The mounted set and the host handles
+/// must follow the tree, or they grow without bound and a command for a recycled id reaches a
+/// detached node.
+#[tokio::test]
+async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
+    use clay_surface::ElementRead;
+    use clay_surface::SurfaceSink;
+    const ROWS: u32 = 40;
+    dioxus_html::set_event_converter(Box::new(RecordingConverter));
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let host_calls = Rc::new(RefCell::new(Vec::<String>::new()));
+    let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
+    let slot = Rc::new(RefCell::new(None));
+    let factory = SurfaceFactory(Rc::new({
+        let (slot, replies) = (slot.clone(), replies.clone());
+        move |_mount, writer| {
+            *slot.borrow_mut() = Some(writer);
+            let replies = replies.clone();
+            Ok(SurfaceSession::new(move |event| {
+                if event.name == ELEMENT_REPLY {
+                    replies
+                        .borrow_mut()
+                        .push(serde_json::from_str(&event.data_json).unwrap());
+                }
+                EventResponse::default()
+            }))
+        }
+    }));
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+    }
+    fn app(props: Props) -> Element {
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+        },
+    );
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let writer = slot.borrow().clone().unwrap();
+    for row in 1..=ROWS {
+        writer
+            .apply(&[
+                Mutation::PushId(0),
+                Mutation::CreateElement(("div".into(), None)),
+                Mutation::SetId(row),
+                Mutation::AddEventListener("mounted".into()),
+                Mutation::AppendChildren(1),
+                Mutation::Pop,
+            ])
+            .unwrap();
+        while host_tree.listener_id("div", "mounted").is_none() {
+            dom.wait_for_work().await;
+            dom.render_immediate(&mut host_tree);
+        }
+        dom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            "mounted",
+            dioxus_core::Event::new(
+                Rc::new(dioxus_html::PlatformEventData::new(Box::new(
+                    RecordingElement(host_calls.clone()),
+                ))) as Rc<dyn std::any::Any>,
+                false,
+            ),
+            host_tree.listener_id("div", "mounted").unwrap(),
+        );
+        assert_eq!(writer.mounted.lock().unwrap().len(), 1);
+        writer
+            .apply(&[Mutation::PushId(row), Mutation::Remove])
+            .unwrap();
+        // The tree retired the element: the mounted set is empty at once, and a command for the
+        // removed id is refused at the boundary.
+        assert!(writer.mounted.lock().unwrap().is_empty());
+        assert!(matches!(
+            writer.element_command(
+                row,
+                ElementCommand {
+                    request: 1,
+                    action: ElementAction::SetFocus(true)
+                }
+            ),
+            Err(PresentationError::InvalidBatch(_))
+        ));
+        while host_tree.listener_id("div", "mounted").is_some() {
+            dom.wait_for_work().await;
+            dom.render_immediate(&mut host_tree);
+        }
+    }
+    // The host handles went with them: a command that raced the removals past the boundary
+    // finds no handle for any row and is answered with an error, not run on a detached node and
+    // not a panic.
+    for row in 1..=ROWS {
+        writer
+            .commands
+            .send((
+                row,
+                ElementCommand {
+                    request: row.into(),
+                    action: ElementAction::Read(ElementRead::ScrollOffset),
+                },
+            ))
+            .unwrap();
+    }
+    while replies.borrow().len() < ROWS as usize {
+        dom.wait_for_work().await;
+        dom.render_immediate(&mut host_tree);
+    }
+    assert!(host_calls.borrow().is_empty());
+    assert!(
+        replies
+            .borrow()
+            .iter()
+            .all(|reply| reply["error"] == "element is not mounted")
+    );
+    assert!(writer.retired.lock().unwrap().is_empty());
+    // Withdrawing clears the tree, which retires every element still in it.
+    writer.withdraw();
+    assert!(writer.mounted.lock().unwrap().is_empty());
+}
+
+/// A mount's root is the `data-dioxus-shadow` element, and the guest's sanitized stylesheet is
+/// its first child, ahead of the guest's own content.
+#[test]
+fn a_guest_stylesheet_renders_as_the_first_child_of_the_shadow_root() {
+    let (_host, owner, mount, _writer) = mounted_writer();
+    let factory = SurfaceFactory(Rc::new(|_mount, writer| {
+        let mut batch = counter_initial_batch();
+        batch.push(Mutation::SetStyleSheet(
+            ".btn { color: red; background: url(https://evil.example/x.png) } @import \"evil.css\";"
+                .into(),
+        ));
+        writer.apply(&batch)?;
+        Ok(SurfaceSession::new(|_| EventResponse::default()))
+    }));
+    #[derive(Clone, PartialEq)]
+    struct Props {
+        mount: SharedMount,
+        owner: Instance,
+        factory: SurfaceFactory,
+    }
+    fn app(props: Props) -> Element {
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let mut dom = VirtualDom::new_with_props(
+        app,
+        Props {
+            mount: SharedMount(mount),
+            owner,
+            factory,
+        },
+    );
+    let mut tree = SurfaceTree::new();
+    dom.rebuild(&mut tree);
+    assert_eq!(
+        tree.outline(),
+        "(div[data-dioxus-shadow,style](style(#),div[data-clay-presentation,style](button[class](#))))"
+    );
+    assert_eq!(tree.text_content(), ".btn {\ncolor: red;\n}0");
+}
+
+/// A hostile parent presentation registers `input` and `keydown` on an ancestor of the slot that
+/// mounts a child presentation. Events that begin inside the child must reach only the child's
+/// listeners; the parent still receives events on its own elements.
+#[test]
+fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentation() {
+    use dioxus_html::Code;
+    use dioxus_html::Key;
+    use dioxus_html::Location;
+    use dioxus_html::Modifiers;
+    use dioxus_html::SerializedFormData;
+    use dioxus_html::SerializedKeyboardData;
+
+    let host = Host::new();
+    let components = NativeComponents::new(&host);
+    let viewer = host.start("viewer");
+    let layout = host.start("hostile parent");
+    let child = host.start("child");
+    let child_events = Rc::new(RefCell::new(Vec::new()));
+    let parent_events = Rc::new(RefCell::new(Vec::new()));
+    let (reference, _child_surface) = components
+        .publish_surface(&child, {
+            let child_events = child_events.clone();
+            move |_, writer| {
+                writer.apply(&[
+                    Mutation::PushId(0),
+                    Mutation::CreateElement(("input".into(), None)),
+                    Mutation::SetId(1),
+                    Mutation::AddEventListener("input".into()),
+                    Mutation::AddEventListener("keydown".into()),
+                    Mutation::AppendChildren(1),
+                    Mutation::Pop,
+                ])?;
+                let child_events = child_events.clone();
+                Ok(SurfaceSession::new(move |event| {
+                    child_events.borrow_mut().push(event.name);
+                    EventResponse::default()
+                }))
+            }
+        })
+        .unwrap();
+    let (parent, _parent_surface) = components
+        .publish_surface(&layout, {
+            let parent_events = parent_events.clone();
+            move |_, writer| {
+                writer.apply(&[
+                    Mutation::PushId(0),
+                    Mutation::CreateElement(("div".into(), None)),
+                    Mutation::SetId(1),
+                    Mutation::AddEventListener("input".into()),
+                    Mutation::AddEventListener("keydown".into()),
+                    Mutation::MountComponent(reference),
+                    Mutation::AppendChildren(1),
+                    Mutation::AppendChildren(1),
+                    Mutation::Pop,
+                ])?;
+                let parent_events = parent_events.clone();
+                Ok(SurfaceSession::new(move |event| {
+                    parent_events.borrow_mut().push(event.name);
+                    EventResponse::default()
+                }))
+            }
+        })
+        .unwrap();
+    fn app(props: (NativeComponents, Instance, ComponentRef)) -> Element {
+        use_context_provider(|| props.0.clone());
+        rsx! { ComponentMount { owner: props.1, reference: props.2 } }
+    }
+    let mut dom = VirtualDom::new_with_props(app, (components, viewer, parent));
+    let mut host_tree = SurfaceTree::new();
+    dom.rebuild(&mut host_tree);
+    let fire = |name: &str, data: EventData, id| {
+        dom.runtime().handle_event_for_target(
+            RenderTargetId::ROOT,
+            name,
+            dioxus_core::Event::new(data.into_any(), true),
+            id,
+        );
+    };
+    let input = || EventData::Form(SerializedFormData::new("typed".into(), Vec::new()));
+    let keydown = || {
+        EventData::Keyboard(SerializedKeyboardData::new(
+            Key::Character("a".into()),
+            Code::KeyA,
+            Location::Standard,
+            false,
+            Modifiers::empty(),
+            false,
+        ))
+    };
+
+    let child_input = host_tree
+        .listener_id("input", "input")
+        .expect("the child's input is in the host tree");
+    fire("input", input(), child_input);
+    fire("keydown", keydown(), child_input);
+    assert_eq!(&*child_events.borrow(), &["input", "keydown"]);
+    assert_eq!(
+        &*parent_events.borrow(),
+        &[] as &[&str],
+        "the parent's ancestor listeners saw events from inside the child"
+    );
+
+    // The barrier is at the boundary only: the parent's own element still receives its events.
+    let parent_div = host_tree
+        .listener_id("div", "input")
+        .expect("the parent's div is in the host tree");
+    fire("input", input(), parent_div);
+    fire("keydown", keydown(), parent_div);
+    assert_eq!(&*parent_events.borrow(), &["input", "keydown"]);
+    assert_eq!(child_events.borrow().len(), 2);
+    drop(dom);
+    host.close();
 }
