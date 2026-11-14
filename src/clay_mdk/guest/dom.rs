@@ -1,10 +1,12 @@
-//! The Dioxus guest adapter: one `VirtualDom` per micro incarnation, one render target per
-//! granted mount, typed `WriteMutations` batches through `surface.apply`. Feature `dioxus`.
+//! The Dioxus guest adapter: one `VirtualDom` per published presentation, one render target and
+//! one component instance per granted mount, typed `WriteMutations` batches through
+//! `surface.apply`. Feature `dioxus`.
 use crate::presentation;
 use crate::presentation_events;
 use crate::wire;
 
-/// The component references the slots of one [`GuestDom`] mount, by slot id. A slot element
+/// The component references the slots of one [`GuestDom`] mount, by slot id (each mount owns
+/// its own table, so a mount's references are released with it). A slot element
 /// names its component by id (see [`wire::SLOT_ATTRIBUTE`]) because a reference is a host
 /// resource that no Dioxus attribute can carry; the flush that writes the element looks the
 /// reference up here and sends it with `mount-component`.
@@ -39,47 +41,79 @@ impl Slots {
 /// batches cross `surface.apply`.
 pub struct GuestDom {
     pub(crate) dom: dioxus_core::VirtualDom,
-    targets: std::rc::Rc<std::cell::RefCell<Vec<(u64, dioxus_core::RenderTargetId)>>>,
+    mounts: std::rc::Rc<std::cell::RefCell<Vec<MountEntry>>>,
     pub(crate) edits:
         std::collections::BTreeMap<dioxus_core::RenderTargetId, wire::WireMutations<'static>>,
     surfaces: std::collections::BTreeMap<u64, (dioxus_core::RenderTargetId, presentation::Surface)>,
+}
+
+/// One live mount as the root renders it: where it renders and the slots its scope owns.
+struct MountEntry {
+    identity: u64,
+    target: dioxus_core::RenderTargetId,
     slots: std::rc::Rc<Slots>,
 }
 
+type RenderFn = std::rc::Rc<dyn Fn() -> dioxus_core::Element>;
+
+/// What one mount's component instance renders from. Equal while the render function and slot
+/// table are the same allocations, so re-rendering the root (another surface mounting or
+/// unmounting) skips this mount's scope instead of re-running its render.
+#[derive(dioxus::prelude::Props, Clone)]
+struct MountProps {
+    render: RenderFn,
+    slots: std::rc::Rc<Slots>,
+}
+
+impl PartialEq for MountProps {
+    fn eq(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.render, &other.render)
+            && std::rc::Rc::ptr_eq(&self.slots, &other.slots)
+    }
+}
+
+/// The component instance a mount renders, like one instance of a custom element: the hooks
+/// `render` calls live in this scope, so every mount has its own, while whatever `render` closes
+/// over (the micro's collections, its store) is shared by all of them.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+fn MountRoot(props: MountProps) -> dioxus_core::Element {
+    dioxus::prelude::use_context_provider(|| props.slots.clone());
+    (props.render)()
+}
+
 impl GuestDom {
-    pub fn new(app: fn() -> dioxus_core::Element) -> Self {
-        Self::from_app(app)
+    /// A presentation whose `render` runs once per mount, in that mount's own component scope.
+    pub fn new(render: fn() -> dioxus_core::Element) -> Self {
+        Self::with_setup(|| {}, std::rc::Rc::new(render))
     }
 
     pub fn new_with_props<P: Clone + 'static>(
-        app: fn(P) -> dioxus_core::Element,
+        render: fn(P) -> dioxus_core::Element,
         props: P,
     ) -> Self {
-        Self::from_app(move || app(props.clone()))
+        Self::with_setup(|| {}, std::rc::Rc::new(move || render(props.clone())))
     }
 
-    fn from_app(app: impl Fn() -> dioxus_core::Element + Clone + 'static) -> Self {
+    /// `setup` runs in the root scope, once per presentation: the hooks and context providers
+    /// every mount shares. `render` runs in a scope of its own for each mount, below the root, so
+    /// it reads the root's context but its hooks are the mount's.
+    pub fn with_setup(setup: impl Fn() + 'static, render: RenderFn) -> Self {
         use dioxus::prelude::*;
 
         dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-        let targets = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
-            u64,
-            dioxus_core::RenderTargetId,
-        )>::new()));
-        let root_targets = targets.clone();
-        let slots = std::rc::Rc::new(Slots::default());
-        let root_slots = slots.clone();
+        let mounts = std::rc::Rc::new(std::cell::RefCell::new(Vec::<MountEntry>::new()));
+        let root_mounts = mounts.clone();
+        let setup = std::rc::Rc::new(setup);
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {
-                use_context_provider(|| root_slots.clone());
-                let children = app();
-                let targets = root_targets.borrow();
+                (*setup)();
+                let mounts = root_mounts.borrow();
                 rsx! {
-                    for (identity, target) in targets.iter() {
+                    for mount in mounts.iter() {
                         Portal {
-                            key: "{identity}",
-                            target: *target,
-                            {children.clone()}
+                            key: "{mount.identity}",
+                            target: mount.target,
+                            MountRoot { render: render.clone(), slots: mount.slots.clone() }
                         }
                     }
                 }
@@ -90,10 +124,9 @@ impl GuestDom {
         dom.rebuild(&mut edits);
         Self {
             dom,
-            targets,
+            mounts,
             edits,
             surfaces: std::collections::BTreeMap::new(),
-            slots,
         }
     }
 
@@ -104,20 +137,27 @@ impl GuestDom {
                 .insert(target, wire::WireMutations::default())
                 .is_none()
         );
-        let mut targets = self.targets.borrow_mut();
-        assert!(targets.iter().all(|(mounted, _)| *mounted != identity));
-        targets.push((identity, target));
+        let mut mounts = self.mounts.borrow_mut();
+        assert!(mounts.iter().all(|mounted| mounted.identity != identity));
+        mounts.push(MountEntry {
+            identity,
+            target,
+            slots: std::rc::Rc::default(),
+        });
         self.dom.mark_dirty(dioxus_core::ScopeId::APP);
         target
     }
 
     pub(crate) fn unmount_target(&mut self, identity: u64) {
         let target = {
-            let mut targets = self.targets.borrow_mut();
-            let Some(index) = targets.iter().position(|(mounted, _)| *mounted == identity) else {
+            let mut mounts = self.mounts.borrow_mut();
+            let Some(index) = mounts
+                .iter()
+                .position(|mounted| mounted.identity == identity)
+            else {
                 return;
             };
-            targets.remove(index).1
+            mounts.remove(index).target
         };
         self.dom.mark_dirty(dioxus_core::ScopeId::APP);
         self.dom.render_immediate(&mut self.edits);
@@ -164,13 +204,19 @@ impl GuestDom {
         loop {
             self.dom.render_immediate(&mut self.edits);
             let mut revoked = Vec::new();
-            let held = self.slots.held.borrow();
+            let mounts = self.mounts.borrow();
             for (&identity, (target, surface)) in &self.surfaces {
                 let edits = self
                     .edits
                     .get_mut(target)
                     .expect("mounted target must have a writer");
+                let slots = &mounts
+                    .iter()
+                    .find(|mounted| mounted.identity == identity)
+                    .expect("a surface's mount is registered until it unmounts")
+                    .slots;
                 if !edits.is_empty() {
+                    let held = slots.held.borrow();
                     let batch = edits.take_resolving(|id| {
                         held.get(&id)
                             .unwrap_or_else(|| panic!("slot {id} was written without a reference"))
@@ -181,13 +227,14 @@ impl GuestDom {
                         Err(error) => return Err(error),
                     }
                 }
+                // Released after the flush: it may still have carried the mutation that created
+                // an element whose slot is already retired.
+                let mut held = slots.held.borrow_mut();
+                for id in slots.retired.take() {
+                    held.remove(&id);
+                }
             }
-            drop(held);
-            let mut held = self.slots.held.borrow_mut();
-            for id in self.slots.retired.take() {
-                held.remove(&id);
-            }
-            drop(held);
+            drop(mounts);
             if revoked.is_empty() {
                 return Ok(());
             }
