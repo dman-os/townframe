@@ -10,3 +10,12 @@ allowed_dependencies = [
     "daybook_types",
 ]
 allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/clay_rt_wasmtime/lib.rs"
+symbol = "module::WasmPackage::from_bytes"
+ceiling = 1
+class = "ARCHITECTURAL_EXCEPTION"
+reason = "outside a tokio runtime the compile runs on its own thread and reports through a oneshot; a closed receiver means the activation awaiting it was cancelled (the micro was disabled), so closure is the signal and the finished artifact is already cached"
+reference = "AGENTS.md"

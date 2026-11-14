@@ -1,0 +1,511 @@
+# Dayframe on Android: what builds, what Blitz allows
+
+Status: Findings. The build results are measured; the platform constraints are read from source and every runtime claim is marked as needing a device.
+Owner: Claude (S3 subagent); operator reviews.
+Scope: `dayframe_mobile`, `dayframe_native`, `x/dayframe.ts android`, FDR 006 / ADR 032 §9 (what Dioxus on Android allows).
+Updated: 2026-11-05 (A1: first run, on an x86_64 emulator)
+
+S3 wrote the sections below from builds and source reading. A1 (end of this file) ran the app on an
+API 36 x86_64 emulator; where A1 contradicts a claim above, A1 wins.
+
+## What was done
+
+| Goal | Result |
+|---|---|
+| 1. `dayframe_mobile` builds for `aarch64-linux-android` with dioxus-native (Blitz) into an installable APK | Done. `x/dayframe.ts android` produced `app-debug.apk`. |
+| 2. Same Clay composition as desktop, Wasm micros on Wasmtime from APK assets, SQLite under the app data dir | Built and linked; not run. Wasmtime, SQLite and the native micros are all in `libmain.so`. |
+| 3. Guardrails `[builds]` for android | Not added: `check-matrix` supports only `native`, `wasm32-wasip3`, `wasm32-unknown-unknown` (`src/xtask/guardrails/matrix.rs:13`). See "CI". |
+| 4. This document | Here. |
+| 5. `x/dayframe.ts android` | Done (`--release`, `--install`). |
+
+### Code layout
+
+- New crate `src/dayframe_native`: the native-engine half of the composition root that desktop and mobile
+  share. It owns the linked built-in micros (settings, toolbar, sample), the Wasmtime package factory
+  (`Package::from_json` + `wasm_factory`), `open_store(path)` over `clay_store::SqliteStore`, the counter
+  demo seed, and the `Shell` launch screen (loading, failure, mount `Application`). A shell supplies only
+  where the store lives and where package bytes come from.
+- `dayframe_desktop` keeps what is desktop-specific: `XDG_DATA_HOME` / `DAYFRAME_STORE_PATH` /
+  `DAYFRAME_PACKAGE_DIR` and the directory scan. Its public `composition::desktop_runtime(store)` is
+  unchanged, so its in-crate tests and e2e did not move.
+- `dayframe_mobile/main.rs` (all Android-gated; a host build is a stub that panics):
+  - `android_main` stores `AndroidApp::internal_data_path()` (app-private, no permission) and the store is
+    `<that>/store.sqlite`.
+  - Packages are `counter` and `layout`, read through `dioxus::asset_resolver::read_asset_bytes` from a folder
+    asset (`asset!("/packages")`). The resolver reads the APK's `assets/` through `AAssetManager`
+    (`packages/asset-resolver/src/native.rs`, `to_java_load_asset`). Android has no directory listing
+    through it, so the two names are listed in code.
+  - `dayframe_native` is an Android-target dependency only, so a host `cargo clippy -p dayframe_mobile`
+    does not compile Wasmtime.
+- The packages are copied into `src/dayframe_mobile/packages/` by `x/dayframe.ts android` before the build
+  (gitignored). `dx` bundles only what `asset!` names; it has no "resources directory" for Android (its
+  `public_dir` copy is web-only, `packages/cli/src/build/request.rs:1450`).
+
+## Commands
+
+Build (first run installs the Dioxus CLI, builds the guests, downloads Gradle 9.1.0 from
+`services.gradle.org` and the Android Gradle plugin; needs network once):
+
+```sh
+deno run --allow-all x/dayframe.ts android              # debug APK
+deno run --allow-all x/dayframe.ts android --release    # release profile (unsigned without a signing config)
+```
+
+It prints `apk: <path>`; the debug APK lands at
+`$CARGO_TARGET_DIR/dx/dayframe_mobile/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`.
+
+Install and run when a device is connected (USB debugging on, `adb devices` lists it):
+
+```sh
+deno run --allow-all x/dayframe.ts android --install
+adb shell am start -n com.example.mobile/dev.dioxus.main.MainActivity   # confirm the package id with: adb shell pm list packages | grep -i mobile
+adb logcat -s RustStdoutStderr:V DioxusNative:V AndroidRuntime:E        # Rust panics appear under RustStdoutStderr
+```
+
+The `BuildConfig` alias in `MainActivity.kt` names `com.example.mobile`, which is where the package id above
+comes from; verify it on the device before relying on the `am start` line.
+
+`dx serve --platform android --device ...` (the old README command) also works for a live loop but was not
+exercised, because nothing could run the result.
+
+## Measurements (debug profile, aarch64, single ABI)
+
+Build time on a warm target dir: 10m34s wall (29m47s user CPU) for `x/dayframe.ts android`, after the guest
+packages were prepared (13m15s wall on a cold dir). A half-finished earlier attempt had already compiled most
+of the dependency graph, so a fully cold APK build will take longer.
+
+| Artifact | Size |
+|---|---|
+| `app-debug.apk` | 201,648,679 B (192 MiB) |
+| `lib/arm64-v8a/libmain.so` (debuginfo, unoptimized) | 833,062,408 B |
+| same, `llvm-strip --strip-all` | 400,251,928 B (89 MB gzip -9) |
+| `counter.component.wasm` / `layout.component.wasm` (debug guests) | 15,086,008 B / 16,086,496 B |
+| `classes*.dex` | ~12 MB |
+
+These are all debug-profile numbers. The release profile was not built (the shared disk was at 17 GB free
+after the debug build). Expect a large drop in `libmain.so`; the guests are built `debug` by
+`x/dayframe-packages.ts` regardless of `--release` and would need a release variant to shrink.
+
+## Verification run
+
+- `cargo clippy -p dayframe_native -p dayframe_desktop -p dayframe_mobile --all-targets`: clean (only the
+  repo-wide manifest warnings).
+- `cargo clippy -p dayframe_native -p dayframe_mobile --target aarch64-linux-android`: clean.
+- `cargo x guardrails lint`: the only failures are four `ERROR_DOC_METADATA` diagnostics for
+  `docs/scratch/dayframe-shell-ledger.md` (written by the other agent on `feat/dayframe-shell`, not touched here).
+- `cargo x guardrails api --all --check`: ok. `cargo x guardrails doctor`: fails with `ERROR_BUILD_FLAGS`
+  because the session's `CARGO_TARGET_DIR` is shared between worktrees (environment, not this change).
+- Desktop e2e / nextest were not run (instruction: no full gate). The desktop change is a move of existing
+  code behind `dayframe_native`; `desktop_runtime(store)` keeps its signature.
+
+## CI
+
+`check-matrix` cannot express Android, so it should not be asked to. A CI job should instead:
+
+1. `cargo clippy -p dayframe_native -p dayframe_mobile --target aarch64-linux-android` (compile-only; the
+   NDK is not needed for `clippy`, only for linking).
+2. On a schedule or per release: `deno run --allow-all x/dayframe.ts android` and upload the APK.
+
+Caveat: `asset!("/packages")` names `src/dayframe_mobile/packages/`. The clippy run above happened with that
+directory present but empty, and it passed; whether clippy passes with the directory entirely absent was not
+tested, so a CI clippy job should `mkdir -p src/dayframe_mobile/packages` first. An APK needs the real files
+(`x/dayframe.ts android` stages them).
+
+Making `check-matrix` aware of `aarch64-linux-android` means adding it to `TARGETS` and giving it a
+policy like `wasm_policy`; that is a guardrails change and was left alone.
+
+## What Blitz-on-Android supports and lacks for FDR 006
+
+Pinned versions (from `Cargo.lock`): `dioxus 0.8.0-alpha.3` (dman-os fork `a3e1e68`), `blitz-shell` and
+`blitz-dom 0.3.0-beta.4`, `winit 0.31.0-beta.3` with `winit-android 0.31.0-beta.3`, `android-activity 0.6.1`
+(native-activity). Paths below are inside those crates' sources.
+
+| Need (FDR 006) | Verdict from source | Evidence | Needs a device to confirm |
+|---|---|---|---|
+| Touch input at all | Supported. Finger down/move/up/cancel become winit `PointerSource::Touch` and Blitz keeps multi-touch state. Mouse tool types are skipped on Android. | `winit-android/src/event_loop.rs:323-445`; `blitz-shell/src/window.rs:82-90,700-830` | Latency, multi-touch fidelity |
+| Resizable sections / drawers by touch drag | Possible, with one trap: a finger drag past a 2 px threshold enters `DragMode::Panning` (scroll) for any target unless the CSS `touch-action` forbids panning on both axes. A drag handle must set `touch-action: none` or it scrolls instead of resizing. | `blitz-dom/src/events/pointer.rs:219-260` (threshold + `Finger` branch), `:158-190` (`touch_action_pan_axes`) | Whether `pointermove` still reaches the handle during a pan; the "no pointer capture" workaround from the Blitz-limits skill (full-window overlay) still applies |
+| Edge-swipe gestures (open sidebar, arc strip) | App side: just pointer events from the screen edge, same as above. System side: Android 10+ gesture navigation owns the left and right edges as "back". Apps opt a region out with `View.setSystemGestureExclusionRects` (Java), which nothing in winit-android / android-activity / Blitz calls. | No `setSystemGestureExclusionRects` anywhere in `winit-android`, `android-activity`, `blitz-shell`; android-activity exposes JNI handles so an app could call it itself | Whether the edge drawer drag wins against the system back gesture; 3-button navigation is unaffected |
+| System back | Delivered. winit-android forwards `KEYCODE_BACK` as `NamedKey::BrowserBack` and returns `Handled`, and the fork ships `dioxus_native::use_back_button(handler)` for exactly this. | `winit-android/src/keycodes.rs:165,250`; `event_loop.rs:454-509`; dioxus fork `packages/native/src/hooks.rs:39` | Important: with `targetSdk = 36` (`Dioxus.toml`) Android's predictive-back rules may stop dispatching back as a key event unless the manifest sets `android:enableOnBackInvokedCallback="false"` (my recollection of the Android 16 docs; not verified here). The generated manifest template does not set it (`packages/cli/assets/android/gen/app/src/main/AndroidManifest.xml.hbs`). Test back first on a device; `Dioxus.toml` `[android.raw.manifest]` is the hook if it needs setting. |
+| Insets / edge-to-edge | **Not handled.** `Window::safe_area()` returns zero insets on Android, and `InsetsChanged` and `ContentRectChanged` are `warn!("TODO")`. Blitz does size its viewport by `safe_area`, so the plumbing exists but is fed zeros. With `targetSdk = 36` the system draws edge-to-edge, so content would sit under the status bar, the navigation bar and a display cutout. | `winit-android/src/event_loop.rs:196-198,253-256,925-927`; `blitz-shell/src/window.rs:35-41,180-190` | Whether the content really is under the bars; the cheapest fix is a local patch to `winit-android` reading `WindowInsets` over JNI into `safe_area()`, or lowering `target_sdk` (a stopgap that only works until the store requires 35+) |
+| Soft keyboard | **Show/hide works; text entry through the IME is the problem.** Blitz asks winit for IME on focus of a text input (`blitz-dom/src/node/node.rs:731,754` -> `blitz-shell/src/lib.rs:116`), and winit-android maps that to `show_soft_input`/`hide_soft_input` (`event_loop.rs:995-1015`). But winit-android only consumes `InputEvent::KeyEvent`; composition text arrives as `InputEvent::TextEvent`, which android-activity produces only in its `game_activity` backend (`android-activity/src/game_activity/mod.rs:1089`), not the `native-activity` backend this crate uses. Expect hardware-style key events only: no composing text, no predictive text, problems with non-Latin input. `set_ime_cursor_area` is an empty function. | as cited | Typing in a text field; this is the most likely blocker for the editor/chat use cases. The remedy is switching to the GameActivity backend (`android-game-activity` winit feature plus its Java glue), a larger change than anything else on this list |
+| Accessibility (TalkBack) | **Not compiled in.** `accesskit_xplat` selects its Android adapter only with its `accesskit_android` feature (`accesskit_xplat/src/platform_impl/mod.rs:30`), which `blitz-shell` does not enable; `accesskit_android` is absent from the resolved graph (`cargo tree --target aarch64-linux-android -i accesskit_android`: no match). The null adapter is used, so TalkBack sees one opaque surface. Adding `accesskit_xplat = { version = "0.2.1", default-features = false, features = ["accesskit_android"] }` for the Android target needs `accesskit_android 0.9.x`; crates.io has `0.9.0` and `0.9.1`, but this session's cached index only listed `0.7.x` and `cargo` would not refresh it (stale index; not re-tried with a network refresh). The Linux AT-SPI defects in the Blitz-limits skill (`has_changes` inverted, `ActionRequested` TODO) live in shared `blitz-shell` code and so apply on Android too. | as cited | All of it. Also whether `accesskit_android`'s `embedded-dex` feature works with the `NativeActivity` subclass `MainActivity.kt` |
+| DPI / scale | Reported from `AConfiguration`. `ConfigChanged` computes the old and new scale from the same call (`event_loop.rs:210-212`), so a runtime density change (display size setting) will not be reported. | cited | Rare; font-scale and density change handling |
+| Lifecycle / data | Pause and resume reach winit as `suspended`/`resumed` (`event_loop.rs:190-193`). `MainEvent::Destroy` is a `warn!("TODO")`, so there is no shutdown hook; `Application` closes the host in `use_drop`, which runs only if the Dioxus runtime is torn down. SQLite writes are durable per transaction so a kill is safe, and a micro that needs a graceful close cannot rely on one. | cited | Behaviour on swipe-away and on process death |
+
+### Other Android facts the UI should assume
+
+- The renderer stack (Blitz's Vello-based renderers via `anyrender`) compiled and linked for Android. Which
+  GPU backend it picks, and its frame rate on a mid device, is unmeasured.
+- Wasmtime is linked into `libmain.so` for `aarch64-linux-android` and the guests are bundled; whether the JIT can
+  map executable memory under the app's SELinux domain is the first thing to confirm at launch. The operator
+  states Wasmtime works on Android; this build only shows it compiles and links.
+- `extractNativeLibs="true"` (from the template) means the 400 MB (stripped debug) library is extracted at
+  install time on top of the APK. A release build and `strip` change this materially.
+- App-private data: `internal_data_path()` is `/data/data/<package>/files`. No storage permission is declared
+  or needed. Uninstalling removes the store.
+
+## What needs a device (checklist for the first run)
+
+1. Launch: does the app start, show "Loading Dayframe…", then the shell, with `installation_errors` empty
+   (the `counter` and `layout` packages parsed)?
+2. Wasmtime: open Settings, enable the counter micro, press its control; watch `adb logcat` for a JIT or
+   mmap error.
+3. Touch: scroll a list; drag a section handle with `touch-action: none` (see above).
+4. Back: press the system back / use the back gesture; does a `use_back_button` handler fire?
+5. Insets: is the header under the status bar and cutout?
+6. Keyboard: focus a text input; does the keyboard appear; do letters arrive; do accents arrive?
+7. TalkBack: swipe through the screen.
+8. Persistence: change state, force-stop, relaunch.
+
+## Recommendation for the FDR 006 UI
+
+Safe to build on today: list/details stacking, a sidebar drawer, bottom/side sheets, touch-scrolled lists, and
+a handle drag if it carries `touch-action: none`. Do not commit to before a device run: edge-swipe gestures that
+compete with the system back gesture, anything that expects safe-area insets, rich text entry, and the arc strip's
+press-and-hold gesture (no device evidence either way). Two upstream-shaped fixes will be needed regardless and
+are small in isolation: safe-area insets in `winit-android`, and an Android accessibility adapter in
+`blitz-shell`/`accesskit_xplat`. The IME path is the large one.
+
+## Environment notes for the next person
+
+- The session's worktree started from `main`, not from `feat/dayframe-shell`; it was reset onto the latter.
+- A fresh worktree needs the gitignored `wit/deps` directories (copied from a checkout that had them) or
+  `wasm_utils_rs` fails to compile in any clippy that reaches it.
+- `x/install-dx.ts` builds the Dioxus CLI from the fork rev into `$CARGO_TARGET_DIR/dioxus-cli`; that took
+  roughly 25 minutes cold.
+- A first `dx build` run was killed with SIGTERM (exit 143) at exactly 6 minutes by something outside the
+  build (the cause was not identified); it succeeded when relaunched detached with `setsid`.
+
+## A1: first run on an emulator (2026-11-05)
+
+Run on `system-images;android-36-ext18;google_apis;x86_64` (API 36, matching `targetSdk` 36, `minSdk` 28), headless,
+`-gpu swiftshader_indirect`, in a 3 GB capped scope. The SDK lives at `/run/media/asdf/p3N/tmp/android-sdk` (emulator and
+image via the Nix `sdkmanager --sdk_root`; the AVD is hand-written `avd/a1.ini` + `a1.avd/config.ini` because the Nix
+`avdmanager` cannot see a foreign SDK root; `platform-tools` is a symlink to the Nix SDK's). Screenshots are in the session
+scratchpad `.../scratchpad/a1/` (`01-home.png`, `02-settings.png`, `03-section.png`, `04-after-back.png`, `05-sidebar.png`,
+`06-back-closes-sidebar.png`, `07-back-at-home.png`); they are not in the repo.
+
+Build: `deno run --allow-all x/dayframe.ts android --abi x86_64` (new `--abi arm64|x86_64` flag, default arm64). dx prints the
+x86_64 triple as `x86_64-unknown-linux-android` and looks its linker up under that name, so the script aliases the NDK's
+`CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER` under dx's spelling (needs the Nix dev shell's NDK env). The branch resolves
+the dman-os blitz fork (rev ffaf2bd0) through the root `[patch.crates-io]`; the x86_64 build links.
+
+What runs: the shell starts, Wasmtime and SQLite load, home lists Layout and Settings, touch taps open Settings and a section,
+the sidebar button responds, and the status bar and gesture bar are padded (insets reach `HostInputs`).
+
+Measured (debug, x86_64, unstripped): `app-debug.apk` 420,602,429 B (the arm64 one was 201,648,679 B; x86_64 debuginfo is larger).
+`am start -W` TotalTime (to the first frame, i.e. the splash) 2.3 to 4.4 s on an unloaded 4-core emulator and 7.0 s on the
+2-core capped one; the shell is on screen a few seconds after that. These are emulator numbers with a software GPU and say
+little about a phone. Release and arm64 sizes were not re-measured (host memory).
+
+### Findings and fixes
+
+1. **Debug builds crash on the emulator's Vulkan** (SIGSEGV in `vk_common_SetDebugUtilsObjectNameEXT`, called from wgpu's
+   `create_bind_group_layout`): wgpu labels objects when `InstanceFlags::DEBUG` is on, which `from_build_config()` sets in debug
+   builds, and the emulator's gfxstream Vulkan driver faults on it. Not fixed in code. Workaround for emulator runs
+   (userdebug image): `adb root; adb shell "setprop wrap.com.example.mobile 'WGPU_DEBUG=0 WGPU_VALIDATION=0 WGPU_DISCARD_HAL_LABELS=1'"`.
+   Disabling emulator Vulkan (`-feature -Vulkan`) instead falls to GLES, where `vello_hybrid` panics requesting a device
+   (`max_compute_workgroups_per_dimension` allowed 0). A release build, or a real GPU, is the open check.
+2. **System back closed the app** (confirmed): at `targetSdk` 36 predictive back stops delivering `KEYCODE_BACK` to the native
+   input queue, so winit never saw `BrowserBack`. Fixed: `MainActivity.kt` registers an `OnBackInvokedCallback` (API 33+) that
+   calls `requestSystemBack` (bound to Rust with `RegisterNatives`, since NativeActivity `dlopen`s the library and the JVM's
+   by-name lookup never finds it). `dayframe_native::SYSTEM_BACK` answers whether the shell can go back
+   (mirrors `HostInputs::can_back`); if so it bumps `platform_back`, otherwise the activity calls `moveTaskToBack`. Verified on
+   the emulator: back from a section returns into the shell and a further back at home sends the app to the launcher with the
+   process alive. A manifest opt-out (`enableOnBackInvokedCallback=false`) was not possible: dx's manifest template has no
+   application-attribute hook (`[android.raw.manifest]` is injected beside `<application>`, not into it).
+3. **Edge-to-edge insets** (fixed): `dayframe_mobile::system_insets` reads `WindowInsets` (`getInsets(systemBars | displayCutout)`
+   on API 30+, the deprecated accessors on 28 to 29) from the decor view over JNI and `dayframe_native::Shell` feeds it to
+   `HostInputs::insets` on every surface resize (winit-android reports neither `InsetsChanged` nor `ContentRectChanged`).
+   Verified: content sits between the bars. A null `getRootWindowInsets` (view not attached yet) reads as zero until the next resize;
+   on this emulator the first resize delivered real values.
+4. **Counter (Wasm) section shows "Section unavailable: Unavailable"**: the package is installed but not enabled (packages are
+   not `enabled_on_admission`), the same as on desktop until enabled under "Choose settings sections". Not exercised further:
+   the emulator was too slow to drive the enable flow within its memory cap, so a Wasm guest actually running on Android
+   (JIT under SELinux) is still unconfirmed.
+
+### Remaining gaps
+
+- Wasm guest execution on Android (enable the counter and press it); needs a longer, less throttled run or a phone.
+- Release build, arm64 build and size, startup on real hardware, real GPU (finding 1).
+- IME (NativeActivity delivers no composition text), AccessKit/TalkBack, gesture-exclusion for edge drawers: as in the S3 table.
+- Host memory: a debug APK build plus an emulator exceeded the host's RAM and the OOM killer took the session once.
+
+## A2: phone checklist (ZTE 8050, Android 13 / API 33, arm64, Mali, 1080x2408 @ 480 dpi)
+
+A2 had the user's phone for a short window and lost it before an APK existed: the arm64 build did not finish
+(disk fell under the 15 GB floor mid-build, twice; see "Build notes"), so **nothing below has run on a device**. This is
+the checklist for the next session. Only touch our package (`com.example.mobile`); no `settings`, `pm disable`, `setprop`,
+`adb root`. Keep captures in the session scratchpad, not the repo.
+
+```sh
+D=LZ0V50ETDC6009467; A="adb -s $D"; P=com.example.mobile; ACT=$P/dev.dioxus.main.MainActivity
+OUT=<scratchpad>/a2; mkdir -p $OUT
+deno run --allow-all x/dayframe.ts android        # via ./x/agent-build.ts --; prints "apk: <path>"
+APK=<path printed>; ls -l $APK                    # APK size
+unzip -l $APK | grep libmain.so                   # libmain.so size (uncompressed column)
+$A install -r $APK
+# 1. launch + Mali render (no emulator debug-label crash expected): cold start to first frame
+$A shell am force-stop $P; $A logcat -c
+$A shell am start -W -n $ACT | grep -E "TotalTime|Status"      # to first frame (splash)
+# shell visibly up: poll screencap until the home renders (app bg is dark, splash is #fafafa)
+t0=$(date +%s.%N); until [ "$($A exec-out screencap | dd bs=1 skip=$((16+(1500*1080+500)*4)) count=1 2>/dev/null | od -An -tu1 | tr -d ' ')" -lt 100 ]; do :; done; echo "to shell: $(echo "$(date +%s.%N) - $t0" | bc)s"
+$A exec-out screencap -p > $OUT/01-home.png
+$A logcat -d --pid=$($A shell pidof $P) | grep -E "RustStd|panicked|F libc|FATAL" | tail    # crash / wgpu errors
+# 2. flows (coordinates are for 1080x2408; home: hamburger ~(78,207), Settings row ~(160,512))
+$A shell input tap 160 512;  sleep 2; $A exec-out screencap -p > $OUT/02-settings.png
+$A shell input tap 214 586;  sleep 2; $A exec-out screencap -p > $OUT/03-section.png   # a section
+$A shell input keyevent KEYCODE_BACK; sleep 2; $A exec-out screencap -p > $OUT/04-back-to-settings.png
+$A shell input keyevent KEYCODE_BACK; sleep 2; $A exec-out screencap -p > $OUT/05-back-to-home.png
+$A shell input keyevent KEYCODE_BACK; sleep 2; $A shell dumpsys activity activities | grep -m1 topResumedActivity   # expect launcher; process alive:
+$A shell pidof $P
+# API 33: predictive back is opt-in (not enabled by the manifest), so KEYCODE_BACK should reach winit as BrowserBack
+# (the OnBackInvokedCallback in MainActivity.kt also registers at API >= 33 and takes over: check BOTH paths reach the shell).
+# Gesture back: swipe in from the left edge:
+$A shell input swipe 2 1200 600 1200 150
+# sidebar: button, then edge swipe from the left edge
+$A shell input tap 78 207; sleep 2; $A exec-out screencap -p > $OUT/06-sidebar-button.png
+$A shell input swipe 2 1200 600 1200 200; sleep 2; $A exec-out screencap -p > $OUT/07-sidebar-edge.png
+# 3. Wasm guest: Settings -> "Choose settings sections" (~(340,403)) -> enable Counter (Wasm), then open the section
+$A shell input tap 160 512; sleep 2; $A shell input tap 340 403; sleep 2; $A exec-out screencap -p > $OUT/08-choose.png
+#    tap the Counter toggle (read its position from 08-choose.png), back, open "Counter (Wasm)" (~(214,586)), tap increment
+$A exec-out screencap -p > $OUT/09-counter.png    # expect the guest's value, not "Section unavailable"; tap increment, re-capture
+$A logcat -d --pid=$($A shell pidof $P) | grep -iE "wasmtime|mmap|jit|trap|panicked" | tail   # JIT/SELinux errors
+#    Layout: enable it the same way, open Layout, show/hide the Sample panel (desktop wcmp hang should NOT occur on Wasmtime)
+# 4. text input: Sample micro section -> tap the Greeting field, then
+$A shell input text hello; $A exec-out screencap -p > $OUT/10-text.png
+$A shell dumpsys input_method | grep -m3 -iE "mInputShown|isInputViewShown"   # was the soft keyboard shown? (read-only)
+#    Expected (S3): keyboard may show, but NativeActivity delivers key events only (no composition text): record what arrives.
+# 5. memory after reaching Settings
+$A shell dumpsys meminfo $P | sed -n 1,30p
+# cleanup: leave the app installed; or `$A uninstall $P`
+```
+
+If the render is blank or the process dies at startup on the Mali GPU, read the first `F libc` / `panicked` line:
+the emulator crash was wgpu debug labels on gfxstream Vulkan (`vk_common_SetDebugUtilsObjectNameEXT`); on a device
+without that driver it should not occur. A `LimitsExceeded` from `vello_hybrid` means the GLES fallback was taken
+(no Vulkan), which the Mali should not need.
+
+### Build notes (A2)
+
+- `x/dayframe.ts android` had been broken by the shell rebase (`prepareDayframePackages` now requires `{ testFixtures }`);
+  fixed in the branch.
+- A cold arm64 debug build needs roughly 12 GB of target space beyond the host debug artifacts; the shared volume sat at
+  13 to 24 GB free, so the build was stopped by hand at the 15 GB floor (by PID, mid-compile, at ~560/1925 crates). The
+  release build was not started. `--release` already reaches `dx build --release`; guests are still built in the debug
+  profile by `x/dayframe-packages.ts` regardless (so the release APK still carries 15 to 16 MB debug guests), and release
+  needs a signing config for an installable APK (Dioxus.toml) or `apksigner` with a debug key.
+- Disk freed on the way: the emulator SDK (9.6 GB, no longer needed with a phone) and the worktree's host `debug/` target dir.
+
+## A3 notes (phone)
+
+Device: ZTE 8050 (`LZ0V50ETDC6009467`), Android 13, arm64, Mali, 1080x2408. Build: `./x/agent-build.ts -- deno run --allow-all
+x/dayframe.ts android --abi arm64` (debug), finished on the third attempt: the first two were stopped by PID at the disk floor
+(8 GB, then 5 GB), and the retries resumed from cached artifacts (target dir kept). APK:
+`<target>/townframe-p3N-4/agent-a13a9caba8415d784/dx/dayframe_mobile/debug/android/app/app/build/outputs/apk/debug/app-debug.apk`,
+213,265,895 B; `lib/arm64-v8a/libmain.so` 888,191,848 B uncompressed (debug, unstripped); the two debug guests inside are 15.1 MB
+(counter) and 17.0 MB (layout). Captures: `/run/media/asdf/p3N/tmp/a3/shots/` (outside the repo; the build log is
+`/run/media/asdf/p3N/tmp/a3/build-debug2.log`). The app is left installed on the phone.
+
+Results (debug build only; release not run):
+
+1. Launch and Mali render: **pass.** `am start -W` TotalTime 4494 ms on the first launch after install, 1217 / 933 ms on later
+   cold starts (page cache warm). A "Loading Dayframe..." splash showed at 6 s (`01-home.png`), the shell at 26 s after the install
+   launch (`01b-home.png`, the Sample micro detail: the first run opened on it, cause not investigated), and the shell is up
+   almost immediately on later cold starts (`25-cold-restart.png`). No `panicked`/`F libc`/`FATAL` lines. Logcat is full of
+   `mali_gralloc: Requested R8 format is not supported with this allocator` errors at startup (harmless to the render, but noisy).
+   No wgpu debug-label crash on Mali (finding 1 of A1 does not reproduce here).
+2. Flows: **pass.** Home lists Layout and Settings; Settings lists Counter (Wasm), Micro lifecycle, Sample micro (`03-settings.png`);
+   "Choose settings sections" expands (`04-choose.png`). Insets: header sits below the status bar and nothing is under the cutout.
+3. Back: **partial.** KEYCODE_BACK from a section returns to Settings, Settings to Home, and with the keyboard up the first back
+   dismisses the keyboard (IME consumes it) and the second navigates. **Fail: back at Home does nothing** (`14-after-home-back.png`,
+   `topResumedActivity` stays MainActivity, process alive). Cause (logcat): `OnBackInvokedCallback: OnBackInvokedCallback is not
+   enabled for the application. Set 'android:enableOnBackInvokedCallback="true"' in the application manifest.` On API 33 the
+   dispatcher callback that `MainActivity.kt` registers is ignored unless the manifest opts in, so the A1 `moveTaskToBack` path
+   never runs; winit gets the key, the shell has nowhere to go and swallows it. Not fixed: the dx manifest template has no hook for
+   the attribute (A1 finding 2) and the alternative (Rust calling `moveTaskToBack` when `can_back` is false on the key path) needs
+   a rebuild. Gesture back (swipe from the left edge) not exercised separately from the key event: unverified.
+4. Sidebar: **pass** by button (hamburger opens a drawer with Home/Layout/Settings/Increment, `15-sidebar-button.png`; back closes
+   it). A left-edge swipe at Home opened nothing (`17-edge-swipe-horiz.png`): no edge-drag drawer exists or it is not
+   recognized; unverified which.
+5. Wasm guest: **pass.** Settings -> Micro lifecycle -> "Enable dayframe.counter micro" turned `Disabled` into `Idle`; before that
+   the section showed "Section unavailable: Unavailable" (`05-counter.png`, not enabled on admission, as A1 finding 4). Opening
+   Counter (Wasm) then renders the guest ("0", Refresh counter) and two presses give "2", "Operation 9: Accepted"
+   (`09-counter.png`). Wasmtime JIT under Android's SELinux works: no mmap/trap/avc lines in logcat. Layout micro enabled too:
+   Layout shows Hide/Show buttons and the Sample and Counter panels toggle without a hang (`19-layout2.png`, `21-layout-hide-sample.png`);
+   the desktop wcmp hang did not occur.
+   Guest timing: the first open of a Wasm section after process start takes about 5.5 s on the debug (unoptimized) guests (polled with
+   `screencap`, ~0.5 s granularity; the compile of a 15 MB debug component is the suspected cost, unverified), and during that
+   time the old frame stays on screen with no loading indicator, so taps look lost. This showed three times (Layout row, Show Counter,
+   Counter section) before I recognized it. A second open in the same process was not cleanly measured (the poll caught other
+   changes). No per-call dispatch timing is logged, so Counter/Layout dispatch latency is unmeasured.
+6. Text input: **partial.** Tapping the Sample micro Greeting field raises the soft keyboard (`dumpsys input_method`:
+   `mInputShown=true`, `mIsInputViewShown=true`) and `input text hello` (injected key events) arrives: "Hello from a microhello"
+   (`10-text.png`), and persists. Real IME composition, accents and swipe typing: **not run** (cannot be driven over adb; the
+   NativeActivity delivers key events only, as in S3).
+7. TalkBack: **not run** (changes a system setting, off limits).
+8. Persistence: **partial.** After `force-stop` and relaunch the Sample micro greeting is still "Hello from a microhello"
+   (`27-persist-sample.png`). The counter value and enabled-micro state across the restart were not read back cleanly: unverified.
+9. Memory (`dumpsys meminfo`, saved at `/run/media/asdf/p3N/tmp/a3/meminfo-settings.txt`): TOTAL PSS 450,043 KB (native heap
+   198 MB, GL mtrack 41 MB, .so mmap 160 MB) after the first Settings and Wasm session; 248,002 KB right after a cold start and
+   ~245 MB after reopening a guest. `gfxinfo` frame stats were empty (0 frames: the Blitz renderer does not go through HWUI), so
+   no jank numbers.
+
+Other findings:
+- The phone's clipboard UI (a floating clip chip, "Shell pasted from your clipboard") overlaid some of my screenshots with clipboard
+  contents; those captures (`08`, `08b`, `11`, `12`) were deleted at once and are not referenced. Nothing in the app reads the
+  clipboard in this run (unverified why the system raised it; likely the keyboard's clipboard suggestions). Future runs should crop
+  or avoid full-screen captures while the user is using the phone.
+- No fixes were committed: the one real bug (back at Home) needs a rebuild or a manifest hook, so it is pinned, not fixed.
+- Release arm64 build: not run (disk).
+
+## A4 notes (back at Home, first Wasm section open)
+
+Captures (cropped to the top 60 to 70 percent of the screen; the crop helper is `/run/media/asdf/p3N/tmp/a4/crop.py`) and build logs:
+`/run/media/asdf/p3N/tmp/a4/`. Debug arm64 build, installed on the ZTE 8050 (`build1b.log`); the first attempt failed at link with
+`ld.lld: failed to open .../dayframe_mobile: Invalid argument` (ntfs3 target dir) and the identical retry linked, cause unknown.
+
+### 1. System back at Home: fixed and verified on the phone
+
+- dx at the pinned rev (`a3e1e68`) has a supported hook after all: `[application] android_manifest = "<file>"` in `Dioxus.toml`
+  (`packages/cli/src/build/android.rs`, `config/app.rs`). dx writes that file verbatim as `AndroidManifest.xml` and renders no
+  template for it, so `src/dayframe_mobile/AndroidManifest.xml` is a copy of dx's `AndroidManifest.xml.hbs` (no permissions,
+  features, deep links configured, `lib_name` = `main`) plus `android:enableOnBackInvokedCallback="true"`. Cost: when the
+  dioxus rev is bumped the copy must be re-diffed against the new template (the file's header says so).
+- Guard against dx dropping the hook: `x/dayframe.ts android` runs `apkanalyzer manifest print <apk>` after the build and throws
+  if the shipped manifest lacks the attribute. It passed on this build.
+- Phone (ZTE 8050, API 33), `adb shell input keyevent KEYCODE_BACK`:
+  - At Home: `topResumedActivity` went from `com.example.mobile/...MainActivity` to `org.mozilla.firefox/...` and
+    `pidof com.example.mobile` still returned a pid: the task moved to back, the process lives (the A3 build stayed on MainActivity).
+  - Settings -> back showed Home (`b-settings.png`, `b-afterback.png`).
+  - Sample micro, Greeting field focused (`dumpsys input_method`: `mInputShown=true`): first back -> `mInputShown=false` and still on
+    Sample micro (`kb1.png`); this needed a tap on the text field, no text was typed.
+- Gesture back (edge swipe) not exercised separately from the key event: unverified. With the opt-in the platform delivers
+  back to the `OnBackInvokedCallback` only (a key event may no longer reach winit); the three checks above passed through that path.
+
+### 2. First Wasm section open after process start
+
+Measured with instrumentation (`INSTR` `eprintln!` lines in `clay_rt_wasmtime::WasmPackage::from_bytes` and `instantiate`, its own
+commit `f4cd3d87`, to be dropped; stderr reaches logcat as `RustStdoutStderr`). Debug guest, cold process, tap Counter (Wasm):
+
+| step | time |
+| --- | --- |
+| `engine()` | 73 ms |
+| `compile_component`, counter debug component, 15,098,908 B | **6.55 s** |
+| `instantiate_async` | 36 ms |
+
+So the 5.5 s of A3 is the Cranelift compile of the debug component, nothing else. `cache_path` returned `None` on the phone:
+`clay_rt_wasmtime` already has a precompiled-artifact cache (`$DAYFRAME_COMPONENT_CACHE`, else `$XDG_CACHE_HOME`/`$HOME/.cache`),
+but an Android app has neither, so every process start compiles from scratch and `run-as com.example.mobile ls cache` is empty.
+
+Levers:
+
+- (a) Release guests: `x/dayframe.ts android --guest-profile wasm-release` (new; commit `855d2285`). There was no
+  `DAYFRAME_GUEST_PROFILE`; the flag selects the workspace's existing `wasm-release` cargo profile and
+  `dayframe-packages.ts` takes a `guestProfile` option. **Not measured on the phone**: the release guest build was stopped at the
+  5 GB disk floor (4.9 GB free; the guest `wasm-release` compile was in its last crates, `micro_layout`) before an APK existed.
+  Expected effect is a smaller, faster-to-compile component, but that is unverified; do not rely on it.
+- (b) Cache in app storage: point `cache_path` at the app's `cache`/`files` dir. Small change (an explicit
+  `set_component_cache_directory` from `android_main` using `app.internal_data_path()`, or `DAYFRAME_COMPONENT_CACHE` set before
+  the engine is built; env mutation needs care, the explicit setter is cleaner). It removes the compile from every start after the
+  first, regardless of guest profile, so it is the lever that fixes the symptom; the first open after install still compiles.
+  Not implemented: no disk left to build and verify it on the phone, and unverified code is not committed.
+- (c) Build-time AOT (`Engine::precompile_component` at build, ship `.cwasm`, `Component::deserialize`): no first-open compile at
+  all, but the artifact is bound to the engine's compatibility hash (wasmtime version and config, target triple/CPU features), needs
+  a host-side step that builds an aarch64 engine config (cross-compile target set), and `deserialize` of untrusted-looking bytes is
+  `unsafe` (APK content is trusted). Larger change than (b); worth it only if the first-after-install compile matters.
+
+Why the shell's "Loading section…" state is not shown: it exists (`render_state` in `src/clay_mdk/hooks.rs`, `SlotState::Loading`
+with `role="status"`), but the compile is a synchronous call inside an async fn (`compile_component` calls `Component::new` /
+`precompile_component` with no `spawn_blocking`). The frame that would show Loading is painted by the same runtime that polls
+that future; whether it is the UI thread is unverified (the `INSTR` lines are logged from the stdio thread and do not name the
+polling thread). The A3 observation (old frame frozen for the whole compile) fits a blocked UI thread. Next check: log the thread
+name and a heartbeat in the instrumentation, or move the compile to `spawn_blocking` and see whether Loading then paints.
+
+### A4 follow-up: (a), (b), (c) implemented, not yet measured (phone disconnected)
+
+The phone (`LZ0V50ETDC6009467`) dropped off `adb devices` after the first release-guest APK was built and stayed gone for the rest
+of the session, so none of the numbers below exist yet. Code state, in commit order after `855d2285`:
+
+- `instr(clay_rt_wasmtime)` also logs the thread that compiles (drop after A4).
+- `feat(clay_rt_wasmtime)`: `set_component_cache_directory(PathBuf)` (OnceLock, set-twice panics) takes precedence over
+  `$DAYFRAME_COMPONENT_CACHE` and the XDG/home default, which remain for desktop and tests. `dayframe_mobile`'s `android_main`
+  sets `<internal_data_path>/component-cache`. Re-exported through `clay_mdk::host` and `dayframe_native`. The existing
+  `precompiled_artifacts_are_reused_by_content` test now uses the setter and asserts it wins over the environment: passes
+  (`nextest run -p clay_rt_wasmtime precompiled_artifacts`, needs `DAYFRAME_COUNTER_COMPONENT`).
+- `fix(clay_rt_wasmtime)`: `WasmPackage::from_bytes(Vec<u8>)` compiles on a `wasm-compile` thread (std thread + oneshot, no tokio
+  runtime assumed) so the polling thread is free. New test `compiling_a_package_leaves_the_polling_thread_free` (cold compile via a
+  uniquely padded component, asserts a 1 ms ticker runs on the polling thread meanwhile): passes. It was not run against the old
+  blocking code, so that it fails there is unverified.
+
+Release guests: `counter.component.wasm` 9,898,967 B and `layout.component.wasm` 11,035,457 B under `wasm-release` (debug: 15.1 and
+17.0 MB; `wasm-release` keeps line tables).
+
+APKs saved for the measurements (all with the INSTR lines, release guests, predictive-back manifest):
+`/run/media/asdf/p3N/tmp/a4/apk-a-release-guests.apk` (release guests only, thread log, no cache, compile still on the polling
+thread) and `/run/media/asdf/p3N/tmp/a4/apk-bc.apk` (plus the cache and the compile thread). `/run/media/asdf/p3N/tmp/a4/cold.sh`
+force-stops, cold-starts, opens Counter (Wasm) and prints the INSTR lines. To do, on a connected phone:
+1. install `apk-a`, run `cold.sh`: release-guest compile time, and the compiling thread's name (UI thread or not);
+2. install `apk-bc`, run `cold.sh` twice: first start compile time (cache miss), second start (cache hit; also `run-as
+   com.example.mobile ls files/component-cache`), and screencap (cropped) during the first open to see "Loading section...".
+Build note: the link step failed three times in a row with `ld.lld: failed to open .../out/dayframe_mobile: Invalid argument`
+(ntfs3 target dir) and succeeded on the fourth identical run; `fallocate`/`ftruncate` of 2 GB in that directory work, cause unknown.
+
+### A4 measurements (phone back; ZTE 8050, cold `force-stop` + start, tap Settings then Counter (Wasm); `cold2.sh`)
+
+| build | engine | `compile_component` | thread | package ready | instantiate |
+| --- | --- | --- | --- | --- | --- |
+| debug guest (A4 first run) | 73 ms | 6.55 s (15.1 MB) | n/a | 6.69 s | 36 ms |
+| (a) release guest, no cache | 80 ms | **2.69 s** (9.9 MB) | `None` (unnamed) | 2.82 s | 36 ms |
+| (a)+(b)+(c), first start (cache miss) | 1 ms | 3.20 s | `wasm-compile` | 4.03 s | 3 ms |
+| (a)+(b)+(c), second start (cache hit) | 0.8 ms | **0.80 s** | `wasm-compile` | 1.58 s | 3 ms |
+
+- (a): release guests cut the compile from 6.55 s to 2.69 s and the component from 15.1 to 9.9 MB (`wasm-release`).
+- (b): `files/component-cache/<hash>.cwasm` (4,848,184 B) exists after the first start (`run-as ... ls`); the second start's compile is
+  0.80 s (deserialize plus the blake3 of the 9.9 MB component to find the key). A miss costs about the compile plus a write (3.20 s).
+- Thread: in (a) `compile_component` ran on an unnamed thread, i.e. not one of the named tokio/stdio threads; it is the shell's polling
+  thread (the `android_main` thread is created natively, so Rust has no name for it). Consistent with that, `a-open1.png` (1.2 s into
+  the open) still shows the Settings list, the old frame, and `a-open2.png` the finished counter. After (c), `bc1-open1.png` and
+  `bc2-open1.png` (same point, first and second start) show the section's **"Loading section..." state painted** under the Counter
+  (Wasm) header; with the compile moved to the `wasm-compile` thread the shell now shows its Loading state.
+- Not yet off the polling thread: `linker()` (WASI p3 + micro client linker, built once) takes about 0.8 s on the phone
+  (package ready minus compile: 0.83 s, 0.78 s, 0.79 s) and still runs in the poll; a candidate for the same treatment or for
+  building at startup. `instantiate` is 3 ms after (b)/(c) and was 36 ms before.
+- Open total, tap to counter on screen: roughly 1.6 s on a second start versus about 6.7 s for the debug guest.
+- The INSTR lines are removed (`revert(clay_rt_wasmtime)`, source-only, not rebuilt: the installed APK is `apk-bc` which still has them).
+
+## A5 notes (release on the phone)
+
+**Not done: the release arm64 build was stopped at the disk floor; no release APK exists, nothing was installed or run on the phone.**
+
+- Command: `./x/agent-build.ts -- deno run --allow-all x/dayframe.ts android --abi arm64 --release --guest-profile wasm-release`
+  at d78251bb. Log: `/run/media/asdf/p3N/tmp/a5/build1.log`.
+- The release profile shares nothing with the warm debug artifacts: dx reported `[1125/1926]` crates compiled after 4850 s (about
+  81 min) when free space on the volume reached 4.2 GB (started at 29 GB, observed 28, 27, 24, 23, 21, 17, 14, 11, 7.8 GB over the
+  run) and I killed my own process tree by PID. Other lanes were building and running clippy/nextest on the same volume at the
+  same time, so not all of the 25 GB drop is this build; the split was not measured.
+- No link was reached, so no `ld.lld ... Invalid argument` flake occurred (0 of 3 retries used).
+- The target dir was not cleaned; the partial release artifacts stay there, so a rerun resumes from crate 1125 and needs roughly
+  (801 remaining crates, including the large wasmtime/vello/libmain link) more space than is free now. Unverified estimate: a
+  completed release build needs on the order of 10 to 20 GB more.
+- Phone state: untouched by this lane; it still has the A4 `apk-bc` debug build installed (per the A4 notes).
+- Open question for the user: free at least about 20 GB (e.g. drop the host `debug/` dirs of other worktrees, or the A3/A4 debug
+  android output) and rerun, or approve cleaning part of the target dir.
+
+## A6 notes (desktop layout e2e: paused clock vs off-thread compile)
+
+- Cause: `WasmPackage::from_bytes` (src/clay_rt_wasmtime/lib.rs:679) awaited a `wasm-compile` std thread through a oneshot (A4). The layout e2e runs on
+  `start_paused` tokio time, which auto-advances to the next timer whenever every task is parked; a future parked on a bare thread's oneshot
+  looks parked on nothing, so virtual time jumped to the layout guest feed's 30 s long poll (and onward, "1230s") mid-compile. Tokio inhibits
+  auto-advance only while a `spawn_blocking` task is in flight. `dayframe_desktop/e2e/layout.rs:179` is where it showed.
+- Fix: inside a tokio runtime (`Handle::try_current`) the compile runs on `spawn_blocking`; with no runtime (Android shell) the `wasm-compile`
+  thread remains. Mechanism commented at the site. `clay_rt_wasmtime` now has tokio `rt` (and dev `test-util`).
+- Pin: `clay_rt_wasmtime::tests::a_paused_clock_does_not_advance_while_a_package_compiles` (fails on the thread-only path, verified by forcing that
+  branch; passes now). The cold padded-bytes helper is shared with the thread-free test.
+- Slow `hiding_a_native_panel_leaves_the_layout_mounted`: unrelated to the compile change. It uses the Wasmi/wcmp path (untouched by the branch,
+  `clay_rt_wcmp` not in the diff) on a real clock; instrumented: ~5 s to start and ~5 s per hide/show round (each re-mount re-loads the guest
+  in a debug-built Wasmi), 6 rounds = ~32-37 s on an idle machine. The 85-108 s runs were presumably under parallel build load. I did not
+  measure it on feat/dayframe-shell, so "same cost there" is unverified. Instrumentation was not committed.
+- Commands: `./x/agent-build.ts -- cargo nextest run -p dayframe_desktop -p dayframe_native -p clay_rt_wasmtime` (73 passed, 44.7 s) and
+  `cargo clippy --all-targets -p clay_rt_wasmtime -p dayframe_desktop -p dayframe_native` (only pre-existing manifest warnings), with
+  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0` and the `check-dayframe.ts --prepare-only` exports.

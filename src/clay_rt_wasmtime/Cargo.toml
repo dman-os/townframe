@@ -24,12 +24,12 @@ wasmtime-wasi.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 ciborium.workspace = true
 clay_guest_session = { workspace = true, features = ["test-utils"] }
 daybook_types.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 wat = "1.262"

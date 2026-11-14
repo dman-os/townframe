@@ -1858,11 +1858,9 @@ async fn precompiled_artifacts_are_reused_by_content() {
     ));
     let artifact = {
         let engine = engine().unwrap();
-        // The cache directory is process-global configuration; this test owns it for its duration.
-        let previous = std::env::var_os("DAYFRAME_COMPONENT_CACHE");
-        // SAFETY: tests in this binary do not read this variable concurrently except through
-        // this test, which restores it before returning.
-        unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", &directory) };
+        // The cache directory is process-global configuration that can be set once, and this is
+        // the only test that sets it: it then names the directory for the rest of the binary.
+        set_component_cache_directory(directory.clone());
         let first = compile_component(&engine, &bytes).unwrap();
         let artifact = cache_path(&engine, &bytes).unwrap();
         assert!(artifact.exists(), "a cold compile publishes its artifact");
@@ -1874,15 +1872,73 @@ async fn precompiled_artifacts_are_reused_by_content() {
             "a warm load must not recompile"
         );
         drop((first, second));
-        match previous {
-            Some(previous) => unsafe { std::env::set_var("DAYFRAME_COMPONENT_CACHE", previous) },
-            None => unsafe { std::env::remove_var("DAYFRAME_COMPONENT_CACHE") },
-        }
+        assert!(
+            artifact.starts_with(&directory),
+            "the explicit directory wins over the environment"
+        );
         artifact
     };
     // A warm load produces a component on the shared engine, from the published artifact.
-    let package = WasmPackage::from_bytes(&bytes).await.unwrap();
+    let package = WasmPackage::from_bytes(bytes).await.unwrap();
     assert!(Engine::same(&package.engine, &engine().unwrap()));
     assert!(artifact.exists());
     std::fs::remove_dir_all(directory).ok();
+}
+
+/// The counter component with a trailing custom section (id 0, name "pad") holding a unique
+/// payload, so its cache key is its own and a compile of it is cold even when the artifact cache
+/// is warm.
+fn uniquely_padded_counter() -> Vec<u8> {
+    let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
+        .expect("DAYFRAME_COUNTER_COMPONENT must name a prepared counter component");
+    let mut bytes = std::fs::read(path).unwrap();
+    // A trailing custom section (id 0, name "pad") with a unique payload gives these bytes a
+    // cache key of their own, so the compile is cold even when the artifact cache is warm.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
+    bytes.extend([0, (1 + 3 + unique.len()) as u8, 3]);
+    bytes.extend(b"pad");
+    bytes.extend(unique);
+    bytes
+}
+
+/// Compiling a package must not occupy the thread that polls it: on Android that is the UI
+/// thread, and a frozen frame hid the section's loading state for the whole compile.
+#[tokio::test(flavor = "current_thread")]
+async fn compiling_a_package_leaves_the_polling_thread_free() {
+    let bytes = uniquely_padded_counter();
+    let mut ticks = 0u32;
+    let compile = WasmPackage::from_bytes(bytes);
+    tokio::pin!(compile);
+    loop {
+        tokio::select! {
+            package = &mut compile => {
+                package.unwrap();
+                break;
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(1)) => ticks += 1,
+        }
+    }
+    assert!(
+        ticks > 1,
+        "the polling thread ran {ticks} ticks during a cold compile; it was blocked"
+    );
+}
+
+/// A compile is a real wait for a paused test clock: awaiting it must not let the runtime
+/// auto-advance virtual time to the next timer (a guest feed's long poll, in the layout e2e).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_paused_clock_does_not_advance_while_a_package_compiles() {
+    let started = tokio::time::Instant::now();
+    let package = tokio::select! {
+        package = WasmPackage::from_bytes(uniquely_padded_counter()) => package.unwrap(),
+        () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+            panic!("the paused clock jumped to a 30 s timer while the compile was in flight")
+        }
+    };
+    drop(package);
+    assert_eq!(started.elapsed(), std::time::Duration::ZERO);
 }

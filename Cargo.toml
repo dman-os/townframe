@@ -68,6 +68,7 @@ members = [
   "./src/clay_dioxus_kit",
   "./src/dioxus_storm",
   "./src/dayframe_composition",
+  "./src/dayframe_native",
   "./src/dayframe_web",
   "./src/dayframe_desktop",
   "./src/dayframe_mobile",
@@ -154,6 +155,7 @@ micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 dayframe_composition = { path = "./src/dayframe_composition" }
+dayframe_native = { path = "./src/dayframe_native" }
 
 #
 # meta

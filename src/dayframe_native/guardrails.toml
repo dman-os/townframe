@@ -1,0 +1,23 @@
+version = 1
+role = "application"
+dependency_reason = "dayframe microkernel layering: the native-engine half of the composition root (Wasmtime, SQLite, linked built-ins) shared by the desktop and mobile shells"
+allowed_dependencies = [
+    "clay_docs",
+    "clay_host",
+    "clay_mdk",
+    "clay_store",
+    "dayframe_composition",
+    "micro_counter_manifest",
+    "micro_sample",
+    "micro_settings",
+    "micro_settings_manifest",
+    "micro_shell",
+    "micro_shell_manifest",
+    "micro_toolbar",
+    "micro_toolbar_manifest",
+    "sqlite_rs",
+    "ui",
+]
+allow_external_api_types = false
+
+[builds.native]

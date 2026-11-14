@@ -18,6 +18,7 @@ use clay_host::Host;
 use clay_host::Instance;
 use clay_host::LocalFuture;
 pub use clay_rt_wasmtime::WasmPackage;
+pub use clay_rt_wasmtime::set_component_cache_directory;
 use clay_rt_wasmtime::WasmRuntime;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSession;

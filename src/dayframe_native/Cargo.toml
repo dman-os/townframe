@@ -1,0 +1,36 @@
+[package]
+name = "dayframe_native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_docs = { workspace = true }
+clay_host = { workspace = true }
+clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
+clay_store = { workspace = true }
+dayframe_composition = { workspace = true }
+dioxus = { workspace = true }
+dioxus-native = { workspace = true, optional = true }
+micro_counter_manifest = { workspace = true }
+micro_sample = { workspace = true }
+micro_settings = { workspace = true }
+micro_settings_manifest = { workspace = true }
+micro_shell = { workspace = true }
+micro_shell_manifest = { workspace = true }
+micro_toolbar = { workspace = true }
+micro_toolbar_manifest = { workspace = true }
+serde_json = { workspace = true }
+sqlite_rs = { workspace = true }
+ui = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[features]
+# Blitz hosting: the winit window-event host inputs and the insets source. Off for a Wry-only
+# build, which must not compile Blitz.
+blitz = ["dep:dioxus-native"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

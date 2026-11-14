@@ -14,6 +14,13 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 --native         the Blitz renderer instead
                 --fresh          start from an empty store in a new temp file
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
+  android     build the Android APK (dayframe_mobile)
+                --abi <arm64|x86_64>  target ABI, default arm64 (aarch64-linux-android);
+                                 x86_64 is what an emulator on this host runs
+                --release        release profile (unsigned unless Dioxus.toml configures signing)
+                --guest-profile <dev|wasm-release>  cargo profile of the bundled Wasm guests,
+                                 default dev (15 to 17 MB components, slow to compile on a phone)
+                --install        adb install the APK on the attached device
   web         build and serve dayframe_web (--build: build only)
   showcase    run the design showcase (dayframe_showcase) in a webview (Wry)
                 --native         the Blitz renderer instead
@@ -63,6 +70,95 @@ switch (command) {
       "--hot-patch",
       "false",
     ).env(env);
+    break;
+  }
+  case "android": {
+    const guestProfileFlag = rest.indexOf("--guest-profile");
+    const guestProfile = guestProfileFlag >= 0
+      ? rest[guestProfileFlag + 1]
+      : "dev";
+    if (guestProfile !== "dev" && guestProfile !== "wasm-release") {
+      throw new Error(
+        `--guest-profile must be dev or wasm-release, got ${guestProfile}`,
+      );
+    }
+    const env = await prepareDayframePackages({
+      testFixtures: false,
+      guestProfile,
+    });
+    // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
+    // `asset!`, so stage the prepared counter and layout beside the crate (gitignored).
+    const staged = root.join("src/dayframe_mobile/packages");
+    await Deno.mkdir(staged.toString(), { recursive: true });
+    for (const name of ["counter", "layout"]) {
+      for (const suffix of ["manifest.json", "component.wasm"]) {
+        await $`cp ${
+          $.path(env["DAYFRAME_PACKAGE_DIR"]).join(`${name}.${suffix}`)
+        } ${staged.join(`${name}.${suffix}`)}`;
+      }
+    }
+    const abiFlag = rest.indexOf("--abi");
+    const abi = abiFlag >= 0 ? rest[abiFlag + 1] : "arm64";
+    const androidTargets: Record<string, string> = {
+      arm64: "aarch64-linux-android",
+      x86_64: "x86_64-linux-android",
+    };
+    const androidTarget = androidTargets[abi];
+    if (!androidTarget) {
+      throw new Error(
+        `--abi must be one of ${Object.keys(androidTargets)}, got ${abi}`,
+      );
+    }
+    // dx parses the triple and prints it back as `x86_64-unknown-linux-android`, so it looks
+    // up its linker under that name (a cargo `target.<triple>.linker` or the matching
+    // `CARGO_TARGET_*_LINKER`) and, failing that, builds the NDK clang name from it, which
+    // does not exist (the NDK ships `x86_64-linux-android<api>-clang`). aarch64 prints back
+    // unchanged and needs nothing. Alias the NDK's own linker under dx's spelling.
+    const ndkLinker = Deno.env.get("CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER");
+    if (abi === "x86_64" && ndkLinker) {
+      Deno.env.set(
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_ANDROID_LINKER",
+        ndkLinker,
+      );
+    }
+    // `dx build` assembles through Gradle into the target dir; `--release` also needs a
+    // signing config in Dioxus.toml to yield a signed APK.
+    await $`deno run --allow-all ${
+      root.join("x/dx.ts")
+    } build --platform android --target ${androidTarget} --renderer native -p dayframe_mobile ${
+      flag("--release") ? ["--release"] : []
+    }`.cwd(root);
+    const metadata =
+      await $`cargo metadata --locked --no-deps --format-version 1`
+        .json<{ target_directory: string }>();
+    const apks =
+      await $`find -H ${metadata.target_directory} -name '*.apk' -path '*dayframe_mobile*' -printf '%T@ %p\n'`
+        .text();
+    const apk = apks.trim().split("\n").filter(Boolean).sort().pop()?.split(
+      " ",
+    )[1];
+    if (!apk) {
+      throw new Error("dx reported success but no dayframe_mobile APK exists");
+    }
+    // `src/dayframe_mobile/AndroidManifest.xml` replaces dx's generated manifest to opt in to
+    // predictive back (dx's template has no hook for application attributes). Check the shipped
+    // APK's manifest rather than trust that dx still honors `android_manifest`: without the
+    // attribute, API 33 ignores `MainActivity`'s back callback and back at Home does nothing.
+    const shippedManifest = await $`apkanalyzer manifest print ${apk}`.text();
+    if (
+      !/android:enableOnBackInvokedCallback="true"/.test(shippedManifest)
+    ) {
+      throw new Error(
+        `${apk} lacks android:enableOnBackInvokedCallback="true"; ` +
+          "dx did not use src/dayframe_mobile/AndroidManifest.xml (Dioxus.toml android_manifest)",
+      );
+    }
+    console.log(`apk: ${apk}`);
+    if (flag("--install")) {
+      // `adb install` fails with "no devices/emulators found" when nothing is attached; that is
+      // the right error, not something to paper over.
+      await $`adb install -r ${apk}`;
+    }
     break;
   }
   case "web":
