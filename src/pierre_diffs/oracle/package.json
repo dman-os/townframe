@@ -1,0 +1,12 @@
+{
+  "name": "pierre-diffs-oracle",
+  "private": true,
+  "type": "module",
+  "description": "Pinned dependency closure of the published @pierre/diffs 1.6.4 and diff 9.0.0 that the oracle imports. package-lock.json carries the integrity hashes; ensure.mjs installs it with `npm ci --ignore-scripts` into a cache directory outside the checkout.",
+  "dependencies": {
+    "@pierre/diffs": "1.6.4",
+    "diff": "9.0.0",
+    "jsdom": "26.1.0",
+    "shiki": "3.23.0"
+  }
+}

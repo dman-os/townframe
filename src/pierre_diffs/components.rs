@@ -1,0 +1,26 @@
+//! Ports of `packages/diffs/src/components/*.ts`, one Rust module per upstream
+//! file (snake_case of the upstream name). The logic lives here against a host
+//! trait; the browser wiring is in the `pierre_diffs_dioxus` crate.
+
+pub mod file_diff;
+pub mod virtualized_file_diff;
+pub mod virtualizer;
+
+#[cfg(test)]
+mod file_diff_churn_test;
+#[cfg(test)]
+mod file_diff_hydration_upstream_tests;
+#[cfg(test)]
+mod file_diff_lifecycle_oracle_tests;
+#[cfg(test)]
+mod file_diff_oracle_tests;
+#[cfg(test)]
+mod file_diff_render_oracle_tests;
+#[cfg(test)]
+mod file_diff_upstream_tests;
+#[cfg(test)]
+mod virtualizer_oracle_tests;
+#[cfg(test)]
+mod virtualizer_reconcile_queue_test;
+#[cfg(test)]
+mod virtualizer_scroll_state_test;

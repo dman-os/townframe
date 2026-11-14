@@ -1,0 +1,11 @@
+version = 1
+role = "interface"
+dependency_reason = "thin Dioxus web layer over the pure pierre_diffs port: DOM event, observer and measurement wiring for the Virtualizer; plain Dioxus, no Clay or micro dependency"
+allowed_dependencies = [
+    "pierre_diffs",
+]
+allow_external_api_types = true
+
+[builds.native]
+
+[builds.wasm32-unknown-unknown]

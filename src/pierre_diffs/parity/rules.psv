@@ -1,0 +1,340 @@
+# Parity matrix rules. First matching rule wins; a pattern ends in `*` for a prefix match.
+# Columns: pattern|status|slice|rust location(s) (relative to src/pierre_diffs, `;` separated)|note
+# status: PORTED (Rust exists and is tested), PENDING (in scope, later slice), OUT (never), DEFER (maybe later).
+# Regenerate PARITY.md and parity/matrix.psv with `node oracle/parity.mjs`; CI-style check: `node oracle/parity.mjs --check`.
+highlights/dist/highlighter.js|PORTED|S7|highlights/highlighter.rs|langIdOf, isSupportedLanguage, codeToTokens over a `HighlightRecords` source (the wasm stays unmodified behind it); instance/memory management, HTML modes, StreamTokenizer and ansi not ported
+highlights/dist/theme.js|PORTED|S7|highlights/theme.rs|style resolution (resolveThemeStyle, resolveThemeSyntax, prepareTheme); wasm HTML packing and ansi colors not ported
+highlights/dist/tokens.js|PORTED|S7|highlights/tokens.rs|resolveOptionThemes, lineRecordsToTokens, rangeToToken, themeHtmlStyle, themeMeta; multi-theme HTML blobs not ported
+highlights/dist/languages.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs
+highlights/dist/token-types.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json) by oracle/generate.mjs
+highlights/dist/themes/pierre-dark.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded
+highlights/dist/themes/pierre-light.js|REPLACED|S7|highlights/data.rs|exported as data (highlights/data/highlights_data.json); the other bundled Zed themes are not embedded
+highlights/dist/highlights.wasm|OUT|S7||unmodified; run by the host behind `HighlightRecords` (pure crate, no engine). Fuel and per-call slicing are the host's concern
+theming/dist/modules/createThemeResolver.js|PORTED|S7|highlights/theming.rs|synchronous resolver (no inflight/generation); the rest of @pierre/theming is not needed
+pierre/src/components/CodeView.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/File.ts|DEFER|-||single-file view deferred; review loop uses FileDiff
+pierre/src/components/FileDiff.ts|PORTED|S12a|components/file_diff.rs|PARTIAL. S12a-1 (the options seam): `FileDiffOptions` (callbacks compared by `Rc` identity), `getTheme`, the interaction wiring rule and `interaction_options`, `canPartiallyRender`, `shouldApplyColumnVariables`, `getLineIndexForDiff`, oracle-tested against the published class constructed without a DOM. S12a-2a (the struct and its first lifecycle seam): constructor wiring over `FileDiffHost`, `setOptions`, `syncInteractionOptions`, `setThemeType`/`applyCachedThemeState`/`hasThemeChanged`, annotations, selection deferral, `flushManagers`, `getLineIndex`, `handleExpandHunk`; oracle-tested over a fake DOM (251 scenarios incl. seeded random sequences). S12a-2b (render and hydration over the `Document`, views under `components/file_diff/`): `render` and its orchestration, `hydrate`/`hydrateElements`/`hydrationSetup`, `loadFilesIfNecessary` and the host-driven `files_loaded`/`abandon_file_load`, `updateInputDiff`, `adoptRenderData`, `emitPostRender`, `rerender`, the shell (`getOrCreateFileContainer`, sprite, pre, header and header slots, separators, annotations, gutter utility, buffers), theme and unsafe CSS (`applyThemeState`, `injectUnsafeCSS`), the code columns, partial render and row trimming; oracle-tested against the published class over jsdom 26.1.0 (handwritten and seeded random scenarios, `s12b_render.json`). S12a-2c: `cleanUp` (managers first, then every node the instance created, never the container) and `isLineRenderable`/`getNearestRenderableLine`/`revealLine` (the `Lines` view), oracle-tested over jsdom (cleanUp, queries, reveal and expandHunk steps; 374 scenarios) and a churn test; edit-session, worker and merge-conflict code is dropped
+pierre/src/components/FileStream.ts|PENDING|S10-S12||PORT as Dioxus components (semantics, not code shape)
+pierre/src/components/UnresolvedFile.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/components/VirtualizedFile.ts|DEFER|-||single-file view deferred; review loop uses FileDiff
+pierre/src/components/VirtualizedFileDiff.ts|PORTED|S12b|components/virtualized_file_diff/layout.rs;components/virtualized_file_diff/window.rs;components/virtualized_file_diff/instance.rs;components/virtualized_file_diff/overrides.rs|PORTED (S12b-1, S12b-2 and S12b-3), split in three: S12b-1 the layout model (`DiffLayout`, `LayoutContext`, the cache, estimated heights, layout checkpoints and their searches, line counts, cache resets, the option-change predicates and the free helpers at the end of the file), pure over `FileDiffMetadata` and the options, oracle-tested against the published class's layout methods (s12b_layout.json: handwritten and seeded random sequences over a pool of diffs); S12b-2 the window and measurement (`window.rs`: `computeRenderRangeFromWindow`, `getLinePosition`; `instance.rs`: `VirtualizedFileDiff` with `reconcileHeights` and `measureFileAnnotationHeight`, `onRender`, `setVisibility`, `syncVirtualizedTop`, `updatePendingRender`, `syncLineAnnotations`, `updateCodeViewLayout`), oracle-tested against the published class over a declared DOM (s12b_window.json: handwritten window sweeps and measurement sequences and 300 seeded random sequences; the window half and the DOM reads are compared at every step); S12b-3 the FileDiff integration (`overrides.rs`: the constructor over `FileDiff`, `OverrideHooks` (the `FileDiffHooks` for `finalizeRender`, `expandHunk`, `handleFilesLoaded`, `setLineAnnotations` and the tail of `flushManagers`), `render`, `rerender`, `setOptions`, `setLineAnnotations`, `cleanUp`, `expandHunk`, `finalizeRender`, and the `SubscribedInstance` the virtualizer drives: `onRender`, `reconcileHeights`, `setVisibility`), verified by the upstream tests in `integration_upstream_tests.rs` and the churn test through a connected instance; and the differential oracle `s12b_virtualized.json` (the published `VirtualizedFileDiff` connected to the published `Virtualizer` over jsdom in a scripted world of declared geometry, scroll, resize, observer deliveries and frames: 24 handwritten and 120 seeded random scenarios, every step's value, host trace, instance and virtualizer state and container trees compared, replayed in components/file_diff_render_oracle_tests/virtualized.rs). CodeView mode, ghost text rows and edit-session hooks are dropped (dropped.psv)
+pierre/src/components/Virtualizer.ts|PORTED|S10|components/virtualizer.rs|logic mirrors the class statement for statement against a `VirtualizerHost` trait (components/virtualizer.rs, oracle-tested against the published class under a scripted fake DOM); the platform host (geometry, events, observers) is the Dioxus-events host to come in pierre_diffs_dioxus (the S10 web-sys `WebHost` was removed in S12a-2). Dev hooks (`__STOP`, `__INSTANCE`, `__TOGGLE`) not ported
+pierre/src/components/VirtulizerDevelopment.d.ts|OUT|-||OUT
+pierre/src/components/web-components.ts|OUT|-||OUT
+pierre/src/constants.ts|PORTED|S1|constants.rs;scanners.rs|values in constants.rs; the twelve RegExp constants are hand-written scanners in scanners.rs
+pierre/src/edit/index.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/EditStateManager.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/cloneRetainedDiffSessionSnapshot.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/command.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editPrediction.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editStack.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editor.css|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/getChangedDocumentLines.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/languages.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/lineAnnotations.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/marker.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/matchBrackets.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/pieceTable.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/platform.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/popover.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/searchPanel.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/selection.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/selectionAction.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/sprite.ts|OUT|S5||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/textDocument.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/textDocumentChangeTransaction.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/textMeasure.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/tokenizer.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/types.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/editor/utils.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/highlighter/DiffsEditorTokenizer.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/DiffsHighlighter.ts|PORTED|S7|highlights/backend.rs|the base-class members the highlights backend uses (name, getTheme, codeToTokens, dispose) as the `DiffsHighlighter` trait (highlighter_types.rs) and `HighlightsHighlighter`; codeToHtml, tokenizers and the type refcount are not ported
+pierre/src/highlighter/backends/highlights.ts|PORTED|S7|highlights/backend.rs|oracle: dist HighlightsHighlighter tokens over the unmodified wasm records (highlights.json); editor/stream tokenizers not ported
+pierre/src/highlighter/backends/shiki.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/highlighterType.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/highlights-editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/highlighter/highlights-stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/areLanguagesAttached.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/attachResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/cleanUpResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/constants.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/getResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/getResolvedOrResolveLanguage.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/hasResolvedLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/registerCustomLanguage.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/resolveLanguage.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/languages/resolveLanguages.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/shared_highlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/shiki-editor.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/highlighter/shiki-stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/stream-tokenizer.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/areThemesAttached.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/attachResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/cleanUpResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/createCSSVariablesTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/createCachedLoader.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/getResolvedOrResolveTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/getResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/hasResolvedThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/registerCustomCSSVariableTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/registerCustomTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/resolveTheme.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/resolveThemes.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/themes/themeResolver.ts|PORTED|S7|highlights/themes.rs|highlights backend only (Zed themes; createHighlightsTheme exact against the dist); TextMate/Shiki branch dropped
+pierre/src/highlighter/themes/types.ts|PORTED|S7|highlights/themes.rs|`DiffsTheme` (zed palette only; the textmate/cssVariables members belong to Shiki)
+pierre/src/highlighter/tokenizer-types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/highlighter/types.ts|PORTED|S5|highlighter_types.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/index.ts|OUT|-||OUT
+pierre/src/managers/InteractionManager.ts|PORTED|S11b|managers/interaction_manager.rs|PARTIAL: line hover (`data-hovered`), line and range selection (click, shift-extend, drag, touch, controlled selection, the pending single-line unselect), the selection renderer (`data-selected-line`), the gutter utility (built-in button and custom slot, selection and hover placement, utility drag), hunk-expand clicks, `onLine*` and selection callbacks, `pluckInteractionOptions`; structural reads go through InteractionHost over the rendered model and events carry their target as a node key. Left out: token events, merge-conflict actions, the editor active line, `__debugPointerEvents`. Oracle-tested against a fake DOM (scenarios + seeded sequences); real hit-testing and pointer capture are unverified
+pierre/src/managers/ResizeManager.ts|PORTED|S11a|managers/resize_manager.rs|DOM behind ResizeManagerHost, the shared static observer is a ResizeObserverHub; oracle-tested against a fake DOM (scenarios + seeded sequences); a real ResizeObserver is unverified
+pierre/src/managers/ScrollSyncManager.ts|PORTED|S11a|managers/scroll_sync_manager.rs|DOM, listeners and timers behind ScrollSyncHost; oracle-tested against a fake DOM with fake timers
+pierre/src/managers/UniversalRenderingManager.ts|PORTED|S10|managers/universal_rendering_manager.rs|module-level queue state is a `UniversalRenderingManager` value over an `AnimationFrames` host; callbacks are not wrapped in try/catch
+pierre/src/react/CodeView.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/EditContext.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/File.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/FileDiff.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/MultiFileDiff.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/PatchDiff.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/UnresolvedFile.tsx|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/react/Virtualizer.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/WorkerPoolContext.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/constants.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/index.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/jsx.d.ts|OUT|-||OUT
+pierre/src/react/types.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/assignRef.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/renderDiffChildren.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/renderFileChildren.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/templateRender.tsx|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useFileDiffInstance.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useFileInstance.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useForceUpdate.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useNextRenderData.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useStableCallback.ts|OUT|-||OUT (framework adapter)
+pierre/src/react/utils/useUnresolvedFileInstance.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/renderers/DiffHunksRenderer.ts|PORTED|S6|renderers/diff_hunks_renderer.rs;renderers/diff_hunks_renderer/process.rs|unified and split in one `process_diff_result`; protected hooks are the `DiffHunksRendererHooks` trait; caches, worker pool, edit session and async highlighting are dropped (see Dropped branches); oracle: hast JSON of processDiffResult/renderFullAST over the stub highlighter (render_s6.json)
+pierre/src/renderers/FileRenderer.ts|DEFER|-||single-file view deferred; review loop uses FileDiff
+pierre/src/renderers/UnresolvedFileHunksRenderer.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/shiki-stream/index.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/shiki-stream/stream.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/shiki-stream/types.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/sprite.ts|PORTED|S5|sprite.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/ssr/FileDiffReact.tsx|OUT|-||OUT (framework adapter)
+pierre/src/ssr/index.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/preloadDiffs.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/preloadFile.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/preloadPatchFile.ts|OUT|-||OUT (framework adapter)
+pierre/src/ssr/renderHTML.ts|OUT|-||OUT (framework adapter)
+pierre/src/string-import.d.ts|OUT|-||OUT
+pierre/src/style.css|PENDING|S8||PORT as stylesheet adapted to Blitz capabilities
+pierre/src/types.ts|PORTED|S1|types/patch.rs;types/options.rs;types/view.rs;types/conflict.rs;types/lines.rs;types/layout.rs|pure-data types; callbacks, DOM-element and hast-bearing types listed in the file header as deferred or out
+pierre/src/utils/annotationHelpers.ts|OUT|S6||type guards that tell `LineAnnotation` from `DiffLineAnnotation` by a `side` key; the port has two typed structs (and `AnnotationName`), so there is nothing to discriminate
+pierre/src/utils/appendItems.ts|OUT|-||engine argument-count workaround for push(...items); Vec::extend (noted in trim_patch_context.rs)
+pierre/src/utils/applyLineTextWithNewline.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areDiffLineAnnotationsEqual.ts|PORTED|S11a|utils/predicates/are_diff_line_annotations_equal.rs|metadata `===` is `PartialEq`; oracle-tested
+pierre/src/utils/areDiffRenderOptionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areDiffTargetsEqual.ts|PORTED|S3|utils/predicates/are_diff_targets_equal.rs|identity is std::ptr::eq
+pierre/src/utils/areFileRenderOptionsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areFileTargetsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areFilesEqual.ts|PORTED|S11a|utils/predicates/are_files_equal.rs|oracle-tested
+pierre/src/utils/areHunkDataEqual.ts|PORTED|S11a|utils/predicates/are_hunk_data_equal.rs|oracle-tested
+pierre/src/utils/areLineAnnotationsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areManagedSnapshotsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/areMergeConflictActionsEqual.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/areObjectsEqual.ts|PORTED|S11a|utils/predicates/are_objects_equal.rs|over `HashMap<String, Value>`; oracle-tested
+pierre/src/utils/areOptionsEqual.ts|PORTED|S12a|utils/predicates/are_options_equal.rs|field-wise over `FileDiffOptions` (exhaustive destructuring), callbacks by `Rc` identity, `theme` defaulting as upstream; undefined-valued keys cannot be told from absent ones; oracle-tested
+pierre/src/utils/arePrePropertiesEqual.ts|PORTED|S11a|utils/predicates/are_pre_properties_equal.rs|oracle-tested
+pierre/src/utils/areRenderRangesEqual.ts|PORTED|S11a|utils/predicates/are_render_ranges_equal.rs|oracle-tested
+pierre/src/utils/areSelectionPointsEqual.ts|PORTED|S11b|utils/predicates/are_selection_points_equal.rs|oracle-tested
+pierre/src/utils/areSelectionsEqual.ts|PORTED|S11b|utils/predicates/are_selections_equal.rs|oracle-tested
+pierre/src/utils/areThemesEqual.ts|PORTED|S11a|utils/predicates/are_themes_equal.rs|oracle-tested
+pierre/src/utils/areVirtualWindowSpecsEqual.ts|PORTED|S10|utils/predicates/are_virtual_window_specs_equal.rs|oracle-tested over undefined/equal/unequal pairs
+pierre/src/utils/areWorkerStatsEqual.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/awaitWithTimeout.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/utils/canUseWASM.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/utils/cleanLastNewline.ts|PORTED|S3|utils/clean_last_newline.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/cloneFileDiffMetadata.ts|PORTED|S3|utils/clone_file_diff_metadata.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/composeCacheKey.ts|PORTED|S3|utils/compose_cache_key.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/computeEstimatedDiffHeights.ts|PORTED|S4|utils/compute_estimated_diff_heights.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/computeFileOffsets.ts|PORTED|S4|utils/compute_file_offsets.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/computeVirtualFileMetrics.ts|PORTED|S4|utils/compute_virtual_file_metrics.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/createAnnotationElement.ts|PORTED|S5|utils/render/create_annotation_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createAnnotationWrapperNode.ts|PORTED|S11a|utils/dom/create_annotation_wrapper_node.rs|returns a hast Element; oracle-tested against a fake DOM
+pierre/src/utils/createCodeViewHeaderFooterHostElement.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createContentColumn.ts|PORTED|S5|utils/render/create_content_column.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createEmptyRowBuffer.ts|PORTED|S5|utils/render/create_empty_row_buffer.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createFileHeaderElement.ts|PORTED|S5|utils/render/create_file_header_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createGutterUtilityContentNode.ts|PORTED|S11a|utils/dom/create_gutter_utility_content_node.rs|returns a hast Element; oracle-tested against a fake DOM
+pierre/src/utils/createGutterUtilityElement.ts|PORTED|S11b|utils/render/create_gutter_utility_element.rs|compared with the dist's hast
+pierre/src/utils/createNoNewlineElement.ts|PORTED|S5|utils/render/create_no_newline_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createPreElement.ts|PORTED|S5|utils/render/create_pre_element.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createRowNodes.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/createSeparator.ts|PORTED|S5|utils/render/create_separator.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/createSpanNodeFromToken.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createStyleElement.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/createUnsafeCSSStyleNode.ts|PORTED|S11a|utils/dom/create_unsafe_css_style_node.rs|returns a hast Element; oracle-tested against a fake DOM
+pierre/src/utils/createWindowFromScrollPosition.ts|PORTED|S4|utils/create_window_from_scroll_position.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/cssWrappers.ts|PORTED|S11a|utils/dom/css_wrappers.rs|raw CSS is assets/style.css exported from the pinned dist; the gutter-declaration RegExp is a hand-written scan; oracle-tested
+pierre/src/utils/detachString.ts|OUT|-||V8 substring-retention workaround; Rust strings own their data
+pierre/src/utils/diffAcceptRejectHunk.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/editSessionAnnotations.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/editSessionHunks.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/formatCSSVariablePrefix.ts|PORTED|S5|utils/render/format_css_variable_prefix.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getCodeViewItemRenderData.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getDiffFileInput.ts|PORTED|S11a|utils/options/get_diff_file_input.rs|`undefined`/`null` sides are `Option<Option<_>>`; throws are panics; oracle-tested
+pierre/src/utils/getDiffHunksRendererOptions.ts|PORTED|S12a|utils/options/get_diff_hunks_renderer_options.rs|over the `FileDiffOptions` struct; oracle-tested against `FileDiff.getHunksRendererOptions`
+pierre/src/utils/getFileRendererOptions.ts|DEFER|-||single-file view deferred; review loop uses FileDiff
+pierre/src/utils/getFiletypeFromFileName.ts|PORTED|S3|utils/get_filetype_from_file_name.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/getHighlighterOptions.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getHighlighterThemeStyles.ts|PORTED|S5|utils/render/get_highlighter_theme_styles.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getHunkSeparatorSlotName.ts|PORTED|S5|utils/render/get_hunk_separator_slot_name.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getHunkSideBoundaries.ts|PORTED|S3|utils/get_hunk_side_boundaries.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/getIconForType.ts|PORTED|S5|utils/render/get_icon_for_type.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getLineAnnotationName.ts|PORTED|S5|utils/render/get_line_annotation_name.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getLineEndingType.ts|PORTED|S3|utils/get_line_ending_type.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/getLineNodes.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/getMergeConflictActionSlotName.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/getMergeConflictLineTypes.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/getOrCreateCodeNode.ts|PORTED|S11a|utils/dom/get_or_create_code_node.rs|hast Element; the caller appends it to the pre; oracle-tested
+pierre/src/utils/getSingularPatch.ts|PORTED|S3|utils/get_singular_patch.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/getThemes.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/getTokenOptions.ts|PORTED|S5|utils/render/get_token_options.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/getTotalLineCountFromHunks.ts|PORTED|S3|utils/get_total_line_count_from_hunks.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/guardWebKitScrollDuringRebuild.ts|OUT|S11a||Safari workaround for bulk innerHTML rebuilds, reached only in edit mode (edit mode is OUT)
+pierre/src/utils/hastToHtml.ts|DEFER|S5||no Rust consumer: the UI renders hast directly, and the module is a speed-up equivalent of hast-util-to-html whose upstream tests need the FileRenderer and Shiki; revisit with S7 if a serializer is wanted
+pierre/src/utils/hast_utils.ts|PORTED|S5|utils/render/hast_utils.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/hostTheme.ts|PORTED|S11a|utils/dom/host_theme.rs|no ShadowRoot: the caller owns the style node as an Option<Element>; oracle-tested
+pierre/src/utils/hydratePartialDiff.ts|PORTED|S4|utils/hydrate_partial_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/includesFileAnnotations.ts|PORTED|S5|utils/render/includes_file_annotations.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/isDefaultRenderRange.ts|PORTED|S11a|utils/predicates/is_default_render_range.rs|oracle-tested
+pierre/src/utils/isDiffPlainText.ts|PORTED|S6|utils/predicates/is_diff_plain_text.rs|none beyond the language
+pierre/src/utils/isFilePlainText.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/isGutterUtilityPath.ts|PORTED|S11b|utils/dom/is_gutter_utility_path.rs|over a model path with an attribute reader; oracle-tested
+pierre/src/utils/isStyleNode.ts|PORTED|S11a|utils/dom/is_style_node.rs|tag-name test on a hast Element; oracle-tested
+pierre/src/utils/isWorkerContext.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/utils/iterateOverDiff.ts|PORTED|S4|utils/iterate_over_diff.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/lineAnnotationIdentity.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/normalizeDiffResolution.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/parseDiffDecorations.ts|PORTED|S4|utils/parse_diff_decorations.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/parseDiffFromFile.ts|PORTED|S3|utils/parse_diff_from_file.rs|diff text from similar: invariants, not byte parity (see PARITY.md notes)
+pierre/src/utils/parseLineType.ts|PORTED|S3|utils/parse_line_type.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/parseMergeConflictDiffFromFile.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/parsePatchFiles.ts|PORTED|S3|utils/parse_patch_files.rs;utils/parse_patch_files/hunk_split.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/parseQuotedDiffFileName.ts|PORTED|S3|utils/parse_quoted_diff_file_name.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/platform.ts|PORTED|S11a|utils/dom/platform.rs|pure functions of PlatformInfo (no navigator/window, no memoization); oracle-tested over user-agent and platform strings
+pierre/src/utils/prefersReducedMotion.ts|PENDING|-||port or replace per slice notes (DOM helper)
+pierre/src/utils/prerenderHTMLIfNecessary.ts|OUT|S11a||shadow-root innerHTML hydration of server-rendered HTML; Dioxus renders the hast
+pierre/src/utils/processLine.ts|PORTED|S5|utils/render/process_line.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/realignChangeContent.ts|PORTED|S3|utils/realign_change_content.rs|realignChangeContentBySimilarity only; slideBlankBoundaryBlocksUp is editor-only (OUT)
+pierre/src/utils/renderDiffWithHighlighter.ts|PORTED|S5|utils/render/render_diff_with_highlighter.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/renderFileWithHighlighter.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/renderTokenLines.ts|PORTED|S5|utils/render/render_token_lines.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/resolveConflict.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/resolvePreferredHighlighter.ts|OUT|-||OUT (use highlights.wasm component; thin adapter in slice S9)
+pierre/src/utils/resolveRegion.ts|DEFER|-||DEFER (not needed for PR review v1)
+pierre/src/utils/roundToDevicePixel.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/scrollbarGutter.ts|PORTED|S11a|utils/dom/scrollbar_gutter.rs|the probe is measured through ScrollbarGutterHost; cache is a thread-local; oracle-tested over a scripted sequence
+pierre/src/utils/setDeferredArrayItem.ts|OUT|-||JS getter-defined lazy array element (Object.defineProperty); no Rust analogue needed, lazy rows arrive with the renderer
+pierre/src/utils/setLanguageOverride.ts|PENDING|-||PORT (Rust, oracle-tested)
+pierre/src/utils/setWrapperNodeProps.ts|PORTED|S11a|utils/dom/set_wrapper_node_props.rs|edits a hast pre Element in place; custom properties apply in sorted key order; oracle-tested
+pierre/src/utils/shouldUseTokenTransformer.ts|PORTED|S11a|utils/options/should_use_token_transformer.rs|callbacks are presence flags; oracle-tested
+pierre/src/utils/splitFileContents.ts|PORTED|S3|utils/split_file_contents.rs|exact oracle parity (patches.json, utilities.json)
+pierre/src/utils/tokenStyle.ts|PORTED|S5|utils/render/token_style.rs|oracle-tested on hast JSON (render_s5.json) with the plain-text stub highlighter
+pierre/src/utils/tokensToHtml.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/utils/trimPatchContext.ts|PORTED|S4|utils/trim_patch_context.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/updateDiffHunks.ts|OUT|-||OUT for v1 (edit mode; later with CM6 lane)
+pierre/src/utils/virtualDiffLayout.ts|PORTED|S4|utils/virtual_diff_layout.rs|exact oracle parity (layout.json) plus ported upstream tests
+pierre/src/utils/wrapTokenFragments.ts|PENDING|-||PORT (Rust, oracle-tested on hast JSON)
+pierre/src/worker/WorkerPoolManager.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/errors.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/getOrCreateWorkerPoolSingleton.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/hastLinesTransport.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/index.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/types.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/worker.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/src/worker/workerMessage.ts|OUT|-||OUT (Clay guest + wasm component replaces)
+pierre/test/getHunkSideBoundaries.test.ts|PORTED|S4|utils/get_hunk_side_boundaries_test.rs|all upstream cases
+pierre/test/hydratePartialDiff.test.ts|PORTED|S4|utils/hydrate_partial_diff_test.rs|toThrow cases are panics; newFile:null on a changed diff is unrepresentable
+pierre/test/trimPatchContext.test.ts|PORTED|S4|utils/trim_patch_context_test.rs|snapshot test asserts snapshot facts plus exact oracle comparison
+pierre/test/computeLineOffsets.test.ts|PORTED|S4|utils/compute_file_offsets_test.rs|all upstream cases (byte offsets)
+pierre/test/computeEstimatedDiffHeights.test.ts|PORTED|S4|utils/compute_estimated_diff_heights_test.rs|all upstream cases
+pierre/test/virtualDiffLayout.test.ts|PORTED|S4|utils/virtual_diff_layout_test.rs|all upstream cases
+pierre/test/isAdditionLineRenderable.test.ts|PORTED|S4|utils/is_addition_line_renderable_test.rs|all upstream cases
+pierre/test/iterateOverDiff.test.ts|PORTED|S4|utils/iterate_over_diff_test.rs|fileOld/fileNew-based tests run on a generated stand-in with the same properties
+pierre/test/getFiletypeFromFileName.test.ts|PORTED|S3|utils/get_filetype_from_file_name_test.rs|custom-extension map is an owned CustomExtensions value
+pierre/test/parseQuotedDiffFileName.test.ts|PORTED|S3|utils/parse_quoted_diff_file_name_test.rs|all upstream cases
+pierre/test/parseDiffFromFile.test.ts|PORTED|S3|utils/parse_diff_from_file_test.rs|digest snapshot test becomes property assertions on the diffRowBufferTest pair (fileOld/fileNew live in apps/demo, absent); ignoreWhitespace/context kept via PatchOptions; both-null throw unrepresentable (DiffFileInput)
+pierre/test/parsePatchFiles.test.ts|PORTED|S3|utils/parse_patch_files_test.rs;utils/parse_patch_files_test/headers.rs;utils/parse_patch_files_test/repairs.rs|ported under upstream titles; digest snapshot (diff.patch absent from the extracted tree), lone-surrogate and renderer-count tests listed in the file header
+pierre/test/createFileHeaderElement.test.ts|PORTED|S5|utils/render/create_file_header_element_test.rs|all four cases; toMatchSnapshot replaced by exact comparison with the dist output (render_s5.json)
+pierre/test/renderTokenLines.test.ts|PORTED|S5|utils/render/render_token_lines_test.rs|two of three cases, asserted on the hast tree instead of HTML+JSDOM; the useTokenTransformer case is out (editor token transformer is not ported)
+pierre/test/e2e/*|OUT|-||Playwright browser e2e against upstream's demo app; replaced by our own e2e on the Clay page
+pierre/test/__snapshots__/*|PENDING|-||snapshot follows the test file it is named after; ported with it
+pierre/test/README.md|OUT|-||upstream test instructions (bun)
+pierre/test/domHarness.ts|REPLACED|S10|fake_dom.rs|jsdom harness replaced by `FakeHost` (declared geometry, recording trace) and `FakeFrames` (explicitly flushed animation frames); installDom/createRoot/wait have no counterpart
+pierre/test/testUtils.ts|PORTED|S6|test_utils.rs;test_utils/hast.rs|hunk-verification and digest helpers (S3); hast helpers (`projectColumn`, `rowDigests`, `annotationProjection`, ...) and the fixture stand-ins (S6)
+pierre/test/mocks.ts|PORTED|S0|oracle/corpus/mocks.mjs|fixtures excerpted into the oracle corpus (filesystem-backed fixtures dropped)
+pierre/test/file.patch|PORTED|S0|oracle/corpus/file.patch|verbatim oracle corpus file
+pierre/test/trim.patch|PORTED|S0|oracle/corpus/trim.patch|verbatim oracle corpus file
+pierre/test/workerPoolHarness.ts|OUT|-||worker pool harness
+pierre/test/editor*|OUT|-||edit mode is out of scope for v1
+pierre/test/edit*|OUT|-||edit mode is out of scope for v1
+pierre/test/*Edit*|OUT|-||edit mode is out of scope for v1
+pierre/test/*edit*|OUT|-||edit mode is out of scope for v1
+pierre/test/react*|OUT|-||React adapter
+pierre/test/*[wW]orker*|OUT|-||worker pool
+pierre/test/Unresolved*|DEFER|-||merge-conflict UI
+pierre/test/*MergeConflict*|DEFER|-||merge-conflict UI
+pierre/test/diffAcceptRejectHunk*|DEFER|-||merge-conflict / edit flow
+pierre/test/hastToHtml*|DEFER|S5||tests compare hastToHtml with hast-util-to-html over rendered files (FileRenderer, Shiki); deferred with the module
+pierre/test/DiffHunksRender.test.ts|PORTED|S6|renderers/diff_hunks_renderer_test.rs|all sixteen cases; row-digest snapshots became source-text invariants, renderFullHTML assertions became hast assertions
+pierre/test/DiffHunksRendererVirtualization.test.ts|PORTED|S6|renderers/virtualization_test.rs|demo-geometry numbers derived from the stand-in fixture; windowed renders are differential against the full render; 4.5/4.6/5.x are one table of windows
+pierre/test/DiffHunksRendererLanguages.test.ts|PORTED|S7|renderers/languages_test.rs|Shiki grammar-loading assertions became the languages each side is tokenised with (recorded at the wasm boundary); hydrate/renderDiff background-loading cases are dropped with the async paths
+pierre/test/DiffHunksRendererRecompute.test.ts|OUT|-||edit-session hunk recompute (edit mode is out of scope for v1)
+pierre/test/annotationHelpers.test.ts|OUT|S6||see utils/annotationHelpers.ts: typed annotation structs
+pierre/test/annotations.test.ts|PORTED|S6|renderers/annotations_test.rs|all eleven cases; demo-fixture line numbers remapped to the stand-in; placement snapshots became invariants
+pierre/test/InjectedRowHooks.test.ts|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
+pierre/test/patchFileRender.test.ts|PORTED|S6|renderers/patch_file_render_test.rs|digest snapshots became invariants over the parsed patch and the rendered rows
+pierre/test/FileRenderer*|DEFER|-||single-file view deferred; review loop uses FileDiff
+pierre/test/CodeView*|PENDING|S12||
+pierre/test/VirtualizedFileDiff.setVisibility.test.ts|PORTED|S12b|components/virtualized_file_diff/integration_upstream_tests.rs|the one case (`renders a replacement after an off-screen placeholder`); the worker pool is dropped, the stub virtualizer is the real one over rule geometry
+pierre/test/VirtualizedFileDiff.partialHydration.test.ts|PENDING|S12b||drives VirtualizedFileDiff `handleFilesLoaded`, `loadFilesIfNecessary` and the worker pool over jsdom; the hydration (`overrides.rs`) is ported, the 865 lines of tests are not converted (handoff)
+pierre/test/FileDiff*|PENDING|S12a||PARTIAL. Ported with their names (components/file_diff_upstream_tests.rs): headerSlots 2 of 3 (the third is edit-session), rerenderInputs 2 of 3 (the third is edit-session), partialRender 4 of 4, partialHydration 14 of 23 (components/file_diff_hydration_upstream_tests.rs; a `LoaderHarness` is the host; the 4 edit-session and 4 worker-priming tests are OUT, the rejected-promise test has no counterpart), themeTypeUpdates 2 of 6 (the FileDiff cases; CodeView/VirtualizedFile are OUT/S12b, File is DEFER). Waiting or OUT: editSessionOwnership, unifiedEditSeparators and workerRendering (OUT); see parity/divergences.psv
+pierre/test/Virtualizer.reconcileQueue.test.ts|PORTED|S10|components/virtualizer_reconcile_queue_test.rs|the one case; jsdom elements are FakeHost names, `wait(20)` is flushing fake frames
+pierre/test/Virtualizer.scrollState.test.ts|PORTED|S10|components/virtualizer_scroll_state_test.rs|both cases (element root, document root); scrollTo stubs are the FakeHost world
+pierre/test/Virtualizer.strictMode.test.ts|PENDING|S12b||drives VirtualizedFileDiff hydrate/render/cleanUp over jsdom: needs a scroll-root element world, `hydrate` over leftover DOM and an observer-count accessor on the `Virtualizer`; not converted in S12b-3 (handoff)
+pierre/test/Virtualizer.offscreenPlaceholder.test.ts|PENDING|S12b||drives VirtualizedFile (DEFER) and VirtualizedFileDiff placeholders over jsdom with an element scroll root, the editor and annotation callbacks; the VirtualizedFileDiff halves are not converted in S12b-3 (handoff)
+pierre/test/Virtualiz*|PENDING|S10||
+pierre/test/virtualizedFileDiffEstimatedHeights.test.ts|PENDING|S12b||PARTIAL (components/virtualized_file_diff/layout_upstream_tests.rs, window_upstream_tests.rs). 5 (S12b-1) + 18 (S12b-2) + 2 (S12b-3, integration_upstream_tests.rs) of the file's 27 VirtualizedFileDiff cases ported with their names. S12b-2 ported the `getLinePosition` cases (paired estimates across style, collapse and expansion changes, `checkpoint generation jumps through large uniform blocks`, `builds layout checkpoints lazily for deep geometry lookups`), `applies measured height deltas without replaying full diff layout`, the file-level annotation measurement cases (`applies measured file-level annotation height`, `ignores first-row annotation keys...`, `preserves...`, `clears...`, `retains removed ... until the top renders`) and the `computeRenderRangeFromWindow` cases (the eight render-range cases and `does not reserve unmeasured file-level annotations above diff source rows`). S12b-3 ported `retains file-level annotation height through recycling until the top remounts` (`cleanUp(true)`) and `ignores trailing fromEnd expansion in render range line totals` (`render` and `expandHunk` on the instance). Pending: `render range clamp reaches additionLines.length after stale layout cache` (needs `recomputeDiffHunks`, the edit-time hunk recompute, not ported: the stale layout cache the test builds is made by an edit session, so nothing in the port that remains can produce it); `builds layout checkpoints lazily for deep render windows` drives CodeView's `getAdvancedStickySpecs` (dropped)
+pierre/test/virtualFileMetricsPadding.test.ts|PENDING|S12b||PARTIAL (layout_upstream_tests.rs, window_upstream_tests.rs). All 14 VirtualizedFileDiff cases are ported with their names (the two height cases in S12b-1, the `getLinePosition` ones in S12b-2); the VirtualizedFile cases are DEFER
+pierre/test/sparseLayoutCheckpoints.test.ts|PENDING|S12b||PARTIAL. Ported (window_upstream_tests.rs): `VirtualizedFileDiff uses checkpoints for deep expanded line positions and anchors` (the `getLinePosition` half; `getNumericScrollAnchor` is dropped, dropped.psv) and `VirtualizedFileDiff maps hidden collapsed line indexes to their separator row`. Ported in S12b-3 (integration_upstream_tests.rs): `VirtualizedFileDiff marks diff indicator changes as layout dirty` (`Virtualizer::is_dom_dirty` stands in for the stub that records `instanceChanged`'s argument); the VirtualizedFile cases are DEFER. The sparse-checkpoint arithmetic itself is covered by the layout oracle
+pierre/test/virtualiz*|PENDING|S10||
+pierre/test/InteractionManager.gutterUtility.test.ts|PORTED|S11b|managers/interaction_manager_gutter_utility_test.rs|the 17 tests of `InteractionManager gutter utility`; the six editor active-line tests are dropped with the editor active line
+pierre/test/getChangedDocumentLines*|OUT|-||edit session helper
+pierre/test/updateDiffHunks*|OUT|-||edit session hunk recompute
+pierre/test/realignChangeContent*|PENDING|S3||
+pierre/test/setDeferredArrayItem*|PENDING|S4||
+pierre/test/getHighlighterThemeStyles*|PENDING|S5||
+pierre/test/registerCustomTheme*|OUT|-||Shiki theme registry
+pierre/test/sharedHighlighter*|OUT|-||Shiki highlighter registry
+pierre/test/hastLinesTransport*|OUT|-||worker transport of hast lines
+pierre/test/preload*|OUT|-||SSR preload
+pierre/test/highlighter*|PENDING|S7||adapted where the behavior exists behind the highlights adapter, else OUT
+pierre/test/resolveTheme*|PENDING|S7||
+pierre/test/themeTypeUpdates*|PENDING|S7||
+pierre/test/UniversalRenderingManager.test.ts|PORTED|S10|managers/universal_rendering_manager_test.rs|all six cases; the module-level queue is a manager value; one added case pins clearRenderQueue
+pierre/test/*|PENDING|-||not yet assigned to a slice; triage in the owning slice
+jsdiff/libesm/diff/base.js|REPLACED|S2|diff.rs|Myers is `similar`; ChangeObject shape kept. Divergence: hunk and run boundaries may differ where several minimal diffs exist; maxEditLength/timeout/callback/comparator options not offered
+jsdiff/libesm/diff/line.js|REPLACED|S2|diff.rs|diffLines -> diff::diff_lines (invariants and minimal edit totals checked against jsdiff goldens); ignoreWhitespace/newlineIsToken/stripTrailingCr/ignoreNewlineAtEof options not offered
+jsdiff/libesm/diff/word.js|REPLACED|S2|diff.rs|diffWordsWithSpace -> diff::diff_words_with_space. Divergence: tokens are similar's (whitespace runs and non-whitespace runs), not jsdiff's word/punctuation tokens, so word-diff ranges differ; invariants only
+jsdiff/libesm/diff/character.js|REPLACED|S2|diff.rs|diffChars -> diff::diff_chars
+jsdiff/libesm/util/string.js|OUT|-||helpers of jsdiff word post-processing, not needed with similar
+jsdiff/libesm/util/params.js|OUT|-||option plumbing
+jsdiff/libesm/util/distance-iterator.js|OUT|-||only jsdiff applyPatch uses it
+jsdiff/libesm/patch/create.js|REPLACED|S2|diff.rs|createTwoFilesPatch -> diff::create_two_files_patch (Index/underline/---/+++ headers, always-present hunk counts, no-newline marker, C-quoted names; hunk boundaries from similar)
+jsdiff/libesm/diff/*|OUT|-||differs @pierre/diffs never calls (array, css, json, sentence)
+jsdiff/libesm/convert/*|OUT|-||format converters
+jsdiff/libesm/patch/*|OUT|-||patch parse/apply/reverse; not called by @pierre/diffs
+jsdiff/libesm/util/array.js|OUT|-||used by diffArrays only
+jsdiff/libesm/index.js|OUT|-||barrel
+jsdiff/libesm/types.js|OUT|-||type-only module

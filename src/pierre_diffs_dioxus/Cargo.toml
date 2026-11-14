@@ -1,0 +1,14 @@
+[package]
+name = "pierre_diffs_dioxus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+pierre_diffs = { workspace = true }
+
+[lints]
+workspace = true

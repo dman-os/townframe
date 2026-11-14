@@ -1,0 +1,288 @@
+// Ported from @pierre/diffs 1.6.4 (tag diffs-v1.6.4, commit
+// 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/src/sprite.ts.
+// Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
+// Changes: the `SVGSpriteNames` string union is the `SvgSpriteName` enum with
+// `as_str`; the sprite sheet constant is generated verbatim from the
+// template literal. `sprite_sheet_element` is what `div.innerHTML =
+// SVGSpriteSheet; div.firstChild` yields in `FileDiff.ensureSpriteSVG`: the sheet
+// parsed into a hast element, whitespace text nodes included. The sheet is
+// well-formed markup of `svg`, `symbol` and `path` elements with double-quoted
+// or bare attributes and no entities, so the parser is that small.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvgSpriteName {
+    ArrowRightShort,
+    BrandGithub,
+    Chevron,
+    ChevronsNarrow,
+    DiffSplit,
+    DiffUnified,
+    Expand,
+    ExpandAll,
+    EyeSlash,
+    FileCode,
+    Plus,
+    SymbolAdded,
+    SymbolAddedDuo,
+    SymbolAddedFill,
+    SymbolDeleted,
+    SymbolDeletedDuo,
+    SymbolDeletedFill,
+    SymbolDiffstat,
+    SymbolDiffstatDuo,
+    SymbolDiffstatFill,
+    SymbolExtracted,
+    SymbolExtractedDuo,
+    SymbolExtractedFill,
+    SymbolIgnored,
+    SymbolIgnoredDuo,
+    SymbolIgnoredFill,
+    SymbolInlined,
+    SymbolInlinedDuo,
+    SymbolInlinedFill,
+    SymbolModified,
+    SymbolModifiedDuo,
+    SymbolModifiedFill,
+    SymbolMoved,
+    SymbolMovedDuo,
+    SymbolMovedFill,
+    SymbolRef,
+}
+
+impl SvgSpriteName {
+    /// The symbol id, e.g. `diffs-icon-expand`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ArrowRightShort => "diffs-icon-arrow-right-short",
+            Self::BrandGithub => "diffs-icon-brand-github",
+            Self::Chevron => "diffs-icon-chevron",
+            Self::ChevronsNarrow => "diffs-icon-chevrons-narrow",
+            Self::DiffSplit => "diffs-icon-diff-split",
+            Self::DiffUnified => "diffs-icon-diff-unified",
+            Self::Expand => "diffs-icon-expand",
+            Self::ExpandAll => "diffs-icon-expand-all",
+            Self::EyeSlash => "diffs-icon-eye-slash",
+            Self::FileCode => "diffs-icon-file-code",
+            Self::Plus => "diffs-icon-plus",
+            Self::SymbolAdded => "diffs-icon-symbol-added",
+            Self::SymbolAddedDuo => "diffs-icon-symbol-added-duo",
+            Self::SymbolAddedFill => "diffs-icon-symbol-added-fill",
+            Self::SymbolDeleted => "diffs-icon-symbol-deleted",
+            Self::SymbolDeletedDuo => "diffs-icon-symbol-deleted-duo",
+            Self::SymbolDeletedFill => "diffs-icon-symbol-deleted-fill",
+            Self::SymbolDiffstat => "diffs-icon-symbol-diffstat",
+            Self::SymbolDiffstatDuo => "diffs-icon-symbol-diffstat-duo",
+            Self::SymbolDiffstatFill => "diffs-icon-symbol-diffstat-fill",
+            Self::SymbolExtracted => "diffs-icon-symbol-extracted",
+            Self::SymbolExtractedDuo => "diffs-icon-symbol-extracted-duo",
+            Self::SymbolExtractedFill => "diffs-icon-symbol-extracted-fill",
+            Self::SymbolIgnored => "diffs-icon-symbol-ignored",
+            Self::SymbolIgnoredDuo => "diffs-icon-symbol-ignored-duo",
+            Self::SymbolIgnoredFill => "diffs-icon-symbol-ignored-fill",
+            Self::SymbolInlined => "diffs-icon-symbol-inlined",
+            Self::SymbolInlinedDuo => "diffs-icon-symbol-inlined-duo",
+            Self::SymbolInlinedFill => "diffs-icon-symbol-inlined-fill",
+            Self::SymbolModified => "diffs-icon-symbol-modified",
+            Self::SymbolModifiedDuo => "diffs-icon-symbol-modified-duo",
+            Self::SymbolModifiedFill => "diffs-icon-symbol-modified-fill",
+            Self::SymbolMoved => "diffs-icon-symbol-moved",
+            Self::SymbolMovedDuo => "diffs-icon-symbol-moved-duo",
+            Self::SymbolMovedFill => "diffs-icon-symbol-moved-fill",
+            Self::SymbolRef => "diffs-icon-symbol-ref",
+        }
+    }
+}
+
+pub const SVG_SPRITE_SHEET: &str = r####"<svg data-icon-sprite aria-hidden="true" width="0" height="0">
+  <symbol id="diffs-icon-arrow-right-short" viewBox="0 0 16 16">
+    <path d="M8.47 4.22a.75.75 0 0 0 0 1.06l1.97 1.97H3.75a.75.75 0 0 0 0 1.5h6.69l-1.97 1.97a.75.75 0 1 0 1.06 1.06l3.25-3.25a.75.75 0 0 0 0-1.06L9.53 4.22a.75.75 0 0 0-1.06 0"/>
+  </symbol>
+  <symbol id="diffs-icon-brand-github" viewBox="0 0 16 16">
+    <path d="M8 0c4.42 0 8 3.58 8 8a8.01 8.01 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27s-1.36.09-2 .27c-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8"/>
+  </symbol>
+  <symbol id="diffs-icon-chevron" viewBox="0 0 16 16">
+    <path d="M1.47 4.47a.75.75 0 0 1 1.06 0L8 9.94l5.47-5.47a.75.75 0 1 1 1.06 1.06l-6 6a.75.75 0 0 1-1.06 0l-6-6a.75.75 0 0 1 0-1.06"/>
+  </symbol>
+  <symbol id="diffs-icon-chevrons-narrow" viewBox="0 0 10 16">
+    <path d="M4.47 2.22a.75.75 0 0 1 1.06 0l3.25 3.25a.75.75 0 0 1-1.06 1.06L5 3.81 2.28 6.53a.75.75 0 0 1-1.06-1.06zM1.22 9.47a.75.75 0 0 1 1.06 0L5 12.19l2.72-2.72a.75.75 0 0 1 1.06 1.06l-3.25 3.25a.75.75 0 0 1-1.06 0l-3.25-3.25a.75.75 0 0 1 0-1.06"/>
+  </symbol>
+  <symbol id="diffs-icon-diff-split" viewBox="0 0 16 16">
+    <path d="M14 0H8.5v16H14a2 2 0 0 0 2-2V2a2 2 0 0 0-2-2m-1.5 6.5v1h1a.5.5 0 0 1 0 1h-1v1a.5.5 0 0 1-1 0v-1h-1a.5.5 0 0 1 0-1h1v-1a.5.5 0 0 1 1 0"/><path d="M2 0a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5.5V0zm.5 7.5h3a.5.5 0 0 1 0 1h-3a.5.5 0 0 1 0-1" opacity=".3"/>
+  </symbol>
+  <symbol id="diffs-icon-diff-unified" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M16 14a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V8.5h16zm-8-4a.5.5 0 0 0-.5.5v1h-1a.5.5 0 0 0 0 1h1v1a.5.5 0 0 0 1 0v-1h1a.5.5 0 0 0 0-1h-1v-1A.5.5 0 0 0 8 10" clip-rule="evenodd"/><path fill-rule="evenodd" d="M14 0a2 2 0 0 1 2 2v5.5H0V2a2 2 0 0 1 2-2zM6.5 3.5a.5.5 0 0 0 0 1h3a.5.5 0 0 0 0-1z" clip-rule="evenodd" opacity=".4"/>
+  </symbol>
+  <symbol id="diffs-icon-expand" viewBox="0 0 16 16">
+    <path d="M3.47 5.47a.75.75 0 0 1 1.06 0L8 8.94l3.47-3.47a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 0 1 0-1.06"/>
+  </symbol>
+  <symbol id="diffs-icon-expand-all" viewBox="0 0 16 16">
+    <path d="M11.47 9.47a.75.75 0 1 1 1.06 1.06l-4 4a.75.75 0 0 1-1.06 0l-4-4a.75.75 0 1 1 1.06-1.06L8 12.94zM7.526 1.418a.75.75 0 0 1 1.004.052l4 4a.75.75 0 1 1-1.06 1.06L8 3.06 4.53 6.53a.75.75 0 1 1-1.06-1.06l4-4z"/>
+  </symbol>
+  <symbol id="diffs-icon-eye-slash" viewBox="0 0 16 16">
+    <path d="m13.47 1.47-12 12 1.06 1.06 12-12zM8 14c-.92 0-1.802-.208-2.624-.547l1.173-1.174c.476.142.963.221 1.451.221 1.66 0 3.307-.949 4.626-2.196a10.4 10.4 0 0 0 1.494-1.751A5 5 0 0 0 14.443 8a5 5 0 0 0-.323-.553 10 10 0 0 0-1.238-1.5l1.061-1.062C15.222 6.173 16 7.511 16 8c0 1.05-3.582 6-8 6"/><path d="M8 11q-.084 0-.167-.005l3.162-3.162q.006.083.005.167a3 3 0 0 1-3 3M5.005 8.167l3.162-3.162a3 3 0 0 0-3.162 3.162"/><path d="M8 3.5c.485 0 .97.081 1.445.227l1.168-1.169C9.794 2.212 8.915 2 8 2 3.582 2 0 6.8 0 8c0 .555.766 1.88 2.027 3.144l1.06-1.06a9.5 9.5 0 0 1-1.203-1.461 4.3 4.3 0 0 1-.345-.617L1.536 8l.003-.006c.064-.149.176-.359.345-.617a9.8 9.8 0 0 1 1.482-1.73C4.675 4.427 6.326 3.5 8 3.5"/>
+  </symbol>
+  <symbol id="diffs-icon-file-code" viewBox="0 0 16 16">
+    <path d="M10.75 0c.199 0 .39.08.53.22l3.5 3.5c.14.14.22.331.22.53v9A2.75 2.75 0 0 1 12.25 16h-8.5A2.75 2.75 0 0 1 1 13.25V2.75A2.75 2.75 0 0 1 3.75 0zm-7 1.5c-.69 0-1.25.56-1.25 1.25v10.5c0 .69.56 1.25 1.25 1.25h8.5c.69 0 1.25-.56 1.25-1.25V5h-1.25A2.25 2.25 0 0 1 10 2.75V1.5z"/><path d="M7.248 6.19a.75.75 0 0 1 .063 1.058L5.753 9l1.558 1.752a.75.75 0 0 1-1.122.996l-2-2.25a.75.75 0 0 1 0-.996l2-2.25a.75.75 0 0 1 1.06-.063M8.69 7.248a.75.75 0 1 1 1.12-.996l2 2.25a.75.75 0 0 1 0 .996l-2 2.25a.75.75 0 1 1-1.12-.996L10.245 9z"/>
+  </symbol>
+  <symbol id="diffs-icon-plus" viewBox="0 0 16 16">
+    <path d="M8 3a.75.75 0 0 1 .75.75v3.5h3.5a.75.75 0 0 1 0 1.5h-3.5v3.5a.75.75 0 0 1-1.5 0v-3.5h-3.5a.75.75 0 0 1 0-1.5h3.5v-3.5A.75.75 0 0 1 8 3"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-added" viewBox="0 0 16 16">
+    <path d="M8 4a.75.75 0 0 1 .75.75v2.5h2.5a.75.75 0 0 1 0 1.5h-2.5v2.5a.75.75 0 0 1-1.5 0v-2.5h-2.5a.75.75 0 0 1 0-1.5h2.5v-2.5A.75.75 0 0 1 8 4"/><path d="M1.788 4.296c.196-.88.478-1.381.802-1.706s.826-.606 1.706-.802C5.194 1.588 6.387 1.5 8 1.5s2.806.088 3.704.288c.88.196 1.381.478 1.706.802s.607.826.802 1.706c.2.898.288 2.091.288 3.704s-.088 2.806-.288 3.704c-.195.88-.478 1.381-.802 1.706s-.826.607-1.706.802c-.898.2-2.091.288-3.704.288s-2.806-.088-3.704-.288c-.88-.195-1.381-.478-1.706-.802s-.606-.826-.802-1.706C1.588 10.806 1.5 9.613 1.5 8s.088-2.806.288-3.704M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-added-duo" viewBox="0 0 16 16">
+    <path d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8" opacity=".2"/><path d="M8 4a.75.75 0 0 1 .75.75v2.5h2.5a.75.75 0 0 1 0 1.5h-2.5v2.5a.75.75 0 0 1-1.5 0v-2.5h-2.5a.75.75 0 0 1 0-1.5h2.5v-2.5A.75.75 0 0 1 8 4"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-added-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8m0 4a.75.75 0 0 0-.75.75v2.5h-2.5a.75.75 0 0 0 0 1.5h2.5v2.5a.75.75 0 0 0 1.5 0v-2.5h2.5a.75.75 0 0 0 0-1.5h-2.5v-2.5A.75.75 0 0 0 8 4" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-deleted" viewBox="0 0 16 16">
+    <path d="M4 8a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5A.75.75 0 0 1 4 8"/><path d="M1.788 4.296c.196-.88.478-1.381.802-1.706s.826-.606 1.706-.802C5.194 1.588 6.387 1.5 8 1.5s2.806.088 3.704.288c.88.196 1.381.478 1.706.802s.607.826.802 1.706c.2.898.288 2.091.288 3.704s-.088 2.806-.288 3.704c-.195.88-.478 1.381-.802 1.706s-.826.607-1.706.802c-.898.2-2.091.288-3.704.288s-2.806-.088-3.704-.288c-.88-.195-1.381-.478-1.706-.802s-.606-.826-.802-1.706C1.588 10.806 1.5 9.613 1.5 8s.088-2.806.288-3.704M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-deleted-duo" viewBox="0 0 16 16">
+    <path d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8" opacity=".2"/><path d="M4 8a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5A.75.75 0 0 1 4 8"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-deleted-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8M4.75 7.25a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5z" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-diffstat" viewBox="0 0 16 16">
+    <path d="M1.788 4.296c.196-.88.478-1.381.802-1.706s.826-.606 1.706-.802C5.194 1.588 6.387 1.5 8 1.5s2.806.088 3.704.288c.88.196 1.381.478 1.706.802s.607.826.802 1.706c.2.898.288 2.091.288 3.704s-.088 2.806-.288 3.704c-.195.88-.478 1.381-.802 1.706s-.826.607-1.706.802c-.898.2-2.091.288-3.704.288s-2.806-.088-3.704-.288c-.88-.195-1.381-.478-1.706-.802s-.606-.826-.802-1.706C1.588 10.806 1.5 9.613 1.5 8s.088-2.806.288-3.704M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8"/><path d="M8.75 4.296a.75.75 0 0 0-1.5 0V6.25h-2a.75.75 0 0 0 0 1.5h2v1.5h1.5v-1.5h2a.75.75 0 0 0 0-1.5h-2zM5.25 10a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5z"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-diffstat-duo" viewBox="0 0 16 16">
+    <path d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8" opacity=".2"/><path d="M8.75 4.296a.75.75 0 0 0-1.5 0V6.25h-2a.75.75 0 0 0 0 1.5h2v1.5h1.5v-1.5h2a.75.75 0 0 0 0-1.5h-2zM5.25 10a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5z"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-diffstat-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8M5.25 10a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5zM8 3.546a.75.75 0 0 0-.75.75V6.25h-2a.75.75 0 0 0 0 1.5h2v1.5h1.5v-1.5h2a.75.75 0 0 0 0-1.5h-2V4.296a.75.75 0 0 0-.75-.75" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-extracted" viewBox="0 0 16 16">
+    <path d="M8.25 4.25a.75.75 0 0 1 0 1.5H6.81l3.302 3.302a1.5 1.5 0 1 1-1.06 1.06L5.75 6.811V8.25a.75.75 0 0 1-1.5 0V5A.75.75 0 0 1 5 4.25z"/><path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8m0 1.5c-1.613 0-2.807.089-3.704.288-.88.196-1.382.477-1.706.802-.325.324-.606.826-.802 1.706C1.588 5.193 1.5 6.387 1.5 8s.089 2.807.288 3.704c.196.88.477 1.382.802 1.706.324.325.826.606 1.706.802.897.2 2.091.288 3.704.288s2.807-.089 3.704-.288c.88-.196 1.382-.477 1.706-.802.325-.324.606-.826.802-1.706.2-.897.288-2.091.288-3.704s-.089-2.807-.288-3.704c-.196-.88-.477-1.382-.802-1.706-.324-.325-.826-.606-1.706-.802C10.807 1.588 9.613 1.5 8 1.5" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-extracted-duo" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8" clip-rule="evenodd" opacity=".2"/><path d="M8.25 4.25a.75.75 0 0 1 0 1.5H6.81l3.302 3.302a1.5 1.5 0 1 1-1.06 1.06L5.75 6.811V8.25a.75.75 0 0 1-1.5 0V5A.75.75 0 0 1 5 4.25z"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-extracted-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8M5 4.25a.75.75 0 0 0-.75.75v3.25a.75.75 0 0 0 1.5 0V6.81l3.302 3.302a1.5 1.5 0 1 0 1.06-1.06L6.811 5.75H8.25a.75.75 0 0 0 0-1.5z" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-ignored" viewBox="0 0 16 16">
+    <path d="M1.5 8c0 1.613.088 2.806.288 3.704.196.88.478 1.381.802 1.706s.826.607 1.706.802c.898.2 2.091.288 3.704.288s2.806-.088 3.704-.288c.88-.195 1.381-.478 1.706-.802s.607-.826.802-1.706c.2-.898.288-2.091.288-3.704s-.088-2.806-.288-3.704c-.195-.88-.478-1.381-.802-1.706s-.826-.606-1.706-.802C10.806 1.588 9.613 1.5 8 1.5s-2.806.088-3.704.288c-.88.196-1.381.478-1.706.802s-.606.826-.802 1.706C1.588 5.194 1.5 6.387 1.5 8M0 8c0-6.588 1.412-8 8-8s8 1.412 8 8-1.412 8-8 8-8-1.412-8-8m11.53-2.47a.75.75 0 0 0-1.06-1.06l-6 6a.75.75 0 1 0 1.06 1.06z"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-ignored-duo" viewBox="0 0 16 16">
+    <path d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8" opacity=".2"/><path d="M11.53 4.47a.75.75 0 0 1 0 1.06l-6 6a.75.75 0 0 1-1.06-1.06l6-6a.75.75 0 0 1 1.06 0"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-ignored-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8m3.53 4.47a.75.75 0 0 0-1.06 0l-6 6a.75.75 0 1 0 1.06 1.06l6-6a.75.75 0 0 0 0-1.06" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-inlined" viewBox="0 0 16 16">
+    <path d="M7.75 11.75a.75.75 0 0 1 0-1.5h1.44L5.887 6.948a1.5 1.5 0 1 1 1.06-1.06l3.302 3.301V7.75a.75.75 0 0 1 1.5 0V11a.75.75 0 0 1-.75.75z"/><path fill-rule="evenodd" d="M8 16c-6.588 0-8-1.412-8-8s1.412-8 8-8 8 1.412 8 8-1.412 8-8 8m0-1.5c1.613 0 2.807-.089 3.704-.288.88-.196 1.382-.477 1.706-.802.325-.324.606-.826.802-1.706.2-.897.288-2.091.288-3.704s-.089-2.807-.288-3.704c-.196-.88-.477-1.382-.802-1.706-.324-.325-.826-.606-1.706-.802C10.807 1.588 9.613 1.5 8 1.5s-2.807.089-3.704.288c-.88.196-1.382.477-1.706.802-.325.324-.606.826-.802 1.706C1.588 5.193 1.5 6.387 1.5 8s.089 2.807.288 3.704c.196.88.477 1.382.802 1.706.324.325.826.606 1.706.802.897.2 2.091.288 3.704.288" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-inlined-duo" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 16c-6.588 0-8-1.412-8-8s1.412-8 8-8 8 1.412 8 8-1.412 8-8 8" clip-rule="evenodd" opacity=".2"/><path d="M7.75 11.75a.75.75 0 0 1 0-1.5h1.44L5.887 6.948a1.5 1.5 0 1 1 1.06-1.06l3.302 3.301V7.75a.75.75 0 0 1 1.5 0V11a.75.75 0 0 1-.75.75z"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-inlined-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8M5.5 4a1.5 1.5 0 1 0 .388 2.948l3.301 3.302H7.75a.75.75 0 0 0 0 1.5H11a.75.75 0 0 0 .75-.75V7.75a.75.75 0 0 0-1.5 0v1.44L6.948 5.887A1.5 1.5 0 0 0 5.5 4" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-modified" viewBox="0 0 16 16">
+    <path d="M1.5 8c0 1.613.088 2.806.288 3.704.196.88.478 1.381.802 1.706s.826.607 1.706.802c.898.2 2.091.288 3.704.288s2.806-.088 3.704-.288c.88-.195 1.381-.478 1.706-.802s.607-.826.802-1.706c.2-.898.288-2.091.288-3.704s-.088-2.806-.288-3.704c-.195-.88-.478-1.381-.802-1.706s-.826-.606-1.706-.802C10.806 1.588 9.613 1.5 8 1.5s-2.806.088-3.704.288c-.88.196-1.381.478-1.706.802s-.606.826-.802 1.706C1.588 5.194 1.5 6.387 1.5 8M0 8c0-6.588 1.412-8 8-8s8 1.412 8 8-1.412 8-8 8-8-1.412-8-8m8 3a3 3 0 1 0 0-6 3 3 0 0 0 0 6"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-modified-duo" viewBox="0 0 16 16">
+    <path d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8" opacity=".2"/><path d="M11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-modified-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8m0 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-moved" viewBox="0 0 16 16">
+    <path d="M1.788 4.296c.196-.88.478-1.381.802-1.706s.826-.606 1.706-.802C5.194 1.588 6.387 1.5 8 1.5s2.806.088 3.704.288c.88.196 1.381.478 1.706.802s.607.826.802 1.706c.2.898.288 2.091.288 3.704s-.088 2.806-.288 3.704c-.195.88-.478 1.381-.802 1.706s-.826.607-1.706.802c-.898.2-2.091.288-3.704.288s-2.806-.088-3.704-.288c-.88-.195-1.381-.478-1.706-.802s-.606-.826-.802-1.706C1.588 10.806 1.5 9.613 1.5 8s.088-2.806.288-3.704M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8"/><path d="M8.495 4.695a.75.75 0 0 0-.05 1.06L10.486 8l-2.041 2.246a.75.75 0 0 0 1.11 1.008l2.5-2.75a.75.75 0 0 0 0-1.008l-2.5-2.75a.75.75 0 0 0-1.06-.051m-4 0a.75.75 0 0 0-.05 1.06l2.044 2.248-1.796 1.995a.75.75 0 0 0 1.114 1.004l2.25-2.5a.75.75 0 0 0-.002-1.007l-2.5-2.75a.75.75 0 0 0-1.06-.05"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-moved-duo" viewBox="0 0 16 16">
+    <path d="M8 0C1.412 0 0 1.412 0 8s1.412 8 8 8 8-1.412 8-8-1.412-8-8-8" opacity=".2"/><path d="M8.496 4.695a.75.75 0 0 0-.051 1.06L10.486 8l-2.041 2.246a.75.75 0 0 0 1.11 1.008l2.5-2.75a.75.75 0 0 0 0-1.008l-2.5-2.75a.75.75 0 0 0-1.06-.051m-4 0a.75.75 0 0 0-.051 1.06L6.49 8.003 4.693 9.998a.75.75 0 0 0 1.114 1.004l2.25-2.5a.75.75 0 0 0-.002-1.007l-2.5-2.75a.75.75 0 0 0-1.06-.05"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-moved-fill" viewBox="0 0 16 16">
+    <path fill-rule="evenodd" d="M8 0c6.588 0 8 1.412 8 8s-1.412 8-8 8-8-1.412-8-8 1.412-8 8-8m1.555 4.745a.75.75 0 0 0-1.11 1.01L10.486 8l-2.04 2.245a.75.75 0 0 0 1.109 1.01l2.5-2.75a.75.75 0 0 0 0-1.01zm-4 0a.75.75 0 0 0-1.11 1.01l2.043 2.248-1.796 1.995a.75.75 0 0 0 1.116 1.004l2.25-2.5a.75.75 0 0 0-.003-1.007z" clip-rule="evenodd"/>
+  </symbol>
+  <symbol id="diffs-icon-symbol-ref" viewBox="0 0 16 16">
+    <path d="M1.5 8c0 1.613.088 2.806.288 3.704.196.88.478 1.381.802 1.706.286.286.71.54 1.41.73V1.86c-.7.19-1.124.444-1.41.73-.324.325-.606.826-.802 1.706C1.588 5.194 1.5 6.387 1.5 8m4 6.397c.697.07 1.522.103 2.5.103 1.613 0 2.806-.088 3.704-.288.88-.195 1.381-.478 1.706-.802s.607-.826.802-1.706c.2-.898.288-2.091.288-3.704s-.088-2.806-.288-3.704c-.195-.88-.478-1.381-.802-1.706s-.826-.606-1.706-.802C10.806 1.588 9.613 1.5 8 1.5c-.978 0-1.803.033-2.5.103zM0 8c0-6.588 1.412-8 8-8s8 1.412 8 8-1.412 8-8 8-8-1.412-8-8m7-2a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v1a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1z"/>
+  </symbol>
+</svg>"####;
+
+/// The sprite sheet as a hast element (see the file header).
+pub fn sprite_sheet_element() -> crate::hast::Element {
+    use crate::hast::Element;
+    use crate::hast::ElementContent;
+    use crate::hast::Properties;
+    use crate::hast::Text;
+
+    let mut stack: Vec<Element> = Vec::new();
+    let mut root: Option<Element> = None;
+    let mut rest = SVG_SPRITE_SHEET;
+    while !rest.is_empty() {
+        if let Some(tag_start) = rest.strip_prefix('<') {
+            let end = tag_start
+                .find('>')
+                .expect("the sprite sheet is well-formed");
+            let tag = &tag_start[..end];
+            rest = &tag_start[end + 1..];
+            if let Some(name) = tag.strip_prefix('/') {
+                let element = stack.pop().expect("a closing tag has an opener");
+                assert_eq!(element.tag_name, name);
+                match stack.last_mut() {
+                    Some(parent) => parent.children.push(ElementContent::Element(element)),
+                    None => root = Some(element),
+                }
+                continue;
+            }
+            let self_closing = tag.ends_with('/');
+            let tag = tag.trim_end_matches('/').trim_end();
+            let (name, attributes) = tag.split_once(' ').unwrap_or((tag, ""));
+            let mut attributes = attributes.trim_start();
+            let mut properties = Properties::new();
+            while !attributes.is_empty() {
+                let key_end = attributes.find(['=', ' ']).unwrap_or(attributes.len());
+                let (key, after) = attributes.split_at(key_end);
+                if let Some(value) = after.strip_prefix("=\"") {
+                    let close = value.find('"').expect("a quoted value closes");
+                    properties.set(key, &value[..close]);
+                    attributes = value[close + 1..].trim_start();
+                } else {
+                    properties.set(key, "");
+                    attributes = after.trim_start();
+                }
+            }
+            let element = Element::new(name, properties, Vec::new());
+            if self_closing {
+                stack
+                    .last_mut()
+                    .expect("a void element has a parent")
+                    .children
+                    .push(ElementContent::Element(element));
+            } else {
+                stack.push(element);
+            }
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            if let Some(parent) = stack.last_mut() {
+                parent
+                    .children
+                    .push(ElementContent::Text(Text::new(&rest[..end])));
+            }
+            rest = &rest[end..];
+        }
+    }
+    root.expect("the sprite sheet has a root element")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sheet_parses_to_one_symbol_per_icon() {
+        let sheet = sprite_sheet_element();
+        assert_eq!(sheet.tag_name, "svg");
+        let symbols = sheet
+            .children
+            .iter()
+            .filter_map(crate::hast::ElementContent::as_element)
+            .count();
+        assert_eq!(symbols, 36);
+    }
+}
