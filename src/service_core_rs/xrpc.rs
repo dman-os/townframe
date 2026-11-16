@@ -18,6 +18,8 @@ pub const NODULE_CAPABILITY_HEADER: &str = "x-nodule-capability";
 pub const NODULE_CONFIG_DOC_HEADER: &str = "x-nodule-config-doc";
 /// The nodule's capability to read its config document and write declared settings datums.
 pub const NODULE_CONFIG_CAPABILITY_HEADER: &str = "x-nodule-config-capability";
+/// The drawer capability for the routine's granted drawer set, when one is present.
+pub const NODULE_DRAWER_CAPABILITY_HEADER: &str = "x-nodule-drawer-capability";
 pub const DOMAIN_ERROR_FIELD: &str = "operationError";
 pub const DOMAIN_ERROR_STATUS: StatusCode = StatusCode::BAD_REQUEST;
 /// The `Authorization` scheme of every XRPC hop, including its separating space.

@@ -2,8 +2,8 @@
 //! served (the contract every XRPC hop speaks) and how its response maps back onto dispatch's
 //! provider errors. [`crate::egress`] is the other direction.
 
+use crate::executor::RoutineCapabilities;
 use big_cabinet_core::authority::Authorization;
-use big_cabinet_core::authority::CapId;
 use big_dispatch::Caller;
 use big_dispatch::ProviderError;
 use big_dispatch_core::InvocationContext;
@@ -17,6 +17,7 @@ use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
+use service_core_rs::xrpc::NODULE_DRAWER_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
@@ -47,8 +48,7 @@ pub fn delivery_headers(
     request: &RequestContext,
     context: &InvocationContext,
     config_doc: &big_cabinet_core::dmeta::DocId,
-    config_capability: Option<CapId>,
-    nodule_capability: Option<CapId>,
+    capabilities: &RoutineCapabilities,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
     write_context_headers(
@@ -64,7 +64,7 @@ pub fn delivery_headers(
         },
     )
     .expect("request context headers are valid HTTP");
-    if let Some(capability) = nodule_capability {
+    if let Some(capability) = capabilities.dispatch {
         headers.insert(
             NODULE_CAPABILITY_HEADER,
             Authorization::id_text(capability)
@@ -72,7 +72,15 @@ pub fn delivery_headers(
                 .expect("a capability id is a valid header value"),
         );
     }
-    if let Some(capability) = config_capability {
+    if let Some(capability) = capabilities.drawers {
+        headers.insert(
+            NODULE_DRAWER_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = capabilities.config {
         headers.insert(
             NODULE_CONFIG_CAPABILITY_HEADER,
             Authorization::id_text(capability)

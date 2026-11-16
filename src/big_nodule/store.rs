@@ -279,26 +279,6 @@ pub(crate) async fn applied_settings(
         .collect()
 }
 
-pub(crate) async fn upsert_applied_settings(
-    database: &Database,
-    cartridge_id: &CartridgeId,
-    doc_id: &DocId,
-    kinds: &big_cabinet_core::doc::DatumKinds,
-    capability_id: CapId,
-) -> Result<(), NodulesError> {
-    let transaction = database.begin_write().await.map_err(storage)?;
-    sqlite::upsert_applied_settings(
-        &transaction,
-        cartridge_id.to_string(),
-        doc_id.to_string(),
-        serde_json::to_string(kinds).expect("datum kinds serialize"),
-        capability_id.as_bytes().to_vec(),
-    )
-    .await
-    .map_err(storage)?;
-    transaction.commit().await.map_err(storage)
-}
-
 pub(crate) async fn delete_applied_settings(
     database: &Database,
     cartridge_id: &CartridgeId,
@@ -307,24 +287,6 @@ pub(crate) async fn delete_applied_settings(
     sqlite::delete_applied_settings(&transaction, cartridge_id.to_string())
         .await
         .map_err(storage)?;
-    transaction.commit().await.map_err(storage)
-}
-
-pub(crate) async fn upsert_applied_operations(
-    database: &Database,
-    cartridge_id: &CartridgeId,
-    scope: &DispatchScope,
-    capability_id: CapId,
-) -> Result<(), NodulesError> {
-    let transaction = database.begin_write().await.map_err(storage)?;
-    sqlite::upsert_applied_operations(
-        &transaction,
-        cartridge_id.to_string(),
-        serde_json::to_string(scope).expect("a dispatch scope serializes"),
-        capability_id.as_bytes().to_vec(),
-    )
-    .await
-    .map_err(storage)?;
     transaction.commit().await.map_err(storage)
 }
 

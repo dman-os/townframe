@@ -182,6 +182,20 @@ fn cartridge_with_echo_input(spec: &Spec, calls: &[String], echo_input: Value) -
             )
         })
         .collect();
+    // Every routine of the fixture can relay, so each lists every operation the nodule calls: a
+    // routine's capability covers its `uses` and nothing else (ADR 047 §6).
+    for routine in cartridge
+        .nodule
+        .as_mut()
+        .expect("the fixture carries a nodule")
+        .routines
+        .values_mut()
+    {
+        routine.uses = calls
+            .iter()
+            .map(|nsid| (nsid.clone(), Default::default()))
+            .collect();
+    }
     cartridge
 }
 
@@ -417,9 +431,9 @@ async fn a_native_handler_is_served_the_production_delivery_contract() {
     assert_ne!(echoed["requestId"], outer.request_id.to_string());
     assert_eq!(echoed["requestId"].as_str().unwrap().len(), 36, "a uuid");
     assert_continues_trace(echoed["traceparent"].as_str().unwrap());
-    // No operations are granted, but the nodule's settings capability (docs read and write on its
-    // config document) is a dispatch capability of its own, so it is told one.
-    assert!(echoed["noduleCapability"].is_string());
+    // The routine uses no operation and no settings, so its capability covers nothing and it is
+    // told none.
+    assert!(echoed["noduleCapability"].is_null());
 
     // A budget travels as the relative `x-timeout-ms`, re-derived from what is left.
     let budgeted = RequestContext::root().with_time_budget(std::time::Duration::from_secs(60));
@@ -487,8 +501,8 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     let denied = relay(&node, &a, &target, None, context.clone()).await;
     assert_eq!(denied["status"], 403, "{denied}");
 
-    // Granted the callee's authority, the same relay succeeds, and B sees the nodule's own
-    // capability as the caller's `authorization`.
+    // Granted the callee's authority, the same relay succeeds, and B sees the capability of the
+    // routine that made the call as the caller's `authorization`.
     node.grant(
         &a.cartridge,
         DispatchScope {
@@ -502,14 +516,18 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
     let relayed = relay(&node, &a, &target, None, context.clone()).await;
     assert_eq!(relayed["status"], 200, "{relayed}");
     assert_eq!(relayed["body"]["input"], json!({ "n": 1 }));
-    assert_eq!(
-        relayed["body"]["authorization"],
-        json!(format!("Bearer {granted}"))
-    );
+    // Each routine holds a capability of its own: the relay routine made this call under its
+    // own, not under the one the echo routine was told.
+    let relay_capability = relayed["body"]["authorization"]
+        .as_str()
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .expect("the callee sees the caller's bearer capability")
+        .to_owned();
+    assert_ne!(relay_capability, granted);
     assert_eq!(relayed["body"]["idempotencyKey"], "nested-key");
-    // B has its own settings capability, but it was not handed A's dispatch capability.
-    assert!(relayed["body"]["noduleCapability"].is_string());
-    assert_ne!(relayed["body"]["noduleCapability"], json!(granted));
+    // B has not been granted anything yet, so its routine holds no capability, and in particular
+    // was not handed A's.
+    assert!(relayed["body"]["noduleCapability"].is_null());
 
     // The nested call is a hop of its own: a new request id, the outer trace under a new span
     // and a budget within the outer one.
@@ -565,8 +583,8 @@ async fn a_native_nodule_calls_another_through_dispatch_only_with_its_own_live_g
         },
     )
     .await;
-    assert!(own_capability(&node, &a).await.is_some());
-    let stale = relay(&node, &a, &target, Some(&granted), context).await;
+    assert!(own_capability(&node, &a).await.is_none());
+    let stale = relay(&node, &a, &target, Some(&relay_capability), context).await;
     assert_eq!(stale["status"], 403, "{stale}");
     node.stop().await;
 }
