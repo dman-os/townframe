@@ -32,3 +32,5 @@ service_core_rs.workspace = true
 #
 # misc
 insta = { workspace = true, features = ["json"] }
+serde.workspace = true
+schemars = "1.2"
