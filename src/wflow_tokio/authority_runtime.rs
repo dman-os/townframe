@@ -95,7 +95,15 @@ use wflow_wdk::types::RetryPolicy;
 
 use crate::interlude::*;
 
+use self::halt::CommitFailure;
+use self::halt::Halt;
+use self::spawn::SpawnOutcome;
+use self::spawn::Spawned;
+use self::spawn::regrant_backoff_ms;
+
+mod halt;
 pub mod session;
+mod spawn;
 
 #[cfg(test)]
 mod tests;
@@ -715,21 +723,6 @@ struct Yielded {
     yielded: Option<SessionYield>,
 }
 
-enum SpawnOutcome {
-    Session(Box<dyn session::Session>),
-    /// The host could not start the invocation; the class says whether a later
-    /// attempt could succeed and carries the host's diagnosis.
-    Failed(session::SpawnError),
-}
-
-/// Host creation completes off-actor and carries the complete lease so every
-/// completion can be fenced against the durable authority state.
-struct Spawned {
-    key: String,
-    lease: authority::Lease,
-    outcome: SpawnOutcome,
-}
-
 /// What an armed deadline belongs to. Every kind is durable in the authority,
 /// so the wheel is rebuilt from the journal/snapshot on recovery.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -763,47 +756,7 @@ impl DeadlineRef {
     }
 }
 
-/// Why the actor stopped serving commands.
-///
-/// Every variant means durable state is unknown or out of reach, so the actor's
-/// in-memory authority may no longer be the journal's and continuing would be a
-/// guess about what committed. The actor answers its queued callers, tears down
-/// its sessions and exits; the supervisor restarts it, and `start`'s replay of
-/// the journal is what reconciles the two.
-#[derive(Debug)]
-enum Halt {
-    /// The writer reported the transition was definitively not committed and
-    /// kept doing so until the retry budget ran out. Nothing was written, so a
-    /// restart replays exactly the committed prefix.
-    Unavailable(eyre::Report),
-    /// The writer could not say whether the transition committed: it may be
-    /// durable. The next start replays it if it is.
-    Ambiguous(eyre::Report),
-    /// The store's revision moved past the one the journal expected, which the
-    /// journal's single-writer contract forbids, so the journal cannot advance
-    /// until it is reopened.
-    ForeignWriter { actual_revision: u64 },
-}
-
-impl Halt {
-    /// Maps a failed durable write onto the reason the actor stops.
-    fn from_commit_error(error: CommitError) -> Self {
-        match error {
-            CommitError::NotCommitted(error) => Self::Unavailable(error),
-            CommitError::Unknown(error) => Self::Ambiguous(error),
-            CommitError::Conflict { actual_revision } => Self::ForeignWriter { actual_revision },
-        }
-    }
-}
-
 /// Why a command did not reach the journal.
-enum CommitFailure {
-    /// The authority refused it; no storage was touched and none may be.
-    Rejected(authority::Rejection),
-    /// Writing it failed in a way only a restart can resolve.
-    Halted(Halt),
-}
-
 /// Answers one command the actor will never process.
 ///
 /// The reply channel is the caller's only way to learn the runtime stopped, so
@@ -838,7 +791,7 @@ struct Actor<W> {
     deadlines: BTreeSet<(u64, DeadlineRef)>,
     /// Consecutive unavailable-host spawn failures per job, which is what the
     /// re-grant backoff doubles. Actor-local on purpose: see
-    /// `spawn_regrant_backoff_ms`.
+    /// `spawn::regrant_backoff_ms`.
     spawn_failures: HashMap<String, u32>,
     /// Completion wakeup hints for in-flight `await_result` callers.
     waiters: Waiters,
@@ -1495,7 +1448,7 @@ impl<W: Writer> Actor<W> {
         self.revoke(key.clone(), lease).await?;
         let failures = self.spawn_failures.entry(key.clone()).or_insert(0);
         *failures = failures.saturating_add(1);
-        let delay_ms = spawn_regrant_backoff_ms(*failures);
+        let delay_ms = regrant_backoff_ms(*failures);
         let fire_at_ms = now_ms().saturating_add(delay_ms);
         warn!(
             %key,
@@ -2254,11 +2207,6 @@ fn decode_terminal(value: &str) -> Res<types::JobResult> {
     serde_json::from_str(value).wrap_err("result index holds an unreadable terminal value")
 }
 
-/// The bound on guest-controlled text in a durable fault.
-///
-/// Both a panic message and the error behind an exhausted retry budget are
-/// workflow-supplied prose that outlives the job in its receipt, the result
-/// index, and every later snapshot, so the runtime stores only the head of each.
 /// The awaiter-facing projection of a settled fault.
 ///
 /// A receipt stores [`authority::Outcome::Faulted`] untouched; this envelope is
@@ -2268,24 +2216,4 @@ fn failure_envelope(failure: &JobFailure) -> types::JobResult {
     Err(types::JobError::Terminal(
         serde_json::to_string(failure).expect(ERROR_JSON),
     ))
-}
-
-/// The re-grant delay after `failures` consecutive unavailable spawn reports:
-/// doubling from 100 ms and saturating at 30 s, so 100 ms, 200 ms, 400 ms, ….
-///
-/// A spawn failure used to re-grant immediately, so an engine or store that was
-/// briefly unavailable burned the submission's whole restart budget in a
-/// millisecond-scale loop and settled as `RestartsExhausted`, which named the
-/// wrong class and kept no diagnosis. The floor is deliberately short: the
-/// common case is a host that is ready almost at once, and the durable restart
-/// budget — not this loop — is what bounds the total damage. The count is
-/// actor-local and a daemon restart resets it, which is acceptable for the same
-/// reason: the restart budget survives, so a pathological host still faults
-/// instead of retrying forever. `Rejected` spawn failures never reach this path;
-/// they settle immediately. See `handle_spawn_failure`.
-fn spawn_regrant_backoff_ms(failures: u32) -> u64 {
-    const MIN_MS: u64 = 100;
-    const MAX_MS: u64 = 30_000;
-    let doublings = failures.saturating_sub(1).min(31);
-    MIN_MS.saturating_mul(1u64 << doublings).min(MAX_MS)
 }

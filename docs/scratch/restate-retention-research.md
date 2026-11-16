@@ -1,5 +1,13 @@
 # Restate: retention and pruning of completed durable state
 
+Status: Research complete; the mapping onto our engine was accepted as WFR-014
+in `wflow-fix-ledger.md` and implemented in `af8649d1`.
+Owner: operator + wflow replacement track
+Updated: 2026-11-16
+Scope: How `restatedev/restate` retains, expires and prunes completed durable
+state, and which parts of that model transfer to a SQLite-journal,
+snapshot-based authority.
+
 Research note for designing an equivalent policy in our own engine. Every non-obvious claim cites a
 docs URL or a pinned source line; guesses are marked UNVERIFIED. **Provenance:**
 `restatedev/restate@12adfb14c497b1577b1bba117f769e5eba941ee6` (`version = "1.8.2-dev"`, cloned

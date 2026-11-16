@@ -140,10 +140,12 @@ async fn native_session_panic_keeps_the_formatted_message() {
         Box::pin(async move {
             // `panic!` with a format string produces a `String` payload, not a
             // `&'static str`, and the durable fault must keep the message
-            // rather than reporting an unknown payload.
-            panic!("boom {}", 7);
-            #[allow(unreachable_code)]
-            Ok::<_, JobErrorX>(())
+            // rather than reporting an unknown payload. The helper returns `!`
+            // so the workflow body needs no unreachable-code suppression.
+            fn boom() -> ! {
+                panic!("boom {}", 7);
+            }
+            Ok::<(), JobErrorX>(boom())
         })
     });
     let session = driver

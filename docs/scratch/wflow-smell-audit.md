@@ -1,5 +1,13 @@
 # wflow production-readiness smell audit (generation 3)
 
+Status: Findings only, one pass. Several rows were refuted on contact with the
+source; the disposition of every row is in `wflow-fix-ledger.md`, which is the
+authority on what was real.
+Owner: operator + wflow replacement track
+Updated: 2026-11-16
+Scope: Read-only audit of the wflow runtime and adapters at `cba72f24`, plus the
+eight items already known at the time, which are deliberately excluded.
+
 Read-only review of `src/wflow_core`, `src/wflow_tokio`, `src/wflow_wdk`,
 `src/wflow_wdk_native`, `src/wflow_wdk_wasm`, `src/wash_plugin_wflow`, `src/wflow`,
 `src/test_wflows` at `cba72f24` (tree clean apart from this ledger pair).

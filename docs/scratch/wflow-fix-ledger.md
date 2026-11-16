@@ -1,5 +1,14 @@
 # Wflow fix ledger (generation 3)
 
+Status: Open. Defects with a landed fix are marked in the waves table; the
+remaining open items are listed below them. Decisions are labelled WFR-; a
+recommendation that has not been accepted says so at the site.
+Owner: operator + wflow replacement track
+Updated: 2026-11-16
+Scope: Outstanding defects and fix evidence for the `feat/native-wflow` engine
+replacement. Design decisions (WFR-001..013) live in
+`wflow-replacement-ledger.md`; this file holds the defect ledger.
+
 Open items from the post-closeout review of `feat/native-wflow`. Complements
 `docs/scratch/wflow-replacement-ledger.md`, which holds the design decisions
 (WFR-001..013); this file holds the outstanding defects and their fix state.
