@@ -1106,3 +1106,64 @@ async fn a_rolled_back_commit_is_retried_and_an_ambiguous_one_stops_the_actor() 
     assert_eq!(probe.steps_runs.load(Ordering::SeqCst), 2);
     runtime.stop().await;
 }
+
+/// A caller that gives up waiting leaves a closed sender behind; registering the
+/// next watch must not grow the list.
+#[test]
+fn abandoned_result_waiters_are_reaped_on_registration() {
+    let mut waiters = Waiters::default();
+    let abandoned = waiters.register("job".into());
+    assert_eq!(waiters.registered("job"), 1);
+    drop(abandoned);
+    let mut live = waiters.register("job".into());
+    assert_eq!(waiters.registered("job"), 1, "the closed sender was reaped");
+    waiters.wake("job");
+    assert_eq!(waiters.registered("job"), 0);
+    assert!(live.try_recv().is_ok());
+    assert!(live.try_recv().is_err(), "a waiter is woken once");
+}
+
+/// A result-index row this build cannot read is a storage error for the reader,
+/// not an abort for whoever asked for the result.
+#[tokio::test]
+async fn an_unreadable_result_index_row_is_reported_instead_of_panicking() {
+    let store = MemoryStore::default();
+    let probe = Arc::new(Probe::default());
+    let (runtime, _) = start(&store, &host(&probe)).await;
+    runtime
+        .submit(Submission::new("job", "steps", "1"))
+        .await
+        .unwrap();
+    assert_eq!(runtime.await_result("job").await, Some(ok(1)));
+    runtime.stop().await;
+
+    // Overwrite the settled job's row through the journal's own index mapping
+    // with a value this build cannot decode, which is the shape an index written
+    // by another format generation has. `stop` released the store's writer, and
+    // the entry committed alongside the row is never replayed: this store is not
+    // reopened.
+    {
+        let mut journal = Journal::open(store.writer().unwrap(), 0).await.unwrap();
+        let frontier = journal.frontier();
+        journal
+            .append(
+                frontier,
+                b"unused".as_slice().into(),
+                vec![Mutation {
+                    key: result_index_key("job"),
+                    value: Some(b"{\"not\":\"a receipt\"}".as_slice().into()),
+                }],
+            )
+            .await
+            .unwrap();
+    }
+    let error = runtime.get_result("job").await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("result index row for \"job\" is unreadable"),
+        "{error:?}"
+    );
+    // The reader-facing projection reports the same class instead of unwrapping.
+    assert!(decode_terminal("not json").is_err());
+}

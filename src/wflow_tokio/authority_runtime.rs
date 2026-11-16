@@ -243,7 +243,11 @@ impl JobHandle {
     /// Reads the durable terminal outcome of this job from the result index;
     /// `None` while the job is unsettled.
     pub async fn get_result(&self) -> Res<Option<types::JobResult>> {
-        Ok(self.receipt().await?.as_ref().map(decode_receipt))
+        self.receipt()
+            .await?
+            .as_ref()
+            .map(decode_receipt)
+            .transpose()
     }
 
     /// Reads the durable compact terminal receipt of this job from the result
@@ -284,9 +288,14 @@ impl JobHandle {
         }
     }
 
-    /// Resolves once this job has a durable terminal outcome; `None` if unknown.
+    /// Resolves once this job has a durable terminal outcome; see
+    /// [`Self::await_receipt`] for what `None` means.
     pub async fn await_result(&self) -> Option<types::JobResult> {
-        self.await_receipt().await.as_ref().map(decode_receipt)
+        let receipt = self.await_receipt().await?;
+        // An undecodable result index row is `None` here for the same reason a
+        // stopped runtime is: this `Option` cannot carry it. `get_result` reports
+        // it as the storage error it is.
+        decode_receipt(&receipt).ok()
     }
 }
 
@@ -325,6 +334,43 @@ enum WatchState {
     Unknown,
     /// The actor stopped before it could tell whether the key was known.
     Stopped,
+}
+
+/// The completion wakeups of the callers waiting on a job's receipt.
+///
+/// One sender is registered per `await_receipt` call and only a settlement
+/// wakes it, so a caller that stops listening — a wait with a timeout, a UI that
+/// asks once per frame — leaves a sender whose receiver is gone. Reaping those on
+/// registration is what keeps the collection proportional to the callers still
+/// waiting instead of to every watch a long-lived job has ever served.
+#[derive(Default)]
+struct Waiters(HashMap<String, Vec<oneshot::Sender<()>>>);
+
+impl Waiters {
+    /// Registers one wakeup for `key` and returns its receiver.
+    fn register(&mut self, key: String) -> oneshot::Receiver<()> {
+        let waiters = self.0.entry(key).or_default();
+        waiters.retain(|waiter| !waiter.is_closed());
+        let (wakeup, receiver) = oneshot::channel();
+        waiters.push(wakeup);
+        receiver
+    }
+
+    /// Wakes every caller waiting on `key` and forgets them; a settled job
+    /// cannot settle again.
+    fn wake(&mut self, key: &str) {
+        for waiter in self.0.remove(key).unwrap_or_default() {
+            // The caller may have stopped listening after registering, which is
+            // its own business: the wakeup is a hint, not a reply.
+            let _cancelled = waiter.send(());
+        }
+    }
+
+    /// The wakeups currently registered for `key`.
+    #[cfg(test)]
+    fn registered(&self, key: &str) -> usize {
+        self.0.get(key).map_or(0, Vec::len)
+    }
 }
 
 enum Command {
@@ -432,7 +478,7 @@ impl AuthorityRuntime {
             running: HashMap::new(),
             waiting: HashMap::new(),
             deadlines: BTreeSet::new(),
-            waiters: HashMap::new(),
+            waiters: Waiters::default(),
             pending_spawns: FuturesUnordered::new(),
         };
         let actor = tokio::spawn(actor.run(commands_rx))
@@ -559,7 +605,11 @@ impl AuthorityRuntime {
     /// Reads the durable terminal outcome of `key` from the result index;
     /// `None` while the job has no committed outcome.
     pub async fn get_result(&self, key: &str) -> Res<Option<types::JobResult>> {
-        Ok(self.receipt(key).await?.as_ref().map(decode_receipt))
+        self.receipt(key)
+            .await?
+            .as_ref()
+            .map(decode_receipt)
+            .transpose()
     }
 
     /// Alias for [`Self::get_result`].
@@ -592,10 +642,16 @@ async fn read_transitions(
     let mut cursor = from;
     while cursor <= frontier {
         let page = reader.read(cursor, RECOVERY_PAGE).await?;
-        assert!(
-            !page.entries.is_empty(),
-            "journal shorter than its frontier"
-        );
+        // `Journal::read` already refuses a hole inside the range it returns, so
+        // an empty page means the frontier this runtime read and the one the
+        // reader saw disagree: a second writer, or a store that lost entries. It
+        // is reported as a storage error rather than asserted, because a
+        // recovery path is exactly where an operator needs the diagnosis.
+        if page.entries.is_empty() {
+            eyre::bail!(
+                "journal page at position {cursor} is empty but the frontier is {frontier}"
+            );
+        }
         cursor += page.entries.len() as u64;
         for entry in page.entries {
             transitions.push(serde_json::from_slice(&entry.value)?);
@@ -608,7 +664,13 @@ async fn read_receipt(reader: &JournalReader, key: &str) -> Res<Option<authority
     let Some(value) = reader.index(&result_index_key(key)).await? else {
         return Ok(None);
     };
-    Ok(Some(serde_json::from_slice(&value).expect(ERROR_JSON)))
+    // The row is written by this build's settlement path, so a row that does not
+    // parse is corrupt or from another format generation. Reporting it keeps one
+    // bad row from aborting whoever asked for the result: the journal and the
+    // snapshot are still intact and can rebuild the receipt.
+    serde_json::from_slice(&value)
+        .map(Some)
+        .wrap_err_with(|| format!("result index row for {key:?} is unreadable"))
 }
 
 fn result_index_key(key: &str) -> Arc<[u8]> {
@@ -726,7 +788,7 @@ struct Actor<W> {
     /// Armed deadlines as `(fire_at_ms, what)`, earliest first.
     deadlines: BTreeSet<(u64, DeadlineRef)>,
     /// Completion wakeup hints for in-flight `await_result` callers.
-    waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
+    waiters: Waiters,
     /// Join handles fence host creation to the actor lifecycle. In particular,
     /// shutdown aborts and joins these before acknowledging completion.
     pending_spawns: FuturesUnordered<tokio::task::JoinHandle<Spawned>>,
@@ -908,9 +970,9 @@ impl<W: Writer> Actor<W> {
             Command::Submit { submission, reply } => self.submit(submission, reply).await,
             Command::WatchResult { key, reply } => {
                 let state = if self.authority.jobs().contains_key(&key) {
-                    let (tx, wakeup) = oneshot::channel();
-                    self.waiters.entry(key).or_default().push(tx);
-                    WatchState::Active { wakeup }
+                    WatchState::Active {
+                        wakeup: self.waiters.register(key),
+                    }
                 } else if self.authority.receipts().contains_key(&key) {
                     WatchState::Settled
                 } else {
@@ -1300,11 +1362,7 @@ impl<W: Writer> Actor<W> {
         self.deadlines
             .retain(|(_, reference)| !reference.belongs_to(&key));
         self.host.forget_job(&key);
-        if let Some(waiters) = self.waiters.remove(&key) {
-            for waiter in waiters {
-                let _cancelled = waiter.send(());
-            }
-        }
+        self.waiters.wake(&key);
     }
 
     fn park(
@@ -1935,15 +1993,19 @@ fn until(fire_at_ms: u64) -> Duration {
     Duration::from_millis(fire_at_ms.saturating_sub(now_ms()))
 }
 
-fn decode_receipt(receipt: &authority::Receipt) -> types::JobResult {
+fn decode_receipt(receipt: &authority::Receipt) -> Res<types::JobResult> {
     match &receipt.outcome {
         authority::Outcome::Completed(terminal) => decode_terminal(&terminal.value),
-        authority::Outcome::Faulted(fault) => failure_envelope(&fault.failure),
+        authority::Outcome::Faulted(fault) => Ok(failure_envelope(&fault.failure)),
     }
 }
 
-fn decode_terminal(value: &str) -> types::JobResult {
-    serde_json::from_str(value).expect(ERROR_JSON)
+/// The durable terminal value is the `JobResult` this build's settlement
+/// encoded, so a value that does not parse belongs to a corrupt or foreign index
+/// row. It is reported to the reader: the journal and the snapshot still hold the
+/// settlement, and one bad row must not abort whoever called `get_result`.
+fn decode_terminal(value: &str) -> Res<types::JobResult> {
+    serde_json::from_str(value).wrap_err("result index holds an unreadable terminal value")
 }
 
 /// The bound on guest-controlled text in a durable fault.
