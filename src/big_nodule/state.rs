@@ -13,6 +13,7 @@ use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
+use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
 use crate::store;
 use big_cabinet::DatumStore;
@@ -36,6 +37,7 @@ use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::DatumKinds;
+use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
@@ -47,7 +49,9 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::reference::DatumTag;
 use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Permbind;
 use big_cartridges_core::Revision;
 use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
@@ -356,6 +360,8 @@ pub(crate) struct State {
     /// The dispatch handle minted for each nodule from its method grants, with the scope it
     /// was minted for.
     applied_operations: BTreeMap<CartridgeId, (DispatchScope, CapId)>,
+    /// What each routine of a cartridge holds, by routine key. In memory: a start mints afresh.
+    routine_capabilities: BTreeMap<CartridgeId, BTreeMap<String, AppliedRoutine>>,
     /// The per-nodule config capabilities, scoped to declared settings datums.
     applied_settings: BTreeMap<CartridgeId, (DocId, DatumKinds, CapId)>,
     /// The resolution lockfile: the provider each enabled nodule's operation request is pinned
@@ -463,16 +469,51 @@ async fn collect_apply_errors(
     Ok(errors)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "serving a nodule needs its resolved capability and readiness inputs"
-)]
+/// The dispatch handle a foreign initializer target is called under: the foreign path as it
+/// was. The target rides on a routine's handle, which `desired_routine_scopes` adds it to (the
+/// routine named like the initializer, or the only one), so it is not scoped to the target. This
+/// and that addition are the part to remove or finish if foreign initializer targets are
+/// dropped.
+fn foreign_initializer_capability(
+    installed: &InstalledNodule,
+    routine_capabilities: &BTreeMap<String, RoutineCapabilities>,
+    init_key: &str,
+    init: &big_cartridges_core::Initializer,
+) -> Option<CapId> {
+    routine_capabilities
+        .get(init_key)
+        .and_then(|capabilities| capabilities.dispatch)
+        .or_else(|| {
+            (installed.nodule.routines.len() == 1)
+                .then(|| {
+                    routine_capabilities
+                        .values()
+                        .find_map(|capabilities| capabilities.dispatch)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            routine_capabilities.iter().find_map(|(key, capabilities)| {
+                let routine = installed.nodule.routines.get(key)?;
+                let implements_target = routine.implements == init.target;
+                let uses_target = routine.uses.keys().any(|binding| {
+                    matches!(
+                        installed.resolved.cartridge.permbinds.get(binding),
+                        Some(Permbind::Method(method)) if method.nsid == init.target
+                    )
+                });
+                (implements_target || uses_target)
+                    .then_some(capabilities.dispatch)
+                    .flatten()
+            })
+        })
+}
+
 async fn serve_nodule(
     state: &mut State,
     installed: &mut InstalledNodule,
     actor: &OpenedActor,
-    capability: Option<CapId>,
-    settings_capability: Option<CapId>,
+    routine_capabilities: BTreeMap<String, RoutineCapabilities>,
     granted: &DispatchScope,
     requests: &BTreeMap<String, RequestStatus>,
     trigger: Trigger,
@@ -481,13 +522,26 @@ async fn serve_nodule(
         .serve(
             installed,
             actor,
-            capability,
-            settings_capability,
+            routine_capabilities,
             granted,
             requests,
             trigger,
         )
         .await
+}
+
+async fn load_applied_grants(
+    sql: &Database,
+) -> Res<BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>> {
+    let mut applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>> =
+        BTreeMap::new();
+    for row in store::applied_grants(sql).await? {
+        applied_grants
+            .entry(row.cartridge_id)
+            .or_default()
+            .insert(row.drawer_id, (row.access, row.capability_id));
+    }
+    Ok(applied_grants)
 }
 
 async fn load_applied_settings(
@@ -510,120 +564,406 @@ async fn load_applied_operations(
         .collect())
 }
 
+/// The scope of each service handle a routine should hold; a service the routine has no access
+/// to is `None`, and no handle is minted for it.
+#[derive(Clone, Default, PartialEq)]
+struct RoutineScopes {
+    dispatch: Option<DispatchScope>,
+    config: Option<DocScope>,
+    drawers: Option<DrawerScope>,
+}
+
+/// What a routine holds: the handles, and the scopes they were minted for, which is what a
+/// later reconcile compares against to keep a handle whose scope did not change.
+#[derive(Clone)]
+pub(crate) struct AppliedRoutine {
+    scopes: RoutineScopes,
+    handles: RoutineCapabilities,
+}
+
+impl AppliedRoutine {
+    fn handles(&self) -> impl Iterator<Item = CapId> {
+        [
+            self.handles.dispatch,
+            self.handles.config,
+            self.handles.drawers,
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
+
+/// Each routine's desired scopes: what its `uses` list, intersected with what was granted
+/// (`effective_operations` for methods, `desired_grants` for drawers) and with what the
+/// permbind declares.
+fn desired_routine_scopes(
+    installed: &InstalledNodule,
+    desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
+    effective_operations: &DispatchScope,
+) -> BTreeMap<String, RoutineScopes> {
+    let settings_kinds = installed.resolved.settings_kinds();
+    installed
+        .nodule
+        .routines
+        .iter()
+        .map(|(routine_key, routine)| {
+            let mut operations = BTreeSet::new();
+            let mut read = BTreeSet::new();
+            let mut write = BTreeSet::new();
+            let mut drawers = BTreeMap::new();
+            let mut create_drawer = false;
+            for (binding, usage) in &routine.uses {
+                let permbind = installed
+                    .resolved
+                    .cartridge
+                    .permbinds
+                    .get(binding)
+                    .expect("admission refuses a routine use without its permbind");
+                match permbind {
+                    // Listing a method permbind is the use: method access has no
+                    // read/write/create/delete to inspect.
+                    Permbind::Method(method) => {
+                        if effective_operations
+                            .operations
+                            .contains(method.nsid.as_str())
+                        {
+                            operations.insert(method.nsid.to_string());
+                        }
+                    }
+                    Permbind::Datum(datum) => {
+                        let tag = DatumTag::new(datum.nsid.to_string())
+                            .expect("an admitted datum binding has a valid tag");
+                        // What the cartridge-wide capabilities this replaces reached, and so
+                        // all a datum permbind reaches: the cartridge config document, whole
+                        // for reads and the declared settings kinds for writes. No code ever
+                        // turned a non-settings `#datum` permbind into a document scope, and
+                        // no document set is named for one yet, so such a permbind confers
+                        // nothing here rather than a document this change invented.
+                        if !settings_kinds
+                            .covers(&DatumKinds::Only(std::iter::once(tag.clone()).collect()))
+                        {
+                            continue;
+                        }
+                        if usage.read {
+                            read.insert(tag.clone());
+                        }
+                        if usage.write || usage.create || usage.delete {
+                            write.insert(tag);
+                        }
+                    }
+                    Permbind::Drawers(drawer) => {
+                        // What the routine uses on existing drawers, as far as the permbind
+                        // declares it and a drawer was granted that far. `create` is not
+                        // among them: it sets only the scope's create flag below, so a
+                        // create-only routine can make drawers without any access to the
+                        // ones that exist (grants never widen silently, ADR 028). Deleting
+                        // has no access level of its own, so it needs Write.
+                        let access = [
+                            (usage.read && drawer.read.is_some(), DrawerAccess::Read),
+                            (usage.write && drawer.write.is_some(), DrawerAccess::Write),
+                            (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
+                        ]
+                        .into_iter()
+                        .filter_map(|(used, access)| used.then_some(access))
+                        .max();
+                        if let Some(access) = access {
+                            drawers.extend(
+                                desired_grants
+                                    .iter()
+                                    .filter(|(_, granted)| **granted >= access)
+                                    .map(|(id, _)| (id.clone(), access)),
+                            );
+                        }
+                        create_drawer |= usage.create && drawer.create.is_some();
+                    }
+                    Permbind::Unknown(_) => {}
+                }
+            }
+            // An initializer whose target another cartridge serves is called through dispatch
+            // as the nodule, so it borrows the handle of the routine named like it (or of the
+            // only routine). A local target is served by its implementing routine, whose
+            // capabilities the executor delivers with the call, so it needs nothing here.
+            for (init_key, initializer) in &installed.nodule.initialization {
+                let foreign = !installed
+                    .admitted
+                    .operations
+                    .contains_key(initializer.target.as_str());
+                if foreign
+                    && (installed.nodule.routines.len() == 1 || init_key == routine_key)
+                    && effective_operations
+                        .operations
+                        .contains(initializer.target.as_str())
+                {
+                    operations.insert(initializer.target.to_string());
+                }
+            }
+            let config = (!read.is_empty() || !write.is_empty()).then(|| {
+                let by_doc = |kinds: BTreeSet<DatumTag>| {
+                    if kinds.is_empty() {
+                        BTreeMap::new()
+                    } else {
+                        BTreeMap::from([(installed.config_doc.clone(), DatumKinds::Only(kinds))])
+                    }
+                };
+                // The nodule reaches the docs service through dispatch, so the handle that
+                // names the document kinds is useless without the operations that carry it.
+                if !read.is_empty() {
+                    operations.insert("org.example.daybook.docs.readDatums".to_owned());
+                }
+                if !write.is_empty() {
+                    operations.insert("org.example.daybook.docs.writeDatums".to_owned());
+                }
+                DocScope {
+                    read: by_doc(read),
+                    write: by_doc(write),
+                    ..Default::default()
+                }
+            });
+            let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
+                drawers,
+                create: create_drawer,
+            });
+            let dispatch = (!operations.is_empty()).then(|| DispatchScope {
+                operations,
+                authorities: effective_operations.authorities.clone(),
+                privileged: effective_operations.privileged,
+            });
+            (
+                routine_key.clone(),
+                RoutineScopes {
+                    dispatch,
+                    config,
+                    drawers,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Mints the handles each routine wants and does not hold, recording the scope each was minted
+/// for. Returns the last mint error: a failed mint leaves its handle unset.
+async fn mint_missing_handles(
+    state: &State,
+    context: &RequestContext,
+    actor: &OpenedActor,
+    desired: &BTreeMap<String, RoutineScopes>,
+    routines: &mut BTreeMap<String, AppliedRoutine>,
+) -> Option<String> {
+    let mut error = None;
+    for (routine_key, scopes) in desired {
+        let applied = routines
+            .entry(routine_key.clone())
+            .or_insert_with(|| AppliedRoutine {
+                scopes: RoutineScopes::default(),
+                handles: RoutineCapabilities::default(),
+            });
+        if applied.handles.dispatch.is_none()
+            && let Some(scope) = &scopes.dispatch
+        {
+            applied.handles.dispatch =
+                match state.stores.mint_operations(context, actor, scope).await {
+                    Ok(capability) => Some(capability),
+                    Err(mint_error) => {
+                        error = Some(mint_error.to_string());
+                        None
+                    }
+                };
+            applied.scopes.dispatch = scopes.dispatch.clone();
+        }
+        if applied.handles.config.is_none()
+            && let Some(scope) = &scopes.config
+        {
+            applied.handles.config = match state
+                .stores
+                .docs
+                .call_with(
+                    context.child(),
+                    Authorization {
+                        authority: state.stores.docs_capability,
+                        signer: state.stores.parent.capability,
+                    }
+                    .metadata(),
+                    MintDocCapability {
+                        scope: scope.clone(),
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+            {
+                Ok(capability) => Some(capability.capability_id),
+                Err(mint_error) => {
+                    error = Some(crate::docs_error(mint_error).to_string());
+                    None
+                }
+            };
+            applied.scopes.config = scopes.config.clone();
+        }
+        if applied.handles.drawers.is_none()
+            && let Some(scope) = &scopes.drawers
+        {
+            applied.handles.drawers = match state
+                .stores
+                .drawers
+                .call_with(
+                    context.child(),
+                    Authorization::identity(state.stores.parent.capability).metadata(),
+                    MintDrawerCapability {
+                        scope: scope.clone(),
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+            {
+                Ok(capability) => Some(capability.capability_id),
+                Err(mint_error) => {
+                    error = Some(drawers_error(mint_error).to_string());
+                    None
+                }
+            };
+            applied.scopes.drawers = scopes.drawers.clone();
+        }
+    }
+    error
+}
+
+/// Brings each routine's handles to its desired scopes (ADR 047 §6): a handle whose scope did
+/// not change is kept, one that changed is retracted and then minted again, and one whose
+/// routine no longer wants it is retracted. Before anything is retracted dispatch is
+/// registered not ready, so a call that arrives between the retraction and the new handle is
+/// answered retryably, never with the old handle or a wider one.
 async fn apply_nodule_capabilities(
     state: &mut State,
     context: &RequestContext,
     cartridge_id: &CartridgeId,
     actor: &OpenedActor,
     installed: &InstalledNodule,
+    desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
     effective_operations: &DispatchScope,
 ) -> Res<(
-    Option<CapId>,
+    BTreeMap<String, RoutineCapabilities>,
     Option<String>,
-    Option<CapId>,
     Option<String>,
     DispatchScope,
 )> {
-    let settings_kinds = installed.resolved.settings_kinds();
-    let (settings_capability, settings_error) = apply_settings(
-        state,
-        context,
-        cartridge_id,
-        actor,
-        &installed.config_doc,
-        &settings_kinds,
-        installed.enabled,
-    )
-    .await?;
-
-    let mut dispatch_operations = effective_operations.clone();
-    if settings_capability.is_some() {
-        dispatch_operations
-            .operations
-            .insert("org.example.daybook.docs.readDatums".to_owned());
-        dispatch_operations
-            .operations
-            .insert("org.example.daybook.docs.writeDatums".to_owned());
-    }
-    let (capability, operations_error) = state
-        .apply_operations(context, cartridge_id, actor, &dispatch_operations)
+    // The cartridge-wide handles of before routines held their own.
+    state
+        .revoke_operations_for_cartridge(context, cartridge_id, &DispatchScope::default())
         .await?;
-    let granted_operations =
-        capability.map_or_else(DispatchScope::default, |_| effective_operations.clone());
-    Ok((
-        capability,
-        operations_error,
-        settings_capability,
-        settings_error,
-        granted_operations,
-    ))
-}
+    revoke_settings_for_cartridge(state, context, cartridge_id, None).await?;
 
-async fn apply_settings(
-    state: &mut State,
-    context: &RequestContext,
-    cartridge_id: &CartridgeId,
-    actor: &OpenedActor,
-    doc_id: &DocId,
-    kinds: &DatumKinds,
-    enabled: bool,
-) -> Res<(Option<CapId>, Option<String>)> {
-    if let Some((applied_doc, applied_kinds, capability)) =
-        state.applied_settings.get(cartridge_id).cloned()
-    {
-        if enabled
-            && applied_doc == *doc_id
-            && applied_kinds == *kinds
-            && state.stores.is_cap_live(context, capability).await?
-        {
-            return Ok((Some(capability), None));
-        }
-        revoke_settings_for_cartridge(state, context, cartridge_id, None).await?;
-    }
-    if !enabled {
-        return Ok((None, None));
-    }
-
-    // ADR 047 §6 will fold this into each routine's capability; this is the per-nodule interim.
-
-    let capability = match state
-        .stores
-        .docs
-        .call_with(
-            context.child(),
-            Authorization {
-                authority: state.stores.docs_capability,
-                signer: state.stores.parent.capability,
-            }
-            .metadata(),
-            MintDocCapability {
-                scope: big_cabinet_core::doc::DocScope {
-                    read: DocScope::read_all([doc_id.clone()]),
-                    write: BTreeMap::from([(doc_id.clone(), kinds.clone())]),
-                    ..Default::default()
-                },
-                rights: Rights::USE,
-                subject: Some(actor.actor.actor_id),
-            },
-        )
-        .await
-    {
-        Ok(capability) => capability.capability_id,
-        Err(error) => return Ok((None, Some(crate::docs_error(error).to_string()))),
+    let desired = if installed.enabled {
+        desired_routine_scopes(installed, desired_grants, effective_operations)
+    } else {
+        BTreeMap::new()
     };
-
-    if let Err(error) =
-        store::upsert_applied_settings(&state.stores.sql, cartridge_id, doc_id, kinds, capability)
-            .await
-    {
-        state.stores.retract_grant_cap(context, capability).await?;
-        return Err(error);
+    let previous = state
+        .routine_capabilities
+        .get(cartridge_id)
+        .cloned()
+        .unwrap_or_default();
+    // Per service handle: one whose scope is as desired and which is still live stays, any
+    // other is retracted, and what is desired but not held is minted below.
+    let mut routines: BTreeMap<String, AppliedRoutine> = BTreeMap::new();
+    let mut stale = Vec::new();
+    for (routine_key, applied) in previous {
+        let wanted = desired.get(&routine_key);
+        let mut kept = AppliedRoutine {
+            scopes: RoutineScopes::default(),
+            handles: RoutineCapabilities::default(),
+        };
+        let held = [
+            (
+                applied.handles.dispatch,
+                wanted.is_some_and(|wanted| wanted.dispatch == applied.scopes.dispatch),
+            ),
+            (
+                applied.handles.config,
+                wanted.is_some_and(|wanted| wanted.config == applied.scopes.config),
+            ),
+            (
+                applied.handles.drawers,
+                wanted.is_some_and(|wanted| wanted.drawers == applied.scopes.drawers),
+            ),
+        ];
+        let mut live = [false; 3];
+        for (index, (handle, matches)) in held.into_iter().enumerate() {
+            let Some(capability) = handle else { continue };
+            if matches && state.stores.is_cap_live(context, capability).await? {
+                live[index] = true;
+            } else {
+                stale.push(capability);
+            }
+        }
+        if live[0] {
+            kept.handles.dispatch = applied.handles.dispatch;
+            kept.scopes.dispatch = applied.scopes.dispatch;
+        }
+        if live[1] {
+            kept.handles.config = applied.handles.config;
+            kept.scopes.config = applied.scopes.config;
+        }
+        if live[2] {
+            kept.handles.drawers = applied.handles.drawers;
+            kept.scopes.drawers = applied.scopes.drawers;
+        }
+        routines.insert(routine_key, kept);
     }
-    state.applied_settings.insert(
-        cartridge_id.clone(),
-        (doc_id.clone(), kinds.clone(), capability),
-    );
-    Ok((Some(capability), None))
+    if !stale.is_empty() {
+        if installed.enabled {
+            state.register_not_ready(
+                &cartridge_id.to_string(),
+                installed,
+                Readiness::Initializing,
+            );
+        }
+        for capability in stale {
+            state.stores.retract_grant_cap(context, capability).await?;
+        }
+    }
+
+    let mut error = mint_missing_handles(state, context, actor, &desired, &mut routines).await;
+    // A routine the manifest no longer has holds nothing.
+    routines.retain(|routine_key, _| desired.contains_key(routine_key));
+    if effective_operations.privileged
+        && !routines
+            .values()
+            .any(|applied| applied.handles.dispatch.is_some())
+    {
+        error = Some("requested privileged operation exceeds the dispatch authority".to_owned());
+    }
+    if error.is_some() {
+        // A routine that got only some of its handles would run with less than it declared:
+        // none keep any, and the next reconcile mints them again.
+        for applied in routines.values() {
+            for capability in applied.handles() {
+                state.stores.retract_grant_cap(context, capability).await?;
+            }
+        }
+        routines.clear();
+    }
+    let handles = desired
+        .keys()
+        .map(|routine_key| {
+            (
+                routine_key.clone(),
+                routines
+                    .get(routine_key)
+                    .map(|applied| applied.handles.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect();
+    state
+        .routine_capabilities
+        .insert(cartridge_id.clone(), routines);
+    let granted_operations = if error.is_none() {
+        effective_operations.clone()
+    } else {
+        DispatchScope::default()
+    };
+    Ok((handles, error, None, granted_operations))
 }
 
 async fn revoke_settings_for_cartridge(
@@ -651,14 +991,7 @@ impl State {
         for row in store::actors(&stores.sql).await? {
             persisted_actors.insert(row.cartridge_id, row.actor_id);
         }
-        let mut applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>> =
-            BTreeMap::new();
-        for row in store::applied_grants(&stores.sql).await? {
-            applied_grants
-                .entry(row.cartridge_id)
-                .or_default()
-                .insert(row.drawer_id, (row.access, row.capability_id));
-        }
+        let applied_grants = load_applied_grants(&stores.sql).await?;
 
         let applied_settings = load_applied_settings(&stores.sql).await?;
 
@@ -696,6 +1029,7 @@ impl State {
             actors: BTreeMap::new(),
             applied_grants,
             applied_operations,
+            routine_capabilities: BTreeMap::new(),
             applied_settings,
             locks,
             applied_heads: BTreeMap::new(),
@@ -1276,8 +1610,18 @@ impl State {
             .flat_map(BTreeMap::values)
             .map(|(_, cap_id)| cap_id);
         let operation_caps = self.applied_operations.values().map(|(_, cap_id)| cap_id);
-        for cap_id in grant_caps.chain(operation_caps) {
-            if !self.stores.is_cap_live(context, *cap_id).await? {
+        let routine_caps = self
+            .routine_capabilities
+            .values()
+            .flat_map(BTreeMap::values)
+            .flat_map(AppliedRoutine::handles)
+            .collect::<Vec<_>>();
+        for cap_id in grant_caps
+            .copied()
+            .chain(operation_caps.copied())
+            .chain(routine_caps)
+        {
+            if !self.stores.is_cap_live(context, cap_id).await? {
                 return Ok(true);
             }
         }
@@ -1328,6 +1672,7 @@ impl State {
             .keys()
             .chain(self.applied_operations.keys())
             .chain(self.applied_settings.keys())
+            .chain(self.routine_capabilities.keys())
             .cloned()
             .collect();
         for cartridge_id in active_cartridges {
@@ -1349,7 +1694,10 @@ impl State {
                     .await;
                 let settings =
                     revoke_settings_for_cartridge(self, context, &cartridge_id, None).await;
-                if let Err(err) = drawers.and(operations).and(settings) {
+                let routines = self
+                    .revoke_routines_for_cartridge(context, &cartridge_id)
+                    .await;
+                if let Err(err) = drawers.and(operations).and(settings).and(routines) {
                     revoke_errors.insert(cartridge_id.clone(), err);
                 }
                 if !resolved.contains_key(&cartridge_id) {
@@ -1637,16 +1985,11 @@ impl State {
     ///
     /// Registering is a no-op when nothing changed and `ensure` is idempotent, so every
     /// reconcile may call this.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the hosted nodule's distinct capability and readiness inputs"
-    )]
     async fn serve(
         &mut self,
         installed: &mut InstalledNodule,
         actor: &OpenedActor,
-        capability: Option<CapId>,
-        settings_capability: Option<CapId>,
+        routine_capabilities: BTreeMap<String, RoutineCapabilities>,
         granted: &DispatchScope,
         requests: &BTreeMap<String, RequestStatus>,
         trigger: Trigger,
@@ -1697,7 +2040,7 @@ impl State {
                 // (a local target needs a handler), so they need no provider of its own.
                 self.stores.dispatch.unbind(&provider_id);
                 return self
-                    .advance_inits(installed, actor, capability, None, trigger)
+                    .advance_inits(installed, actor, &routine_capabilities, None, trigger)
                     .await
                     .unwrap_or(readiness);
             }
@@ -1730,33 +2073,35 @@ impl State {
                 (key.clone(), component.clone())
             })
             .collect();
-        let routines = installed
-            .nodule
-            .routines
-            .values()
-            .map(|routine| {
-                let big_cartridges_core::RoutineImpl::ComponentExport(export) = &routine.r#impl
-                else {
-                    unreachable!("admission accepted an unknown routine implementation")
-                };
-                (
-                    routine.implements.to_string(),
-                    RoutineSpec {
-                        component: export.component.clone(),
-                        export: export.export.clone(),
-                    },
-                )
-            })
-            .collect();
+        let mut routines = BTreeMap::new();
+        for (routine_key, routine) in &installed.nodule.routines {
+            let big_cartridges_core::RoutineImpl::ComponentExport(export) = &routine.r#impl else {
+                unreachable!("admission accepted an unknown routine implementation")
+            };
+            let operation = routine.implements.to_string();
+            assert!(
+                routines
+                    .insert(
+                        operation,
+                        RoutineSpec {
+                            routine_key: routine_key.clone(),
+                            component: export.component.clone(),
+                            export: export.export.clone(),
+                        },
+                    )
+                    .is_none(),
+                "each operation must have exactly one implementing routine"
+            );
+        }
         let spec = HandlerSpec {
             cartridge_id: cartridge_id.clone(),
             revision: installed.revision,
             components,
             routines,
             actor: actor.clone(),
-            capability,
+            routine_capabilities: routine_capabilities.clone(),
             config_doc: installed.config_doc.clone(),
-            config_capability: settings_capability,
+
             reensure: self.reensure.handle(cartridge_id.clone()),
         };
         self.hosted.insert(cartridge_id.clone(), installed.revision);
@@ -1767,7 +2112,7 @@ impl State {
                 .advance_inits(
                     installed,
                     actor,
-                    capability,
+                    &routine_capabilities,
                     Some(Arc::clone(&provider)),
                     trigger,
                 )
@@ -1838,7 +2183,7 @@ impl State {
         &mut self,
         installed: &InstalledNodule,
         actor: &OpenedActor,
-        capability: Option<CapId>,
+        routine_capabilities: &BTreeMap<String, RoutineCapabilities>,
         provider: Option<Arc<dyn Provider>>,
         trigger: Trigger,
     ) -> Option<Readiness> {
@@ -1894,6 +2239,18 @@ impl State {
             .operations
             .contains_key(init.target.as_str())
         {
+            // The executor delivers the call with the capabilities of the routine that
+            // implements the target, which is exactly one.
+            assert_eq!(
+                installed
+                    .nodule
+                    .routines
+                    .values()
+                    .filter(|routine| routine.implements == init.target)
+                    .count(),
+                1,
+                "a local initializer target has exactly one implementing routine"
+            );
             InitRoute::Local {
                 provider: provider.expect(
                     "a local initializer target means the nodule has a handler, and its \
@@ -1931,7 +2288,9 @@ impl State {
                 }
                 return Some(Readiness::Initializing);
             }
-            InitRoute::Dispatch(match capability {
+            let initializer_capability =
+                foreign_initializer_capability(installed, routine_capabilities, init_key, init);
+            InitRoute::Dispatch(match initializer_capability {
                 Some(authority) => Authorization {
                     authority,
                     signer: actor.capability,
@@ -2180,9 +2539,9 @@ impl State {
     ) -> Res<NoduleRecord> {
         let cartridge_id = installed.cartridge_id.clone();
         let actor = self.ensure_nodule_actor(context, &cartridge_id).await?;
-        // The handle is minted (or revoked) before the handler is ensured, so the executor is
-        // handed the handle that is live now. A disabled nodule has none: it is not serving, and
-        // re-enabling it mints a fresh one.
+        // The handles are minted (or revoked) before the handler is ensured, so the executor is
+        // handed the handles that are live now. A disabled nodule has none: it is not serving,
+        // and re-enabling it mints fresh ones.
         // The manifest bounds what configuration can confer: only the grants that cover a
         // requested operation are minted, as those exact operations. An entry covering no
         // request is reported on the record rather than applied, which is what keeps "can X
@@ -2194,23 +2553,24 @@ impl State {
         } else {
             DispatchScope::default()
         };
-        let (capability, operations_error, settings_capability, settings_error, granted_operations) =
+        let (routine_capabilities, operations_error, settings_error, granted_operations) =
             apply_nodule_capabilities(
                 self,
                 context,
                 &cartridge_id,
                 &actor,
                 &installed,
+                &desired_grants,
                 &effective_operations,
             )
             .await?;
+
         let requests = self.resolve_requests(&installed, providers).await?;
         let readiness = serve_nodule(
             self,
             &mut installed,
             &actor,
-            capability,
-            settings_capability,
+            routine_capabilities,
             &granted_operations,
             &requests,
             trigger,
@@ -2305,7 +2665,6 @@ impl State {
             }
         }
 
-        let operations_granted = capability.is_some() && !bound_operations.is_empty();
         let error = if apply_errors.is_empty() {
             self.applied_heads
                 .insert(cartridge_id.clone(), heads.to_vec());
@@ -2327,7 +2686,7 @@ impl State {
             methods: (!desired_operations.is_empty()).then_some(NoduleMethodGrantStatus {
                 desired: bound_operations,
                 unrequested: unrequested_operations,
-                granted: operations_granted,
+                granted: operations_error.is_none() && !granted_operations.operations.is_empty(),
                 error: operations_error,
             }),
             requests,
@@ -2336,57 +2695,6 @@ impl State {
             applied_heads: self.applied_heads.get(&cartridge_id).cloned(),
             error,
         })
-    }
-
-    /// Brings the nodule's dispatch handle in line with `desired`, returning the live handle (if
-    /// any) and the reason the grant could not be applied, which is reported on the record
-    /// instead of failing the reconcile, as a drawer grant's failure is. Only storage failures
-    /// are fatal.
-    ///
-    /// A handle minted for exactly `desired` and still live is kept (so a restart or an
-    /// unrelated config change does not change the id the handler holds). Any other handle is
-    /// retracted first and a new one minted, so a changed scope is never a widening of the old
-    /// handle; an empty `desired` only revokes. A revocation that fails leaves the handle
-    /// recorded for the next reconcile to retry, and reports none to the handler: fail closed.
-    async fn apply_operations(
-        &mut self,
-        context: &RequestContext,
-        cartridge_id: &CartridgeId,
-        actor: &OpenedActor,
-        desired: &DispatchScope,
-    ) -> Res<(Option<CapId>, Option<String>)> {
-        if let Some((applied, cap_id)) = self.applied_operations.get(cartridge_id).cloned() {
-            if applied == *desired && self.stores.is_cap_live(context, cap_id).await? {
-                return Ok((Some(cap_id), None));
-            }
-            if let Err(error) = self
-                .revoke_operations_for_cartridge(context, cartridge_id, &DispatchScope::default())
-                .await
-            {
-                return match error {
-                    NodulesError::Storage(error) => Err(NodulesError::Storage(error)),
-                    error => Ok((None, Some(error.to_string()))),
-                };
-            }
-        }
-        if *desired == DispatchScope::default() {
-            return Ok((None, None));
-        }
-        let cap_id = match self.stores.mint_operations(context, actor, desired).await {
-            Ok(cap_id) => cap_id,
-            Err(NodulesError::Storage(error)) => return Err(NodulesError::Storage(error)),
-            Err(error) => return Ok((None, Some(error.to_string()))),
-        };
-        if let Err(error) =
-            store::upsert_applied_operations(&self.stores.sql, cartridge_id, desired, cap_id).await
-        {
-            // The handle exists but is not recorded, so nothing would ever retract it.
-            self.stores.retract_grant_cap(context, cap_id).await?;
-            return Err(error);
-        }
-        self.applied_operations
-            .insert(cartridge_id.clone(), (desired.clone(), cap_id));
-        Ok((Some(cap_id), None))
     }
 
     /// Retracts the nodule's dispatch handle unless it was minted for exactly `keep`, and
@@ -2406,6 +2714,22 @@ impl State {
         self.stores.retract_grant_cap(context, cap_id).await?;
         store::delete_applied_operations(&self.stores.sql, cartridge_id).await?;
         self.applied_operations.remove(cartridge_id);
+        Ok(())
+    }
+
+    /// Retracts every routine handle of the cartridge and forgets them.
+    async fn revoke_routines_for_cartridge(
+        &mut self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+    ) -> Res<()> {
+        let Some(routines) = self.routine_capabilities.get(cartridge_id) else {
+            return Ok(());
+        };
+        for capability in routines.values().flat_map(AppliedRoutine::handles) {
+            self.stores.retract_grant_cap(context, capability).await?;
+        }
+        self.routine_capabilities.remove(cartridge_id);
         Ok(())
     }
 
