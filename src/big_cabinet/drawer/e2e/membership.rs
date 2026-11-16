@@ -1437,7 +1437,7 @@ async fn metadata_protocol_respects_root_and_child_audiences() {
                 .mint_doc(
                     &actor,
                     DocScope {
-                        read: BTreeSet::from([doc.clone()]),
+                        read: DocScope::read_all([doc.clone()]),
                         ..Default::default()
                     },
                 )
@@ -1558,7 +1558,7 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                 .metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        read: BTreeSet::from([created.doc_id.clone()]),
+                        read: DocScope::read_all([created.doc_id.clone()]),
                         ..Default::default()
                     },
                     rights: Rights::USE | Rights::NARROW,
@@ -1642,11 +1642,11 @@ async fn metadata_only_capability_does_not_grant_drawer_or_content() {
                 ..Default::default()
             },
             DocScope {
-                read: BTreeSet::from([home.clone()]),
+                read: DocScope::read_all([home.clone()]),
                 ..Default::default()
             },
             DocScope {
-                read: BTreeSet::from([content.clone()]),
+                read: DocScope::read_all([content.clone()]),
                 ..Default::default()
             },
         ] {

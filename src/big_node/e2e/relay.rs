@@ -67,7 +67,7 @@ async fn a_relay_access_member_holds_a_drawer_it_cannot_read() {
     let capability = capability(
         cluster.node(1),
         DocScope {
-            read: BTreeSet::from([note.clone()]),
+            read: DocScope::read_all([note.clone()]),
             ..DocScope::default()
         },
     )

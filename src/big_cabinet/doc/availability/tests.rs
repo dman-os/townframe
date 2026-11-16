@@ -245,7 +245,7 @@ async fn passive_query_neither_creates_workers_nor_acquires_demand() {
     let repo = &node.docs.service.big_repo;
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -373,7 +373,7 @@ async fn scoped_stream_acquires_demand_and_reports_materialization_through_bindi
     let doc_id = repo.allocate_id().await.unwrap();
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -424,7 +424,7 @@ async fn denied_streams_neither_disclose_content_nor_acquire_interest() {
     let capability = node.capability(DocScope::default()).await;
     let retracted = node
         .capability(DocScope {
-            read: BTreeSet::from([known.clone(), unknown.clone()]),
+            read: DocScope::read_all([known.clone(), unknown.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -465,7 +465,7 @@ async fn quiet_retraction_closes_even_with_an_unread_initial_snapshot() {
     let doc_id = node.docs.service.big_repo.allocate_id().await.unwrap();
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -575,7 +575,7 @@ async fn stream_context_cancellation_and_service_stop_are_quiet() {
     let doc_id = DocId::new([8; 32]);
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -638,7 +638,7 @@ async fn dropping_a_consumer_releases_its_observer_task() {
     let doc_id = DocId::new([9; 32]);
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -664,7 +664,7 @@ async fn repository_failure_is_reported_once_and_ends_observation() {
     let doc_id = DocId::new([10; 32]);
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;
@@ -708,7 +708,7 @@ async fn expired_contexts_are_rejected_before_repository_observation() {
     let doc_id = DocId::new([11; 32]);
     let capability = node
         .capability(DocScope {
-            read: BTreeSet::from([doc_id.clone()]),
+            read: DocScope::read_all([doc_id.clone()]),
             ..DocScope::default()
         })
         .await;

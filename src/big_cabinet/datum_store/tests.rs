@@ -405,7 +405,7 @@ async fn load_mutate_at_and_noop_preserve_sibling_datums() {
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([doc_id.clone()]),
+                read: DocScope::read_all([doc_id.clone()]),
                 write: std::collections::BTreeMap::from([(
                     doc_id.clone(),
                     big_cabinet_core::doc::DatumKinds::All,
@@ -515,7 +515,7 @@ async fn concurrent_foreign_write_merges_at_loaded_heads_and_watch_streams_updat
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([doc_id.clone()]),
+                read: DocScope::read_all([doc_id.clone()]),
                 write: std::collections::BTreeMap::from([(
                     doc_id.clone(),
                     big_cabinet_core::doc::DatumKinds::All,
@@ -656,7 +656,7 @@ async fn rejected_entry_is_preserved_and_access_loss_surfaces_on_empty_and_popul
         .capability(
             &alice,
             DocScope {
-                read: BTreeSet::from([doc_id.clone()]),
+                read: DocScope::read_all([doc_id.clone()]),
                 write: std::collections::BTreeMap::from([(
                     doc_id.clone(),
                     big_cabinet_core::doc::DatumKinds::All,
@@ -699,7 +699,7 @@ async fn rejected_entry_is_preserved_and_access_loss_surfaces_on_empty_and_popul
         .capability(
             &bob,
             DocScope {
-                read: BTreeSet::from([empty_doc.clone()]),
+                read: DocScope::read_all([empty_doc.clone()]),
                 ..DocScope::default()
             },
         )

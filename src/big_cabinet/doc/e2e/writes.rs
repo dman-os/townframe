@@ -97,7 +97,7 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
                     .capability(
                         &alice,
                         DocScope {
-                            read: BTreeSet::from([document.clone()]),
+                            read: DocScope::read_all([document.clone()]),
                             ..DocScope::default()
                         },
                     )

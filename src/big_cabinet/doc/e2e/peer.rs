@@ -74,7 +74,7 @@ async fn observation_fetches_remote_document_without_manual_document_sync() {
         .capability(
             &principal,
             DocScope {
-                read: BTreeSet::from([created.doc_id.clone()]),
+                read: DocScope::read_all([created.doc_id.clone()]),
                 ..DocScope::default()
             },
         )
