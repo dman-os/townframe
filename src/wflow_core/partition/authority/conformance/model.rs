@@ -84,12 +84,14 @@ pub(super) struct ModelFault {
     pub(super) restarts: u64,
     pub(super) position: u64,
 }
-/// Projection of the two durable faults the authority can produce.
+/// Projection of the two durable faults the model can produce. The model has no
+/// action that reports a fault from a lease holder, so the other variants are
+/// unreachable in this projection.
 pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64) {
     match failure {
         JobFailure::Cancelled { .. } => ("cancelled", 0),
         JobFailure::RestartsExhausted { restarts, .. } => ("restarts-exhausted", *restarts),
-        _ => unreachable!("authority cannot persist this job failure"),
+        _ => unreachable!("the model never reports a lease-holder fault"),
     }
 }
 pub(super) fn model_fault(fault: &Fault) -> ModelFault {
@@ -196,7 +198,10 @@ pub(super) fn model_receipt(key: &str, receipt: &Receipt) -> ModelJob {
     };
     ModelJob {
         key: key.to_owned(),
-        args: receipt.args.clone(),
+        // A settled receipt keeps only a fingerprint of the submission
+        // arguments, so the projection of a receipt has none. The model clears
+        // a record's `args` when it settles, mirroring the authority.
+        args: String::new(),
         incarnation: receipt.incarnation,
         submission_position: receipt.submission_position,
         steps: Vec::new(),
@@ -365,5 +370,6 @@ pub(super) fn rejection_name(rejection: &Rejection) -> &'static str {
         Rejection::Nondeterministic => "nondeterministic",
         Rejection::RetryPending { .. } => "retry-pending",
         Rejection::RetriesExhausted { .. } => "retries-exhausted",
+        Rejection::InvalidFault => "invalid-fault",
     }
 }

@@ -183,11 +183,14 @@ fn retry_exhaustion_leaves_the_lease_held_for_settlement() {
 
     commit(
         &mut authority,
-        Command::Complete {
+        Command::Fail {
             key: "job".into(),
             lease: second,
-            expected_steps: 0,
-            value: "settled".into(),
+            failure: JobFailure::RetriesExhausted {
+                retries: 1,
+                max_retries: 1,
+                last_error: "exhausted".into(),
+            },
         },
     );
     assert!(authority.receipts().contains_key("job"));

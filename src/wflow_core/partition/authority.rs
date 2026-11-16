@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
 use super::JobFailure;
+use super::MAX_PANIC_MESSAGE_BYTES;
 use super::RetryBudget;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -113,11 +114,12 @@ impl Outcome {
 /// Compact terminal receipt retained permanently after a job settles.
 ///
 /// Settling drops the job's replay step log, inbox, message deduplication map,
-/// waits, and retry state from live authority state and snapshots while
-/// preserving idempotent submission identity and result lookup.
+/// waits, retry state, and submission payload from live authority state and
+/// snapshots while preserving idempotent submission identity and result lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
-    pub args: String,
+    /// Fingerprint of the submission arguments; see [`PayloadFingerprint`].
+    pub payload: PayloadFingerprint,
     pub incarnation: u64,
     pub submission_position: u64,
     pub policy: RetryPolicy,
@@ -126,9 +128,83 @@ pub struct Receipt {
     pub outcome: Outcome,
 }
 
+/// The stable content fingerprint of a submission's arguments.
+///
+/// A receipt answers "was this key submitted with this exact payload?" for as
+/// long as the key stays reserved, which is forever, so it records a
+/// fingerprint instead of the payload itself. `policy` and `budget` stay
+/// compared as values, so the fingerprint replaces only the argument string in
+/// that comparison.
+///
+/// Two FNV-1a lanes with distinct offset bases, each finished by splitmix64's
+/// finaliser. FNV-1a is byte-at-a-time over the stored string, so no
+/// serialisation can drift underneath it, and it is stable; the finaliser
+/// spreads a one-byte difference across each 64-bit half instead of leaving it
+/// in the low bits. Both halves must agree for two payloads to compare equal,
+/// so an accidental collision needs a 128-bit match. This is an idempotency
+/// comparison between payloads the same application submits under one key, not
+/// a security boundary. This crate has no cryptographic hash dependency, and
+/// the construction is part of the durable receipt format: it must never
+/// change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadFingerprint([u64; 2]);
+
+impl PayloadFingerprint {
+    fn of(args: &str) -> Self {
+        let bytes = args.as_bytes();
+        Self([
+            finish(fnv1a(FNV_OFFSET_A, bytes), 0x9e37_79b9_7f4a_7c15),
+            finish(fnv1a(FNV_OFFSET_B, bytes), 0xc2b2_ae3d_27d4_eb4f),
+        ])
+    }
+}
+
+/// FNV-1a over the payload bytes at 128-bit width. The multiplication wraps,
+/// which is the algorithm's own modulus.
+fn fnv1a(mut state: u128, bytes: &[u8]) -> u128 {
+    for byte in bytes {
+        state = (state ^ u128::from(*byte)).wrapping_mul(FNV_PRIME);
+    }
+    state
+}
+
+/// splitmix64's finaliser over one lane, with the lane's high half folded in so
+/// both halves of the fingerprint depend on the whole payload.
+fn finish(state: u128, seed: u64) -> u64 {
+    let mut mixed = (state as u64) ^ ((state >> 64) as u64) ^ seed;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
+/// The canonical FNV-1a 128-bit offset basis, a second independent lane seed,
+/// and the algorithm's prime.
+const FNV_OFFSET_A: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+const FNV_OFFSET_B: u128 = 0xcbf2_9ce4_8422_2325_cbf2_9ce4_8422_2325;
+const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+/// Truncates host panic text to the durable maximum.
+///
+/// A fault's panic message is unbounded host text kept for the life of the key,
+/// so the authority stores only its head. Truncation lands on a UTF-8 boundary
+/// so the stored string stays valid.
+fn bounded_panic(mut message: String) -> String {
+    if message.len() <= MAX_PANIC_MESSAGE_BYTES {
+        return message;
+    }
+    let mut end = MAX_PANIC_MESSAGE_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message.truncate(end);
+    message
+}
+
 /// How far a job had got when its current run was granted. A re-run that
 /// starts from the same progress is a restart; any committed step or resolved
-/// wait since then resets the count.
+/// wait since then resets the count. A re-run that re-attaches to a held wait
+/// or a due retry re-enters durable state instead of restarting a crashed
+/// activation, so it is not charged as one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub steps: u64,
@@ -207,21 +283,12 @@ impl Job {
         }
     }
 
+    /// The permanent receipt this job settles into. The only trace of the
+    /// submission payload it keeps is the argument fingerprint, so settling
+    /// does not retain the payload itself.
     pub fn receipt(&self, outcome: Outcome) -> Receipt {
         Receipt {
-            args: self.args.clone(),
-            incarnation: self.incarnation,
-            submission_position: self.submission_position,
-            policy: self.policy,
-            budget: self.budget,
-            steps: self.steps.len() as u64,
-            outcome,
-        }
-    }
-
-    fn settle(self, outcome: Outcome) -> Receipt {
-        Receipt {
-            args: self.args,
+            payload: PayloadFingerprint::of(&self.args),
             incarnation: self.incarnation,
             submission_position: self.submission_position,
             policy: self.policy,
@@ -232,11 +299,13 @@ impl Job {
     }
 
     /// The restart count a grant of `self` would record given its current
-    /// `progress`. A due retry re-run keeps the count; a re-run from unchanged
-    /// progress (crash or lost lease) costs one; any progress resets it. Shared
-    /// by `prepare_grant` and the durable `Granted` application so both agree.
+    /// `progress`. A due retry re-run keeps the count, and so does a re-grant
+    /// that re-attaches to a held wait: neither begins a fresh activation of a
+    /// crashed run. A re-run from unchanged progress (crash or lost lease)
+    /// costs one; any progress resets it. Shared by `prepare_grant` and the
+    /// durable `Granted` application so both agree.
     fn restarts_after(&self, progress: Progress) -> u64 {
-        if self.retry.is_some() {
+        if self.retry.is_some() || self.wait.is_some() {
             self.restarts
         } else if self.progress == Some(progress) {
             self.restarts.checked_add(1).unwrap()
@@ -281,20 +350,46 @@ impl Job {
         Ok(())
     }
 
-    /// Validates a durable fault. Cancellation can settle any active job, while
-    /// restart exhaustion is recomputed from log-derived state.
-    fn validate_fault(&self, fault: &Fault, position: u64) -> Res<()> {
+    /// Validates a durable fault against the job and the actor that reported
+    /// it.
+    ///
+    /// The authority settles cancellation and restart exhaustion from durable
+    /// state alone, so their counters are recomputed here and nothing else is
+    /// accepted. The failures a lease holder reports are external facts the log
+    /// cannot derive (a panic, a divergent replay, the error behind an
+    /// exhausted retry budget), so they are accepted only from the lease the
+    /// job currently holds: a superseded activation must not settle a live job.
+    fn validate_fault(&self, fault: &Fault, lease: Option<&Lease>, position: u64) -> Res<()> {
         if fault.position != position {
             return Err(ferr!("invalid durable fault"));
         }
+        let holds_lease = lease.is_some_and(|lease| self.lease.as_ref() == Some(lease));
         match &fault.failure {
-            JobFailure::Cancelled { .. } => Ok(()),
+            JobFailure::Cancelled { .. } if lease.is_none() => Ok(()),
             JobFailure::RestartsExhausted {
                 restarts,
                 max_restarts,
-            } if self.budget.max_restarts == Some(*max_restarts)
+            } if lease.is_none()
+                && self.budget.max_restarts == Some(*max_restarts)
                 && *restarts == self.restarts_after(self.progress())
                 && restarts > max_restarts =>
+            {
+                Ok(())
+            }
+            JobFailure::RetriesExhausted {
+                retries,
+                max_retries,
+                ..
+            } if holds_lease
+                && self.budget.max_retries == Some(*max_retries)
+                && *retries == self.retry_attempts
+                && retries >= max_retries =>
+            {
+                Ok(())
+            }
+            JobFailure::ReplayDiverged { .. } if holds_lease => Ok(()),
+            JobFailure::Panicked(message)
+                if holds_lease && message.len() <= MAX_PANIC_MESSAGE_BYTES =>
             {
                 Ok(())
             }
@@ -413,6 +508,14 @@ pub enum Command {
         expected_steps: u64,
         value: String,
     },
+    /// The leased invocation cannot continue. `failure` is the classified,
+    /// durable reason the job settles with; the authority owns whether that
+    /// reason is admissible for the job's durable state.
+    Fail {
+        key: String,
+        lease: Lease,
+        failure: JobFailure,
+    },
     Revoke {
         key: String,
         lease: Lease,
@@ -505,6 +608,11 @@ pub enum Transition {
     Faulted {
         key: String,
         incarnation: u64,
+        /// The activation that reported a failure the authority cannot
+        /// recompute. `None` for the two faults the authority settles from
+        /// durable state alone: cancellation (an operator fact) and restart
+        /// exhaustion (charged at grant time, when no lease is held).
+        lease: Option<Lease>,
         fault: Fault,
     },
 }
@@ -576,11 +684,15 @@ pub enum Rejection {
         fire_at_ms: u64,
     },
     /// The transient-error retry budget ran out; the lease remains held so the
-    /// runtime can settle the job through the normal completion path.
+    /// runtime can settle the job with [`Command::Fail`].
     RetriesExhausted {
         retries: u64,
         max_retries: u64,
     },
+    /// The reported failure disagrees with durable job state: its counters, its
+    /// budget, or the activation that reported it are not the ones this job
+    /// reached.
+    InvalidFault,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,8 +709,19 @@ pub struct Proposal {
     ack: Ack,
 }
 
+/// The shape version of the serialized [`Snapshot`].
+///
+/// The journal versions its own format, but it treats the published snapshot
+/// blob as opaque JSON, so the authority owns this one: a snapshot written
+/// before the field existed deserializes `format` as 0 and is rejected at
+/// recovery instead of being misread field by field.
+pub const SNAPSHOT_FORMAT: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// See [`SNAPSHOT_FORMAT`].
+    #[serde(default)]
+    pub format: u32,
     pub partition_incarnation: u64,
     pub cut: u64,
     pub next_job_incarnation: u64,
@@ -665,6 +788,7 @@ impl Authority {
 
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            format: SNAPSHOT_FORMAT,
             partition_incarnation: self.partition_incarnation,
             cut: self.revision,
             next_job_incarnation: self.next_job_incarnation,
@@ -731,6 +855,11 @@ impl Authority {
                 expected_steps,
                 value,
             } => self.prepare_complete(key, lease, expected_steps, value),
+            Command::Fail {
+                key,
+                lease,
+                failure,
+            } => self.prepare_fail(key, lease, failure),
             Command::Revoke { key, lease } => self.prepare_revoke(key, lease),
             Command::BeginWait {
                 key,
@@ -786,7 +915,10 @@ impl Authority {
             }));
         }
         if let Some(receipt) = self.receipts.get(&key) {
-            if receipt.args != args || receipt.policy != policy || receipt.budget != budget {
+            if receipt.payload != PayloadFingerprint::of(&args)
+                || receipt.policy != policy
+                || receipt.budget != budget
+            {
                 return Err(Rejection::PayloadConflict);
             }
             return Ok(Decision::Duplicate(Ack {
@@ -840,7 +972,9 @@ impl Authority {
         }
         // Restart budget is charged at grant time: a re-run that starts
         // without new progress since the previous run costs one restart. A
-        // due retry does not: that re-run is paid from the retry budget.
+        // due retry does not, and neither does a re-grant that re-attaches to
+        // a held wait: those re-runs are resumptions of durable state, not
+        // restarts of a crashed activation.
         let restarts = job.restarts_after(job.progress());
         if let Some(max_restarts) = job.budget.max_restarts
             && restarts > max_restarts
@@ -860,6 +994,7 @@ impl Authority {
                 Transition::Faulted {
                     key,
                     incarnation,
+                    lease: None,
                     fault,
                 },
                 intents,
@@ -1014,6 +1149,65 @@ impl Authority {
             intents,
             Ack {
                 position: self.next_position(),
+                disposition: Disposition::Completed,
+            },
+        ))
+    }
+
+    /// Settles the job with the failure its lease holder reported.
+    ///
+    /// A failure for a key that already settled carries no new information
+    /// unless it names a different failure, so the identical one is
+    /// acknowledged idempotently and a different one conflicts with the durable
+    /// receipt. A panic message is truncated to the durable maximum before that
+    /// comparison, so a resent panic still matches the settlement it produced.
+    fn prepare_fail(
+        &self,
+        key: String,
+        lease: Lease,
+        failure: JobFailure,
+    ) -> Result<Decision, Rejection> {
+        let failure = match failure {
+            JobFailure::Panicked(message) => JobFailure::Panicked(bounded_panic(message)),
+            failure => failure,
+        };
+        if let Some(receipt) = self.receipts.get(&key) {
+            if receipt.incarnation != lease.job_incarnation {
+                return Err(Rejection::IncarnationConflict);
+            }
+            let Outcome::Faulted(existing) = &receipt.outcome else {
+                return Err(Rejection::StaleLease);
+            };
+            if existing.failure == failure {
+                return Ok(Decision::Duplicate(Ack {
+                    position: existing.position,
+                    disposition: Disposition::Completed,
+                }));
+            }
+            return Err(Rejection::PayloadConflict);
+        }
+        let job = self.job_for_lease(&key, lease.job_incarnation)?;
+        self.require_current_lease(job, &lease)?;
+        let position = self.next_position();
+        let fault = Fault { failure, position };
+        // Publication re-applies the transition, so admission runs the same
+        // check replay will: a settlement the log would reject never commits.
+        job.validate_fault(&fault, Some(&lease), position)
+            .map_err(|_| Rejection::InvalidFault)?;
+        let intents = vec![Intent::Fault {
+            key: key.clone(),
+            fault: fault.clone(),
+        }];
+        Ok(self.proposal(
+            Transition::Faulted {
+                key,
+                incarnation: lease.job_incarnation,
+                lease: Some(lease),
+                fault,
+            },
+            intents,
+            Ack {
+                position,
                 disposition: Disposition::Completed,
             },
         ))
@@ -1207,7 +1401,7 @@ impl Authority {
 
     /// Releases the lease and parks the job on a durable retry computed from
     /// its policy. Exhaustion rejects without releasing the current lease so the
-    /// runtime can settle through the normal completion path.
+    /// runtime can still settle the job with [`Command::Fail`].
     fn prepare_retry(
         &self,
         key: String,
@@ -1272,6 +1466,7 @@ impl Authority {
             Transition::Faulted {
                 key,
                 incarnation,
+                lease: None,
                 fault,
             },
             intents,
@@ -1367,6 +1562,12 @@ impl Authority {
     }
 
     fn validate_snapshot(partition_incarnation: u64, snapshot: &Snapshot) -> Res<()> {
+        if snapshot.format != SNAPSHOT_FORMAT {
+            return Err(ferr!(
+                "unsupported authority snapshot format {} (this build reads {SNAPSHOT_FORMAT}); offline reset or migration required",
+                snapshot.format
+            ));
+        }
         if snapshot.partition_incarnation != partition_incarnation {
             return Err(ferr!("snapshot belongs to another partition incarnation"));
         }
@@ -1487,9 +1688,9 @@ impl Authority {
                 {
                     return Err(ferr!("invalid durable completion"));
                 }
-                let job = self.jobs.remove(&key).expect("validated above");
-                self.receipts
-                    .insert(key, job.settle(Outcome::Completed(terminal)));
+                let receipt = job.receipt(Outcome::Completed(terminal));
+                self.jobs.remove(&key).expect("validated above");
+                self.receipts.insert(key, receipt);
             }
             Transition::Revoked { key, lease } => {
                 let job = self.durable_job_mut(&key, lease.job_incarnation)?;
@@ -1533,13 +1734,20 @@ impl Authority {
             Transition::Faulted {
                 key,
                 incarnation,
+                lease,
                 fault,
             } => {
+                if lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.job_incarnation != incarnation)
+                {
+                    return Err(ferr!("durable fault names another incarnation"));
+                }
                 let job = self.durable_job_mut(&key, incarnation)?;
-                job.validate_fault(&fault, position)?;
-                let job = self.jobs.remove(&key).expect("validated above");
-                self.receipts
-                    .insert(key, job.settle(Outcome::Faulted(fault)));
+                job.validate_fault(&fault, lease.as_ref(), position)?;
+                let receipt = job.receipt(Outcome::Faulted(fault));
+                self.jobs.remove(&key).expect("validated above");
+                self.receipts.insert(key, receipt);
             }
         }
         self.revision = position;

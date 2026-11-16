@@ -188,7 +188,7 @@ fn snapshot_suffix_and_full_replay_agree() {
     assert_eq!(
         from_snapshot.receipts()["job"],
         Receipt {
-            args: "args".into(),
+            payload: PayloadFingerprint::of("args"),
             incarnation: 1,
             submission_position: 1,
             policy: RetryPolicy::Immediate,
@@ -244,6 +244,26 @@ fn terminal_receipt_is_permanent_and_submission_stays_idempotent() {
     *args = "different".into();
     assert_eq!(
         authority.prepare(conflicting),
+        Err(Rejection::PayloadConflict)
+    );
+    // The receipt's payload fingerprint covers the arguments; the policy and
+    // budget it keeps as values remain part of the same identity check.
+    let mut repriced = submit_command();
+    let Command::Submit { policy, .. } = &mut repriced else {
+        unreachable!();
+    };
+    *policy = RetryPolicy::Fixed { delay_ms: 3 };
+    assert_eq!(authority.prepare(repriced), Err(Rejection::PayloadConflict));
+    let mut rebudgeted = submit_command();
+    let Command::Submit { budget, .. } = &mut rebudgeted else {
+        unreachable!();
+    };
+    *budget = RetryBudget {
+        max_retries: Some(1),
+        max_restarts: None,
+    };
+    assert_eq!(
+        authority.prepare(rebudgeted),
         Err(Rejection::PayloadConflict)
     );
     assert_eq!(authority.next_job_incarnation(), 1);
@@ -504,6 +524,354 @@ fn waiting_job_cannot_complete() {
     );
 }
 
+fn fail(lease: &Lease, failure: JobFailure) -> Command {
+    Command::Fail {
+        key: "job".into(),
+        lease: lease.clone(),
+        failure,
+    }
+}
+
+/// A job parked on a durable wait is re-granted on every restart of its
+/// authority without ever starting a fresh run, so no re-grant may charge the
+/// restart budget: otherwise a job that never failed exhausts it and settles
+/// `RestartsExhausted`.
+#[test]
+fn parked_job_regrants_do_not_charge_the_restart_budget() {
+    for kind in [WaitKind::Message, TIMER] {
+        let mut authority = Authority::new(7, 1);
+        commit(
+            &mut authority,
+            Command::Submit {
+                key: "job".into(),
+                args: "args".into(),
+                policy: RetryPolicy::Immediate,
+                // One restart is allowed; the old rule exhausted it on the
+                // third boot of this parked job.
+                budget: RetryBudget {
+                    max_retries: None,
+                    max_restarts: Some(1),
+                },
+            },
+        );
+        let (lease, _) = grant(&mut authority, 11);
+        let (ack, _) = commit(&mut authority, begin_wait(&lease, 0, kind));
+        assert_eq!(ack.disposition, Disposition::Park);
+        let mut durable = authority.suffix().to_vec();
+
+        for boot in 0..4 {
+            let mut authority = Authority::recover(7, boot + 2, None, &durable).unwrap();
+            assert_eq!(
+                authority.jobs()["job"].restarts,
+                0,
+                "{kind:?} charged a restart while parked at boot {boot}"
+            );
+            let (lease, replay) = grant(&mut authority, 20 + boot);
+            assert!(replay.is_empty());
+            // The re-granted invocation replays up to the held wait and
+            // re-attaches to it.
+            assert_eq!(
+                authority.prepare(begin_wait(&lease, 0, kind)),
+                Ok(Decision::Duplicate(Ack {
+                    position: 3,
+                    disposition: Disposition::Park,
+                }))
+            );
+            assert_eq!(authority.jobs()["job"].restarts, 0);
+            assert!(
+                authority.receipts().is_empty(),
+                "{kind:?} settled at boot {boot}"
+            );
+            durable = authority.suffix().to_vec();
+        }
+    }
+}
+
+/// Settles a freshly granted job with `failure` and proves the fault survives
+/// full-log replay and snapshot restore unchanged.
+fn assert_fault_survives_recovery(budget: RetryBudget, failure: JobFailure) {
+    let mut authority = Authority::new(7, 1);
+    commit(
+        &mut authority,
+        Command::Submit {
+            key: "job".into(),
+            args: "args".into(),
+            policy: RetryPolicy::Immediate,
+            budget,
+        },
+    );
+    let (lease, _) = grant(&mut authority, 11);
+    let (ack, intents) = commit(&mut authority, fail(&lease, failure.clone()));
+    assert_eq!(ack.disposition, Disposition::Completed);
+    let [Intent::Fault { fault, .. }] = intents.as_slice() else {
+        panic!("a fault must settle its invocation")
+    };
+    assert_eq!(fault.failure, failure);
+
+    let from_log = Authority::recover(7, 2, None, authority.suffix()).unwrap();
+    let from_snapshot = Authority::recover(7, 2, Some(authority.snapshot()), &[]).unwrap();
+    for recovered in [&from_log, &from_snapshot] {
+        assert!(recovered.jobs().is_empty());
+        assert_eq!(recovered.receipts(), authority.receipts());
+    }
+    // A resent failure of the same activation is the same settlement; any
+    // other failure would overlay it.
+    assert_eq!(
+        from_log.prepare(fail(&lease, failure.clone())),
+        Ok(Decision::Duplicate(Ack {
+            position: fault.position,
+            disposition: Disposition::Completed,
+        }))
+    );
+    assert_eq!(
+        from_log.prepare(fail(&lease, JobFailure::Panicked("other".into()))),
+        Err(Rejection::PayloadConflict)
+    );
+}
+
+#[test]
+fn every_lease_holder_fault_survives_replay_and_snapshot_restore() {
+    for (budget, failure) in [
+        (
+            RetryBudget {
+                max_retries: Some(0),
+                max_restarts: None,
+            },
+            JobFailure::RetriesExhausted {
+                retries: 0,
+                max_retries: 0,
+                last_error: "transient".into(),
+            },
+        ),
+        (RetryBudget::default(), JobFailure::Panicked("boom".into())),
+        (
+            RetryBudget::default(),
+            JobFailure::ReplayDiverged {
+                step: 0,
+                replayed: StepKind::Recv,
+            },
+        ),
+    ] {
+        assert_fault_survives_recovery(budget, failure);
+    }
+}
+
+#[test]
+fn every_authority_fault_survives_replay_and_snapshot_restore() {
+    // Cancellation settles without a lease.
+    let mut cancelled = Authority::new(7, 1);
+    submit(&mut cancelled);
+    let (lease, _) = grant(&mut cancelled, 11);
+    commit(&mut cancelled, begin_wait(&lease, 0, WaitKind::Message));
+    commit(
+        &mut cancelled,
+        Command::Cancel {
+            key: "job".into(),
+            incarnation: 1,
+            reason: "operator".into(),
+        },
+    );
+
+    // Restart exhaustion is charged by the grant that would have re-run the
+    // job without progress.
+    let mut exhausted = Authority::new(7, 1);
+    commit(
+        &mut exhausted,
+        Command::Submit {
+            key: "job".into(),
+            args: "args".into(),
+            policy: RetryPolicy::Immediate,
+            budget: RetryBudget {
+                max_retries: None,
+                max_restarts: Some(0),
+            },
+        },
+    );
+    let (lease, _) = grant(&mut exhausted, 11);
+    commit(
+        &mut exhausted,
+        Command::Revoke {
+            key: "job".into(),
+            lease,
+        },
+    );
+    let (ack, intents) = commit(
+        &mut exhausted,
+        Command::Grant {
+            key: "job".into(),
+            incarnation: 1,
+            worker: 12,
+            now_ms: 0,
+        },
+    );
+    assert_eq!(ack.disposition, Disposition::Completed);
+    assert!(matches!(intents.as_slice(), [Intent::Fault { .. }]));
+
+    for authority in [&cancelled, &exhausted] {
+        let durable = authority.suffix().to_vec();
+        let from_log = Authority::recover(7, 2, None, &durable).unwrap();
+        let from_snapshot = Authority::recover(7, 2, Some(authority.snapshot()), &[]).unwrap();
+        for recovered in [&from_log, &from_snapshot] {
+            assert!(recovered.jobs().is_empty());
+            assert_eq!(recovered.receipts(), authority.receipts());
+            let Outcome::Faulted(fault) = &recovered.receipts()["job"].outcome else {
+                panic!("these jobs settle as faults")
+            };
+            assert!(matches!(
+                fault.failure,
+                JobFailure::Cancelled { .. } | JobFailure::RestartsExhausted { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn a_superseded_activation_cannot_fault_a_live_job() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let (stale, _) = grant(&mut authority, 11);
+    commit(
+        &mut authority,
+        Command::Revoke {
+            key: "job".into(),
+            lease: stale.clone(),
+        },
+    );
+    let (current, _) = grant(&mut authority, 12);
+
+    for failure in [
+        JobFailure::Panicked("late".into()),
+        JobFailure::ReplayDiverged {
+            step: 0,
+            replayed: StepKind::Recv,
+        },
+        JobFailure::RetriesExhausted {
+            retries: 0,
+            max_retries: 0,
+            last_error: "late".into(),
+        },
+    ] {
+        assert_eq!(
+            authority.prepare(fail(&stale, failure)),
+            Err(Rejection::StaleLease)
+        );
+    }
+    assert!(authority.receipts().is_empty());
+
+    commit(
+        &mut authority,
+        fail(&current, JobFailure::Panicked("current".into())),
+    );
+    // The live activation settled the job; the superseded one can neither
+    // resettle it with another failure nor claim the settlement as its own.
+    assert_eq!(
+        authority.prepare(fail(&stale, JobFailure::Panicked("other".into()))),
+        Err(Rejection::PayloadConflict)
+    );
+}
+
+#[test]
+fn a_fault_the_durable_log_cannot_recompute_is_rejected() {
+    let mut authority = Authority::new(7, 1);
+    commit(
+        &mut authority,
+        Command::Submit {
+            key: "job".into(),
+            args: "args".into(),
+            policy: RetryPolicy::Immediate,
+            budget: RetryBudget {
+                max_retries: Some(1),
+                max_restarts: Some(1),
+            },
+        },
+    );
+    let (lease, _) = grant(&mut authority, 11);
+
+    for failure in [
+        // The retry budget has not been spent, so it cannot be exhausted.
+        JobFailure::RetriesExhausted {
+            retries: 1,
+            max_retries: 1,
+            last_error: "invented".into(),
+        },
+        // The restart budget is charged at grant time, never by an activation.
+        JobFailure::RestartsExhausted {
+            restarts: 2,
+            max_restarts: 1,
+        },
+        // Cancellation is an operator fact and names no lease.
+        JobFailure::Cancelled {
+            reason: "invented".into(),
+        },
+    ] {
+        assert_eq!(
+            authority.prepare(fail(&lease, failure)),
+            Err(Rejection::InvalidFault)
+        );
+    }
+    assert!(authority.receipts().is_empty());
+}
+
+#[test]
+fn the_durable_panic_message_is_bounded() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let (lease, _) = grant(&mut authority, 11);
+    let (ack, _) = commit(
+        &mut authority,
+        fail(
+            &lease,
+            JobFailure::Panicked("x".repeat(MAX_PANIC_MESSAGE_BYTES * 2)),
+        ),
+    );
+    assert_eq!(ack.disposition, Disposition::Completed);
+    let Outcome::Faulted(fault) = &authority.receipts()["job"].outcome else {
+        panic!("the panic settles as a fault")
+    };
+    let JobFailure::Panicked(message) = &fault.failure else {
+        panic!("the fault keeps its panic")
+    };
+    assert_eq!(message.len(), MAX_PANIC_MESSAGE_BYTES);
+
+    let recovered = Authority::recover(7, 2, None, authority.suffix()).unwrap();
+    assert_eq!(recovered.receipts(), authority.receipts());
+    assert!(matches!(
+        recovered.prepare(fail(
+            &lease,
+            JobFailure::Panicked("x".repeat(MAX_PANIC_MESSAGE_BYTES * 3))
+        )),
+        Ok(Decision::Duplicate(_))
+    ));
+}
+
+/// The fingerprint is written into permanent receipts, so the construction is
+/// part of the durable format: this vector must not change without a receipt
+/// and snapshot format bump.
+#[test]
+fn the_payload_fingerprint_is_frozen() {
+    assert_eq!(
+        PayloadFingerprint::of("args"),
+        PayloadFingerprint([0x4977_0ec0_4256_f321, 0xbfc0_ee11_1b8d_85db])
+    );
+    assert_ne!(
+        PayloadFingerprint::of("args"),
+        PayloadFingerprint::of("argt")
+    );
+}
+
+#[test]
+fn a_snapshot_without_a_format_version_is_rejected() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let mut snapshot = authority.snapshot();
+    snapshot.format = 0;
+    let error = Authority::recover(7, 2, Some(snapshot), &[]).unwrap_err();
+    assert!(
+        error.to_string().contains("snapshot format"),
+        "unexpected error: {error}"
+    );
+}
+
 #[derive(Debug, Clone)]
 enum Operation {
     Submit,
@@ -517,6 +885,8 @@ enum Operation {
     Send(u8),
     /// A transient failure under the current lease, with host-supplied jitter.
     Retry(u8),
+    /// A classified failure the current lease holder reports.
+    Fail(u8),
     /// An operator cancel; needs no lease, so it also hits parked jobs.
     Cancel,
 }
@@ -534,6 +904,7 @@ fn operation() -> impl proptest::strategy::Strategy<Value = Operation> {
         1 => Just(Operation::Fire),
         2 => (0..3_u8).prop_map(Operation::Send),
         3 => (0..4_u8).prop_map(Operation::Retry),
+        1 => (0..3_u8).prop_map(Operation::Fail),
         1 => Just(Operation::Cancel),
     ]
 }
@@ -624,6 +995,22 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
             policy: None,
             now_ms,
             jitter_ms: u64::from(jitter) * 3,
+        }),
+        Operation::Fail(which) => lease.map(|lease| Command::Fail {
+            key,
+            lease,
+            failure: match which {
+                0 => JobFailure::Panicked("boom".into()),
+                1 => JobFailure::ReplayDiverged {
+                    step: job.unwrap().steps.len() as u64,
+                    replayed: StepKind::Sleep,
+                },
+                _ => JobFailure::RetriesExhausted {
+                    retries: job.unwrap().retry_attempts,
+                    max_retries: 1,
+                    last_error: "transient".into(),
+                },
+            },
         }),
         Operation::Cancel => job.map(|job| Command::Cancel {
             key,
