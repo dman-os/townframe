@@ -110,7 +110,7 @@ fn envelope_with_lexicon(doc: &DocId, heads: &[ChangeHash]) -> (Cartridge, Nsid)
 }
 fn cartridge(version: &str, title: &str) -> Cartridge {
     let mut cartridge = Cartridge::new(cartridge_id("photos"), version.parse().unwrap());
-    cartridge.title = Some(title.into());
+    cartridge.name = Some(title.into());
     sign_as_example(cartridge)
 }
 

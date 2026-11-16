@@ -119,7 +119,7 @@ mod tests {
     fn one_version_names_one_revision() {
         let mut catalog = catalog(&["1.2.3"]);
         let mut republished = cartridge("1.2.3");
-        republished.title = Some("Photos, republished".into());
+        republished.name = Some("Photos, republished".into());
         let error = catalog.import(republished).unwrap_err().to_string();
         assert!(
             error.contains(crate::example_cartridge!("photos")),

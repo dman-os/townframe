@@ -445,7 +445,7 @@ async fn a_published_version_never_changes_content() {
     assert_eq!(again.record, first.record);
 
     let mut changed = photos(&node, "1.0.0", &info).await;
-    changed.title = Some("Photos, renamed".into());
+    changed.name = Some("Photos, renamed".into());
     let changed = sign_as_example(changed);
     assert_eq!(
         publish(&node, operator, changed.clone()).await,
@@ -470,7 +470,7 @@ async fn a_published_version_never_changes_content() {
         )
         .await
         .unwrap();
-    assert_eq!(kept.envelope.title, None);
+    assert_eq!(kept.envelope.name, None);
 
     // Removal leaves a tombstone: the label is never reused for other content, though the
     // identical envelope may be published again.
@@ -757,7 +757,7 @@ async fn a_version_rewritten_by_a_synced_write_is_surfaced_and_the_first_seen_co
     // Another node's write arrives as an ordinary datum write on the document: the test writes
     // it directly, as the synced change would land.
     let mut rewritten = original.clone();
-    rewritten.title = Some("Rewritten elsewhere".into());
+    rewritten.name = Some("Rewritten elsewhere".into());
     write_version_datum(&node, &record.doc_id, &sign_as_example(rewritten)).await;
 
     let version = loop {
@@ -824,7 +824,7 @@ async fn an_envelope_must_carry_its_namespace_owners_signature() {
     ));
     // A signature that no longer matches the envelope it is attached to.
     let mut tampered = photos(&node, "1.0.0", &info).await;
-    tampered.title = Some("edited after signing".into());
+    tampered.name = Some("edited after signing".into());
     assert!(matches!(
         publish(&node, operator, tampered).await,
         Err(CartridgesError::Signature(SignatureError::Invalid(_)))
@@ -1698,7 +1698,7 @@ async fn an_author_document_is_imported_and_each_version_is_verified_as_it_is_fo
             0 => sign_with_seed(envelope, &[9; 32]),
             _ => {
                 let mut edited = sign_as_example(envelope);
-                edited.title = Some("edited after signing".into());
+                edited.name = Some("edited after signing".into());
                 edited
             }
         },
