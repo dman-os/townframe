@@ -23,3 +23,6 @@ desktop = ["dioxus/desktop"]
 [[bin]]
 name = "dayframe_showcase"
 path = "main.rs"
+
+[lints]
+workspace = true

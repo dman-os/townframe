@@ -347,12 +347,6 @@ mod tests {
         }
     }
 
-    #[component]
-    fn Close() -> Element {
-        let actions = use_list_details();
-        rsx! { button { onclick: move |_| actions.back(), "Close" } }
-    }
-
     #[test]
     fn a_list_details_scaffold_survives_any_order_of_events_at_every_width() {
         for width in [
