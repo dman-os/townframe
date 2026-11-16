@@ -45,6 +45,7 @@ use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
 use big_nodule::executor::Reensure;
+use big_nodule::executor::RoutineCapabilities;
 use big_nodule::wire::delivery_headers;
 use big_nodule::wire::gateway_error;
 use big_nodule::wire::provider_result;
@@ -248,6 +249,7 @@ impl WasmExecutor {
                 (
                     operation.clone(),
                     RoutineTarget {
+                        routine_key: routine.routine_key.clone(),
                         workload_id: component.workload_id.clone(),
                         // The current nodule guest exposes one `wasi:http/handler#handle` entry
                         // point; every fixture routine names that export. Keep the declared export
@@ -297,10 +299,10 @@ impl NoduleExecutor for WasmExecutor {
                 {
                     // Grants may change without recompiling a component: every routine provider
                     // sees the capability that is live now on its next request.
-                    running.provider.set_capability(spec.capability);
                     running
                         .provider
-                        .set_config(spec.config_doc.clone(), spec.config_capability);
+                        .set_capabilities(spec.routine_capabilities.clone());
+                    running.provider.set_config(spec.config_doc.clone());
                     return Hosted::Ready(Arc::clone(&running.provider) as Arc<dyn Provider>);
                 }
                 Some(_) => hosted.remove(&spec.cartridge_id),
@@ -413,8 +415,8 @@ impl NoduleExecutor for WasmExecutor {
         let provider = Arc::new(WasmProvider {
             ingress: Arc::clone(&self.ingress),
             routines,
-            capability: Mutex::new(spec.capability),
-            config: Mutex::new((spec.config_doc.clone(), spec.config_capability)),
+            routine_capabilities: Mutex::new(spec.routine_capabilities.clone()),
+            config: Mutex::new(spec.config_doc.clone()),
         });
         self.hosted.lock().expect("hosted lock").insert(
             spec.cartridge_id.clone(),
@@ -458,6 +460,7 @@ impl NoduleExecutor for WasmExecutor {
 /// attached to each route so a component-specific ABI can use it without changing dispatch.
 struct RoutineTarget {
     workload_id: String,
+    routine_key: String,
     export: String,
 }
 
@@ -465,19 +468,20 @@ struct RoutineTarget {
 struct WasmProvider {
     ingress: Arc<Ingress<Sealed, Egress>>,
     routines: BTreeMap<String, RoutineTarget>,
-    /// The nodule's own dispatch capability, delivered in [`NODULE_CAPABILITY_HEADER`]. Replaced in
-    /// place when the nodule's grants change.
-    capability: Mutex<Option<CapId>>,
-    config: Mutex<(big_cabinet_core::dmeta::DocId, Option<CapId>)>,
+    routine_capabilities: Mutex<BTreeMap<String, RoutineCapabilities>>,
+    config: Mutex<big_cabinet_core::dmeta::DocId>,
 }
 
 impl WasmProvider {
-    fn set_capability(&self, capability: Option<CapId>) {
-        *self.capability.lock().expect("capability lock") = capability;
+    fn set_capabilities(&self, capabilities: BTreeMap<String, RoutineCapabilities>) {
+        *self
+            .routine_capabilities
+            .lock()
+            .expect("routine capabilities lock") = capabilities;
     }
 
-    fn set_config(&self, doc_id: big_cabinet_core::dmeta::DocId, capability: Option<CapId>) {
-        *self.config.lock().expect("config lock") = (doc_id, capability);
+    fn set_config(&self, doc_id: big_cabinet_core::dmeta::DocId) {
+        *self.config.lock().expect("config lock") = doc_id;
     }
 }
 
@@ -498,7 +502,7 @@ impl Provider for WasmProvider {
             return Err(big_nodule::wire::byte_body_refused());
         }
         // The guest sees the contract every XRPC hop speaks, built by the shared `wire`.
-        let (config_doc, config_capability) = self.config.lock().expect("config lock").clone();
+        let config_doc = self.config.lock().expect("config lock").clone();
         let routine = self
             .routines
             .get(operation)
@@ -513,8 +517,11 @@ impl Provider for WasmProvider {
             request,
             context,
             &config_doc,
-            config_capability,
-            *self.capability.lock().expect("capability lock"),
+            self.routine_capabilities
+                .lock()
+                .expect("routine capabilities lock")
+                .get(&routine.routine_key)
+                .expect("a ready routine has capabilities"),
         );
         let mut http_request = hyper::Request::post(format!("http://{AUTHORITY}/xrpc/{operation}"))
             .header(hyper::header::CONTENT_TYPE, "application/json");

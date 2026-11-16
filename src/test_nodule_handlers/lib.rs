@@ -23,8 +23,8 @@
 //!   dynamic, so the call goes through `Cx::transport` and `Cx::next_hop` rather than a typed
 //!   `Cx::call`; an empty `operation` is the `InvalidRequest` domain error. It forwards the
 //!   incoming `idempotency-key` and answers 200 with
-//!   `{ status, body }` (`body` is the upstream JSON, or a string when the upstream body is
-//!   not JSON), or the `UpstreamFailed` domain error when the outgoing request fails. With a
+//!   `{ status, body, authority }` (`body` is the upstream JSON, or a string when the upstream
+//!   body is not JSON; `authority` is the capability id the call presented), or the `UpstreamFailed` domain error when the outgoing request fails. With a
 //!   `query` it sends `GET /xrpc/<operation>?<query>` with no body instead, which is how a
 //!   query is called.
 //! - Any other `/xrpc/` operation answers 404 `{ "error": "UnknownOperation" }` and any other
@@ -231,6 +231,10 @@ impl Handler<Relay> for Fixture {
         let body = serde_json::from_slice::<Value>(&response.body).unwrap_or_else(|_| {
             Value::String(String::from_utf8_lossy(&response.body).into_owned())
         });
-        Ok(json!({ "status": response.status.as_u16(), "body": body }))
+        Ok(json!({
+            "status": response.status.as_u16(),
+            "body": body,
+            "authority": authority,
+        }))
     }
 }

@@ -12,6 +12,7 @@ use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
 use crate::executor::Reensure;
+use crate::executor::RoutineCapabilities;
 use async_trait::async_trait;
 use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
@@ -48,7 +49,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use tokio::sync::Notify;
 use tokio::sync::watch;
+
+mod routines;
 
 const OWN: &str = "org.example.photos.list";
 const PHOTOS: &str = example_cartridge!("photos");
@@ -58,10 +62,53 @@ const PHOTOS: &str = example_cartridge!("photos");
 /// for a revision it already hosts as a lookup, since the reconciler calls it on every
 /// reconcile (a config mutation reconciles once itself and once more on the watch event).
 pub(super) struct FakeExecutor {
-    state: Mutex<FakeState>,
+    state: Arc<Mutex<FakeState>>,
     provider: Arc<dyn Provider>,
     /// How many times `ensure` has answered ready, for a test to wait on without polling.
     ready_answers: watch::Sender<usize>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct EnsureHold {
+    pub(super) entered: Arc<Notify>,
+    pub(super) release: Arc<Notify>,
+}
+
+/// Delivers a call the way the wasm provider does: the capabilities of the routine the called
+/// operation belongs to, read at the call.
+struct Delivering {
+    inner: Arc<dyn Provider>,
+    state: Arc<Mutex<FakeState>>,
+}
+
+#[async_trait]
+impl Provider for Delivering {
+    async fn call(
+        &self,
+        caller: &big_dispatch::Caller,
+        operation: &str,
+        request: &RequestContext,
+        context: &big_dispatch_core::InvocationContext,
+        input: serde_json::Value,
+        body: Option<big_dispatch_core::Body>,
+    ) -> Result<big_dispatch_core::Body, big_dispatch::ProviderError> {
+        {
+            // Every cartridge's operations reach this one provider, but only the last
+            // `ensure`d cartridge's routines are known here.
+            let mut state = self.state.lock().unwrap();
+            if let Some(routine) = state.routine_of.get(operation) {
+                let capabilities = state
+                    .routine_capabilities
+                    .get(routine)
+                    .expect("a ready routine has capabilities")
+                    .clone();
+                state.delivered.push((operation.to_owned(), capabilities));
+            }
+        }
+        self.inner
+            .call(caller, operation, request, context, input, body)
+            .await
+    }
 }
 
 #[derive(Default)]
@@ -70,6 +117,14 @@ struct FakeState {
     hosted: BTreeMap<CartridgeId, BTreeMap<String, ManifestComponent>>,
     /// Every `ensure` call, which the reconciler makes once per reconcile of a hosted nodule.
     ensures: usize,
+    /// The routine capabilities of the last `ensure`, and which routine serves each operation.
+    routine_capabilities: BTreeMap<String, RoutineCapabilities>,
+    routine_of: BTreeMap<String, String>,
+    /// What each served call was delivered with, as the wasm provider selects it: the
+    /// capabilities of the routine that implements the called operation, at the call.
+    delivered: Vec<(String, RoutineCapabilities)>,
+    /// A gate the next `ensure` waits at, for a test to look at the node mid-reconcile.
+    hold: Option<EnsureHold>,
     log: Vec<String>,
     reensure: BTreeMap<CartridgeId, Reensure>,
     /// How long `ensure` takes, as a wasm workload compiling and instantiating does.
@@ -84,12 +139,16 @@ impl FakeExecutor {
     /// An executor whose hosted handlers are `provider`, answering `ensure` ready from the
     /// start when `ready` (otherwise once [`Self::arrive`] says the bytes did).
     pub(super) fn hosting(provider: Arc<dyn Provider>, ready: bool) -> Arc<Self> {
+        let state = Arc::new(Mutex::new(FakeState {
+            ready,
+            ..FakeState::default()
+        }));
         Arc::new(Self {
-            state: Mutex::new(FakeState {
-                ready,
-                ..FakeState::default()
+            provider: Arc::new(Delivering {
+                inner: provider,
+                state: Arc::clone(&state),
             }),
-            provider,
+            state,
             ready_answers: watch::channel(0).0,
         })
     }
@@ -100,6 +159,25 @@ impl FakeExecutor {
 
     pub(super) fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
+    }
+
+    /// The routine capabilities the last `ensure` was handed, by routine key.
+    pub(super) fn routine_capabilities(&self) -> BTreeMap<String, RoutineCapabilities> {
+        self.state.lock().unwrap().routine_capabilities.clone()
+    }
+
+    /// What each served call was delivered with, in order: the operation and the capabilities
+    /// of the routine that implements it.
+    pub(super) fn delivered(&self) -> Vec<(String, RoutineCapabilities)> {
+        self.state.lock().unwrap().delivered.clone()
+    }
+
+    /// The next `ensure` signals `entered` and waits for `release`, which is the window a
+    /// reconcile has between applying capabilities and serving.
+    pub(super) fn hold_next_ensure(&self) -> EnsureHold {
+        let hold = EnsureHold::default();
+        self.state.lock().unwrap().hold = Some(hold.clone());
+        hold
     }
 
     fn provider(&self) -> Arc<dyn Provider> {
@@ -128,10 +206,23 @@ impl NoduleExecutor for FakeExecutor {
     }
 
     async fn ensure(&self, spec: &HandlerSpec) -> Hosted {
-        let takes = self.state.lock().unwrap().ensure_takes;
+        let (takes, hold) = {
+            let mut state = self.state.lock().unwrap();
+            (state.ensure_takes, state.hold.take())
+        };
         tokio::time::sleep(takes).await;
+        if let Some(hold) = hold {
+            hold.entered.notify_one();
+            hold.release.notified().await;
+        }
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
+        state.routine_capabilities = spec.routine_capabilities.clone();
+        state.routine_of = spec
+            .routines
+            .iter()
+            .map(|(operation, routine)| (operation.clone(), routine.routine_key.clone()))
+            .collect();
         let components = spec.components.clone();
         if state.hosted.get(&spec.cartridge_id) != Some(&components) {
             let digest = components
