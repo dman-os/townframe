@@ -91,6 +91,11 @@ enum JobTrap {
         /// The fork the plugin saw while the guest ran, if any.
         diverged: Option<ReplayDivergence>,
     },
+    /// The component aborted: a Rust panic inside the guest surfaces as a Wasm
+    /// trap, so it is the engine's `Panicked` class rather than the workflow's
+    /// own terminal error. The text is the trap's own diagnosis, capped by the
+    /// authority before it reaches a durable fault.
+    Panicked(String),
 }
 
 #[derive(Debug)]
@@ -534,12 +539,18 @@ impl WflowPlugin {
             active_step: None.into(),
             diverged: None.into(),
         });
-        let _old = self
-            .active_jobs
-            .write()
-            .expect(ERROR_MUTEX)
-            .insert(Arc::clone(&ctx_id), Arc::clone(&active_job));
-        assert!(_old.is_none(), "fishy");
+        {
+            let mut active = self.active_jobs.write().expect(ERROR_MUTEX);
+            // An activation context is minted per store, so a collision means
+            // two sessions were started for one context. Reporting it keeps the
+            // failure with the job; panicking here would exit the plugin host.
+            if active.contains_key(&ctx_id) {
+                return Err(ferr!(
+                    "activation context {ctx_id} already has an active job"
+                ));
+            }
+            active.insert(Arc::clone(&ctx_id), Arc::clone(&active_job));
+        }
 
         let join_handle = tokio::spawn({
             let cancel_token = pause_cancel.clone();
@@ -550,7 +561,7 @@ impl WflowPlugin {
                 cancel_token
                     .clone()
                     .run_until_cancelled(async move {
-                        let result = match store
+                        let outcome = store
                             .run_concurrent(async move |accessor| {
                                 instance
                                     .townframe_wflow_bundle()
@@ -558,18 +569,24 @@ impl WflowPlugin {
                                     .await
                             })
                             .await
-                            .and_then(|res| res)
-                        {
-                            Ok(res) => res,
-                            Err(err) => {
-                                let terminal =
-                                    types::JobError::Terminal(format!("wasm error: {err:?}"));
-                                Err(terminal)
-                            }
-                        };
-                        let trap = JobTrap::RunComplete {
-                            result,
-                            diverged: active_job.take_divergence(),
+                            .and_then(|res| res);
+                        // A recorded fork outranks the trap: the durable class
+                        // must not depend on whether the guest diverged before
+                        // it aborted.
+                        let trap = match (outcome, active_job.take_divergence()) {
+                            (Ok(result), diverged) => JobTrap::RunComplete { result, diverged },
+                            (Err(err), Some(diverged)) => JobTrap::RunComplete {
+                                result: Err(types::JobError::Terminal(format!(
+                                    "component aborted after diverging: {err:?}"
+                                ))),
+                                diverged: Some(diverged),
+                            },
+                            // The guest cannot return a trap as a workflow
+                            // error, so every trap is the component aborting.
+                            // Reporting it as `Completed(Err(Terminal))` used
+                            // to launder it into a successful settlement that
+                            // claimed the workflow had finished.
+                            (Err(err), None) => JobTrap::Panicked(format!("{err:?}")),
                         };
                         if yield_tx.send(trap).is_err() && !cancel_token.is_cancelled() {
                             panic!("{}", ERROR_CALLER);
@@ -632,7 +649,12 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
             .iter()
             .find(|iface| iface.namespace == "townframe" && iface.package == "wflow")
         else {
-            unreachable!();
+            // A component bound to this plugin without the wflow interface is a
+            // configuration error in the workload, so it is reported rather
+            // than panicking the plugin host on a guest-supplied world.
+            anyhow::bail!(
+                "townframe:wflow component declares no townframe:wflow interface: {interface_configs:?}"
+            );
         };
         if !iface.interfaces.contains("bundle") {
             anyhow::bail!("unupported component {interface_configs:?}");

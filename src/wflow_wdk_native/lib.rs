@@ -362,10 +362,23 @@ async fn run_session(command: SpawnCommand) {
                 result,
             },
             Err(payload) => {
-                let message = payload.downcast_ref::<&str>().map_or_else(
-                    || "unknown panic payload".to_owned(),
-                    |message| (*message).to_owned(),
-                );
+                // `panic!("literal")` carries a `&'static str` payload while
+                // `panic!("{formatted}")` carries a `String`, and the formatted
+                // form is the common one. Both are the workflow's own message
+                // and must reach the durable fault, which is capped to
+                // `MAX_FAULT_TEXT_BYTES` by the authority. Any other payload is
+                // `panic_any` with a non-string type, which this engine has no
+                // vocabulary for, so it is reported as such rather than
+                // silently dropped.
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|text| (*text).to_owned())
+                    })
+                    .unwrap_or_else(|| "non-string panic payload".to_owned());
                 SessionYield::Panicked(message)
             }
         },

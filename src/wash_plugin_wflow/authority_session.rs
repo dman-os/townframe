@@ -68,6 +68,7 @@ impl Session for WasmSession {
                     WaitTrapDeets::Message { wait_id } => WaitYield::Message { wait_id },
                 },
             },
+            JobTrap::Panicked(message) => SessionYield::Panicked(message),
             JobTrap::RunComplete { result, diverged } => match diverged {
                 // A fork the plugin saw while the guest ran settles as the
                 // engine's divergence class, never as the guest's own terminal

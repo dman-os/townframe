@@ -93,6 +93,28 @@ exit, not a task failure.
 | 26 | the only native/Wasm conformance test cannot find its fixture under this repo's build policy, so parity has no CI evidence | **B2** |
 | 27-31 | tests assert failure classes by substring, use wall-clock sleeps, pin commit counts, have no fault tests, and depend on a hard-coded sampling seed | **B2** (the three named tests) |
 
+## Adapter fixes (unblocked by the manifest revert)
+
+`wash_plugin_wflow` did not compile at HEAD, so three of its defects could be
+neither reproduced nor fixed until `2eb6581a` restored the `wash-runtime` pin.
+Then, in the plugin and the native adapter only:
+
+- **Wasm trap laundering (audit 4).** Every store/run error became
+  `SessionYield::Complete { result: Err(Terminal("wasm error: …")) }`, so a
+  component that panicked was durably recorded as *completed*. A Rust panic in a
+  component surfaces as a trap, so it is now `JobTrap::Panicked` →
+  `SessionYield::Panicked` → `Faulted(Panicked)`, matching native. A detected
+  divergence still outranks the trap.
+- **Formatted panic messages (audit 16).** The native adapter only downcast the
+  payload to `&str`, so `panic!("boom {n}")` recorded "unknown panic payload".
+  `String` is tried first now, and a non-string `panic_any` payload is named as
+  such rather than silently dropped.
+- **Guest-facing binder panics (audit 22).** `on_workload_bind` did
+  `unreachable!()` when a component declared no wflow interface, and `spawn`
+  asserted `"fishy"` on a duplicate activation context. Both are configuration
+  states a workload can reach, and both exited the plugin host; they are typed
+  errors now.
+
 ## Lane B split
 
 Findings 9 was **refuted on inspection**: `src/wflow_core/kvstore/atomic.rs` is
@@ -273,7 +295,7 @@ authority (receipts included) into one snapshot blob.
 Needed (from WFR-006, deferred): separate the idempotency-key lifetime from the
 result-payload lifetime, and stop retaining submission payloads at all.
 
-### 7. Wasm cancellation is delivered as a catchable protocol error — **verified benign, residual is finding 18**
+### 7. Wasm cancellation is delivered as a catchable protocol error — **verified benign; residuals fixed**
 
 Re-checked against the code. `wash_plugin_wflow`'s run task wraps the guest in
 `cancel_token.run_until_cancelled(...)`, and the `Store` is owned by that future,
@@ -282,14 +304,22 @@ The run task then ends without sending a trap, `next_yield` returns `None`, and
 `recover_activation_loss` sees a settled job: `job_for_lease` answers
 `StaleLease` for the same incarnation, which the recovery path already returns
 quietly. So a cancelled Wasm job settles exactly once, as `Faulted(Cancelled)`,
-and never re-executes.
+and never re-executes. The guest-observable `Protocol("session cancelled")` is
+only reachable in the window before that drop.
 
-What remains is real but smaller: the `HostError::Protocol("session cancelled")`
-is observable by the guest during teardown, and the `join_handle` is never joined,
-so a panic inside the Wasm run task is silently dropped and surfaces as ordinary
-activation loss. Native reports the same panic as `SessionYield::Panicked`, so the
-two adapters disagree about a panicking workflow. Folded into F-hygiene as audit
-finding 18.
+Two residuals were real and are fixed in the adapters:
+
+- **A Wasm trap was laundered into a completed receipt.** Every store/run error
+  became `SessionYield::Complete { result: Err(JobError::Terminal("…")) }`, so a
+  workflow that panicked inside the component was recorded as having *completed*
+  with a terminal error. A Rust panic in a component surfaces as a trap, so
+  `JobTrap::Panicked` now carries it to `SessionYield::Panicked` and settles as
+  `Faulted(Panicked)`, matching the native adapter. A detected divergence still
+  outranks the trap, so the durable class cannot depend on which came first.
+- **A formatted native panic lost its message.** The adapter only downcast the
+  payload to `&str`, so `panic!("boom {n}")` — the common form — recorded
+  "unknown panic payload". It now tries `String` first, then `&str`, and names a
+  non-string `panic_any` payload as such.
 
 ### 7a. (superseded text, kept for context) Wasm cancellation is delivered as a catchable protocol error
 

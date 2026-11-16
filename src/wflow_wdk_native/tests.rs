@@ -132,3 +132,25 @@ async fn native_session_maps_terminal_failure() {
     };
     assert!(value.contains("bad input"));
 }
+
+#[tokio::test]
+async fn native_session_panic_keeps_the_formatted_message() {
+    let driver = NativeHostDriver::new();
+    driver.register_typed("panics", |_cx, (): ()| {
+        Box::pin(async move {
+            // `panic!` with a format string produces a `String` payload, not a
+            // `&'static str`, and the durable fault must keep the message
+            // rather than reporting an unknown payload.
+            panic!("boom {}", 7);
+            #[allow(unreachable_code)]
+            Ok::<_, JobErrorX>(())
+        })
+    });
+    let session = driver
+        .spawn(Arc::from("job-panic"), "panics", "null".into(), Vec::new())
+        .expect("registered workflow");
+    let Some(SessionYield::Panicked(message)) = session.next_yield().await else {
+        panic!("a panicking workflow must be reported as a panic");
+    };
+    assert_eq!(message, "boom 7");
+}
