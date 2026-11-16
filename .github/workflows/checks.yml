@@ -103,6 +103,31 @@ jobs:
       # before it is assigned").
       - name: Check model safety through three transitions
         run: nix develop .#ci-rust --command quint verify src/wflow_core/partition/authority.qnt --main=bounded --init=init --step=step --invariant=invariant --max-steps=3 --apalache-version=0.62.4 --verbosity=1
+  wflow-parity:
+    name: wflow native and Wasm conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src/wasm_utils_rs -> target
+      # The parity test drives one workflow through the native adapter and the
+      # same workflow through a real Wasm component, then asserts both settle to
+      # the same durable receipts. It is the only evidence that the two adapters
+      # agree on failure classes, and it needs the guest binary: the guest is its
+      # own workspace, so the artifact lands in src/wasm_utils_rs/target, which is
+      # the first place the test resolves it. Without this build the test used to
+      # be skipped for want of a fixture, which is why the parity claim had no CI
+      # evidence at all.
+      - name: Build the conformance guest
+        run: nix develop .#ci-rust --command cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml --release --target wasm32-wasip3 -p test_wflows
+      - name: Run native and Wasm parity
+        run: nix develop .#ci-rust --command cargo nextest run -p wflow --profile "$NEXTEST_PROFILE"
   rust-target-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 60

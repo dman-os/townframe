@@ -102,6 +102,29 @@ exit, not a task failure.
 | 26 | the only native/Wasm conformance test cannot find its fixture under this repo's build policy, so parity has no CI evidence | **B2** |
 | 27-31 | tests assert failure classes by substring, use wall-clock sleeps, pin commit counts, have no fault tests, and depend on a hard-coded sampling seed | **B2** (the three named tests) |
 
+## Parity now has evidence (audit 26)
+
+The native/Wasm conformance test resolves its fixture from `TEST_WFLOWS_WASM` or
+an *external* `CARGO_TARGET_DIR`. Under this repo's build policy
+`CARGO_TARGET_DIR` is unset and the guest is its own workspace, so its artifact
+lands in `src/wasm_utils_rs/target` and the test could not find it by default:
+the parity claim had no evidence anyone could reproduce.
+
+Measured, not assumed: `cargo build --locked --manifest-path
+src/wasm_utils_rs/Cargo.toml --release --target wasm32-wasip3 -p test_wflows`
+takes about four minutes warm and produces
+`src/wasm_utils_rs/target/wasm32-wasip3/release/test_wflows.wasm` (1.9 MB).
+With that file present, `cargo nextest run -p wflow` is
+`11 tests run: 11 passed`, including
+`authority_conformance::authority_native_and_wasm_conformance` (0.16 s).
+
+Two changes follow from it: `wasm_path()` now looks in the guest workspace
+target before `CARGO_TARGET_DIR`, so the documented build is enough on its own;
+and `.github/workflows/checks.yml` gains a `wflow-parity` job that builds the
+guest and runs the crate's tests. It runs alongside `wflow-authority` rather
+than inside it, because the guest build is minutes of work and the model job
+already spends ~8 of its 30 minutes on Apalache.
+
 ## Adapter fixes (unblocked by the manifest revert)
 
 `wash_plugin_wflow` did not compile at HEAD, so three of its defects could be
@@ -194,8 +217,9 @@ time; builds serialised (memory is the constraint, not CPU).
 | 2 | B1-contract | `src/wflow_tokio/**`, `src/wflow_wdk/**`, adapters | A | **done** `ff428451` + `c922ad0a`, verified 39/39 + 37/37 |
 | 3 | B2-robust | `src/wflow_tokio/**`, adapters | B1 | **done** `e8879cd1` + `45b0c3c7`, verified 36/36 + 37/37 |
 | 3 | E-retention | WFR-014 (core + runtime + model) | B2 | **done** `af8649d1`, verified 42/42 + 37/37 |
-| 4 | F-hygiene | item 3, item 8, audit 11/21 | B2 | dispatched |
-| — | I-parity | audit 26: conformance fixture | — | open |
+| 4 | F-hygiene | item 3, item 8, audit 11/21 | B2 | **done** `4659843d`, verified 42/42 + 39/39 + 10/10 |
+| 5 | G-guardrails | module split, doc metadata, allow attribute | — | **done** `6ac671fd`, lint 0 diagnostics |
+| — | I-parity | audit 26: conformance fixture | — | **done** fixture resolves from the guest workspace; CI job added |
 | — | adapter | audit 4/16/22 (Wasm trap class, panic text, binder panics) | — | **done** `6268314f` |
 
 B owns the adapters too. Splitting "runtime" from "adapters" is what produced

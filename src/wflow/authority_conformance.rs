@@ -131,8 +131,15 @@ struct ConformanceHarness {
 }
 
 fn wasm_path() -> Res<PathBuf> {
+    // The guest lives in its own workspace, so it has its own managed `target`;
+    // the root `target` is never where its artifacts land. Under this repo's
+    // build policy `CARGO_TARGET_DIR` is unset, so resolving only through it
+    // made the fixture unreachable by default even after the documented build.
+    let guest_target = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../wasm_utils_rs/target/wasm32-wasip3/release/test_wflows.wasm");
     let path = std::env::var_os("TEST_WFLOWS_WASM")
         .map(PathBuf::from)
+        .or_else(|| guest_target.is_file().then_some(guest_target.clone()))
         .or_else(|| {
             std::env::var_os("CARGO_TARGET_DIR")
                 .map(PathBuf::from)
@@ -140,7 +147,8 @@ fn wasm_path() -> Res<PathBuf> {
         })
         .ok_or_else(|| {
             ferr!(
-                "test_wflows.wasm path is unset; set TEST_WFLOWS_WASM or external CARGO_TARGET_DIR"
+                "test_wflows.wasm path is unset and not at {}; set TEST_WFLOWS_WASM or build it there",
+                guest_target.display()
             )
         })?;
     eyre::ensure!(
