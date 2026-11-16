@@ -91,7 +91,7 @@ impl SurfaceSession {
     }
 
     pub fn handler(&self) -> SurfaceEventHandler {
-        self.dispatch.clone()
+        Rc::clone(&self.dispatch)
     }
 }
 
