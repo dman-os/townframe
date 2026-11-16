@@ -249,3 +249,34 @@ What the stress test asks of Clay, beyond the needs table:
   surfaced are fixed in `pierre_diffs`: the interaction manager held keys of rows a re-render had
   freed, where upstream holds detached elements; `setup` now forgets them. Unverified: the draft's
   focus (`MountedData::set_focus`) in a real window, the gutter "+" path, and IME.
+
+## Week of 2026-11-16 (operator's goals)
+
+- **Finish `CodeView`** (C1-C6, `feat/pierre-code-view`) and make sure the port works well inside micros. C1 is
+  ported. Its 367 old golden cases are byte-identical, and 269 were added. The tests still need a run on the
+  mothership.
+- **Merge #80 and #81** after the operator's review (2026-11-14). #80 has main merged in. It's going through the
+  workspace lints main now carries, and replies to the 14 review comments are drafted. Main's CI has been red since
+  at least 11-14: `ci-desktop` doesn't set `LIBCLANG_PATH`, which #120 fixes.
+- **Cartridge authoring experience, with the nodules lane:** how a cartridge is authored in Rust (one set of
+  declaration traits that lowers into the ADR 047 manifest, shared by micros and nodules), and how it's authored
+  from inside daytxt. Nodules is taking micro/nodule interface isomorphism and the per-routine permission model
+  this week. Our inputs: Method/Lexicon request types usable from wasip3 guests, and capability-bank and collection
+  capabilities folded into the permbind/`uses` vocabulary.
+- **End-user programmability, problem statement first.** The operator wants elisp-grade editing, core base micros
+  included, editable in the app. Rust micros need either in-app Rust→wasm builds or a second micro language with
+  MDK analogs and a good fit with the surface bridge. Language candidates wait until the problem is agreed.
+- **End-user styling (from the #80 review).** The customization target is Obsidian/VS Code grade. Inline styles in
+  headless parts beat any user stylesheet, and Tailwind skins baked into Rust strings can't be restyled by users.
+  Redesign the styling contract around that (see the kit ADR item below).
+- **Ledger for later PRs:**
+  - A kit-conventions ADR, with the design-language rules (width classes, layers, motion) moved to
+    `docs/design-language/`.
+  - The keyboard model: every action reachable by key, roving focus, focus restore, a command and shortcut
+    registry that micros declare into, and Vimium-style hints later.
+  - `ListRow` folded into the tile column.
+  - Skins as consts, no per-component styled wrapper files.
+  - Turn modern-web-guidance into KIT rules.
+- **The node stack** (big-node-next, split as #93-#119, node-01 to node-22) lands after the operator reviews all
+  of it. Our node-lane branches (holder, cart-micros, micro-dispatch, datum-client, claytxt-node) rebase once it
+  lands. `stack/node-14-nsid` is the main-equivalent base if we need one sooner.
