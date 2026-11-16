@@ -1563,7 +1563,7 @@ pub(super) async fn import_document(
             operator(node).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([doc_id.clone()]),
+                    read: DocScope::read_all([doc_id.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,

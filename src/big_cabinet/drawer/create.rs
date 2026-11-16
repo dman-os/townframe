@@ -160,7 +160,7 @@ impl Core {
                 context,
                 self.issuer,
                 DocScope {
-                    read: [doc_id.clone()].into(),
+                    read: DocScope::read_all([doc_id.clone()]),
                     ..Default::default()
                 },
                 |Authorization {

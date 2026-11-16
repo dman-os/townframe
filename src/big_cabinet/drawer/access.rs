@@ -388,7 +388,8 @@ impl DocAccess for DrawerAccess {
             let write_docs: BTreeSet<_> = scope.write.keys().cloned().collect();
             for (doc, needed) in scope
                 .read
-                .difference(&write_docs)
+                .keys()
+                .filter(|doc| !write_docs.contains(*doc))
                 .map(|doc| (doc, Access::Read))
                 .chain(scope.write.keys().map(|doc| (doc, Access::Write)))
             {

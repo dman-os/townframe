@@ -49,7 +49,7 @@ impl DocsStub {
                 assert_eq!(
                     scope,
                     DocScope {
-                        read: BTreeSet::from([document.clone()]),
+                        read: DocScope::read_all([document.clone()]),
                         write: if write {
                             std::collections::BTreeMap::from([(
                                 document.clone(),

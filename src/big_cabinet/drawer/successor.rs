@@ -23,7 +23,7 @@ impl Core {
                 context,
                 self.issuer,
                 DocScope {
-                    read: [drawer.clone()].into(),
+                    read: DocScope::read_all([drawer.clone()]),
                     ..Default::default()
                 },
                 |Authorization {
