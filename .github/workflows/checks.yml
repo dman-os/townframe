@@ -86,15 +86,21 @@ jobs:
       # stale local server with an old version would still reject the model.
       #
       # The bound is three transitions, not four. Three checks the whole depth-3
-      # tree in ~6.5 minutes (Apalache reports 391874 ms). Four first spends ~7
-      # minutes getting to the 25 states that are one transition further, and
-      # each of those then costs minutes on its own (the first was still working
-      # through its 9 invariants a minute in), so four runs for hours and does
-      # not fit this job's 30-minute budget. What that leaves unproven: a
-      # violation that first appears after four transitions (e.g.
-      # submit -> grant -> commitStep -> complete) is not proven absent, and no
-      # trace of length 5 or more is covered. The simulation step above samples
-      # up to 16 steps but asserts only on the traces it draws.
+      # tree in ~6.5 minutes (Apalache reports 391874 ms). Four does not fit:
+      # Apalache checks each of the ~25 states reachable at a step separately,
+      # and every state one step deeper costs ~100 s of invariant queries (~13 s
+      # per invariant), so a fourth transition needs 50+ minutes. Shrinking the
+      # constants does not help — `module boundedVerify` (1 key, 1 worker, 1
+      # message id, all 38 actions still reachable) has the same ~25 enabled
+      # transitions per step and was measured at 103 s for its first depth-4
+      # state group. What that leaves unproven: a violation that first appears
+      # after four transitions (e.g. submit -> grant -> commitStep -> complete)
+      # is not proven absent, and no trace of length 5 or more is covered. The
+      # simulation step above samples up to 16 steps but asserts only on the
+      # traces it draws. Recovering the fourth transition needs the model, not
+      # the instance: fewer actions per step, or an inductive invariant (quint
+      # 0.33 rejects this model's --inductive-invariant with "state is used
+      # before it is assigned").
       - name: Check model safety through three transitions
         run: nix develop .#ci-rust --command quint verify src/wflow_core/partition/authority.qnt --main=bounded --init=init --step=step --invariant=invariant --max-steps=3 --apalache-version=0.62.4 --verbosity=1
   rust-target-matrix:

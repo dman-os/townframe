@@ -58,3 +58,6 @@ generated/**
 
 specs
 result
+
+# `quint verify` starts an Apalache server that writes its run directory here.
+_apalache-out/

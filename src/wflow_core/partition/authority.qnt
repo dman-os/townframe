@@ -1451,18 +1451,23 @@ module bounded {
   import wflow_authority(KEYS = Set("a", "b"), WORKERS = Set(11, 12), MESSAGE_IDS = Set("m1", "m2")).*
 }
 
-// Single-partition instance used only by the CI proof step
-// (`quint verify --main=boundedVerify`). Every action in `step` picks one key,
-// one worker and one message id, and no guard asks for a second, distinct one,
-// so all 38 actions stay reachable here: an action histogram over 1000 sampled
-// traces (the CI seed and nine more, 100 traces each) sees 36 of them, and
-// `retryExhausted`/`failRetriesExhausted` are reached by the same step relation
-// restricted to the retry path (submit -> grant -> retry -> grantDueRetry ->
-// retryExhausted). What this instance cannot express: any relation between two
-// partitions, a worker choosing between two live leases, or two in-flight
-// message ids. The constants are smaller because Apalache's bounded check
-// enumerates every transition at every depth, and the two-key instance does not
-// finish a fourth transition inside CI's budget.
+// Single-partition instance: 1 key, 1 worker, 1 message id. Every action in
+// `step` picks one key, one worker and one message id, and no guard asks for a
+// second, distinct one, so all 38 actions stay reachable here — an action
+// histogram over 1000 sampled traces (the CI seed and nine more, 100 traces
+// each) sees 36 of them, and `retryExhausted`/`failRetriesExhausted` are
+// reached by the same step relation restricted to the retry path
+// (submit -> grant -> retry -> grantDueRetry -> retryExhausted). What this
+// instance cannot express: any relation between two partitions, a worker
+// choosing between two live leases, or two in-flight message ids.
+//
+// CI does not verify against this module: the constants are not what makes a
+// fourth transition expensive. Apalache enumerates the ~25 enabled transitions
+// at every step, and each of the 25 states one transition past depth three then
+// costs ~100 s of invariant queries, so a fourth transition needs 50+ minutes
+// here too (measured: one depth-4 state group in 103 s, the next still running
+// after 3.5 min). It is the cheapest place to run a deeper check by hand
+// (`quint verify --main=boundedVerify --max-steps=4`).
 module boundedVerify {
   import wflow_authority(KEYS = Set("a"), WORKERS = Set(11), MESSAGE_IDS = Set("m1")).*
 }
