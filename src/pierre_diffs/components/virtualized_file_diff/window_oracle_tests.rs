@@ -294,6 +294,10 @@ struct Replay {
     dom: Rc<FakeDom>,
     instance: Rc<Instance>,
     diffs: HashMap<String, Rc<FileDiffMetadata>>,
+    /// The diffs a name denoted before it was rebound: upstream's object is
+    /// the same one after the in-place hydration, and a pending file load still
+    /// holds the old `Rc`.
+    retired: Vec<(String, Rc<FileDiffMetadata>)>,
     lists: HashMap<String, LineAnnotations<u8>>,
     separator_functions: HashMap<String, SeparatorFn>,
     container: Option<NodeKey>,
@@ -352,6 +356,7 @@ impl Replay {
                 .chain(scenario.own_diffs.iter())
                 .map(|(name, diff)| (name.clone(), Rc::new(diff.clone())))
                 .collect(),
+            retired: Vec::new(),
             lists: scenario
                 .lists
                 .iter()
@@ -381,7 +386,9 @@ impl Replay {
     /// A name denotes an object upstream, which hydrates in place; here the
     /// hydrated `Rc` takes the name of the one it replaced.
     fn rebind(&mut self, name: &str, replacement: &Rc<FileDiffMetadata>) {
-        self.diffs.insert(name.to_owned(), Rc::clone(replacement));
+        if let Some(previous) = self.diffs.insert(name.to_owned(), Rc::clone(replacement)) {
+            self.retired.push((name.to_owned(), previous));
+        }
     }
 
     fn diff_name(&self, diff: Option<&Rc<FileDiffMetadata>>) -> Value {
@@ -390,6 +397,7 @@ impl Replay {
             Some(diff) => self
                 .diffs
                 .iter()
+                .chain(self.retired.iter().map(|(name, retired)| (name, retired)))
                 .find(|(_, candidate)| Rc::ptr_eq(candidate, diff))
                 .map_or_else(|| json!("?"), |(name, _)| json!(name)),
         }

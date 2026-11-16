@@ -278,7 +278,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/worker/types.ts` | 274 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/worker/worker.ts` | 260 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
 | `pierre/src/worker/workerMessage.ts` | 43 | OUT | - |  | OUT (Clay guest + wasm component replaces) |
-| `pierre/test/CodeView.collapsed.test.ts` | 275 | PENDING | C2 | `components/code_view/*` | 6 cases; mixed file and diff items: fixtures become diff items if file items stay DEFER (divergences.psv) |
+| `pierre/test/CodeView.collapsed.test.ts` | 275 | PENDING | C2 |  | 6 cases; mixed file and diff items: fixtures become diff items if file items stay DEFER (divergences.psv) |
 | `pierre/test/CodeView.diffIndicators.test.ts` | 120 | PENDING | C5 |  | 1 case, option change re-render |
 | `pierre/test/CodeView.edit.test.ts` | 3284 | OUT | - |  | edit mode is out of scope for v1 |
 | `pierre/test/CodeView.editHighlightCache.test.ts` | 507 | OUT | - |  | edit mode is out of scope for v1 |

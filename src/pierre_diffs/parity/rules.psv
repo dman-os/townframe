@@ -296,7 +296,7 @@ pierre/test/annotations.test.ts|PORTED|S6|renderers/annotations_test.rs|all elev
 pierre/test/InjectedRowHooks.test.ts|PORTED|S6|renderers/injected_row_hooks_test.rs|two of three cases; the UnresolvedFileHunksRenderer case is deferred with the merge-conflict renderer
 pierre/test/patchFileRender.test.ts|PORTED|S6|renderers/patch_file_render_test.rs|digest snapshots became invariants over the parsed patch and the rendered rows
 pierre/test/FileRenderer*|DEFER|-||single-file view deferred; review loop uses FileDiff
-pierre/test/CodeView.collapsed.test.ts|PENDING|C2|components/code_view/*|6 cases; mixed file and diff items: fixtures become diff items if file items stay DEFER (divergences.psv)
+pierre/test/CodeView.collapsed.test.ts|PENDING|C2||6 cases; mixed file and diff items: fixtures become diff items if file items stay DEFER (divergences.psv)
 pierre/test/CodeView.diffIndicators.test.ts|PENDING|C5||1 case, option change re-render
 pierre/test/CodeView.elementPooling.test.ts|PENDING|C4||6 cases; the two that drive the React `CodeViewCoordinator` (managed slot children) are OUT with the coordinator
 pierre/test/CodeView.headerFooter.test.ts|PENDING|C4||10 cases; the host content callbacks become `Rendered` slot content

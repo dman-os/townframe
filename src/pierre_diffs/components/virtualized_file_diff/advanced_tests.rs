@@ -38,6 +38,20 @@ fn long_diff(edited: usize) -> Rc<FileDiffMetadata> {
     )
 }
 
+/// Every line changed: one change block longer than a render window, so the
+/// render range has rows below the window (a lone edit renders as one short hunk).
+fn all_lines_changed() -> Rc<FileDiffMetadata> {
+    parse_files(
+        plain_file("long.txt", &numbered(400, 0)),
+        plain_file(
+            "long.txt",
+            &(1..=400)
+                .map(|line| format!("edited {line}\n"))
+                .collect::<String>(),
+        ),
+    )
+}
+
 fn render(world: &World, container: crate::document::NodeKey, diff: &Rc<FileDiffMetadata>) {
     world.instance.render(FileDiffRenderProps {
         file_container: Some(container),
@@ -61,7 +75,7 @@ fn advanced_render_is_visible_without_connecting_and_has_no_buffers() {
     // buffers are not applied (the sticky container flows items contiguously).
     let (world, _code_view) = advanced_with_window(0.0, 100.0);
     let container = world.dom.doc.create_element("div");
-    let diff = long_diff(200);
+    let diff = all_lines_changed();
     world
         .instance
         .update_code_view_layout(&diff, 0.0, None, None);
