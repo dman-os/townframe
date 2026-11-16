@@ -282,6 +282,18 @@ Shape of the fix: classify spawn failure. A returned host error is recoverable
 activation loss but must be *reported* on the fault path (typed, bounded
 detail); the re-grant must not be an unbounded immediate loop.
 
+**Resolved `4659843d`.** `Host::spawn` returns
+`Result<Box<dyn Session>, SpawnError>` with `Rejected` (settles as
+`JobFailure::ActivationFailed { message }` under the lease the grant issued) and
+`Unavailable` (durable revoke, then a re-grant armed on the deadline wheel behind
+100 ms doubling to 30 s). Residual, deliberately not changed: `handle_spawned`
+still asserts `host.contains_wflow` *before* matching the outcome, so a workflow
+key removed from a live host between admission and grant panics rather than
+faulting. `submit` refuses an unregistered key and recovery refuses to start if a
+durable job needs one, so no supported path removes a key mid-flight; the assert
+is the invariant that makes the `Rejected` doc example ("an unknown workflow
+key") reachable only through an unsupported mutation.
+
 ### 4. CI simulation checks no invariants; the verify step cannot pass — **resolved `bf1baea6`**
 
 Root cause was not the model. `.github/workflows/checks.yml:71` ran `quint run` with
@@ -384,13 +396,18 @@ Two residuals were real and are fixed in the adapters:
 session before the guest can observe it
 (`wflow_wdk_native/lib.rs:111,121` is checked before the guest resumes).
 
-### 8. Dead code and leftover schema
+### 8. Dead code and leftover schema — **resolved `4659843d`**
 
-- `Command::CommitStep.attempt` and `Step.attempt` are `u64` fields that are
-  always 0 (`authority.rs:947` rejects non-zero).
-- `RETRY_JITTER_WINDOW_MS = 0` makes `retry_jitter_ms` dead
-  (`authority_runtime.rs:93,1485`).
-- `Job::receipt` and `Job::settle` are near-duplicates (`authority.rs:210,222`).
+- `Step::attempt`, `Command::CommitStep::attempt` and `Rejection::InvalidAttempt`
+  were removed: the runtime always stamped 0 and the authority rejected anything
+  else, so the field recorded nothing.
+- `Command::Retry::jitter_ms`, `retry_jitter_ms` and `RETRY_JITTER_WINDOW_MS`
+  were removed: the window was 0, so the field was always 0.
+- `Job::receipt` and `Job::settle` were collapsed into one constructor in
+  `2e7c11cd`.
+- `SNAPSHOT_FORMAT` 2 -> 3 and journal `FORMAT_VERSION` 3 -> 4 follow from the
+  step/retry shape change; a snapshot or journal written before it is rejected at
+  recovery rather than misread.
 
 ### 9. A parked job keeps its lease, so `RetriesExhausted` can settle it
 
