@@ -421,6 +421,49 @@ async fn failures_retry_transients_and_commit_terminal_errors() {
     runtime.stop().await;
 }
 
+/// A transient error is guest-supplied prose that outlives the job in its
+/// receipt, so the exhausted-retry fault keeps only the head of it.
+#[tokio::test]
+async fn exhausted_retry_error_is_bounded_in_the_durable_fault() {
+    let store = MemoryStore::default();
+    let host = LocalNativeHost::new();
+    host.register_typed("noisy", |_cx, (): ()| {
+        Box::pin(async {
+            Err::<u64, _>(JobErrorX::Transient(ferr!(
+                "{}",
+                "e".repeat(4 * MAX_FAULT_TEXT_BYTES)
+            )))
+        })
+    });
+    let (runtime, _) = start(&store, &host).await;
+
+    // A zero retry budget turns the first transient failure into the exhausted
+    // rejection, so the fault is settled from the very error the guest reported.
+    runtime
+        .submit(
+            Submission::new("noisy", "noisy", "null").budget(RetryBudget {
+                max_retries: Some(0),
+                max_restarts: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let receipt = runtime.handle("noisy").await_receipt().await.unwrap();
+    let JobFailure::RetriesExhausted {
+        retries,
+        max_retries,
+        last_error,
+    } = fault_of(&receipt)
+    else {
+        panic!("expected exhausted retries, got {:?}", fault_of(&receipt));
+    };
+    assert_eq!((*retries, *max_retries), (0, 0));
+    // The stored error is the guest's own JSON envelope; only its tail is gone.
+    assert_eq!(last_error.len(), MAX_FAULT_TEXT_BYTES);
+    assert!(last_error.starts_with(r#"{"msg":"#), "{last_error}");
+    runtime.stop().await;
+}
+
 #[tokio::test]
 async fn restart_keeps_durable_retry_deadline() {
     let store = MemoryStore::default();

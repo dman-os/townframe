@@ -64,6 +64,7 @@ use wflow_core::kvstore::journal::CompactionProgress;
 use wflow_core::kvstore::journal::Journal;
 use wflow_core::kvstore::journal::JournalReader;
 use wflow_core::partition::JobFailure;
+use wflow_core::partition::MAX_PANIC_MESSAGE_BYTES;
 use wflow_core::partition::RetryBudget;
 use wflow_core::partition::authority;
 use wflow_wdk::session::ReplayStep;
@@ -1240,7 +1241,7 @@ impl<W: Writer> Actor<W> {
                     JobFailure::RetriesExhausted {
                         retries,
                         max_retries,
-                        last_error: err.error_json,
+                        last_error: bounded_fault_text(err.error_json),
                     },
                 )
                 .await;
@@ -1537,6 +1538,30 @@ fn decode_receipt(receipt: &authority::Receipt) -> types::JobResult {
 
 fn decode_terminal(value: &str) -> types::JobResult {
     serde_json::from_str(value).expect(ERROR_JSON)
+}
+
+/// The bound on guest-controlled text in a durable fault.
+///
+/// Both a panic message and the error behind an exhausted retry budget are
+/// workflow-supplied prose that outlives the job in its receipt, the result
+/// index, and every later snapshot, so the runtime stores only the head of each.
+/// The bound is the authority's own panic-message cap so both fields are bounded
+/// identically; the cost is that a large error payload loses its tail in the
+/// durable record while the guest sees the whole of it live.
+const MAX_FAULT_TEXT_BYTES: usize = MAX_PANIC_MESSAGE_BYTES;
+
+/// Truncates guest-reported fault text to [`MAX_FAULT_TEXT_BYTES`], landing on a
+/// UTF-8 boundary so the stored string stays valid JSON.
+fn bounded_fault_text(mut text: String) -> String {
+    if text.len() <= MAX_FAULT_TEXT_BYTES {
+        return text;
+    }
+    let mut end = MAX_FAULT_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
 }
 
 /// The awaiter-facing projection of a settled fault.
