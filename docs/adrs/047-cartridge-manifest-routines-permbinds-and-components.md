@@ -80,7 +80,7 @@ A cartridge has **at most one nodule**: nothing separates two nodules of one car
     },
     "revisionedStores": { /* ADR 027 §7, unchanged in meaning */ },
     "localState": { /* ADR 027 §6, the plug manifest's local_states */ },
-    "initialization": { "seed": { "target": "org.example.photos.reindex", "mode": "once" } }
+    "initialization": [{ "key": "seed", "target": "org.example.photos.reindex", "mode": "once" }]
   }
 }
 ```
@@ -135,7 +135,7 @@ Unchanged, named here because the manifest is only half of it:
 
 ### 8. Typed keys and maps
 
-Every keyed section is a map. NSIDs are a typed `Nsid` parsed on deserialize (one exists in `clay_collection::nsid`; it moves to `big_cabinet_core`), so a manifest with a bad NSID is refused at the edge and never constructed.
+Every keyed section is a map except `nodule.initialization`, which is a list of `{key, target, mode}` entries. Its declaration order is the lifecycle contract from ledger D7: Automerge maps sort their keys, and `Cartridge::revision()` hashes key-sorted canonical JSON, so neither preserves initializer order. NSIDs are a typed `Nsid` parsed on deserialize (one exists in `clay_collection::nsid`; it moves to `big_cabinet_core`), so a manifest with a bad NSID is refused at the edge and never constructed.
 
 ### 9. What this changes in earlier ADRs
 
