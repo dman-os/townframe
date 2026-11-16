@@ -215,6 +215,7 @@ macro_rules! expand_surface_event_listener {
         }
     };
     (@serialize Mounted, $data:ident, $platform:expr) => {{
+        let _platform = $platform;
         "null".to_owned()
     }};
     (@serialize $group:ident, $data:ident, $platform:expr) => {{

@@ -134,13 +134,14 @@ mod tests {
         drop(session);
         assert_eq!(drops.get(), 1);
         // The handler outlives its session; dispatch must stay usable after the hook fired.
-        let _ = handler(Event {
+        let response = handler(Event {
             revision: 8,
             element: 3,
             name: "click".into(),
             bubbles: true,
             data_json: "null".into(),
         });
+        assert_eq!(response, EventResponse::default());
         assert_eq!(drops.get(), 1);
     }
 

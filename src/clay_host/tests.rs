@@ -828,7 +828,7 @@ fn committing_initialization_twice_is_an_invariant_failure() {
     let instance = host.create("twice").unwrap();
     host.begin_initialization(&instance).unwrap();
     host.commit_initialization(&instance).unwrap();
-    let _ = host.commit_initialization(&instance);
+    host.commit_initialization(&instance).unwrap();
 }
 
 #[test]
