@@ -143,7 +143,7 @@ async fn read(node: &BigNode, document: &DocId) -> DatumsRead {
     let capability = capability(
         node,
         DocScope {
-            read: BTreeSet::from([document.clone()]),
+            read: DocScope::read_all([document.clone()]),
             ..DocScope::default()
         },
     )

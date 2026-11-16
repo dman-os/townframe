@@ -359,7 +359,7 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         );
     }
     let doc_scope = DocScope {
-        read: [doc.clone()].into(),
+        read: DocScope::read_all([doc.clone()]),
         ..Default::default()
     };
     let mut drawer_caps = Vec::new();
@@ -923,7 +923,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
         .unwrap();
     let scopes = [
         DocScope {
-            read: [doc.clone()].into(),
+            read: DocScope::read_all([doc.clone()]),
             ..Default::default()
         },
         DocScope {
@@ -1153,7 +1153,7 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
         ..Default::default()
     };
     let doc_scope = DocScope {
-        read: [doc.clone()].into(),
+        read: DocScope::read_all([doc.clone()]),
         ..Default::default()
     };
     let drawer_cap = node.mint_drawer(&bob, drawer_scope.clone()).await.unwrap();

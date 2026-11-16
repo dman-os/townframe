@@ -1087,7 +1087,7 @@ impl Node {
                 self.operator().metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        read: BTreeSet::from([doc_id.clone()]),
+                        read: DocScope::read_all([doc_id.clone()]),
                         ..DocScope::default()
                     },
                     rights: Rights::USE,
@@ -1915,7 +1915,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([receipt.doc_id.clone()]),
+                    read: DocScope::read_all([receipt.doc_id.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,

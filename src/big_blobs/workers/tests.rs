@@ -144,7 +144,7 @@ impl Polls {
 
 fn metadata_scope(document: DocId, write: bool) -> DocScope {
     DocScope {
-        read: BTreeSet::from([document.clone()]),
+        read: DocScope::read_all([document.clone()]),
         write: if write {
             std::collections::BTreeMap::from([(document, big_cabinet_core::doc::DatumKinds::All)])
         } else {

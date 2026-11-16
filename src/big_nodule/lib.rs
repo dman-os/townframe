@@ -646,7 +646,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([config_doc.clone()]),
+                    read: DocScope::read_all([config_doc.clone()]),
                     write: std::collections::BTreeMap::from([(
                         config_doc.clone(),
                         big_cabinet_core::doc::DatumKinds::All,

@@ -510,7 +510,7 @@ impl Node {
                         .mint_doc(
                             actor,
                             DocScope {
-                                read: [doc.clone()].into(),
+                                read: DocScope::read_all([doc.clone()]),
                                 ..Default::default()
                             },
                         )
@@ -602,7 +602,7 @@ impl Node {
                         .mint_doc(
                             &self.drawers_actor,
                             DocScope {
-                                read: [drawer.clone()].into(),
+                                read: DocScope::read_all([drawer.clone()]),
                                 ..Default::default()
                             },
                         )
