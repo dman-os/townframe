@@ -30,5 +30,5 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-wash-runtime = { workspace = true, default-features = true }
+wash-runtime = { workspace = true, features = ["wasi-config"] }
 wasmtime.workspace = true
