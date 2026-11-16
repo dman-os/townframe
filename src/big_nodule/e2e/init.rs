@@ -337,7 +337,6 @@ async fn calls_are_not_ready_while_an_initializer_runs_and_served_once_it_succee
         Some(NoduleInitStatus {
             attempts: 1,
             error: None,
-            waiting_on: None,
         })
     );
     assert_eq!(
@@ -491,82 +490,27 @@ async fn the_idempotency_key_names_the_cartridge_revision_and_initializer() {
 }
 
 #[tokio::test]
-async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operations_grant() {
+async fn an_initializer_targeting_another_cartridges_operation_is_refused_at_admission() {
     let probe = Probe::new();
-    let remote = Probe::new();
     let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    node.admit(
-        operator,
-        init_cartridge(
-            "alpha",
-            "1.0.0",
-            &[PING],
-            &[REMOTE],
-            &[("sync", REMOTE, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-
-    // Nobody provides the operation yet: the nodule waits, which is not an attempt.
-    let record = node.set_enabled_record(ALPHA).await;
-    assert_eq!(record.readiness, Readiness::Initializing);
-    assert_eq!(
-        record.init,
-        Some(NoduleInitStatus {
-            attempts: 0,
-            error: None,
-            waiting_on: Some(REMOTE.to_owned()),
-        })
-    );
-    let nodule_actor = record.actor.unwrap().actor_id;
-    let revision = record.revision.unwrap();
-
-    node.dispatch
-        .router
-        .register(
-            "remote",
-            [(
-                REMOTE.to_owned(),
-                Operation::unchecked(Some(OperationKind::Query)),
-            )],
-            ProviderState::Ready(ProviderKind::BuiltIn(
-                Arc::clone(&remote) as Arc<dyn Provider>
-            )),
+    let error = node
+        .admit(
+            node.operator(),
+            init_cartridge(
+                "alpha",
+                "1.0.0",
+                &[PING],
+                &[REMOTE],
+                &[("sync", REMOTE, RunMode::Once)],
+            ),
         )
-        .unwrap();
-    // Without a grant dispatch refuses the nodule's actor, and the provider is never entered.
-    node.touch(ALPHA).await;
-    let record = node.until(ALPHA, Readiness::InitFailed).await;
-    let init = record.init.unwrap();
-    assert_eq!(init.attempts, 1);
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
-        init.error.as_deref().unwrap().contains("does not permit"),
-        "{init:?}"
+        error.contains("not implemented by a routine of this cartridge"),
+        "{error}"
     );
-    assert!(remote.calls().is_empty());
-
-    // A grant that does not cover the operation is as good as none.
-    node.grant_operations(ALPHA, &["org.example.other"]).await;
-    let record = node.until(ALPHA, Readiness::InitFailed).await;
-    assert_eq!(record.init.unwrap().attempts, 2);
-    assert!(remote.calls().is_empty());
-
-    let record = node.grant_operations(ALPHA, &["org.example.remote"]).await;
-    assert!(record.methods.unwrap().granted);
-    node.until(ALPHA, Readiness::Ready).await;
-    assert_eq!(
-        remote.calls(),
-        [Call {
-            operation: REMOTE.to_owned(),
-            idempotency_key: Some(format!("nodule/{ALPHA}/{revision}/sync")),
-            // The call is the nodule actor's own, not the operator's or the service's.
-            actor: nodule_actor,
-        }]
-    );
-    // The foreign target is not the nodule's handler.
-    assert!(probe.calls().is_empty());
     node.shutdown().await;
 }
 
@@ -616,92 +560,6 @@ async fn a_result_from_a_superseded_revision_is_dropped() {
     node.restart_nodules().await.unwrap();
     node.until(ALPHA, Readiness::Ready).await;
     assert_eq!(probe.operations(), [SETUP, SETUP]);
-    node.shutdown().await;
-}
-
-#[tokio::test]
-async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle() {
-    let probe = Probe::new();
-    let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    let alpha_ping = "org.example.alpha.ping";
-    let beta_ping = "org.example.beta.ping";
-    node.admit(
-        operator,
-        init_cartridge(
-            "alpha",
-            "1.0.0",
-            &[alpha_ping],
-            &[beta_ping],
-            &[("needs-beta", beta_ping, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-    node.admit(
-        operator,
-        init_cartridge(
-            "beta",
-            "1.0.0",
-            &[beta_ping],
-            &[alpha_ping],
-            &[("needs-alpha", alpha_ping, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-    node.set_enabled(ALPHA, true).await;
-    node.set_enabled(example_cartridge!("beta"), true).await;
-
-    // Each saw the other unregistered or not blocked yet; the next reconcile sees both waiting
-    // on each other, and each reports it.
-    node.touch(ALPHA).await;
-    for record in node.list_records().await {
-        assert_eq!(record.readiness, Readiness::InitFailed, "{record:?}");
-        let error = record.init.unwrap().error.unwrap();
-        assert!(error.contains("dependency cycle"), "{error}");
-    }
-    // Waiting is not invoking.
-    assert!(probe.calls().is_empty());
-    node.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_path() {
-    let probe = Probe::new();
-    let node = node_hosting(&probe).await;
-    let operator = node.operator();
-    let beta_ping = "org.example.beta.ping";
-    node.admit(
-        operator,
-        init_cartridge(
-            "alpha",
-            "1.0.0",
-            &[PING],
-            &[beta_ping],
-            &[("needs-beta", beta_ping, RunMode::Once)],
-        ),
-    )
-    .await
-    .unwrap();
-    // Beta is installed after alpha but stays disabled, so nobody provides its operation.
-    node.admit(
-        operator,
-        init_cartridge("beta", "1.0.0", &[beta_ping], &[], &[]),
-    )
-    .await
-    .unwrap();
-    node.grant_operations(ALPHA, &["org.example.beta"]).await;
-    let record = node.set_enabled_record(ALPHA).await;
-    assert_eq!(record.readiness, Readiness::Initializing);
-    assert_eq!(record.init.unwrap().waiting_on.as_deref(), Some(beta_ping));
-
-    // Enabling beta is the only change: its transition to ready wakes alpha, whose
-    // initializer then runs through dispatch (alpha sorts before beta, so a plain reconcile
-    // would have looked at beta too early).
-    node.set_enabled(example_cartridge!("beta"), true).await;
-    node.until(ALPHA, Readiness::Ready).await;
-    assert_eq!(probe.operations(), [beta_ping]);
     node.shutdown().await;
 }
 
