@@ -222,15 +222,11 @@ impl Nodule {
             initialization: self
                 .initialization
                 .iter()
-                .map(|init| {
-                    (
-                        init.key.clone(),
-                        big_cartridges_core::Initializer {
-                            target: init.target.parse().unwrap(),
-                            mode: init.mode.clone(),
-                            extra: Default::default(),
-                        },
-                    )
+                .map(|init| big_cartridges_core::Initializer {
+                    key: init.key.clone(),
+                    target: init.target.parse().unwrap(),
+                    mode: init.mode.clone(),
+                    extra: Default::default(),
                 })
                 .collect(),
             bindings: self.bindings.clone(),
@@ -861,7 +857,7 @@ fn initializer_keys_are_present_and_unique() {
     let mut again = repeated.initialization[0].clone();
     again.mode = RunMode::EveryStart;
     repeated.initialization.push(again);
-    repeated.admit(Some(PHOTOS)).unwrap();
+    refuse(repeated, "initialization[1].key");
 
     // The key is a required field of the description, so a datum without one never parses.
     let mut value = serde_json::to_value(photos()).unwrap();

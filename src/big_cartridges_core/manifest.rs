@@ -131,14 +131,8 @@ pub struct Nodule {
     )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub local_state: BTreeMap<String, LocalState>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<String, BTreeMap<String, serde_json::Value>>")
-    )]
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub initialization: BTreeMap<String, Initializer>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initialization: Vec<Initializer>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub bindings: IndexMap<String, serde_json::Value>,
     #[serde(flatten)]
@@ -225,6 +219,7 @@ pub enum StoreMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Initializer {
+    pub key: String,
     pub target: Nsid,
     pub mode: RunMode,
     #[serde(flatten)]
