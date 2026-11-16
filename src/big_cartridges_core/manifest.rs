@@ -125,28 +125,10 @@ pub struct ImageResource {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Nodule {
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<String, BTreeMap<String, serde_json::Value>>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub routines: BTreeMap<String, Routine>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<String, BTreeMap<String, serde_json::Value>>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub revisioned_stores: BTreeMap<String, RevisionedStore>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<String, BTreeMap<String, serde_json::Value>>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub local_state: BTreeMap<String, LocalState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
