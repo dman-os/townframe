@@ -9,6 +9,7 @@ use http::HeaderValue;
 use http::Method;
 use http::StatusCode;
 use http::header;
+use method_core::ByteBody;
 use method_core::HttpInput;
 use method_core::HttpMethod;
 use method_core::MethodKind;
@@ -92,23 +93,36 @@ impl<E> From<XrpcClientError<E>> for ClientError<E> {
     }
 }
 
+/// An encoded XRPC body. JSON messages are bounded bytes; byte messages remain a
+/// pull-based stream and are never collected by the transport.
+#[derive(Debug)]
+pub enum XrpcBody {
+    Json(Vec<u8>),
+    Bytes(ByteBody),
+}
+
+impl XrpcBody {
+    pub fn json(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::Json(bytes.into())
+    }
+}
+
 /// An encoded unary request. `path` is relative to the server's base URL and carries the query
 /// string of a query method; the deadline travels in a header.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct XrpcRequest {
     pub method: Method,
     pub path: String,
     pub headers: HeaderMap,
-    pub body: Vec<u8>,
+    pub body: XrpcBody,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct XrpcResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
-    pub body: Vec<u8>,
+    pub body: XrpcBody,
 }
-
 /// The HTTP exchange failed before a response was read, or while reading it.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("{message}")]
@@ -234,9 +248,11 @@ pub fn encode_request<P: Serialize>(
                 path.push('?');
                 path.push_str(&query);
             }
-            Vec::new()
+            XrpcBody::json(Vec::new())
         }
-        HttpInput::JsonBody => serde_json::to_vec(params).map_err(|error| error.to_string())?,
+        HttpInput::JsonBody => {
+            XrpcBody::json(serde_json::to_vec(params).map_err(|error| error.to_string())?)
+        }
     };
     let mut headers = HeaderMap::new();
     write_context_headers(&mut headers, context, metadata)?;
@@ -262,12 +278,21 @@ pub fn decode_response<O, E>(
     request_id: uuid::Uuid,
     status: StatusCode,
     headers: &HeaderMap,
-    body: &[u8],
+    body: &XrpcBody,
 ) -> Result<ResponseEnvelope<O>, XrpcClientError<E>>
 where
     O: DeserializeOwned,
     E: DeserializeOwned,
 {
+    let body = match body {
+        XrpcBody::Json(body) => body,
+        XrpcBody::Bytes(_) => {
+            return Err(XrpcClientError::Protocol {
+                message: "expected a JSON XRPC response, received a byte stream".to_owned(),
+                outcome_unknown: operation.kind == MethodKind::Procedure,
+            });
+        }
+    };
     if let Err(message) = response_request_id(headers, request_id) {
         return Err(XrpcClientError::Protocol {
             message,

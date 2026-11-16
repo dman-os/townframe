@@ -10,6 +10,7 @@ use http::HeaderName;
 use http::HeaderValue;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::xrpc::TIMEOUT_HEADER;
@@ -74,7 +75,14 @@ impl HttpTransport for WasiHttp {
             .set_path_with_query(Some(&format!("/{}", request.path)))
             .expect("an encoded XRPC path is valid");
 
-        let body = request.body;
+        let body = match request.body {
+            XrpcBody::Json(body) => body,
+            XrpcBody::Bytes(_) => {
+                return Err(HttpTransportError {
+                    message: "byte request bodies are not enabled yet".to_owned(),
+                });
+            }
+        };
         wit_bindgen::spawn_local(async move {
             let remaining = body_tx.write_all(body).await;
             assert!(remaining.is_empty(), "outgoing body stream closed early");
@@ -113,7 +121,7 @@ impl HttpTransport for WasiHttp {
         Ok(XrpcResponse {
             status,
             headers,
-            body,
+            body: XrpcBody::Json(body),
         })
     }
 }

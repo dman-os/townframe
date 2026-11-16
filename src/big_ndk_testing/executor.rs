@@ -37,6 +37,7 @@ use http::StatusCode;
 use serde_json::Value;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_client_native_rs::Client;
@@ -137,19 +138,27 @@ pub(crate) struct Egress {
 
 impl HttpTransport for Egress {
     async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        let body = match request.body {
+            XrpcBody::Json(body) => body,
+            XrpcBody::Bytes(_) => {
+                return Err(HttpTransportError {
+                    message: "byte request bodies are not enabled yet".to_owned(),
+                });
+            }
+        };
         let (status, body) = egress::call(
             &self.dispatch,
             Some(self.signer),
             &request.method,
             &format!("/{}", request.path),
             &request.headers,
-            &request.body,
+            &body,
         )
         .await;
         Ok(XrpcResponse {
             status,
             headers: HeaderMap::new(),
-            body: serde_json::to_vec(&body).expect("a JSON value serializes"),
+            body: XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes")),
         })
     }
 }

@@ -365,7 +365,7 @@ impl NodeClient {
         };
         if content_type
             .as_deref()
-            .is_some_and(|mime| mime.starts_with("application/json"))
+            .is_some_and(method_core::is_json_content_type)
         {
             let mut body = Vec::new();
             while let Some(chunk) = chunks.next().await {
