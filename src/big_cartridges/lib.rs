@@ -710,3 +710,12 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
         host_stop.then(follow_stop).then(domain_stop),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn registry_schema_groups_follow_the_node_boot_admission_path() {
+        big_cabinet::schema::SchemaRepo::open(super::schema_groups())
+            .expect("cartridge and nodule registry schemas admit at node boot");
+    }
+}
