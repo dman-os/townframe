@@ -197,7 +197,7 @@ fn definite_failure_can_retry_but_unknown_outcome_requires_reopen() -> Res<()> {
 #[test]
 fn legacy_unknown_format_and_incarnation_mismatch_do_not_mutate() -> Res<()> {
     futures::executor::block_on(async {
-        for bytes in [None, Some(1), Some(999)] {
+        for bytes in [None, Some(1), Some(2), Some(999)] {
             let store = MemoryStore::default();
             let mut writer = store.writer()?;
             let mutation = match bytes {
@@ -333,6 +333,7 @@ fn authority_warm_step_has_one_commit_and_cold_replay_cannot_continue_old_lease(
                 args: "{}".into(),
                 policy: RetryPolicy::Immediate,
                 budget: RetryBudget::default(),
+                retention_ms: 0,
             },
         )
         .await?;

@@ -7,6 +7,7 @@ fn cancel(reason: &str) -> Command {
         key: "job".into(),
         incarnation: 1,
         reason: reason.into(),
+        now_ms: 0,
     }
 }
 
@@ -66,6 +67,7 @@ fn cancellation_atomically_faults_and_fences_all_late_work() {
             lease: lease.clone(),
             expected_steps: 0,
             value: "late".into(),
+            now_ms: 0,
         }),
         Err(Rejection::StaleLease)
     );
@@ -139,6 +141,7 @@ fn cancel_after_success_is_already_terminal() {
             lease,
             expected_steps: 0,
             value: "done".into(),
+            now_ms: 0,
         },
     );
 
@@ -161,6 +164,7 @@ fn retry_exhaustion_leaves_the_lease_held_for_settlement() {
                 max_retries: Some(1),
                 max_restarts: None,
             },
+            retention_ms: RETENTION,
         },
     );
     let (first, _) = grant(&mut authority, 11);
@@ -191,6 +195,7 @@ fn retry_exhaustion_leaves_the_lease_held_for_settlement() {
                 max_retries: 1,
                 last_error: "exhausted".into(),
             },
+            now_ms: 0,
         },
     );
     assert!(authority.receipts().contains_key("job"));

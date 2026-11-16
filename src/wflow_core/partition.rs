@@ -22,8 +22,8 @@ pub struct RetryBudget {
 
 /// How much of a host-reported panic message a durable fault keeps.
 ///
-/// A receipt is retained for the life of its key, and every free-text field of a
-/// fault is host-supplied and unbounded, so the authority stores only the head
+/// A receipt is retained for its configured window, and every free-text field of
+/// a fault is host-supplied and unbounded, so the authority stores only the head
 /// of each. The cap is part of the durable record: replay rejects a message
 /// longer than this rather than accepting a settlement the authority would not
 /// have written.
@@ -34,8 +34,8 @@ pub const MAX_FAULT_TEXT_BYTES: usize = 4096;
 /// This is the single place the durable text limit is applied, because every
 /// path that can put host text into a fault must obey it: a fault reaches the
 /// receipt, the result index and every later snapshot, so an unbounded string
-/// would inflate partition state for the life of the key. Truncation lands on a
-/// UTF-8 boundary so the stored string stays valid JSON.
+/// would inflate partition state for the receipt's whole retention window.
+/// Truncation lands on a UTF-8 boundary so the stored string stays valid JSON.
 pub fn bounded_fault_text(mut text: String) -> String {
     if text.len() <= MAX_FAULT_TEXT_BYTES {
         return text;

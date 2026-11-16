@@ -227,6 +227,7 @@ fn transition_key(transition: &authority::Transition) -> &str {
         | T::WaitResolved { key, .. }
         | T::RetryScheduled { key, .. }
         | T::Faulted { key, .. }
+        | T::Pruned { key, .. }
         | T::MessageAccepted { key, .. } => key,
     }
 }
@@ -713,6 +714,95 @@ async fn restart_keeps_durable_timer_deadlines() {
     }
     assert_eq!(probe.sleeper_before_runs.load(Ordering::SeqCst), 2);
     assert_eq!(probe.sleeper_after_runs.load(Ordering::SeqCst), 2);
+    runtime.stop().await;
+}
+
+/// A receipt's retention window is a durable deadline like a timer: the actor
+/// expires it itself, and the key then answers "gone" to anyone watching.
+///
+/// The parked waiter here registers while the job is still active, which is the
+/// only state in which `WatchResult` parks a caller; settlement wakes it. Zero
+/// retention puts the prune at the settlement instant, so the whole sequence is
+/// bounded by durable commits rather than by wall-clock time. After the prune a
+/// fresh watch must answer `Unknown` — the same "gone" a never-submitted key is
+/// — rather than parking on a settlement that will never come.
+#[tokio::test]
+async fn a_parked_waiter_resolves_and_a_pruned_receipt_is_gone() {
+    let store = MemoryStore::default();
+    let host = LocalNativeHost::new();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        host.register_typed("blocked", move |_cx, (): ()| {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(1u64)
+            })
+        });
+    }
+    let (runtime, mut commits) = start(&store, &host).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null").retention_ms(0))
+        .await
+        .unwrap();
+    entered.notified().await;
+
+    // Park a waiter exactly as `await_receipt` does: the actor registers the
+    // wakeup while the key is still an active job.
+    let (reply, state) = oneshot::channel();
+    runtime
+        .commands
+        .send(Command::WatchResult {
+            key: "job".into(),
+            reply,
+        })
+        .await
+        .unwrap();
+    let WatchState::Active { wakeup } = state.await.unwrap() else {
+        panic!("an active job must park its waiter");
+    };
+
+    // Epoch bump, Submitted, Granted, Completed, Pruned. Settlement wakes the
+    // parked waiter; the prune then deletes the receipt and its index row.
+    release.notify_one();
+    committed(&mut commits, 5).await;
+    wakeup
+        .await
+        .expect("settlement must wake the parked waiter");
+    assert!(
+        transitions(&runtime, "job")
+            .await
+            .iter()
+            .any(|transition| matches!(transition, authority::Transition::Pruned { .. })),
+        "the receipt was not pruned, only absent"
+    );
+    assert_eq!(runtime.result("job").await.unwrap(), None);
+    assert_eq!(runtime.await_result("job").await, None);
+    let (reply, state) = oneshot::channel();
+    runtime
+        .commands
+        .send(Command::WatchResult {
+            key: "job".into(),
+            reply,
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(state.await.unwrap(), WatchState::Unknown),
+        "a pruned receipt must not park a watcher"
+    );
+
+    // The key is free: resubmitting it is a new incarnation, not a duplicate.
+    let ack = runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+    assert_eq!(ack.disposition, authority::Disposition::Admitted);
     runtime.stop().await;
 }
 

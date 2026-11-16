@@ -6,7 +6,7 @@
 //! while each session awaiting its next yield remains abortable by key and lease.
 //! Late creation/yield completion is fenced against current authority state.
 //!
-//! Cancellation first commits and indexes a permanent fault receipt, then aborts
+//! Cancellation first commits and indexes a fault receipt, then aborts
 //! or drops process-local activation state, clears deadlines, forgets host state,
 //! and wakes result waiters. Unexpected current-lease activation loss is durably
 //! revoked and re-granted within the submission's restart budget.
@@ -51,10 +51,18 @@
 //! parks the session again, and for a wait resolved between the grant and the
 //! re-attach (a timer coming due, a message arriving) resumes it with the
 //! committed value.
+//!
+//! A settled receipt keeps the job key reserved until its retention window
+//! elapses. The wheel also arms one deadline per receipt, at the receipt's own
+//! absolute `retained_until_ms`; when it fires the actor commits
+//! `Command::Prune`, which deletes the receipt and its result-index row and
+//! wakes anyone still watching the key. A resubmission after that is a new
+//! incarnation with an empty journal.
 
 use std::collections::BTreeSet;
 use std::hash::DefaultHasher;
 use std::hash::Hasher;
+use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use futures::FutureExt;
@@ -98,6 +106,14 @@ const DEFAULT_COMPACTION_PAGE: NonZeroUsize = NonZeroUsize::new(512).unwrap();
 const SNAPSHOT_TRANSITIONS: u64 = 100;
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
 const RESULT_INDEX_PREFIX: &[u8] = b"result/";
+
+/// How long a receipt is kept when neither the submission nor the runtime
+/// configuration says otherwise. One day mirrors the platform this retention
+/// window was modelled on.
+const DEFAULT_RETENTION_MS: NonZeroU64 = NonZeroU64::new(24 * 60 * 60 * 1000).unwrap();
+/// The ceiling a submission's retention is clamped to, so one caller cannot
+/// pin receipts in the partition indefinitely.
+const MAX_RETENTION_MS: NonZeroU64 = NonZeroU64::new(7 * 24 * 60 * 60 * 1000).unwrap();
 
 /// Attempts at one durable append before the actor stops serving.
 ///
@@ -151,6 +167,10 @@ pub struct Submission {
     invocation: Invocation,
     policy: RetryPolicy,
     budget: RetryBudget,
+    /// How long the settled receipt is retained, measured from settlement.
+    /// `None` takes the runtime's configured default; either way the value is
+    /// clamped to the configured ceiling and frozen at admission.
+    retention_ms: Option<u64>,
 }
 
 impl Submission {
@@ -174,6 +194,7 @@ impl Submission {
                 max_retries: Some(8),
                 max_restarts: Some(3),
             },
+            retention_ms: None,
         }
     }
 
@@ -186,6 +207,14 @@ impl Submission {
     /// Bounds on retry and restart loops; `None` explicitly opts into no bound.
     pub fn budget(mut self, budget: RetryBudget) -> Self {
         self.budget = budget;
+        self
+    }
+
+    /// How long the settled receipt is retained. The runtime clamps this to
+    /// `AuthorityRuntimeConfig::retention_max_ms`; zero is allowed and frees the
+    /// key as soon as the settlement is durable.
+    pub fn retention_ms(mut self, retention_ms: u64) -> Self {
+        self.retention_ms = Some(retention_ms);
         self
     }
 }
@@ -304,12 +333,19 @@ impl JobHandle {
 pub struct AuthorityRuntimeConfig {
     /// Maximum number of journal entries reclaimed by one maintenance turn.
     pub compaction_page_size: NonZeroUsize,
+    /// How long a settled receipt is retained when a submission does not name
+    /// its own window.
+    pub retention_default_ms: NonZeroU64,
+    /// Ceiling applied to every submission's retention, including the default.
+    pub retention_max_ms: NonZeroU64,
 }
 
 impl Default for AuthorityRuntimeConfig {
     fn default() -> Self {
         Self {
             compaction_page_size: DEFAULT_COMPACTION_PAGE,
+            retention_default_ms: DEFAULT_RETENTION_MS,
+            retention_max_ms: MAX_RETENTION_MS,
         }
     }
 }
@@ -574,7 +610,7 @@ impl AuthorityRuntime {
         }
     }
 
-    /// Durably cancels `key`. The permanent cancellation receipt is committed
+    /// Durably cancels `key`. The cancellation receipt is committed
     /// before the actor aborts or drops any running/parked session, and every
     /// late completion is fenced by the removed lease.
     pub async fn cancel(
@@ -702,14 +738,23 @@ struct Spawned {
 /// so the wheel is rebuilt from the journal/snapshot on recovery.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum DeadlineRef {
-    Timer { key: String, step: u64 },
-    Retry { key: String },
+    Timer {
+        key: String,
+        step: u64,
+    },
+    Retry {
+        key: String,
+    },
+    /// A receipt's retention deadline; firing it proposes `Command::Prune`.
+    Prune {
+        key: String,
+    },
 }
 
 impl DeadlineRef {
     fn belongs_to(&self, candidate: &str) -> bool {
         match self {
-            Self::Timer { key, .. } | Self::Retry { key } => key == candidate,
+            Self::Timer { key, .. } | Self::Retry { key } | Self::Prune { key } => key == candidate,
         }
     }
 }
@@ -1030,6 +1075,7 @@ impl<W: Writer> Actor<W> {
                     key: key.clone(),
                     incarnation: job.incarnation,
                     reason,
+                    now_ms: now_ms(),
                 };
                 let (ack, intents) = match self.commit(command).await {
                     Ok(committed) => committed,
@@ -1048,7 +1094,7 @@ impl<W: Writer> Actor<W> {
                         return Err(halt);
                     }
                 };
-                // The permanent fault receipt and result index are committed
+                // The fault receipt and result index are committed
                 // before process-local activation state is torn down.
                 self.settle_intents(intents);
                 let _cancelled = reply.send(Ok(ack));
@@ -1059,7 +1105,8 @@ impl<W: Writer> Actor<W> {
         }
     }
 
-    /// Rebuilds the deadline wheel from durable timer waits and retries.
+    /// Rebuilds the deadline wheel from durable timer waits, retries, and
+    /// receipts awaiting retention expiry.
     fn arm_recovered_deadlines(&mut self) {
         for (key, job) in self.authority.jobs() {
             if let Some(authority::Wait {
@@ -1080,6 +1127,12 @@ impl<W: Writer> Actor<W> {
                 self.deadlines
                     .insert((retry.fire_at_ms, DeadlineRef::Retry { key: key.clone() }));
             }
+        }
+        for (key, receipt) in self.authority.receipts() {
+            self.deadlines.insert((
+                receipt.retained_until_ms,
+                DeadlineRef::Prune { key: key.clone() },
+            ));
         }
     }
 
@@ -1124,6 +1177,37 @@ impl<W: Writer> Actor<W> {
                     }
                     let incarnation = self.authority.jobs()[&key].incarnation;
                     self.grant(key, incarnation).await?;
+                }
+                DeadlineRef::Prune { key } => {
+                    let Some(retained_until_ms) = self
+                        .authority
+                        .receipts()
+                        .get(&key)
+                        .map(|r| r.retained_until_ms)
+                    else {
+                        // Already pruned, or the key was pruned and resubmitted:
+                        // either way this wheel entry names no live receipt.
+                        continue;
+                    };
+                    if retained_until_ms > now {
+                        // Waking a hair before the wall-clock instant re-arms at
+                        // the durable deadline rather than proposing a prune the
+                        // authority would reject as early.
+                        self.deadlines
+                            .insert((retained_until_ms, DeadlineRef::Prune { key }));
+                        continue;
+                    }
+                    let intents = self
+                        .commit_accepted(authority::Command::Prune {
+                            key: key.clone(),
+                            at_ms: now,
+                        })
+                        .await?;
+                    assert!(intents.is_empty(), "prune produced unexpected intents");
+                    // The receipt and its result-index row are durable-deleted;
+                    // a caller still watching this key must observe "gone"
+                    // rather than wait for a settlement that will never come.
+                    self.waiters.wake(&key);
                 }
             }
         }
@@ -1187,17 +1271,27 @@ impl<W: Writer> Actor<W> {
             invocation,
             policy,
             budget,
+            retention_ms,
         } = submission;
         if !self.host.contains_wflow(&invocation.wflow_key) {
             let _cancelled = reply.send(Err(SubmitError::UnknownWorkflow));
             return Ok(());
         }
+        // Resolution happens here, at submission: the caller's window wins,
+        // otherwise the runtime default applies, and the configured ceiling
+        // clamps either. The authority freezes the resolved duration on the job;
+        // the absolute deadline is stamped at settlement, where the window
+        // actually starts and the host supplies the clock.
+        let retention_ms = retention_ms
+            .unwrap_or(self.config.retention_default_ms.get())
+            .min(self.config.retention_max_ms.get());
         let args = serde_json::to_string(&invocation).expect(ERROR_JSON);
         let command = authority::Command::Submit {
             key: key.clone(),
             args,
             policy,
             budget,
+            retention_ms,
         };
         let ack = match self.commit(command).await {
             Ok((ack, _)) => ack,
@@ -1353,7 +1447,9 @@ impl<W: Writer> Actor<W> {
 
     /// Finalizes settlement only after the compact receipt and result index are
     /// durable: aborts running work, drops parked work, clears runtime deadlines,
-    /// forgets host state, and wakes result waiters.
+    /// forgets host state, and wakes result waiters. It then arms the receipt's
+    /// retention deadline, because the receipt — not the settled job — is now
+    /// what the wheel must expire.
     fn settled(&mut self, key: String) {
         if let Some((_, abort)) = self.running.remove(&key) {
             abort.abort();
@@ -1363,6 +1459,11 @@ impl<W: Writer> Actor<W> {
             .retain(|(_, reference)| !reference.belongs_to(&key));
         self.host.forget_job(&key);
         self.waiters.wake(&key);
+        // The receipt is durable by now, so its absolute deadline is the one
+        // fact the wheel needs; replay re-arms the same value from the snapshot.
+        let retained_until_ms = self.authority.receipts()[&key].retained_until_ms;
+        self.deadlines
+            .insert((retained_until_ms, DeadlineRef::Prune { key }));
     }
 
     fn park(
@@ -1634,6 +1735,7 @@ impl<W: Writer> Actor<W> {
             key: key.clone(),
             lease,
             failure,
+            now_ms: now_ms(),
         };
         let intents = match self.commit(command).await {
             Ok((_, intents)) => intents,
@@ -1807,6 +1909,7 @@ impl<W: Writer> Actor<W> {
             key: key.clone(),
             lease: lease.clone(),
             value: serde_json::to_string(result).expect(ERROR_JSON),
+            now_ms: now_ms(),
         };
         let intents = match self.commit(command).await {
             Ok((_, intents)) => intents,
@@ -1898,22 +2001,42 @@ impl<W: Writer> Actor<W> {
             .expect(ERROR_JSON)
             .into();
         let indexes = match &proposal.transition {
-            authority::Transition::Completed { key, terminal } => {
-                let receipt = self.authority.jobs()[key]
-                    .receipt(authority::Outcome::Completed(terminal.clone()));
+            authority::Transition::Completed {
+                key,
+                terminal,
+                retained_until_ms,
+            } => {
+                let receipt = self.authority.jobs()[key].receipt(
+                    authority::Outcome::Completed(terminal.clone()),
+                    *retained_until_ms,
+                );
                 vec![Mutation {
                     key: result_index_key(key),
                     value: Some(serde_json::to_vec(&receipt).expect(ERROR_JSON).into()),
                 }]
             }
-            authority::Transition::Faulted { key, fault, .. } => {
-                let receipt =
-                    self.authority.jobs()[key].receipt(authority::Outcome::Faulted(fault.clone()));
+            authority::Transition::Faulted {
+                key,
+                fault,
+                retained_until_ms,
+                ..
+            } => {
+                let receipt = self.authority.jobs()[key].receipt(
+                    authority::Outcome::Faulted(fault.clone()),
+                    *retained_until_ms,
+                );
                 vec![Mutation {
                     key: result_index_key(key),
                     value: Some(serde_json::to_vec(&receipt).expect(ERROR_JSON).into()),
                 }]
             }
+            // The receipt lives in the result index too, so pruning must delete
+            // that row in the same durable append: otherwise the key would look
+            // settled to a reader after the authority had freed it.
+            authority::Transition::Pruned { key, .. } => vec![Mutation {
+                key: result_index_key(key),
+                value: None,
+            }],
             _ => Vec::new(),
         };
         let position = self

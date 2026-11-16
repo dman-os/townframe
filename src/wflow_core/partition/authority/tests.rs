@@ -4,6 +4,10 @@ use wflow_wdk::types::RetryPolicy;
 
 mod cancellation;
 
+/// The retention window every test submission freezes. Deadlines are absolute,
+/// so `retained_until_ms` is this value plus the settle command's `now_ms`.
+const RETENTION: u64 = 1_000;
+
 fn commit(authority: &mut Authority, command: Command) -> (Ack, Vec<Intent>) {
     let Decision::Commit(proposal) = authority.prepare(command).unwrap() else {
         panic!("command must commit")
@@ -19,6 +23,7 @@ fn submit_command() -> Command {
         args: "args".into(),
         policy: RetryPolicy::Immediate,
         budget: RetryBudget::default(),
+        retention_ms: RETENTION,
     }
 }
 
@@ -27,11 +32,12 @@ fn submit(authority: &mut Authority) {
 }
 
 fn grant(authority: &mut Authority, worker: u64) -> (Lease, Vec<Step>) {
+    let incarnation = authority.jobs()["job"].incarnation;
     let (_, intents) = commit(
         authority,
         Command::Grant {
             key: "job".into(),
-            incarnation: 1,
+            incarnation,
             worker,
             now_ms: 0,
         },
@@ -174,6 +180,7 @@ fn snapshot_suffix_and_full_replay_agree() {
             lease,
             expected_steps: 1,
             value: "done".into(),
+            now_ms: 0,
         },
     );
     let full_log = authority.suffix().to_vec();
@@ -206,12 +213,13 @@ fn snapshot_suffix_and_full_replay_agree() {
                 },
                 position: 4,
             }),
+            retained_until_ms: RETENTION,
         }
     );
 }
 
 #[test]
-fn terminal_receipt_is_permanent_and_submission_stays_idempotent() {
+fn terminal_receipt_reserves_the_key_and_submission_stays_idempotent() {
     let mut authority = Authority::new(7, 1);
     submit(&mut authority);
     let (lease, _) = grant(&mut authority, 11);
@@ -220,6 +228,7 @@ fn terminal_receipt_is_permanent_and_submission_stays_idempotent() {
         lease: lease.clone(),
         expected_steps: 0,
         value: "done".into(),
+        now_ms: 0,
     };
     let (ack, intents) = commit(&mut authority, command.clone());
     assert_eq!(ack.disposition, Disposition::Completed);
@@ -496,6 +505,7 @@ fn messages_queue_deduplicate_and_resolve_waits() {
             lease,
             expected_steps: 2,
             value: "done".into(),
+            now_ms: 0,
         },
     );
     assert_eq!(
@@ -519,6 +529,7 @@ fn waiting_job_cannot_complete() {
             lease,
             expected_steps: 0,
             value: "done".into(),
+            now_ms: 0,
         }),
         Err(Rejection::OutOfOrder)
     );
@@ -529,6 +540,7 @@ fn fail(lease: &Lease, failure: JobFailure) -> Command {
         key: "job".into(),
         lease: lease.clone(),
         failure,
+        now_ms: 0,
     }
 }
 
@@ -552,6 +564,7 @@ fn parked_job_regrants_do_not_charge_the_restart_budget() {
                     max_retries: None,
                     max_restarts: Some(1),
                 },
+                retention_ms: RETENTION,
             },
         );
         let (lease, _) = grant(&mut authority, 11);
@@ -598,6 +611,7 @@ fn assert_fault_survives_recovery(budget: RetryBudget, failure: JobFailure) {
             args: "args".into(),
             policy: RetryPolicy::Immediate,
             budget,
+            retention_ms: RETENTION,
         },
     );
     let (lease, _) = grant(&mut authority, 11);
@@ -669,6 +683,7 @@ fn every_authority_fault_survives_replay_and_snapshot_restore() {
             key: "job".into(),
             incarnation: 1,
             reason: "operator".into(),
+            now_ms: 0,
         },
     );
 
@@ -685,6 +700,7 @@ fn every_authority_fault_survives_replay_and_snapshot_restore() {
                 max_retries: None,
                 max_restarts: Some(0),
             },
+            retention_ms: RETENTION,
         },
     );
     let (lease, _) = grant(&mut exhausted, 11);
@@ -783,6 +799,7 @@ fn a_fault_the_durable_log_cannot_recompute_is_rejected() {
                 max_retries: Some(1),
                 max_restarts: Some(1),
             },
+            retention_ms: RETENTION,
         },
     );
     let (lease, _) = grant(&mut authority, 11);
@@ -844,7 +861,7 @@ fn the_durable_panic_message_is_bounded() {
     ));
 }
 
-/// The fingerprint is written into permanent receipts, so the construction is
+/// The fingerprint is written into durable receipts, so the construction is
 /// part of the durable format: this vector must not change without a receipt
 /// and snapshot format bump.
 #[test]
@@ -870,6 +887,172 @@ fn a_snapshot_without_a_format_version_is_rejected() {
         error.to_string().contains("snapshot format"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn a_version_one_snapshot_is_rejected_with_the_receipt_shape_change() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let mut snapshot = authority.snapshot();
+    snapshot.format = 1;
+    let error = Authority::recover(7, 2, Some(snapshot), &[]).unwrap_err();
+    assert!(
+        error.to_string().contains("snapshot format"),
+        "unexpected error: {error}"
+    );
+}
+
+fn prune(at_ms: u64) -> Command {
+    Command::Prune {
+        key: "job".into(),
+        at_ms,
+    }
+}
+
+/// Settles `job` at host-clock `settled_at` and returns the receipt deadline.
+fn settle(authority: &mut Authority, lease: Lease, settled_at: u64) -> u64 {
+    commit(
+        authority,
+        Command::Complete {
+            key: "job".into(),
+            lease,
+            expected_steps: authority.jobs()["job"].steps.len() as u64,
+            value: "done".into(),
+            now_ms: settled_at,
+        },
+    );
+    authority.receipts()["job"].retained_until_ms
+}
+
+#[test]
+fn expired_receipt_is_pruned_and_the_key_reexecutes_as_a_new_incarnation() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let (lease, _) = grant(&mut authority, 11);
+    commit(&mut authority, step(&lease, 0, "first"));
+    let deadline = settle(&mut authority, lease, 40);
+    assert_eq!(deadline, 40 + RETENTION);
+    assert_eq!(authority.jobs().len(), 0, "settled job is a receipt");
+
+    let (ack, intents) = commit(&mut authority, prune(deadline));
+    assert_eq!(
+        ack,
+        Ack {
+            position: 5,
+            disposition: Disposition::Completed,
+        }
+    );
+    assert!(intents.is_empty(), "a prune has no host-side intent");
+    assert!(
+        authority.receipts().is_empty(),
+        "the receipt died at its deadline"
+    );
+    assert!(authority.jobs().is_empty());
+
+    // The key is free: a different payload is a new incarnation, not a
+    // payload conflict, and it starts from an empty step log.
+    let (ack, _) = commit(
+        &mut authority,
+        Command::Submit {
+            key: "job".into(),
+            args: "different".into(),
+            policy: RetryPolicy::Immediate,
+            budget: RetryBudget::default(),
+            retention_ms: RETENTION,
+        },
+    );
+    assert_eq!(ack.disposition, Disposition::Admitted);
+    assert_eq!(authority.jobs()["job"].incarnation, 2);
+    assert!(authority.jobs()["job"].steps.is_empty());
+    let (_, replay) = grant(&mut authority, 12);
+    assert!(replay.is_empty(), "the new incarnation replays no old step");
+}
+
+#[test]
+fn a_prune_before_the_deadline_is_rejected_and_changes_nothing() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let (lease, _) = grant(&mut authority, 11);
+    let deadline = settle(&mut authority, lease, 0);
+    let before = authority.snapshot();
+    let durable = authority.suffix().to_vec();
+    let revision = authority.revision();
+
+    assert_eq!(
+        authority.prepare(prune(deadline - 1)),
+        Err(Rejection::NotExpired)
+    );
+    assert_eq!(authority.snapshot(), before);
+    assert_eq!(authority.suffix(), durable);
+    assert_eq!(authority.revision(), revision);
+    assert!(authority.receipts().contains_key("job"));
+}
+
+#[test]
+fn a_conflicting_resubmission_is_rejected_until_the_receipt_is_pruned() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let (lease, _) = grant(&mut authority, 11);
+    let deadline = settle(&mut authority, lease, 0);
+    let conflicting = |args: &str| Command::Submit {
+        key: "job".into(),
+        args: args.into(),
+        policy: RetryPolicy::Immediate,
+        budget: RetryBudget::default(),
+        retention_ms: RETENTION,
+    };
+
+    assert_eq!(
+        authority.prepare(conflicting("different")),
+        Err(Rejection::PayloadConflict)
+    );
+    commit(&mut authority, prune(deadline));
+    let (ack, _) = commit(&mut authority, conflicting("different"));
+    assert_eq!(ack.disposition, Disposition::Admitted);
+    assert_eq!(authority.jobs()["job"].incarnation, 2);
+}
+
+#[test]
+fn a_prune_replays_and_the_key_reexecutes_from_an_empty_journal() {
+    let mut authority = Authority::new(7, 1);
+    submit(&mut authority);
+    let (lease, _) = grant(&mut authority, 11);
+    commit(&mut authority, step(&lease, 0, "first"));
+    let deadline = settle(&mut authority, lease, 10);
+    commit(&mut authority, prune(deadline));
+    let (ack, _) = commit(
+        &mut authority,
+        Command::Submit {
+            key: "job".into(),
+            args: "second-run".into(),
+            policy: RetryPolicy::Immediate,
+            budget: RetryBudget::default(),
+            retention_ms: RETENTION,
+        },
+    );
+    assert_eq!(ack.disposition, Disposition::Admitted);
+    let (lease, replay) = grant(&mut authority, 12);
+    assert!(replay.is_empty());
+    commit(&mut authority, step(&lease, 0, "second"));
+
+    let durable = authority.suffix().to_vec();
+    assert!(matches!(
+        durable.as_slice(),
+        [
+            Transition::Submitted { .. },
+            Transition::Granted { .. },
+            Transition::StepCommitted { .. },
+            Transition::Completed { .. },
+            Transition::Pruned { .. },
+            Transition::Submitted { .. },
+            Transition::Granted { .. },
+            Transition::StepCommitted { .. },
+        ]
+    ));
+    assert_recovery_equivalent(&authority, &durable, 2);
+    let from_log = Authority::recover(7, 2, None, &durable).unwrap();
+    assert_eq!(from_log.jobs()["job"].incarnation, 2);
+    assert_eq!(from_log.jobs()["job"].steps.len(), 1);
 }
 
 #[derive(Debug, Clone)]
@@ -941,6 +1124,7 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
                 max_retries: Some(1),
                 max_restarts: Some(2),
             },
+            retention_ms: RETENTION,
         }),
         Operation::Grant(worker) => job.map(|job| Command::Grant {
             key,
@@ -962,6 +1146,7 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
             lease,
             expected_steps: job.unwrap().steps.len() as u64,
             value: "done".into(),
+            now_ms,
         }),
         Operation::Revoke => lease.map(|lease| Command::Revoke { key, lease }),
         Operation::Wait(timer) => lease.map(|lease| Command::BeginWait {
@@ -1011,11 +1196,13 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
                     last_error: "transient".into(),
                 },
             },
+            now_ms,
         }),
         Operation::Cancel => job.map(|job| Command::Cancel {
             key,
             incarnation: job.incarnation,
             reason: "operator".into(),
+            now_ms,
         }),
         Operation::Recover(_) => unreachable!("recovery replaces the authority"),
     }

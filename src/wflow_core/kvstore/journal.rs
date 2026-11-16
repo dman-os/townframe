@@ -11,7 +11,9 @@ use std::ops::Bound;
 
 const METADATA_KEY: &[u8] = b"\0wflow-journal";
 const PUBLISHED_SNAPSHOT_KEY: &[u8] = b"\x03wflow-journal-published-snapshot";
-const FORMAT_VERSION: u32 = 2;
+/// Version 3 added the durable `Transition::Pruned` variant, so a version-2
+/// journal entry would otherwise fail only as a serde error during replay.
+const FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Metadata {

@@ -683,6 +683,7 @@ async fn snapshot_after_transition_threshold_reclaims_in_bounded_pages() {
         host,
         AuthorityRuntimeConfig {
             compaction_page_size: NonZeroUsize::new(1).unwrap(),
+            ..AuthorityRuntimeConfig::default()
         },
     )
     .await

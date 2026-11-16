@@ -113,6 +113,9 @@ module wflow_authority {
     progress: Progress,
     has_fault: bool,
     fault: Fault,
+    // The settled receipt's absolute retention deadline. 0 while the entry is
+    // an active job, which has no receipt yet.
+    retained_until: int,
   }
 
   type Intent = {
@@ -162,6 +165,11 @@ module wflow_authority {
     progress: Progress,
     retry: RetryWait,
     fault: Fault,
+    // The absolute retention deadline stamped on a settling record, and the
+    // host instant a prune record claims. Both are wall-clock values the
+    // authority never derives itself.
+    retained_until: int,
+    at_ms: int,
   }
 
   var state: State
@@ -170,6 +178,17 @@ module wflow_authority {
   // The fixed deadline every sampled timer wait begins with. The authority
   // never reads a clock, so its value only has to round-trip.
   pure val TIMER_FIRE_AT = 5
+
+  // The retention window every sampled submission freezes. Every settling
+  // action runs with the driver's host clock at 0, so a receipt's absolute
+  // deadline is exactly this constant, and `pruneEarly` can name 1 less.
+  pure val RETENTION_MS = 5
+
+  // The host instants a prune may name, chosen nondeterministically like a
+  // timer's deadline. `prune` admits only those at or past the receipt's
+  // deadline and `pruneEarly` only those strictly before it, so the two
+  // actions together pin the comparison rather than assuming it.
+  pure val PRUNE_INSTANTS = Set(0, RETENTION_MS - 1, RETENTION_MS)
 
   // The retry budget every sampled submission carries, and the fixed delay
   // its policy schedules. Small on purpose: one transient failure retries
@@ -264,6 +283,7 @@ module wflow_authority {
     progress: emptyProgress,
     has_fault: false,
     fault: emptyFault,
+    retained_until: 0,
   }
 
   def emptyIntent: Intent = {
@@ -292,6 +312,8 @@ module wflow_authority {
     progress: emptyProgress,
     retry: emptyRetryWait,
     fault: emptyFault,
+    retained_until: 0,
+    at_ms: 0,
   }
 
   def outcome(kind: str, position: int, disposition: str, reason: str): Outcome = {
@@ -418,7 +440,7 @@ module wflow_authority {
     }
     else if (record.kind == "complete") {
       // Settlement keeps the payload identity (`args`) and drops every active
-      // field: the record that remains is the permanent receipt, and the
+      // field: the record that remains is the compact receipt, and the
       // authority's receipt keeps the argument fingerprint, which is `args`
       // in this abstraction. See the `args` comment on `Job`.
       ...emptyJob,
@@ -428,6 +450,7 @@ module wflow_authority {
       submission_position: job.submission_position,
       has_terminal: true,
       terminal: record.terminal,
+      retained_until: record.retained_until,
     }
     else if (record.kind == "revoke") {
       ...job,
@@ -466,6 +489,7 @@ module wflow_authority {
       submission_position: job.submission_position,
       has_fault: true,
       fault: record.fault,
+      retained_until: record.retained_until,
     }
     else {
       ...job,
@@ -490,6 +514,15 @@ module wflow_authority {
         incarnation: record.incarnation,
         submission_position: position,
       }),
+    }
+    else if (record.kind == "prune") {
+      // Pruning erases the receipt entry, so the key has no record at all: it
+      // is neither an active job nor a settled receipt afterwards, and a later
+      // `submit` admits a fresh incarnation.
+      ...applied,
+      jobs: before.jobs.foldl([], (result, job) =>
+        if (job.key == record.key) result else result.append(job)
+      ),
     }
     else {
       ...applied,
@@ -561,7 +594,7 @@ module wflow_authority {
       val fault = { failure: "restarts-exhausted", restarts: restarts, retries: 0, position: state.revision + 1 }
       commit(
         state,
-        { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault },
+        { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault, retained_until: RETENTION_MS },
         [faultIntent(key, fault)],
         outcome("accepted", state.revision + 1, "completed", ""),
       )
@@ -668,7 +701,7 @@ module wflow_authority {
   }
 
   // Cancellation atomically removes the active job, fences its lease and
-  // publishes a permanent fault receipt before host-side teardown.
+  // publishes a durable fault receipt before host-side teardown.
   action cancel = {
     nondet key = KEYS.oneOf()
     all {
@@ -679,7 +712,7 @@ module wflow_authority {
         val fault = { failure: "cancelled", restarts: 0, retries: 0, position: state.revision + 1 }
         commit(
           state,
-          { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault },
+          { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault, retained_until: RETENTION_MS },
           [faultIntent(key, fault)],
           outcome("accepted", state.revision + 1, "completed", ""),
         ),
@@ -687,7 +720,7 @@ module wflow_authority {
     }
   }
 
-  // A later cancel of a cancelled receipt is rejected at the permanent
+  // A later cancel of a cancelled receipt is rejected at the durable
   // terminal boundary; cancellation is not a duplicate command.
   action duplicateCancel = {
     nondet key = KEYS.oneOf()
@@ -702,7 +735,7 @@ module wflow_authority {
     }
   }
 
-  // Every other terminal receipt has the same permanent cancellation boundary.
+  // Every other terminal receipt has the same durable cancellation boundary.
   action cancelSettled = {
     nondet key = KEYS.oneOf()
     all {
@@ -720,7 +753,7 @@ module wflow_authority {
   // log. `validate_fault` admits it from the lease the job currently holds and
   // nothing else, so this is the one fault whose only fence is "am I still the
   // activation this job leased?"; the settlement then replaces the active job
-  // with a permanent receipt. A waiting job is included on purpose: a durable
+  // with a durable receipt. A waiting job is included on purpose: a durable
   // wait suspends resumption, not the reporting of a failure.
   //
   // The fault text is not modelled. `prepare_fail` truncates every free-text
@@ -747,7 +780,7 @@ module wflow_authority {
           // record none.
           commit(
             state,
-            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault },
+            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault, retained_until: RETENTION_MS },
             [faultIntent(key, fault)],
             outcome("accepted", state.revision + 1, "completed", ""),
           )
@@ -778,7 +811,7 @@ module wflow_authority {
           }
           commit(
             state,
-            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault },
+            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault, retained_until: RETENTION_MS },
             [faultIntent(key, fault)],
             outcome("accepted", state.revision + 1, "completed", ""),
           )
@@ -956,7 +989,7 @@ module wflow_authority {
           }
           commit(
             state,
-            { ...emptyRecord, kind: "complete", key: key, terminal: terminal },
+            { ...emptyRecord, kind: "complete", key: key, terminal: terminal, retained_until: RETENTION_MS },
             [terminalIntent(key, terminal)],
             outcome("accepted", state.revision + 1, "completed", ""),
           )
@@ -972,6 +1005,48 @@ module wflow_authority {
         all {
           job.has_terminal,
           quiet(state, outcome("duplicate", job.terminal.position, "completed", ""))
+        }
+      }
+  }
+
+  // The receipt's retention window elapsed. Pruning is itself a durable
+  // transition: it deletes the receipt together with its result-index row and
+  // leaves the key with no record at all, so a resubmission is a fresh
+  // incarnation that re-executes from an empty journal. The host instant is a
+  // nondeterministic input like a timer's deadline, and admission is the same
+  // comparison replay re-checks: `at_ms` at or past the receipt's deadline.
+  action prune = {
+    nondet key = KEYS.oneOf()
+    nondet at_ms = PRUNE_INSTANTS.oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          isSettled(job),
+          at_ms >= job.retained_until,
+          commit(
+            state,
+            { ...emptyRecord, kind: "prune", key: key, at_ms: at_ms },
+            [],
+            outcome("accepted", state.revision + 1, "completed", ""),
+          )
+        }
+      }
+  }
+
+  // A prune before the deadline: rejected as `NotExpired`, and
+  // `rejectionHasNoIntents` plus the unchanged state record that the receipt,
+  // its key and its result row stay exactly where they were.
+  action pruneEarly = {
+    nondet key = KEYS.oneOf()
+    nondet at_ms = PRUNE_INSTANTS.oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          isSettled(job),
+          at_ms < job.retained_until,
+          quiet(state, outcome("rejected", 0, "", "not-expired")),
         }
       }
   }
@@ -1208,7 +1283,7 @@ module wflow_authority {
       }
   }
 
-  // A timer from before cancellation is fenced by the permanent receipt.
+  // A timer from before cancellation is fenced by the durable receipt.
   action fireAfterCancel = {
     nondet key = KEYS.oneOf()
     all {
@@ -1330,6 +1405,8 @@ module wflow_authority {
     failStaleLease,
     complete,
     duplicateComplete,
+    prune,
+    pruneEarly,
     revoke,
     beginTimerWait,
     beginMessageWait,
@@ -1411,26 +1488,41 @@ module wflow_authority {
 
   val rejectionHasNoIntents = state.outcome.kind != "rejected" or state.intents == []
 
-  // Settled jobs retain only their compact permanent receipt: active step
-  // history, leases, waits, retries, progress, and inboxes are dropped, while
-  // the payload identity and the submission header stay.
+  // Every key the state still holds is either a whole active job or a whole
+  // compact receipt, never a partial remnant of one. A settled key that has
+  // been pruned is not represented at all: `prune` erases the receipt entry in
+  // the same committed record that frees the key, and a later `submit` enters
+  // as a fresh incarnation. So "gone" is the second stable shape, not a
+  // weakened receipt predicate: an entry that is not settled must carry no
+  // terminal, no fault and no retention deadline, and one that is settled must
+  // keep exactly the compact receipt plus the deadline stamped at settlement.
   val receiptSafety = state.jobs.foldl(true, (valid, job) => valid and
-    (not(isSettled(job)) or and {
-      not(job.has_terminal and job.has_fault),
-      job.steps == [],
-      job.inbox == [],
-      job.delivered == 0,
-      not(job.leased),
-      job.lease == emptyLease,
-      not(job.waiting),
-      job.wait == emptyWait,
-      not(job.retrying),
-      job.retry == emptyRetryWait,
-      job.retry_attempts == 0,
-      job.restarts == 0,
-      not(job.has_progress),
-      job.progress == emptyProgress,
-    })
+    if (isSettled(job))
+      and {
+        not(job.has_terminal and job.has_fault),
+        job.steps == [],
+        job.inbox == [],
+        job.delivered == 0,
+        not(job.leased),
+        job.lease == emptyLease,
+        not(job.waiting),
+        job.wait == emptyWait,
+        not(job.retrying),
+        job.retry == emptyRetryWait,
+        job.retry_attempts == 0,
+        job.restarts == 0,
+        not(job.has_progress),
+        job.progress == emptyProgress,
+        job.retained_until == RETENTION_MS,
+      }
+    else
+      and {
+        not(job.has_terminal),
+        not(job.has_fault),
+        job.terminal == emptyTerminal,
+        job.fault == emptyFault,
+        job.retained_until == 0,
+      }
   )
 
   val durabilityBoundary = state.revision == durable.length() and state.durable_len == durable.length()
@@ -1453,11 +1545,12 @@ module bounded {
 
 // Single-partition instance: 1 key, 1 worker, 1 message id. Every action in
 // `step` picks one key, one worker and one message id, and no guard asks for a
-// second, distinct one, so all 38 actions stay reachable here — an action
-// histogram over 1000 sampled traces (the CI seed and nine more, 100 traces
-// each) sees 36 of them, and `retryExhausted`/`failRetriesExhausted` are
-// reached by the same step relation restricted to the retry path
-// (submit -> grant -> retry -> grantDueRetry -> retryExhausted). What this
+// second, distinct one, so all 40 actions stay reachable here — the two prune
+// arms need only a settled key, which this instance reaches like any other, so
+// the smaller constants do not narrow the action set. Sampling is a separate
+// question: `retryExhausted`/`failRetriesExhausted` share the one state with a
+// spent retry budget (submit -> grant -> retry -> grantDueRetry), so a
+// histogram can miss them even though the step relation reaches them. What this
 // instance cannot express: any relation between two partitions, a worker
 // choosing between two live leases, or two in-flight message ids.
 //

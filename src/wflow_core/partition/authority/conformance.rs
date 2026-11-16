@@ -34,6 +34,11 @@ const MAX_RETRIES: u64 = 1;
 /// Mirrors the model's `MAX_RESTARTS`: one progress-free re-run may restart,
 /// the next grant settles the job with `RestartsExhausted`.
 const MAX_RESTARTS: u64 = 1;
+/// Mirrors the model's `RETENTION_MS`: the fixed window every sampled receipt
+/// keeps. Every settling command in the driver runs with the host clock at 0,
+/// so every receipt's absolute deadline is this constant, exactly as the model
+/// records it.
+const RETENTION_MS: u64 = 5;
 
 /// The boundary names the model's `STEP_NAMES` samples from; `""` is `None`.
 fn model_step_name(name: &str) -> Option<String> {
@@ -126,6 +131,8 @@ impl Driver for AuthorityDriver {
             failStaleLease(key: String) => self.fail_stale_lease(key),
             complete(key: String) => self.complete(key),
             duplicateComplete(key: String) => self.duplicate_complete(key),
+            prune(key: String) => self.prune(key),
+            pruneEarly(key: String) => self.prune_early(key),
             revoke(key: String) => self.revoke(key),
             beginTimerWait(key: String) => self.begin_wait(key, TIMER),
             beginMessageWait(key: String) => self.begin_wait(key, WaitKind::Message),
@@ -208,6 +215,7 @@ impl AuthorityDriver {
                 max_retries: Some(MAX_RETRIES),
                 max_restarts: Some(MAX_RESTARTS),
             },
+            retention_ms: RETENTION_MS,
         });
     }
 
@@ -350,6 +358,7 @@ impl AuthorityDriver {
             key,
             incarnation,
             reason: "operator".into(),
+            now_ms: 0,
         });
     }
 
@@ -363,6 +372,7 @@ impl AuthorityDriver {
             key,
             lease,
             failure: JobFailure::Panicked("panic".into()),
+            now_ms: 0,
         });
     }
 
@@ -381,6 +391,7 @@ impl AuthorityDriver {
                 max_retries: MAX_RETRIES,
                 last_error: "transient".into(),
             },
+            now_ms: 0,
         });
     }
 
@@ -410,6 +421,7 @@ impl AuthorityDriver {
             key,
             lease,
             failure,
+            now_ms: 0,
         });
     }
 
@@ -439,6 +451,7 @@ impl AuthorityDriver {
             key,
             lease,
             failure: JobFailure::Panicked("panic".into()),
+            now_ms: 0,
         });
     }
 
@@ -449,7 +462,23 @@ impl AuthorityDriver {
             lease: job.lease.clone().unwrap(),
             expected_steps: job.steps.len() as u64,
             value: "done".into(),
+            now_ms: 0,
         });
+    }
+
+    /// The model's `prune`, run at the receipt's own durable deadline: the
+    /// earliest instant admission accepts.
+    fn prune(&mut self, key: String) {
+        let at_ms = self.authority.receipts()[&key].retained_until_ms;
+        self.execute(Command::Prune { key, at_ms });
+    }
+
+    /// The model's `pruneEarly`, one millisecond before the deadline. The
+    /// sampled retention is positive, so the instant is strictly early and the
+    /// authority must reject without touching state.
+    fn prune_early(&mut self, key: String) {
+        let at_ms = self.authority.receipts()[&key].retained_until_ms - 1;
+        self.execute(Command::Prune { key, at_ms });
     }
 
     fn duplicate_complete(&mut self, key: String) {
@@ -462,6 +491,7 @@ impl AuthorityDriver {
             lease: terminal.lease.clone(),
             expected_steps: receipt.steps,
             value: terminal.value.clone(),
+            now_ms: 0,
         });
     }
 
@@ -623,18 +653,19 @@ fn authority_conformance() {
             init: Some("init".into()),
             step: Some("step".into()),
             // Wait resolutions and terminal paths sit behind submit, grant,
-            // and begin-wait or cancel, and the always-enabled restarts and
-            // rejections dilute the sampled actions; 200 traces of 32 steps is
-            // what it takes for every action in `step` to appear. The seed is
-            // part of the configuration: `retryExhausted` and
+            // and begin-wait or cancel; the always-enabled restarts, rejections,
+            // and the two prune arms dilute the sampled actions. 200 traces of
+            // 32 steps is what it takes for every action in `step` to appear.
+            // The seed is part of the configuration: `retryExhausted` and
             // `failRetriesExhausted` share the one state with a spent retry
             // budget (submit, grant, retry, due-re-grant) and split the samples
-            // that reach it, so the seed has to be one where both are taken —
-            // this one also covers every other action, down to a fault reported
-            // from a held wait.
+            // that reach it, so the seed has to be one where both are taken.
+            // This one also covers every other action, down to a fault reported
+            // from a held wait; the previous seed stopped covering the retry
+            // pair once the prune arms were added.
             max_samples: Some(200),
             max_steps: Some(32),
-            seed: "161803".into(),
+            seed: "141421".into(),
         },
     };
     if let Err(err) = run_test(driver, config) {

@@ -112,11 +112,19 @@ impl Outcome {
     }
 }
 
-/// Compact terminal receipt retained permanently after a job settles.
+/// Compact terminal receipt retained until its retention deadline.
 ///
 /// Settling drops the job's replay step log, inbox, message deduplication map,
 /// waits, retry state, and submission payload from live authority state and
 /// snapshots while preserving idempotent submission identity and result lookup.
+/// The receipt then lives until [`Receipt::retained_until_ms`], at which point
+/// [`Transition::Pruned`] erases it and frees the key for a new incarnation.
+///
+/// This is the only retention horizon. Settlement already drops the replay log,
+/// waits, inbox and retry state, so there is nothing else to expire per job: the
+/// journal entries that recorded them are reclaimed by the existing
+/// snapshot-watermark paging. A separate journal deadline would therefore only
+/// be able to delete records the receipt no longer refers to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Receipt {
     /// Fingerprint of the submission arguments; see [`PayloadFingerprint`].
@@ -127,15 +135,19 @@ pub struct Receipt {
     pub budget: RetryBudget,
     pub steps: u64,
     pub outcome: Outcome,
+    /// The wall-clock instant after which the receipt is pruned. The settling
+    /// command stamps it from the job's frozen retention, so it is absolute:
+    /// replay re-checks the deadline but never re-resolves it against
+    /// configuration.
+    pub retained_until_ms: u64,
 }
 
 /// The stable content fingerprint of a submission's arguments.
 ///
 /// A receipt answers "was this key submitted with this exact payload?" for as
-/// long as the key stays reserved, which is forever, so it records a
-/// fingerprint instead of the payload itself. `policy` and `budget` stay
-/// compared as values, so the fingerprint replaces only the argument string in
-/// that comparison.
+/// long as the receipt lives, so it records a fingerprint instead of the payload
+/// itself. `policy` and `budget` stay compared as values, so the fingerprint
+/// replaces only the argument string in that comparison.
 ///
 /// Two FNV-1a lanes with distinct offset bases, each finished by splitmix64's
 /// finaliser. FNV-1a is byte-at-a-time over the stored string, so no
@@ -188,7 +200,7 @@ const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
 ///
 /// Applied to every variant that carries host or caller text, at the one place
 /// a fault is proposed, so no command path can commit an unbounded string. A
-/// fault's text is kept for the life of the key.
+/// fault's text is kept for the life of the receipt.
 fn bounded_failure(failure: JobFailure) -> JobFailure {
     match failure {
         JobFailure::Panicked(message) => JobFailure::Panicked(bounded_fault_text(message)),
@@ -266,6 +278,10 @@ pub struct Job {
     pub policy: RetryPolicy,
     /// Finite bounds on the retry/restart loops; unbounded by default.
     pub budget: RetryBudget,
+    /// How long the receipt this job settles into is retained, measured from
+    /// settlement. Frozen at submission from the runtime's resolved value so a
+    /// later configuration edit cannot move the deadline.
+    pub retention_ms: u64,
     /// The retry the job is parked on, if a transient failure scheduled one.
     pub retry: Option<RetryWait>,
     /// Transient retries since the last committed step or resolved wait.
@@ -293,10 +309,12 @@ impl Job {
         }
     }
 
-    /// The permanent receipt this job settles into. The only trace of the
-    /// submission payload it keeps is the argument fingerprint, so settling
-    /// does not retain the payload itself.
-    pub fn receipt(&self, outcome: Outcome) -> Receipt {
+    /// The receipt this job settles into. The authority never reads a clock, so
+    /// the caller supplies `retained_until_ms`: the job's frozen retention
+    /// added to the instant of settlement. The only trace of the task's
+    /// arguments is the fingerprint, so settling does not retain the payload
+    /// itself.
+    pub fn receipt(&self, outcome: Outcome, retained_until_ms: u64) -> Receipt {
         Receipt {
             payload: PayloadFingerprint::of(&self.args),
             incarnation: self.incarnation,
@@ -305,6 +323,7 @@ impl Job {
             budget: self.budget,
             steps: self.steps.len() as u64,
             outcome,
+            retained_until_ms,
         }
     }
 
@@ -494,6 +513,13 @@ pub enum Command {
         args: String,
         policy: RetryPolicy,
         budget: RetryBudget,
+        /// How long the receipt this submission settles into is retained,
+        /// measured from settlement. The runtime has already resolved it from
+        /// its configuration (`min(override, max)`); the authority freezes it
+        /// on the job so a later config edit cannot move an existing deadline.
+        /// The absolute deadline is stamped by the settling command, because
+        /// the window counts from settlement and the authority owns no clock.
+        retention_ms: u64,
     },
     Grant {
         key: String,
@@ -517,6 +543,9 @@ pub enum Command {
         lease: Lease,
         expected_steps: u64,
         value: String,
+        /// The host's wall clock at settlement, stamped into the receipt's
+        /// retention deadline. The authority never reads a clock itself.
+        now_ms: u64,
     },
     /// The leased invocation cannot continue. `failure` is the classified,
     /// durable reason the job settles with; the authority owns whether that
@@ -525,6 +554,8 @@ pub enum Command {
         key: String,
         lease: Lease,
         failure: JobFailure,
+        /// The host's wall clock at settlement; see [`Command::Complete`].
+        now_ms: u64,
     },
     Revoke {
         key: String,
@@ -562,11 +593,22 @@ pub enum Command {
         now_ms: u64,
         jitter_ms: u64,
     },
-    /// Atomically fences active work and settles a permanent cancellation receipt.
+    /// Atomically fences active work and settles a cancellation receipt.
     Cancel {
         key: String,
         incarnation: u64,
         reason: String,
+        /// The host's wall clock at settlement; see [`Command::Complete`].
+        now_ms: u64,
+    },
+    /// Retires a settled key once its retention window has elapsed.
+    ///
+    /// The authority reads no clock: `at_ms` is the host's instant and the
+    /// comparison against the receipt's durable deadline re-runs identically on
+    /// replay.
+    Prune {
+        key: String,
+        at_ms: u64,
     },
 }
 
@@ -578,6 +620,8 @@ pub enum Transition {
         incarnation: u64,
         policy: RetryPolicy,
         budget: RetryBudget,
+        /// The duration the eventual receipt keeps; see [`Command::Submit`].
+        retention_ms: u64,
     },
     Granted {
         key: String,
@@ -590,6 +634,10 @@ pub enum Transition {
     Completed {
         key: String,
         terminal: Terminal,
+        /// The wall-clock instant the receipt stops being retained. Stamped by
+        /// the authority when admission runs, from the settling command's clock
+        /// and the job's frozen retention, and copied verbatim on replay.
+        retained_until_ms: u64,
     },
     Revoked {
         key: String,
@@ -624,6 +672,18 @@ pub enum Transition {
         /// exhaustion (charged at grant time, when no lease is held).
         lease: Option<Lease>,
         fault: Fault,
+        /// The receipt's retention deadline; see [`Transition::Completed`].
+        retained_until_ms: u64,
+    },
+    /// The receipt's retention window elapsed at `at_ms`; the receipt is
+    /// deleted and the key is free to be submitted as a new incarnation.
+    ///
+    /// Replay re-validates the same fact admission checked: the receipt must
+    /// still exist and `at_ms` must be at or past its durable deadline.
+    Pruned {
+        key: String,
+        incarnation: u64,
+        at_ms: u64,
     },
 }
 
@@ -703,6 +763,12 @@ pub enum Rejection {
     /// budget, or the activation that reported it are not the ones this job
     /// reached.
     InvalidFault,
+    /// A prune arrived before the receipt's retention deadline. The receipt,
+    /// the key and the result-index row all stay exactly as they were.
+    NotExpired,
+    /// A prune named a key whose job is still active, so there is no receipt to
+    /// retire.
+    NotSettled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -724,8 +790,10 @@ pub struct Proposal {
 /// The journal versions its own format, but it treats the published snapshot
 /// blob as opaque JSON, so the authority owns this one: a snapshot written
 /// before the field existed deserializes `format` as 0 and is rejected at
-/// recovery instead of being misread field by field.
-pub const SNAPSHOT_FORMAT: u32 = 1;
+/// recovery instead of being misread field by field. Version 2 added the
+/// receipt's absolute retention deadline, so a version-1 blob carrying the old
+/// receipt shape is rejected loudly rather than misread.
+pub const SNAPSHOT_FORMAT: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -843,7 +911,8 @@ impl Authority {
                 args,
                 policy,
                 budget,
-            } => self.prepare_submit(key, args, policy, budget),
+                retention_ms,
+            } => self.prepare_submit(key, args, policy, budget, retention_ms),
             Command::Grant {
                 key,
                 incarnation,
@@ -864,12 +933,14 @@ impl Authority {
                 lease,
                 expected_steps,
                 value,
-            } => self.prepare_complete(key, lease, expected_steps, value),
+                now_ms,
+            } => self.prepare_complete(key, lease, expected_steps, value, now_ms),
             Command::Fail {
                 key,
                 lease,
                 failure,
-            } => self.prepare_fail(key, lease, failure),
+                now_ms,
+            } => self.prepare_fail(key, lease, failure, now_ms),
             Command::Revoke { key, lease } => self.prepare_revoke(key, lease),
             Command::BeginWait {
                 key,
@@ -897,7 +968,9 @@ impl Authority {
                 key,
                 incarnation,
                 reason,
-            } => self.prepare_cancel(key, incarnation, reason),
+                now_ms,
+            } => self.prepare_cancel(key, incarnation, reason, now_ms),
+            Command::Prune { key, at_ms } => self.prepare_prune(key, at_ms),
         }
     }
 
@@ -914,6 +987,7 @@ impl Authority {
         args: String,
         policy: RetryPolicy,
         budget: RetryBudget,
+        retention_ms: u64,
     ) -> Result<Decision, Rejection> {
         if let Some(job) = self.jobs.get(&key) {
             if job.args != args || job.policy != policy || job.budget != budget {
@@ -949,6 +1023,7 @@ impl Authority {
                 incarnation,
                 policy,
                 budget,
+                retention_ms,
             },
             Vec::new(),
             ack,
@@ -1006,6 +1081,7 @@ impl Authority {
                     incarnation,
                     lease: None,
                     fault,
+                    retained_until_ms: now_ms.saturating_add(job.retention_ms),
                 },
                 intents,
                 Ack {
@@ -1121,6 +1197,7 @@ impl Authority {
         lease: Lease,
         expected_steps: u64,
         value: String,
+        now_ms: u64,
     ) -> Result<Decision, Rejection> {
         if let Some(receipt) = self.receipts.get(&key) {
             if receipt.incarnation != lease.job_incarnation {
@@ -1155,7 +1232,11 @@ impl Authority {
             terminal: terminal.clone(),
         }];
         Ok(self.proposal(
-            Transition::Completed { key, terminal },
+            Transition::Completed {
+                key,
+                terminal,
+                retained_until_ms: now_ms.saturating_add(job.retention_ms),
+            },
             intents,
             Ack {
                 position: self.next_position(),
@@ -1176,6 +1257,7 @@ impl Authority {
         key: String,
         lease: Lease,
         failure: JobFailure,
+        now_ms: u64,
     ) -> Result<Decision, Rejection> {
         let failure = bounded_failure(failure);
         if let Some(receipt) = self.receipts.get(&key) {
@@ -1211,6 +1293,7 @@ impl Authority {
                 incarnation: lease.job_incarnation,
                 lease: Some(lease),
                 fault,
+                retained_until_ms: now_ms.saturating_add(job.retention_ms),
             },
             intents,
             Ack {
@@ -1453,14 +1536,16 @@ impl Authority {
 
     /// Atomically settles cancellation before any host-side session teardown.
     /// Removing the live job fences every late lease result, wait resolution,
-    /// retry deadline, and message while the permanent receipt preserves the key.
+    /// retry deadline, and message while the receipt preserves the key until
+    /// its retention window elapses.
     fn prepare_cancel(
         &self,
         key: String,
         incarnation: u64,
         reason: String,
+        now_ms: u64,
     ) -> Result<Decision, Rejection> {
-        self.active_job(&key, incarnation)?;
+        let job = self.active_job(&key, incarnation)?;
         let fault = Fault {
             failure: JobFailure::Cancelled {
                 reason: bounded_fault_text(reason),
@@ -1477,8 +1562,42 @@ impl Authority {
                 incarnation,
                 lease: None,
                 fault,
+                retained_until_ms: now_ms.saturating_add(job.retention_ms),
             },
             intents,
+            Ack {
+                position: self.next_position(),
+                disposition: Disposition::Completed,
+            },
+        ))
+    }
+
+    /// Retires a settled key once its retention window has elapsed.
+    ///
+    /// A receipt is the key's only durable record, so deleting it is what frees
+    /// the key: a later submission is a new incarnation and re-executes from an
+    /// empty journal. The receipt's digest and the payload-conflict check die
+    /// with it. Admission and replay share the same two facts: a receipt must
+    /// exist, and the host's instant must be at or past the receipt's durable
+    /// deadline. Neither side reads a clock.
+    fn prepare_prune(&self, key: String, at_ms: u64) -> Result<Decision, Rejection> {
+        let Some(receipt) = self.receipts.get(&key) else {
+            return Err(if self.jobs.contains_key(&key) {
+                Rejection::NotSettled
+            } else {
+                Rejection::UnknownJob
+            });
+        };
+        if at_ms < receipt.retained_until_ms {
+            return Err(Rejection::NotExpired);
+        }
+        Ok(self.proposal(
+            Transition::Pruned {
+                incarnation: receipt.incarnation,
+                key,
+                at_ms,
+            },
+            Vec::new(),
             Ack {
                 position: self.next_position(),
                 disposition: Disposition::Completed,
@@ -1642,6 +1761,7 @@ impl Authority {
                 incarnation,
                 policy,
                 budget,
+                retention_ms,
             } => {
                 if incarnation != self.next_job_incarnation + 1
                     || self.jobs.contains_key(&key)
@@ -1664,6 +1784,7 @@ impl Authority {
                         messages: BTreeMap::new(),
                         policy,
                         budget,
+                        retention_ms,
                         retry: None,
                         retry_attempts: 0,
                         restarts: 0,
@@ -1689,7 +1810,11 @@ impl Authority {
                 job.retry_attempts = 0;
                 job.steps.push(step);
             }
-            Transition::Completed { key, terminal } => {
+            Transition::Completed {
+                key,
+                terminal,
+                retained_until_ms,
+            } => {
                 let job = self.durable_job_mut(&key, terminal.lease.job_incarnation)?;
                 if job.lease.as_ref() != Some(&terminal.lease)
                     || job.wait.is_some()
@@ -1697,7 +1822,7 @@ impl Authority {
                 {
                     return Err(ferr!("invalid durable completion"));
                 }
-                let receipt = job.receipt(Outcome::Completed(terminal));
+                let receipt = job.receipt(Outcome::Completed(terminal), retained_until_ms);
                 self.jobs.remove(&key).expect("validated above");
                 self.receipts.insert(key, receipt);
             }
@@ -1745,6 +1870,7 @@ impl Authority {
                 incarnation,
                 lease,
                 fault,
+                retained_until_ms,
             } => {
                 if lease
                     .as_ref()
@@ -1754,9 +1880,26 @@ impl Authority {
                 }
                 let job = self.durable_job_mut(&key, incarnation)?;
                 job.validate_fault(&fault, lease.as_ref(), position)?;
-                let receipt = job.receipt(Outcome::Faulted(fault));
+                let receipt = job.receipt(Outcome::Faulted(fault), retained_until_ms);
                 self.jobs.remove(&key).expect("validated above");
                 self.receipts.insert(key, receipt);
+            }
+            Transition::Pruned {
+                key,
+                incarnation,
+                at_ms,
+            } => {
+                let receipt = self
+                    .receipts
+                    .get(&key)
+                    .ok_or_else(|| ferr!("durable prune names unknown receipt"))?;
+                if receipt.incarnation != incarnation {
+                    return Err(ferr!("durable prune names obsolete incarnation"));
+                }
+                if at_ms < receipt.retained_until_ms {
+                    return Err(ferr!("durable prune precedes its retention deadline"));
+                }
+                self.receipts.remove(&key).expect("validated above");
             }
         }
         self.revision = position;

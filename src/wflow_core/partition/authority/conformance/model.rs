@@ -156,6 +156,9 @@ pub(super) struct ModelJob {
     pub(super) progress: ModelProgress,
     pub(super) has_fault: bool,
     pub(super) fault: ModelFault,
+    /// Absolute retention deadline of a settled receipt; 0 while the job is
+    /// active (it has no receipt yet).
+    pub(super) retained_until: u64,
 }
 pub(super) fn model_job(key: &str, job: &Job) -> ModelJob {
     let mut inbox: Vec<Message> = job
@@ -199,6 +202,7 @@ pub(super) fn model_job(key: &str, job: &Job) -> ModelJob {
             .map_or_else(empty_progress, model_progress),
         has_fault: false,
         fault: empty_fault(),
+        retained_until: 0,
     }
 }
 pub(super) fn model_receipt(key: &str, receipt: &Receipt) -> ModelJob {
@@ -238,6 +242,7 @@ pub(super) fn model_receipt(key: &str, receipt: &Receipt) -> ModelJob {
         progress: empty_progress(),
         has_fault,
         fault,
+        retained_until: receipt.retained_until_ms,
     }
 }
 /// `Wait` with its kind flattened: a timer carries its `fire_at`, a message
@@ -387,5 +392,7 @@ pub(super) fn rejection_name(rejection: &Rejection) -> &'static str {
         Rejection::RetryPending { .. } => "retry-pending",
         Rejection::RetriesExhausted { .. } => "retries-exhausted",
         Rejection::InvalidFault => "invalid-fault",
+        Rejection::NotExpired => "not-expired",
+        Rejection::NotSettled => "not-settled",
     }
 }
