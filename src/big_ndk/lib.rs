@@ -44,6 +44,7 @@ pub use serve::Nodule;
 pub use serve::Reply;
 pub use serve::invoke;
 pub use serve::serve;
+pub use service_client_core_rs::xrpc::XrpcBody;
 pub use wasi::WasiHttp;
 pub use wasi::serve_wasi;
 
@@ -88,11 +89,11 @@ macro_rules! export_nodule {
                 &self,
                 nsid: &str,
                 cx: &$crate::Cx,
-                body: &[u8],
+                body: $crate::XrpcBody,
             ) -> impl ::core::future::Future<Output = ::core::option::Option<$crate::Reply>> {
                 async move {
                     $(
-                        if nsid == <$method as $crate::method_core::Method>::XRPC.nsid {
+                        if nsid.split('?').next().unwrap_or(nsid) == <$method as $crate::method_core::Method>::XRPC.nsid {
                             return ::core::option::Option::Some(
                                 $crate::invoke::<Self, $method>(self, cx, body).await,
                             );

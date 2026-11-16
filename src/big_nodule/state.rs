@@ -2660,10 +2660,10 @@ fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Op
                     });
             (
                 nsid.clone(),
-                Operation {
-                    lexicon,
-                    ..Operation::unchecked(*kind)
-                },
+                lexicon.map_or_else(
+                    || Operation::unchecked(*kind),
+                    |source| Operation::declared(*kind, source),
+                ),
             )
         })
         .collect()

@@ -20,6 +20,7 @@ mod sqlite {
 }
 mod cartridge_docs;
 pub mod egress;
+pub use service_client_core_rs::xrpc::XrpcBody;
 pub mod executor;
 mod state;
 mod store;

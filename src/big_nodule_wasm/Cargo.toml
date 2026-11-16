@@ -18,6 +18,7 @@ big_cabinet_core = { workspace = true, features = ["manifest"] }
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 method_core.workspace = true
+
 big_nodule.workspace = true
 big_nodule_core = { workspace = true, features = ["schemars"] }
 big_cartridges_core.workspace = true
@@ -32,6 +33,8 @@ wash-runtime.workspace = true
 wasmtime-wasi-http.workspace = true
 hyper.workspace = true
 http-body-util = "0.1"
+http-body = "1.0"
+futures.workspace = true
 bytes.workspace = true
 blake3.workspace = true
 # encoding, errors and state

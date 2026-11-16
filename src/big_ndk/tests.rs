@@ -98,13 +98,16 @@ async fn post(path: &str, headers: &[(&str, &str)], body: &str) -> (StatusCode, 
         &Method::POST,
         path,
         &map,
-        body.as_bytes(),
+        XrpcBody::json(body.as_bytes().to_vec()),
     )
     .await;
     let (parts, body) = response.into_parts();
     (
         parts.status,
-        serde_json::from_slice(&body).unwrap(),
+        match body {
+            XrpcBody::Json(body) => serde_json::from_slice(&body).unwrap(),
+            XrpcBody::Bytes(_) => panic!("JSON test response was bytes"),
+        },
         parts.headers,
     )
 }
@@ -159,7 +162,7 @@ async fn refusals_that_are_not_the_methods_are_bare_errors() {
         &Method::GET,
         "/xrpc/org.example.test.greet",
         &HeaderMap::new(),
-        b"",
+        XrpcBody::json(Vec::new()),
     )
     .await;
     assert_eq!(get.status(), StatusCode::NOT_FOUND);

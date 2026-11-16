@@ -167,6 +167,10 @@ pub struct Operation {
     /// The method's declared body encodings, which dispatch holds every call and answer to.
     pub input: Encoding,
     pub output: Encoding,
+    /// The media type a Lexicon-declared byte side names (a nodule's, which is owned data), which
+    /// wins over the static one in `input`/`output`'s `Encoding::Bytes`.
+    pub input_mime: Option<Arc<str>>,
+    pub output_mime: Option<Arc<str>>,
     /// The method's declaration says it is local-only (`XrpcMethod::local_only`): dispatch
     /// refuses a call whose origin is not local.
     pub local_only: bool,
@@ -181,7 +185,24 @@ impl Operation {
             privileged: false,
             input: Encoding::Json,
             output: Encoding::Json,
+            input_mime: None,
+            output_mime: None,
             local_only: false,
+        }
+    }
+
+    /// An operation of `kind` checked against the Lexicon `lexicon`, whose `input` and `output`
+    /// encodings are the body encodings the operation takes and answers (`*/*` is bytes), so a
+    /// provider with no compiled-in method, such as a nodule, declares byte bodies in its file.
+    pub fn declared(kind: Option<OperationKind>, lexicon: LexiconSource) -> Self {
+        let (input, output) = method_lexicon::body_encodings(&lexicon.file);
+        Self {
+            input: input.encoding,
+            output: output.encoding,
+            input_mime: input.mime.map(Into::into),
+            output_mime: output.mime.map(Into::into),
+            lexicon: Some(lexicon),
+            ..Self::unchecked(kind)
         }
     }
 }
@@ -230,6 +251,8 @@ pub struct ProviderEntry {
     pub privileged: bool,
     pub input: Encoding,
     pub output: Encoding,
+    pub input_mime: Option<Arc<str>>,
+    pub output_mime: Option<Arc<str>>,
     pub local_only: bool,
     pub state: ProviderState,
     pub contract: Option<Arc<Contract>>,
@@ -419,6 +442,8 @@ impl Router {
                         privileged: operation.privileged,
                         input: operation.input,
                         output: operation.output,
+                        input_mime: operation.input_mime.clone(),
+                        output_mime: operation.output_mime.clone(),
                         local_only: operation.local_only,
                         state: state.clone(),
                         contract: contracts.remove(nsid),
@@ -457,6 +482,8 @@ impl Router {
                                 && operation.privileged == held.privileged
                                 && operation.input == held.input
                                 && operation.output == held.output
+                                && operation.input_mime == held.input_mime
+                                && operation.output_mime == held.output_mime
                                 && operation.local_only == held.local_only
                                 && *state == held.state
                                 // Lexicons only matter to a provider that is called.
