@@ -113,6 +113,9 @@ fn advanced_clean_up_recycle_recomputes_the_layout_when_the_rendered_diff_lags_t
     world.instance.clean_up(true);
     assert!(code_view.instance_changed_calls.borrow().is_empty());
 
+    // `cleanUp` disabled the instance; CodeView calls `virtualizedSetup()`
+    // before it renders a recycled item (CodeView.ts:3620).
+    world.instance.file_diff().virtualized().virtualized_setup();
     render(&world, container, &first);
     world
         .instance
