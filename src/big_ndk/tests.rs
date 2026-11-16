@@ -12,6 +12,7 @@ use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_core_rs::ClientError;
@@ -224,7 +225,7 @@ impl HttpTransport for Recording {
         Ok(XrpcResponse {
             status: StatusCode::OK,
             headers: HeaderMap::new(),
-            body: serde_json::to_vec("hello back").unwrap(),
+            body: XrpcBody::json(serde_json::to_vec("hello back").unwrap()),
         })
     }
 }
