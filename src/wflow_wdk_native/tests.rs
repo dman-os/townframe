@@ -48,10 +48,10 @@ async fn native_session_yields_effect_sleep_recv_and_complete() {
         panic!("recv must yield third");
     };
     assert!(session.deliver(Arc::from("5")));
-    let Some(SessionYield::Complete(Ok(value))) = session.next_yield().await else {
-        panic!("workflow must complete");
+    let Some(SessionYield::Complete { steps: 3, result }) = session.next_yield().await else {
+        panic!("workflow must complete at the third durable step");
     };
-    assert_eq!(value, "12");
+    assert_eq!(result, Ok("12".to_owned()));
 }
 
 #[tokio::test]
@@ -72,10 +72,46 @@ async fn native_session_replays_completed_effect_without_running_it() {
             vec![ReplayStep::completed("4")],
         )
         .expect("registered workflow");
-    let Some(SessionYield::Complete(Ok(value))) = session.next_yield().await else {
-        panic!("replayed workflow must complete");
+    let Some(SessionYield::Complete { steps: 1, result }) = session.next_yield().await else {
+        panic!("replayed workflow must complete at the replayed step");
     };
-    assert_eq!(value, "4");
+    assert_eq!(result, Ok("4".to_owned()));
+}
+
+#[tokio::test]
+async fn native_session_reports_a_replay_divergence_as_its_own_class() {
+    let driver = NativeHostDriver::new();
+    driver.register_typed("diverges", |cx, (): ()| {
+        Box::pin(async move {
+            // Durable step 0 is an effect; the re-registered workflow sleeps
+            // there instead. The guest only ever sees a terminal error, so the
+            // adapter must report the engine class itself.
+            cx.sleep(Duration::from_millis(1)).await?;
+            Ok::<_, JobErrorX>(0_u64)
+        })
+    });
+
+    let session = driver
+        .spawn(
+            Arc::from("job-diverged"),
+            "diverges",
+            "null".into(),
+            vec![ReplayStep::durable(
+                &wflow_wdk::StepMeta::new(wflow_wdk::StepKind::Effect, None),
+                "1",
+            )],
+        )
+        .expect("registered workflow");
+    let Some(SessionYield::ReplayDiverged(diverged)) = session.next_yield().await else {
+        panic!("a divergent replay must be reported as the engine's divergence class");
+    };
+    assert_eq!(
+        diverged,
+        wflow_wdk::session::ReplayDivergence {
+            step: 0,
+            replayed: wflow_wdk::StepKind::Sleep,
+        }
+    );
 }
 
 #[tokio::test]
@@ -87,7 +123,10 @@ async fn native_session_maps_terminal_failure() {
     let session = driver
         .spawn(Arc::from("job-fails"), "fails", "null".into(), Vec::new())
         .expect("registered workflow");
-    let Some(SessionYield::Complete(Err(JobError::Terminal(value)))) = session.next_yield().await
+    let Some(SessionYield::Complete {
+        steps: 0,
+        result: Err(JobError::Terminal(value)),
+    }) = session.next_yield().await
     else {
         panic!("failure must be mapped to terminal job error");
     };

@@ -17,6 +17,7 @@ use wash_runtime::wit::WitWorld;
 
 use wasmtime::component::Accessor;
 use wasmtime::component::HasSelf;
+use wflow_wdk::session::ReplayDivergence;
 use wflow_wdk::session::ReplayStep;
 use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
@@ -51,6 +52,14 @@ struct ActiveJobCtx {
     cur_step: AtomicU64,
     active_step: std::sync::Mutex<Option<ActiveStepCtx>>,
     replay: std::sync::Mutex<Vec<ReplayStep>>,
+    /// The first replay divergence this invocation hit, if any.
+    ///
+    /// The plugin detects a fork inside `next-step` and must report it to the
+    /// guest as a `host-error`, so the guest's own result cannot carry the
+    /// engine class back. Recording it here lets the session report the durable
+    /// divergence once the guest run stops, even if the guest swallowed the
+    /// error.
+    diverged: std::sync::Mutex<Option<ReplayDivergence>>,
     ctx_id: Arc<str>,
 }
 
@@ -77,7 +86,11 @@ enum JobTrap {
         deets: WaitTrapDeets,
         meta: host::StepMeta,
     },
-    RunComplete(Result<String, types::JobError>),
+    RunComplete {
+        result: Result<String, types::JobError>,
+        /// The fork the plugin saw while the guest ran, if any.
+        diverged: Option<ReplayDivergence>,
+    },
 }
 
 #[derive(Debug)]
@@ -118,6 +131,16 @@ fn lookup_active_job<T>(
 }
 
 impl ActiveJobCtx {
+    /// The number of durable boundaries this invocation traversed.
+    fn steps(&self) -> u64 {
+        self.cur_step.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The divergence this invocation recorded, if any.
+    fn take_divergence(&self) -> Option<ReplayDivergence> {
+        self.diverged.lock().expect(ERROR_MUTEX).take()
+    }
+
     /// Parks the session on `trap` until the host resumes it. Cancellation or
     /// channel closure tears down the invocation and surfaces as a protocol error.
     async fn yield_and_wait_resume(&self, trap: JobTrap) -> Result<SessionResume, host::HostError> {
@@ -145,6 +168,8 @@ impl ActiveJobCtx {
 
 struct SessionHandle {
     ctx_id: Arc<str>,
+    /// The invocation itself: its step cursor and the divergence it recorded.
+    job: Arc<ActiveJobCtx>,
     resume_tx: mpsc::UnboundedSender<SessionResume>,
     yield_rx: mpsc::UnboundedReceiver<JobTrap>,
     cancel_token: CancellationToken,
@@ -208,6 +233,16 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
         let replay = job.replay.lock().expect(ERROR_MUTEX);
         let step = replay.get(step_id as usize);
         if let Err(err) = WflowPlugin::validate_replay_meta(step, step_id, &meta) {
+            // The first fork is the one the run diverged from; recording it here
+            // is what lets the session settle the job with the engine's
+            // divergence class instead of the guest's terminal error.
+            job.diverged
+                .lock()
+                .expect(ERROR_MUTEX)
+                .get_or_insert(ReplayDivergence {
+                    step: step_id,
+                    replayed: meta.kind.into(),
+                });
             return Ok(Err(err));
         }
         if let Some(ReplayStep {
@@ -497,6 +532,7 @@ impl WflowPlugin {
             ctx_id: Arc::clone(&ctx_id),
             cur_step: default(),
             active_step: None.into(),
+            diverged: None.into(),
         });
         let _old = self
             .active_jobs
@@ -507,11 +543,14 @@ impl WflowPlugin {
 
         let join_handle = tokio::spawn({
             let cancel_token = pause_cancel.clone();
+            // The guest's result cannot carry the engine's divergence class, so
+            // the trap attaches the fork the plugin saw while the guest ran.
+            let active_job = Arc::clone(&active_job);
             async move {
                 cancel_token
                     .clone()
                     .run_until_cancelled(async move {
-                        let trap = match store
+                        let result = match store
                             .run_concurrent(async move |accessor| {
                                 instance
                                     .townframe_wflow_bundle()
@@ -521,12 +560,16 @@ impl WflowPlugin {
                             .await
                             .and_then(|res| res)
                         {
-                            Ok(res) => JobTrap::RunComplete(res),
+                            Ok(res) => res,
                             Err(err) => {
                                 let terminal =
                                     types::JobError::Terminal(format!("wasm error: {err:?}"));
-                                JobTrap::RunComplete(Err(terminal))
+                                Err(terminal)
                             }
+                        };
+                        let trap = JobTrap::RunComplete {
+                            result,
+                            diverged: active_job.take_divergence(),
                         };
                         if yield_tx.send(trap).is_err() && !cancel_token.is_cancelled() {
                             panic!("{}", ERROR_CALLER);
@@ -538,6 +581,7 @@ impl WflowPlugin {
 
         Ok(SessionHandle {
             ctx_id,
+            job: active_job,
             resume_tx,
             yield_rx,
             cancel_token: pause_cancel,

@@ -167,6 +167,15 @@ pub enum JobErrorX {
     Transient(eyre::Report),
 }
 
+/// The guest-visible projection of a backend error.
+///
+/// A divergence is folded into `Terminal` for the guest, whose error taxonomy
+/// has no engine class, and the adapter keeps the typed divergence beside the
+/// run (`SessionYield::ReplayDiverged`) so the durable settlement is the
+/// engine's `ReplayDiverged` fault rather than a generic terminal string. A
+/// guest that swallows this terminal error cannot turn a fork into a success:
+/// its own step cursor still lags the durable log, which the completion guard
+/// rejects.
 impl From<BackendError> for JobErrorX {
     fn from(err: BackendError) -> Self {
         Self::Terminal(eyre::Report::new(err))

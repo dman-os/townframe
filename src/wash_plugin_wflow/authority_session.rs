@@ -5,17 +5,26 @@ use wflow_wdk::StepKind;
 use wflow_wdk::StepMeta;
 use wflow_wdk::types as shared_types;
 
+/// The component-model `step-kind` is generated in this crate, so the durable
+/// boundary the guest declared can be lifted into the shared kind the authority
+/// commits against without a WIT round-trip.
+impl From<host::StepKind> for StepKind {
+    fn from(kind: host::StepKind) -> Self {
+        match kind {
+            host::StepKind::Effect => StepKind::Effect,
+            host::StepKind::Sleep => StepKind::Sleep,
+            host::StepKind::Recv => StepKind::Recv,
+        }
+    }
+}
+
 /// The component-model `step-meta` record is generated in this crate, so the
 /// durable boundary the guest declared can be lifted into the shared type the
 /// authority commits against without a WIT round-trip.
 impl From<host::StepMeta> for StepMeta {
     fn from(meta: host::StepMeta) -> Self {
         Self {
-            kind: match meta.kind {
-                host::StepKind::Effect => StepKind::Effect,
-                host::StepKind::Sleep => StepKind::Sleep,
-                host::StepKind::Recv => StepKind::Recv,
-            },
+            kind: meta.kind.into(),
             name: meta.name,
         }
     }
@@ -59,32 +68,40 @@ impl Session for WasmSession {
                     WaitTrapDeets::Message { wait_id } => WaitYield::Message { wait_id },
                 },
             },
-            JobTrap::RunComplete(result) => {
-                SessionYield::Complete(result.map_err(|err| match err {
-                    types::JobError::Terminal(value) => shared_types::JobError::Terminal(value),
-                    types::JobError::Transient(err) => {
-                        shared_types::JobError::Transient(shared_types::TransientJobError {
-                            error_json: err.error_json,
-                            retry_policy: err.retry_policy.map(|policy| match policy {
-                                types::RetryPolicy::Immediate => {
-                                    shared_types::RetryPolicy::Immediate
-                                }
-                                types::RetryPolicy::Fixed(fixed) => {
-                                    shared_types::RetryPolicy::Fixed {
-                                        delay_ms: fixed.delay_ms,
+            JobTrap::RunComplete { result, diverged } => match diverged {
+                // A fork the plugin saw while the guest ran settles as the
+                // engine's divergence class, never as the guest's own terminal
+                // error: the same fork must produce the same durable outcome
+                // whichever side of the boundary noticed it.
+                Some(diverged) => SessionYield::ReplayDiverged(diverged),
+                None => SessionYield::Complete {
+                    steps: self.0.job.steps(),
+                    result: result.map_err(|err| match err {
+                        types::JobError::Terminal(value) => shared_types::JobError::Terminal(value),
+                        types::JobError::Transient(err) => {
+                            shared_types::JobError::Transient(shared_types::TransientJobError {
+                                error_json: err.error_json,
+                                retry_policy: err.retry_policy.map(|policy| match policy {
+                                    types::RetryPolicy::Immediate => {
+                                        shared_types::RetryPolicy::Immediate
                                     }
-                                }
-                                types::RetryPolicy::CappedExponential(exp) => {
-                                    shared_types::RetryPolicy::CappedExponential {
-                                        base_ms: exp.base_ms,
-                                        cap_ms: exp.cap_ms,
+                                    types::RetryPolicy::Fixed(fixed) => {
+                                        shared_types::RetryPolicy::Fixed {
+                                            delay_ms: fixed.delay_ms,
+                                        }
                                     }
-                                }
-                            }),
-                        })
-                    }
-                }))
-            }
+                                    types::RetryPolicy::CappedExponential(exp) => {
+                                        shared_types::RetryPolicy::CappedExponential {
+                                            base_ms: exp.base_ms,
+                                            cap_ms: exp.cap_ms,
+                                        }
+                                    }
+                                }),
+                            })
+                        }
+                    }),
+                },
+            },
         })
     }
 

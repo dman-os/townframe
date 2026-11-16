@@ -202,8 +202,12 @@ async fn start_script_counted(
     (runtime, counter)
 }
 
-fn complete(value: u64) -> SessionYield {
-    SessionYield::Complete(ok(value))
+/// A session that reached `steps` durable boundaries and returned `value`.
+fn complete(steps: u64, value: u64) -> SessionYield {
+    SessionYield::Complete {
+        steps,
+        result: ok(value),
+    }
 }
 
 fn persist(value: &str) -> SessionYield {
@@ -255,13 +259,13 @@ async fn slow_spawn_does_not_block_unrelated_work_and_late_session_is_dropped() 
         SpawnPlan::Blocked {
             gate: Arc::clone(&spawn_gate),
             session: Box::new(
-                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
             ),
         },
     );
     host.push(
         "fast",
-        SpawnPlan::Session(Box::new(ScriptSession::new([complete(2)]))),
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 2)]))),
     );
     let runtime = start_script(Arc::clone(&host)).await;
 
@@ -329,7 +333,7 @@ async fn concurrent_stop_survives_cancellation_of_first_waiter() {
         SpawnPlan::Blocked {
             gate: Arc::clone(&gate),
             session: Box::new(
-                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
             ),
         },
     );
@@ -360,7 +364,7 @@ async fn stop_aborts_a_pending_host_spawn_before_completing() {
         SpawnPlan::Blocked {
             gate: Arc::clone(&spawn_gate),
             session: Box::new(
-                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
             ),
         },
     );
@@ -385,7 +389,7 @@ async fn cancellation_aborts_a_session_parked_in_next_yield() {
     host.push(
         "blocked",
         SpawnPlan::Session(Box::new(
-            ScriptSession::new([complete(1)])
+            ScriptSession::new([complete(0, 1)])
                 .blocked(Arc::clone(&yield_gate))
                 .observed_drop(Arc::clone(&dropped)),
         )),
@@ -438,12 +442,13 @@ async fn cancellation_clears_a_durable_retry_deadline() {
     let host = ScriptHost::registered();
     host.push(
         "retrying",
-        SpawnPlan::Session(Box::new(ScriptSession::new([SessionYield::Complete(Err(
-            types::JobError::Transient(types::TransientJobError {
+        SpawnPlan::Session(Box::new(ScriptSession::new([SessionYield::Complete {
+            steps: 0,
+            result: Err(types::JobError::Transient(types::TransientJobError {
                 retry_policy: None,
                 error_json: "retry".into(),
-            }),
-        ))]))),
+            })),
+        }]))),
     );
     let store = MemoryStore::default();
     let (runtime, mut commits) = start_script_counted(&store, host).await;
@@ -479,7 +484,7 @@ async fn current_session_loss_is_revoked_and_replayed() {
     host.push("loss", SpawnPlan::Session(Box::new(ScriptSession::new([]))));
     host.push(
         "loss",
-        SpawnPlan::Session(Box::new(ScriptSession::new([complete(7)]))),
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 7)]))),
     );
     let runtime = start_script(Arc::clone(&host)).await;
     runtime
@@ -509,7 +514,7 @@ async fn resume_loss_after_step_commit_replays_durable_progress() {
     );
     host.push(
         "resume",
-        SpawnPlan::Session(Box::new(ScriptSession::new([complete(9)]))),
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1, 9)]))),
     );
     let runtime = start_script(Arc::clone(&host)).await;
     runtime
@@ -531,7 +536,7 @@ async fn deliver_loss_after_wait_resolution_replays_durable_progress() {
     );
     host.push(
         "deliver",
-        SpawnPlan::Session(Box::new(ScriptSession::new([complete(11)]))),
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1, 11)]))),
     );
     let runtime = start_script(Arc::clone(&host)).await;
     runtime
@@ -579,7 +584,7 @@ async fn result_waiters_race_permanent_receipt_publication() {
     host.push(
         "waiter",
         SpawnPlan::Session(Box::new(
-            ScriptSession::new([complete(13)]).blocked(Arc::clone(&gate)),
+            ScriptSession::new([complete(0, 13)]).blocked(Arc::clone(&gate)),
         )),
     );
     let runtime = start_script(host).await;
@@ -607,7 +612,7 @@ async fn recovery_rejects_an_unregistered_workflow() {
     host.push(
         "configured",
         SpawnPlan::Session(Box::new(
-            ScriptSession::new([complete(1)]).blocked(Arc::clone(&gate)),
+            ScriptSession::new([complete(0, 1)]).blocked(Arc::clone(&gate)),
         )),
     );
     let runtime_host = Arc::clone(&host);
@@ -634,7 +639,7 @@ async fn snapshot_follows_the_dirtying_timer_without_sleeping() {
     let host = ScriptHost::registered();
     host.push(
         "timed",
-        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1)]))),
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
     );
     let store = MemoryStore::default();
     let (runtime, mut commits) = start_script_counted(&store, host).await;
@@ -659,7 +664,7 @@ async fn snapshot_after_transition_threshold_reclaims_in_bounded_pages() {
     for _ in 0..34 {
         host.push(
             "counted",
-            SpawnPlan::Session(Box::new(ScriptSession::new([complete(1)]))),
+            SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
         );
     }
     let store = MemoryStore::default();
@@ -703,7 +708,7 @@ async fn graceful_stop_publishes_the_latest_snapshot() {
     let host = ScriptHost::registered();
     host.push(
         "final",
-        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1)]))),
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
     );
     let store = MemoryStore::default();
     let (runtime, _) = start_script_counted(&store, host).await;
@@ -728,7 +733,7 @@ async fn dropping_runtime_drains_spawns_and_publishes_final_snapshot() {
         SpawnPlan::Blocked {
             gate: Arc::clone(&gate),
             session: Box::new(
-                ScriptSession::new([complete(1)]).observed_drop(Arc::clone(&dropped)),
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
             ),
         },
     );

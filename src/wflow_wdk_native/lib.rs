@@ -31,6 +31,7 @@ use wflow_wdk::StepState;
 use wflow_wdk::WflowBackend;
 use wflow_wdk::WflowCtx;
 use wflow_wdk::run_wflow;
+use wflow_wdk::session::ReplayDivergence;
 use wflow_wdk::session::ReplayStep;
 use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
@@ -61,6 +62,12 @@ struct Shared {
     replay: Mutex<Vec<ReplayStep>>,
     cur_step: Mutex<u64>,
     active_step: Mutex<Option<ActiveStep>>,
+    /// The first replay divergence this invocation hit, if any.
+    ///
+    /// The adapter detects a fork inside a backend call, where the guest only
+    /// sees a terminal error; recording it here lets the session report the
+    /// engine class once the run stops, whichever way it stopped.
+    diverged: Mutex<Option<ReplayDivergence>>,
     yield_tx: async_channel::Sender<SessionYield>,
     resume_rx: async_channel::Receiver<SessionResume>,
     cancel: CancellationToken,
@@ -86,6 +93,14 @@ impl Shared {
                     .as_ref()
                     .is_some_and(|name| name.as_deref() != meta.name.as_deref()))
         {
+            // The first fork is the one the run diverged from; a later call
+            // cannot be reached without the guest swallowing this error, and the
+            // classification must not depend on that.
+            let mut diverged = self.diverged.lock().expect(ERROR_MUTEX);
+            diverged.get_or_insert(ReplayDivergence {
+                step: step_id,
+                replayed: meta.kind,
+            });
             return Err(BackendError::NondeterministicReplay {
                 step_id,
                 expected: StepMeta {
@@ -99,6 +114,11 @@ impl Shared {
             });
         }
         Ok(())
+    }
+
+    /// The divergence this invocation recorded, if any.
+    fn take_divergence(&self) -> Option<ReplayDivergence> {
+        self.diverged.lock().expect(ERROR_MUTEX).take()
     }
 
     async fn yield_and_wait(&self, yielded: SessionYield) -> Result<SessionResume, BackendError> {
@@ -329,15 +349,26 @@ async fn run_session(command: SpawnCommand) {
         .await;
     shared.finished.store(true, Ordering::Release);
     let Some(outcome) = outcome else { return };
-    let yielded = match outcome {
-        Ok(result) => SessionYield::Complete(result),
-        Err(payload) => {
-            let message = payload.downcast_ref::<&str>().map_or_else(
-                || "unknown panic payload".to_owned(),
-                |message| (*message).to_owned(),
-            );
-            SessionYield::Panicked(message)
-        }
+    // A recorded fork outranks whatever the guest returned for it: the guest
+    // may have turned the divergence into a terminal error, or swallowed it and
+    // returned a value or panicked, and the durable class must not depend on
+    // which. Reading the cursor after the run is complete is what makes a short
+    // run visible to the completion guard.
+    let yielded = match shared.take_divergence() {
+        Some(diverged) => SessionYield::ReplayDiverged(diverged),
+        None => match outcome {
+            Ok(result) => SessionYield::Complete {
+                steps: *shared.cur_step.lock().expect(ERROR_MUTEX),
+                result,
+            },
+            Err(payload) => {
+                let message = payload.downcast_ref::<&str>().map_or_else(
+                    || "unknown panic payload".to_owned(),
+                    |message| (*message).to_owned(),
+                );
+                SessionYield::Panicked(message)
+            }
+        },
     };
     if shared.yield_tx.send(yielded).await.is_err() && !shared.cancel.is_cancelled() {
         panic!("{}", ERROR_CALLER);
@@ -499,6 +530,7 @@ impl NativeHostDriver {
             replay: Mutex::new(replay),
             cur_step: Mutex::new(0),
             active_step: Mutex::new(None),
+            diverged: Mutex::new(None),
             yield_tx,
             resume_rx,
             cancel: CancellationToken::new(),

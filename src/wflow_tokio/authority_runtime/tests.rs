@@ -13,6 +13,7 @@ use wflow_core::kvstore::journal::JournalSnapshot;
 use wflow_core::kvstore::journal::StaleReaderError;
 use wflow_wdk::JobErrorX;
 use wflow_wdk::Json;
+use wflow_wdk::StepKind;
 
 use super::*;
 use crate::local_native_host::LocalNativeHost;
@@ -680,12 +681,22 @@ async fn receive_survives_restart_and_a_message_racing_the_replay() {
     runtime.stop().await;
 }
 
+/// The classified failure a settled receipt carries.
+fn fault_of(receipt: &authority::Receipt) -> &JobFailure {
+    match &receipt.outcome {
+        authority::Outcome::Faulted(fault) => &fault.failure,
+        authority::Outcome::Completed(terminal) => {
+            panic!("expected a fault, committed {:?}", terminal.value)
+        }
+    }
+}
+
 #[tokio::test]
-async fn nondeterministic_replay_across_restart_and_wait_resolution_fails_terminally() {
+async fn adapter_detected_replay_divergence_settles_as_a_fault() {
     let store = MemoryStore::default();
     let probe = Arc::new(Probe::default());
 
-    // 1. Commit step 0 as an Effect, then stop while step 1 is in flight.
+    // Commit step 0 as an Effect, then stop while step 1 is in flight.
     let (runtime, _) = start(&store, &host(&probe)).await;
     runtime
         .submit(Submission::new("cold_kind", "gated", "null"))
@@ -694,8 +705,10 @@ async fn nondeterministic_replay_across_restart_and_wait_resolution_fails_termin
     probe.gate_entered.notified().await;
     runtime.stop().await;
 
-    // Restart with a fresh host where `"gated"` instead sleeps at step 0:
-    // durable `ReplayStep.kind` detects the Effect -> Sleep mismatch.
+    // Restart with a fresh host where `"gated"` instead sleeps at step 0. The
+    // replay carries the durable kind, so the adapter notices the Effect ->
+    // Sleep fork before the authority is asked to commit anything, and the job
+    // must still settle as the engine's divergence class.
     let mutated_host = LocalNativeHost::new();
     mutated_host.register_typed("gated", |cx, (): ()| {
         Box::pin(async move {
@@ -703,64 +716,185 @@ async fn nondeterministic_replay_across_restart_and_wait_resolution_fails_termin
             Ok::<u64, _>(0)
         })
     });
-    mutated_host.register_typed("race_kind", |cx, (): ()| {
+
+    let (runtime, _) = start(&store, &mutated_host).await;
+    let receipt = runtime.handle("cold_kind").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&receipt),
+        &JobFailure::ReplayDiverged {
+            step: 0,
+            replayed: StepKind::Sleep,
+        }
+    );
+    runtime.stop().await;
+}
+
+/// Registers the workflow the parity test re-registers in a mutated form: an
+/// effect, then two durable receives.
+fn fork_host() -> LocalNativeHost {
+    let host = LocalNativeHost::new();
+    host.register_typed("fork", |cx, (): ()| {
         Box::pin(async move {
-            cx.effect(|| async { Ok(Json(1u64)) }).await?;
-            let Json(msg): Json<u64> = cx.recv().await?;
-            Ok(msg)
+            let first: u64 = cx.effect(|| async { Ok(Json(1_u64)) }).await?;
+            let Json(second): Json<u64> = cx.recv().await?;
+            let Json(third): Json<u64> = cx.recv().await?;
+            Ok::<_, JobErrorX>(first + second + third)
         })
     });
+    host
+}
 
-    let (runtime, mut commits) = start(&store, &mutated_host).await;
-    let Some(Err(types::JobError::Terminal(err))) = runtime.await_result("cold_kind").await else {
-        panic!("expected terminal nondeterministic replay error for cold_kind");
-    };
-    assert!(err.contains("nondeterministic"), "{err}");
+/// The mutated `"fork"`: it offers an effect at step 1, which is durably a
+/// receive, and parks on the gate after the first effect so the caller can
+/// sequence a durable change against the replay.
+fn diverging_fork_host(gate: Arc<Gate>) -> LocalNativeHost {
+    let host = LocalNativeHost::new();
+    host.register_typed("fork", move |cx, (): ()| {
+        let gate = Arc::clone(&gate);
+        Box::pin(async move {
+            cx.effect(|| async { Ok(Json(1_u64)) }).await?;
+            gate.pass().await;
+            let diverge: u64 = cx.effect(|| async { Ok(Json(99_u64)) }).await?;
+            let Json(third): Json<u64> = cx.recv().await?;
+            Ok::<_, JobErrorX>(diverge + third)
+        })
+    });
+    host
+}
 
-    // 2. Start `"race_kind"` so step 0 commits as Effect and step 1 parks on a
-    // message wait, then restart with a mutated `"race_kind"` that pauses
-    // before step 1 and runs `effect` instead of `recv` after a message
-    // resolves the wait in the authority.
-    let before_race = *commits.borrow();
+#[tokio::test]
+async fn adapter_and_authority_divergence_settle_into_the_same_receipt() {
+    // The same fork on both sides: durable step 1 is a receive, and the
+    // re-registered workflow offers an effect there. The durable outcome must not
+    // depend on which side notices first.
+
+    // A: step 1 is already durable when the runtime restarts, so the replay pins
+    // it and the adapter notices the fork inside `next_step`.
+    let store = MemoryStore::default();
+    let (runtime, mut commits) = start(&store, &fork_host()).await;
     runtime
-        .submit(Submission::new("race", "race_kind", "null"))
+        .submit(Submission::new("fork", "fork", "null"))
         .await
         .unwrap();
-    committed(&mut commits, before_race + 4).await;
+    // Epoch bump, Submitted, Granted, step 0, and the receive at step 1.
+    committed(&mut commits, 5).await;
+    // Deliver step 1's message in this run, so the data job parks on its second
+    // receive with two durable steps.
+    runtime.send_message("fork", "m1", "10").await.unwrap();
+    committed(&mut commits, 7).await;
+    runtime.stop().await;
+
+    // An open gate: case A needs no sequencing, the durable log already agrees
+    // with itself.
+    let (runtime, _) = start(&store, &diverging_fork_host(Arc::new(Gate::default()))).await;
+    let adapter_receipt = runtime.handle("fork").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&adapter_receipt),
+        &JobFailure::ReplayDiverged {
+            step: 1,
+            replayed: StepKind::Effect,
+        }
+    );
+    runtime.stop().await;
+
+    // B: the same fork, but the durable receive at step 1 only appears after the
+    // re-granted session took its replay snapshot, so the authority is the side
+    // that rejects it.
+    let store = MemoryStore::default();
+    let (runtime, mut commits) = start(&store, &fork_host()).await;
+    runtime
+        .submit(Submission::new("fork", "fork", "null"))
+        .await
+        .unwrap();
+    committed(&mut commits, 5).await;
     runtime.stop().await;
 
     let replay_gate = Arc::new(Gate::default());
     replay_gate.close();
-    let race_host = LocalNativeHost::new();
-    race_host.register_typed("gated", |_cx, (): ()| Box::pin(async { Ok::<u64, _>(0) }));
+    let (runtime, _) = start(&store, &diverging_fork_host(Arc::clone(&replay_gate))).await;
+    replay_gate.entered.notified().await;
+    // Resolve step 1 as a message while the session is paused with its 1-step
+    // replay snapshot, so only the authority can catch the fork.
+    runtime.send_message("fork", "m1", "10").await.unwrap();
+    replay_gate.open();
+    let authority_receipt = runtime.handle("fork").await_receipt().await.unwrap();
+    runtime.stop().await;
+
+    // Everything a caller or a later snapshot reads agrees; only the settlement
+    // position differs, because the two runs reached the fork after a different
+    // number of durable transitions (a delivery, or a delivery plus a wait).
+    assert_eq!(authority_receipt.steps, adapter_receipt.steps);
+    assert_eq!(authority_receipt.payload, adapter_receipt.payload);
+    assert_eq!(authority_receipt.incarnation, adapter_receipt.incarnation);
+    assert_eq!(
+        authority_receipt.submission_position,
+        adapter_receipt.submission_position
+    );
+    assert_eq!(authority_receipt.policy, adapter_receipt.policy);
+    assert_eq!(authority_receipt.budget, adapter_receipt.budget);
+    assert_eq!(
+        fault_of(&authority_receipt),
+        fault_of(&adapter_receipt),
+        "the same fork must settle as the same fault whichever side noticed it"
+    );
+}
+
+#[tokio::test]
+async fn short_completion_faults_instead_of_claiming_unexecuted_durable_steps() {
+    let store = MemoryStore::default();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    let deployed = LocalNativeHost::new();
     {
-        let replay_gate = Arc::clone(&replay_gate);
-        race_host.register_typed("race_kind", move |cx, (): ()| {
-            let replay_gate = Arc::clone(&replay_gate);
+        let gate = Arc::clone(&gate);
+        deployed.register_typed("deploy", move |cx, (): ()| {
+            let gate = Arc::clone(&gate);
             Box::pin(async move {
-                cx.effect(|| async { Ok(Json(1u64)) }).await?;
-                replay_gate.pass().await;
-                let v: u64 = cx.effect(|| async { Ok(Json(99u64)) }).await?;
-                Ok(v)
+                let first: u64 = cx
+                    .named_effect("first", || async { Ok(Json(1_u64)) })
+                    .await?;
+                let second: u64 = cx
+                    .named_effect("second", || async { Ok(Json(2_u64)) })
+                    .await?;
+                let third: u64 = cx
+                    .named_effect("third", || async { Ok(Json(3_u64)) })
+                    .await?;
+                // Outside any step, so stopping here leaves three committed
+                // steps and a run that has not returned.
+                gate.pass().await;
+                Ok::<_, JobErrorX>(first + second + third)
             })
         });
     }
+    let (runtime, _) = start(&store, &deployed).await;
+    runtime
+        .submit(Submission::new("job", "deploy", "null"))
+        .await
+        .unwrap();
+    gate.entered.notified().await;
+    runtime.stop().await;
 
-    let (runtime, _) = start(&store, &race_host).await;
-    replay_gate.entered.notified().await;
-    // Resolve step 1 as a Message in the authority while the session is still
-    // replaying with its 1-step snapshot.
-    runtime.send_message("race", "m1", "42").await.unwrap();
-    replay_gate.open();
-
-    let Some(Err(types::JobError::Terminal(err))) = runtime.await_result("race").await else {
-        panic!("expected terminal nondeterministic error for race");
-    };
-    // The message resolved step 1 as a durable Recv after the session took its
-    // 1-step replay snapshot, so the session cannot catch the fork itself; the
-    // authority rejects the replayed Effect commit and the runtime settles it
-    // as the explicit `ReplayDiverged` class rather than a generic string.
-    assert!(err.contains("ReplayDiverged"), "{err}");
-    assert!(err.contains("durably Recv"), "{err}");
+    // The deployed workflow now performs one effect and returns, while the
+    // durable log still holds three steps.
+    let shorter = LocalNativeHost::new();
+    shorter.register_typed("deploy", |cx, (): ()| {
+        Box::pin(async move {
+            let first: u64 = cx
+                .named_effect("first", || async { Ok(Json(1_u64)) })
+                .await?;
+            Ok::<_, JobErrorX>(first)
+        })
+    });
+    let (runtime, _) = start(&store, &shorter).await;
+    let receipt = runtime.handle("job").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&receipt),
+        &JobFailure::ReplayDiverged {
+            step: 1,
+            replayed: StepKind::Effect,
+        }
+    );
+    // The three durable steps survive; only the completion claim was wrong.
+    assert_eq!(receipt.steps, 3);
     runtime.stop().await;
 }

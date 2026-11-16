@@ -19,6 +19,13 @@
 //! [`Invocation`], a step `value` is the raw step JSON, and a terminal `value`
 //! is the JSON [`types::JobResult`]. A commit failure fail-stops the actor.
 //!
+//! A completion carries the session's own step cursor, so an invocation that
+//! returns before reaching every durable step settles as a fault instead of a
+//! receipt claiming boundaries it never executed. Every unrecoverable invocation
+//! outcome (a panic, a divergent replay, an exhausted retry budget) settles
+//! through `Command::Fail` and is durable as a fault receipt; only a successful
+//! or workflow-terminal result commits a completed receipt.
+//!
 //! Sleeps and receives are durable waits. A `WaitStep` yield commits
 //! `BeginWait`; the actor then holds the session parked in `waiting` until
 //! the authority commits the step the wait resolved to, and delivers that
@@ -1127,20 +1134,17 @@ impl<W: Writer> Actor<W> {
                     Ok((_, intents)) => intents,
                     Err(authority::Rejection::StaleLease) => return,
                     Err(authority::Rejection::Nondeterministic) => {
-                        let detail = match self.authority.jobs()[&key].steps.get(step_id as usize) {
-                            Some(durable) => format!(
-                                "durably {:?} named {:?}, replayed as {kind:?}",
-                                durable.kind, durable.name
-                            ),
-                            None => format!("{kind:?} steps are durable waits, not commits"),
-                        };
                         drop(session);
-                        self.complete_failure(
+                        // The fault records the boundary the session offered at
+                        // the diverged position, which is the whole of what the
+                        // authority can re-validate from its step log; the
+                        // durable side's own name and kind stay in the log.
+                        self.fail(
                             key,
                             lease,
                             JobFailure::ReplayDiverged {
                                 step: step_id,
-                                detail,
+                                replayed: kind,
                             },
                         )
                         .await;
@@ -1181,13 +1185,24 @@ impl<W: Writer> Actor<W> {
                 self.begin_wait(key, lease, session, step_id, kind, meta.name)
                     .await;
             }
-            SessionYield::Complete(Err(types::JobError::Transient(err))) => {
-                self.retry_transient(key, lease, err).await;
+            SessionYield::Complete { steps, result } => match result {
+                // A transient failure is a stop, not a completion claim: the job
+                // parks on a retry and the next attempt replays the durable log,
+                // so the guard applies only to the settled outcomes below.
+                Err(types::JobError::Transient(err)) => {
+                    self.retry_transient(key, lease, err).await;
+                }
+                result => self.complete(key, lease, steps, &result).await,
+            },
+            SessionYield::ReplayDiverged(diverged) => {
+                let failure = JobFailure::ReplayDiverged {
+                    step: diverged.step,
+                    replayed: diverged.replayed,
+                };
+                self.fail(key, lease, failure).await;
             }
-            SessionYield::Complete(result) => self.complete(key, lease, &result).await,
             SessionYield::Panicked(msg) => {
-                self.complete_failure(key, lease, JobFailure::Panicked(msg))
-                    .await;
+                self.fail(key, lease, JobFailure::Panicked(msg)).await;
             }
         }
     }
@@ -1219,7 +1234,7 @@ impl<W: Writer> Actor<W> {
                 retries,
                 max_retries,
             }) => {
-                self.complete_failure(
+                self.fail(
                     key,
                     held,
                     JobFailure::RetriesExhausted {
@@ -1241,18 +1256,27 @@ impl<W: Writer> Actor<W> {
             .insert((retry.fire_at_ms, DeadlineRef::Retry { key }));
     }
 
-    /// Settles the job under its live lease with a classified failure. The
-    /// durable outcome is the ordinary terminal envelope, so awaiters and the
-    /// result index see one shape whether the job succeeded, failed on its own,
-    /// or ran out of a budget.
-    async fn complete_failure(
-        &mut self,
-        key: String,
-        lease: authority::Lease,
-        failure: JobFailure,
-    ) {
-        let result = failure_envelope(&failure);
-        self.complete(key, lease, &result).await;
+    /// Settles the job under its live lease with a classified failure.
+    ///
+    /// This is the single durable path for a failure the authority cannot
+    /// recompute: the job settles as [`authority::Outcome::Faulted`], never as a
+    /// completed receipt carrying a double-encoded failure string. A rejected
+    /// report means the classification disagrees with durable state the runtime
+    /// derived it from, which is an invariant break rather than a session
+    /// outcome.
+    async fn fail(&mut self, key: String, lease: authority::Lease, failure: JobFailure) {
+        let command = authority::Command::Fail {
+            key: key.clone(),
+            lease,
+            failure,
+        };
+        let intents = match self.commit(command).await {
+            Ok((_, intents)) => intents,
+            // A superseded session's failure is not this job's to settle.
+            Err(authority::Rejection::StaleLease) => return,
+            Err(rejection) => panic!("failure of {key} rejected: {rejection:?}"),
+        };
+        self.settle_intents(intents);
     }
 
     /// Recovers unexpected loss only when `lease` is still current. Revocation
@@ -1324,17 +1348,18 @@ impl<W: Writer> Actor<W> {
             Err(authority::Rejection::StaleLease) => return,
             Err(authority::Rejection::Nondeterministic) => {
                 // A replayed wait that disagrees with the durable one (kind or
-                // name) is divergence; settle it like any other replay fork.
-                let detail = match self.authority.jobs()[&key].wait {
-                    Some(ref durable) => format!(
-                        "durably {:?} named {:?}, replayed as {kind:?}",
-                        durable.kind, durable.name
-                    ),
-                    None => format!("no durable wait at step {step}"),
-                };
+                // name) is divergence; settle it like any other replay fork,
+                // recording the boundary kind the session offered at the step.
                 drop(session);
-                self.complete_failure(key, lease, JobFailure::ReplayDiverged { step, detail })
-                    .await;
+                self.fail(
+                    key,
+                    lease,
+                    JobFailure::ReplayDiverged {
+                        step,
+                        replayed: kind.step_kind(),
+                    },
+                )
+                .await;
                 return;
             }
             Err(rejection) => panic!("wait {step} of {key} rejected: {rejection:?}"),
@@ -1369,17 +1394,62 @@ impl<W: Writer> Actor<W> {
         }
     }
 
-    async fn complete(&mut self, key: String, lease: authority::Lease, result: &types::JobResult) {
+    /// Settles the invocation with `result` at the step cursor it reached.
+    ///
+    /// `steps` is the session's own count of the durable boundaries it
+    /// traversed; the authority compares it against its journal, so an
+    /// invocation that returns before reaching every durable step cannot commit
+    /// a receipt claiming to have completed over them. That mismatch is a replay
+    /// divergence: the durable log records boundaries this run never entered.
+    async fn complete(
+        &mut self,
+        key: String,
+        lease: authority::Lease,
+        steps: u64,
+        result: &types::JobResult,
+    ) {
         let command = authority::Command::Complete {
-            expected_steps: self.authority.jobs()[&key].steps.len() as u64,
-            key,
-            lease,
+            expected_steps: steps,
+            key: key.clone(),
+            lease: lease.clone(),
             value: serde_json::to_string(result).expect(ERROR_JSON),
         };
         let intents = match self.commit(command).await {
             Ok((_, intents)) => intents,
             Err(authority::Rejection::StaleLease) => return,
-            Err(rejection) => panic!("completion rejected: {rejection:?}"),
+            Err(authority::Rejection::OutOfOrder) => {
+                // The run settled where its durable log does not agree: it
+                // stopped short of the boundaries recorded there, or completed
+                // while still suspended on one. The fault names the position the
+                // run stopped at; the kind recorded with it is the durable
+                // boundary at that position, because a run that stops there
+                // offers no boundary of its own for the authority to record.
+                let job = &self.authority.jobs()[&key];
+                let replayed = usize::try_from(steps)
+                    .ok()
+                    .and_then(|index| job.steps.get(index))
+                    .map(|step| step.kind)
+                    .or_else(|| {
+                        job.wait
+                            .as_ref()
+                            .filter(|wait| wait.step == steps)
+                            .map(|wait| wait.kind.step_kind())
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("completion of {key} at step {steps} names a position with no durable boundary")
+                    });
+                self.fail(
+                    key,
+                    lease,
+                    JobFailure::ReplayDiverged {
+                        step: steps,
+                        replayed,
+                    },
+                )
+                .await;
+                return;
+            }
+            Err(rejection) => panic!("completion of {key} rejected: {rejection:?}"),
         };
         self.settle_intents(intents);
     }
@@ -1469,9 +1539,11 @@ fn decode_terminal(value: &str) -> types::JobResult {
     serde_json::from_str(value).expect(ERROR_JSON)
 }
 
-/// The terminal envelope a classified failure settles with: a `Terminal` error
-/// whose JSON is the [`JobFailure`], so awaiters and the result index see one
-/// shape whether the job succeeded, failed on its own, or ran out of a budget.
+/// The awaiter-facing projection of a settled fault.
+///
+/// A receipt stores [`authority::Outcome::Faulted`] untouched; this envelope is
+/// only what `types::JobResult` callers see, because that result has no
+/// engine-level failure class. It is never written back into a receipt.
 fn failure_envelope(failure: &JobFailure) -> types::JobResult {
     Err(types::JobError::Terminal(
         serde_json::to_string(failure).expect(ERROR_JSON),

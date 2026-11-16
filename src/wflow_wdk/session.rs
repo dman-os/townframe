@@ -20,8 +20,39 @@ pub enum SessionYield {
         deets: WaitYield,
         meta: StepMeta,
     },
-    Complete(types::JobResult),
+    /// The invocation stopped before its durable boundary stream was exhausted,
+    /// or entered a boundary that disagrees with it, as seen by the adapter.
+    ///
+    /// A divergence the adapter can see never reaches the guest as an engine
+    /// outcome: the guest's own result taxonomy has no engine class, so the
+    /// adapter reports it here instead and the runtime settles the job with the
+    /// same durable fault an authority-side divergence produces.
+    ReplayDiverged(ReplayDivergence),
+    /// The invocation returned `result` after traversing `steps` durable
+    /// boundaries.
+    ///
+    /// `steps` is the session's own cursor, not the durable log length: the
+    /// runtime forwards it as the completion's expected step count, so a
+    /// workflow that stops early is fenced instead of committing a receipt over
+    /// boundaries it never executed.
+    Complete {
+        steps: u64,
+        result: types::JobResult,
+    },
     Panicked(String),
+}
+
+/// One adapter-observed replay divergence, in the terms the authority can
+/// re-validate from its own log: the position that diverged and the boundary
+/// kind the invocation offered there.
+///
+/// The adapter's richer error (the expected kind and name) is deliberately not
+/// carried: it is not part of the durable fault record, and the two adapters
+/// must settle an identical fork into an identical receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayDivergence {
+    pub step: u64,
+    pub replayed: StepKind,
 }
 
 #[derive(Debug)]
