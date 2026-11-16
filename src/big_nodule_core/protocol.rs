@@ -167,17 +167,12 @@ pub struct NoduleMethodGrantStatus {
 #[serde(rename_all = "camelCase")]
 pub struct NoduleInitStatus {
     /// Invocations made of the initializer that has not succeeded yet, since the previous one
-    /// succeeded (or since the start began). A wait for a foreign provider is not an attempt.
+    /// succeeded (or since the start began).
     pub attempts: u32,
     /// The last failure of that initializer, kept while it is retried and dropped once it
     /// succeeds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// The foreign operation the current initializer is waiting for a ready provider of: not
-    /// installed, not enabled, or still initializing itself. Present while it waits, even
-    /// before any attempt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub waiting_on: Option<String>,
 }
 
 /// The result of [`ListNodules`].
