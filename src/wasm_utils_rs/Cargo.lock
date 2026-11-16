@@ -231,6 +231,8 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "big_ndk"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "futures",
  "getrandom 0.3.4",
  "http",
  "method_core",
@@ -4031,6 +4033,8 @@ name = "test_nodule_handlers"
 version = "0.1.0"
 dependencies = [
  "big_ndk",
+ "bytes",
+ "futures",
  "http",
  "method_core",
  "serde",

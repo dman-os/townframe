@@ -156,8 +156,13 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
         .unwrap()
 }
 
-/// A blobs handle the node operator mints over the wire, from its identity credential alone.
-async fn blob_cap(node: &BigNode, scope: BlobsScope) -> CapId {
+/// A blobs handle the node operator mints over the wire, from its identity credential alone,
+/// bound to `subject` or, when `None`, to the operator.
+async fn blob_cap(
+    node: &BigNode,
+    scope: BlobsScope,
+    subject: Option<big_cabinet_core::dmeta::Uuid7>,
+) -> CapId {
     node.blobs
         .client
         .call_with(
@@ -166,7 +171,7 @@ async fn blob_cap(node: &BigNode, scope: BlobsScope) -> CapId {
             MintBlobsCapability {
                 scope,
                 rights: Rights::USE,
-                subject: None,
+                subject,
             },
         )
         .await
@@ -175,23 +180,45 @@ async fn blob_cap(node: &BigNode, scope: BlobsScope) -> CapId {
 }
 
 pub(super) async fn put_cap(node: &BigNode) -> CapId {
+    put_cap_for(node, None).await
+}
+
+/// [`put_cap`] bound to `subject`. A nodule's blobs handle is minted here, by the harness, because
+/// the blobs service only lets the operator or a blobs handle mint: a nodule actor presenting its
+/// method permbind cannot call `mintCapability` itself. The flow where the guest mints its own
+/// handle waits on that permission-model decision.
+pub(super) async fn put_cap_for(
+    node: &BigNode,
+    subject: Option<big_cabinet_core::dmeta::Uuid7>,
+) -> CapId {
     blob_cap(
         node,
         BlobsScope {
             put: true,
             ..Default::default()
         },
+        subject,
     )
     .await
 }
 
 pub(super) async fn read_cap(node: &BigNode, blob: &BlobId) -> CapId {
+    read_cap_for(node, blob, None).await
+}
+
+/// [`read_cap`] bound to `subject`; minted by the harness for the same reason as [`put_cap_for`].
+pub(super) async fn read_cap_for(
+    node: &BigNode,
+    blob: &BlobId,
+    subject: Option<big_cabinet_core::dmeta::Uuid7>,
+) -> CapId {
     blob_cap(
         node,
         BlobsScope {
             read: BTreeSet::from([*blob]),
             ..Default::default()
         },
+        subject,
     )
     .await
 }
