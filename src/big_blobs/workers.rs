@@ -96,7 +96,7 @@ impl MetadataCapabilities {
             *capability
         } else {
             let capability = (self.mint)(big_cabinet_core::doc::DocScope {
-                read: DocScope::read_all([document.clone()]),
+                read: big_cabinet_core::doc::DocScope::read_all([document.clone()]),
                 write: if write {
                     std::collections::BTreeMap::from([(
                         document.clone(),
