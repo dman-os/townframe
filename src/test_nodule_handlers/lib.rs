@@ -45,6 +45,7 @@ use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::write_context_headers;
 
@@ -213,14 +214,16 @@ impl Handler<Relay> for Fixture {
                 method: Method::GET,
                 path: format!("xrpc/{}?{query}", input.operation),
                 headers,
-                body: Vec::new(),
+                body: XrpcBody::json(Vec::new()),
             },
             None => XrpcRequest {
                 method: Method::POST,
                 path: format!("xrpc/{}", input.operation),
                 headers,
-                body: serde_json::to_vec(input.input.as_ref().unwrap_or(&Value::Null))
-                    .expect("serializing a Value cannot fail"),
+                body: XrpcBody::json(
+                    serde_json::to_vec(input.input.as_ref().unwrap_or(&Value::Null))
+                        .expect("serializing a Value cannot fail"),
+                ),
             },
         };
         let response = cx
@@ -228,9 +231,15 @@ impl Handler<Relay> for Fixture {
             .send(request)
             .await
             .map_err(|error| FixtureError::UpstreamFailed(error.message))?;
-        let body = serde_json::from_slice::<Value>(&response.body).unwrap_or_else(|_| {
-            Value::String(String::from_utf8_lossy(&response.body).into_owned())
-        });
+        let body = match response.body {
+            XrpcBody::Json(body) => serde_json::from_slice::<Value>(&body)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned())),
+            XrpcBody::Bytes(_) => {
+                return Err(FixtureError::UpstreamFailed(
+                    "the fixture cannot relay a byte body yet".to_owned(),
+                ));
+            }
+        };
         Ok(json!({ "status": response.status.as_u16(), "body": body }))
     }
 }
