@@ -630,11 +630,28 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     let object = schema
         .as_object()
         .ok_or_else(|| invalid(path, "supplement positions must be schema objects"))?;
-    if object.contains_key(LEXICON_REF) {
-        // The position is the named Lexicon def; the overlay checks the Lexicon refers to it and
-        // leaves the rest to the def, so nothing beneath it is the supplement's to state.
-        return match object.get(LEXICON_REF) {
-            Some(Value::String(_)) => Ok(()),
+    if object.contains_key("prefixItems") {
+        return Err(invalid(
+            path,
+            "`prefixItems` is not supported: Lexicon arrays have one `items` position, not tuple positions",
+        ));
+    }
+    if let Some(declared) = object.get(LEXICON_REF) {
+        // A reference annotation delegates the position's semantics to the named Lexicon definition.
+        // Only descriptive annotations may accompany it; semantic siblings would be silently ignored.
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                LEXICON_REF | "$schema" | "title" | "description"
+            )
+        }) {
+            return Err(invalid(
+                path,
+                format!("`{LEXICON_REF}` cannot have semantic siblings"),
+            ));
+        }
+        return match declared {
+            Value::String(_) => Ok(()),
             _ => Err(invalid(path, format!("`{LEXICON_REF}` must be a string"))),
         };
     }
@@ -861,6 +878,36 @@ struct Overlay<'a> {
 }
 
 impl Overlay<'_> {
+    fn lexicon_ref_key(&self, declared: &str, path: &str) -> Result<String> {
+        self.base
+            .iter()
+            .find(|(_, definition)| definition.get(DEF).and_then(Value::as_str) == Some(declared))
+            .map(|(key, _)| key.clone())
+            .ok_or_else(|| {
+                invalid(
+                    path,
+                    format!("`{LEXICON_REF}` names no carried definition `{declared}`"),
+                )
+            })
+    }
+
+    fn is_nullable_supplement(supplement: &Value) -> bool {
+        let Some(object) = supplement.as_object() else {
+            return false;
+        };
+        object
+            .get("type")
+            .and_then(Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "null"))
+            || object
+                .get("anyOf")
+                .and_then(Value::as_array)
+                .is_some_and(|branches| {
+                    branches
+                        .iter()
+                        .any(|branch| branch.get("type") == Some(&json!("null")))
+                })
+    }
     fn apply(
         &mut self,
         primary: &mut Value,
@@ -875,6 +922,8 @@ impl Overlay<'_> {
             .as_object()
             .ok_or_else(|| invalid(path, "supplement positions must be schema objects"))?;
         if let Some(declared) = object.get(LEXICON_REF) {
+            let declared = declared.as_str().expect("checked x-lexicon-ref string");
+            self.lexicon_ref_key(declared, path)?;
             // A Rust type that *is* a Lexicon def (a `DatumReference` is `#datumRef`) says so
             // rather than restating it. The Lexicon must refer to that same def here; then the def
             // decides everything about the position and the supplement adds nothing.
@@ -890,7 +939,8 @@ impl Overlay<'_> {
                 .and_then(Value::as_str)
                 .and_then(|reference| reference.strip_prefix("#/$defs/"))
                 .and_then(|key| self.definitions.get(key))
-                .and_then(|definition| definition.get(DEF));
+                .and_then(|definition| definition.get(DEF))
+                .and_then(Value::as_str);
             if stamped != Some(declared) {
                 return Err(invalid(
                     path,
@@ -933,6 +983,9 @@ impl Overlay<'_> {
             .and_then(|reference| reference.strip_prefix("#/$defs/"))
         {
             let key = key.to_owned();
+            if Self::is_nullable_supplement(supplement) {
+                return self.apply_nullable_reference(primary, key, supplement, path, depth);
+            }
             return self.apply_reference(primary, key, supplement, path, depth);
         }
         if let Some(branches) = primary.get_mut("anyOf").and_then(Value::as_array_mut) {
@@ -949,6 +1002,44 @@ impl Overlay<'_> {
         Self::check_vocabulary(primary, object, &kind, path)?;
         Self::apply_storage(primary, object, &kind, path)?;
         self.apply_structure(primary, object, path, depth)
+    }
+
+    fn apply_nullable_reference(
+        &mut self,
+        primary: &mut Value,
+        key: String,
+        supplement: &Value,
+        path: &str,
+        depth: usize,
+    ) -> Result<()> {
+        let pair = (
+            key.clone(),
+            serde_json::to_string(supplement).expect("schema serializes"),
+        );
+        let name = if let Some(name) = self.paired.get(&pair) {
+            name.clone()
+        } else {
+            let name = format!("S{}", self.paired.len());
+            self.paired.insert(pair, name.clone());
+            let mut target = self
+                .base
+                .get(&key)
+                .expect("compiled reference target")
+                .clone();
+            let object = supplement
+                .as_object()
+                .expect("checked nullable supplement object");
+            self.apply_nullable(&mut target, supplement, object, path, depth + 1)?;
+            self.definitions.insert(name.clone(), target);
+            name
+        };
+        *primary = json!({
+            "anyOf": [
+                {"$ref": format!("#/$defs/{name}")},
+                {"type": "null"}
+            ]
+        });
+        Ok(())
     }
 
     /// Overlay a supplement onto the compiled definition a primary `$ref` names. The overlaid
@@ -1399,9 +1490,35 @@ impl Overlay<'_> {
         Ok(())
     }
 
+    fn lexicon_ref_leaf(&mut self, schema: &Value, path: &str, depth: usize) -> Result<Value> {
+        let declared = schema
+            .get(LEXICON_REF)
+            .and_then(Value::as_str)
+            .expect("checked x-lexicon-ref string");
+        let key = self.lexicon_ref_key(declared, path)?;
+        let mut primary = json!({"$ref": format!("#/$defs/{key}")});
+        self.apply(&mut primary, schema, path, depth + 1)?;
+        Ok(primary)
+    }
+
+    fn one_of_leaf(&mut self, schema: &Value, path: &str, depth: usize) -> Result<Value> {
+        let branches = schema
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .expect("oneOf leaf branches");
+        let branches = branches
+            .iter()
+            .map(|branch| self.leaf(branch, path, depth + 1))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(json!({"oneOf": branches}))
+    }
+
     fn leaf(&mut self, schema: &Value, path: &str, depth: usize) -> Result<Value> {
         if depth > 128 {
             return Err(invalid(path, "typed-map schema depth exceeded"));
+        }
+        if schema.get(LEXICON_REF).is_some() {
+            return self.lexicon_ref_leaf(schema, path, depth);
         }
         if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
             if schema.as_object().is_none_or(|object| object.len() != 1) {
@@ -1439,9 +1556,18 @@ impl Overlay<'_> {
                 return self.nullable_leaf(nonnull[0], path, depth + 1);
             }
         }
+        if schema.get("oneOf").is_some() {
+            return self.one_of_leaf(schema, path, depth);
+        }
         let kind = schema
             .get("type")
             .and_then(Value::as_str)
+            .or_else(|| {
+                schema
+                    .get("const")
+                    .and_then(Value::as_str)
+                    .map(|_| "string")
+            })
             .ok_or_else(|| invalid(path, "typed-map leaves must declare a supported type"))?;
         let mut primary = match kind {
             "string"
@@ -1455,7 +1581,7 @@ impl Overlay<'_> {
             {
                 json!({"type": "string", "x-automerge": "datetime", KEYWORD: {"type": "string", "format": "datetime"}})
             }
-            "string" => json!({"type": "string", KEYWORD: {"type": "string"}}),
+            "string" => Compiler::primitive_position("string", schema),
             "integer" => {
                 let mut lexicon = json!({"type": "integer"});
                 for key in ["minimum", "maximum"] {
@@ -1483,7 +1609,7 @@ impl Overlay<'_> {
                     .expect("checked properties");
                 let mut compiled = Map::new();
                 for (name, property) in properties {
-                    if name.starts_with('$') {
+                    if name.starts_with('$') && name != "$type" {
                         return Err(invalid(
                             path,
                             "application properties cannot use reserved dollar keys",
@@ -1542,6 +1668,9 @@ impl Overlay<'_> {
             _ => return Err(invalid(path, "unsupported typed-map leaf type")),
         };
         self.apply(&mut primary, schema, path, depth + 1)?;
+        if let Some(not) = schema.get("not") {
+            primary["not"] = not.clone();
+        }
         Ok(primary)
     }
 
@@ -1593,6 +1722,11 @@ impl jsonschema::Keyword for Constraint {
     }
 
     fn is_valid(&self, instance: &Value) -> bool {
+        if self.0.get("type").is_none()
+            && let Some(constant) = self.0.get("const")
+        {
+            return instance == constant;
+        }
         match self.0["type"].as_str() {
             Some("string") => {
                 let Some(value) = instance.as_str() else {
