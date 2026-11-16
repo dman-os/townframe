@@ -2980,6 +2980,7 @@ dependencies = [
 name = "method_core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "schemars 1.2.2",
  "serde",

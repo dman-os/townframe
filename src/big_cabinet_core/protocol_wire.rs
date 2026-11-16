@@ -173,7 +173,7 @@ fn doc_availability_wire() {
         )),
         json!({"ObserveDocAvailability": {
             "context": context,
-            "metadata": {"authorization": null, "idempotency_key": null},
+            "metadata": {"authorization": null, "idempotency_key": null, "range": null},
             "params": {"capability": capability, "docId": doc_id},
         }}),
     );
@@ -187,7 +187,7 @@ fn doc_availability_wire() {
         )),
         json!({"GetDocAvailability": {
             "context": context,
-            "metadata": {"authorization": null, "idempotency_key": null},
+            "metadata": {"authorization": null, "idempotency_key": null, "range": null},
             "params": {"capability": capability, "docId": doc_id},
         }}),
     );
@@ -366,7 +366,7 @@ fn core_protocol_envelopes_wire() {
     let expected = |variant: &str, params: Value| {
         json!({(variant): {
             "context": context,
-            "metadata": {"authorization": null, "idempotency_key": null},
+            "metadata": {"authorization": null, "idempotency_key": null, "range": null},
             "params": params,
         }})
     };

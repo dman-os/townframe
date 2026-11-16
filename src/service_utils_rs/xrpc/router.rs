@@ -1,8 +1,11 @@
 //! Server side: route `/xrpc/{nsid}` to a mounted operation.
 
 use super::DOMAIN_ERROR_STATUS;
+use super::PeerCredentials;
 use super::REQUEST_ID_HEADER;
 use super::XrpcErrorEnvelope;
+use super::XrpcFallbackRequest;
+use super::XrpcFallbackResponse;
 use super::XrpcHandlerError;
 use super::XrpcRequest;
 use crate::context::HttpMetadata;
@@ -24,6 +27,7 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::any;
 use futures::StreamExt as _;
+use method_core::ByteBody;
 use method_core::HttpInput;
 use method_core::HttpMethod;
 use method_core::MethodKind;
@@ -124,6 +128,38 @@ impl XrpcMethodHandler {
     }
 }
 
+/// The handler that serves every NSID no operation is registered for, for a router whose
+/// operations are not known when it is built (a reverse proxy in front of a routing table that
+/// changes at runtime). It sees the request with its body unread and answers JSON or a byte
+/// stream ([`XrpcFallbackRequest`], [`XrpcFallbackResponse`]).
+#[derive(Clone)]
+pub struct XrpcFallbackHandler {
+    handler: Arc<dyn Fn(XrpcFallbackRequest) -> FallbackFuture + Send + Sync>,
+}
+
+type FallbackFuture =
+    Pin<Box<dyn Future<Output = Result<XrpcFallbackResponse, XrpcHandlerError>> + Send>>;
+
+impl std::fmt::Debug for XrpcFallbackHandler {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("XrpcFallbackHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl XrpcFallbackHandler {
+    pub fn new<F, Fut>(handler: F) -> Self
+    where
+        F: Fn(XrpcFallbackRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<XrpcFallbackResponse, XrpcHandlerError>> + Send + 'static,
+    {
+        Self {
+            handler: Arc::new(move |request| Box::pin(handler(request))),
+        }
+    }
+}
+
 /// A registered subscription handler, carried over a WebSocket upgrade of
 /// the same `/xrpc/{nsid}` route rather than the unary HTTP exchange.
 #[derive(Clone)]
@@ -211,7 +247,7 @@ impl XrpcSubscriptionHandler {
 #[derive(Clone, Debug)]
 pub struct XrpcRouter {
     operations: Arc<BTreeMap<String, XrpcMethodHandler>>,
-    fallback: Option<XrpcMethodHandler>,
+    fallback: Option<XrpcFallbackHandler>,
     subscriptions: Arc<BTreeMap<String, XrpcSubscriptionHandler>>,
     max_body_bytes: usize,
     admission: Arc<Semaphore>,
@@ -231,10 +267,12 @@ pub enum XrpcRegistrationError {
     DuplicateOperation(String),
     #[error("XRPC subscriptions are not supported by the unary HTTP adapter")]
     SubscriptionUnsupported,
-    #[error("the XRPC fallback handler must be a procedure")]
-    FallbackNotProcedure,
     #[error("an XRPC fallback handler is already registered")]
     DuplicateFallback,
+    #[error(
+        "{0} has a byte body, which a mounted operation cannot carry; serve it from a fallback"
+    )]
+    ByteBodyUnsupported(String),
 }
 
 impl XrpcRouter {
@@ -308,6 +346,13 @@ impl XrpcRouter {
         P: Unary,
         H: Handler<P>,
     {
+        // A byte body is a stream this adapter would neither read nor send: such a method is
+        // reached through a fallback handler that does (dispatch's).
+        if P::XRPC.input_encoding.is_bytes() || P::XRPC.output_encoding.is_bytes() {
+            return Err(XrpcRegistrationError::ByteBodyUnsupported(
+                P::XRPC.nsid.to_owned(),
+            ));
+        }
         self.register(XrpcMethodHandler::new(P::XRPC, move |request| {
             let host = Arc::clone(&host);
             async move {
@@ -412,22 +457,14 @@ impl XrpcRouter {
         Ok(())
     }
 
-    /// Installs the handler that serves every NSID no operation is registered for, for a router
-    /// whose operations are not known when it is built (a reverse proxy in front of a routing
-    /// table that changes at runtime). The request's `nsid` names the operation and the handler
-    /// learns the verb ([`XrpcRequest::verb`]): a POST's JSON body is the input, a GET carries
-    /// only a query string (`raw_query`, which the handler reads itself, as it alone knows which
-    /// names repeat). The method's kind is the handler's to hold the verb to, since only it knows
-    /// the NSID's contract. It is registered as a procedure; registered operations take
-    /// precedence.
+    /// Installs the handler that serves every NSID no operation is registered for; registered
+    /// operations take precedence. The method's kind and body encoding are the handler's to hold
+    /// the request to, since only it knows the NSID's contract: the request arrives with the verb
+    /// it used and its body unread, and the answer is JSON or a byte stream.
     pub fn register_fallback(
         &mut self,
-        handler: XrpcMethodHandler,
+        handler: XrpcFallbackHandler,
     ) -> Result<(), XrpcRegistrationError> {
-        let operation = handler.operation();
-        if operation.kind != MethodKind::Procedure {
-            return Err(XrpcRegistrationError::FallbackNotProcedure);
-        }
         if self.fallback.is_some() {
             return Err(XrpcRegistrationError::DuplicateFallback);
         }
@@ -500,21 +537,27 @@ async fn dispatch(
         )
         .await;
     }
-    let registered = router.operations.get(&nsid);
-    let Some(handler) = registered.or(router.fallback.as_ref()) else {
-        return error_response(
-            StatusCode::NOT_FOUND,
+    let Some(handler) = router.operations.get(&nsid) else {
+        let Some(fallback) = router.fallback.clone() else {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                request_id,
+                "UnknownMethod",
+                "unknown XRPC operation",
+            );
+        };
+        return dispatch_fallback(
+            &fallback,
+            router.admission_pool(false),
+            nsid,
+            raw_query,
+            parts,
+            body,
             request_id,
-            "UnknownMethod",
-            "unknown XRPC operation",
-        );
+        )
+        .await;
     };
-    let mut operation = handler.operation();
-    // The fallback serves a GET as a query: the verb is the handler's to judge, not the
-    // procedure it was registered as.
-    if registered.is_none() && parts.method == Method::GET {
-        operation = XrpcMethod::query(operation.nsid);
-    }
+    let operation = handler.operation();
     let (context, metadata) = match request_context(&parts.headers) {
         Ok(value) => value,
         Err(message) => {
@@ -577,16 +620,7 @@ async fn dispatch(
             );
         }
     };
-    // A fallback's GET hands over the raw query string alone.
-    let params = match if registered.is_none() && operation.input == HttpInput::Query {
-        if body.is_empty() {
-            Ok(Value::Null)
-        } else {
-            Err("query operations must not carry a request body".to_owned())
-        }
-    } else {
-        decode_input(operation.input, raw_query.as_deref(), &body)
-    } {
+    let params = match decode_input(operation.input, raw_query.as_deref(), &body) {
         Ok(params) => params,
         Err(error) => {
             return error_response(
@@ -632,6 +666,168 @@ async fn dispatch(
         }
         Err(error) => handler_error_response(error, request_id),
     }
+}
+
+/// Serves an NSID no operation is registered for through the fallback: the request body is not
+/// read here but handed over as a stream, and the answer is JSON or a byte stream (ADR 042 §2).
+async fn dispatch_fallback(
+    fallback: &XrpcFallbackHandler,
+    admission: Arc<Semaphore>,
+    nsid: String,
+    raw_query: Option<String>,
+    parts: axum::http::request::Parts,
+    body: axum::body::Body,
+    request_id: Option<uuid::Uuid>,
+) -> Response {
+    let (context, metadata) = match request_context(&parts.headers) {
+        Ok(value) => value,
+        Err(message) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "InvalidRequest",
+                &message,
+            );
+        }
+    };
+    let request_id = Some(context.request_id);
+    let verb = match parts.method {
+        Method::GET => HttpMethod::Get,
+        Method::POST => HttpMethod::Post,
+        _ => {
+            return error_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                request_id,
+                "InvalidRequest",
+                "XRPC serves GET and POST only",
+            );
+        }
+    };
+    let _admission = match admission.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                request_id,
+                "Unavailable",
+                "XRPC handler admission is currently full",
+            );
+        }
+    };
+    let body = match verb {
+        HttpMethod::Get if !axum::body::HttpBody::is_end_stream(&body) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                request_id,
+                "InvalidRequest",
+                "query operations must not carry a request body",
+            );
+        }
+        HttpMethod::Get => None,
+        HttpMethod::Post => {
+            let mut stream = ByteBody::new(
+                body.into_data_stream()
+                    .map(|chunk| chunk.map_err(std::io::Error::other)),
+            );
+            if let Some(mime) = parts
+                .headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+            {
+                stream = stream.with_mime(mime);
+            }
+            if let Some(length) = parts
+                .headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok())
+            {
+                stream = stream.with_length(length);
+            }
+            Some(stream)
+        }
+    };
+    let call = (fallback.handler)(XrpcFallbackRequest {
+        nsid,
+        verb,
+        context: context.clone(),
+        metadata,
+        raw_query,
+        body,
+        transport: parts
+            .extensions
+            .get::<crate::TransportContext>()
+            .cloned()
+            .unwrap_or(crate::TransportContext::Http),
+        peer: parts.extensions.get::<PeerCredentials>().copied(),
+    });
+    let call = match context.remaining_budget() {
+        Some(remaining) => match tokio::time::timeout(remaining, call).await {
+            Ok(result) => result,
+            Err(_) => {
+                return error_response(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    request_id,
+                    "DeadlineExceeded",
+                    "XRPC operation exceeded its time budget",
+                );
+            }
+        },
+        None => call.await,
+    };
+    match call {
+        Ok(XrpcFallbackResponse::Json(output)) => {
+            let mut response = json_response(StatusCode::OK, request_id, output.output);
+            output.metadata.write_headers(response.headers_mut());
+            response
+        }
+        Ok(XrpcFallbackResponse::Bytes { metadata, body }) => {
+            bytes_response(request_id, &metadata, body)
+        }
+        Err(error) => handler_error_response(error, request_id),
+    }
+}
+
+/// A byte body as the raw response body. A body with a span is a ranged answer: `206 Partial
+/// Content` with the `Content-Range` that places it in the whole.
+fn bytes_response(
+    request_id: Option<uuid::Uuid>,
+    metadata: &crate::ResponseMetadata,
+    body: ByteBody,
+) -> Response {
+    let (mime, length, span) = (body.mime.clone(), body.length, body.span);
+    let mut response = Response::new(axum::body::Body::from_stream(body));
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime.as_deref().unwrap_or("application/octet-stream"))
+            .expect("a mime type is a valid header value"),
+    );
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(length) = length {
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    }
+    if let Some(span) = span {
+        let length = length.expect("a ranged byte body states its length");
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!(
+                "bytes {}-{}/{}",
+                span.start,
+                span.start + length - 1,
+                span.total
+            ))
+            .expect("a content range is a valid header value"),
+        );
+    }
+    if let Some(request_id) = request_id
+        && let Ok(value) = HeaderValue::from_str(&request_id.to_string())
+    {
+        response.headers_mut().insert(REQUEST_ID_HEADER, value);
+    }
+    metadata.write_headers(response.headers_mut());
+    response
 }
 
 async fn dispatch_subscription(

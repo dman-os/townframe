@@ -17,13 +17,12 @@ pub use reference::DatumPin;
 pub use reference::DatumReference;
 pub use reference::DatumTag;
 pub use reference::DocId;
+pub use reference::KeyReference;
 pub use reference::Location;
 pub use reference::REFERENCE_SCHEME;
 pub use reference::ReferenceDocId;
 pub use reference::ReferenceError;
 pub use reference::SELF_DOC;
 
-#[cfg(test)]
-mod panproto_schema_store_poc;
 #[cfg(test)]
 mod protocol_wire;

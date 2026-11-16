@@ -45,6 +45,15 @@ Options:
           
           [env: DAY_NODE=[..]/node]
 
+      --body <FILE>
+          Stream this file as the raw request body of an operation whose input is bytes, such as org.example.daybook.blobs.put; the input is then its parameters, as a query string
+
+      --range <RANGE>
+          An HTTP Range, such as bytes=0-99, for an operation that answers part of its bytes
+
+      --output <FILE>
+          Write an answer that is bytes, such as org.example.daybook.blobs.read, to this file
+
   -h, --help
           Print help (see a summary with '-h')
 

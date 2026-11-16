@@ -14,10 +14,14 @@ use big_cartridges_core::Cartridge;
 use big_cartridges_core::Contribution;
 use big_cartridges_core::Digest;
 use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::config::Component;
 use big_cartridges_core::example_cartridge;
+use big_cartridges_core::protocol::SetCartridgeEnabled;
+use big_cartridges_core::protocol::UninstallCartridge;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
@@ -25,8 +29,7 @@ use big_dispatch_core::NotReadyReason;
 use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Nodule;
-use big_nodule_core::protocol::SetNoduleEnabled;
-use big_nodule_core::protocol::UninstallNodule;
+use method_core::ByteBody;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
@@ -51,7 +54,8 @@ impl Provider for Echo {
         _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        _body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
         if let Some(reason) = input.get("invalid") {
             return Err(ProviderError::InvalidInput(reason.to_string()));
         }
@@ -65,7 +69,7 @@ impl Provider for Echo {
             self.started.notify_one();
             self.release.notified().await;
         }
-        Ok(json!({
+        Ok(Body::Json(json!({
             "echo": input,
             "idempotencyKey": context.idempotency_key,
             "caller": {
@@ -73,7 +77,7 @@ impl Provider for Echo {
                 "actor": caller.actor,
                 "scope": caller.scope,
             },
-        }))
+        })))
     }
 }
 
@@ -149,14 +153,10 @@ impl Node {
             .call_with(
                 RequestContext::root(),
                 authorization.metadata(),
-                Invoke {
-                    operation: operation.to_owned(),
-                    input,
-                    context,
-                },
+                Invoke::json(operation, input, context),
             )
             .await
-            .map(|output| output.output)
+            .map(|output| output.body.into_json())
             .map_err(|error| match error {
                 ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -176,8 +176,9 @@ impl Node {
     pub(super) async fn set_enabled(&self, cartridge_id: &str, enabled: bool) {
         self.call(
             self.operator(),
-            SetNoduleEnabled {
+            SetCartridgeEnabled {
                 cartridge_id: id(cartridge_id),
+                component: Component::Nodule,
                 enabled,
             },
         )
@@ -242,7 +243,7 @@ async fn an_admitted_nodules_operations_follow_its_lifecycle() {
     node.set_enabled(example_cartridge!("photos"), true).await;
     node.call(
         operator,
-        UninstallNodule {
+        UninstallCartridge {
             cartridge_id: id(example_cartridge!("photos")),
         },
     )

@@ -195,10 +195,13 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
             nsid,
             input,
             get,
+            body,
+            range,
+            output,
             command,
         } => match (command, nsid) {
             (Some(ExecCommands::Intxt { command }), _) => cmds::intxt::run(command).await,
-            (None, Some(nsid)) => cmds::exec::run(nsid, input, get).await,
+            (None, Some(nsid)) => cmds::exec::run(nsid, input, get, body, range, output).await,
             (None, None) => unreachable!("checked before the node was opened"),
         },
     }
@@ -275,6 +278,16 @@ enum StaticCommands {
         /// instead of the JSON body of a POST
         #[arg(long)]
         get: bool,
+        /// Stream this file as the raw request body of an operation whose input is bytes, such
+        /// as org.example.daybook.blobs.put; the input is then its parameters, as a query string
+        #[arg(long, value_name = "FILE")]
+        body: Option<std::path::PathBuf>,
+        /// An HTTP Range, such as bytes=0-99, for an operation that answers part of its bytes
+        #[arg(long, value_name = "RANGE")]
+        range: Option<String>,
+        /// Write an answer that is bytes, such as org.example.daybook.blobs.read, to this file
+        #[arg(long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
         #[clap(subcommand)]
         command: Option<ExecCommands>,
     },

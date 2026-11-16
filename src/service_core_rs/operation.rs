@@ -1,5 +1,6 @@
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
+use method_core::ByteBody;
 use method_core::ContextError;
 use method_core::Method;
 use method_core::Subscription;
@@ -43,16 +44,36 @@ impl<T> From<T> for ResponseEnvelope<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Envelope<P> {
     pub context: RequestContext,
     pub metadata: HttpMetadata,
     pub params: P,
     #[serde(skip)]
     transport: TransportContext,
+    /// The request body of a method whose input encoding is bytes (ADR 042): a stream moved
+    /// with the envelope, so it exists only in process. The wire forms carry it as the raw HTTP
+    /// request body instead, which is why a transport that cannot stream refuses such a method.
+    #[serde(skip)]
+    body: Option<ByteBody>,
 }
 
 impl<P> Envelope<P> {
+    /// Attaches the byte request body of a method that takes one.
+    pub fn with_body(mut self, body: ByteBody) -> Self {
+        self.body = Some(body);
+        self
+    }
+
+    /// Takes the byte request body: a handler of a bytes-input method calls this once.
+    pub fn take_body(&mut self) -> Option<ByteBody> {
+        self.body.take()
+    }
+
+    pub fn has_body(&self) -> bool {
+        self.body.is_some()
+    }
+
     pub fn transport(&self) -> &TransportContext {
         &self.transport
     }
@@ -67,6 +88,7 @@ impl<P> Envelope<P> {
             metadata: HttpMetadata::default(),
             params,
             transport: TransportContext::Unknown,
+            body: None,
         }
     }
 
@@ -76,6 +98,7 @@ impl<P> Envelope<P> {
             metadata,
             params,
             transport: TransportContext::Unknown,
+            body: None,
         }
     }
 

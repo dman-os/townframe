@@ -19,6 +19,7 @@ use big_cartridges_core::Revision;
 use big_dispatch::Caller;
 use big_dispatch::Provider;
 use big_dispatch::ProviderError;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::InvocationContext;
 use big_ndk::HttpHandle;
@@ -33,6 +34,7 @@ use big_nodule::wire::provider_result;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
+use method_core::ByteBody;
 use serde_json::Value;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
@@ -168,7 +170,11 @@ impl Provider for NativeProvider {
         request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
+        if body.is_some() {
+            return Err(big_nodule::wire::byte_body_refused());
+        }
         let (reply, answer) = oneshot::channel();
         let job = Job {
             path: format!("/xrpc/{operation}"),
@@ -189,7 +195,7 @@ impl Provider for NativeProvider {
         let (status, body) = answer
             .await
             .map_err(|_| gateway_error("the nodule stopped before it answered"))?;
-        provider_result(status, &body)
+        provider_result(status, &body).map(Body::Json)
     }
 }
 

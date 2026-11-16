@@ -140,6 +140,7 @@ pub async fn micro_pair(
     envelope
         .contributions
         .push(Contribution::Micro(MicroContribution {
+            component: MICRO_COMPONENT_ARTIFACT.into(),
             schema: CLAY_MICRO_MANIFEST_SCHEMA.into(),
             description: manifest.into_iter().collect(),
             extra: Default::default(),

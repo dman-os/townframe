@@ -121,6 +121,7 @@ impl DocsService {
         drawer_id: &DocId,
         at_least: big_cabinet_core::drawer::DrawerAccess,
     ) -> Result<(), DocsError> {
+        DocsError::ensure_doc_id(drawer_id)?;
         match authority {
             DomainAuthority::Scoped(scope) => scope
                 .drawers
