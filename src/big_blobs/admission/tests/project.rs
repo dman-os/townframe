@@ -1,4 +1,4 @@
-use super::project::*;
+use crate::admission::project::*;
 use super::*;
 use automerge::transaction::Transactable;
 use big_cabinet_core::authority::AuthorityMessage;

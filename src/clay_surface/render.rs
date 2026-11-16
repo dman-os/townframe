@@ -75,7 +75,7 @@ impl<C: Clone> SurfaceTree<C> {
                                 listener_name,
                                 self.revision,
                                 guest_node_id,
-                                std::rc::Rc::clone(&dispatch),
+                                std::rc::Rc::clone(dispatch),
                             )
                             .expect("validated surface listener"),
                         );
