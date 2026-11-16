@@ -356,7 +356,7 @@ crate::define_enum_and_tag!(
         #[serde(rename_all = "camelCase")]
         #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
         PlugsConfig struct {
-            /// full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
+            /// full ref: dtxt:datum:<doc-id>/org.example.daybook.plugManifest/main
             ///            ?branch=<branch>&at=<head1>|<head2>
             pub enabled: HashMap<String, Url>,
             /// Known plugs (plug id -> track): the latest version seen with

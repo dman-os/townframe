@@ -59,11 +59,27 @@ impl SecretStore {
             .expect(ERROR_IMPOSSIBLE);
     }
 
-    /// Open the platform keyring backend.
+    /// Open the keyring backend: the platform's, or the in-memory mock under `cfg(test)` or the
+    /// `test-support` feature.
     pub async fn boot() -> Res<Self> {
         Ok(Self {
             store: Some(Self::resolve_store().await?),
         })
+    }
+
+    /// Open the platform keyring even where [`SecretStore::boot`] would select the in-memory
+    /// mock. For a test that must look at what a real, separately built binary left in the
+    /// platform keyring (the `day` blackbox tests clean up after it this way).
+    pub async fn boot_platform() -> Res<Self> {
+        Ok(Self {
+            store: Some(Self::open_platform_store().await?),
+        })
+    }
+
+    async fn open_platform_store() -> Res<Arc<keyring_core::CredentialStore>> {
+        tokio::task::spawn_blocking(Self::platform_store)
+            .await
+            .expect(ERROR_TOKIO)
     }
 
     /// Test/bootstrap constructor using an explicitly selected keyring store.
@@ -83,9 +99,7 @@ impl SecretStore {
                         .await?,
                 ) as _
             } else {
-                tokio::task::spawn_blocking(Self::platform_store)
-                    .await
-                    .expect(ERROR_TOKIO)?
+                Self::open_platform_store().await?
             };
 
         Ok(store)
@@ -181,6 +195,26 @@ impl SecretStore {
         tokio::task::spawn_blocking(move || {
             let entry = store.build(&service, &name, None)?;
             entry.set_password(&encoded).map_err(SecretsError::from)
+        })
+        .await
+        .expect(ERROR_TOKIO)
+    }
+
+    /// Remove an entry from the keyring. Returns whether it existed; deleting an absent entry is
+    /// not an error, so teardown can be repeated.
+    pub async fn delete_secret(&self, service: &str, name: &str) -> Result<bool, SecretsError> {
+        validate_name(service)?;
+        validate_name(name)?;
+        let service = service.to_string();
+        let name = name.to_string();
+        let store = self.store();
+        tokio::task::spawn_blocking(move || {
+            let entry = store.build(&service, &name, None)?;
+            match entry.delete_credential() {
+                Ok(()) => Ok(true),
+                Err(keyring_core::Error::NoEntry) => Ok(false),
+                Err(err) => Err(SecretsError::from(err)),
+            }
         })
         .await
         .expect(ERROR_TOKIO)
@@ -325,6 +359,16 @@ mod tests {
             .get_or_create_secret("tests", "deterministic", 32)
             .await?;
         assert_eq!(first, second);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_deleted_secret_is_gone_and_deleting_twice_is_fine() -> Res<()> {
+        let store = test_store().await;
+        store.get_or_create_secret("tests", "doomed", 32).await?;
+        assert!(store.delete_secret("tests", "doomed").await?);
+        assert!(store.get_secret("tests", "doomed").await?.is_none());
+        assert!(!store.delete_secret("tests", "doomed").await?);
         Ok(())
     }
 

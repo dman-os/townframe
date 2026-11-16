@@ -1,6 +1,6 @@
 -- name: actors :many
--- returns: plug_id String, actor_uuid String
-SELECT plug_id
+-- returns: cartridge_id String, actor_uuid String
+SELECT cartridge_id
      , actor_uuid
   FROM nodule_actors
- ORDER BY plug_id;
+ ORDER BY cartridge_id;

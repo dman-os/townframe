@@ -11,9 +11,13 @@ impl DocsService {
     async fn create(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: CreateDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
+        let instr_start = std::time::Instant::now(); // INSTR
+        let caller = self
+            .signing_invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -23,6 +27,7 @@ impl DocsService {
             },
         )
         .await?;
+        let instr_authorized = instr_start.elapsed(); // INSTR
         let owner_id = caller.originating_actor;
         let request_digest = digest(&(
             "create",
@@ -62,7 +67,7 @@ impl DocsService {
             aliases: BTreeMap::new(),
         };
         let initial = match self
-            .initial_content(context, actor.capability, &mut plan, Automerge::new())
+            .initial_content(context, caller.via, &mut plan, Automerge::new())
             .await
         {
             Ok(initial) => initial,
@@ -75,11 +80,13 @@ impl DocsService {
                 return Err(error);
             }
         };
+        let instr_staged = instr_start.elapsed(); // INSTR
         let document = self
             .big_repo
             .commit_id(doc_id.clone(), initial, Vec::new(), &[])
             .await
             .map_err(repository)?;
+        let instr_committed = instr_start.elapsed(); // INSTR
         let heads = sorted(document.with_document_read(|doc| doc.get_heads()).await);
         self.settle_create(
             context,
@@ -90,6 +97,7 @@ impl DocsService {
             &heads,
         )
         .await?;
+        tracing::debug!(?instr_authorized, ?instr_staged, ?instr_committed, total = ?instr_start.elapsed(), "INSTR create timing"); // INSTR
         Ok(WriteReceipt { doc_id, heads })
     }
 
@@ -141,6 +149,9 @@ impl Handler<CreateDoc> for DocsService {
         &self,
         request: Envelope<CreateDoc>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
-        Ok(self.create(&request.context, request.params).await?.into())
+        Ok(self
+            .create(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }

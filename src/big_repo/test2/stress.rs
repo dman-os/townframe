@@ -4,6 +4,7 @@
 //! documents, performs mutations on nodes that are already ready, and checks
 //! the resulting durable frontier after the runner reconnects the full mesh.
 
+use super::harness::StorageConfig;
 use super::harness::fixtures::wait_for_agent;
 use super::harness::log_nickname;
 use super::harness::topo::Node;
@@ -11,7 +12,6 @@ use crate::BigKeyhiveGroup;
 use crate::DocumentId;
 use crate::PeerKey;
 use crate::Res;
-use crate::StorageConfig;
 use am_utils_rs::codecs::ThroughJson;
 use big_sync::HostPartStore;
 use big_sync::stress_support::StressFixture;

@@ -21,6 +21,12 @@ mod input;
 pub mod lexicon;
 #[cfg(feature = "schemars")]
 pub use input::LexiconAdmissionError;
+#[cfg(feature = "schemars")]
+pub use input::PositionValidator;
+#[cfg(feature = "schemars")]
+pub use input::admit_lexicon;
+#[cfg(feature = "schemars")]
+pub use input::compile_position;
 
 #[cfg(feature = "schemars")]
 mod universe;
@@ -28,20 +34,28 @@ mod universe;
 #[cfg(all(test, feature = "schemars"))]
 mod e2e;
 
-/// The vocabulary a wasm guest declares a type with lives in `datum_core`; everything the
-/// declaration macro emits against resolves through this path as well.
-#[doc(hidden)]
-pub use datum_core::const_format;
 pub use datum_core::DatumMember;
 pub use datum_core::DatumShape;
 pub use datum_core::Extra;
 pub use datum_core::KnownString;
 pub use datum_core::Member;
+#[cfg(feature = "schemars")]
+pub use datum_core::MemberSchema;
 pub use datum_core::Openness;
 pub use datum_core::Shape;
+#[cfg(feature = "schemars")]
+pub use datum_core::ShapeError;
+#[cfg(feature = "schemars")]
+pub use datum_core::ShapeFlag;
 pub use datum_core::Tagging;
 pub use datum_core::UnionLayout;
 pub use datum_core::UnknownMember;
+#[cfg(feature = "schemars")]
+pub use datum_core::check_shape;
+/// The vocabulary a wasm guest declares a type with lives in `datum_core`; everything the
+/// declaration macro emits against resolves through this path as well.
+#[doc(hidden)]
+pub use datum_core::const_format;
 pub use datum_core::deserialize_closed_str;
 pub use datum_core::deserialize_known_str;
 pub use datum_core::deserialize_union;
@@ -49,14 +63,6 @@ pub use datum_core::is_nsid;
 pub use datum_core::is_nsid_authority;
 pub use datum_core::serialize_member;
 pub use datum_core::str_eq;
-#[cfg(feature = "schemars")]
-pub use datum_core::MemberSchema;
-#[cfg(feature = "schemars")]
-pub use datum_core::ShapeError;
-#[cfg(feature = "schemars")]
-pub use datum_core::ShapeFlag;
-#[cfg(feature = "schemars")]
-pub use datum_core::check_shape;
 #[cfg(feature = "schemars")]
 pub use datum_core::string_schema;
 #[cfg(feature = "schemars")]
@@ -79,9 +85,7 @@ pub use codec::Counter;
 #[cfg(feature = "schemars")]
 pub use codec::DeclaredReference;
 #[cfg(feature = "schemars")]
-pub use codec::Float32;
-#[cfg(feature = "schemars")]
-pub use codec::Float64;
+pub use codec::F64;
 #[cfg(feature = "schemars")]
 pub use codec::KEYWORD;
 #[cfg(feature = "schemars")]
@@ -112,3 +116,5 @@ pub use universe::TypeDecl;
 pub use universe::Universe;
 #[cfg(feature = "schemars")]
 pub use universe::UniverseError;
+#[cfg(feature = "schemars")]
+pub use universe::rust_number_formats_to_bounds;

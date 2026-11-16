@@ -1,29 +1,31 @@
 //! The schema registry (ADR 028 §4–§5, plan item P7): an enabled nodule's datum records are
 //! registered live in the node's schema repo and retired with it, data requests resolve against
-//! the plug holding the datum (with `minRevision` checked), and copies of a Lexicon that cannot
+//! the cartridge holding the datum (with `minRevision` checked), and copies of a Lexicon that cannot
 //! be reconciled are refused. Against the fake executor, with no sleeps.
 
 use super::Node;
 use super::init::Probe;
-use super::init::init_plug;
+use super::init::init_cartridge;
 use super::init::node_hosting;
 use super::init::with_requests;
+use big_cabinet_core::datum::Codec;
+use big_cabinet_core::datum::CompiledSchema;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::Dmeta;
-use big_nodule_core::inventory::Readiness;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Request;
+use big_dispatch_core::Readiness;
 use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
-use big_plugs_core::Contribution;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Request;
 use serde_json::Value;
 use serde_json::json;
 
-const ALPHA: &str = example_plug!("alpha");
-const BETA: &str = example_plug!("beta");
-const GAMMA: &str = example_plug!("gamma");
+const ALPHA: &str = example_cartridge!("alpha");
+const BETA: &str = example_cartridge!("beta");
+const GAMMA: &str = example_cartridge!("gamma");
 const NOTE: &str = "org.example.beta.note";
 
 /// A record Lexicon for `nsid` with one string property `field`, at `revision` when given.
@@ -43,10 +45,10 @@ fn record(nsid: &str, revision: Option<u32>, field: &str) -> Value {
     lexicon
 }
 
-/// `plug` carrying one more Lexicon file.
-fn with_lexicon(mut plug: Plug, lexicon: Value) -> Plug {
-    let Some(Contribution::Nodule(nodule)) = plug.contributions.first_mut() else {
-        panic!("init plugs carry a nodule");
+/// `cartridge` carrying one more Lexicon file.
+fn with_lexicon(mut cartridge: Cartridge, lexicon: Value) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
     };
     nodule
         .description
@@ -55,13 +57,13 @@ fn with_lexicon(mut plug: Plug, lexicon: Value) -> Plug {
         .as_array_mut()
         .unwrap()
         .push(lexicon);
-    plug
+    cartridge
 }
 
 /// Beta, holding the `note` record at `revision`.
-fn beta(version: &str, revision: u32) -> Plug {
+fn beta(version: &str, revision: u32) -> Cartridge {
     with_lexicon(
-        init_plug("beta", version, &[], &[], &[]),
+        init_cartridge("beta", version, &[], &[], &[]),
         record(NOTE, Some(revision), "text"),
     )
 }
@@ -78,7 +80,7 @@ async fn node_with_alpha(requests: Vec<Request>) -> Node {
     let node = node_hosting(&Probe::new()).await;
     node.admit(
         node.operator(),
-        with_requests(init_plug("alpha", "1.0.0", &[], &[], &[]), requests),
+        with_requests(init_cartridge("alpha", "1.0.0", &[], &[], &[]), requests),
     )
     .await
     .unwrap();
@@ -127,16 +129,96 @@ async fn an_enabled_nodules_datums_are_registered_live_and_retired_with_it() {
     node.shutdown().await;
 }
 
+/// `cartridge` with `document` as the sidecar of its record `nsid`.
+fn with_sidecar(mut cartridge: Cartridge, nsid: &str, document: Value) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
+    };
+    nodule
+        .description
+        .entry("sidecar".into())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .unwrap()
+        .insert(nsid.to_owned(), document);
+    cartridge
+}
+
+/// The sidecar document `Bundle::document` renders for a record with one string `field`, stored
+/// in the form `storage` names.
+fn sidecar(field: &str, storage: &str) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/Note",
+        "$defs": { "Note": {
+            "type": "object",
+            "properties": { field: { "type": "string", "x-automerge": storage } },
+        } },
+    })
+}
+
+/// The storage form a compiled record gives its `text` member, if it declares one.
+fn text_storage(compiled: &CompiledSchema) -> Option<Codec> {
+    let member = compiled.member(&["text"]).unwrap();
+    Codec::of(member.document()).unwrap()
+}
+
+#[tokio::test]
+async fn a_held_records_sidecar_gives_it_storage_forms() {
+    let node = node_with_alpha(Vec::new()).await;
+    // The Lexicon alone states no storage form: registered without a sidecar `text` is a plain
+    // string, stored as a scalar.
+    node.admit(node.operator(), beta("1.0.0", 1)).await.unwrap();
+    node.set_enabled(BETA, true).await;
+    let plain = node.schemas.require_for_write(NOTE).unwrap();
+    assert_eq!(text_storage(plain.compiled()), None);
+
+    let cartridge = with_sidecar(
+        with_lexicon(
+            init_cartridge("beta", "1.1.0", &[], &[], &[]),
+            record(NOTE, Some(2), "text"),
+        ),
+        NOTE,
+        sidecar("text", "text"),
+    );
+    node.admit(node.operator(), cartridge).await.unwrap();
+    let declared = node.schemas.require_for_write(NOTE).unwrap();
+    assert_eq!(declared.lexicon()["revision"], 2);
+    assert_eq!(text_storage(declared.compiled()), Some(Codec::Text));
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_sidecar_for_a_record_the_nodule_does_not_hold_is_refused() {
+    let node = node_hosting(&Probe::new()).await;
+    // Alpha holds nothing under `org.example.beta`: describing beta's record is not its to do.
+    let cartridge = with_sidecar(
+        init_cartridge("alpha", "1.0.0", &[], &[], &[]),
+        NOTE,
+        sidecar("text", "text"),
+    );
+    let error = node
+        .admit(node.operator(), cartridge)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("not a record this cartridge holds"),
+        "{error}"
+    );
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_nodule_holding_a_datum_the_node_already_knows_is_refused() {
-    // `dmeta` is a boot schema: a plug claiming its NSID would shadow the node's own.
+    // `dmeta` is a boot schema: a cartridge claiming its NSID would shadow the node's own.
     let node = node_hosting(&Probe::new()).await;
-    let mut plug = with_lexicon(
-        init_plug("beta", "1.0.0", &[], &[], &[]),
+    let mut cartridge = with_lexicon(
+        init_cartridge("beta", "1.0.0", &[], &[], &[]),
         record(Dmeta::ID, None, "text"),
     );
-    plug.authority = Some("org.example".into());
-    node.install(plug).await;
+    cartridge.authority = Some("org.example".into());
+    node.install(cartridge).await;
     let record = node.record(BETA).await;
     assert_eq!(record.readiness, Readiness::Refused);
     assert!(
@@ -213,7 +295,7 @@ async fn a_vendored_copy_that_conflicts_with_the_holders_is_refused_and_surfaced
     // Gamma vendors `note` at the holder's revision with a different body.
     let gamma = with_requests(
         with_lexicon(
-            init_plug("gamma", "1.0.0", &[], &[], &[]),
+            init_cartridge("gamma", "1.0.0", &[], &[], &[]),
             record(NOTE, Some(1), "title"),
         ),
         vec![read(NOTE, None)],

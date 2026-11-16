@@ -32,6 +32,7 @@ impl RecordedCommand {
         match self.clone() {
             Self::AddDoc(mut req) => {
                 req.capability = capability;
+                req.reach = capability;
                 node.drawers()
                     .call(RequestContext::root(), req)
                     .await
@@ -256,7 +257,7 @@ impl DrawerModel {
             .max()
     }
 
-    async fn check(&mut self, node: &Node, alice: &Actor, bob: &Actor, context: &str) {
+    async fn check(&mut self, node: &Node, alice: &OpenedActor, bob: &OpenedActor, context: &str) {
         let expected_listed: BTreeMap<DrawerId, Access> = (0..DRAWERS)
             .filter_map(|d| {
                 self.effective_bob(d)
@@ -287,6 +288,7 @@ impl DrawerModel {
             )
             .await
             .unwrap()
+            .drawers
             .into_iter()
             .map(|d| (d.drawer_id, d.access))
             .collect();
@@ -396,8 +398,8 @@ impl DrawerModel {
 /// One script's run against the node: Alice administers every drawer it touches, Bob is the
 /// subject whose reach `model` predicts, and `home` is the drawer the docs are created in.
 struct ScriptRun {
-    alice: Actor,
-    bob: Actor,
+    alice: OpenedActor,
+    bob: OpenedActor,
     home: DrawerId,
     model: DrawerModel,
 }
@@ -412,8 +414,8 @@ impl ScriptRun {
             .grants
             .grant(
                 &RequestContext::root(),
-                alice.actor_id,
-                drawer_object(Access::Admin, &node.local().registry_id),
+                alice.actor.actor_id,
+                drawer_object(Access::Admin, &node.local().known_drawers_id),
                 Rights::USE,
                 None,
             )
@@ -446,7 +448,7 @@ impl ScriptRun {
     }
 
     /// Alice's capability for a script step: Admin on every model drawer, the home, and the
-    /// registry, minted afresh since a boot retires the previous one.
+    /// known-drawers list, minted afresh since a boot retires the previous one.
     async fn admin_capability(&self, node: &Node) -> CapId {
         node.mint_drawer(
             &self.alice,
@@ -455,7 +457,7 @@ impl ScriptRun {
                     .model
                     .drawers
                     .iter()
-                    .chain([&self.home, &node.local().registry_id])
+                    .chain([&self.home, &node.local().known_drawers_id])
                     .map(|drawer| (drawer.clone(), Access::Admin))
                     .collect(),
                 create: false,
@@ -524,6 +526,7 @@ impl ScriptRun {
             } => {
                 let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,
+                    reach: capability,
                     command,
                     drawer_id: self.model.drawers[drawer].clone(),
                     doc_id: self.model.docs[doc].clone(),
@@ -571,6 +574,7 @@ impl ScriptRun {
                 };
                 let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,
+                    reach: capability,
                     command,
                     drawer_id: self.model.drawers[drawer].clone(),
                     doc_id: self.model.docs[doc].clone(),
@@ -671,7 +675,7 @@ impl ScriptRun {
                         RevokeDrawer {
                             capability,
                             drawer_id: self.model.drawers[drawer].clone(),
-                            subject_id: self.bob.actor_id,
+                            subject_id: self.bob.actor.actor_id,
                         },
                     )
                     .await

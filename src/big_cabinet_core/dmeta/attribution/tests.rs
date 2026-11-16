@@ -22,7 +22,7 @@ fn fixture() -> (Attribution, ActorMetadata, SigningKey) {
             .try_into()
             .unwrap(),
         pubkey: pubkey.clone(),
-        actor_url: "db+actor://node/process".into(),
+        actor_url: "dtxt:actor:node/process".into(),
     };
     let actor = ActorMetadata {
         extra: Default::default(),
@@ -116,7 +116,7 @@ fn rfc9052_signature1_literal_fixture() {
                 "627574696f6e2e76312b6377744058b4a501782d7a4656656e3358363639784c7a7369364e32",
                 "563931446f69797a487a6731754167716954386a5a396e5339365a02782d7a3538365a374832",
                 "76705839714e684e3254346539557475676965336f676a62787a47614d744d3345364852353a",
-                "0001000050017f22e279b07cc398c4dc0c0c07398f3a000100017764622b6163746f723a2f2f",
+                "0001000050017f22e279b07cc398c4dc0c0c07398f3a0001000177647478743a6163746f723a",
                 "6e6f64652f70726f636573733a000100027819646179626f6f6b2e6163746f722d6174747269",
                 "627574696f6e",
             )
@@ -224,7 +224,7 @@ fn rejects_tampering_and_invalid_output_signatures() {
         let mut fields = unpack(&certificate);
         if index == 2 {
             modify_map(&mut fields, index, |map| {
-                replace(map, ACTOR_URL, Value::Text("db+actor://node/other".into()));
+                replace(map, ACTOR_URL, Value::Text("dtxt:actor:node/other".into()));
             });
         } else {
             let Value::Bytes(signature) = &mut fields[index] else {
@@ -269,7 +269,7 @@ fn checks_issuer_and_each_binding_component_without_consulting_delegation() {
         (
             attribution.actor_uuid,
             actor.pubkey.clone(),
-            "db+actor://node/%70rocess".into(),
+            "dtxt:actor:node/%70rocess".into(),
         ),
     ] {
         let other = ActorMetadata {

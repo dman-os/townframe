@@ -1,4 +1,4 @@
-//! The nodule description: a plug's one node-facing facet (ADR 027 §2–3, §5–7).
+//! The nodule description: a cartridge's one node-facing facet (ADR 027 §2–3, §5–7).
 //!
 //! A [`Nodule`] carries the Lexicons a package declares, both its datums and its operation
 //! contracts (`query` | `procedure` | `subscription`), and what the runtime understands about
@@ -18,12 +18,11 @@
 //! requests), checks that what it serves is declared, and refuses what this build could not
 //! serve. It reads no binding.
 //!
-//! The nodule has no identity or authority of its own: the envelope's `PlugId` names the package
+//! The nodule has no identity or authority of its own: the envelope's `CartridgeId` names the package
 //! and the envelope's `authority` is the NSID prefix it holds. [`Nodule::admit`] takes that
 //! prefix: a Lexicon file under it is the nodule's own, and one outside it is a vendored copy that
 //! must be the contract of a request or an operation the nodule implements.
 
-use crate::dispatch::DispatchScope;
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::GrammarError;
 use big_cabinet_core::datum::is_nsid;
@@ -32,8 +31,9 @@ use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::datum::parse_ref;
 use big_cabinet_core::datum::validate_object_schema;
 use big_cabinet_core::datum::validate_object_value;
-use big_plugs_core::PlugError;
-use big_plugs_core::request::Request;
+use big_cartridges_core::CartridgeError;
+use big_cartridges_core::request::Request;
+use big_dispatch_core::DispatchScope;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
@@ -42,7 +42,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 pub mod config;
-pub mod dispatch;
 pub mod inventory;
 pub mod protocol;
 pub mod providers;
@@ -50,7 +49,7 @@ pub mod providers;
 pub const AUTHORITY: &str = "org.example.daybook";
 
 /// `org.example.daybook.nodule/main`: what a package contributes to a node. It carries no
-/// identity or authority: the envelope's `PlugId` names the package and its `authority` is the NSID
+/// identity or authority: the envelope's `CartridgeId` names the package and its `authority` is the NSID
 /// prefix the package holds. An NSID in the description is *held* when it is under that prefix and
 /// declared in `lexicons`; every other NSID it uses must be implemented or requested.
 #[macros::datum(authority = AUTHORITY)]
@@ -63,6 +62,14 @@ pub struct Nodule {
     /// schema language.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lexicons: Vec<IndexMap<String, Value>>,
+    /// Per record this nodule holds, keyed by its NSID: the record's sidecar JSON Schema document,
+    /// which carries what its Lexicon cannot say, the `x-automerge` storage forms above all (ADR 021
+    /// §3), in the form `big_cabinet_core`'s `Bundle::document` renders. Without one, a held record
+    /// keeps the plain JSON kind its Lexicon states at every position: no collaborative text, no
+    /// counter, no declared reference. Admission checks that each key is a held record; the
+    /// document itself is checked against the record's Lexicon when the record is registered.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub sidecar: IndexMap<String, Value>,
     /// What the nodule uses that it does not hold, in the shared request shape: foreign
     /// operations it calls (a request without `access`), datum contracts it reads or writes.
     /// Strictness: any NSID the description references outside the envelope's authority that it
@@ -114,8 +121,8 @@ pub struct Handler {
 /// A nodule's datum Lexicons split for the schema registry: see [`Nodule::registrable_datums`].
 #[derive(Debug, Default)]
 pub struct RegistrableDatums<'a> {
-    /// `(nsid, file)` of each record the nodule holds.
-    pub held: Vec<(&'a str, &'a IndexMap<String, Value>)>,
+    /// `(nsid, file, sidecar)` of each record the nodule holds; see [`Nodule::sidecar`].
+    pub held: Vec<(&'a str, &'a IndexMap<String, Value>, Option<&'a Value>)>,
     pub carried: Vec<&'a IndexMap<String, Value>>,
 }
 
@@ -155,7 +162,7 @@ pub enum StoreMode {
 #[serde(rename_all = "camelCase")]
 pub struct Initializer {
     /// Names this initializer within the nodule: unique and not empty. A node records that a
-    /// [`RunMode::Once`] initializer ran under this key and the plug revision, and derives the
+    /// [`RunMode::Once`] initializer ran under this key and the cartridge revision, and derives the
     /// idempotency key of each invocation from it, so renaming one makes it a new initializer.
     pub key: String,
     pub target: String,
@@ -169,7 +176,7 @@ pub struct Initializer {
 #[macros::datum(open_string)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RunMode {
-    /// Once per node per plug revision: not again on restart or re-enable, again on a new revision.
+    /// Once per node per cartridge revision: not again on restart or re-enable, again on a new revision.
     Once,
     /// Each time the nodule starts: node boot, and enabling it.
     EveryStart,
@@ -259,14 +266,6 @@ type Result<T> = std::result::Result<T, NoduleError>;
 type Implemented = BTreeMap<String, Option<OperationKind>>;
 
 impl Nodule {
-    /// Whether `nsid` is `authority` itself or lives under `authority.`: the one NSID-prefix
-    /// rule for authorities, whole segments only (`org.example.photos` owns
-    /// `org.example.photos.list`, not `org.example.photosynthesis`).
-    pub fn authority_owns(authority: &str, nsid: &str) -> bool {
-        nsid.strip_prefix(authority)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-    }
-
     /// The requests that call an operation (no `access`): the ones a dispatch grant can satisfy.
     pub fn operation_requests(&self) -> impl Iterator<Item = &Request> {
         self.requires
@@ -305,7 +304,7 @@ impl Nodule {
                 .filter(|authority| {
                     !requested
                         .iter()
-                        .any(|nsid| Self::authority_owns(authority, nsid))
+                        .any(|nsid| DispatchScope::authority_owns(authority, nsid))
                 })
                 .cloned()
                 .collect(),
@@ -326,7 +325,7 @@ impl Nodule {
 
     /// The required requests, operation or data, whose `statuses` (by binding, see
     /// [`providers::RequestStatus::evaluate`]) say no provider satisfies them: while any exists
-    /// the nodule is held at [`inventory::Readiness::ProviderMissing`]. An optional request
+    /// the nodule is held at [`big_dispatch_core::Readiness::ProviderMissing`]. An optional request
     /// never appears.
     pub fn missing_providers<'a>(
         &'a self,
@@ -382,8 +381,10 @@ impl Nodule {
                 .and_then(|main| main.get("type"))
                 .and_then(Value::as_str)
                 == Some("record");
-            if is_record && authority.is_some_and(|authority| Self::authority_owns(authority, id)) {
-                split.held.push((id, file));
+            if is_record
+                && authority.is_some_and(|authority| DispatchScope::authority_owns(authority, id))
+            {
+                split.held.push((id, file, self.sidecar.get(id)));
             } else {
                 split.carried.push(file);
             }
@@ -393,13 +394,13 @@ impl Nodule {
 
     /// The gate before hosting, under the NSID `authority` of the envelope that carries the
     /// description (`None`: it holds no prefix, so everything it declares is a vendored copy).
-    /// Requests are well formed and name contracts other plugs hold; every Lexicon file and
+    /// Requests are well formed and name contracts other cartridges hold; every Lexicon file and
     /// reference outside the authority is implemented or requested; the handler serves only
     /// operations declared here; nothing this build cannot serve is accepted. Bindings are not
     /// read.
     pub fn admit(&self, authority: Option<&str>) -> Result<Admitted> {
         Request::validate_all(&self.requires, "requires").map_err(|error| match error {
-            PlugError::Invalid { path, reason } => NoduleError::invalid(path, reason),
+            CartridgeError::Invalid { path, reason } => NoduleError::invalid(path, reason),
             other => unreachable!("request validation only reports invalid fields: {other}"),
         })?;
         let admission = Admission {
@@ -410,6 +411,7 @@ impl Nodule {
         };
         admission.requests()?;
         admission.lexicon_files()?;
+        admission.sidecar()?;
         admission.lexicon_refs()?;
         admission.private_state()?;
         let (operations, artifacts) = admission.services()?;
@@ -522,7 +524,7 @@ impl<'a> Admission<'a> {
     /// prefixes).
     fn owns(&self, nsid: &str) -> bool {
         self.authority
-            .is_some_and(|authority| Nodule::authority_owns(authority, nsid))
+            .is_some_and(|authority| DispatchScope::authority_owns(authority, nsid))
     }
 
     /// Whether the nodule holds `nsid`: under its authority and declared in its Lexicons.
@@ -530,7 +532,7 @@ impl<'a> Admission<'a> {
         self.owns(nsid) && self.lexicons.contains_key(nsid)
     }
 
-    /// A request names a contract another plug holds: one under this nodule's own authority
+    /// A request names a contract another cartridge holds: one under this nodule's own authority
     /// would be a self-edge.
     fn requests(&self) -> Result<()> {
         for (index, request) in self.nodule.requires.iter().enumerate() {
@@ -538,7 +540,7 @@ impl<'a> Admission<'a> {
                 return Err(NoduleError::invalid(
                     format!("requires[{index}].contract"),
                     format!(
-                        "`{}` is under this plug's authority; requests name contracts other plugs hold",
+                        "`{}` is under this cartridge's authority; requests name contracts other cartridges hold",
                         request.contract
                     ),
                 ));
@@ -560,11 +562,26 @@ impl<'a> Admission<'a> {
                 return Err(NoduleError::invalid(
                     format!("lexicons[{index}].id"),
                     format!(
-                        "`{id}` is outside this plug's authority{} and is neither requested nor implemented",
+                        "`{id}` is outside this cartridge's authority{} and is neither requested nor implemented",
                         self.authority
                             .map(|authority| format!(" `{authority}`"))
                             .unwrap_or_default()
                     ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A sidecar document belongs to a record this nodule holds: a vendored copy is the holder's
+    /// to describe, and a document for a record nothing declares would never be read.
+    fn sidecar(&self) -> Result<()> {
+        let held = self.nodule.registrable_datums(self.authority).held;
+        for nsid in self.nodule.sidecar.keys() {
+            if !held.iter().any(|(id, _, _)| id == nsid) {
+                return Err(NoduleError::invalid(
+                    format!("sidecar.{nsid}"),
+                    format!("`{nsid}` is not a record this cartridge holds"),
                 ));
             }
         }
@@ -641,7 +658,7 @@ impl<'a> Admission<'a> {
                     ),
                 ));
             }
-            // An operation under this plug's authority must be declared here as an operation. A
+            // An operation under this cartridge's authority must be declared here as an operation. A
             // foreign one is checked against its vendored Lexicon when this description carries
             // one, and admitted on syntax alone otherwise: its contract lives in another
             // nodule's Lexicons, which admission cannot see. Resolving it is a bind-time
@@ -661,7 +678,7 @@ impl<'a> Admission<'a> {
                     return Err(NoduleError::invalid(
                         path,
                         format!(
-                            "`{nsid}` is under this plug's authority but is not a declared operation"
+                            "`{nsid}` is under this cartridge's authority but is not a declared operation"
                         ),
                     ));
                 }
@@ -739,7 +756,7 @@ impl<'a> Admission<'a> {
         if !self.holds(file) {
             return Err(NoduleError::invalid(
                 "config.schema",
-                format!("`{file}` is not a Lexicon under this plug's authority"),
+                format!("`{file}` is not a Lexicon under this cartridge's authority"),
             ));
         }
         let defs = self.schema_defs();
@@ -792,7 +809,7 @@ impl<'a> Admission<'a> {
                 Err(NoduleError::invalid(
                     path,
                     format!(
-                        "`{file}` is outside this plug's authority and is neither implemented nor requested"
+                        "`{file}` is outside this cartridge's authority and is neither implemented nor requested"
                     ),
                 ))
             };
@@ -800,7 +817,7 @@ impl<'a> Admission<'a> {
         let Some(lexicon) = self.lexicons.get(file) else {
             return Err(NoduleError::invalid(
                 path,
-                format!("`{file}` is under this plug's authority but not declared"),
+                format!("`{file}` is under this cartridge's authority but not declared"),
             ));
         };
         let def = def.unwrap_or("main");

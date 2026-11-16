@@ -194,6 +194,96 @@ pub(crate) enum EventSubject {
     Unresolved,
 }
 
+/// Reverse membership: for each agent, group or document, the groups and documents that
+/// list it as a direct member. Walking it upward from the point where a delegation enters
+/// the graph finds every document whose reader set the delegation can change, without
+/// visiting the documents it cannot reach.
+///
+/// Edges are only ever added. A revoked member leaves a stale edge, so a walk may list a
+/// document the member no longer reaches; reader reconciliation treats that as a no-op,
+/// while a missing edge would lose a CGKA add, so over-approximating is the safe side.
+#[derive(Debug, Default)]
+pub(crate) struct MembershipReach {
+    parents: HashMap<Identifier, BTreeSet<Identifier>>,
+}
+
+impl MembershipReach {
+    /// The direct-membership edges of every group and document in the hive, inverted to
+    /// child -> parents. One short lock per node and no transitive walk: O(groups +
+    /// documents + edges) of map clones. Taken once; admitted delegations extend it.
+    pub(crate) async fn from_hive(hive: &BigKeyhiveHandle) -> Self {
+        let keyhive = hive.keyhive.as_ref();
+        let doc_ids: Vec<KhDocumentId> = {
+            let docs = keyhive.documents().lock().await;
+            docs.keys().copied().collect()
+        };
+        let group_ids: Vec<KhGroupId> = {
+            let groups = keyhive.groups().lock().await;
+            groups.keys().copied().collect()
+        };
+        let mut reach = Self::default();
+        for kh_doc_id in doc_ids {
+            if let Some(doc) = keyhive.get_document(kh_doc_id).await {
+                let parent: Identifier = kh_doc_id.into();
+                for member in Membered::Document(kh_doc_id, doc)
+                    .members()
+                    .await
+                    .into_keys()
+                {
+                    reach.record(member, parent);
+                }
+            }
+        }
+        for kh_group_id in group_ids {
+            if let Some(group) = keyhive.get_group(kh_group_id).await {
+                let parent: Identifier = kh_group_id.into();
+                for member in Membered::Group(kh_group_id, group)
+                    .members()
+                    .await
+                    .into_keys()
+                {
+                    reach.record(member, parent);
+                }
+            }
+        }
+        reach
+    }
+
+    /// The ids among `ids` that name documents held by `hive`.
+    pub(crate) async fn documents_among(
+        hive: &BigKeyhiveHandle,
+        ids: impl IntoIterator<Item = Identifier>,
+    ) -> BTreeSet<DocumentId> {
+        let docs = hive.keyhive.documents().lock().await;
+        ids.into_iter()
+            .filter_map(|id| {
+                let kh_doc_id = KhDocumentId::from(id);
+                docs.contains_key(&kh_doc_id)
+                    .then(|| DocumentId::new(kh_doc_id.to_bytes()))
+            })
+            .collect()
+    }
+
+    /// `member` is a direct member of `parent`.
+    pub(crate) fn record(&mut self, member: Identifier, parent: Identifier) {
+        self.parents.entry(member).or_default().insert(parent);
+    }
+
+    /// `start` and everything that reaches it, through any depth of nesting.
+    pub(crate) fn reaching(&self, start: Identifier) -> BTreeSet<Identifier> {
+        let mut visited = BTreeSet::from([start]);
+        let mut explore = vec![start];
+        while let Some(node) = explore.pop() {
+            for parent in self.parents.get(&node).into_iter().flatten() {
+                if visited.insert(*parent) {
+                    explore.push(*parent);
+                }
+            }
+        }
+        visited
+    }
+}
+
 // a background task. rename to new
 impl BigKeyhiveHandle {
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
@@ -443,7 +533,8 @@ impl BigKeyhiveHandle {
     }
 
     /// All docs reachable by `agent`, with the [`Access`] level for each.
-    /// O(all_docs × transitive_members) — only for boot full reindex.
+    /// O(all_docs × transitive_members): boot full reindex and test diagnostics. Reader
+    /// reconciliation uses [`MembershipReach`], which does not walk every document.
     pub async fn docs_for_agent(&self, agent: &Identifier) -> BTreeMap<DocumentId, Access> {
         let keyhive = self.keyhive.as_ref();
         let mut caps = BTreeMap::new();
@@ -566,6 +657,19 @@ impl BigKeyhiveHandle {
             .map(|(_, access)| *access);
         }
         None
+    }
+
+    /// Whether `agent` may commit to `document`: editor access of its own (direct or through
+    /// groups), or editor access granted to the well-known Public agent, which anyone may write
+    /// through by encrypting with Public's well-known keys. This is the predicate the doc
+    /// worker's commit gate enforces, so a caller that asks first gets the gate's answer.
+    pub async fn can_write(&self, agent: &Identifier, document: Identifier) -> bool {
+        let editor = |access: Option<Access>| access.is_some_and(|access| access.is_editor());
+        editor(self.agent_access_on(agent, document).await)
+            || editor(
+                self.agent_access_on(&keyhive_core::principal::public::Public.id(), document)
+                    .await,
+            )
     }
 
     /// What [`Access`] `agent` holds on this doc/group through its own delegation, ignoring
@@ -698,16 +802,6 @@ impl BigKeyhiveHandle {
                     .then_some(group_id.to_bytes())
             })
             .collect())
-    }
-
-    /// Whether `doc_id` is shaped like a Keyhive document id (an Ed25519
-    /// verifying key). The shape is not a classifier: blake3-derived object ids
-    /// pass it about half the time. Only the frontier worker's test-only scope
-    /// assertion uses this — the document/derived scope boundary, not id shape,
-    /// is what keeps non-documents out of the frontier source.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn is_valid_keyhive_document_id(doc_id: DocumentId) -> bool {
-        keyhive_doc_id(doc_id).is_ok()
     }
 
     pub(crate) async fn current_cgka_ops_count(&self, doc_id: DocumentId) -> Res<usize> {
@@ -1138,7 +1232,8 @@ impl BigKeyhiveHandle {
             .into_iter()
             .map(|(doc_id, refs)| Ok((keyhive_doc_id(doc_id)?, refs)))
             .collect::<Res<BTreeMap<_, _>>>()?;
-        let update = kh
+        let instr_member = member.clone(); // INSTR
+        let update = match kh
             .add_member_with_manual_content(
                 member,
                 &Membered::Group(group_id, group.shared()),
@@ -1146,7 +1241,13 @@ impl BigKeyhiveHandle {
                 after_content,
             )
             .await
-            .map_err(|err| ferr!("group member add failed: {err}"))?;
+        {
+            Ok(update) => update,
+            Err(err) => {
+                instr_explain_member_add_failure(kh, &instr_member, &err).await; // INSTR
+                return Err(ferr!("group member add failed: {err}"));
+            }
+        };
         let affected_docs = update
             .cgka_ops
             .iter()
@@ -1293,7 +1394,65 @@ impl BigKeyhiveHandle {
     }
 }
 
-fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
+/// INSTR: which copy of the added member's individual the failed add selected prekeys
+/// from, beside the hive registry's copy and whatever else the hive files under that id.
+async fn instr_explain_member_add_failure(
+    kh: &BigKeyhiveKeyhive,
+    member: &BigKeyhiveAgent,
+    err: &keyhive_core::principal::document::AddMemberError,
+) {
+    let id = member.id();
+    let (kind, passed_ops, passed_live, passed_arc) = match member {
+        BigKeyhiveAgent::Individual(_, indie) => {
+            let locked = indie.lock().await;
+            (
+                "individual",
+                locked.prekey_ops().len(),
+                locked.prekeys().len(),
+                Some(Arc::clone(indie)),
+            )
+        }
+        BigKeyhiveAgent::Active(..) => ("active", 0, 0, None),
+        BigKeyhiveAgent::Group(..) => ("group", 0, 0, None),
+        BigKeyhiveAgent::Document(..) => ("document", 0, 0, None),
+    };
+    let registry = kh.get_individual(id.into()).await;
+    let (reg_ops, reg_live, same_arc) = match &registry {
+        Some(reg) => {
+            let locked = reg.lock().await;
+            (
+                locked.prekey_ops().len(),
+                locked.prekeys().len(),
+                passed_arc.as_ref().is_some_and(|p| Arc::ptr_eq(p, reg)),
+            )
+        }
+        None => (0, 0, false),
+    };
+    let resolved = match kh.get_agent(id).await {
+        Some(BigKeyhiveAgent::Individual(..)) => "individual",
+        Some(BigKeyhiveAgent::Active(..)) => "active",
+        Some(BigKeyhiveAgent::Group(..)) => "group",
+        Some(BigKeyhiveAgent::Document(..)) => "document",
+        None => "none",
+    };
+    tracing::warn!(
+        %id,
+        %err,
+        kind,
+        passed_ops,
+        passed_live,
+        registered = registry.is_some(),
+        reg_ops,
+        reg_live,
+        same_arc,
+        resolved,
+        "INSTR group member add failed"
+    );
+}
+
+pub(crate) fn keyhive_doc_id(
+    doc_id: DocumentId,
+) -> Res<keyhive_core::principal::document::id::DocumentId> {
     // A document key is a BigSync object key, which ADR 012 decision 1 makes arbitrary
     // bytes: the keyhive identifier is a fixed-width consumer, so a wrong-width key is an
     // error here rather than a panicking assertion.
@@ -1462,3 +1621,29 @@ fn enqueue_member(
 
 #[cfg(test)]
 mod tests;
+
+/// Of `groups`, the ones `peer` is a member of (at any access, relay included), by this node's
+/// Keyhive view. A group's big_sync part is readable by exactly its members, so this is "which of
+/// these parts may `peer` have": the keyhive-access half of a sync policy. A group this node knows
+/// nothing of has no members here and is not in the answer.
+pub async fn groups_with_member(
+    keyhive: &BigKeyhiveHandle,
+    peer: &PeerKey,
+    groups: &[[u8; 32]],
+) -> Res<Vec<[u8; 32]>> {
+    let agent = Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32()?)
+            .map_err(|_| ferr!("peer id is not a valid Ed25519 point"))?,
+    );
+    let mut readable = Vec::new();
+    for &group in groups {
+        let group_id = Identifier::from(
+            ed25519_dalek::VerifyingKey::from_bytes(&group)
+                .map_err(|_| ferr!("group id is not a valid Ed25519 point"))?,
+        );
+        if keyhive.agent_access_on(&agent, group_id).await.is_some() {
+            readable.push(group);
+        }
+    }
+    Ok(readable)
+}

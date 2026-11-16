@@ -103,7 +103,7 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
-use big_cabinet_core::authority::ResolveActor;
+use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::datum::CompiledSchema;
@@ -117,6 +117,9 @@ use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumMetadata;
 use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::Dmeta;
+use big_cabinet_core::dmeta::DmetaRead;
+use big_cabinet_core::dmeta::DmetaSchema;
+use big_cabinet_core::dmeta::DmetaWrite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
@@ -152,6 +155,7 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ObserveDocAvailability;
 use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::QueriedDatumRef;
+use big_cabinet_core::doc::QueriedDatumRefs;
 use big_cabinet_core::doc::QueryDatumRefs;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::SignatureEvidence;
@@ -165,14 +169,16 @@ use big_cabinet_core::doc::WriteReceipt;
 use big_repo::BigDocHandle;
 use big_repo::DocLookup;
 use big_repo::SharedBigRepo;
+use method_core::ContextError;
+use method_core::EventStream;
 use serde_json::Value as Json;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
-use service_utils_rs::ContextError;
 use service_utils_rs::Envelope;
-use service_utils_rs::EventStream;
 use service_utils_rs::Handler;
 use service_utils_rs::Host;
+use service_utils_rs::HttpMetadata;
 use service_utils_rs::RequestContext;
 use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::Spawner;
@@ -219,7 +225,7 @@ pub struct DocsService {
     system_actor: Actor,
     node_issuer: MultibaseKey,
     raw: CompiledSchema,
-    dmeta: SchemaHandle,
+    dmeta: DmetaSchema,
     branch: SchemaHandle,
     commands: Commands,
     datum_set: Option<Arc<DatumSetStore>>,
@@ -247,13 +253,13 @@ fn committed_change(doc: &Automerge, command: &CommandId) -> Option<ChangeHash> 
 
 fn authority_error(error: ClientError<AuthorityServiceError>) -> DocsError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => DocsError::Denied,
-        ClientError::Operation(error) => DocsError::Authority(error),
+        ClientError::Method(error) => DocsError::Authority(error),
         ClientError::Transport { message, .. } => DocsError::AuthorityUnavailable(message),
     }
 }
@@ -267,6 +273,18 @@ fn access_error(error: AccessError) -> DocsError {
 
 fn repository(error: impl std::fmt::Display) -> DocsError {
     DocsError::Repository(error.to_string())
+}
+
+/// The refusal for a document commit big_repo rejected. A capability can authorize a write
+/// this node cannot make: the operator is a cabinet superuser on every drawer it knows, but
+/// keyhive enforces the node's own standing at commit time, and a drawer synced in from a peer
+/// may hold only Read. That rejection ([`big_repo::NoWriteAccess`]) is the caller's write being
+/// denied, and it never persisted, so it is `Some(Denied)`, a definite refusal. `None` for any
+/// other failure: a repository fault whose outcome the caller cannot know.
+fn commit_refusal(error: &utils_rs::prelude::eyre::Report) -> Option<DocsError> {
+    error
+        .downcast_ref::<big_repo::NoWriteAccess>()
+        .map(|_| DocsError::Denied)
 }
 
 fn sorted(mut heads: Vec<ChangeHash>) -> Vec<ChangeHash> {
@@ -312,6 +330,29 @@ fn unaccepted(verdict: Verdict) -> Result<Vec<ChangeHash>, Unaccepted> {
 }
 
 impl DocsService {
+    /// The invocation of a request that signs: a create, write, branch or merge. The handle signs
+    /// as its own subject unless the caller attached an `Authorization` whose `authority` is this
+    /// request's handle, whose `signer` is then the handle the call signs through. That is how a
+    /// service signs on behalf of its authenticated caller without being introduced to the
+    /// caller's actor: the signature is exactly as wide as the handle the caller presented. Any
+    /// other credential in the metadata (dispatch forwards its caller's) is the transport's, not a
+    /// signer for this handle, and is not consulted.
+    async fn signing_invocation(
+        &self,
+        context: &RequestContext,
+        metadata: &HttpMetadata,
+        capability: CapId,
+    ) -> Result<Invocation<DocScope>, DocsError> {
+        let signer = match Authorization::from_metadata(metadata) {
+            Ok(authorization) if authorization.authority == capability => authorization.signer,
+            _ => capability,
+        };
+        self.capabilities
+            .resolve_signed(context, capability, signer)
+            .await
+            .map_err(authority_error)
+    }
+
     async fn invocation(
         &self,
         context: &RequestContext,
@@ -480,7 +521,7 @@ impl DocsRepo {
     pub async fn mint_inspection_handle(
         &self,
         doc_id: DocId,
-        signer: CapId,
+        subject: Uuid7,
     ) -> Result<Capability, DocsError> {
         let service = Arc::clone(&self.service);
         let owner = self.mint_spawner.clone();
@@ -491,21 +532,15 @@ impl DocsRepo {
                     let context = RequestContext::root();
                     let caller = service
                         .inspection_capabilities
-                        .source::<DocId>(
-                            &context,
-                            Authorization {
-                                authority: service.issuer,
-                                signer,
-                            },
-                        )
+                        .source::<DocId>(&context, Authorization::identity(service.issuer))
                         .await
                         .map_err(authority_error)?;
                     service
                         .inspection_capabilities
                         .mint(
                             &context,
-                            service.issuer,
                             &caller,
+                            Some(subject),
                             doc_id,
                             Rights::USE,
                             Vec::new(),
@@ -539,12 +574,18 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         .authority
         .call(
             RequestContext::root(),
-            ResolveActor {
+            ResolveAuthority {
                 capability: config.issuer,
             },
         )
         .await
-        .map_err(authority_error)?;
+        .map_err(authority_error)?
+        .actor
+        .ok_or_else(|| {
+            authority_error(ClientError::Method(
+                AuthorityServiceError::UnrecognizedActor,
+            ))
+        })?;
     let core = |tag: &str| {
         config
             .schema_repo
@@ -572,7 +613,8 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         system_actor: actor,
         node_issuer: config.node_issuer,
         raw: CompiledSchema::compile(serde_json::json!({})).expect("the empty schema compiles"),
-        dmeta,
+        dmeta: DmetaSchema::new(dmeta.compiled().clone())
+            .expect("dmeta's member declarations compile on their own"),
         branch,
         commands: Commands::open(config.sql).await?,
         datum_set: config.datum_set,
@@ -585,7 +627,7 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         .then(mint_stop)
         .then(service_stop)
         .then(service.capabilities.stop_token());
-    let client = Client::direct(DocsBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(DocsBinding::new(Arc::clone(&host))));
     Ok((
         DocsRepo {
             service,

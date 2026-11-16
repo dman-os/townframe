@@ -5,7 +5,7 @@
 //! (`DocDelta`), keyed per consumer site by a durable sparse memory of the
 //! last heads seen per branch. It talks about BRANCH DOCS — physical
 //! automerge objects — not logical documents. Logical identity (which
-//! document a branch belongs to) is content-derived (ADR 007) and is resolved
+//! document a branch belongs to) is content-derived (ADR 034) and is resolved
 //! by consumers as part of their own projection work, where they hydrate the
 //! branch doc anyway. The store owns no cursor, no event loop, and does no
 //! content I/O; consumers walk it with `ConcurrentDeltaWalker` and drive
@@ -81,7 +81,7 @@ pub struct DocDelta {
 /// intentionally absent — it needs content-derived identity; when main
 /// branches get their own keyhive group part it becomes a plain
 /// subscription. Until then, main-branch-only consumers are per-document
-/// object subscriptions (main branch: BranchId == DocumentId, ADR 007).
+/// object subscriptions (main branch: BranchId == DocumentId, ADR 034).
 ///
 /// The filter is live across diffs by construction: a branch created after
 /// the walker opened is filtered at its first event.
@@ -474,7 +474,7 @@ mod tests {
 
     /// The branch key both sides agree on: `BranchId` is the physical branch
     /// doc's id in its text form, which is what `event_branch_id` derives from
-    /// the event and therefore what the memory rows are written under (ADR 007:
+    /// the event and therefore what the memory rows are written under (ADR 034:
     /// a branch doc's identity IS its id).
     fn branch_of(doc_id: &ObjKey) -> BranchId {
         BranchId(doc_id.to_string())

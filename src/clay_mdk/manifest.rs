@@ -27,7 +27,7 @@ pub const MANIFEST_NSID: &str = "org.example.clay.micro.manifest";
 pub const SHELL_ROOTS: &str = "org.example.clay.shell.roots";
 
 /// The namespace the stand-in loaders and native built-ins install micros under, until Clay runs
-/// on the node and the node's own DID takes its place (`big_plugs`' importer maps a sidecar
+/// on the node and the node's own DID takes its place (`big_cartridges`' importer maps a sidecar
 /// `id` to `<node did>/<id>`). `did:example` is the DID method the W3C reserves for
 /// documentation: syntactically a DID, so it passes the same validation as a real namespace,
 /// yet it can never name a real publisher, so a stand-in id cannot be mistaken for one.
@@ -116,7 +116,7 @@ impl std::fmt::Display for MicroId {
     }
 }
 
-/// W3C DID Core syntax, as `big_plugs_core::PlugId` checks its namespace: `did:` method
+/// W3C DID Core syntax, as `big_cartridges_core::CartridgeId` checks its namespace: `did:` method
 /// (`1*(a-z / 0-9)`) `:` a non-empty method-specific id of `ALPHA / DIGIT / . - _ :` and
 /// uppercase-hex `%` escapes that does not end in `:`. Whether the method is known is a
 /// resolution concern, not a syntax one.
@@ -160,7 +160,7 @@ fn is_did(did: &str) -> bool {
     true
 }
 
-/// A plug name, as `big_plugs_core::PlugId` checks it.
+/// A plug name, as `big_cartridges_core::CartridgeId` checks it.
 fn is_plug_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     !bytes.is_empty()
@@ -289,21 +289,21 @@ open_vocabulary! {
 }
 
 impl Default for Necessity {
-    /// Omitted means `required`, the safe reading, as in `big_plugs_core::request`.
+    /// Omitted means `required`, the safe reading, as in `big_cartridges_core::request`.
     fn default() -> Self {
         Self::Required
     }
 }
 
 impl Default for BindingResolution {
-    /// Omitted means `configured`, the common case, as in `big_plugs_core::request`.
+    /// Omitted means `configured`, the common case, as in `big_cartridges_core::request`.
     fn default() -> Self {
         Self::Configured
     }
 }
 
 /// `skip_serializing_if` for [`Request`]'s defaulted members: a default stays off the wire so
-/// the canonical form of a manifest is minimal and deterministic, exactly as in `big_plugs`.
+/// the canonical form of a manifest is minimal and deterministic, exactly as in `big_cartridges`.
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
@@ -335,7 +335,7 @@ pub struct PublicationDeclaration {
 /// another micro publishes) and never a concrete supplier: configuration resolves `binding`,
 /// the plug-local name code uses, to one. Declaring a request grants no authority.
 ///
-/// The wire shape mirrors `big_plugs_core::request::Request` member for member (camelCase,
+/// The wire shape mirrors `big_cartridges_core::request::Request` member for member (camelCase,
 /// open `access`/`necessity`/`resolution` strings), and this type is replaced by it once that
 /// crate is reachable from this branch.
 ///
@@ -445,13 +445,13 @@ pub struct MicroManifest {
 
 /// A manifest with the identity its plug envelope will own, in the standalone on-disk form: the
 /// `<name>.manifest.json` sidecar, flat JSON of the manifest's members plus `id`,
-/// `package_version` and `authority`. `big_plugs`' micro importer reads exactly this (`id` becomes the plug
+/// `package_version` and `authority`. `big_cartridges`' micro importer reads exactly this (`id` becomes the plug
 /// name, `package_version` the semver), and the loader splits it back into the identity and the
 /// manifest the plug's micro section carries. STAND-IN until the envelope delivers both.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Sidecar {
     /// The plug name (`dayframe.counter`), not a full [`MicroId`]: the namespace is whoever
-    /// installs the package (`big_plugs`' importer prefixes the node DID), so the same sidecar
+    /// installs the package (`big_cartridges`' importer prefixes the node DID), so the same sidecar
     /// installs under any namespace. [`Sidecar::validate`] checks it is a plug name.
     pub id: String,
     pub package_version: u32,

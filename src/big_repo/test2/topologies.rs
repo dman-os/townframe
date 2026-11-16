@@ -140,6 +140,15 @@ async fn assert_sedimentree_parity_nodes(
         heads.sort_by_key(|h| h.0);
         if let Some(ref base) = baseline {
             if &heads != base {
+                // INSTR: every node's heads, checkpoint commits flagged.
+                let mut summaries = Vec::new();
+                for node in nodes {
+                    let state = node.repo.doc_head_state(doc_id.clone()).await?;
+                    summaries.push(crate::test2::harness::heads::state_summary(
+                        node.label, &state,
+                    ));
+                }
+                tracing::warn!(summaries = %summaries.join(" | "), "INSTR sedimentree parity violated"); // INSTR
                 return Err(crate::ferr!(
                     "sedimentree-heads parity violated at node {} — {:?} vs {:?}",
                     idx,
@@ -221,6 +230,11 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     )
     .await?;
     assert_eq!(read_title(&b_doc).await, "relay-doc");
+
+    // Materialising mints follow-up facts reactively (reader op and checkpoint,
+    // then the owner's seating op and checkpoint, ...); a fixed sync script races
+    // the next one, so drive the topology to a fixed point before comparing.
+    topo.converge(std::slice::from_ref(&doc_id)).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
@@ -388,6 +402,11 @@ async fn tier3_line_replication() -> crate::Res<()> {
     )
     .await?;
     assert_eq!(read_title(&c_doc).await, "line-doc");
+
+    // Materialising mints follow-up facts reactively (reader op and checkpoint,
+    // then the owner's seating op and checkpoint, ...); a fixed sync script races
+    // the next one, so drive the topology to a fixed point before comparing.
+    topo.converge(std::slice::from_ref(&doc_id)).await?;
 
     // Tier 0: sedimentree parity across all three nodes.
     assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
@@ -717,9 +736,26 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
         "reader must see content written during partition"
     );
 
+    // Materialising and admitting mint follow-up keyhive ops and checkpoints on
+    // both sides reactively; a fixed sync script races the next round, so drive
+    // the pair to a fixed point before comparing.
+    crate::test2::harness::converge::converge(
+        &[a, b],
+        &[&a_b_conn2, &b_a_conn2],
+        std::slice::from_ref(&doc_id),
+    )
+    .await?;
+
     // Tier 0: sedimentree parity.
     let a_state = a.repo.doc_head_state(doc_id.clone()).await?;
     let b_state = b.repo.doc_head_state(doc_id).await?;
+    tracing::warn!(
+        a = %crate::test2::harness::heads::state_summary(a.label, &a_state),
+        b = %crate::test2::harness::heads::state_summary(b.label, &b_state),
+        a_ledger = %kh_snap::describe_ledger(&a.repo).await?,
+        b_ledger = %kh_snap::describe_ledger(&b.repo).await?,
+        "INSTR partition_then_heal state"
+    ); // INSTR
     let (mut a_heads, mut b_heads) = (
         a_state.sedimentree_heads.to_vec(),
         b_state.sedimentree_heads.to_vec(),
@@ -1258,6 +1294,24 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
         guard.node(idx).repo.wait_for_quiescence(None).await?;
     }
 
+    // Healing syncs trigger reactive keyhive ops and checkpoints on every node;
+    // drive all live links to a fixed point before the content asserts.
+    crate::test2::harness::converge::converge(
+        &[guard.node(0), guard.node(1), guard.node(2), guard.node(3)],
+        &[&a_b2, &b_a2, &c_d2, &d_c2, &b_c, &c_b, &d_a, &a_d],
+        std::slice::from_ref(&doc_id),
+    )
+    .await?;
+    // INSTR: every node's head state and keyhive ledger before the content asserts.
+    for idx in 0..4 {
+        let node = guard.node(idx);
+        let state = node.repo.doc_head_state(doc_id.clone()).await?;
+        tracing::warn!(
+            state = %crate::test2::harness::heads::state_summary(node.label, &state),
+            ledger = %kh_snap::describe_ledger(&node.repo).await?,
+            "INSTR partial_mesh heal state"
+        ); // INSTR
+    }
     // Both independent branches must survive the heal.
     for handle in [&owner_doc, &c_doc] {
         assert_eq!(

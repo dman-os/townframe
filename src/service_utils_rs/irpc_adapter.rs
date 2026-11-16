@@ -17,7 +17,7 @@ pub struct IrpcAdapter;
 impl IrpcAdapter {
     /// Serves `Proto` from an in-process queue of `queue` messages and returns
     /// the irpc client that feeds it. Hand the client to
-    /// [`Client::irpc`](crate::Client::irpc).
+    /// `Client::new(Transport::irpc(client))` of `service_client_native_rs`.
     pub fn local<H, Proto>(
         host: Arc<H>,
         admission: Arc<Admission>,

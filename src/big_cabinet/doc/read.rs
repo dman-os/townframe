@@ -86,10 +86,14 @@ impl DocsService {
                 for (key, verdict, version) in verdicts {
                     let read = match verdict {
                         Verdict::Accepted { native: None, .. } => DatumRead::Absent { version },
-                        Verdict::Accepted { .. } => {
+                        Verdict::Accepted { authors, .. } => {
                             let datums = present(&key).expect("an accepted value is present");
                             match self.json(&tx, datums, &key) {
-                                Ok(value) => DatumRead::Accepted { value, version },
+                                Ok(value) => DatumRead::Accepted {
+                                    value,
+                                    version,
+                                    authors,
+                                },
                                 Err(reason) => DatumRead::Undecodable { reason, version },
                             }
                         }

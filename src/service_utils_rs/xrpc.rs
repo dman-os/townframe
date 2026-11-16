@@ -14,33 +14,43 @@ pub use service_core_rs::xrpc::TIMEOUT_HEADER;
 pub use service_core_rs::xrpc::TRACEPARENT_HEADER;
 pub use service_core_rs::xrpc::XrpcDomainDetailsError;
 pub use service_core_rs::xrpc::XrpcErrorEnvelope;
-mod client;
+pub use service_core_rs::xrpc::domain_error_envelope;
+pub use service_core_rs::xrpc::error_name;
 #[cfg(feature = "iroh-http")]
 mod iroh;
 mod router;
 mod serve;
 #[cfg(test)]
 mod tests;
+#[cfg(unix)]
+mod unix;
 
-pub use client::XrpcClient;
-pub use client::XrpcClientError;
-#[cfg(feature = "iroh-http")]
-pub use iroh::IROH_XRPC_HTTP_ALPN;
-#[cfg(feature = "iroh-http")]
-pub use iroh::IrohXrpcClient;
 #[cfg(feature = "iroh-http")]
 pub use iroh::IrohXrpcProtocolHandler;
 #[cfg(feature = "iroh-http")]
 pub use iroh::iroh_protocol_handler;
-pub use router::XrpcOperationHandler;
+pub use router::XrpcMethodHandler;
 pub use router::XrpcRegistrationError;
 pub use router::XrpcRouter;
 pub use router::XrpcSubscriptionHandler;
+pub use serve::AcceptFuture;
+pub use serve::ConnectionAcceptor;
 pub use serve::serve;
+pub use serve::serve_with_acceptor;
 pub use serve::serve_with_connection_limit;
+#[cfg(unix)]
+pub use unix::PeerCredentials;
+#[cfg(unix)]
+pub use unix::UnixConnectionAcceptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XrpcRequest {
+    /// The NSID the request addressed. A fallback handler serves many NSIDs and learns which
+    /// one here; a registered handler already knows its own.
+    pub nsid: String,
+    /// The HTTP verb the request used. A fallback handler serves both: it is a GET's query
+    /// string (`raw_query`) or a POST's JSON body (`params`).
+    pub verb: method_core::HttpMethod,
     pub context: RequestContext,
     pub metadata: HttpMetadata,
     pub params: Value,
