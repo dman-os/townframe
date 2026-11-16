@@ -228,7 +228,7 @@ impl Model {
             .capability(
                 actor,
                 DocScope {
-                    read: BTreeSet::from([self.document.clone()]),
+                    read: DocScope::read_all([self.document.clone()]),
                     ..DocScope::default()
                 },
             )

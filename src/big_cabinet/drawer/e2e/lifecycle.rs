@@ -1382,7 +1382,7 @@ async fn a_pending_successor_is_not_absence_or_a_terminal_answer() {
                     .mint_doc(
                         &node.drawers_actor,
                         DocScope {
-                            read: [middle.clone()].into(),
+                            read: DocScope::read_all([middle.clone()]),
                             ..Default::default()
                         },
                     )

@@ -133,7 +133,7 @@ async fn metadata_issuer_mints_only_requested_documents_without_root_or_content_
     let public = metadata(&node, &drawer, MetaRoot::Public, "first").await;
     let sensitive = metadata(&node, &drawer, MetaRoot::Sensitive, "first").await;
     let exact = |document: DocId, write| DocScope {
-        read: BTreeSet::from([document.clone()]),
+        read: DocScope::read_all([document.clone()]),
         write: if write {
             std::collections::BTreeMap::from([(
                 document.clone(),

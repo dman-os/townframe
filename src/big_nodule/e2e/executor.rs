@@ -442,7 +442,7 @@ async fn config_blobs(node: &Node) -> BTreeMap<DatumKey, DatumRead> {
             Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    read: BTreeSet::from([config_doc.clone()]),
+                    read: DocScope::read_all([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,

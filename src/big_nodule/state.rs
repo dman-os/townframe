@@ -598,7 +598,7 @@ async fn apply_settings(
             .metadata(),
             MintDocCapability {
                 scope: big_cabinet_core::doc::DocScope {
-                    read: BTreeSet::from([doc_id.clone()]),
+                    read: DocScope::read_all([doc_id.clone()]),
                     write: BTreeMap::from([(doc_id.clone(), kinds.clone())]),
                     ..Default::default()
                 },
