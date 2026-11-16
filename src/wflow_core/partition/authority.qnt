@@ -49,20 +49,26 @@ module wflow_authority {
 
   // The classified failure that settled a job which cannot make progress.
   // `failure` names the Rust `JobFailure` variant; `restarts` carries the
-  // count for "restarts-exhausted" and is 0 for every other failure.
+  // re-run count for "restarts-exhausted" and `retries` the transient-failure
+  // count for "retries-exhausted"; both are 0 for every other failure. Those
+  // two counts are the ones the authority recomputes from durable state, so a
+  // reported fault is admitted by comparing them against the job.
   //
   // A fault is the single durable failure shape: `Outcome` has only
   // "completed" and "faulted", and nothing is laundered through a completed
-  // terminal as an error string. The model produces the two faults the
-  // authority settles from durable state alone, with no reporting lease:
-  // "cancelled" (an operator fact) and "restarts-exhausted" (charged at grant
-  // time, when no lease is held). The failures a lease holder reports —
-  // "retries-exhausted", "replay-diverged", "panicked" — are admitted by
-  // `Job::validate_fault` only from the lease the job currently holds, and are
-  // not modelled here because the model has no action that reports one.
+  // terminal as an error string. Two of the five variants are settled by the
+  // authority itself, with no reporting lease: "cancelled" (an operator fact)
+  // and "restarts-exhausted" (charged at grant time, when no lease is held).
+  // The other three are reported by a lease holder through `Command::Fail`:
+  // "retries-exhausted" (recomputed counters), "replay-diverged" and
+  // "panicked" (facts only the activation can know, admitted from the current
+  // lease alone). This model samples a panic and an exhausted retry budget as
+  // the reported faults; a divergent replay is modelled as the rejection that
+  // produces it (`nondeterministic`), not as the settlement that follows.
   type Fault = {
     failure: str,
     restarts: int,
+    retries: int,
     position: int,
   }
 
@@ -220,6 +226,7 @@ module wflow_authority {
   def emptyFault: Fault = {
     failure: "",
     restarts: 0,
+    retries: 0,
     position: 0,
   }
 
@@ -551,7 +558,7 @@ module wflow_authority {
       position: state.revision + 1,
     }
     if (restarts > MAX_RESTARTS) {
-      val fault = { failure: "restarts-exhausted", restarts: restarts, position: state.revision + 1 }
+      val fault = { failure: "restarts-exhausted", restarts: restarts, retries: 0, position: state.revision + 1 }
       commit(
         state,
         { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault },
@@ -669,7 +676,7 @@ module wflow_authority {
       val job = state.jobs.findJob(key)
       all {
         not(isSettled(job)),
-        val fault = { failure: "cancelled", restarts: 0, position: state.revision + 1 }
+        val fault = { failure: "cancelled", restarts: 0, retries: 0, position: state.revision + 1 }
         commit(
           state,
           { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, fault: fault },
@@ -705,6 +712,116 @@ module wflow_authority {
           isSettled(job),
           not(job.has_fault and job.fault.failure == "cancelled"),
           quiet(state, outcome("rejected", 0, "", "already-terminal")),
+        }
+      }
+  }
+
+  // The leased invocation reports a failure no replica could derive from the
+  // log. `validate_fault` admits it from the lease the job currently holds and
+  // nothing else, so this is the one fault whose only fence is "am I still the
+  // activation this job leased?"; the settlement then replaces the active job
+  // with a permanent receipt. A waiting job is included on purpose: a durable
+  // wait suspends resumption, not the reporting of a failure.
+  //
+  // The panic message is not modelled. `prepare_fail` truncates a reported
+  // panic to `MAX_PANIC_MESSAGE_BYTES` *before* `validate_fault` compares the
+  // length, so admission on this path never depends on it; the bound only
+  // rejects a durable `Faulted` record that was written some other way, which
+  // is a replay check this state-based model does not express.
+  action failPanicked = {
+    nondet key = KEYS.oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          job.leased,
+          not(isSettled(job)),
+          val fault = {
+            failure: "panicked",
+            restarts: 0,
+            retries: 0,
+            position: state.revision + 1,
+          }
+          // The record carries the reporting lease, mirroring
+          // `Transition::Faulted.lease`: only the two authority-settled faults
+          // record none.
+          commit(
+            state,
+            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault },
+            [faultIntent(key, fault)],
+            outcome("accepted", state.revision + 1, "completed", ""),
+          )
+        }
+      }
+  }
+
+  // The lease holder reports that the transient-error retry budget is spent.
+  // Unlike a panic, the authority can recompute this from durable state, so the
+  // report is admitted only when the count it carries is the job's own
+  // `retry_attempts` and that count has reached the submission budget — the
+  // same two conjuncts `prepare_retry` rejects on when it refuses to schedule
+  // one more retry.
+  action failRetriesExhausted = {
+    nondet key = KEYS.oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          job.leased,
+          not(isSettled(job)),
+          job.retry_attempts >= MAX_RETRIES,
+          val fault = {
+            failure: "retries-exhausted",
+            restarts: 0,
+            retries: job.retry_attempts,
+            position: state.revision + 1,
+          }
+          commit(
+            state,
+            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault },
+            [faultIntent(key, fault)],
+            outcome("accepted", state.revision + 1, "completed", ""),
+          )
+        }
+      }
+  }
+
+  // A lease holder reports a failure it has no standing to settle: "cancelled"
+  // and "restarts-exhausted" are admitted only with no reporting lease, and an
+  // exhausted-retry claim must be admissible for the job's own budget. The
+  // rejection leaves the job exactly as it was — same lease, same steps, no
+  // receipt — so a mistaken or replayed session cannot settle a live job, and
+  // `rejectionHasNoIntents` records that no side effect escaped either.
+  action failInvalid = {
+    nondet key = KEYS.oneOf()
+    nondet failure = Set("restarts-exhausted", "retries-exhausted").oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          job.leased,
+          not(isSettled(job)),
+          // A retry-budget claim is only invalid while the budget is unspent;
+          // at the budget it is `failRetriesExhausted`'s business.
+          failure != "retries-exhausted" or job.retry_attempts < MAX_RETRIES,
+          quiet(state, outcome("rejected", 0, "", "invalid-fault")),
+        }
+      }
+  }
+
+  // A failure reported by an activation that does not hold the job's current
+  // lease. `require_current_lease` runs before the failure is classified, so a
+  // superseded session is fenced before its report is even read. Covers both a
+  // leased job addressed with an older lease and an unleased job (revoked or
+  // recovered) whose last lease reports a failure.
+  action failStaleLease = {
+    nondet key = KEYS.oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          not(isSettled(job)),
+          quiet(state, outcome("rejected", 0, "", "stale-lease")),
         }
       }
   }
@@ -1207,6 +1324,10 @@ module wflow_authority {
     cancel,
     duplicateCancel,
     cancelSettled,
+    failPanicked,
+    failRetriesExhausted,
+    failInvalid,
+    failStaleLease,
     complete,
     duplicateComplete,
     revoke,

@@ -120,6 +120,10 @@ impl Driver for AuthorityDriver {
             cancel(key: String) => self.cancel(key),
             duplicateCancel(key: String) => self.cancel(key),
             cancelSettled(key: String) => self.cancel(key),
+            failPanicked(key: String) => self.fail_panicked(key),
+            failRetriesExhausted(key: String) => self.fail_retries_exhausted(key),
+            failInvalid(key: String, failure: String) => self.fail_invalid(key, failure),
+            failStaleLease(key: String) => self.fail_stale_lease(key),
             complete(key: String) => self.complete(key),
             duplicateComplete(key: String) => self.duplicate_complete(key),
             revoke(key: String) => self.revoke(key),
@@ -349,6 +353,95 @@ impl AuthorityDriver {
         });
     }
 
+    /// The model's `failPanicked`: a panic reported by the job's current
+    /// lease. Panic text is host-supplied, so the report carries a short
+    /// message; the authority truncates anything longer before it validates the
+    /// record, so admission on this path never depends on the message.
+    fn fail_panicked(&mut self, key: String) {
+        let lease = self.authority.jobs()[&key].lease.clone().unwrap();
+        self.execute(Command::Fail {
+            key,
+            lease,
+            failure: JobFailure::Panicked("panic".into()),
+        });
+    }
+
+    /// The model's `failRetriesExhausted`: the report carries the job's own
+    /// retry count and the submitted budget, which are exactly the two values
+    /// `validate_fault` recomputes before admitting an exhausted-retry fault.
+    fn fail_retries_exhausted(&mut self, key: String) {
+        let job = &self.authority.jobs()[&key];
+        let lease = job.lease.clone().unwrap();
+        let retries = job.retry_attempts;
+        self.execute(Command::Fail {
+            key,
+            lease,
+            failure: JobFailure::RetriesExhausted {
+                retries,
+                max_retries: MAX_RETRIES,
+                last_error: "transient".into(),
+            },
+        });
+    }
+
+    /// The model's `failInvalid`: a failure the reporting lease has no standing
+    /// to settle. The model's nondeterministic pick says which one, and both
+    /// must come back `InvalidFault` with the job untouched.
+    fn fail_invalid(&mut self, key: String, failure: String) {
+        let job = &self.authority.jobs()[&key];
+        let lease = job.lease.clone().unwrap();
+        let failure = match failure.as_str() {
+            // Settled by the authority from durable state, so admissible only
+            // with no reporting lease.
+            "restarts-exhausted" => JobFailure::RestartsExhausted {
+                restarts: job.restarts,
+                max_restarts: MAX_RESTARTS,
+            },
+            // Admissible only once the budget is spent; the model samples it
+            // below the budget, where the counters disagree.
+            "retries-exhausted" => JobFailure::RetriesExhausted {
+                retries: job.retry_attempts,
+                max_retries: MAX_RETRIES,
+                last_error: "transient".into(),
+            },
+            other => unreachable!("the model samples only inadmissible failures, not {other}"),
+        };
+        self.execute(Command::Fail {
+            key,
+            lease,
+            failure,
+        });
+    }
+
+    /// The model's `failStaleLease`: a report from a lease that is gone, either
+    /// because the job leases a newer activation or because it holds none after
+    /// a revoke or a recovery. Both are fenced before the failure is read.
+    fn fail_stale_lease(&mut self, key: String) {
+        let job = &self.authority.jobs()[&key];
+        let lease = match &job.lease {
+            Some(lease) => {
+                let mut stale = lease.clone();
+                stale.authority_epoch = 0;
+                stale
+            }
+            // A job with no lease at all still names a well-formed old lease:
+            // the fence is the comparison, not the shape of the value.
+            None => Lease {
+                partition_incarnation: self.authority.partition_incarnation(),
+                authority_epoch: 0,
+                job_incarnation: job.incarnation,
+                generation: job.last_generation,
+                worker: 0,
+                position: 0,
+            },
+        };
+        self.execute(Command::Fail {
+            key,
+            lease,
+            failure: JobFailure::Panicked("panic".into()),
+        });
+    }
+
     fn complete(&mut self, key: String) {
         let job = &self.authority.jobs()[&key];
         self.execute(Command::Complete {
@@ -530,14 +623,18 @@ fn authority_conformance() {
             init: Some("init".into()),
             step: Some("step".into()),
             // Wait resolutions and terminal paths sit behind submit, grant,
-            // and begin-wait or cancel, and the always-enabled
-            // restarts and rejections dilute the sampled actions; 200
-            // traces of 32 steps is what it takes for every action in
-            // `step` (down to a terminal failure reported from a held wait)
-            // to appear under this seed.
+            // and begin-wait or cancel, and the always-enabled restarts and
+            // rejections dilute the sampled actions; 200 traces of 32 steps is
+            // what it takes for every action in `step` to appear. The seed is
+            // part of the configuration: `retryExhausted` and
+            // `failRetriesExhausted` share the one state with a spent retry
+            // budget (submit, grant, retry, due-re-grant) and split the samples
+            // that reach it, so the seed has to be one where both are taken —
+            // this one also covers every other action, down to a fault reported
+            // from a held wait.
             max_samples: Some(200),
             max_steps: Some(32),
-            seed: "424242".into(),
+            seed: "161803".into(),
         },
     };
     if let Err(err) = run_test(driver, config) {

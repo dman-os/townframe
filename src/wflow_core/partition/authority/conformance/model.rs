@@ -82,24 +82,32 @@ pub(super) fn empty_progress() -> ModelProgress {
 pub(super) struct ModelFault {
     pub(super) failure: String,
     pub(super) restarts: u64,
+    pub(super) retries: u64,
     pub(super) position: u64,
 }
-/// Projection of the two durable faults the model can produce. The model has no
-/// action that reports a fault from a lease holder, so `RetriesExhausted`,
-/// `ReplayDiverged` and `Panicked` — which `Job::validate_fault` admits only
-/// from the job's current lease — are unreachable in this projection.
-pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64) {
+/// Projection of a durable fault onto the model's vocabulary.
+///
+/// The model's `Fault` carries the two counters the authority recomputes from
+/// durable state: `restarts` for `RestartsExhausted` and `retries` for
+/// `RetriesExhausted`. `Cancelled`, `Panicked` and `ReplayDiverged` carry
+/// neither, so both project as 0. `ReplayDiverged` is unreachable here: the
+/// model ends a divergent replay at the `nondeterministic` rejection that
+/// produces it, never at the settlement that follows.
+pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64, u64) {
     match failure {
-        JobFailure::Cancelled { .. } => ("cancelled", 0),
-        JobFailure::RestartsExhausted { restarts, .. } => ("restarts-exhausted", *restarts),
-        _ => unreachable!("the model never reports a lease-holder fault"),
+        JobFailure::Cancelled { .. } => ("cancelled", 0, 0),
+        JobFailure::RestartsExhausted { restarts, .. } => ("restarts-exhausted", *restarts, 0),
+        JobFailure::RetriesExhausted { retries, .. } => ("retries-exhausted", 0, *retries),
+        JobFailure::ReplayDiverged { .. } => ("replay-diverged", 0, 0),
+        JobFailure::Panicked(_) => ("panicked", 0, 0),
     }
 }
 pub(super) fn model_fault(fault: &Fault) -> ModelFault {
-    let (failure, restarts) = failure_name(&fault.failure);
+    let (failure, restarts, retries) = failure_name(&fault.failure);
     ModelFault {
         failure: failure.into(),
         restarts,
+        retries,
         position: fault.position,
     }
 }
@@ -107,6 +115,7 @@ pub(super) fn empty_fault() -> ModelFault {
     ModelFault {
         failure: String::new(),
         restarts: 0,
+        retries: 0,
         position: 0,
     }
 }
