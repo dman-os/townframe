@@ -141,7 +141,7 @@ pub(super) async fn all_datums(node: &BigNode, document: &DocId) -> DatumsRead {
                 capability: capability(
                     node,
                     DocScope {
-                        read: BTreeSet::from([document.clone()]),
+                        read: DocScope::read_all([document.clone()]),
                         ..Default::default()
                     },
                 )

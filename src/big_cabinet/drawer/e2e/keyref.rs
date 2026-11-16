@@ -114,7 +114,7 @@ impl Node {
             .mint_doc(
                 reader,
                 DocScope {
-                    read: readable.iter().map(|doc| (*doc).clone()).collect(),
+                    read: DocScope::read_all(readable.iter().map(|doc| (*doc).clone())),
                     ..Default::default()
                 },
             )
@@ -142,7 +142,7 @@ impl Node {
             .mint_doc(
                 reader,
                 DocScope {
-                    read: readable.iter().map(|doc| (*doc).clone()).collect(),
+                    read: DocScope::read_all(readable.iter().map(|doc| (*doc).clone())),
                     ..Default::default()
                 },
             )

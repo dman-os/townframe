@@ -116,7 +116,7 @@ impl BigNode {
                 operator.metadata(),
                 MintDocCapability {
                     scope: DocScope {
-                        read: BTreeSet::from([doc_id.clone()]),
+                        read: DocScope::read_all([doc_id.clone()]),
                         ..Default::default()
                     },
                     rights: Rights::USE,

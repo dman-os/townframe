@@ -224,7 +224,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
                     .metadata(),
                     MintDocCapability {
                         scope: DocScope {
-                            read: BTreeSet::from([other.doc_id.clone()]),
+                            read: DocScope::read_all([other.doc_id.clone()]),
                             ..DocScope::default()
                         },
                         rights: Rights::USE,
@@ -242,7 +242,7 @@ async fn a_handle_stays_bound_to_its_subject_and_signs_as_whichever_handle_the_c
             signer: owner.capability,
         },
         DocScope {
-            read: BTreeSet::from([created.doc_id.clone()]),
+            read: DocScope::read_all([created.doc_id.clone()]),
             ..DocScope::default()
         },
         Rights::USE,
@@ -345,6 +345,93 @@ async fn a_document_capability_limits_set_and_remove_to_its_datum_kinds() {
 }
 
 #[tokio::test]
+async fn a_document_capability_filters_reads_to_its_datum_kinds() {
+    let node = Node::boot().await;
+    let owner = node.writer("owner").await;
+    let other_key: DatumKey = format!("{TEXT_NOTE}/main").parse().unwrap();
+    let created = node
+        .create(
+            &owner,
+            "create",
+            [
+                (key("main"), note("public")),
+                (
+                    other_key.clone(),
+                    json!({"$type": TEXT_NOTE, "text": "sensitive"}),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &owner,
+            DocScope {
+                read: BTreeMap::from([(
+                    created.doc_id.clone(),
+                    DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+                )]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let listing = node
+        .client()
+        .call(
+            RequestContext::root(),
+            ListDatums {
+                capability,
+                doc_id: created.doc_id.clone(),
+                at: At::Current,
+                with_authors: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listing.datums.keys().collect::<Vec<_>>(),
+        vec![&key("main")]
+    );
+
+    let read = node
+        .client()
+        .call(
+            RequestContext::root(),
+            ReadDatums {
+                capability,
+                doc_id: created.doc_id.clone(),
+                at: At::Current,
+                datums: None,
+                optimistic: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(read.datums.contains_key(&key("main")));
+    assert!(!read.datums.contains_key(&other_key));
+
+    assert_eq!(
+        op(node
+            .client()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability,
+                    doc_id: created.doc_id,
+                    at: At::Current,
+                    datums: Some(BTreeSet::from([other_key])),
+                    optimistic: false,
+                },
+            )
+            .await),
+        Err(DocsError::Denied)
+    );
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn datum_kind_capabilities_can_only_be_narrowed() {
     let node = Node::boot().await;
     let owner = node.writer("owner").await;
@@ -356,6 +443,10 @@ async fn datum_kind_capabilities_can_only_be_narrowed() {
         &node,
         Authorization::identity(owner.capability),
         DocScope {
+            read: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
             write: BTreeMap::from([(
                 created.doc_id.clone(),
                 DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
@@ -372,6 +463,10 @@ async fn datum_kind_capabilities_can_only_be_narrowed() {
             signer: owner.capability,
         },
         DocScope {
+            read: BTreeMap::from([(
+                created.doc_id.clone(),
+                DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
+            )]),
             write: BTreeMap::from([(
                 created.doc_id.clone(),
                 DatumKinds::Only(BTreeSet::from([key("main").tag().clone()])),
@@ -1472,7 +1567,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     let read_doc = DocId::new([71; 32]);
     let write_doc = DocId::new([72; 32]);
     let scope = DocScope {
-        read: BTreeSet::from([read_doc.clone()]),
+        read: DocScope::read_all([read_doc.clone()]),
         write: std::collections::BTreeMap::from([(
             write_doc.clone(),
             big_cabinet_core::doc::DatumKinds::All,
@@ -1513,7 +1608,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
         dependencies
     );
     let mut overlapping = scope.clone();
-    overlapping.read.insert(write_doc.clone());
+    overlapping.read.insert(write_doc.clone(), DatumKinds::All);
     assert_eq!(
         node.access
             .prove(&context, owner.actor.actor_id, &overlapping)
@@ -1547,7 +1642,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
                 signer: owner.capability,
             },
             DocScope {
-                read: BTreeSet::from([write_doc.clone()]),
+                read: DocScope::read_all([write_doc.clone()]),
                 ..DocScope::default()
             },
             Rights::USE,
@@ -1625,7 +1720,7 @@ async fn a_scoped_handle_presented_by_an_actor_it_is_not_bound_to_cannot_mint() 
         .await
         .unwrap();
     let scope = DocScope {
-        read: BTreeSet::from([created.doc_id.clone()]),
+        read: DocScope::read_all([created.doc_id.clone()]),
         ..DocScope::default()
     };
     let held = mint(
@@ -1669,7 +1764,7 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
         .await
         .unwrap();
     let scope = DocScope {
-        read: BTreeSet::from([created.doc_id.clone()]),
+        read: DocScope::read_all([created.doc_id.clone()]),
         ..DocScope::default()
     };
     let use_only = actor(&node, "use-only", Rights::USE).await;
@@ -2080,7 +2175,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             None
         };
         let scope = DocScope {
-            read: BTreeSet::from([created.doc_id.clone()]),
+            read: DocScope::read_all([created.doc_id.clone()]),
             ..DocScope::default()
         };
         let capability = mint(
@@ -2175,7 +2270,7 @@ async fn a_held_document_poll_acquires_interest_in_an_absent_document() {
         .capability(
             &reader,
             DocScope {
-                read: BTreeSet::from([absent.clone()]),
+                read: DocScope::read_all([absent.clone()]),
                 ..DocScope::default()
             },
         )
@@ -2229,7 +2324,7 @@ async fn a_document_id_that_is_not_32_bytes_is_refused_and_the_node_keeps_servin
         // Minting a scope that names the id, as a document it reads or writes or as a drawer.
         for scope in [
             DocScope {
-                read: BTreeSet::from([bad.clone()]),
+                read: DocScope::read_all([bad.clone()]),
                 ..DocScope::default()
             },
             DocScope {
@@ -2251,7 +2346,7 @@ async fn a_document_id_that_is_not_32_bytes_is_refused_and_the_node_keeps_servin
             .capability(
                 &owner,
                 DocScope {
-                    read: BTreeSet::from([created.doc_id.clone()]),
+                    read: DocScope::read_all([created.doc_id.clone()]),
                     ..DocScope::default()
                 },
             )
