@@ -95,7 +95,7 @@ impl<N: Nodule + Clone + Send + 'static> Registered for Hosting<N> {
                                 &Method::POST,
                                 &job.path,
                                 &job.headers,
-                                &job.body,
+                                job.body,
                             )
                             .await;
                             // The caller's deadline or cancellation drops its end of the reply
@@ -118,8 +118,8 @@ impl<N: Nodule + Clone + Send + 'static> Registered for Hosting<N> {
 struct Job {
     path: String,
     headers: HeaderMap,
-    body: Vec<u8>,
-    reply: oneshot::Sender<(StatusCode, Vec<u8>)>,
+    body: XrpcBody,
+    reply: oneshot::Sender<(StatusCode, XrpcBody)>,
 }
 
 pub(crate) struct Started {
@@ -138,27 +138,25 @@ pub(crate) struct Egress {
 
 impl HttpTransport for Egress {
     async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
-        let body = match request.body {
-            XrpcBody::Json(body) => body,
-            XrpcBody::Bytes(_) => {
-                return Err(HttpTransportError {
-                    message: "byte request bodies are not enabled yet".to_owned(),
-                });
-            }
-        };
+        let XrpcRequest {
+            method,
+            path,
+            headers,
+            body,
+        } = request;
         let (status, body) = egress::call(
             &self.dispatch,
             Some(self.signer),
-            &request.method,
-            &format!("/{}", request.path),
-            &request.headers,
-            &body,
+            &method,
+            &format!("/{path}"),
+            &headers,
+            body,
         )
         .await;
         Ok(XrpcResponse {
             status,
             headers: HeaderMap::new(),
-            body: XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes")),
+            body,
         })
     }
 }
@@ -182,9 +180,15 @@ impl Provider for NativeProvider {
         input: Value,
         body: Option<Body>,
     ) -> Result<Body, ProviderError> {
-        if body.is_some() {
-            return Err(big_nodule::wire::byte_body_refused());
-        }
+        let body = match body {
+            None => XrpcBody::json(serde_json::to_vec(&input).expect("a JSON value serializes")),
+            Some(Body::Bytes(body)) => XrpcBody::Bytes(body),
+            Some(Body::Json(body)) => {
+                XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes"))
+            }
+            #[cfg(unix)]
+            Some(Body::Descriptors(_)) => return Err(big_nodule::wire::descriptor_body_refused()),
+        };
         let (reply, answer) = oneshot::channel();
         let job = Job {
             path: format!("/xrpc/{operation}"),
@@ -199,7 +203,7 @@ impl Provider for NativeProvider {
                     .expect("config capability lock"),
                 *self.capability.lock().expect("capability lock"),
             ),
-            body: serde_json::to_vec(&input).expect("a JSON value serializes"),
+            body,
             reply,
         };
         // A call that raced the nodule's retirement reaches a stopped thread. Like the wasm
@@ -210,7 +214,11 @@ impl Provider for NativeProvider {
         let (status, body) = answer
             .await
             .map_err(|_| gateway_error("the nodule stopped before it answered"))?;
-        provider_result(status, &body).map(Body::Json)
+        match body {
+            XrpcBody::Json(body) => provider_result(status, &body).map(Body::Json),
+            XrpcBody::Bytes(body) if status.is_success() => Ok(Body::Bytes(body)),
+            XrpcBody::Bytes(_) => Err(gateway_error("a failed byte response is not an XRPC error")),
+        }
     }
 }
 

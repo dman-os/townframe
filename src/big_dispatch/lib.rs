@@ -370,8 +370,11 @@ async fn admit_input(
         #[cfg(unix)]
         (Encoding::Json, _, body @ Body::Descriptors(_)) => return Err(mismatch("JSON", &body)),
         (Encoding::Bytes { mime }, http, Body::Bytes(raw)) => {
-            if let (Some(declared), Some(sent)) = (mime, raw.mime.as_deref())
-                && !essence(sent).eq_ignore_ascii_case(declared)
+            // A Lexicon-declared media type (a nodule's) is owned by the operation; a built-in
+            // states its own as a static in the `Encoding`.
+            let declared = entry.input_mime.as_deref().or(mime);
+            if let (Some(declared), Some(sent)) = (declared, raw.mime.as_deref())
+                && !method_core::content_type_essence(sent).eq_ignore_ascii_case(declared)
             {
                 return Err(DispatchError::BodyMismatch {
                     expected: declared.to_owned(),
@@ -412,12 +415,6 @@ async fn admit_input(
     Ok((input, body))
 }
 
-/// The media type without its parameters: `application/json; charset=utf-8` is
-/// `application/json`.
-fn essence(mime: &str) -> &str {
-    mime.split(';').next().unwrap_or_default().trim()
-}
-
 /// A raw HTTP request body read as the JSON input of a procedure.
 async fn decode_json(raw: ByteBody) -> Res<Value> {
     let Some(mime) = raw.mime.as_deref() else {
@@ -426,7 +423,7 @@ async fn decode_json(raw: ByteBody) -> Res<Value> {
             found: "no Content-Type".to_owned(),
         });
     };
-    if !essence(mime).eq_ignore_ascii_case("application/json") {
+    if !method_core::is_json_content_type(mime) {
         return Err(DispatchError::BodyMismatch {
             expected: "application/json".to_owned(),
             found: mime.to_owned(),
