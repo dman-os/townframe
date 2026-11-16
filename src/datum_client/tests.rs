@@ -3,6 +3,8 @@ use super::*;
 use big_cabinet_core::doc::DatumPage;
 use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::QueriedDatumRefs;
+use big_cabinet_core::doc::ResolvedKeyRef;
 use serde::Deserialize;
 use service_core_rs::Envelope;
 use service_core_rs::ResponseEnvelope;
@@ -27,6 +29,8 @@ struct FakeTransport {
     listings: Mutex<VecDeque<big_cabinet_core::doc::DatumListing>>,
     writes: Mutex<VecDeque<WriteReceipt>>,
     polls: Mutex<VecDeque<DatumPage>>,
+    resolves: Mutex<VecDeque<Result<ResolvedKeyRef, DocsError>>>,
+    ref_queries: Mutex<VecDeque<QueriedDatumRefs>>,
     requests: Mutex<Vec<RecordedRequest>>,
 }
 
@@ -38,6 +42,8 @@ enum RecordedRequest {
     List(ListDatums),
     Write(WriteDatums),
     Poll(PollDatums),
+    Resolve(ResolveKeyRef),
+    QueryRefs(QueryDatumRefs),
 }
 
 impl service_client_core_rs::UnaryTransport<ReadDatums> for FakeTransportHandle {
@@ -120,6 +126,48 @@ impl service_client_core_rs::UnaryTransport<PollDatums> for FakeTransportHandle 
             .unwrap()
             .pop_front()
             .expect("fake poll response")
+            .into())
+    }
+}
+
+impl service_client_core_rs::UnaryTransport<ResolveKeyRef> for FakeTransportHandle {
+    async fn call(
+        &self,
+        request: Envelope<ResolveKeyRef>,
+    ) -> Result<ResponseEnvelope<ResolvedKeyRef>, ClientError<DocsError>> {
+        self.0
+            .requests
+            .lock()
+            .unwrap()
+            .push(RecordedRequest::Resolve(request.params));
+        self.0
+            .resolves
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("fake resolve response")
+            .map(Into::into)
+            .map_err(ClientError::Method)
+    }
+}
+
+impl service_client_core_rs::UnaryTransport<QueryDatumRefs> for FakeTransportHandle {
+    async fn call(
+        &self,
+        request: Envelope<QueryDatumRefs>,
+    ) -> Result<ResponseEnvelope<QueriedDatumRefs>, ClientError<DocsError>> {
+        self.0
+            .requests
+            .lock()
+            .unwrap()
+            .push(RecordedRequest::QueryRefs(request.params));
+        Ok(self
+            .0
+            .ref_queries
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("fake ref query response")
             .into())
     }
 }
@@ -346,4 +394,105 @@ async fn a_wrong_tag_from_the_network_is_an_error() {
     .await
     .unwrap_err();
     assert!(matches!(error, Error::WrongTag { .. }));
+}
+
+#[tokio::test]
+async fn resolve_decodes_the_copy_and_unresolved_is_none() {
+    let transport = Arc::new(FakeTransport::default());
+    let expected = Note {
+        text: "content-addressed".to_owned(),
+    };
+    {
+        let mut resolves = transport.resolves.lock().unwrap();
+        resolves.push_back(Ok(ResolvedKeyRef {
+            doc_id: doc(),
+            heads: Vec::new(),
+            value: serde_json::to_value(&expected).unwrap(),
+        }));
+        resolves.push_back(Err(DocsError::KeyRefUnresolved {
+            datum_key: key(NOTE_TAG, "gone"),
+        }));
+    }
+    let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
+
+    assert_eq!(
+        resolve::<_, Note>(
+            &client,
+            RequestContext::root(),
+            capability(),
+            String::from("4c1f"),
+        )
+        .await
+        .unwrap(),
+        Some(Resolved {
+            doc_id: doc(),
+            heads: Vec::new(),
+            value: expected,
+        })
+    );
+    assert_eq!(
+        resolve::<_, Note>(
+            &client,
+            RequestContext::root(),
+            capability(),
+            String::from("gone"),
+        )
+        .await
+        .unwrap(),
+        None
+    );
+
+    let requests = transport.requests.lock().unwrap();
+    let RecordedRequest::Resolve(request) = &requests[0] else {
+        panic!("expected resolve request");
+    };
+    assert_eq!(request.capability, capability());
+    assert_eq!(request.key, key(NOTE_TAG, "4c1f"));
+}
+
+#[tokio::test]
+async fn referrers_query_by_key_and_return_the_node_answer() {
+    let transport = Arc::new(FakeTransport::default());
+    let referrer = QueriedDatumRef {
+        origin_doc_id: doc(),
+        origin_datum_key: key("org.example.entry", "range"),
+        path: "/commits/0".to_owned(),
+        target_doc_id: None,
+        target_datum_key: key(NOTE_TAG, "4c1f"),
+        ref_heads: Vec::new(),
+    };
+    transport
+        .ref_queries
+        .lock()
+        .unwrap()
+        .push_back(QueriedDatumRefs {
+            refs: vec![referrer.clone()],
+        });
+    let client = Client::new(FakeTransportHandle(Arc::clone(&transport)));
+
+    assert_eq!(
+        referrers::<_, Note>(
+            &client,
+            RequestContext::root(),
+            capability(),
+            Some(doc()),
+            String::from("4c1f"),
+        )
+        .await
+        .unwrap(),
+        vec![referrer]
+    );
+
+    let requests = transport.requests.lock().unwrap();
+    let RecordedRequest::QueryRefs(request) = &requests[0] else {
+        panic!("expected ref query request");
+    };
+    assert_eq!(request.capability, capability());
+    assert_eq!(request.drawer_id, Some(doc()));
+    assert_eq!(
+        request.selector,
+        DatumRefSelector::Key {
+            key: key(NOTE_TAG, "4c1f"),
+        }
+    );
 }

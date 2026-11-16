@@ -9,13 +9,18 @@ use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::PollDatums;
+use big_cabinet_core::doc::QueriedDatumRef;
+use big_cabinet_core::doc::QueryDatumRefs;
+use big_cabinet_core::doc::DatumRefSelector;
 use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::ResolveKeyRef;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
@@ -272,6 +277,86 @@ where
         next_cursor: response.through,
         caught_up: response.caught_up,
     })
+}
+
+/// A content-addressed datum [`resolve`] found: the document the copy was read from, at which
+/// heads, and its value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Resolved<D> {
+    pub doc_id: DocId,
+    pub heads: Vec<ChangeHash>,
+    pub value: D,
+}
+
+/// Resolve a `#keyRef` to `D` under `slot` (ADR 035 §2.9): read a copy from any document the
+/// capability reaches whose value hashes to the key. `D::TAG` must be a content-addressed kind.
+///
+/// The node answers `KeyRefUnresolved` both when no copy exists and when the caller can read none,
+/// so the two are not told apart here either: both are `Ok(None)`, like an absent datum in
+/// [`read`].
+pub async fn resolve<T, D>(
+    client: &Client<T>,
+    context: RequestContext,
+    capability: CapId,
+    slot: impl Into<Vec<u8>>,
+) -> Result<Option<Resolved<D>>, Error>
+where
+    T: UnaryTransport<ResolveKeyRef>,
+    D: TypedDatum,
+{
+    let key = datum_key::<D>(slot)?;
+    let response = match client
+        .call(
+            context,
+            ResolveKeyRef {
+                capability,
+                key: key.clone(),
+            },
+        )
+        .await
+    {
+        Ok(response) => response,
+        Err(ClientError::Method(DocsError::KeyRefUnresolved { .. })) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let value = serde_json::from_value(response.value).map_err(|error| Error::Decode {
+        key,
+        message: error.to_string(),
+    })?;
+    Ok(Some(Resolved {
+        doc_id: response.doc_id,
+        heads: response.heads,
+        value,
+    }))
+}
+
+/// Every `#keyRef` naming `D` under `slot`, whichever document holds the referrer: "what
+/// references this commit" is one call. `drawer_id` narrows the answer to one drawer's documents.
+///
+/// The answer names referrers, not their values: read the ones you need with [`read`].
+pub async fn referrers<T, D>(
+    client: &Client<T>,
+    context: RequestContext,
+    capability: CapId,
+    drawer_id: Option<DocId>,
+    slot: impl Into<Vec<u8>>,
+) -> Result<Vec<QueriedDatumRef>, Error>
+where
+    T: UnaryTransport<QueryDatumRefs>,
+    D: TypedDatum,
+{
+    let key = datum_key::<D>(slot)?;
+    Ok(client
+        .call(
+            context,
+            QueryDatumRefs {
+                capability,
+                drawer_id,
+                selector: DatumRefSelector::Key { key },
+            },
+        )
+        .await?
+        .refs)
 }
 
 fn datum_tag<D: TypedDatum>() -> Result<DatumTag, Error> {
