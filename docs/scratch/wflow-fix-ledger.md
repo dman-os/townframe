@@ -118,12 +118,43 @@ With that file present, `cargo nextest run -p wflow` is
 `11 tests run: 11 passed`, including
 `authority_conformance::authority_native_and_wasm_conformance` (0.16 s).
 
-Two changes follow from it: `wasm_path()` now looks in the guest workspace
-target before `CARGO_TARGET_DIR`, so the documented build is enough on its own;
-and `.github/workflows/checks.yml` gains a `wflow-parity` job that builds the
-guest and runs the crate's tests. It runs alongside `wflow-authority` rather
-than inside it, because the guest build is minutes of work and the model job
-already spends ~8 of its 30 minutes on Apalache.
+`wasm_path()` now looks in the guest workspace target before
+`CARGO_TARGET_DIR`, so the documented build is enough on its own. That is also
+what makes the test pass in CI: the `tests` job already builds `test_wflows` into
+`src/wasm_utils_rs/target` and runs the whole workspace under `cargo llvm-cov`.
+CI never sets `TEST_WFLOWS_WASM`, and whatever `CARGO_TARGET_DIR` the test sees
+there (unset, or `cargo llvm-cov`'s own directory under the root `target`) is
+never the guest workspace's target, so the old lookup could not find the
+fixture in CI either.
+
+### CI layout (review of `5e9f6d60`)
+
+`5e9f6d60` first added a `wflow-parity` job, beside the earlier
+`wflow-authority` job. Both were mostly duplicates and were removed after
+checking real timings on main (scheduled run 43848942334):
+
+| Job | Wall | Note |
+|---|---|---|
+| `tests` | 33.5 min | critical path: 23.6 min nextest, 4.9 min plug OCI, 1.4 min `test_wflows`/`test_nodule_guest` builds |
+| Nix CLI package | 26.5 min | |
+| rust-target-matrix native | 21.6 min | 17.7 min check-matrix |
+| E2E (CLI) | 12.9 min | |
+| Lint (pre-commit + nix checks) | 10.5 min | 8.9 min hooks |
+
+Per-job setup (checkout, Nix installer, FlakeHub cache, rust-cache) is ~1-1.5
+min before the first `nix develop`, and the first `nix develop` plus WIT fetch
+is another 1.3-3.5 min.
+
+- `wflow-parity` rebuilt `test_wflows` and ran `cargo nextest -p wflow`; the
+  `tests` job already does both (its `builds` step and its `--workspace` run).
+  Removed outright.
+- `wflow-authority` ran `cargo nextest -p wflow_core`, also in `tests`. Its only
+  unique work is quint: typecheck 2 s, `quint run` 2 s, `quint verify
+  --max-steps=3` 448 s locally (391 s on an earlier run). Those three steps moved
+  into the Lint job under `if: !cancelled()`: Lint has ~23 min of slack under
+  `tests`, already realizes `ci-desktop` (which carries `formalTools`), and the
+  model is a source-only check like the hooks. A job of its own would add a
+  runner's setup for under 8 minutes of work and no wall-clock gain.
 
 ## Adapter fixes (unblocked by the manifest revert)
 
@@ -219,7 +250,7 @@ time; builds serialised (memory is the constraint, not CPU).
 | 3 | E-retention | WFR-014 (core + runtime + model) | B2 | **done** `af8649d1`, verified 42/42 + 37/37 |
 | 4 | F-hygiene | item 3, item 8, audit 11/21 | B2 | **done** `4659843d`, verified 42/42 + 39/39 + 10/10 |
 | 5 | G-guardrails | module split, doc metadata, allow attribute | — | **done** `6ac671fd`, lint 0 diagnostics |
-| — | I-parity | audit 26: conformance fixture | — | **done** fixture resolves from the guest workspace; CI job added |
+| — | I-parity | audit 26: conformance fixture | — | **done** fixture resolves from the guest workspace; runs in the `tests` job |
 | — | adapter | audit 4/16/22 (Wasm trap class, panic text, binder panics) | — | **done** `6268314f` |
 
 B owns the adapters too. Splitting "runtime" from "adapters" is what produced
