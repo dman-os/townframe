@@ -144,7 +144,29 @@ exists. The audit is right that this is an availability outage, and the earlier
 review was wrong that it was a design flaw in the cooperative model — the model
 is fine; the missing piece is a yield/interruption deadline and a way to reclaim
 a session that stops yielding. This needs a product call on what the engine
-guarantees before B2 shapes anything.
+guarantees — and the question is genuinely about the promise, not the code.
+
+Recommendation, not yet implemented and not yet accepted:
+
+1. **Bounded teardown first.** `LocalExecutor::drop` does `thread.join()`, so a
+   guest blocked in synchronous code hangs host shutdown forever. Cancel, wait a
+   short bounded interval for the run future to finish, then detach the thread
+   and record that the abandoned activation's thread is unrecoverable. That is
+   honest: we cannot preempt arbitrary blocking code on the same OS thread, and
+   pretending otherwise with an async deadline is a lie.
+2. **Then per-activation isolation, if the availability promise matters.** One
+   `current_thread` runtime + `LocalSet` per activation instead of per driver.
+   Non-`Send` guest futures stay legal because each activation owns its thread.
+   Cost is one thread per in-flight activation (tens, for a personal Daybook),
+   and cancellation becomes "drop the runtime", which is a real reclaim rather
+   than a request.
+3. **An activation deadline is not a substitute** for either: a wall-clock
+   deadline cannot interrupt synchronous code, and a cooperative yield deadline
+   only catches guests that yield.
+
+Recommended: (1) now because it is a shutdown hang with no user-visible benefit,
+and (2) as a separate change once the availability promise is stated. (3) only
+for guests we do not trust.
 
 
 Three waves, because the authority is the shared contract and the runtime,
@@ -162,9 +184,10 @@ time; builds serialised (memory is the constraint, not CPU).
 | 2 | D-ci | `.github/workflows/checks.yml` | A, C | **done** `bf1baea6`; depth-4 follow-up dispatched |
 | 2 | B1-contract | `src/wflow_tokio/**`, `src/wflow_wdk/**`, adapters | A | **done** `ff428451` + `c922ad0a`, verified 39/39 + 37/37 |
 | 3 | B2-robust | `src/wflow_tokio/**`, adapters | B1 | **done** `e8879cd1` + `45b0c3c7`, verified 36/36 + 37/37 |
-| 3 | E-retention | WFR-014 (core + runtime + model) | B2 | dispatched |
-| 4 | F-hygiene | item 3, item 8, audit 11/16/18 | B2 | ready after E (same files) |
-| — | I-parity | audit 26: conformance fixture | — | dispatched (disjoint files) |
+| 3 | E-retention | WFR-014 (core + runtime + model) | B2 | **done** `af8649d1`, verified 42/42 + 37/37 |
+| 4 | F-hygiene | item 3, item 8, audit 11/21 | B2 | dispatched |
+| — | I-parity | audit 26: conformance fixture | — | open |
+| — | adapter | audit 4/16/22 (Wasm trap class, panic text, binder panics) | — | **done** `6268314f` |
 
 B owns the adapters too. Splitting "runtime" from "adapters" is what produced
 the two laundering defects in the first place: the error class has to be
