@@ -1642,6 +1642,7 @@ dependencies = [
 name = "big_ndk"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "getrandom 0.3.4",
  "http",
@@ -1705,6 +1706,7 @@ dependencies = [
  "big_repo",
  "big_sync",
  "big_sync_core",
+ "bytes",
  "data-encoding",
  "futures",
  "iroh",
@@ -1745,6 +1747,7 @@ dependencies = [
  "big_nodule_core",
  "big_repo",
  "blake3",
+ "bytes",
  "futures",
  "http",
  "indexmap 2.14.2",
@@ -1801,6 +1804,8 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "bytes",
+ "futures",
+ "http-body",
  "http-body-util",
  "hyper",
  "method_core",
@@ -15726,6 +15731,8 @@ name = "test_nodule_handlers"
 version = "0.1.0"
 dependencies = [
  "big_ndk",
+ "bytes",
+ "futures",
  "http",
  "method_core",
  "serde",

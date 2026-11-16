@@ -189,6 +189,8 @@ impl ServiceProvider {
                         privileged: route.method.privileged,
                         input: route.method.input_encoding,
                         output: route.method.output_encoding,
+                        input_mime: None,
+                        output_mime: None,
                         local_only: route.method.local_only,
                         lexicon: Some(LexiconSource {
                             file,
