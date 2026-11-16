@@ -49,6 +49,7 @@ A cartridge has **at most one nodule**: nothing separates two nodules of one car
   "id": "did:plc:…/photos",
   "version": "1.2.0",
   "authority": "org.example.photos",
+  "name": "Photos",
   "dependencies": { "did:plc:…/blobs": "^1" },          // delivery hints (028 §4)
   "lexicons":   { "org.example.photos.album": { /* #datumPin */ }, … },
   "sidecars":   { "org.example.photos.album": { /* #datumPin */ } },     // §1, same keys as lexicons
@@ -84,6 +85,8 @@ A cartridge has **at most one nodule**: nothing separates two nodules of one car
   }
 }
 ```
+
+Presentation metadata follows the W3C Web App Manifest vocabulary used by MASL and Web Tiles: `name`, `shortName`, `description`, `categories`, `themeColor`, `icons` and `screenshots`. The latter two are lists of one shared `ImageResource` shape; each `src` is a `#datumPin` to a bundled blob datum, while `sizes`, `type`, `purpose` and screenshot `label` carry the Web App Manifest image metadata.
 
 **The cartridge's:** identity, version, authority, dependencies, Lexicons, components, **permbinds** (one list of what the cartridge reaches, whichever part reaches it, which is what an audit and a grant read) and **settings** (ADR 044 already makes them shared by the nodule and the micro).
 
