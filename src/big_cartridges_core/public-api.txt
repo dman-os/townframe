@@ -94,7 +94,7 @@ pub mod big_cartridges_core::registry
 pub mod big_cartridges_core::request
 pub mod big_cartridges_core::signature
 pub mod big_cartridges_core::test_support
-pub struct big_cartridges_core::Cartridge  { id: CartridgeId, version: Version, authority: Option < String >, title: Option < String >, description: Option < String >, dependencies: BTreeMap < CartridgeId , VersionReq >, lexicons: BTreeMap < Nsid , DatumPin >, sidecars: BTreeMap < Nsid , DatumPin >, components: BTreeMap < String , DatumPin >, permbinds: BTreeMap < String , Permbind >, settings: BTreeSet < Nsid >, nodule: Option < Nodule >, micro: Option < MicroContribution >, signature: Option < signature :: CartridgeSignature >, extra: Extra }
+pub struct big_cartridges_core::Cartridge  { id: CartridgeId, version: Version, authority: Option < String >, name: Option < String >, description: Option < String >, short_name: Option < String >, categories: Vec < String >, theme_color: Option < String >, icons: Vec < ImageResource >, screenshots: Vec < ImageResource >, dependencies: BTreeMap < CartridgeId , VersionReq >, lexicons: BTreeMap < Nsid , DatumPin >, sidecars: BTreeMap < Nsid , DatumPin >, components: BTreeMap < String , DatumPin >, permbinds: BTreeMap < String , Permbind >, settings: BTreeSet < Nsid >, nodule: Option < Nodule >, micro: Option < MicroContribution >, signature: Option < signature :: CartridgeSignature >, extra: Extra }
 pub struct big_cartridges_core::CartridgeId  { namespace: String, name: String }
 pub struct big_cartridges_core::InvalidCartridgeId  { 0: String }
 pub struct big_cartridges_core::MicroContribution  { component: String, schema: String, description: IndexMap < String , serde_json :: Value >, extra: Extra }
@@ -134,6 +134,7 @@ pub struct big_cartridges_core::signature::CartridgeSignature  { alg: String, va
 pub struct big_cartridges_core::test_support::FixtureCartridge  { resolved: ResolvedCartridge, blobs: BTreeMap < Digest , Vec < u8 > > }
 pub use big_cartridges_core::manifest :: Component
 pub use big_cartridges_core::manifest :: ComponentExport
+pub use big_cartridges_core::manifest :: ImageResource
 pub use big_cartridges_core::manifest :: Initializer
 pub use big_cartridges_core::manifest :: LocalState
 pub use big_cartridges_core::manifest :: Nodule

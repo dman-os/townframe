@@ -19,7 +19,24 @@ fn datum_pin() -> DatumPin {
 
 fn manifest_cartridge() -> Cartridge {
     let mut cartridge = cartridge();
-    cartridge.title = Some("Photos".into());
+    cartridge.name = Some("Photos".into());
+    cartridge.short_name = Some("Photos".into());
+    cartridge.categories = vec!["photography".into()];
+    cartridge.theme_color = Some("#123456".into());
+    let icon = ImageResource {
+        src: datum_pin(),
+        sizes: Some("192x192".into()),
+        media_type: "image/png".into(),
+        purpose: Some("any".into()),
+        label: None,
+        extra: Default::default(),
+    };
+    cartridge.icons.push(icon.clone());
+    let mut screenshot = icon;
+    screenshot.sizes = None;
+    screenshot.purpose = None;
+    screenshot.label = Some("Photos overview".into());
+    cartridge.screenshots.push(screenshot);
     cartridge.dependencies.insert(
         example_cartridge!("search-api").parse().unwrap(),
         "^2".parse().unwrap(),
@@ -258,6 +275,12 @@ fn the_envelope_spells_ids_versions_and_digests_as_text() {
     let value = serde_json::to_value(&cartridge).unwrap();
     assert_eq!(value["id"], example_cartridge!("photos"));
     assert_eq!(value["version"], "1.2.3");
+    assert_eq!(value["name"], "Photos");
+    assert_eq!(value["shortName"], "Photos");
+    assert_eq!(value["categories"][0], "photography");
+    assert_eq!(value["themeColor"], "#123456");
+    assert_eq!(value["icons"][0]["type"], "image/png");
+    assert_eq!(value["screenshots"][0]["label"], "Photos overview");
     assert_eq!(
         value["dependencies"][example_cartridge!("search-api")],
         "^2"
@@ -448,7 +471,7 @@ fn a_signature_round_trips_and_leaves_the_revision_alone() {
 #[test]
 fn a_tampered_envelope_does_not_verify() {
     let mut signed = test_support::sign_as_example(cartridge());
-    signed.title = Some("Not what was signed".into());
+    signed.name = Some("Not what was signed".into());
     assert!(matches!(
         signed.verify_signature(),
         Err(crate::signature::SignatureError::Invalid(_))

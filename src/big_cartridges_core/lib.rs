@@ -42,6 +42,7 @@ pub const AUTHORITY: &str = "org.example.daybook";
 mod manifest;
 pub use manifest::Component;
 pub use manifest::ComponentExport;
+pub use manifest::ImageResource;
 pub use manifest::Initializer;
 pub use manifest::LocalState;
 pub use manifest::Nodule;
@@ -73,9 +74,19 @@ pub struct Cartridge {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
+    pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub icons: Vec<ImageResource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screenshots: Vec<ImageResource>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<CartridgeId, VersionReq>,
     // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
@@ -144,8 +155,13 @@ impl Cartridge {
             id,
             version,
             authority: None,
-            title: None,
+            name: None,
             description: None,
+            short_name: None,
+            categories: Vec::new(),
+            theme_color: None,
+            icons: Vec::new(),
+            screenshots: Vec::new(),
             dependencies: BTreeMap::new(),
             lexicons: BTreeMap::new(),
             sidecars: BTreeMap::new(),
