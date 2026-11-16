@@ -705,16 +705,20 @@ async fn a_value_captured_by_a_view_is_dropped_inside_the_close() {
                 ..Spec::default()
             },
             {
-                let (host, instance, seen) = (rig.host.clone(), instance.clone(), seen.clone());
+                let (host, instance, seen) = (
+                    rig.host.clone(),
+                    std::rc::Rc::clone(&instance),
+                    std::rc::Rc::clone(&seen),
+                );
                 move |context| {
                     let probe = Probe {
                         host: host.clone(),
-                        instance: instance.clone(),
-                        seen: seen.clone(),
+                        instance: std::rc::Rc::clone(&instance),
+                        seen: std::rc::Rc::clone(&seen),
                     };
                     async move {
                         context.publish::<ViewPub>(move || {
-                            let _ = &probe;
+                            let _probe = &probe;
                             blank()
                         })?;
                         Ok(())

@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn session_drop_fires_the_hook_exactly_once() {
         let drops = Rc::new(Cell::new(0_u32));
-        let counted = drops.clone();
+        let counted = Rc::clone(&drops);
         let session = SurfaceSession::with_drop(
             |_| EventResponse::default(),
             move || {

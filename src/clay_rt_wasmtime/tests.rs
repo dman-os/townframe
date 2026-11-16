@@ -1055,7 +1055,7 @@ fn oversized_adapter_batch_withdraws_before_resolving_component_handles() {
     let placement = state
         .table
         .push(Placement::new(
-            writer.clone(),
+            std::sync::Arc::clone(&writer),
             Arc::new(AtomicBool::new(false)),
         ))
         .unwrap();
@@ -1137,7 +1137,7 @@ async fn close_before_mount_revokes_and_releases_incarnation_owners() {
     host.close_instance(&owner).unwrap();
     let writer: Arc<dyn SurfaceSink<ComponentRef>> = Arc::new(TestSink::default());
     assert_eq!(
-        runtime.mount("view", writer.clone()).err(),
+        runtime.mount("view", std::sync::Arc::clone(&writer)).err(),
         Some(PresentationError::Revoked)
     );
     assert!(writer.is_live());
@@ -1354,7 +1354,9 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     .await
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
-    let surface = runtime.mount("view", writer.clone()).unwrap();
+    let surface = runtime
+        .mount("view", std::sync::Arc::clone(&writer))
+        .unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
         "3Pending counter writes: 0Refresh counter"
@@ -1447,7 +1449,9 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     .unwrap();
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
-        let session = runtime.mount("view", writer.clone()).unwrap();
+        let session = runtime
+            .mount("view", std::sync::Arc::clone(&writer))
+            .unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
             .await;
@@ -1750,7 +1754,7 @@ fn retained_surface_handles_are_bounded_and_release_capacity() {
     let placement = state
         .table
         .push(Placement::new(
-            writer.clone(),
+            std::sync::Arc::clone(&writer),
             Arc::new(AtomicBool::new(false)),
         ))
         .unwrap();
