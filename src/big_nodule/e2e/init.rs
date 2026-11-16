@@ -208,14 +208,12 @@ pub(super) fn init_cartridge(
         add_method(&mut cartridge, request, request, Necessity::Optional, None);
     }
     for (key, target, mode) in inits {
-        nodule_mut(&mut cartridge).initialization.insert(
-            (*key).to_owned(),
-            Initializer {
-                target: (*target).parse().unwrap(),
-                mode: mode.clone(),
-                extra: Default::default(),
-            },
-        );
+        nodule_mut(&mut cartridge).initialization.push(Initializer {
+            key: (*key).to_owned(),
+            target: (*target).parse().unwrap(),
+            mode: mode.clone(),
+            extra: Default::default(),
+        });
     }
     cartridge
 }
@@ -360,6 +358,29 @@ async fn calls_are_not_ready_while_an_initializer_runs_and_served_once_it_succee
     ));
     node.invoke(operator, PING, json!({})).await.unwrap();
     assert_eq!(probe.operations(), [SETUP, PING]);
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn initializer_declaration_order_survives_registry_round_trip() {
+    let probe = Probe::new();
+    let node = node_hosting(&probe).await;
+    let operator = node.operator();
+    let inits = [
+        ("z-first", SETUP, RunMode::Once),
+        ("a-second", WARM, RunMode::Once),
+    ];
+
+    node.admit(
+        operator,
+        init_cartridge("alpha", "1.0.0", &[PING, SETUP, WARM], &[], &inits),
+    )
+    .await
+    .unwrap();
+    node.set_enabled(ALPHA, true).await;
+    node.until(ALPHA, Readiness::Ready).await;
+
+    assert_eq!(probe.operations(), [SETUP, WARM]);
     node.shutdown().await;
 }
 
