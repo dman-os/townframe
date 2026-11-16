@@ -89,36 +89,12 @@ pub struct Cartridge {
     pub screenshots: Vec<ImageResource>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<CartridgeId, VersionReq>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<Nsid, serde_json::Value>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lexicons: BTreeMap<Nsid, DatumPin>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<Nsid, serde_json::Value>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sidecars: BTreeMap<Nsid, DatumPin>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<String, serde_json::Value>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub components: BTreeMap<String, DatumPin>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "BTreeMap<String, serde_json::Value>")
-    )]
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub permbinds: BTreeMap<String, Permbind>,
     /// Held as a set so a repeated NSID cannot appear twice; the datum schema describes it as a
@@ -126,20 +102,8 @@ pub struct Cartridge {
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<Nsid>"))]
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub settings: BTreeSet<Nsid>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "Option<BTreeMap<String, serde_json::Value>>")
-    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nodule: Option<Nodule>,
-    // The datum overlay does not honour `x-lexicon-ref` inside `additionalProperties`: this is an
-    // open map in the schema, and the real fix is in the overlay.
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "Option<BTreeMap<String, serde_json::Value>>")
-    )]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub micro: Option<MicroContribution>,
     /// The publisher's signature over [`Cartridge::revision`].
