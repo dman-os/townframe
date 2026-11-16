@@ -85,8 +85,9 @@ pub(super) struct ModelFault {
     pub(super) position: u64,
 }
 /// Projection of the two durable faults the model can produce. The model has no
-/// action that reports a fault from a lease holder, so the other variants are
-/// unreachable in this projection.
+/// action that reports a fault from a lease holder, so `RetriesExhausted`,
+/// `ReplayDiverged` and `Panicked` — which `Job::validate_fault` admits only
+/// from the job's current lease — are unreachable in this projection.
 pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64) {
     match failure {
         JobFailure::Cancelled { .. } => ("cancelled", 0),
@@ -199,9 +200,15 @@ pub(super) fn model_receipt(key: &str, receipt: &Receipt) -> ModelJob {
     ModelJob {
         key: key.to_owned(),
         // A settled receipt keeps only a fingerprint of the submission
-        // arguments, so the projection of a receipt has none. The model clears
-        // a record's `args` when it settles, mirroring the authority.
-        args: String::new(),
+        // arguments, while the model keeps the arguments themselves: it treats
+        // them as the payload identity, so the fingerprint is a 1:1 function of
+        // them in this abstraction and a receipt projects back to its
+        // arguments. The driver submits `args = key` for every job (`submit`),
+        // so a settled receipt's identity is its key — exactly what the model
+        // recorded at submission. Blanking the field would erase the identity a
+        // conflicting resubmission is compared against, which is the only
+        // reason the receipt carries a payload at all.
+        args: key.to_owned(),
         incarnation: receipt.incarnation,
         submission_position: receipt.submission_position,
         steps: Vec::new(),

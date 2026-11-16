@@ -50,6 +50,16 @@ module wflow_authority {
   // The classified failure that settled a job which cannot make progress.
   // `failure` names the Rust `JobFailure` variant; `restarts` carries the
   // count for "restarts-exhausted" and is 0 for every other failure.
+  //
+  // A fault is the single durable failure shape: `Outcome` has only
+  // "completed" and "faulted", and nothing is laundered through a completed
+  // terminal as an error string. The model produces the two faults the
+  // authority settles from durable state alone, with no reporting lease:
+  // "cancelled" (an operator fact) and "restarts-exhausted" (charged at grant
+  // time, when no lease is held). The failures a lease holder reports —
+  // "retries-exhausted", "replay-diverged", "panicked" — are admitted by
+  // `Job::validate_fault` only from the lease the job currently holds, and are
+  // not modelled here because the model has no action that reports one.
   type Fault = {
     failure: str,
     restarts: int,
@@ -71,6 +81,11 @@ module wflow_authority {
 
   type Job = {
     key: str,
+    // The submission's payload identity. The authority keeps only a
+    // fingerprint of the arguments on a receipt, and in this abstraction the
+    // fingerprint is a 1:1 function of the arguments, so the receipt keeps
+    // carrying them: they are what a conflicting resubmission is compared
+    // against (`PayloadConflict`). Settling therefore keeps `args`.
     args: str,
     incarnation: int,
     submission_position: int,
@@ -361,11 +376,14 @@ module wflow_authority {
   }
 
   // The restart count a grant would record: a due-retry re-run keeps the
-  // count, a re-run from unchanged progress (crash or lost lease) costs one,
-  // and any progress since the last run resets it. Shared by the grant
-  // actions and `applyToJob`, mirroring Rust's `restarts_after`.
+  // count, and so does a re-grant that re-attaches to a held wait. Neither
+  // begins a fresh activation of a crashed run — both re-enter durable state
+  // the log already holds — so neither is charged a restart. A re-run from
+  // unchanged progress (crash or lost lease) costs one, and any progress since
+  // the last run resets it. Shared by the grant actions and `applyToJob`,
+  // mirroring Rust's `restarts_after`.
   def restartsAfter(job: Job): int =
-    if (job.retrying) job.restarts
+    if (job.retrying or job.waiting) job.restarts
     else if (job.has_progress and job.progress == jobProgress(job)) job.restarts + 1
     else 0
 
@@ -392,6 +410,10 @@ module wflow_authority {
       retry_attempts: 0,
     }
     else if (record.kind == "complete") {
+      // Settlement keeps the payload identity (`args`) and drops every active
+      // field: the record that remains is the permanent receipt, and the
+      // authority's receipt keeps the argument fingerprint, which is `args`
+      // in this abstraction. See the `args` comment on `Job`.
       ...emptyJob,
       key: job.key,
       args: job.args,
@@ -428,6 +450,8 @@ module wflow_authority {
       retry_attempts: job.retry_attempts + 1,
     }
     else if (record.kind == "fault") {
+      // As with "complete", the fault settles into a receipt that keeps only
+      // the payload identity alongside the fault.
       ...emptyJob,
       key: job.key,
       args: job.args,
@@ -512,7 +536,10 @@ module wflow_authority {
   // Rust's `prepare_grant` after the settled/retry-pending/lease checks).
   // The restart budget is charged here: a re-run that starts without new
   // progress since the previous run costs one restart, and exceeding the
-  // budget settles the job with a classified fault instead of leasing it.
+  // budget settles the job with a classified fault instead of leasing it. A
+  // re-grant that re-attaches to a durable retry or a held wait is a
+  // resumption of durable state, not a restart of a crashed activation, so
+  // `restartsAfter` keeps the count for it.
   action grantRun(key: str, job: Job, worker: int): bool = {
     val restarts = restartsAfter(job)
     val lease = {
@@ -1264,7 +1291,8 @@ module wflow_authority {
   val rejectionHasNoIntents = state.outcome.kind != "rejected" or state.intents == []
 
   // Settled jobs retain only their compact permanent receipt: active step
-  // history, leases, waits, retries, progress, and inboxes are dropped.
+  // history, leases, waits, retries, progress, and inboxes are dropped, while
+  // the payload identity and the submission header stay.
   val receiptSafety = state.jobs.foldl(true, (valid, job) => valid and
     (not(isSettled(job)) or and {
       not(job.has_terminal and job.has_fault),
