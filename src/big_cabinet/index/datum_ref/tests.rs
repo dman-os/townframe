@@ -14,8 +14,18 @@ fn edge(origin: &DatumRoute, path: &str, target: &DatumRoute, heads: &[u8]) -> D
     DatumRefEdge {
         origin: origin.clone(),
         path: path.to_owned(),
-        target: target.clone(),
-        ref_heads: heads.iter().map(|byte| ChangeHash([*byte; 32])).collect(),
+        target: DatumRefTarget::Route {
+            route: target.clone(),
+            heads: heads.iter().map(|byte| ChangeHash([*byte; 32])).collect(),
+        },
+    }
+}
+
+fn key_edge(origin: &DatumRoute, path: &str, key: &DatumKey) -> DatumRefEdge {
+    DatumRefEdge {
+        origin: origin.clone(),
+        path: path.to_owned(),
+        target: DatumRefTarget::Key(key.clone()),
     }
 }
 
@@ -29,27 +39,50 @@ fn ephemeral() -> Database {
 /// this store is the read surface over what it wrote, so the tests seed the table it reads.
 async fn seed(sql: &Database, edges: &[DatumRefEdge]) {
     for edge in edges {
-        Sql::new(
-            r#"INSERT INTO big_cabinet_datum_ref_edges (
-                   origin_doc
-                 , origin_datum
-                 , origin_path
-                 , target_doc
-                 , target_datum
-                 , ref_heads
-               ) VALUES "#,
-        )
-        .bind_list([
-            edge.origin.doc_id.to_string().into_value(),
-            edge.origin.datum_key.to_string().into_value(),
-            edge.path.clone().into_value(),
-            edge.target.doc_id.to_string().into_value(),
-            edge.target.datum_key.to_string().into_value(),
-            serde_json::to_vec(&edge.ref_heads).unwrap().into_value(),
-        ])
-        .execute(sql)
-        .await
-        .unwrap();
+        match &edge.target {
+            DatumRefTarget::Route { route, heads } => {
+                Sql::new(
+                    r#"INSERT INTO big_cabinet_datum_ref_edges (
+                           origin_doc
+                         , origin_datum
+                         , origin_path
+                         , target_doc
+                         , target_datum
+                         , ref_heads
+                       ) VALUES "#,
+                )
+                .bind_list([
+                    edge.origin.doc_id.to_string().into_value(),
+                    edge.origin.datum_key.to_string().into_value(),
+                    edge.path.clone().into_value(),
+                    route.doc_id.to_string().into_value(),
+                    route.datum_key.to_string().into_value(),
+                    serde_json::to_vec(heads).unwrap().into_value(),
+                ])
+                .execute(sql)
+                .await
+                .unwrap();
+            }
+            DatumRefTarget::Key(key) => {
+                Sql::new(
+                    r#"INSERT INTO big_cabinet_datum_ref_key_edges (
+                           origin_doc
+                         , origin_datum
+                         , origin_path
+                         , target_key
+                       ) VALUES "#,
+                )
+                .bind_list([
+                    edge.origin.doc_id.to_string().into_value(),
+                    edge.origin.datum_key.to_string().into_value(),
+                    edge.path.clone().into_value(),
+                    key.to_string().into_value(),
+                ])
+                .execute(sql)
+                .await
+                .unwrap();
+            }
+        }
     }
 }
 
@@ -130,6 +163,70 @@ async fn every_selector_serves_the_direction_it_names_in_route_order() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// A `#keyRef` names no document, so it is found by its key alone: from every document that holds a
+/// referrer, and never by a document selector.
+#[tokio::test]
+async fn a_key_reference_is_found_by_its_key_whichever_document_holds_the_referrer() {
+    let sql = ephemeral();
+    let store = DatumRefStore::new(sql.clone()).await.unwrap();
+    let key = DatumKey::from_text("org.example.blob", "aa").unwrap();
+    let other = DatumKey::from_text("org.example.blob", "bb").unwrap();
+    let (first, second, third) = (route(1, "main"), route(2, "main"), route(3, "main"));
+    let pointee = route(4, "main");
+    seed(
+        &sql,
+        &[
+            key_edge(&second, "/target", &key),
+            key_edge(&first, "/target", &key),
+            key_edge(&third, "/target", &other),
+            edge(&first, "/link", &pointee, &[]),
+        ],
+    )
+    .await;
+    assert_eq!(
+        store.query(DatumRefQuery::Key(key.clone())).await.unwrap(),
+        vec![
+            key_edge(&first, "/target", &key),
+            key_edge(&second, "/target", &key)
+        ]
+    );
+    assert!(
+        store
+            .query(DatumRefQuery::Key(
+                DatumKey::from_text("org.example.blob", "cc").unwrap()
+            ))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // From the referrer's side the edge is an ordinary one whose target is the key.
+    assert_eq!(
+        store
+            .query(DatumRefQuery::Origin(first.clone()))
+            .await
+            .unwrap(),
+        vec![
+            edge(&first, "/link", &pointee, &[]),
+            key_edge(&first, "/target", &key)
+        ]
+    );
+    // No document selector can match it: its row has no document.
+    assert!(
+        store
+            .query(DatumRefQuery::TargetDoc(DocId::new([0; 32])))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .query(DatumRefQuery::Target(pointee.clone()))
+            .await
+            .unwrap(),
+        vec![edge(&first, "/link", &pointee, &[])]
     );
 }
 

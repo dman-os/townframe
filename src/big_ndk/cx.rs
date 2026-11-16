@@ -152,6 +152,7 @@ impl Cx {
             // The nested call is a different command from the one being served, so it does not
             // inherit the idempotency key: reusing it would make dispatch treat the two as one.
             idempotency_key: None,
+            range: None,
         };
         Client::new(Xrpc(self.transport()))
             .call_with(self.next_hop(), metadata, input)

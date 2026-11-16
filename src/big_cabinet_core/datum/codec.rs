@@ -56,6 +56,7 @@ mod walk;
 mod e2e;
 
 pub use references::DeclaredReference;
+pub use references::ReferenceTarget;
 pub use references::declared_references;
 #[cfg(test)]
 pub(crate) use target::reconcile_json;
@@ -523,7 +524,7 @@ pub enum CodecError {
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
 
-    /// the position refers to a reference def (`datumRef`, `datumLocation`, `datumPin`), and the
+    /// the position refers to a reference def (`datumRef`, `datumLocation`, `datumPin`, `keyRef`), and the
     /// value is not of that form
     #[error("this position is declared a {form}, and {stated} is not one: {reason}")]
     NotADatumReference {

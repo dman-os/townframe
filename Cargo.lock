@@ -1422,6 +1422,7 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "irpc",
+ "method_core",
  "proptest",
  "rand 0.9.5",
  "serde",
@@ -1526,6 +1527,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service_core_rs",
+ "sha1-checked",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -1585,9 +1587,11 @@ name = "big_dispatch"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "big_cabinet",
  "big_cabinet_core",
  "big_dispatch_core",
+ "bytes",
  "futures",
  "http",
  "irpc",
@@ -1602,6 +1606,7 @@ dependencies = [
  "sqlite_rs",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -1718,6 +1723,7 @@ dependencies = [
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
+ "big_cartridges",
  "big_cartridges_core",
  "big_dispatch",
  "big_dispatch_core",
@@ -1782,6 +1788,7 @@ dependencies = [
  "bytes",
  "http-body-util",
  "hyper",
+ "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -2800,6 +2807,7 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "clay_store",
+ "datum_core",
  "proptest",
  "serde",
  "serde_json",
@@ -4175,6 +4183,7 @@ dependencies = [
  "clap_complete",
  "data-encoding",
  "directories",
+ "futures",
  "http",
  "libc",
  "method_core",
@@ -4188,6 +4197,7 @@ dependencies = [
  "sqlite_rs",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "trycmd",
@@ -4709,6 +4719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
+ "const-oid 0.9.6",
  "crypto-common 0.1.7",
  "subtle",
 ]
@@ -9499,6 +9510,7 @@ dependencies = [
 name = "method_core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "schemars 1.2.3",
  "serde",
@@ -14286,6 +14298,16 @@ dependencies = [
  "cfg-if 1.0.5",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1-checked"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89f599ac0c323ebb1c6082821a54962b839832b03984598375bff3975b804423"
+dependencies = [
+ "digest 0.10.7",
+ "sha1",
 ]
 
 [[package]]

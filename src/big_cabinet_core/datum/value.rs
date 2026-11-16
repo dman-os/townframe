@@ -802,6 +802,7 @@ values!(
     crate::DatumReference,
     crate::Location,
     crate::DatumPin,
+    crate::KeyReference,
     crate::ActorUrl,
     crate::drawer::GroupKey,
 );

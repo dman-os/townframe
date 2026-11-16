@@ -18,14 +18,20 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::MintDispatchCapability;
+use big_dispatch_core::Origin;
+use bytes::Bytes;
 use futures::FutureExt;
+use futures::StreamExt;
+use method_core::ByteBody;
 use method_core::ContextError;
+use method_core::Encoding;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
@@ -56,7 +62,8 @@ impl Provider for Echo {
         _request: &RequestContext,
         context: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        _body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
         if let Some(reason) = input.get("invalid") {
             return Err(ProviderError::InvalidInput(reason.to_string()));
         }
@@ -70,7 +77,7 @@ impl Provider for Echo {
             self.started.notify_one();
             self.release.notified().await;
         }
-        Ok(json!({
+        Ok(Body::Json(json!({
             "echo": input,
             "idempotencyKey": context.idempotency_key,
             "caller": {
@@ -78,7 +85,7 @@ impl Provider for Echo {
                 "actor": caller.actor,
                 "scope": caller.scope,
             },
-        }))
+        })))
     }
 }
 
@@ -193,14 +200,10 @@ impl Harness {
             .call_with(
                 request,
                 authorization.metadata(),
-                Invoke {
-                    operation: operation.to_owned(),
-                    input,
-                    context,
-                },
+                Invoke::json(operation, input, context),
             )
             .await
-            .map(|output| output.output)
+            .map(|output| output.body.into_json())
             .map_err(|error| match error {
                 ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
@@ -442,11 +445,7 @@ async fn a_request_without_a_credential_is_unauthenticated() {
         .client
         .call(
             RequestContext::root(),
-            Invoke {
-                operation: ECHO.to_owned(),
-                input: json!({}),
-                context: Default::default(),
-            },
+            Invoke::json(ECHO, json!({}), Default::default()),
         )
         .await;
     assert_eq!(
@@ -613,9 +612,10 @@ impl Provider for Canned {
         _: &RequestContext,
         _: &InvocationContext,
         input: Value,
-    ) -> Result<Value, ProviderError> {
+        _: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
         self.seen.lock().unwrap().push(input);
-        Ok(self.output.clone())
+        Ok(Body::Json(self.output.clone()))
     }
 }
 
@@ -649,12 +649,11 @@ impl Harness {
             "output": body,
         }}});
         let operation = |kind, file| Operation {
-            kind: Some(kind),
-            privileged: false,
             lexicon: Some(LexiconSource {
                 file,
                 carried: Vec::new(),
             }),
+            ..Operation::unchecked(Some(kind))
         };
         self.dispatch
             .router
@@ -788,7 +787,13 @@ async fn the_wrong_http_verb_for_a_methods_kind_is_invalid() {
     let h = harness().await;
     h.register_contract(json!({"ok": true}));
     for (operation, http, expected) in [
-        (GET, HttpForm::Post, "expected GET"),
+        (
+            GET,
+            HttpForm::Post {
+                query: String::new(),
+            },
+            "expected GET",
+        ),
         (
             PUT,
             HttpForm::Get {
@@ -840,9 +845,8 @@ async fn an_operation_referring_to_the_nodes_reference_defs_is_validated_with_th
                 [(
                     nsid.to_owned(),
                     Operation {
-                        kind: Some(OperationKind::Procedure),
-                        privileged: false,
                         lexicon: Some(LexiconSource { file: tag, carried }),
+                        ..Operation::unchecked(Some(OperationKind::Procedure))
                     },
                 )],
                 ProviderState::Ready(ProviderKind::BuiltIn(
@@ -877,5 +881,288 @@ async fn an_operation_referring_to_the_nodes_reference_defs_is_validated_with_th
             "{nsid}: refused by the format, not as a type error: {message}"
         );
     }
+    h.shutdown().await;
+}
+
+const INGEST: &str = "org.example.bytes.ingest";
+const SPIT: &str = "org.example.bytes.spit";
+
+/// A provider of byte methods. `ingest` pulls its request body and reports each chunk the moment
+/// it arrives; `spit` answers a byte body; `lie` is declared JSON and answers bytes.
+struct Chunks {
+    seen: tokio::sync::mpsc::UnboundedSender<Bytes>,
+}
+
+#[async_trait]
+impl Provider for Chunks {
+    async fn call(
+        &self,
+        _: &Caller,
+        operation: &str,
+        _: &RequestContext,
+        _: &InvocationContext,
+        input: Value,
+        body: Option<ByteBody>,
+    ) -> Result<Body, ProviderError> {
+        match operation {
+            INGEST => {
+                let mut body = body.expect("a bytes-input method is called with its body");
+                let mime = body.mime.clone();
+                while let Some(chunk) = body.next().await {
+                    self.seen.send(chunk.expect("the chunk")).unwrap();
+                }
+                Ok(Body::Json(json!({ "mime": mime, "parameters": input })))
+            }
+            SPIT => Ok(Body::Bytes(
+                ByteBody::new(futures::stream::iter([
+                    Ok(Bytes::from_static(b"ab")),
+                    Ok(Bytes::from_static(b"cd")),
+                ]))
+                .with_mime("text/plain"),
+            )),
+            _ => Ok(Body::Bytes(ByteBody::from_bytes(Bytes::from_static(b"x")))),
+        }
+    }
+}
+
+impl Harness {
+    fn register_chunks(&self) -> tokio::sync::mpsc::UnboundedReceiver<Bytes> {
+        let (seen, chunks) = tokio::sync::mpsc::unbounded_channel();
+        let bytes = Encoding::Bytes { mime: None };
+        self.dispatch
+            .router
+            .register(
+                "chunks",
+                [
+                    (
+                        INGEST.to_owned(),
+                        Operation {
+                            input: bytes,
+                            ..Operation::unchecked(Some(OperationKind::Procedure))
+                        },
+                    ),
+                    (
+                        SPIT.to_owned(),
+                        Operation {
+                            output: bytes,
+                            ..Operation::unchecked(Some(OperationKind::Query))
+                        },
+                    ),
+                    (
+                        ECHO.to_owned(),
+                        Operation::unchecked(Some(OperationKind::Query)),
+                    ),
+                ],
+                ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(Chunks { seen }))),
+            )
+            .unwrap();
+        chunks
+    }
+
+    async fn call_raw(
+        &self,
+        invoke: Invoke,
+    ) -> Result<big_dispatch_core::InvokeOutput, DispatchError> {
+        self.dispatch
+            .client
+            .call_with(RequestContext::root(), self.operator().metadata(), invoke)
+            .await
+            .map_err(|error| match error {
+                ClientError::Method(error) => error,
+                ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
+            })
+    }
+}
+
+/// A body of the other case than the method declares is refused before the provider is called,
+/// in both directions; an answer of the other case is the provider's bug (ADR 042 §2).
+#[tokio::test]
+async fn a_body_of_the_other_case_than_the_method_declares_is_refused() {
+    let h = harness().await;
+    let mut chunks = h.register_chunks();
+    let mismatch = |expected: &str, found: &str| DispatchError::BodyMismatch {
+        expected: expected.to_owned(),
+        found: found.to_owned(),
+    };
+    // JSON for a method whose input is bytes.
+    let refused = h
+        .call_raw(Invoke::json(INGEST, json!({"n": 1}), Default::default()))
+        .await;
+    assert_eq!(refused.unwrap_err(), mismatch("bytes", "JSON"));
+    // Bytes for a method whose input is JSON (a call that did not come over HTTP, which would
+    // have said how to read the body).
+    let refused = h
+        .call_raw(Invoke {
+            operation: ECHO.to_owned(),
+            parameters: Value::Null,
+            body: Body::Bytes(ByteBody::from_bytes(Bytes::from_static(b"{}"))),
+            context: Default::default(),
+        })
+        .await;
+    assert_eq!(refused.unwrap_err(), mismatch("JSON", "bytes"));
+    // Neither reached the provider.
+    assert!(chunks.try_recv().is_err());
+    // The matching cases are served, and the byte answer is declared by its method.
+    let spat = h
+        .call_raw(Invoke::json(SPIT, json!({}), Default::default()))
+        .await
+        .unwrap();
+    let Body::Bytes(body) = spat.body else {
+        panic!("a byte method answers bytes")
+    };
+    assert_eq!(body.mime.as_deref(), Some("text/plain"));
+    assert_eq!(body.collect(16).await.unwrap().as_ref(), b"abcd");
+    // A provider that answers bytes for a method declared JSON is a provider failure.
+    h.dispatch
+        .router
+        .register(
+            "liar",
+            [(
+                "org.example.bytes.lie".to_owned(),
+                Operation::unchecked(Some(OperationKind::Query)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(Chunks {
+                seen: tokio::sync::mpsc::unbounded_channel().0,
+            }))),
+        )
+        .unwrap();
+    let lied = h
+        .call_raw(Invoke::json(
+            "org.example.bytes.lie",
+            json!({}),
+            Default::default(),
+        ))
+        .await;
+    assert!(
+        matches!(lied, Err(DispatchError::InvalidOutput(_))),
+        "{lied:?}"
+    );
+    h.shutdown().await;
+}
+
+/// The provider pulls the request body: each chunk reaches it before the sender produces the
+/// next (with the stream's own backpressure, a provider that gathered the body first would never
+/// see the first chunk and this would not finish), and the parameters the body cannot carry
+/// arrive beside it.
+#[tokio::test]
+async fn a_byte_body_reaches_the_provider_chunk_by_chunk() {
+    let h = harness().await;
+    let mut seen = h.register_chunks();
+    let (send, mut receive) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(1);
+    let body = ByteBody::new(futures::stream::poll_fn(move |cx| receive.poll_recv(cx)))
+        .with_mime("image/png");
+    let call = h.call_raw(Invoke {
+        operation: INGEST.to_owned(),
+        parameters: json!({"capability": "c"}),
+        body: Body::Bytes(body),
+        context: Default::default(),
+    });
+    let sender = async {
+        for chunk in [&b"one"[..], b"two", b"three"] {
+            send.send(Ok(Bytes::copy_from_slice(chunk))).await.unwrap();
+            assert_eq!(seen.recv().await.unwrap().as_ref(), chunk);
+        }
+        drop(send);
+    };
+    let (output, ()) = tokio::join!(call, sender);
+    assert_eq!(
+        output.unwrap().body.into_json(),
+        json!({"mime": "image/png", "parameters": {"capability": "c"}})
+    );
+    h.shutdown().await;
+}
+
+/// A local-only method is refused unless the edge transport that accepted the call vouched that
+/// it came from the node's own machine, however the call is otherwise authorized (ADR 042 §3).
+/// Nothing the caller serializes can claim to be local.
+#[tokio::test]
+async fn a_local_only_method_is_served_only_to_a_local_origin() {
+    use tower::ServiceExt;
+    const NSID: &str = "org.example.local.only";
+    let h = harness().await;
+    h.dispatch
+        .router
+        .register(
+            "local",
+            [(
+                NSID.to_owned(),
+                Operation {
+                    local_only: true,
+                    ..Operation::unchecked(Some(OperationKind::Query))
+                },
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(Echo::default()))),
+        )
+        .unwrap();
+    let call = |origin| {
+        h.call_raw(Invoke::json(
+            NSID,
+            json!({}),
+            InvocationContext {
+                origin,
+                ..Default::default()
+            },
+        ))
+    };
+    // The operator holds every capability and is still refused from a remote origin, which is
+    // what a call with no edge behind it, a TCP peer and a nodule's egress all have.
+    assert_eq!(
+        call(Origin::Remote).await.unwrap_err(),
+        DispatchError::LocalOnly
+    );
+    assert_eq!(
+        call(Default::default()).await.unwrap_err(),
+        DispatchError::LocalOnly,
+        "no origin is not a local one"
+    );
+    call(Origin::UnixPeer { uid: 1000 }).await.unwrap();
+    call(Origin::Embedded).await.unwrap();
+    // The origin has no wire form: a serialized call carrying one comes back remote.
+    let wire = serde_json::to_value(InvocationContext {
+        origin: Origin::Embedded,
+        ..Default::default()
+    })
+    .unwrap();
+    let decoded: InvocationContext = serde_json::from_value(wire).unwrap();
+    assert_eq!(decoded.origin, Origin::Remote);
+
+    // Through the HTTP surface the listener, not the request, says where a call came from.
+    let operator = h.operator();
+    let status = |edge, peer: Option<service_utils_rs::xrpc::PeerCredentials>| {
+        let router = crate::xrpc_router(
+            h.dispatch.client.clone(),
+            crate::Anonymous::Acts(operator),
+            edge,
+        )
+        .into_router();
+        let router = match peer {
+            Some(peer) => router.layer(axum::Extension(peer)),
+            None => router,
+        };
+        async move {
+            let response = router
+                .oneshot(
+                    http::Request::get(format!("/xrpc/{NSID}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    let peer = service_utils_rs::xrpc::PeerCredentials {
+        uid: 1000,
+        gid: 1000,
+        pid: None,
+    };
+    let (refused, body) = status(crate::Edge::Tcp, None).await;
+    assert_eq!((refused, body["error"].as_str()), (403, Some("LocalOnly")));
+    assert_eq!(status(crate::Edge::Unix, Some(peer)).await.0, 200);
+    assert_eq!(status(crate::Edge::Embedded, None).await.0, 200);
     h.shutdown().await;
 }
