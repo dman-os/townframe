@@ -1260,7 +1260,7 @@ mod admission_tests {
 
         // A version label means one revision: another envelope under the label is refused.
         let mut forged = cartridge_with(example_cartridge!("photos"), "1.1.0", photos());
-        forged.title = Some("not what was installed".into());
+        forged.name = Some("not what was installed".into());
         assert!(matches!(
             install(&mut config, &cache, &forged),
             Err(InventoryError::Cartridge(

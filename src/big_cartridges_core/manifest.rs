@@ -102,6 +102,24 @@ pub struct WasmComponent {
     pub extra: Extra,
 }
 
+#[macros::datum(authority = AUTHORITY, name = "imageResource")]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageResource {
+    pub src: DatumPin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<String>,
+    #[serde(rename = "type")]
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 #[macros::datum(authority = AUTHORITY, name = "nodule")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
