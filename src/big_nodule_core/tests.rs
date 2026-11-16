@@ -792,7 +792,7 @@ fn the_handler_implements_each_declared_operation_once() {
 }
 
 #[test]
-fn initializers_and_store_sources_name_implemented_or_required_operations() {
+fn initializers_name_own_operations_and_store_sources_name_implemented_or_required_ones() {
     let mut subscription = photos();
     subscription.initialization[0].target = "org.example.photos.changes".into();
     refuse(subscription, "is a subscription");
@@ -804,14 +804,14 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
     unimplemented.revisioned_stores[0].source = None;
     refuse(
         unimplemented,
-        "initialization[0].target`: `org.example.photos.import` is declared here but is not implemented",
+        "initialization[0].target`: `org.example.photos.import` is not implemented by a routine of this cartridge",
     );
 
     let mut unrequired = photos();
     unrequired.initialization[0].target = "org.example.tags.apply".into();
     refuse(
         unrequired,
-        "initialization[0].target`: `org.example.tags.apply` is neither implemented nor requested",
+        "initialization[0].target`: `org.example.tags.apply` is not implemented by a routine of this cartridge",
     );
 
     // A foreign operation this nodule implements is as good a target or source as a local one.
@@ -820,12 +820,14 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
     foreign_implemented.revisioned_stores[0].source = Some("org.example.search.query".into());
     foreign_implemented.admit(Some(PHOTOS)).unwrap();
 
+    // Another cartridge's operation is no initializer target even when it is requested: the
+    // initializer is this cartridge's own hook, and a routine calls other services itself.
     let mut required = photos();
     required
         .requires
         .push(Request::new("tags", "org.example.tags.apply"));
     required.initialization[0].target = "org.example.tags.apply".into();
-    required.admit(Some(PHOTOS)).unwrap();
+    refuse(required, "not implemented by a routine of this cartridge");
 
     // A data contract is read or written, not called.
     let mut data_target = photos();
@@ -833,7 +835,10 @@ fn initializers_and_store_sources_name_implemented_or_required_operations() {
         .requires
         .push(data_request("tags", "org.example.tags.apply"));
     data_target.initialization[0].target = "org.example.tags.apply".into();
-    refuse(data_target, "neither implemented nor requested");
+    refuse(
+        data_target,
+        "not implemented by a routine of this cartridge",
+    );
 
     let mut missing_source = photos();
     missing_source.revisioned_stores[0].source = Some("org.example.photos.ingest".into());

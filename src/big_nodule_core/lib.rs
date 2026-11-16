@@ -697,8 +697,8 @@ impl<'a> Admission<'a> {
         Ok(())
     }
 
-    /// Initializers: each has a unique key and invokes an implemented or required query or
-    /// procedure, in a run mode this build has.
+    /// Initializers: each has a unique key and invokes a query or procedure this cartridge
+    /// implements, in a run mode this build has.
     fn initializers(&self, implemented: &Implemented) -> Result<()> {
         let mut keys = BTreeSet::new();
         for (index, initializer) in self.nodule.initialization.iter().enumerate() {
@@ -843,9 +843,10 @@ impl<'a> Admission<'a> {
             })
     }
 
-    /// An operation an initializer invokes: one this nodule implements (local, or foreign with
-    /// an unchecked kind) or a requested operation call, never a known subscription: it is
-    /// observed, not invoked.
+    /// An operation an initializer invokes: one of this cartridge's own routines implements it,
+    /// as a query or procedure, never a subscription (observed, not invoked). The initializer is
+    /// the cartridge's own lifecycle hook, so an operation of another cartridge is no target: a
+    /// routine that needs another service calls it under its own capability.
     fn invocation_target(&self, nsid: &str, implemented: &Implemented, path: &str) -> Result<()> {
         if !is_nsid(nsid) {
             return Err(NoduleError::invalid(
@@ -859,26 +860,13 @@ impl<'a> Admission<'a> {
                 format!("`{nsid}` is a subscription; an invocation targets a query or procedure"),
             )),
             Some(_) => Ok(()),
-            None => match self
-                .resolved
-                .operation_requests()
-                .into_iter()
-                .find(|request| request.contract == nsid)
-            {
-                Some(request) if request.is_operation_call() => Ok(()),
-                Some(_request) => Err(NoduleError::invalid(
-                    path,
-                    format!("`{nsid}` is requested by a non-method permbind"),
-                )),
-                None if self.lexicons.contains_key(nsid) => Err(NoduleError::invalid(
-                    path,
-                    format!("`{nsid}` is declared here but is not implemented"),
-                )),
-                None => Err(NoduleError::invalid(
-                    path,
-                    format!("`{nsid}` is neither implemented nor requested"),
-                )),
-            },
+            None => Err(NoduleError::invalid(
+                path,
+                format!(
+                    "`{nsid}` is not implemented by a routine of this cartridge; an initializer \
+                     targets one of the cartridge's own operations"
+                ),
+            )),
         }
     }
 }

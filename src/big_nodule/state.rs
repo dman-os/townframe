@@ -71,7 +71,6 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::InvocationContext;
-use big_dispatch_core::Invoke;
 use big_dispatch_core::MintDispatchCapability;
 use big_dispatch_core::Readiness;
 use big_nodule_core::NoduleAdmission;
@@ -256,74 +255,8 @@ struct InitRun {
     attempts: u32,
     /// The last failure of that initializer.
     error: Option<String>,
-    /// The last invocation failed (or a dependency cycle was found) and nothing has retried it.
+    /// The last invocation failed and nothing has retried it.
     failed: bool,
-    /// The provider id whose not-ready operation the next initializer is waiting on, if it is
-    /// waiting on a nodule: what dependency cycles are found along.
-    blocked_on: Option<String>,
-    /// The foreign operation the next initializer is waiting for a ready provider of. The
-    /// nodule that starts providing it wakes this run (see [`State::wake_waiters`]).
-    waiting_on: Option<String>,
-}
-
-/// How one initializer invocation reaches its target.
-enum InitRoute {
-    /// The nodule's own hosted handler, called by the runtime as the nodule service.
-    Local {
-        provider: Arc<dyn Provider>,
-        caller: Caller,
-    },
-    /// Through dispatch, as the nodule's actor presenting this authorization.
-    Dispatch(Authorization),
-}
-
-impl InitRoute {
-    /// Calls `target` and reduces the outcome to what a record reports.
-    async fn invoke(
-        self,
-        dispatch: &Client<DispatchProtocol>,
-        target: &str,
-        context: InvocationContext,
-    ) -> Result<(), String> {
-        let input = serde_json::json!({});
-        match self {
-            Self::Local { provider, caller } => provider
-                .call(
-                    &caller,
-                    target,
-                    &RequestContext::root(),
-                    &context,
-                    input,
-                    None,
-                )
-                .await
-                .map(drop)
-                .map_err(|error| match error {
-                    ProviderError::InvalidInput(reason) => {
-                        format!("`{target}` refused the input: {reason}")
-                    }
-                    ProviderError::Failed { status, body } => {
-                        format!("`{target}` failed with status {status}: {body}")
-                    }
-                }),
-            Self::Dispatch(authorization) => dispatch
-                .call_with(
-                    RequestContext::root(),
-                    authorization.metadata(),
-                    Invoke::json(target, input, context),
-                )
-                .await
-                .map(drop)
-                .map_err(|error| match error {
-                    ClientError::Method(error) => format!("`{target}`: {error}"),
-                    // Dispatch outlives the nodule service, and shutdown cancels the task
-                    // that makes this call first.
-                    ClientError::Transport { message, .. } => {
-                        panic!("dispatch transport failed during an initializer: {message}")
-                    }
-                }),
-        }
-    }
 }
 
 /// An initializer invocation's outcome on its way back to the state actor.
@@ -467,46 +400,6 @@ async fn collect_apply_errors(
         errors.push(error.to_string());
     }
     Ok(errors)
-}
-
-/// The dispatch handle a foreign initializer target is called under: the foreign path as it
-/// was. The target rides on a routine's handle, which `desired_routine_scopes` adds it to (the
-/// routine named like the initializer, or the only one), so it is not scoped to the target. This
-/// and that addition are the part to remove or finish if foreign initializer targets are
-/// dropped.
-fn foreign_initializer_capability(
-    installed: &InstalledNodule,
-    routine_capabilities: &BTreeMap<String, RoutineCapabilities>,
-    init_key: &str,
-    init: &big_cartridges_core::Initializer,
-) -> Option<CapId> {
-    routine_capabilities
-        .get(init_key)
-        .and_then(|capabilities| capabilities.dispatch)
-        .or_else(|| {
-            (installed.nodule.routines.len() == 1)
-                .then(|| {
-                    routine_capabilities
-                        .values()
-                        .find_map(|capabilities| capabilities.dispatch)
-                })
-                .flatten()
-        })
-        .or_else(|| {
-            routine_capabilities.iter().find_map(|(key, capabilities)| {
-                let routine = installed.nodule.routines.get(key)?;
-                let implements_target = routine.implements == init.target;
-                let uses_target = routine.uses.keys().any(|binding| {
-                    matches!(
-                        installed.resolved.cartridge.permbinds.get(binding),
-                        Some(Permbind::Method(method)) if method.nsid == init.target
-                    )
-                });
-                (implements_target || uses_target)
-                    .then_some(capabilities.dispatch)
-                    .flatten()
-            })
-        })
 }
 
 async fn serve_nodule(
@@ -677,24 +570,6 @@ fn desired_routine_scopes(
                         create_drawer |= usage.create && drawer.create.is_some();
                     }
                     Permbind::Unknown(_) => {}
-                }
-            }
-            // An initializer whose target another cartridge serves is called through dispatch
-            // as the nodule, so it borrows the handle of the routine named like it (or of the
-            // only routine). A local target is served by its implementing routine, whose
-            // capabilities the executor delivers with the call, so it needs nothing here.
-            for (init_key, initializer) in &installed.nodule.initialization {
-                let foreign = !installed
-                    .admitted
-                    .operations
-                    .contains_key(initializer.target.as_str());
-                if foreign
-                    && (installed.nodule.routines.len() == 1 || init_key == routine_key)
-                    && effective_operations
-                        .operations
-                        .contains(initializer.target.as_str())
-                {
-                    operations.insert(initializer.target.to_string());
                 }
             }
             let config = (!read.is_empty() || !write.is_empty()).then(|| {
@@ -2035,14 +1910,10 @@ impl State {
             self.retire(&cartridge_id).await;
             let readiness = installed.readiness();
             if readiness.is_ready() {
-                // No handler: it implements nothing, so there is no provider to register. It
-                // can still have initializers, which then target foreign operations only
-                // (a local target needs a handler), so they need no provider of its own.
+                // No handler: it implements nothing, so there is no provider to register, and
+                // no initializer either (a target is one of its own operations).
                 self.stores.dispatch.unbind(&provider_id);
-                return self
-                    .advance_inits(installed, actor, &routine_capabilities, None, trigger)
-                    .await
-                    .unwrap_or(readiness);
+                return readiness;
             }
             self.register_not_ready(&provider_id, installed, readiness);
             return readiness;
@@ -2109,13 +1980,7 @@ impl State {
             // The runtime calls a local initializer on the provider directly, so the provider is
             // used here even while dispatch still answers not ready.
             Hosted::Ready(provider) => match self
-                .advance_inits(
-                    installed,
-                    actor,
-                    &routine_capabilities,
-                    Some(Arc::clone(&provider)),
-                    trigger,
-                )
+                .advance_inits(installed, Arc::clone(&provider), trigger)
                 .await
             {
                 None => ProviderState::Ready(ProviderKind::Executor {
@@ -2140,33 +2005,7 @@ impl State {
         }
 
         let state = self.register_claims(&provider_id, installed, state);
-        // The one place a hosted nodule's registration turns ready, whichever way it got
-        // there (its inits finished, its bytes arrived, it was enabled or installed late).
-        // Comparing with the previous reconcile's record makes it a transition, so a steady
-        // ready nodule never wakes anyone and a woken waiter cannot wake itself in a loop.
-        let was_ready = self
-            .records
-            .get(&cartridge_id)
-            .is_some_and(|record| record.readiness.is_ready());
-        if state.readiness().is_ready() && !was_ready {
-            self.wake_waiters(&installed.admitted.operations);
-        }
         state.readiness()
-    }
-
-    /// Asks for a reconcile of every run waiting for one of `operations`, which a nodule has
-    /// just started providing. Systemd and Kubernetes likewise re-evaluate dependents on a
-    /// readiness transition rather than wait for an unrelated event.
-    fn wake_waiters(&self, operations: &BTreeMap<String, Option<OperationKind>>) {
-        for (cartridge_id, run) in &self.inits {
-            if run
-                .waiting_on
-                .as_ref()
-                .is_some_and(|nsid| operations.contains_key(nsid))
-            {
-                self.reensure.handle(cartridge_id.clone()).request();
-            }
-        }
     }
 
     /// Moves the nodule's initializers along and returns `None` when every one has succeeded in
@@ -2175,16 +2014,14 @@ impl State {
     /// They run one at a time in declaration order. Each invocation is a task off this actor
     /// (the actor never awaits a handler) whose result returns as an [`InitFinished`] message; a
     /// failed one stays failed until a reconcile other than its own result's retries it, with no
-    /// backoff yet. `provider` is the hosted handler, which a local target is called on directly
-    /// (the host running its own lifecycle hook, as the nodule service); a foreign target goes
-    /// through dispatch as the nodule's actor under its operations handle, so it needs a grant
-    /// like any other call of the nodule's.
+    /// backoff yet. `provider` is the hosted handler, which the target (always an operation of
+    /// the cartridge's own routines, by admission) is called on directly: the host running its
+    /// own lifecycle hook, as the nodule service. The executor delivers that call with the
+    /// capabilities of the routine implementing the target.
     async fn advance_inits(
         &mut self,
         installed: &InstalledNodule,
-        actor: &OpenedActor,
-        routine_capabilities: &BTreeMap<String, RoutineCapabilities>,
-        provider: Option<Arc<dyn Provider>>,
+        provider: Arc<dyn Provider>,
         trigger: Trigger,
     ) -> Option<Readiness> {
         let cartridge_id = &installed.cartridge_id;
@@ -2216,8 +2053,6 @@ impl State {
                     attempts: 0,
                     error: None,
                     failed: false,
-                    blocked_on: None,
-                    waiting_on: None,
                 },
             );
         }
@@ -2234,77 +2069,27 @@ impl State {
             return Some(Readiness::InitFailed);
         }
 
-        let route = if installed
-            .admitted
-            .operations
-            .contains_key(init.target.as_str())
-        {
-            // The executor delivers the call with the capabilities of the routine that
-            // implements the target, which is exactly one.
-            assert_eq!(
-                installed
-                    .nodule
-                    .routines
-                    .values()
-                    .filter(|routine| routine.implements == init.target)
-                    .count(),
-                1,
-                "a local initializer target has exactly one implementing routine"
-            );
-            InitRoute::Local {
-                provider: provider.expect(
-                    "a local initializer target means the nodule has a handler, and its \
-                     initializers only run once it is hosted",
-                ),
-                caller: Caller {
-                    authorization: Authorization::identity(self.stores.parent.capability),
-                    actor: self.stores.parent.actor.actor_id,
-                    scope: None,
-                },
-            }
-        } else {
-            // A foreign operation. Wait for its provider rather than fail the first call: it
-            // may be a nodule that is itself still initializing, or not installed yet. Only a
-            // provider that is ready is invoked, so a denial or a failure is the call's own.
-            let waiting_on = match self.stores.dispatch.resolve(init.target.as_str()) {
-                Ok(entry) if matches!(entry.state, ProviderState::Ready(_)) => None,
-                Ok(entry) => Some(Some(entry.provider_id.clone())),
-                Err(_) => Some(None),
-            };
-            if let Some(provider_id) = waiting_on {
-                let run = self.inits.get_mut(cartridge_id).expect("run present");
-                run.failed = false;
-                run.blocked_on = provider_id;
-                run.waiting_on = Some(init.target.to_string());
-                if self.in_dependency_cycle(cartridge_id) {
-                    let run = self.inits.get_mut(cartridge_id).expect("run present");
-                    run.failed = true;
-                    run.error = Some(format!(
-                        "initializer `{}` waits for `{}`, whose provider waits for this nodule \
-                         (dependency cycle)",
-                        init_key, init.target
-                    ));
-                    return Some(Readiness::InitFailed);
-                }
-                return Some(Readiness::Initializing);
-            }
-            let initializer_capability =
-                foreign_initializer_capability(installed, routine_capabilities, init_key, init);
-            InitRoute::Dispatch(match initializer_capability {
-                Some(authority) => Authorization {
-                    authority,
-                    signer: actor.capability,
-                },
-                // No operations grant: dispatch refuses an identity that is not the operator's.
-                None => Authorization::identity(actor.capability),
-            })
+        // The executor delivers the call with the capabilities of the routine that implements
+        // the target, which is exactly one.
+        assert_eq!(
+            installed
+                .nodule
+                .routines
+                .values()
+                .filter(|routine| routine.implements == init.target)
+                .count(),
+            1,
+            "an initializer target has exactly one implementing routine"
+        );
+        let caller = Caller {
+            authorization: Authorization::identity(self.stores.parent.capability),
+            actor: self.stores.parent.actor.actor_id,
+            scope: None,
         };
 
         let run = self.inits.get_mut(cartridge_id).expect("run present");
         run.attempts += 1;
         run.failed = false;
-        run.blocked_on = None;
-        run.waiting_on = None;
         run.running = Some(init_key.clone());
         let context = InvocationContext {
             idempotency_key: Some(format!(
@@ -2321,10 +2106,28 @@ impl State {
             outcome: Ok(()),
         };
         let target = init.target.to_string();
-        let dispatch_client = self.stores.dispatch_client.clone();
         let invocation = async move {
+            let outcome = provider
+                .call(
+                    &caller,
+                    &target,
+                    &RequestContext::root(),
+                    &context,
+                    serde_json::json!({}),
+                    None,
+                )
+                .await
+                .map(drop)
+                .map_err(|error| match error {
+                    ProviderError::InvalidInput(reason) => {
+                        format!("`{target}` refused the input: {reason}")
+                    }
+                    ProviderError::Failed { status, body } => {
+                        format!("`{target}` failed with status {status}: {body}")
+                    }
+                });
             InitFinished {
-                outcome: route.invoke(&dispatch_client, &target, context).await,
+                outcome,
                 ..finished
             }
         };
@@ -2360,35 +2163,11 @@ impl State {
     fn init_status(&self, cartridge_id: &CartridgeId) -> Option<NoduleInitStatus> {
         self.inits
             .get(cartridge_id)
-            .filter(|run| run.attempts > 0 || run.error.is_some() || run.waiting_on.is_some())
+            .filter(|run| run.attempts > 0 || run.error.is_some())
             .map(|run| NoduleInitStatus {
                 attempts: run.attempts,
                 error: run.error.clone(),
-                waiting_on: run.waiting_on.clone(),
             })
-    }
-
-    /// Whether following who each blocked nodule waits on, from `cartridge_id`'s own blocked
-    /// initializer, comes back to `cartridge_id`.
-    fn in_dependency_cycle(&self, cartridge_id: &CartridgeId) -> bool {
-        let own = cartridge_id.to_string();
-        let waits: BTreeMap<String, &str> = self
-            .inits
-            .iter()
-            .filter_map(|(cartridge, run)| {
-                Some((cartridge.to_string(), run.blocked_on.as_deref()?))
-            })
-            .collect();
-        let mut at = waits.get(&own).copied();
-        // More hops than waiting nodules means a cycle that does not include this one.
-        for _ in 0..=waits.len() {
-            match at {
-                Some(provider_id) if provider_id == own => return true,
-                Some(provider_id) => at = waits.get(provider_id).copied(),
-                None => return false,
-            }
-        }
-        false
     }
 
     /// Applies an initializer's result, then reconciles so the router and the records show it
