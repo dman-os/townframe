@@ -14,6 +14,7 @@ use service_core_rs::RequestContext;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
+use service_core_rs::xrpc::NODULE_DRAWER_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_core_rs::xrpc::bearer_token;
 use service_core_rs::xrpc::request_context;
@@ -70,6 +71,7 @@ pub struct Cx {
     pub(crate) caller: Option<String>,
     pub(crate) nodule: Option<String>,
     pub(crate) idempotency_key: Option<String>,
+    pub(crate) drawer_capability: Option<String>,
     pub(crate) config_doc: Option<String>,
     pub(crate) config_capability: Option<String>,
     pub(crate) transport: HttpHandle,
@@ -82,6 +84,7 @@ impl std::fmt::Debug for Cx {
             .field("request", &self.request)
             .field("caller", &self.caller)
             .field("nodule", &self.nodule)
+            .field("drawer_capability", &self.drawer_capability)
             .field("idempotency_key", &self.idempotency_key)
             .finish_non_exhaustive()
     }
@@ -109,6 +112,14 @@ impl Cx {
                 Ok::<_, String>(value.to_owned())
             })
             .transpose()?;
+        let drawer_capability = headers
+            .get(NODULE_DRAWER_CAPABILITY_HEADER)
+            .map(|value| {
+                value.to_str().map(str::to_owned).map_err(|_| {
+                    format!("{NODULE_DRAWER_CAPABILITY_HEADER} must be valid UTF-8 HTTP text")
+                })
+            })
+            .transpose()?;
         let config_capability = headers
             .get(NODULE_CONFIG_CAPABILITY_HEADER)
             .map(|value| {
@@ -126,6 +137,7 @@ impl Cx {
                 .and_then(bearer_token)
                 .map(str::to_owned),
             nodule,
+            drawer_capability,
             idempotency_key: metadata.idempotency_key,
             config_doc,
             config_capability,
@@ -160,6 +172,11 @@ impl Cx {
     /// The capability scoped to this nodule's config document and declared settings.
     pub fn config_capability(&self) -> Option<&str> {
         self.config_capability.as_deref()
+    }
+
+    /// The routine's capability to access its granted drawers.
+    pub fn drawer_capability(&self) -> Option<&str> {
+        self.drawer_capability.as_deref()
     }
 
     /// Reads the cartridge config document through the capability delivered with this request.
