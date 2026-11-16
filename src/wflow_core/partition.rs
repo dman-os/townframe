@@ -22,12 +22,31 @@ pub struct RetryBudget {
 
 /// How much of a host-reported panic message a durable fault keeps.
 ///
-/// A receipt is retained for the life of its key while panic text is
-/// host-supplied and unbounded, so the authority stores only the head of it.
-/// The cap is part of the durable record: replay rejects a message longer than
-/// this rather than accepting a settlement the authority would not have
-/// written.
-pub const MAX_PANIC_MESSAGE_BYTES: usize = 4096;
+/// A receipt is retained for the life of its key, and every free-text field of a
+/// fault is host-supplied and unbounded, so the authority stores only the head
+/// of each. The cap is part of the durable record: replay rejects a message
+/// longer than this rather than accepting a settlement the authority would not
+/// have written.
+pub const MAX_FAULT_TEXT_BYTES: usize = 4096;
+
+/// Truncates host-supplied fault text to [`MAX_FAULT_TEXT_BYTES`].
+///
+/// This is the single place the durable text limit is applied, because every
+/// path that can put host text into a fault must obey it: a fault reaches the
+/// receipt, the result index and every later snapshot, so an unbounded string
+/// would inflate partition state for the life of the key. Truncation lands on a
+/// UTF-8 boundary so the stored string stays valid JSON.
+pub fn bounded_fault_text(mut text: String) -> String {
+    if text.len() <= MAX_FAULT_TEXT_BYTES {
+        return text;
+    }
+    let mut end = MAX_FAULT_TEXT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
 
 /// The classified failure that settles a job which cannot make progress.
 ///
@@ -36,7 +55,8 @@ pub const MAX_PANIC_MESSAGE_BYTES: usize = 4096;
 /// inside a completed result value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobFailure {
-    /// The job was cancelled. Cancellation permanently fences the job from
+    /// The job was cancelled. `reason` is caller-supplied text, truncated to
+    /// [`MAX_FAULT_TEXT_BYTES`]. Cancellation permanently fences the job from
     /// future progress; it does not claim that in-flight external effects were
     /// undone.
     Cancelled { reason: String },
@@ -47,11 +67,12 @@ pub enum JobFailure {
     /// that diverged and the boundary kind the replay offered there.
     ReplayDiverged { step: u64, replayed: StepKind },
     /// The workflow code panicked. `message` is the host's own text for the
-    /// panic, truncated to [`MAX_PANIC_MESSAGE_BYTES`].
+    /// panic, truncated to [`MAX_FAULT_TEXT_BYTES`].
     Panicked(String),
     /// The transient-error retry budget ran out. The job settles directly
     /// without entering compensation, and in-flight external effects may
-    /// remain applied.
+    /// remain applied. `last_error` is the workflow's own report for the last
+    /// transient failure, truncated to [`MAX_FAULT_TEXT_BYTES`].
     RetriesExhausted {
         retries: u64,
         max_retries: u64,

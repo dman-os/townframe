@@ -1,8 +1,9 @@
 use crate::interlude::*;
 
 use super::JobFailure;
-use super::MAX_PANIC_MESSAGE_BYTES;
+use super::MAX_FAULT_TEXT_BYTES;
 use super::RetryBudget;
+use super::bounded_fault_text;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -183,21 +184,30 @@ const FNV_OFFSET_A: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
 const FNV_OFFSET_B: u128 = 0xcbf2_9ce4_8422_2325_cbf2_9ce4_8422_2325;
 const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
 
-/// Truncates host panic text to the durable maximum.
+/// Truncates a fault's free text to the durable maximum.
 ///
-/// A fault's panic message is unbounded host text kept for the life of the key,
-/// so the authority stores only its head. Truncation lands on a UTF-8 boundary
-/// so the stored string stays valid.
-fn bounded_panic(mut message: String) -> String {
-    if message.len() <= MAX_PANIC_MESSAGE_BYTES {
-        return message;
+/// Applied to every variant that carries host or caller text, at the one place
+/// a fault is proposed, so no command path can commit an unbounded string. A
+/// fault's text is kept for the life of the key.
+fn bounded_failure(failure: JobFailure) -> JobFailure {
+    match failure {
+        JobFailure::Panicked(message) => JobFailure::Panicked(bounded_fault_text(message)),
+        JobFailure::Cancelled { reason } => JobFailure::Cancelled {
+            reason: bounded_fault_text(reason),
+        },
+        JobFailure::RetriesExhausted {
+            retries,
+            max_retries,
+            last_error,
+        } => JobFailure::RetriesExhausted {
+            retries,
+            max_retries,
+            last_error: bounded_fault_text(last_error),
+        },
+        failure @ (JobFailure::ReplayDiverged { .. } | JobFailure::RestartsExhausted { .. }) => {
+            failure
+        }
     }
-    let mut end = MAX_PANIC_MESSAGE_BYTES;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    message.truncate(end);
-    message
 }
 
 /// How far a job had got when its current run was granted. A re-run that
@@ -389,7 +399,7 @@ impl Job {
             }
             JobFailure::ReplayDiverged { .. } if holds_lease => Ok(()),
             JobFailure::Panicked(message)
-                if holds_lease && message.len() <= MAX_PANIC_MESSAGE_BYTES =>
+                if holds_lease && message.len() <= MAX_FAULT_TEXT_BYTES =>
             {
                 Ok(())
             }
@@ -1167,10 +1177,7 @@ impl Authority {
         lease: Lease,
         failure: JobFailure,
     ) -> Result<Decision, Rejection> {
-        let failure = match failure {
-            JobFailure::Panicked(message) => JobFailure::Panicked(bounded_panic(message)),
-            failure => failure,
-        };
+        let failure = bounded_failure(failure);
         if let Some(receipt) = self.receipts.get(&key) {
             if receipt.incarnation != lease.job_incarnation {
                 return Err(Rejection::IncarnationConflict);
@@ -1455,7 +1462,9 @@ impl Authority {
     ) -> Result<Decision, Rejection> {
         self.active_job(&key, incarnation)?;
         let fault = Fault {
-            failure: JobFailure::Cancelled { reason },
+            failure: JobFailure::Cancelled {
+                reason: bounded_fault_text(reason),
+            },
             position: self.next_position(),
         };
         let intents = vec![Intent::Fault {

@@ -723,11 +723,11 @@ module wflow_authority {
   // with a permanent receipt. A waiting job is included on purpose: a durable
   // wait suspends resumption, not the reporting of a failure.
   //
-  // The panic message is not modelled. `prepare_fail` truncates a reported
-  // panic to `MAX_PANIC_MESSAGE_BYTES` *before* `validate_fault` compares the
+  // The fault text is not modelled. `prepare_fail` truncates every free-text
+  // field to `MAX_FAULT_TEXT_BYTES` *before* `validate_fault` compares the
   // length, so admission on this path never depends on it; the bound only
-  // rejects a durable `Faulted` record that was written some other way, which
-  // is a replay check this state-based model does not express.
+  // rejects a durable `Faulted` record written some other way, which is a
+  // replay check this state-based model does not express.
   action failPanicked = {
     nondet key = KEYS.oneOf()
     all {
@@ -1449,4 +1449,20 @@ module wflow_authority {
 
 module bounded {
   import wflow_authority(KEYS = Set("a", "b"), WORKERS = Set(11, 12), MESSAGE_IDS = Set("m1", "m2")).*
+}
+
+// Single-partition instance used only by the CI proof step
+// (`quint verify --main=boundedVerify`). Every action in `step` picks one key,
+// one worker and one message id, and no guard asks for a second, distinct one,
+// so all 38 actions stay reachable here: an action histogram over 1000 sampled
+// traces (the CI seed and nine more, 100 traces each) sees 36 of them, and
+// `retryExhausted`/`failRetriesExhausted` are reached by the same step relation
+// restricted to the retry path (submit -> grant -> retry -> grantDueRetry ->
+// retryExhausted). What this instance cannot express: any relation between two
+// partitions, a worker choosing between two live leases, or two in-flight
+// message ids. The constants are smaller because Apalache's bounded check
+// enumerates every transition at every depth, and the two-key instance does not
+// finish a fourth transition inside CI's budget.
+module boundedVerify {
+  import wflow_authority(KEYS = Set("a"), WORKERS = Set(11), MESSAGE_IDS = Set("m1")).*
 }

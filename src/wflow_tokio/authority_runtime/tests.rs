@@ -11,6 +11,7 @@ use wflow_core::kvstore::atomic::MemoryWriter;
 use wflow_core::kvstore::atomic::Store;
 use wflow_core::kvstore::journal::JournalSnapshot;
 use wflow_core::kvstore::journal::StaleReaderError;
+use wflow_core::partition::MAX_FAULT_TEXT_BYTES;
 use wflow_wdk::JobErrorX;
 use wflow_wdk::Json;
 use wflow_wdk::StepKind;

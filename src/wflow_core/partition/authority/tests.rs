@@ -821,7 +821,7 @@ fn the_durable_panic_message_is_bounded() {
         &mut authority,
         fail(
             &lease,
-            JobFailure::Panicked("x".repeat(MAX_PANIC_MESSAGE_BYTES * 2)),
+            JobFailure::Panicked("x".repeat(MAX_FAULT_TEXT_BYTES * 2)),
         ),
     );
     assert_eq!(ack.disposition, Disposition::Completed);
@@ -831,14 +831,14 @@ fn the_durable_panic_message_is_bounded() {
     let JobFailure::Panicked(message) = &fault.failure else {
         panic!("the fault keeps its panic")
     };
-    assert_eq!(message.len(), MAX_PANIC_MESSAGE_BYTES);
+    assert_eq!(message.len(), MAX_FAULT_TEXT_BYTES);
 
     let recovered = Authority::recover(7, 2, None, authority.suffix()).unwrap();
     assert_eq!(recovered.receipts(), authority.receipts());
     assert!(matches!(
         recovered.prepare(fail(
             &lease,
-            JobFailure::Panicked("x".repeat(MAX_PANIC_MESSAGE_BYTES * 3))
+            JobFailure::Panicked("x".repeat(MAX_FAULT_TEXT_BYTES * 3))
         )),
         Ok(Decision::Duplicate(_))
     ));
