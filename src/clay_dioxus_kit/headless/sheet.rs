@@ -102,6 +102,7 @@ pub fn Sheet(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -199,14 +200,6 @@ mod tests {
         page.key(dialog, Key::Named(NamedKey::Escape));
         assert_eq!(*dismissals.borrow(), 1);
     }
-}
-
-/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
-/// any order of events is a bug, and a seed that found one stays here as a regression case.
-#[cfg(test)]
-mod storm {
-    use super::*;
-    use dioxus_storm::Storm;
 
     fn owner() -> Element {
         let mut open = use_signal(|| true);

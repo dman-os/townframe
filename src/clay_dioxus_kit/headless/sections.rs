@@ -589,6 +589,7 @@ fn pane_style(weight: f64, rule: &SizeRule, collapsed: bool) -> String {
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
 
     /// A rule with a minimum and nothing else.
@@ -881,6 +882,67 @@ mod tests {
         page.key(handle, Key::Named(NamedKey::Tab));
         assert_eq!(reported_sizes(&reports), [216.0, 584.0]);
     }
+
+    /// A controlled owner, as a shell writes one: it keeps the weights and the fold, and answers
+    /// every callback the component makes.
+    fn owner(renderer: Renderer) -> Element {
+        let mut weights = use_signal(|| vec![1.0, 2.0, 1.0]);
+        let mut folded = use_signal(|| false);
+        let rail = SizeRule {
+            min: 80.0,
+            snap: Some(Snap {
+                below: 160.0,
+                to: 80.0,
+            }),
+            collapse_past: Some(40.0),
+            ..SizeRule::default()
+        };
+        let split = Split::new(weights(), 900.0)
+            .rule(0, rail)
+            .rule(
+                1,
+                SizeRule {
+                    min: 120.0,
+                    ..SizeRule::default()
+                },
+            )
+            .rule(
+                2,
+                SizeRule {
+                    min: 120.0,
+                    max: 500.0,
+                    ..SizeRule::default()
+                },
+            )
+            .renderer(renderer);
+        let panes = ["Rail", "Main", "Aside"]
+            .map(|name| SectionPane {
+                name: name.into(),
+                content: rsx! { button { "{name}" } },
+            })
+            .to_vec();
+        rsx! {
+            Sections {
+                label: "Workspace",
+                panes,
+                split,
+                on_resize: move |next| weights.set(next),
+                on_collapse: move |_| folded.set(true),
+                on_expand: move |()| folded.set(false),
+                folded: folded(),
+            }
+        }
+    }
+
+    #[test]
+    fn sections_survive_any_order_of_events_in_both_renderers() {
+        for renderer in [Renderer::Browser, Renderer::Blitz] {
+            Storm::with_props(owner, renderer)
+                .viewport(900.0, 600.0)
+                .steps(400)
+                .run_seeds(0..64);
+        }
+    }
 }
 
 /// Dragging a pane shut and reopening it from the edge strip.
@@ -1103,74 +1165,5 @@ mod collapse_tests {
         page.pointer_without_buttons(overlay, 500.0);
         assert_eq!(resized_sidebar(&heard), 300.0);
         assert_eq!(heard.borrow()[1], Heard::Expanded);
-    }
-}
-
-/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
-/// any order of events is a bug, and a seed that found one stays here as a regression case.
-#[cfg(test)]
-mod storm {
-    use super::*;
-    use dioxus_storm::Storm;
-
-    /// A controlled owner, as a shell writes one: it keeps the weights and the fold, and answers
-    /// every callback the component makes.
-    fn owner(renderer: Renderer) -> Element {
-        let mut weights = use_signal(|| vec![1.0, 2.0, 1.0]);
-        let mut folded = use_signal(|| false);
-        let rail = SizeRule {
-            min: 80.0,
-            snap: Some(Snap {
-                below: 160.0,
-                to: 80.0,
-            }),
-            collapse_past: Some(40.0),
-            ..SizeRule::default()
-        };
-        let split = Split::new(weights(), 900.0)
-            .rule(0, rail)
-            .rule(
-                1,
-                SizeRule {
-                    min: 120.0,
-                    ..SizeRule::default()
-                },
-            )
-            .rule(
-                2,
-                SizeRule {
-                    min: 120.0,
-                    max: 500.0,
-                    ..SizeRule::default()
-                },
-            )
-            .renderer(renderer);
-        let panes = ["Rail", "Main", "Aside"]
-            .map(|name| SectionPane {
-                name: name.into(),
-                content: rsx! { button { "{name}" } },
-            })
-            .to_vec();
-        rsx! {
-            Sections {
-                label: "Workspace",
-                panes,
-                split,
-                on_resize: move |next| weights.set(next),
-                on_collapse: move |_| folded.set(true),
-                on_expand: move |()| folded.set(false),
-                folded: folded(),
-            }
-        }
-    }
-
-    #[test]
-    fn sections_survive_any_order_of_events_in_both_renderers() {
-        for renderer in [Renderer::Browser, Renderer::Blitz] {
-            Storm::with_props(owner, renderer)
-                .viewport(900.0, 600.0)
-                .steps(400)
-                .run_seeds(0..64);
-        }
     }
 }

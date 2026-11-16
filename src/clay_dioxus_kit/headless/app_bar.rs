@@ -53,6 +53,7 @@ pub fn AppBar(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
 
     fn app(with_slots: bool) -> Element {
         rsx! {
@@ -95,14 +96,6 @@ mod tests {
         assert!(page.has_role("heading", "Settings"));
         assert!(!page.has_role("button", "Back"));
     }
-}
-
-/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
-/// any order of events is a bug, and a seed that found one stays here as a regression case.
-#[cfg(test)]
-mod storm {
-    use super::*;
-    use dioxus_storm::Storm;
 
     fn bar() -> Element {
         let mut presses = use_signal(|| 0u32);
