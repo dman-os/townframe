@@ -197,7 +197,10 @@ fn definite_failure_can_retry_but_unknown_outcome_requires_reopen() -> Res<()> {
 #[test]
 fn legacy_unknown_format_and_incarnation_mismatch_do_not_mutate() -> Res<()> {
     futures::executor::block_on(async {
-        for bytes in [None, Some(1), Some(2), Some(999)] {
+        // The current format is deliberately absent: this pins that each
+        // superseded generation is refused, and the next bump adds its
+        // predecessor here.
+        for bytes in [None, Some(1), Some(2), Some(3), Some(999)] {
             let store = MemoryStore::default();
             let mut writer = store.writer()?;
             let mutation = match bytes {
@@ -354,7 +357,6 @@ fn authority_warm_step_has_one_commit_and_cold_replay_cannot_continue_old_lease(
             key: "job".into(),
             lease,
             step: 0,
-            attempt: 0,
             value: "created".into(),
             kind: StepKind::Effect,
             name: None,

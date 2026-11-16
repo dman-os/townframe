@@ -9,7 +9,11 @@
 //! Cancellation first commits and indexes a fault receipt, then aborts
 //! or drops process-local activation state, clears deadlines, forgets host state,
 //! and wakes result waiters. Unexpected current-lease activation loss is durably
-//! revoked and re-granted within the submission's restart budget.
+//! revoked and re-granted within the submission's restart budget. A host that
+//! refuses to start a workflow is classified instead of retried blindly: a
+//! rejection settles as [`JobFailure::ActivationFailed`] with the host's
+//! diagnosis, and a temporarily unavailable host is re-granted behind an
+//! exponential backoff armed on the deadline wheel.
 //!
 //! Restart loads the latest published snapshot and replays the uncompacted suffix.
 //! Recovery clears process-local leases, then re-grants every active job so its
@@ -60,8 +64,6 @@
 //! incarnation with an empty journal.
 
 use std::collections::BTreeSet;
-use std::hash::DefaultHasher;
-use std::hash::Hasher;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
@@ -84,6 +86,7 @@ use wflow_core::partition::JobFailure;
 use wflow_core::partition::RetryBudget;
 use wflow_core::partition::authority;
 use wflow_core::partition::bounded_fault_text;
+use wflow_wdk::StepMeta;
 use wflow_wdk::session::ReplayStep;
 use wflow_wdk::session::SessionYield;
 use wflow_wdk::session::WaitYield;
@@ -127,16 +130,6 @@ const COMMIT_ATTEMPTS: u32 = 4;
 /// Delay before the first retry; each later retry doubles it, so exhausting the
 /// budget costs 5 + 10 + 20 ms of stalled actor time.
 const COMMIT_RETRY_BACKOFF: Duration = Duration::from_millis(5);
-
-/// Window the host spreads retry fire times over, handed to the authority as
-/// `Command::Retry::jitter_ms` and folded into the durable `fire_at_ms`.
-///
-/// The authority reads neither a clock nor an RNG — it stamps `fire_at_ms` as
-/// `now_ms + policy.delay_ms(attempts) + jitter_ms` — so the spread is a host
-/// input. Deriving it from the job key (rather than drawing randomly) keeps the
-/// runtime deterministic while still de-synchronising the distinct jobs that
-/// fail together, which is the herd this exists for. Zero disables it.
-const RETRY_JITTER_WINDOW_MS: u64 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Invocation {
@@ -514,6 +507,7 @@ impl AuthorityRuntime {
             running: HashMap::new(),
             waiting: HashMap::new(),
             deadlines: BTreeSet::new(),
+            spawn_failures: HashMap::new(),
             waiters: Waiters::default(),
             pending_spawns: FuturesUnordered::new(),
         };
@@ -723,7 +717,9 @@ struct Yielded {
 
 enum SpawnOutcome {
     Session(Box<dyn session::Session>),
-    Failed,
+    /// The host could not start the invocation; the class says whether a later
+    /// attempt could succeed and carries the host's diagnosis.
+    Failed(session::SpawnError),
 }
 
 /// Host creation completes off-actor and carries the complete lease so every
@@ -745,6 +741,11 @@ enum DeadlineRef {
     Retry {
         key: String,
     },
+    /// A spawn that reported the host is temporarily unavailable; firing it
+    /// re-grants the job.
+    Regrant {
+        key: String,
+    },
     /// A receipt's retention deadline; firing it proposes `Command::Prune`.
     Prune {
         key: String,
@@ -754,7 +755,10 @@ enum DeadlineRef {
 impl DeadlineRef {
     fn belongs_to(&self, candidate: &str) -> bool {
         match self {
-            Self::Timer { key, .. } | Self::Retry { key } | Self::Prune { key } => key == candidate,
+            Self::Timer { key, .. }
+            | Self::Retry { key }
+            | Self::Regrant { key }
+            | Self::Prune { key } => key == candidate,
         }
     }
 }
@@ -832,6 +836,10 @@ struct Actor<W> {
     reclamation_through: Option<u64>,
     /// Armed deadlines as `(fire_at_ms, what)`, earliest first.
     deadlines: BTreeSet<(u64, DeadlineRef)>,
+    /// Consecutive unavailable-host spawn failures per job, which is what the
+    /// re-grant backoff doubles. Actor-local on purpose: see
+    /// `spawn_regrant_backoff_ms`.
+    spawn_failures: HashMap<String, u32>,
     /// Completion wakeup hints for in-flight `await_result` callers.
     waiters: Waiters,
     /// Join handles fence host creation to the actor lifecycle. In particular,
@@ -1178,6 +1186,19 @@ impl<W: Writer> Actor<W> {
                     let incarnation = self.authority.jobs()[&key].incarnation;
                     self.grant(key, incarnation).await?;
                 }
+                DeadlineRef::Regrant { key } => {
+                    // The deadline only exists because `handle_spawn_failure`
+                    // revoked the lease; if the job settled or was re-granted
+                    // by another path in the meantime, this entry is stale.
+                    let Some(job) = self.authority.jobs().get(&key) else {
+                        continue;
+                    };
+                    if job.lease.is_some() || job.retry.is_some() {
+                        continue;
+                    }
+                    let incarnation = job.incarnation;
+                    self.grant(key, incarnation).await?;
+                }
                 DeadlineRef::Prune { key } => {
                     let Some(retained_until_ms) = self
                         .authority
@@ -1382,7 +1403,7 @@ impl<W: Writer> Actor<W> {
                 .await
             {
                 Ok(session) => SpawnOutcome::Session(session),
-                Err(_) => SpawnOutcome::Failed,
+                Err(error) => SpawnOutcome::Failed(error),
             };
             Spawned {
                 key,
@@ -1431,11 +1452,61 @@ impl<W: Writer> Actor<W> {
         );
         match outcome {
             SpawnOutcome::Session(session) => {
+                // The host is working again, so the next unavailability starts
+                // its backoff from the floor instead of from the old ceiling.
+                self.spawn_failures.remove(&key);
                 self.park(key, lease, session);
                 Ok(())
             }
-            SpawnOutcome::Failed => self.recover_activation_loss(key, lease).await,
+            SpawnOutcome::Failed(error) => self.handle_spawn_failure(key, lease, error).await,
         }
+    }
+
+    /// Classifies a failed host spawn instead of discarding it.
+    ///
+    /// `Rejected` is deterministic for this build: the workflow key is not in
+    /// the host's registry, or the host refused its component, manifest or
+    /// configuration. A re-grant would spend the restart budget to fail
+    /// identically, so the job settles as
+    /// [`JobFailure::ActivationFailed`] with the host's own diagnosis. The fault
+    /// is reported under the lease the grant just issued; settling consumes that
+    /// lease, which is the durable fence on an activation that never started, so
+    /// no separate `Revoke` is needed (and revoking first would leave nothing
+    /// for the fault to be reported under).
+    ///
+    /// `Unavailable` is transient: the lease is revoked durably and the re-grant
+    /// is armed on the deadline wheel behind a bounded exponential backoff. Both
+    /// halves matter — the revoke is what keeps the job grantable, and the wheel
+    /// is what stops a short outage from looping through the restart budget.
+    async fn handle_spawn_failure(
+        &mut self,
+        key: String,
+        lease: authority::Lease,
+        error: session::SpawnError,
+    ) -> Result<(), Halt> {
+        let message = match error {
+            session::SpawnError::Rejected { message } => {
+                return self
+                    .fail(key, lease, JobFailure::ActivationFailed { message })
+                    .await;
+            }
+            session::SpawnError::Unavailable { message } => message,
+        };
+        self.revoke(key.clone(), lease).await?;
+        let failures = self.spawn_failures.entry(key.clone()).or_insert(0);
+        *failures = failures.saturating_add(1);
+        let delay_ms = spawn_regrant_backoff_ms(*failures);
+        let fire_at_ms = now_ms().saturating_add(delay_ms);
+        warn!(
+            %key,
+            %message,
+            failures = *failures,
+            delay_ms,
+            "host could not start the workflow; re-grant deferred"
+        );
+        self.deadlines
+            .insert((fire_at_ms, DeadlineRef::Regrant { key }));
+        Ok(())
     }
 
     fn is_current(&self, key: &str, lease: &authority::Lease) -> bool {
@@ -1455,6 +1526,7 @@ impl<W: Writer> Actor<W> {
             abort.abort();
         }
         self.waiting.remove(&key);
+        self.spawn_failures.remove(&key);
         self.deadlines
             .retain(|(_, reference)| !reference.belongs_to(&key));
         self.host.forget_job(&key);
@@ -1528,7 +1600,6 @@ impl<W: Writer> Actor<W> {
                     key: key.clone(),
                     lease: lease.clone(),
                     step: step_id,
-                    attempt: 0,
                     value: value_json.to_string(),
                     kind,
                     name: meta.name,
@@ -1609,37 +1680,7 @@ impl<W: Writer> Actor<W> {
                 meta,
                 ..
             } => {
-                let kind = match deets {
-                    WaitYield::Timer { fire_at, .. } => authority::WaitKind::Timer {
-                        fire_at_ms: u64::try_from(fire_at.as_millisecond())
-                            .expect("timer deadline before the unix epoch"),
-                    },
-                    WaitYield::Message { .. } => authority::WaitKind::Message,
-                };
-                let declared = kind.step_kind();
-                if declared != meta.kind {
-                    // The boundary kind is declared twice — by this yield and by
-                    // the meta the guest supplies to `next-step`, a public entry
-                    // point a component may contradict — so a disagreement means
-                    // the run entered a boundary the durable log will not agree
-                    // with. That is the same divergence the authority reports as
-                    // `Nondeterministic` once a wait is committed. It is one
-                    // job's verdict, never a reason to abort the actor: a durable
-                    // job replays to the same boundary, so an abort would restart
-                    // into the same abort on every boot.
-                    drop(session);
-                    return self
-                        .fail(
-                            key,
-                            lease,
-                            JobFailure::ReplayDiverged {
-                                step: step_id,
-                                replayed: declared,
-                            },
-                        )
-                        .await;
-                }
-                self.begin_wait(key, lease, session, step_id, kind, meta.name)
+                self.begin_wait_step(key, lease, session, step_id, deets, meta)
                     .await
             }
             SessionYield::Complete { steps, result } => match result {
@@ -1660,6 +1701,71 @@ impl<W: Writer> Actor<W> {
         }
     }
 
+    /// Commits one wait boundary the guest offered.
+    ///
+    /// A timer has to survive as a durable `fire_at_ms`, so a guest sleep the
+    /// model cannot record settles the job here rather than panicking the actor
+    /// mid-yield; a boundary kind that disagrees with the guest's own `meta` is
+    /// the replay divergence the authority would otherwise fence after the wait
+    /// was already committed.
+    async fn begin_wait_step(
+        &mut self,
+        key: String,
+        lease: authority::Lease,
+        session: Box<dyn session::Session>,
+        step_id: u64,
+        deets: WaitYield,
+        meta: StepMeta,
+    ) -> Result<(), Halt> {
+        let kind = match deets {
+            WaitYield::Timer { fire_at, .. } => {
+                // A durable wait records `fire_at_ms` as an unsigned millisecond
+                // offset from the unix epoch. An instant before it cannot be
+                // recorded, and the session cannot be trusted to have derived the
+                // instant from a representable sleep, so this is a fault of the
+                // workflow's own request: `Panicked` would claim a crash that did
+                // not happen, and `ActivationFailed` would blame a host that is
+                // fine. No re-run makes the request representable — a sleep long
+                // enough to leave the range overflows on every replay, and a
+                // merely pre-epoch instant is a host defect a restart would hide
+                // — so the job settles here.
+                let fire_at_ms = fire_at.as_millisecond();
+                let Ok(fire_at_ms) = u64::try_from(fire_at_ms) else {
+                    drop(session);
+                    return self
+                        .fail(key, lease, JobFailure::TimerOutOfRange { fire_at_ms })
+                        .await;
+                };
+                authority::WaitKind::Timer { fire_at_ms }
+            }
+            WaitYield::Message { .. } => authority::WaitKind::Message,
+        };
+        let declared = kind.step_kind();
+        if declared != meta.kind {
+            // The boundary kind is declared twice — by this yield and by the meta
+            // the guest supplies to `next-step`, a public entry point a component
+            // may contradict — so a disagreement means the run entered a boundary
+            // the durable log will not agree with. That is the same divergence the
+            // authority reports as `Nondeterministic` once a wait is committed. It
+            // is one job's verdict, never a reason to abort the actor: a durable
+            // job replays to the same boundary, so an abort would restart into the
+            // same abort on every boot.
+            drop(session);
+            return self
+                .fail(
+                    key,
+                    lease,
+                    JobFailure::ReplayDiverged {
+                        step: step_id,
+                        replayed: declared,
+                    },
+                )
+                .await;
+        }
+        self.begin_wait(key, lease, session, step_id, kind, meta.name)
+            .await
+    }
+
     async fn retry_transient(
         &mut self,
         key: String,
@@ -1675,7 +1781,6 @@ impl<W: Writer> Actor<W> {
             error: err.error_json.clone(),
             policy: err.retry_policy,
             now_ms: now_ms(),
-            jitter_ms: retry_jitter_ms(&key),
         };
         match self.commit(command).await {
             Ok((_, intents)) => {
@@ -1762,6 +1867,15 @@ impl<W: Writer> Actor<W> {
             return Ok(());
         }
         let incarnation = lease.job_incarnation;
+        self.revoke(key.clone(), lease.clone()).await?;
+        self.grant(key, incarnation).await
+    }
+
+    /// Durably releases `lease` and drops whatever process-local activation
+    /// holds it. Only the caller decides what happens next: an immediate
+    /// re-grant for lost sessions, waits and deliveries, or an armed backoff for
+    /// a host that reported it is temporarily unavailable.
+    async fn revoke(&mut self, key: String, lease: authority::Lease) -> Result<(), Halt> {
         let intents = match self
             .commit(authority::Command::Revoke {
                 key: key.clone(),
@@ -1773,9 +1887,10 @@ impl<W: Writer> Actor<W> {
             Err(CommitFailure::Rejected(
                 authority::Rejection::StaleLease | authority::Rejection::UnknownJob,
             )) => return Ok(()),
-            // The job was current under this very lease immediately above, so
-            // the remaining variants (a receipt for another incarnation) would
-            // mean the authority settled it between two actor statements.
+            // The caller checked that the job was current under this very lease
+            // before revoking, so the remaining variants (a receipt for another
+            // incarnation) would mean the authority settled it between two actor
+            // statements.
             Err(CommitFailure::Rejected(rejection)) => {
                 panic!("activation loss revoke rejected: {rejection:?}")
             }
@@ -1811,7 +1926,7 @@ impl<W: Writer> Actor<W> {
         {
             self.waiting.remove(&key);
         }
-        self.grant(key, incarnation).await
+        Ok(())
     }
 
     async fn begin_wait(
@@ -2091,6 +2206,14 @@ impl<W: Writer> Actor<W> {
     }
 }
 
+/// The host's wall clock in milliseconds since the unix epoch.
+///
+/// The durable model records every deadline as an unsigned offset from that
+/// epoch, so a host whose clock predates it cannot express a comparable instant
+/// at all: this is an invariant of the machine the authority runs on, not
+/// guest-reachable input. A guest cannot drive the value below zero; the
+/// deadline it *can* choose is classified at the yield boundary instead (see
+/// `JobFailure::TimerOutOfRange`).
 fn now_ms() -> u64 {
     u64::try_from(Timestamp::now().as_millisecond()).expect("clock before the unix epoch")
 }
@@ -2147,14 +2270,22 @@ fn failure_envelope(failure: &JobFailure) -> types::JobResult {
     ))
 }
 
-/// Deterministic per-key retry spread, so a fleet of simultaneous failures does
-/// not re-run in lockstep yet a given key always jitters the same amount (tests
-/// stay deterministic and recovery never recomputes). Zero closes the window.
-fn retry_jitter_ms(key: &str) -> u64 {
-    if RETRY_JITTER_WINDOW_MS == 0 {
-        return 0;
-    }
-    let mut hasher = DefaultHasher::new();
-    hasher.write(key.as_bytes());
-    hasher.finish() % RETRY_JITTER_WINDOW_MS
+/// The re-grant delay after `failures` consecutive unavailable spawn reports:
+/// doubling from 100 ms and saturating at 30 s, so 100 ms, 200 ms, 400 ms, ….
+///
+/// A spawn failure used to re-grant immediately, so an engine or store that was
+/// briefly unavailable burned the submission's whole restart budget in a
+/// millisecond-scale loop and settled as `RestartsExhausted`, which named the
+/// wrong class and kept no diagnosis. The floor is deliberately short: the
+/// common case is a host that is ready almost at once, and the durable restart
+/// budget — not this loop — is what bounds the total damage. The count is
+/// actor-local and a daemon restart resets it, which is acceptable for the same
+/// reason: the restart budget survives, so a pathological host still faults
+/// instead of retrying forever. `Rejected` spawn failures never reach this path;
+/// they settle immediately. See `handle_spawn_failure`.
+fn spawn_regrant_backoff_ms(failures: u32) -> u64 {
+    const MIN_MS: u64 = 100;
+    const MAX_MS: u64 = 30_000;
+    let doublings = failures.saturating_sub(1).min(31);
+    MIN_MS.saturating_mul(1u64 << doublings).min(MAX_MS)
 }

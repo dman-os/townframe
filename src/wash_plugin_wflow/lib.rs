@@ -211,28 +211,16 @@ impl<T: 'static + Send> host::HostWithStore<T> for HasSelf<SharedWashCtx> {
             return Ok(Err(host::HostError::Protocol("session cancelled".into())));
         }
         let mut active_step = job.active_step.lock().expect(ERROR_MUTEX);
-        if let Some(stale_active) = active_step.as_ref() {
-            let stale_step_id = stale_active.step_id;
-            let replay = job.replay.lock().expect(ERROR_MUTEX);
-            let stale_completed = replay
-                .get(stale_step_id as usize)
-                .is_some_and(|step| step.value_json.is_some());
-            drop(replay);
-            if stale_completed {
-                active_step.take();
-                job.cur_step
-                    .compare_exchange(
-                        stale_step_id,
-                        stale_step_id + 1,
-                        std::sync::atomic::Ordering::SeqCst,
-                        std::sync::atomic::Ordering::Relaxed,
-                    )
-                    .expect("impossible: wasm is single threaded");
-            } else {
-                return Ok(Err(host::HostError::Protocol(
-                    "concurrent steps not allowed".into(),
-                )));
-            }
+        if active_step.is_some() {
+            // The guest re-entered `next_step` for a step it has not finished.
+            // `persist_step`, `sleep` and `recv_message` each take the active
+            // step (and advance `cur_step`) before resuming the guest, so a step
+            // that is still active here was never persisted: there is nothing
+            // in the replay log to repair, and a second activation for one step
+            // is what the authority would read as divergent replay.
+            return Ok(Err(host::HostError::Protocol(
+                "concurrent steps not allowed".into(),
+            )));
         }
         let step_id = job.cur_step.load(std::sync::atomic::Ordering::Relaxed);
         let replay = job.replay.lock().expect(ERROR_MUTEX);

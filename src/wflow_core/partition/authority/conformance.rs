@@ -25,8 +25,8 @@ const SPEC: &str = "partition/authority.qnt";
 const TIMER: WaitKind = WaitKind::Timer { fire_at_ms: 5 };
 
 /// The retry policy every sampled submission carries; the model schedules
-/// `RETRY_DELAY` as the parked retry's deadline (jitter is 0, so `fire_at_ms`
-/// is exactly `now_ms + RETRY_DELAY`).
+/// `RETRY_DELAY` as the parked retry's deadline, so `fire_at_ms` is exactly
+/// `now_ms + RETRY_DELAY`.
 const RETRY_DELAY: u64 = 3;
 /// Mirrors the model's `MAX_RETRIES`: one transient failure may park a retry
 /// before the next transient failure is rejected as `RetriesExhausted`.
@@ -126,6 +126,7 @@ impl Driver for AuthorityDriver {
             duplicateCancel(key: String) => self.cancel(key),
             cancelSettled(key: String) => self.cancel(key),
             failPanicked(key: String) => self.fail_panicked(key),
+            failActivation(key: String) => self.fail_activation(key),
             failRetriesExhausted(key: String) => self.fail_retries_exhausted(key),
             failInvalid(key: String, failure: String) => self.fail_invalid(key, failure),
             failStaleLease(key: String) => self.fail_stale_lease(key),
@@ -252,7 +253,6 @@ impl AuthorityDriver {
             key,
             lease: job.lease.clone().unwrap(),
             step: job.steps.len() as u64,
-            attempt: 0,
             value: "value".into(),
             kind: StepKind::Effect,
             name: model_step_name(&name),
@@ -271,7 +271,6 @@ impl AuthorityDriver {
             key,
             lease,
             step: step.id,
-            attempt: step.attempt,
             value: step.value,
             kind: step.kind,
             name: step.name,
@@ -286,7 +285,6 @@ impl AuthorityDriver {
             key,
             lease,
             step: job.steps.len() as u64,
-            attempt: 0,
             value: "stale".into(),
             kind: StepKind::Effect,
             name: None,
@@ -310,7 +308,6 @@ impl AuthorityDriver {
             key,
             lease: job.lease.clone().unwrap_or_else(|| last.lease.clone()),
             step: last.id,
-            attempt: last.attempt,
             value: last.value.clone(),
             kind: last.kind,
             name: model_step_name(&inverted_name(&last.name)),
@@ -337,7 +334,7 @@ impl AuthorityDriver {
     }
 
     /// The transient failure the model's retry actions report; their guards
-    /// differ, while the command uses clock 0, no jitter, and durable policy.
+    /// differ, while the command uses clock 0 and the durable policy.
     fn retry(&mut self, key: String) {
         let job = &self.authority.jobs()[&key];
         self.execute(Command::Retry {
@@ -346,7 +343,6 @@ impl AuthorityDriver {
             error: "transient".into(),
             policy: None,
             now_ms: 0,
-            jitter_ms: 0,
         });
     }
 
@@ -372,6 +368,22 @@ impl AuthorityDriver {
             key,
             lease,
             failure: JobFailure::Panicked("panic".into()),
+            now_ms: 0,
+        });
+    }
+
+    /// The model's `failActivation`: the job's lease holder reports that the
+    /// host refused to instantiate the workflow for this activation. There is no
+    /// counter to recompute — the authority cannot derive a host's registry from
+    /// its log — so admission is the lease alone, exactly like `fail_panicked`.
+    fn fail_activation(&mut self, key: String) {
+        let lease = self.authority.jobs()[&key].lease.clone().unwrap();
+        self.execute(Command::Fail {
+            key,
+            lease,
+            failure: JobFailure::ActivationFailed {
+                message: "activation".into(),
+            },
             now_ms: 0,
         });
     }
@@ -661,11 +673,12 @@ fn authority_conformance() {
             // budget (submit, grant, retry, due-re-grant) and split the samples
             // that reach it, so the seed has to be one where both are taken.
             // This one also covers every other action, down to a fault reported
-            // from a held wait; the previous seed stopped covering the retry
-            // pair once the prune arms were added.
+            // from a held wait; it was retuned when `failActivation` joined the
+            // action set, because the previous seed stopped covering the retry
+            // pair with one more action competing for the same traces.
             max_samples: Some(200),
             max_steps: Some(32),
-            seed: "141421".into(),
+            seed: "424242".into(),
         },
     };
     if let Err(err) = run_test(driver, config) {

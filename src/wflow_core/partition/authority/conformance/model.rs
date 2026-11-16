@@ -12,7 +12,6 @@ pub(super) struct ModelStep {
     pub(super) id: u64,
     pub(super) kind: StepKind,
     pub(super) name: String,
-    pub(super) attempt: u64,
     pub(super) value: String,
     pub(super) lease: Lease,
     pub(super) position: u64,
@@ -22,7 +21,6 @@ pub(super) fn model_step(step: &Step) -> ModelStep {
         id: step.id,
         kind: step.kind,
         name: step_name(&step.name),
-        attempt: step.attempt,
         value: step.value.clone(),
         lease: step.lease.clone(),
         position: step.position,
@@ -33,7 +31,6 @@ pub(super) fn empty_model_step() -> ModelStep {
         id: 0,
         kind: StepKind::Effect,
         name: String::new(),
-        attempt: 0,
         value: String::new(),
         lease: empty_lease(),
         position: 0,
@@ -89,10 +86,12 @@ pub(super) struct ModelFault {
 ///
 /// The model's `Fault` carries the two counters the authority recomputes from
 /// durable state: `restarts` for `RestartsExhausted` and `retries` for
-/// `RetriesExhausted`. `Cancelled`, `Panicked` and `ReplayDiverged` carry
-/// neither, so both project as 0. `ReplayDiverged` is unreachable here: the
-/// model ends a divergent replay at the `nondeterministic` rejection that
-/// produces it, never at the settlement that follows.
+/// `RetriesExhausted`. `Cancelled`, `Panicked`, `ActivationFailed`,
+/// `TimerOutOfRange` and `ReplayDiverged` carry neither, so both counters
+/// project as 0. `ReplayDiverged` and `TimerOutOfRange` are unreachable here:
+/// the model ends a divergent replay at the `nondeterministic` rejection that
+/// produces it, and it has no timer the durable `fire_at` cannot represent, so
+/// neither ever reaches the settlement that follows.
 pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64, u64) {
     match failure {
         JobFailure::Cancelled { .. } => ("cancelled", 0, 0),
@@ -100,6 +99,8 @@ pub(super) fn failure_name(failure: &JobFailure) -> (&'static str, u64, u64) {
         JobFailure::RetriesExhausted { retries, .. } => ("retries-exhausted", 0, *retries),
         JobFailure::ReplayDiverged { .. } => ("replay-diverged", 0, 0),
         JobFailure::Panicked(_) => ("panicked", 0, 0),
+        JobFailure::ActivationFailed { .. } => ("activation-failed", 0, 0),
+        JobFailure::TimerOutOfRange { .. } => ("timer-out-of-range", 0, 0),
     }
 }
 pub(super) fn model_fault(fault: &Fault) -> ModelFault {
@@ -386,7 +387,6 @@ pub(super) fn rejection_name(rejection: &Rejection) -> &'static str {
         Rejection::LeaseActive => "lease-active",
         Rejection::StaleLease => "stale-lease",
         Rejection::OutOfOrder => "out-of-order",
-        Rejection::InvalidAttempt => "invalid-attempt",
         Rejection::NotWaiting => "not-waiting",
         Rejection::Nondeterministic => "nondeterministic",
         Rejection::RetryPending { .. } => "retry-pending",

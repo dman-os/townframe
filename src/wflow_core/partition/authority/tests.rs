@@ -57,7 +57,6 @@ fn step_as(lease: &Lease, id: u64, value: &str, kind: StepKind, name: Option<&st
         key: "job".into(),
         lease: lease.clone(),
         step: id,
-        attempt: 0,
         value: value.into(),
         kind,
         name: name.map(str::to_owned),
@@ -1066,8 +1065,8 @@ enum Operation {
     Wait(bool),
     Fire,
     Send(u8),
-    /// A transient failure under the current lease, with host-supplied jitter.
-    Retry(u8),
+    /// A transient failure under the current lease.
+    Retry,
     /// A classified failure the current lease holder reports.
     Fail(u8),
     /// An operator cancel; needs no lease, so it also hits parked jobs.
@@ -1086,7 +1085,7 @@ fn operation() -> impl proptest::strategy::Strategy<Value = Operation> {
         2 => any::<bool>().prop_map(Operation::Wait),
         1 => Just(Operation::Fire),
         2 => (0..3_u8).prop_map(Operation::Send),
-        3 => (0..4_u8).prop_map(Operation::Retry),
+        3 => Just(Operation::Retry),
         1 => (0..3_u8).prop_map(Operation::Fail),
         1 => Just(Operation::Cancel),
     ]
@@ -1136,7 +1135,6 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
             key,
             lease,
             step: job.unwrap().steps.len() as u64,
-            attempt: 0,
             value,
             kind: StepKind::Effect,
             name: None,
@@ -1173,13 +1171,12 @@ fn command_for(authority: &Authority, operation: Operation, now_ms: u64) -> Opti
             id: id.to_string(),
             payload: format!("payload-{id}"),
         }),
-        Operation::Retry(jitter) => lease.map(|lease| Command::Retry {
+        Operation::Retry => lease.map(|lease| Command::Retry {
             key,
             lease,
             error: "transient".into(),
             policy: None,
             now_ms,
-            jitter_ms: u64::from(jitter) * 3,
         }),
         Operation::Fail(which) => lease.map(|lease| Command::Fail {
             key,

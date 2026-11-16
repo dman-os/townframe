@@ -18,7 +18,6 @@ module wflow_authority {
     // The boundary name the workflow chose; "" models Rust's `None`, so a
     // replay that renames a step diverges exactly as the authority rejects it.
     name: str,
-    attempt: int,
     value: str,
     lease: Lease,
     position: int,
@@ -56,15 +55,18 @@ module wflow_authority {
   //
   // A fault is the single durable failure shape: `Outcome` has only
   // "completed" and "faulted", and nothing is laundered through a completed
-  // terminal as an error string. Two of the five variants are settled by the
-  // authority itself, with no reporting lease: "cancelled" (an operator fact)
-  // and "restarts-exhausted" (charged at grant time, when no lease is held).
-  // The other three are reported by a lease holder through `Command::Fail`:
-  // "retries-exhausted" (recomputed counters), "replay-diverged" and
-  // "panicked" (facts only the activation can know, admitted from the current
-  // lease alone). This model samples a panic and an exhausted retry budget as
-  // the reported faults; a divergent replay is modelled as the rejection that
-  // produces it (`nondeterministic`), not as the settlement that follows.
+  // terminal as an error string. Two of the six variants named here are settled
+  // by the authority itself, with no reporting lease: "cancelled" (an operator
+  // fact) and "restarts-exhausted" (charged at grant time, when no lease is
+  // held). The other four are reported by a lease holder through `Command::Fail`:
+  // "retries-exhausted" (recomputed counters), "replay-diverged",
+  // "panicked" and "activation-failed" (facts only the activation can know,
+  // admitted from the current lease alone). This model samples a panic, a
+  // rejected host activation and an exhausted retry budget as the reported
+  // faults; a divergent replay is modelled as the rejection that produces it
+  // (`nondeterministic`), not as the settlement that follows. Rust's seventh
+  // variant, `TimerOutOfRange`, has no action because this model's only timer
+  // deadline is the constant `TIMER_FIRE_AT`, which is always representable.
   type Fault = {
     failure: str,
     restarts: int,
@@ -216,7 +218,6 @@ module wflow_authority {
     id: 0,
     kind: "effect",
     name: "",
-    attempt: 0,
     value: "",
     lease: emptyLease,
     position: 0,
@@ -788,6 +789,37 @@ module wflow_authority {
       }
   }
 
+  // The lease holder reports that the host refused to instantiate this
+  // workflow for this activation: an unknown key, an invalid component, a
+  // rejected manifest. Like a panic it is a fact only the activation can know,
+  // so the lease alone decides admission; unlike a restart it is not retried,
+  // because the same configuration cannot start. The host's text is bounded by
+  // the authority before the record is compared, so it does not enter this
+  // abstraction.
+  action failActivation = {
+    nondet key = KEYS.oneOf()
+    all {
+        state.jobs.hasJob(key),
+        val job = state.jobs.findJob(key)
+        all {
+          job.leased,
+          not(isSettled(job)),
+          val fault = {
+            failure: "activation-failed",
+            restarts: 0,
+            retries: 0,
+            position: state.revision + 1,
+          }
+          commit(
+            state,
+            { ...emptyRecord, kind: "fault", key: key, incarnation: job.incarnation, lease: job.lease, fault: fault, retained_until: RETENTION_MS },
+            [faultIntent(key, fault)],
+            outcome("accepted", state.revision + 1, "completed", ""),
+          )
+        }
+      }
+  }
+
   // The lease holder reports that the transient-error retry budget is spent.
   // Unlike a panic, the authority can recompute this from durable state, so the
   // report is admitted only when the count it carries is the job's own
@@ -864,7 +896,6 @@ module wflow_authority {
     id: job.steps.length(),
     kind: kind,
     name: name,
-    attempt: 0,
     value: value,
     lease: job.lease,
     position: position,
@@ -1112,7 +1143,6 @@ module wflow_authority {
               id: job.steps.length(),
               kind: "recv",
               name: "",
-              attempt: 0,
               value: job.inbox[job.delivered].payload,
               lease: job.lease,
               position: state.revision + 1,
@@ -1234,7 +1264,6 @@ module wflow_authority {
             id: job.wait.step,
             kind: "sleep",
             name: "",
-            attempt: 0,
             value: "null",
             lease: job.wait.lease,
             position: state.revision + 1,
@@ -1315,7 +1344,6 @@ module wflow_authority {
           id: job.wait.step,
           kind: "recv",
           name: "",
-          attempt: 0,
           value: message.payload,
           lease: job.wait.lease,
           position: position,
@@ -1400,6 +1428,7 @@ module wflow_authority {
     duplicateCancel,
     cancelSettled,
     failPanicked,
+    failActivation,
     failRetriesExhausted,
     failInvalid,
     failStaleLease,
@@ -1545,7 +1574,7 @@ module bounded {
 
 // Single-partition instance: 1 key, 1 worker, 1 message id. Every action in
 // `step` picks one key, one worker and one message id, and no guard asks for a
-// second, distinct one, so all 40 actions stay reachable here — the two prune
+// second, distinct one, so all 41 actions stay reachable here — the two prune
 // arms need only a settled key, which this instance reaches like any other, so
 // the smaller constants do not narrow the action set. Sampling is a separate
 // question: `retryExhausted`/`failRetriesExhausted` share the one state with a

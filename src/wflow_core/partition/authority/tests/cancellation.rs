@@ -18,7 +18,6 @@ fn retry(lease: &Lease, error: &str) -> Command {
         error: error.into(),
         policy: None,
         now_ms: 0,
-        jitter_ms: 0,
     }
 }
 

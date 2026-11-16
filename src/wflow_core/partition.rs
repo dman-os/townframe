@@ -69,6 +69,28 @@ pub enum JobFailure {
     /// The workflow code panicked. `message` is the host's own text for the
     /// panic, truncated to [`MAX_FAULT_TEXT_BYTES`].
     Panicked(String),
+    /// The host refused to instantiate this workflow for this activation.
+    ///
+    /// This is the deterministic half of a spawn failure: the workflow key is
+    /// unknown to the build, or the host rejected the component, its manifest,
+    /// or its configuration. It is a different class from
+    /// [`JobFailure::Panicked`] because nothing crashed, and from
+    /// [`JobFailure::RestartsExhausted`] because no restart could ever help: a
+    /// re-grant would fail identically. `message` is the host's own diagnosis,
+    /// truncated to [`MAX_FAULT_TEXT_BYTES`].
+    ActivationFailed { message: String },
+    /// The workflow asked for a timer deadline the durable model cannot record.
+    ///
+    /// A durable wait stores `fire_at_ms` as an unsigned millisecond offset from
+    /// the unix epoch, and the session handed the authority an instant before
+    /// that epoch. `fire_at_ms` records exactly what the session offered: the
+    /// requested sleep duration is not part of the session protocol, so
+    /// inventing one would be a claim the authority cannot back. It settles
+    /// instead of retrying because no re-run makes the request representable: a
+    /// sleep long enough to leave the representable range overflows on every
+    /// replay, and an instant that is merely before the epoch is a host defect
+    /// that a restart would only hide.
+    TimerOutOfRange { fire_at_ms: i64 },
     /// The transient-error retry budget ran out. The job settles directly
     /// without entering compensation, and in-flight external effects may
     /// remain applied. `last_error` is the workflow's own report for the last

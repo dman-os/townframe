@@ -7,6 +7,7 @@ use wflow_wdk::StepMeta;
 use super::*;
 use crate::authority_runtime::session::Host;
 use crate::authority_runtime::session::Session;
+use crate::authority_runtime::session::SpawnError;
 
 #[derive(Default)]
 struct DropProbe {
@@ -101,7 +102,10 @@ enum SpawnPlan {
         gate: Arc<Gate>,
         session: Box<dyn Session>,
     },
-    Fail,
+    /// The host cannot start this invocation now but might later.
+    Unavailable,
+    /// The host will never start this workflow as configured.
+    Rejected,
     Panic,
 }
 
@@ -152,7 +156,7 @@ impl Host for ScriptHost {
         wflow_key: &str,
         _args_json: String,
         replay: Vec<ReplayStep>,
-    ) -> Res<Box<dyn Session>> {
+    ) -> Result<Box<dyn Session>, SpawnError> {
         self.replay_lengths
             .lock()
             .unwrap()
@@ -165,14 +169,19 @@ impl Host for ScriptHost {
             .unwrap()
             .get_mut(wflow_key)
             .and_then(VecDeque::pop_front)
-            .unwrap_or(SpawnPlan::Fail);
+            .unwrap_or(SpawnPlan::Unavailable);
         match plan {
             SpawnPlan::Session(session) => Ok(session),
             SpawnPlan::Blocked { gate, session } => {
                 gate.pass().await;
                 Ok(session)
             }
-            SpawnPlan::Fail => Err(ferr!("host unavailable")),
+            SpawnPlan::Unavailable => Err(SpawnError::Unavailable {
+                message: format!("engine for {wflow_key} is not ready"),
+            }),
+            SpawnPlan::Rejected => Err(SpawnError::Rejected {
+                message: format!("workflow {wflow_key} is not registered"),
+            }),
             SpawnPlan::Panic => panic!("host spawn panic"),
         }
     }
@@ -230,6 +239,22 @@ fn receive() -> SessionYield {
         start_at: Timestamp::now(),
         deets: WaitYield::Message { wait_id: 0 },
         meta: StepMeta::new(StepKind::Recv, None),
+    }
+}
+
+/// A timer whose deadline the durable model cannot record: a durable wait keeps
+/// `fire_at_ms` as an unsigned offset from the unix epoch, and this instant is a
+/// millisecond before it.
+fn unrepresentable_timer() -> SessionYield {
+    SessionYield::WaitStep {
+        step_id: 0,
+        start_at: Timestamp::now(),
+        deets: WaitYield::Timer {
+            wait_id: 0,
+            fire_at: Timestamp::from_millisecond(-1)
+                .expect("a millisecond before the epoch is a representable instant"),
+        },
+        meta: StepMeta::new(StepKind::Sleep, None),
     }
 }
 
@@ -554,13 +579,16 @@ async fn deliver_loss_after_wait_resolution_replays_durable_progress() {
     runtime.stop().await;
 }
 
+/// Every attempt now waits out the wheel's backoff (100 + 200 + 400 ms), so the
+/// restart budget still bounds a host that never comes back, only at the pace of
+/// the backoff rather than in a hot loop.
 #[tokio::test]
 async fn repeated_spawn_loss_exhausts_the_finite_restart_budget() {
     let host = ScriptHost::registered();
     for _ in 0..4 {
-        host.push("missing-host", SpawnPlan::Fail);
+        host.push("missing-host", SpawnPlan::Unavailable);
     }
-    let runtime = start_script(host).await;
+    let runtime = start_script(Arc::clone(&host)).await;
     runtime
         .submit(Submission::new("job", "missing-host", "null"))
         .await
@@ -577,7 +605,161 @@ async fn repeated_spawn_loss_exhausts_the_finite_restart_budget() {
             max_restarts: 3,
         }
     );
+    assert_eq!(host.replay_lengths("missing-host"), vec![0, 0, 0, 0]);
     runtime.stop().await;
+}
+
+/// A host spawn failure is classified, not discarded: the deterministic case
+/// settles with the host's own diagnosis and no retry, and the transient case is
+/// re-granted behind the deadline wheel's backoff instead of hot-looping through
+/// the restart budget.
+///
+/// The two classes lead to different durable outcomes, so they are asserted
+/// separately: a rejection must leave the restart budget untouched (one grant,
+/// no revoke), while an unavailable host must be retried only after the wheel's
+/// deadlines — the elapsed-time floor below is what a hot loop cannot satisfy.
+#[tokio::test]
+async fn a_rejected_spawn_faults_with_its_cause_and_an_unavailable_one_retries_with_backoff() {
+    // A: the host will never instantiate this workflow as configured.
+    let host = ScriptHost::registered();
+    host.push("rejected", SpawnPlan::Rejected);
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "rejected", "null"))
+        .await
+        .unwrap();
+    let receipt = runtime.handle("job").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&receipt),
+        &JobFailure::ActivationFailed {
+            message: "workflow rejected is not registered".into(),
+        }
+    );
+    let history = transitions(&runtime, "job").await;
+    assert_eq!(host.replay_lengths("rejected"), vec![0], "one attempt only");
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Granted { .. }))
+            .count(),
+        1,
+        "a rejection must not consume the restart budget"
+    );
+    assert!(
+        history
+            .iter()
+            .all(|event| !matches!(event, authority::Transition::Revoked { .. })),
+        "a rejection settles under the lease it failed to use"
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+
+    // B: the host cannot start the workflow yet. Two failures, then a session:
+    // the re-grants are 100 ms and 200 ms out, so nothing is attempted until
+    // each deadline passes.
+    let host = ScriptHost::registered();
+    host.push("backoff", SpawnPlan::Unavailable);
+    host.push("backoff", SpawnPlan::Unavailable);
+    host.push(
+        "backoff",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    let started = Instant::now();
+    runtime
+        .submit(Submission::new("job", "backoff", "null"))
+        .await
+        .unwrap();
+    assert_eq!(runtime.await_result("job").await, Some(ok(1)));
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "the re-grants were not deferred behind the wheel: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        host.replay_lengths("backoff"),
+        vec![0, 0, 0],
+        "exactly one attempt per grant, and no attempt while a backoff is armed"
+    );
+    let history = transitions(&runtime, "job").await;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Granted { .. }))
+            .count(),
+        3,
+        "two failures, then the successful re-grant"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Revoked { .. }))
+            .count(),
+        2,
+        "each transient failure releases the lease the backoff replaces"
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+/// A sleep the durable model cannot record faults the job that asked for it.
+///
+/// Two shapes reach the same class of request. A session hands the authority a
+/// timer deadline before the unix epoch, which is the only way the durable
+/// unsigned `fire_at_ms` can fail to represent it (this used to be an `expect`
+/// that exited the daemon). And a guest can ask for
+/// `Duration::from_millis(u64::MAX)`, which is not a representable instant at
+/// all, so the adapter catches the overflow while the workflow runs and the job
+/// faults with the run's own diagnosis. Neither may abort the actor or settle
+/// the job as completed.
+#[tokio::test]
+async fn a_sleep_the_durable_model_cannot_record_faults_one_job() {
+    let host = ScriptHost::registered();
+    host.push(
+        "pre-epoch",
+        SpawnPlan::Session(Box::new(ScriptSession::new([unrepresentable_timer()]))),
+    );
+    host.push(
+        "healthy",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 7)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    for key in ["pre-epoch", "healthy"] {
+        runtime
+            .submit(Submission::new(key, key, "null"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(runtime.await_result("healthy").await, Some(ok(7)));
+    let receipt = runtime.handle("pre-epoch").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&receipt),
+        &JobFailure::TimerOutOfRange { fire_at_ms: -1 }
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+
+    let store = MemoryStore::default();
+    let native = LocalNativeHost::new();
+    native.register_typed("oversleeping", |cx, (): ()| {
+        Box::pin(async move {
+            cx.sleep(Duration::from_millis(u64::MAX)).await?;
+            Ok::<u64, JobErrorX>(1)
+        })
+    });
+    let (runtime, _) = start(&store, &native).await;
+    runtime
+        .submit(Submission::new("job", "oversleeping", "null"))
+        .await
+        .unwrap();
+    let receipt = runtime.handle("job").await_receipt().await.unwrap();
+    assert!(
+        matches!(receipt.outcome, authority::Outcome::Faulted(_)),
+        "an unrepresentable sleep must fault, committed {:?}",
+        receipt.outcome
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
 }
 
 #[tokio::test]

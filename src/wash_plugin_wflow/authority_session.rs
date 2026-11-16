@@ -1,6 +1,7 @@
 use super::*;
 use wflow_tokio::authority_runtime::session::Host;
 use wflow_tokio::authority_runtime::session::Session;
+use wflow_tokio::authority_runtime::session::SpawnError;
 use wflow_wdk::StepKind;
 use wflow_wdk::StepMeta;
 use wflow_wdk::types as shared_types;
@@ -130,15 +131,25 @@ impl Host for WflowPlugin {
         wflow_key: &str,
         args_json: String,
         replay: Vec<ReplayStep>,
-    ) -> Res<Box<dyn Session>> {
+    ) -> Result<Box<dyn Session>, SpawnError> {
+        // Both failures below are deterministic for a given build: the registry
+        // is the set of component workloads this host resolved, and
+        // `start_session` only fails while creating the component store,
+        // instantiating the component, or applying its configuration. None of
+        // that changes on a re-grant, so the job must settle as an activation
+        // fault with this diagnosis instead of spending the restart budget.
         let workload = self
             .registry
             .lookup(wflow_key)
-            .ok_or_else(|| ferr!("workflow not registered: {wflow_key}"))?;
+            .ok_or_else(|| SpawnError::Rejected {
+                message: format!("workflow not registered: {wflow_key}"),
+            })?;
         let session = self
             .start_session(&workload, job_id, wflow_key, args_json, replay)
             .await
-            .map_err(|err| ferr!("wasm session could not start: {err:?}"))?;
+            .map_err(|err| SpawnError::Rejected {
+                message: format!("wasm session could not start: {err:?}"),
+            })?;
         Ok(Box::new(WasmSession(session)))
     }
 

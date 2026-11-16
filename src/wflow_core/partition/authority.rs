@@ -31,7 +31,6 @@ pub struct Step {
     /// model), where it round-trips as an unnamed step.
     #[serde(default)]
     pub name: Option<String>,
-    pub attempt: u64,
     pub value: String,
     pub lease: Lease,
     pub position: u64,
@@ -204,6 +203,9 @@ const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
 fn bounded_failure(failure: JobFailure) -> JobFailure {
     match failure {
         JobFailure::Panicked(message) => JobFailure::Panicked(bounded_fault_text(message)),
+        JobFailure::ActivationFailed { message } => JobFailure::ActivationFailed {
+            message: bounded_fault_text(message),
+        },
         JobFailure::Cancelled { reason } => JobFailure::Cancelled {
             reason: bounded_fault_text(reason),
         },
@@ -216,9 +218,9 @@ fn bounded_failure(failure: JobFailure) -> JobFailure {
             max_retries,
             last_error: bounded_fault_text(last_error),
         },
-        failure @ (JobFailure::ReplayDiverged { .. } | JobFailure::RestartsExhausted { .. }) => {
-            failure
-        }
+        failure @ (JobFailure::ReplayDiverged { .. }
+        | JobFailure::RestartsExhausted { .. }
+        | JobFailure::TimerOutOfRange { .. }) => failure,
     }
 }
 
@@ -385,7 +387,8 @@ impl Job {
     /// The authority settles cancellation and restart exhaustion from durable
     /// state alone, so their counters are recomputed here and nothing else is
     /// accepted. The failures a lease holder reports are external facts the log
-    /// cannot derive (a panic, a divergent replay, the error behind an
+    /// cannot derive (a panic, a host that could not instantiate the workflow,
+    /// an unrepresentable timer, a divergent replay, the error behind an
     /// exhausted retry budget), so they are accepted only from the lease the
     /// job currently holds: a superseded activation must not settle a live job.
     fn validate_fault(&self, fault: &Fault, lease: Option<&Lease>, position: u64) -> Res<()> {
@@ -417,7 +420,13 @@ impl Job {
                 Ok(())
             }
             JobFailure::ReplayDiverged { .. } if holds_lease => Ok(()),
+            JobFailure::TimerOutOfRange { .. } if holds_lease => Ok(()),
             JobFailure::Panicked(message)
+                if holds_lease && message.len() <= MAX_FAULT_TEXT_BYTES =>
+            {
+                Ok(())
+            }
+            JobFailure::ActivationFailed { message }
                 if holds_lease && message.len() <= MAX_FAULT_TEXT_BYTES =>
             {
                 Ok(())
@@ -533,7 +542,6 @@ pub enum Command {
         key: String,
         lease: Lease,
         step: u64,
-        attempt: u64,
         value: String,
         kind: StepKind,
         name: Option<String>,
@@ -582,16 +590,14 @@ pub enum Command {
         payload: String,
     },
     /// The leased invocation failed transiently with `error`; park the job on a
-    /// retry computed from its policy. `jitter_ms` is host-supplied spread so
-    /// a fleet of failures does not re-run in lockstep. `policy` is a one-shot
-    /// override for this failure only; the durable submission policy is kept.
+    /// retry computed from its policy. `policy` is a one-shot override for this
+    /// failure only; the durable submission policy is kept.
     Retry {
         key: String,
         lease: Lease,
         error: String,
         policy: Option<RetryPolicy>,
         now_ms: u64,
-        jitter_ms: u64,
     },
     /// Atomically fences active work and settles a cancellation receipt.
     Cancel {
@@ -743,7 +749,6 @@ pub enum Rejection {
     LeaseActive,
     StaleLease,
     OutOfOrder,
-    InvalidAttempt,
     /// The job is not suspended on the named wait.
     NotWaiting,
     /// Replay reached a committed step with a different boundary kind or name.
@@ -792,8 +797,10 @@ pub struct Proposal {
 /// before the field existed deserializes `format` as 0 and is rejected at
 /// recovery instead of being misread field by field. Version 2 added the
 /// receipt's absolute retention deadline, so a version-1 blob carrying the old
-/// receipt shape is rejected loudly rather than misread.
-pub const SNAPSHOT_FORMAT: u32 = 2;
+/// receipt shape is rejected loudly rather than misread. Version 3 removed the
+/// `Step::attempt` field, which no run ever set: the durable step shape is
+/// smaller, and a version-2 blob is rejected for the same reason.
+pub const SNAPSHOT_FORMAT: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -923,11 +930,10 @@ impl Authority {
                 key,
                 lease,
                 step,
-                attempt,
                 value,
                 kind,
                 name,
-            } => self.prepare_step(key, lease, step, attempt, value, kind, name),
+            } => self.prepare_step(key, lease, step, value, kind, name),
             Command::Complete {
                 key,
                 lease,
@@ -962,8 +968,7 @@ impl Authority {
                 error,
                 policy,
                 now_ms,
-                jitter_ms,
-            } => self.prepare_retry(key, lease, error, policy, now_ms, jitter_ms),
+            } => self.prepare_retry(key, lease, error, policy, now_ms),
             Command::Cancel {
                 key,
                 incarnation,
@@ -1113,19 +1118,13 @@ impl Authority {
         ))
     }
 
-    // Each `prepare_*` takes exactly the fields of its `Command` variant; this
-    // one carries the durable step identity (`kind` + `name`) alongside the
-    // attempt coordinates, which pushes it one past clippy's limit.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors Command::Step's field list one-for-one; bundling kind+name into a struct here would hide the identity the guard is checking"
-    )]
+    // Takes exactly the fields of its `Command` variant plus the key; the
+    // durable step identity (`kind` + `name`) is part of that field list.
     fn prepare_step(
         &self,
         key: String,
         lease: Lease,
         step_id: u64,
-        attempt: u64,
         value: String,
         kind: StepKind,
         name: Option<String>,
@@ -1144,7 +1143,6 @@ impl Authority {
                 && existing.kind == kind
                 && existing.name == name
                 && existing.lease == lease
-                && existing.attempt == attempt
                 && existing.value == value
             {
                 return Ok(Decision::Duplicate(Ack {
@@ -1165,14 +1163,10 @@ impl Authority {
         if step_id != job.steps.len() as u64 || job.wait.is_some() {
             return Err(Rejection::OutOfOrder);
         }
-        if attempt != 0 {
-            return Err(Rejection::InvalidAttempt);
-        }
         let step = Step {
             id: step_id,
             kind,
             name,
-            attempt,
             value,
             lease,
             position: self.next_position(),
@@ -1369,7 +1363,6 @@ impl Authority {
                 id: step_id,
                 kind: StepKind::Recv,
                 name,
-                attempt: 0,
                 value: queued.payload.clone(),
                 lease,
                 position,
@@ -1429,7 +1422,6 @@ impl Authority {
             id: step_id,
             kind: StepKind::Sleep,
             name: wait.name.clone(),
-            attempt: 0,
             value,
             lease: wait.lease.clone(),
             position: self.next_position(),
@@ -1471,7 +1463,6 @@ impl Authority {
                 id: wait.step,
                 kind: StepKind::Recv,
                 name: wait.name.clone(),
-                attempt: 0,
                 value: message.payload.clone(),
                 lease: wait.lease.clone(),
                 position,
@@ -1499,7 +1490,6 @@ impl Authority {
         error: String,
         policy: Option<RetryPolicy>,
         now_ms: u64,
-        jitter_ms: u64,
     ) -> Result<Decision, Rejection> {
         let job = self.job_for_lease(&key, lease.job_incarnation)?;
         self.require_current_lease(job, &lease)?;
@@ -1518,9 +1508,7 @@ impl Authority {
         // submission policy is what every later retry falls back to.
         let effective = policy.unwrap_or(job.policy);
         let retry = RetryWait {
-            fire_at_ms: now_ms
-                .saturating_add(effective.delay_ms(job.retry_attempts))
-                .saturating_add(jitter_ms),
+            fire_at_ms: now_ms.saturating_add(effective.delay_ms(job.retry_attempts)),
             error,
             position: self.next_position(),
         };

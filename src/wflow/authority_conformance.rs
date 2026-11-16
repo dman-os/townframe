@@ -99,8 +99,11 @@ impl Host for ConformanceHost {
         wflow_key: &str,
         args_json: String,
         replay: Vec<wflow_wdk::session::ReplayStep>,
-    ) -> Res<Box<dyn Session>> {
+    ) -> Result<Box<dyn Session>, wflow_tokio::authority_runtime::session::SpawnError> {
         let gate = self.replay_gates.get(job_id.as_ref()).map(Arc::clone);
+        // Both adapters classify their own failures, so the conformance host
+        // only has to decide which adapter to ask; forwarding the class keeps
+        // the parity test on the same durable outcomes as production.
         let session = if self.wasm.contains_workflow(wflow_key) {
             <WflowPlugin as Host>::spawn(&*self.wasm, job_id, wflow_key, args_json, replay).await?
         } else {
