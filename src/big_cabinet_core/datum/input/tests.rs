@@ -40,6 +40,132 @@ fn supplement(properties: Value) -> Universe {
     }
 }
 
+fn primary_with_reference(position: Value) -> Value {
+    let mut primary = record(json!({"value": position}), &[], &[]);
+    primary["defs"]["thing"] = json!({"type": "integer", "minimum": 1});
+    primary
+}
+
+fn reference_annotation() -> Value {
+    json!({LEXICON_REF: format!("{TAG}#thing")})
+}
+
+fn compile_reference_position(
+    primary_position: Value,
+    supplement_position: Value,
+) -> CompiledSchema {
+    Bundle::new(
+        &supplement(json!({"value": supplement_position})),
+        Vec::new(),
+    )
+    .validate_lexicon(TAG, &primary_with_reference(primary_position), &[])
+    .unwrap()
+}
+#[test]
+fn lexicon_refs_in_additional_properties_use_the_referenced_primary() {
+    let schema = compile_reference_position(
+        json!({"type": "unknown"}),
+        json!({"type": "object", "additionalProperties": reference_annotation()}),
+    );
+    assert!(accepts(&schema, json!({"value": {"answer": 2}})));
+    assert!(!accepts(&schema, json!({"value": {"answer": 0}})));
+}
+
+#[test]
+fn lexicon_refs_in_pattern_properties_use_the_referenced_primary() {
+    let schema = compile_reference_position(
+        json!({"type": "unknown"}),
+        json!({
+            "type": "object",
+            "patternProperties": {"^[a-z]+$": reference_annotation()},
+            "additionalProperties": false
+        }),
+    );
+    assert!(accepts(&schema, json!({"value": {"answer": 2}})));
+    assert!(!accepts(&schema, json!({"value": {"answer": 0}})));
+}
+
+#[test]
+fn lexicon_refs_in_array_items_keep_the_referenced_primary() {
+    let schema = compile_reference_position(
+        json!({"type": "array", "items": {"type": "ref", "ref": "#thing"}}),
+        json!({"type": "array", "items": reference_annotation()}),
+    );
+    assert!(accepts(&schema, json!({"value": [2]})));
+    assert!(!accepts(&schema, json!({"value": [0]})));
+}
+
+#[test]
+fn lexicon_refs_survive_nested_map_and_array_leaves() {
+    let schema = compile_reference_position(
+        json!({"type": "unknown"}),
+        json!({
+            "type": "object",
+            "additionalProperties": {"type": "array", "items": reference_annotation()}
+        }),
+    );
+    assert!(accepts(&schema, json!({"value": {"answer": [2]}})));
+    assert!(!accepts(&schema, json!({"value": {"answer": [0]}})));
+}
+
+#[test]
+fn nullable_map_leaves_keep_the_referenced_primary() {
+    let schema = compile_reference_position(
+        json!({"type": "unknown"}),
+        json!({
+            "type": "object",
+            "additionalProperties": {
+                "anyOf": [reference_annotation(), {"type": "null"}]
+            }
+        }),
+    );
+    assert!(accepts(
+        &schema,
+        json!({"value": {"answer": 2, "empty": null}})
+    ));
+    assert!(!accepts(&schema, json!({"value": {"answer": 0}})));
+}
+
+#[test]
+fn lexicon_refs_reject_semantic_siblings() {
+    let error = Bundle::new(
+        &supplement(json!({
+            "value": {"x-lexicon-ref": format!("{TAG}#thing"), "type": "integer"}
+        })),
+        Vec::new(),
+    )
+    .validate_lexicon(
+        TAG,
+        &primary_with_reference(json!({"type": "integer"})),
+        &[],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("cannot have semantic siblings"), "{error}");
+}
+
+#[test]
+fn prefix_items_are_rejected_as_tuple_schemas() {
+    let error = Bundle::new(
+        &supplement(json!({
+            "value": {"type": "array", "prefixItems": [{"type": "integer"}]}
+        })),
+        Vec::new(),
+    )
+    .validate_lexicon(
+        TAG,
+        &record(
+            json!({"value": {"type": "array", "items": {"type": "integer"}}}),
+            &[],
+            &[],
+        ),
+        &[],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("prefixItems"), "{error}");
+}
+
 #[test]
 fn byte_and_grapheme_limits_are_not_json_schema_character_counts() {
     let primary = record(

@@ -35,6 +35,36 @@ fn lexicon_of<M: MethodSchema>() -> Value {
     lexicon::<M>().expect("the method publishes a Lexicon")
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct DatumReferenceRequest {
+    reference: big_cabinet_core::DatumReference,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+struct DatumReferenceOutput {
+    accepted: bool,
+}
+
+method_core::methods! {
+    error = big_cabinet_core::doc::DocsError, nsid_prefix = "org.example.test.";
+    DatumReferenceRequest => DatumReferenceOutput, procedure, "reference";
+}
+
+impl method_core::schema::MethodSchema for DatumReferenceRequest {
+    fn schemas() -> method_core::schema::MethodSchemas {
+        method_core::schema::collect::<Self, DatumReferenceOutput, big_cabinet_core::doc::DocsError>(
+        )
+    }
+}
+
+#[test]
+fn a_method_input_with_a_datum_reference_rejects_a_number() {
+    let file = lexicon_of::<DatumReferenceRequest>();
+    let contract = super::MethodContract::compile(&file, &[]).unwrap();
+
+    assert!(contract.check_request(&json!({"reference": 123})).is_err());
+}
+
 #[test]
 fn a_procedure_states_its_request_as_the_input_body() {
     insta::assert_json_snapshot!(lexicon_of::<big_cabinet_core::drawer::protocol::AddChild>());
