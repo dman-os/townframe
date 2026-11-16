@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -44,6 +45,94 @@ impl Writer for CountingWriter {
         self.commits.send_modify(|commits| *commits += 1);
         Ok(revision)
     }
+}
+
+/// Blocks every write until its gate opens, so a test can queue commands while
+/// the actor is inside a durable commit.
+struct GatedWriter {
+    inner: MemoryWriter,
+    gate: Arc<Gate>,
+}
+
+#[async_trait]
+impl Writer for GatedWriter {
+    fn reader(&self) -> Arc<dyn Store> {
+        self.inner.reader()
+    }
+
+    async fn commit(
+        &mut self,
+        expected_revision: u64,
+        mutations: Vec<Mutation>,
+    ) -> Result<u64, CommitError> {
+        self.gate.pass().await;
+        self.inner.commit(expected_revision, mutations).await
+    }
+}
+
+/// Injects one chosen storage outcome at a chosen commit, lifted from
+/// `journal_tests::FaultWriter` to the runtime so the actor's handling of a
+/// failed append is what is under test.
+struct FaultWriter {
+    inner: MemoryWriter,
+    /// `(commit number, fault)`, commit numbers counted from the journal open.
+    faults: Mutex<Vec<(u64, Fault)>>,
+    commits: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    /// The store rolls the transaction back: nothing was written.
+    NotCommitted,
+    /// The store applies the mutations and then loses the outcome, which is what
+    /// a failed `COMMIT` reply looks like to the writer.
+    Unknown,
+}
+
+#[async_trait]
+impl Writer for FaultWriter {
+    fn reader(&self) -> Arc<dyn Store> {
+        self.inner.reader()
+    }
+
+    async fn commit(
+        &mut self,
+        expected_revision: u64,
+        mutations: Vec<Mutation>,
+    ) -> Result<u64, CommitError> {
+        let commit = self.commits.fetch_add(1, Ordering::SeqCst) + 1;
+        let armed = {
+            let mut faults = self.faults.lock().unwrap();
+            faults
+                .iter()
+                .position(|(at, _)| *at == commit)
+                .map(|index| faults.remove(index).1)
+        };
+        match armed {
+            Some(Fault::NotCommitted) => Err(CommitError::NotCommitted(ferr!("injected rollback"))),
+            Some(Fault::Unknown) => {
+                self.inner.commit(expected_revision, mutations).await?;
+                Err(CommitError::Unknown(ferr!("injected lost commit reply")))
+            }
+            None => self.inner.commit(expected_revision, mutations).await,
+        }
+    }
+}
+
+/// Starts a runtime over `store` with the given faults armed.
+async fn start_faulty(
+    store: &MemoryStore,
+    host: &LocalNativeHost,
+    faults: impl IntoIterator<Item = (u64, Fault)>,
+) -> AuthorityRuntime {
+    let writer = FaultWriter {
+        inner: store.writer().unwrap(),
+        faults: Mutex::new(faults.into_iter().collect()),
+        commits: AtomicU64::new(0),
+    };
+    AuthorityRuntime::start(writer, 0, Arc::new(host.clone()))
+        .await
+        .unwrap()
 }
 
 /// Starts a runtime over `store` and returns it with its commit counter.
@@ -940,5 +1029,80 @@ async fn short_completion_faults_instead_of_claiming_unexecuted_durable_steps() 
     );
     // The three durable steps survive; only the completion claim was wrong.
     assert_eq!(receipt.steps, 3);
+    runtime.stop().await;
+}
+
+/// The number of durable commits of `step` for `key`.
+async fn step_commits(runtime: &AuthorityRuntime, key: &str, step: u64) -> usize {
+    transitions(runtime, key)
+        .await
+        .iter()
+        .filter(|transition| {
+            matches!(
+                transition,
+                authority::Transition::StepCommitted { step: committed, .. }
+                    if committed.id == step
+            )
+        })
+        .count()
+}
+
+/// A storage outcome is a per-commit event, not a reason to abort the process.
+///
+/// A definite rollback wrote nothing, so the actor resends the same transition.
+/// An outcome the writer cannot classify may have been written, so the actor
+/// stops instead of continuing on a guess, answers its callers, and lets the
+/// next start replay the journal.
+#[tokio::test]
+async fn a_rolled_back_commit_is_retried_and_an_ambiguous_one_stops_the_actor() {
+    // A: the first step commit is rolled back and resent.
+    let store = MemoryStore::default();
+    let probe = Arc::new(Probe::default());
+    let native_host = host(&probe);
+    let runtime = start_faulty(&store, &native_host, [(4, Fault::NotCommitted)]).await;
+    runtime
+        .submit(Submission::new("retried", "steps", "2"))
+        .await
+        .unwrap();
+    assert_eq!(runtime.await_result("retried").await, Some(ok(3)));
+    // Submitted, Granted, two steps, Completed: the retried append added no
+    // entry, so the log is exactly the fault-free log.
+    assert_eq!(journal_frontier(&runtime).await, 5);
+    assert_eq!(step_commits(&runtime, "retried", 0).await, 1);
+    // Both effect closures ran once; the resend re-sent the step, it did not
+    // re-run the workflow.
+    assert_eq!(probe.steps_runs.load(Ordering::SeqCst), 2);
+    runtime.stop().await;
+    drop(runtime);
+
+    // B: the same commit is applied and then reported as an unknown outcome.
+    let store = MemoryStore::default();
+    let probe = Arc::new(Probe::default());
+    let native_host = host(&probe);
+    let runtime = start_faulty(&store, &native_host, [(4, Fault::Unknown)]).await;
+    runtime
+        .submit(Submission::new("ambiguous", "steps", "2"))
+        .await
+        .unwrap();
+    // The first step commit is the ambiguous append. The actor exits normally —
+    // `stop` would panic on a failed actor task — and serves nothing after it.
+    runtime.actor.clone().await.unwrap();
+    assert_eq!(
+        runtime.submit(Submission::new("after", "steps", "1")).await,
+        Err(SubmitError::Stopped)
+    );
+    runtime.stop().await;
+    drop(runtime);
+
+    // The step may have been written, so a restart replays it: the same store
+    // reopens at the committed prefix, one step was not executed twice, and the
+    // job finishes.
+    let (runtime, _) = start(&store, &native_host).await;
+    assert_eq!(runtime.await_result("ambiguous").await, Some(ok(3)));
+    // Submitted, Granted, the step that may have been written, then the
+    // re-grant, the second step and Completed on the next start.
+    assert_eq!(journal_frontier(&runtime).await, 6);
+    assert_eq!(step_commits(&runtime, "ambiguous", 0).await, 1);
+    assert_eq!(probe.steps_runs.load(Ordering::SeqCst), 2);
     runtime.stop().await;
 }

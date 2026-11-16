@@ -211,8 +211,12 @@ fn complete(steps: u64, value: u64) -> SessionYield {
 }
 
 fn persist(value: &str) -> SessionYield {
+    persist_at(0, value)
+}
+
+fn persist_at(step_id: u64, value: &str) -> SessionYield {
     SessionYield::PersistStep {
-        step_id: 0,
+        step_id,
         start_at: Timestamp::now(),
         end_at: Timestamp::now(),
         value_json: Arc::from(value),
@@ -755,4 +759,178 @@ async fn dropping_runtime_drains_spawns_and_publishes_final_snapshot() {
         }
         commits.changed().await.unwrap();
     }
+}
+
+/// A timer wait whose declared boundary kind contradicts the yield.
+///
+/// The meta is the guest's own: `wash_plugin_wflow` stores whatever the
+/// component passed to the public `host.next-step(job-id, meta)` entry point, so
+/// a stale or hand-written component can declare `effect` and then sleep.
+fn mislabelled_sleep() -> SessionYield {
+    SessionYield::WaitStep {
+        step_id: 0,
+        start_at: Timestamp::now(),
+        deets: WaitYield::Timer {
+            wait_id: 0,
+            fire_at: Timestamp::now()
+                .checked_add(Duration::from_secs(3600))
+                .expect("an hour from now is a representable instant"),
+        },
+        meta: StepMeta::new(StepKind::Effect, None),
+    }
+}
+
+/// A run whose boundaries disagree with its durable record faults that job, and
+/// only that job: neither a guest-declared kind nor a rewritten value is allowed
+/// to abort the single-writer actor.
+#[tokio::test]
+async fn divergent_yields_fault_one_job_while_another_completes() {
+    let host = ScriptHost::registered();
+    host.push(
+        "mislabelled",
+        SpawnPlan::Session(Box::new(ScriptSession::new([mislabelled_sleep()]))),
+    );
+    host.push(
+        "rewritten",
+        SpawnPlan::Session(Box::new(ScriptSession::new([
+            persist_at(0, "1"),
+            persist_at(0, "2"),
+        ]))),
+    );
+    host.push(
+        "good",
+        SpawnPlan::Session(Box::new(ScriptSession::new([persist("7"), complete(1, 7)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    for key in ["mislabelled", "rewritten", "good"] {
+        runtime
+            .submit(Submission::new(key, key, "null"))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(runtime.await_result("good").await, Some(ok(7)));
+    let mislabelled = runtime.handle("mislabelled").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&mislabelled),
+        &JobFailure::ReplayDiverged {
+            step: 0,
+            replayed: StepKind::Sleep,
+        }
+    );
+    // The run offered a different value for a boundary the log already holds,
+    // which is the same fork from the other side.
+    let rewritten = runtime.handle("rewritten").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&rewritten),
+        &JobFailure::ReplayDiverged {
+            step: 0,
+            replayed: StepKind::Effect,
+        }
+    );
+    // `stop` panics on a failed actor task, so surviving both divergences is
+    // itself the "no actor panic" assertion.
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+/// The authority models a repeated step commit as idempotent; the runtime must
+/// honour the acknowledgement it returns instead of aborting the actor.
+#[tokio::test]
+async fn a_redelivered_step_commit_is_honoured_and_the_job_completes() {
+    let host = ScriptHost::registered();
+    host.push(
+        "redelivered",
+        SpawnPlan::Session(Box::new(ScriptSession::new([
+            persist_at(0, "1"),
+            persist_at(0, "1"),
+            complete(1, 4),
+        ]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "redelivered", "null"))
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.await_result("job").await, Some(ok(4)));
+    let steps = transitions(&runtime, "job")
+        .await
+        .iter()
+        .filter(|transition| matches!(transition, authority::Transition::StepCommitted { .. }))
+        .count();
+    assert_eq!(steps, 1, "the redelivery committed nothing");
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+/// Stopping answers the callers whose commands were already queued, and a send
+/// to a stopped runtime is a typed outcome rather than a panic.
+#[tokio::test]
+async fn stop_answers_every_queued_caller_with_a_typed_outcome() {
+    let host = ScriptHost::registered();
+    host.push(
+        "job",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+    );
+    let store = MemoryStore::default();
+    let gate = Arc::new(Gate::default());
+    let runtime = AuthorityRuntime::start(
+        GatedWriter {
+            inner: store.writer().unwrap(),
+            gate: Arc::clone(&gate),
+        },
+        0,
+        host,
+    )
+    .await
+    .unwrap();
+
+    // Hold the actor inside its first durable write, so everything below is
+    // queued behind a command that has already been accepted.
+    gate.close();
+    let mut accepted = Box::pin(runtime.submit(Submission::new("job", "job", "null")));
+    assert!(futures::poll!(accepted.as_mut()).is_pending());
+    gate.entered.notified().await;
+
+    // Shutdown goes in first; the three commands behind it are never served.
+    let mut stopping = Box::pin(runtime.stop());
+    assert!(futures::poll!(stopping.as_mut()).is_pending());
+    let mut queued_submit = Box::pin(runtime.submit(Submission::new("late", "job", "null")));
+    let mut queued_message = Box::pin(runtime.send_message("job", "m1", "1"));
+    let mut queued_cancel = Box::pin(runtime.cancel("job", "stop"));
+    assert!(futures::poll!(queued_submit.as_mut()).is_pending());
+    assert!(futures::poll!(queued_message.as_mut()).is_pending());
+    assert!(futures::poll!(queued_cancel.as_mut()).is_pending());
+    gate.open();
+
+    let (accepted, _stopped, submit, message, cancel) = tokio::join!(
+        accepted,
+        stopping,
+        queued_submit,
+        queued_message,
+        queued_cancel
+    );
+    let ack = accepted.unwrap();
+    assert_eq!(ack.disposition, authority::Disposition::Admitted);
+    assert_eq!(submit, Err(SubmitError::Stopped));
+    assert_eq!(message, Err(SendError::Stopped));
+    assert_eq!(cancel, Err(CancelError::Stopped));
+    runtime.actor.clone().await.unwrap();
+
+    // And a caller that arrives after the mailbox closed gets the same answer.
+    assert_eq!(
+        runtime
+            .submit(Submission::new("later", "job", "null"))
+            .await,
+        Err(SubmitError::Stopped)
+    );
+    assert_eq!(
+        runtime.send_message("job", "m2", "1").await,
+        Err(SendError::Stopped)
+    );
+    assert_eq!(
+        runtime.cancel("job", "stop").await,
+        Err(CancelError::Stopped)
+    );
 }
