@@ -19,6 +19,8 @@ service_client_core_rs.workspace = true
 
 #
 # misc
+bytes.workspace = true
+futures.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true

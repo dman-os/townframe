@@ -257,13 +257,24 @@ mod callee_query {
 struct Asker;
 
 impl big_ndk::Nodule for Asker {
-    async fn route(&self, nsid: &str, cx: &big_ndk::Cx, body: &[u8]) -> Option<big_ndk::Reply> {
+    async fn route(
+        &self,
+        nsid: &str,
+        cx: &big_ndk::Cx,
+        body: big_ndk::XrpcBody,
+    ) -> Option<big_ndk::Reply> {
         match nsid.rsplit('.').next() {
             Some("ask") => Some(big_ndk::invoke::<Self, Ask>(self, cx, body).await),
             Some("peek") => Some(big_ndk::Reply {
                 status: http::StatusCode::OK,
-                body: serde_json::from_slice(body)
-                    .expect("dispatch hands a query its input as JSON"),
+                body: big_ndk::XrpcBody::json(
+                    serde_json::to_vec(&match body {
+                        big_ndk::XrpcBody::Json(body) => serde_json::from_slice::<Value>(&body)
+                            .expect("dispatch hands a query its input as JSON"),
+                        big_ndk::XrpcBody::Bytes(_) => panic!("query input is JSON"),
+                    })
+                    .expect("a query input serializes"),
+                ),
             }),
             _ => Fixture.route(nsid, cx, body).await,
         }
