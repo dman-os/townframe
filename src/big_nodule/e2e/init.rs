@@ -105,7 +105,7 @@ impl Probe {
         self.calls.lock().unwrap().clone()
     }
 
-    fn operations(&self) -> Vec<String> {
+    pub(super) fn operations(&self) -> Vec<String> {
         self.calls()
             .into_iter()
             .map(|call| call.operation)
@@ -253,7 +253,7 @@ impl Node {
     /// Reads `cartridge_id` until `readiness` shows. Every read is a round trip through the state
     /// actor, which handles an initializer's result as a message of its own, so this ends once
     /// the awaited result has been applied; it waits on no clock.
-    async fn until(&self, cartridge_id: &str, readiness: Readiness) -> NoduleRecord {
+    pub(super) async fn until(&self, cartridge_id: &str, readiness: Readiness) -> NoduleRecord {
         loop {
             let record = self.get(self.operator(), cartridge_id).await.unwrap();
             if record.readiness == readiness {
@@ -265,7 +265,7 @@ impl Node {
 
     /// A config change that touches nothing: every config mutation reconciles once, which is
     /// what retries a failed initializer.
-    async fn touch(&self, cartridge_id: &str) -> NoduleRecord {
+    pub(super) async fn touch(&self, cartridge_id: &str) -> NoduleRecord {
         // Revoking a grant that was never made changes nothing in the document, and still
         // reconciles.
         self.set_grant(

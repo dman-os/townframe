@@ -12,9 +12,11 @@ use big_cartridges_core::CartridgeId;
 use big_cartridges_core::ComponentExport;
 use big_cartridges_core::Nodule;
 use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindDatum;
 use big_cartridges_core::PermbindMethod;
 use big_cartridges_core::Routine;
 use big_cartridges_core::RoutineImpl;
+use big_cartridges_core::RoutineUse;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
@@ -42,6 +44,7 @@ use method_core::ByteBody;
 use method_core::Method;
 use service_utils_rs::ClientError;
 use service_utils_rs::TraceContext;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// One nodule running the test guest: the guest serves `echo` and `relay` under whatever
@@ -215,6 +218,23 @@ fn cartridge_requiring(
         spec.ingest(),
         spec.emit(),
     ];
+    let settings = format!("{}.settings", spec.authority);
+    // Each routine holds its own capability, built from what it uses: the settings kind it
+    // reads and writes, and the methods it relays to.
+    let uses: BTreeMap<String, RoutineUse> = std::iter::once((
+        settings.clone(),
+        RoutineUse {
+            read: true,
+            write: true,
+            ..Default::default()
+        },
+    ))
+    .chain(
+        requires
+            .iter()
+            .map(|request| (request.nsid.clone(), RoutineUse::default())),
+    )
+    .collect();
     let mut nodule = Nodule::default();
     let mut lexicons = Vec::new();
     for nsid in &operations {
@@ -239,12 +259,11 @@ fn cartridge_requiring(
                     extra: Default::default(),
                 }),
                 implements: nsid.parse().unwrap(),
-                uses: Default::default(),
+                uses: uses.clone(),
                 extra: Default::default(),
             },
         );
     }
-    let settings = format!("{}.settings", spec.authority);
     lexicons.push(serde_json::from_value(setting(&settings)).unwrap());
     let mut cartridge = FixtureCartridge::new(Cartridge::new(
         spec.cartridge.clone(),
@@ -272,6 +291,18 @@ fn cartridge_requiring(
             )
         })
         .collect();
+    cartridge.permbinds.insert(
+        settings.clone(),
+        Permbind::Datum(PermbindDatum {
+            nsid: settings.parse().unwrap(),
+            description: settings,
+            read: Some(big_cartridges_core::Necessity::Required),
+            write: Some(big_cartridges_core::Necessity::Required),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
     cartridge
 }
 
@@ -931,11 +962,18 @@ async fn a_wasm_guest_serves_byte_bodied_methods_as_streams() {
     shutdown(node, stop).await;
 }
 
-/// The capability id a nodule is told in `x-nodule-capability`, as the guest echoes it.
+/// The capability id the nodule's `relay` routine is told in `x-nodule-capability` (each routine
+/// holds its own), as the relay reports having presented it on a call to an operation nothing
+/// serves.
 async fn own_capability(node: &BigNode, spec: &Spec) -> Option<String> {
-    invoke(node, &spec.echo(), json!({}), Default::default())
-        .await
-        .unwrap()["noduleCapability"]
+    relay(
+        node,
+        spec,
+        "org.example.nowhere.ping",
+        None,
+        Default::default(),
+    )
+    .await["authority"]
         .as_str()
         .map(str::to_owned)
 }
