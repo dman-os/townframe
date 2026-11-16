@@ -700,12 +700,19 @@ impl<'a> Admission<'a> {
     /// Initializers: each has a unique key and invokes an implemented or required query or
     /// procedure, in a run mode this build has.
     fn initializers(&self, implemented: &Implemented) -> Result<()> {
-        for (index, (key, initializer)) in self.nodule.initialization.iter().enumerate() {
+        let mut keys = BTreeSet::new();
+        for (index, initializer) in self.nodule.initialization.iter().enumerate() {
             let path = format!("initialization[{index}]");
-            if key.is_empty() {
+            if initializer.key.is_empty() {
                 return Err(NoduleError::invalid(
                     format!("{path}.key"),
                     "a key is not empty",
+                ));
+            }
+            if !keys.insert(&initializer.key) {
+                return Err(NoduleError::invalid(
+                    format!("{path}.key"),
+                    format!("`{}` is listed twice", initializer.key),
                 ));
             }
             self.invocation_target(
