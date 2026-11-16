@@ -1355,7 +1355,7 @@ async fn document_driver_delivers_neutral_updates_and_closes_on_guest_trap() {
     .unwrap();
     let writer = Arc::new(RecordingSink::new());
     let surface = runtime
-        .mount("view", std::sync::Arc::clone(&writer))
+        .mount("view", Arc::<RecordingSink>::clone(&writer))
         .unwrap();
     assert_eq!(
         writer.tree(SurfaceTree::text_content),
@@ -1450,7 +1450,7 @@ async fn collection_probe_bootstraps_polls_replays_resumes_resets_and_revokes() 
     let scenario = async move {
         let writer = Arc::new(RecordingSink::new());
         let session = runtime
-            .mount("view", std::sync::Arc::clone(&writer))
+            .mount("view", Arc::<RecordingSink>::clone(&writer))
             .unwrap();
         let text = writer
             .wait_for(|text| text.contains("status=live") && text.contains("beta=two"))
