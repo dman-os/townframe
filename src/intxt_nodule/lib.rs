@@ -247,7 +247,7 @@ async fn summarize(
             description: title.description,
             entries: Some(u32::try_from(body.order.len()).unwrap_or(u32::MAX)),
             updated: Some(clock),
-            link: Some(generic::Intxt::reference(&drawer).to_string()),
+            link: Some(generic::Intxt::reference(&drawer, []).to_string()),
             ..summary(SummaryStatus::Found)
         },
         Err(reason) => unreadable(reason),

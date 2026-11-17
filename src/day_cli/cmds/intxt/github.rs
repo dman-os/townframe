@@ -299,7 +299,11 @@ impl Packaging<'_> {
             datum.state,
             if written { "imported" } else { "unchanged" }
         )?;
-        let named = generic::Intxt::named_in(&datum.body);
+        // A malformed block fails the pull, after the pull request itself is imported above, so
+        // the description is fixed at its source rather than guessed at.
+        let named = generic::PrLinks::read(&datum.body)
+            .wrap_err("reading the intxt block of the pull request description")?
+            .intxts;
         if named.is_empty() {
             writeln!(out, "  names no intxt")?;
         }
@@ -307,7 +311,8 @@ impl Packaging<'_> {
         let live = self.live_intxts().await?;
         let ids =
             short_ids::ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
-        for drawer in named {
+        for linked in named {
+            let drawer = linked.reference.document().clone();
             let name = if live.contains(&drawer) {
                 shown(&ids, &drawer.to_string())
             } else {
@@ -328,7 +333,7 @@ impl Packaging<'_> {
             writeln!(
                 out,
                 "  intxt {name} \"{title}\"\n    link: {}",
-                generic::Intxt::reference(&drawer)
+                linked.reference
             )?;
             match self.caller.add_part(&drawer, &part).await {
                 Ok(included) => writeln!(
