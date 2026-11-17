@@ -352,10 +352,10 @@ impl FsKeyhiveStorage {
                 ));
             }
         }
-        let result = match tokio::fs::hard_link(&tmp, &dest).await {
+        let result = match publish_no_replace(&tmp, &dest).await {
             Ok(()) => {
                 if let Err(err) = Self::sync_dir(&parent_dir) {
-                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after hard link");
+                    tracing::warn!(?parent_dir, error = %err, "failed to fsync keyhive storage dir after publishing");
                 }
                 Ok(true)
             }
@@ -561,10 +561,10 @@ impl FsKeyhiveStorage {
                 file.write_all(&dek).await?;
                 file.sync_all().await?;
                 drop(file);
-                let result = match tokio::fs::hard_link(&tmp, &path).await {
+                let result = match publish_no_replace(&tmp, &path).await {
                     Ok(()) => {
                         if let Err(err) = Self::sync_dir(&dir) {
-                            tracing::warn!(?dir, error = %err, "failed to fsync DEK directory after hard link");
+                            tracing::warn!(?dir, error = %err, "failed to fsync DEK directory after publishing");
                         }
                         Ok(dek)
                     }
@@ -1402,6 +1402,36 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
     fn delete_local_secret(&self, hash: StorageHash) -> BoxFuture<'_, Result<(), Self::Error>> {
         self.inner.delete_local_secret(hash)
     }
+}
+
+/// Publishes the fully written `tmp` at `dest` only if nothing is there yet: atomic, the first
+/// writer wins, and a later writer gets `AlreadyExists` and keeps what is there (content-addressed
+/// blobs and the DEK rely on this). On Linux and Android this is `renameat2(RENAME_NOREPLACE)`:
+/// Android's SELinux policy refuses apps the `link` syscall on their own data files, so a hard link
+/// (the portable way to get the same no-clobber publish) fails there with `EACCES`. A filesystem
+/// without `RENAME_NOREPLACE` (`EINVAL`), and other platforms, publish with a hard link instead.
+async fn publish_no_replace(tmp: &Path, dest: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let (from, to) = (tmp.to_owned(), dest.to_owned());
+        let renamed = tokio::task::spawn_blocking(move || {
+            rustix::fs::renameat_with(
+                rustix::fs::CWD,
+                &from,
+                rustix::fs::CWD,
+                &to,
+                rustix::fs::RenameFlags::NOREPLACE,
+            )
+        })
+        .await
+        .expect("the rename task does not panic");
+        match renamed {
+            Ok(()) => return Ok(()),
+            Err(rustix::io::Errno::INVAL) => {}
+            Err(errno) => return Err(io::Error::from(errno)),
+        }
+    }
+    tokio::fs::hard_link(tmp, dest).await
 }
 
 #[cfg(test)]
