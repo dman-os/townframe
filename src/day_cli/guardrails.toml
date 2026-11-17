@@ -4,6 +4,7 @@ dependency_reason = "The CLI reaches a node either through its daemon's socket o
 allowed_dependencies = [
     "big_cabinet",
     "big_cabinet_core",
+    "big_cartridges_core",
     "big_dispatch",
     "big_dispatch_core",
     "big_node",
