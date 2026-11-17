@@ -172,3 +172,34 @@ Kept, and restated because the words are easy to blur:
 - **Uninstalled:** the install goes; the cartridge config document stays, so a reinstall or a sister finds its settings and grants (ADR 044 §7). Clearing it is the explicit `clearCartridgeConfig`.
 
 In one line: **install** is "have it here, at this version", **configure** is "what it may reach", **enable** is "run it now", and only enable is a plain switch.
+
+## Amendments proposed 2026-11-17 (not accepted)
+
+Nothing below is decided except (a). They are proposals for the operator's review; the ledger (D47, D49) records what was decided.
+
+### A. Initializers target only their own cartridge's operations
+
+Decided (operator, 2026-11-17). An initializer's `target` must be an operation NSID that its own cartridge implements; admission refuses a foreign target. An initializer runs with the capability of the routine that implements its target (§6). A foreign target has no such routine, so it needed a one-off capability, and it could only be called with the empty input below, which no real operation takes. A cartridge that must call another service during setup does so from its own initializer routine, under that routine's `uses`. The input stays `{}`.
+- **Open:** a typed input record (trigger: install, upgrade or start; previous and current revision) is deferred, so an initializer cannot yet tell a first install from an upgrade.
+
+### B. A `#hosted` component kind for language-runtime cartridges
+
+A cartridge that supplies a language runtime (an interpreter, a JS engine) and a cartridge that is only source for it are different cartridges. `…component#hosted` is the second: `runtime` names a component of another cartridge, `<DID>/<name>@<range>#<component>` (the dependency rules of 028 §4 apply), and `sources` is one of:
+- pinned datums (`#datumPin`s): a published cartridge, immutable like any other version;
+- a reference to a working drawer: live, so an edit runs at once.
+
+Grants bind to the manifest's permbinds, never to the sources: the sources are data the runtime interprets, so what they may reach is what the hosting cartridge's manifest says, and editing a source cannot widen it. A working-copy reference is admitted only on nodes where the editing user holds write on that drawer (own devices); a published or registry cartridge must pin, since a reference to someone's drawer is not a version. "Publish" (settling) pins the drawer's heads into a new version, and that is when ahead-of-time builds run.
+- **Open:** whether the runtime range is resolved at install (lockfile, §7) or at publish.
+
+### C. Lineage
+
+A fork records where it came from in a signed `lineage` datum beside the envelope: a base `<id>@<version>` plus the patch pins. The envelope pins the datum (§1), so the publisher's signature covers it, and it records published states only, never a working copy. A fork keeps the identity rules of ADR 028 (a new id; lineage is provenance, not identity). Its grants start as the original's narrowed to the fork manifest's requests (028 §3, "never widen silently"); anything wider needs fresh consent. Un-forking re-substitutes the base: the install pin returns to the base version and the fork's patches stop applying.
+- **Open:** whether a base upgrade can be offered as a rebase of the patch pins.
+
+### D. `localState` kinds `volume` and `sandbox`
+
+Two kinds beside the existing ones, shaped like Docker's: `volume` is a filesystem volume, `sandbox` is a named container. A cartridge states which it needs; the node picks how to provide it, so the contract must not leak the platform. The baseline contract: a Linux userland, volumes, an exec/stdio/env API, and egress and mounts granted through permbinds (§5), so a sandbox reaches nothing the manifest did not name.
+
+Backends are optimizations under that one contract: a microVM on desktop and server, a wasm-hosted emulator for web nodes and Play builds, proot only for sideload builds. What differs is reported, and may be absent: isolation level (hardware VM, emulated VM, process only), native versus emulated CPU, and snapshot/fork. A cartridge that needs a capability the node lacks is not startable, as with a widened grant (§6). dpaths may be mounted inside volumes, which is how datums reach files; a datum-backed filesystem is dropped.
+- **Open:** how a cartridge declares a required capability (a field of the kind, or a permbind).
+- Packaging and distribution of what runs inside: `docs/scratch/sandbox-packaging.md`.
