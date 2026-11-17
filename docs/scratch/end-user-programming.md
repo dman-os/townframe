@@ -155,3 +155,27 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
   `sandbox`: node-local, not synced, its lifecycle tied to the install, with a disk quota. Egress and mounts are
   granted through the permbind/`uses` vocabulary. Import and export across the datum boundary are explicit
   operations under the routine's grants.
+
+## Sandbox baseline: wasm everywhere, Nix for packages (2026-11-17, discussion)
+
+- **Web nodes** need a sandbox too, and in a browser only wasm can host one. That makes an emulated Linux in wasm
+  the baseline every platform can run (web, Play builds, desktop). Native containers and microVMs are
+  optimizations under the same contract.
+  - trynix (fzakaria, 2026-09-04): x86_64 Linux under QEMU-in-wasm in a browser, resumed from a pre-booted
+    snapshot; Hydra-built closures fetched from cache.nixos.org into an in-memory `/nix/store`, shared into the VM
+    over 9p; packages can be added while it runs; about 1.5–7.5 s to a shell; about a 1.5 GiB tab cap; serial
+    console only.
+- **Play:** a wasm guest, and Linux emulated inside it, likely falls under Play's VM/interpreter exception, unlike
+  a downloaded native ELF. That is a policy reading, unverified.
+- **ISA:** portability comes from packaging, not one ISA. Cartridges reference Nix store paths or flake outputs
+  rather than opaque binaries, and each host substitutes its own system (`x86_64-linux`, `aarch64-linux`) from the
+  binary cache. Opaque-binary carts fall back to emulation.
+- **Nix rather than a distro base:** a sandbox is a minimal init plus a `/nix/store` volume plus a workspace
+  volume, and its contents are a list of store paths. That gives about 310k package versions, side-by-side
+  versions without conflicts, packages added live, content addressing that matches datum pins (closures could live
+  in big_blobs), a store shared across sandboxes, and cross-arch for free. Nix-on-Droid shows Nix over proot on
+  Android. The cost: glibc closures are heavy compared with musl/Alpine.
+- **Spikes:**
+  1. trynix's approach under our web build.
+  2. A Nix closure on proot on a phone.
+  3. container2wasm/QEMU under Wasmtime, to see whether one wasm backend serves web, Play and desktop.
