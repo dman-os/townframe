@@ -205,9 +205,14 @@ async fn installing_intxt_twice_changes_nothing() {
             .unwrap();
         assert!(again.already_installed);
         assert_eq!(again.record.readiness, big_dispatch_core::Readiness::Ready);
-        let after = crate::cmds::intxt::call(client, GetCartridge { id: before.id.clone() })
-            .await
-            .unwrap();
+        let after = crate::cmds::intxt::call(
+            client,
+            GetCartridge {
+                id: before.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(after, before);
         assert_eq!(after.versions.len(), 1);
     })
@@ -627,8 +632,8 @@ async fn assert_new_with_shares_commits_document(
 /// finds the intxt from the worktree.
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_op() {
-    use crate::cmds::intxt::package::Named;
     use crate::cmds::intxt::package::Packaging;
+    use intxt_core::edit::Named;
 
     with_intxt_node(async |tmp, client| {
         let node_root = tmp.path().join("node");
@@ -870,13 +875,13 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_add_branch_imports_history_that_was_never_recorded() {
     use crate::cmds::intxt::capture;
-    use crate::cmds::intxt::package::Named;
     use crate::cmds::intxt::package::Packaging;
     use big_cabinet_core::DocId;
     use big_cabinet_core::datum::DatumMember;
     use intxt_capture::host;
     use intxt_capture::identity;
     use intxt_core::client::Caller;
+    use intxt_core::edit::Named;
     use intxt_core::work;
     use service_utils_rs::RequestContext;
     use std::io::Write;
@@ -995,10 +1000,10 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_add_copies_the_rewrites_the_hook_reported() {
     use crate::cmds::intxt::capture;
-    use crate::cmds::intxt::package::Named;
     use crate::cmds::intxt::package::Packaging;
     use big_cabinet_core::datum::DatumMember;
     use intxt_core::client::Caller;
+    use intxt_core::edit::Named;
     use intxt_core::work;
     use service_utils_rs::RequestContext;
 
@@ -1136,12 +1141,12 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
 /// leaves the inbox.
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_review_comments_follow_a_rebase_and_resolve() {
-    use crate::cmds::intxt::package::Named;
     use crate::cmds::intxt::package::Packaging;
     use crate::cmds::intxt::review::Side;
     use big_cabinet_core::authority::OpenActor;
     use big_cabinet_core::authority::Rights;
     use intxt_core::annotation::Motivation;
+    use intxt_core::edit::Named;
 
     with_intxt_node(async |tmp, client| {
         let node_root = tmp.path().join("node");
@@ -1748,6 +1753,301 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
                 .unwrap();
         assert_eq!(state["pulls"]["o/r#12"], doc.to_string());
         assert_eq!(held().await["title"], "Edited again");
+    })
+    .await;
+}
+
+/// `day x intxt edit` (ledger D64): the document printed, changed by an agent's partial and full
+/// documents and by a scripted `$EDITOR`, and what `show` says after each.
+#[tokio::test(flavor = "multi_thread")]
+async fn intxt_edit_prints_applies_partial_documents_and_runs_the_editor() {
+    use crate::cmds::intxt::package::Packaging;
+    use intxt_core::edit::Applied;
+    use intxt_core::edit::Failed;
+    use intxt_core::edit::Named;
+    use serde_json::Value;
+    use serde_json::json;
+
+    fn code(code: ExitCode) -> String {
+        format!("{code:?}")
+    }
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let base = tmp.path().canonicalize().unwrap();
+        let repo = init_repo(&base, &[("a.txt", "one\n")]);
+        for path in ["b.txt", "c.txt"] {
+            std::fs::write(repo.join(path), format!("{path}\n")).unwrap();
+            git(&repo, &["add", "-A"]);
+            git(&repo, &["commit", "-q", "-m", &format!("add {path}")]);
+        }
+        let packaging = Packaging::new(client, &repo, &node_root);
+        let drawer = packaging
+            .create(&mut Vec::new(), "Edit me", Some("Before."), None)
+            .await
+            .unwrap();
+        let short = short_ids::ShortIds::new([drawer.to_string()])
+            .render(&drawer.to_string())
+            .unique;
+        packaging
+            .add(
+                &mut Vec::new(),
+                Some(&short),
+                Named::Branch("feat/x".to_owned()),
+                false,
+            )
+            .await
+            .unwrap();
+
+        let show = async || {
+            let mut out = Vec::new();
+            packaging.show(&mut out, Some(&short)).await.unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let print = async || {
+            let mut out = Vec::new();
+            packaging.edit_print(&mut out, Some(&short)).await.unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        // Applies `document` from a file; answers (exit code, stdout, stderr).
+        let apply = async |document: &str, json: bool, dry_run: bool| {
+            let file = tmp.path().join("document.json");
+            std::fs::write(&file, document).unwrap();
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let exit = packaging
+                .edit_apply(
+                    &mut out,
+                    &mut err,
+                    Some(&short),
+                    file.to_str().unwrap(),
+                    json,
+                    dry_run,
+                )
+                .await
+                .unwrap();
+            (
+                code(exit),
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(err).unwrap(),
+            )
+        };
+
+        // The printed document: a fixed layout, one entry per line, full ids.
+        let printed = print().await;
+        println!("{printed}");
+        let document: Value = serde_json::from_str(&printed).unwrap();
+        assert_eq!(document["$type"], "org.example.intxt.edit");
+        assert_eq!(document["intxt"], format!("dtxt:doc:{drawer}"));
+        assert!(
+            document["$schema"]
+                .as_str()
+                .unwrap()
+                .ends_with("intxt-edit.schema.json")
+        );
+        assert!(
+            printed.contains("\n  \"title\": \"Edit me\",\n"),
+            "{printed}"
+        );
+        assert_eq!(printed, print().await, "printing twice is the same text");
+        let entries = document["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        let line_of = |kind: &str| {
+            printed
+                .lines()
+                .filter(|line| line.contains(&format!("\"{kind}\":")))
+                .count()
+        };
+        assert_eq!((line_of("commits"), line_of("ref")), (1, 1), "{printed}");
+        let id_of = |kind: &str| -> String {
+            entries
+                .iter()
+                .find(|entry| entry.get(kind).is_some())
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let ref_id = id_of("ref");
+        assert_eq!((ref_id.len(), id_of("commits").len()), (32, 32));
+        let base_heads = document["base"].clone();
+
+        // An unchanged document changes nothing, and nothing is written for it.
+        let (exit, out, _) = apply(&printed, false, false).await;
+        assert_eq!(
+            (exit, out.as_str()),
+            (code(ExitCode::SUCCESS), "nothing to change\n")
+        );
+        assert_eq!(print().await, printed);
+
+        // A partial document, with a short prefix of the ref's id, as a dry run first.
+        let partial = json!({
+            "base": base_heads,
+            "title": "Renamed",
+            "description": null,
+            "entries": [
+                { "remove": &ref_id[..3] },
+                { "add": { "commits": "feat/x~1" } },
+            ],
+        })
+        .to_string();
+        let (exit, out, _) = apply(&partial, false, true).await;
+        assert_eq!(exit, code(ExitCode::SUCCESS));
+        assert!(out.starts_with("dry run, nothing written"), "{out}");
+        assert!(
+            out.contains("title") && out.contains("remove") && out.contains("--commits feat/x~1"),
+            "{out}"
+        );
+        assert_eq!(print().await, printed, "a dry run writes nothing");
+        let (_, json_out, _) = apply(&partial, true, true).await;
+        let dry: Applied = serde_json::from_str(&json_out).unwrap();
+        assert!(
+            dry.dry_run && dry.changes.len() == 4 && dry.undo.is_empty(),
+            "{json_out}"
+        );
+
+        let (exit, out, err) = apply(&partial, false, false).await;
+        assert_eq!(
+            (exit.as_str(), err.as_str()),
+            (code(ExitCode::SUCCESS).as_str(), ""),
+            "{out}"
+        );
+        assert!(out.starts_with("changed:"), "{out}");
+        let shown = show().await;
+        assert!(shown.contains("\"Renamed\""), "{shown}");
+        assert!(!shown.contains("Before."), "{shown}");
+        assert!(!shown.contains("tracked refs"), "{shown}");
+        assert!(shown.contains("commits (2):"), "{shown}");
+        let after = print().await;
+        assert_ne!(after, printed);
+
+        // The same document again is stale: refused with exit 3 and the current document.
+        let (exit, out, err) = apply(&partial, false, false).await;
+        assert_eq!(exit, code(ExitCode::from(3)));
+        assert_eq!(out, after);
+        assert!(err.starts_with("/base:"), "{err}");
+        let (exit, out, _) = apply(&partial, true, false).await;
+        assert_eq!(exit, code(ExitCode::from(3)));
+        let stale: Failed = serde_json::from_str(&out).unwrap();
+        assert_eq!(stale.errors[0].path, "/base");
+        assert_eq!(stale.current.unwrap().to_text(), after);
+
+        // A document that is wrong: each error has a path, and exit is 1.
+        let now: Value = serde_json::from_str(&after).unwrap();
+        let wrong = json!({
+            "base": now["base"],
+            "entries": [{ "remove": "nope" }, { "add": { "branch": "no/such" } }],
+        })
+        .to_string();
+        let (exit, out, _) = apply(&wrong, true, false).await;
+        assert_eq!(exit, code(ExitCode::FAILURE));
+        let failed: Failed = serde_json::from_str(&out).unwrap();
+        assert!(failed.current.is_none());
+        assert_eq!(failed.errors[0].path, "/entries/0/remove", "{out}");
+        let (exit, _, err) = apply(&wrong, false, false).await;
+        assert_eq!(exit, code(ExitCode::FAILURE));
+        assert!(err.contains("/entries/0/remove"), "{err}");
+        assert!(show().await.contains("\"Renamed\""));
+
+        // The undo of the title comes first and is a document at the intxt's new base.
+        let (_, json_out, _) = apply(
+            &json!({ "base": now["base"], "title": "Third", "description": "Again." }).to_string(),
+            true,
+            false,
+        )
+        .await;
+        let applied: Applied = serde_json::from_str(&json_out).unwrap();
+        assert_eq!(applied.changes.len(), 2, "{json_out}");
+        let undo = &applied.undo[0];
+        let body = undo
+            .strip_prefix("echo '")
+            .and_then(|rest| rest.split_once("' | day x intxt edit"))
+            .map(|(body, _)| body.replace("'\\''", "'"))
+            .unwrap_or_else(|| panic!("{undo}"));
+        let (exit, _, _) = apply(&body, false, false).await;
+        assert_eq!(exit, code(ExitCode::SUCCESS));
+        let shown = show().await;
+        assert!(
+            shown.contains("\"Renamed\"") && !shown.contains("Again."),
+            "{shown}"
+        );
+
+        // Removing by the full id, and what undoes it.
+        let current: Value = serde_json::from_str(&print().await).unwrap();
+        let commits_id = current["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry.get("commits").is_some())
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (_, json_out, _) = apply(
+            &json!({ "base": current["base"], "entries": [{ "remove": commits_id }] }).to_string(),
+            true,
+            false,
+        )
+        .await;
+        let removed: Applied = serde_json::from_str(&json_out).unwrap();
+        assert_eq!(removed.changes[0].op, "remove");
+        assert!(removed.undo[0].contains("day x intxt add"), "{removed:?}");
+
+        // The editor: a script that rewrites the file, as GIT_SEQUENCE_EDITOR does. The first
+        // pass saves an empty title, which is refused and reopens with `errors`; the second
+        // sees them and fixes the title.
+        use std::os::unix::fs::PermissionsExt;
+        let script = tmp.path().join("editor.sh");
+        std::fs::write(
+            &script,
+            r##"#!/bin/sh
+if grep -q '"errors"' "$1"; then t=Fixed; else t=; fi
+sed -i "s/^  \(\"title\": \)\"[^\"]*\"/  \1\"$t\"/" "$1"
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut out = Vec::new();
+        let exit = packaging
+            .edit_interactive(&mut out, Some(&short), script.to_str().unwrap(), false)
+            .await
+            .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(code(exit), code(ExitCode::SUCCESS), "{out}");
+        assert!(out.starts_with("changed:"), "{out}");
+        assert!(show().await.contains("\"Fixed\""));
+
+        // An editor that changes nothing aborts, as does one that leaves the errors alone.
+        let mut out = Vec::new();
+        let exit = packaging
+            .edit_interactive(&mut out, Some(&short), "true", false)
+            .await
+            .unwrap();
+        assert_eq!(code(exit), code(ExitCode::SUCCESS));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "edit aborted, nothing changed\n"
+        );
+        let blank = tmp.path().join("blank.sh");
+        std::fs::write(
+            &blank,
+            r##"#!/bin/sh
+sed -i 's/^  \("title": \)"[^"]*"/  \1""/' "$1"
+"##,
+        )
+        .unwrap();
+        std::fs::set_permissions(&blank, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut out = Vec::new();
+        let exit = packaging
+            .edit_interactive(
+                &mut out,
+                Some(&short),
+                &format!("sh {}", blank.display()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(code(exit), code(ExitCode::FAILURE));
+        assert!(show().await.contains("\"Fixed\""));
     })
     .await;
 }
