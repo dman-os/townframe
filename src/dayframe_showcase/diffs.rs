@@ -37,16 +37,18 @@ enum DiffsView {
     Specimens,
     Pr84,
     Pr84CodeView,
+    ScrollProbe,
 }
 
 impl DiffsView {
-    const ALL: [Self; 3] = [Self::Specimens, Self::Pr84, Self::Pr84CodeView];
+    const ALL: [Self; 4] = [Self::Specimens, Self::Pr84, Self::Pr84CodeView, Self::ScrollProbe];
 
     fn label(self) -> &'static str {
         match self {
             Self::Specimens => "Specimens",
             Self::Pr84 => "PR #84",
             Self::Pr84CodeView => "PR #84 (CodeView)",
+            Self::ScrollProbe => "Scroll probe",
         }
     }
 }
@@ -59,6 +61,7 @@ pub fn DiffsFoundation() -> Element {
         match crate::lab_setting("DAYFRAME_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
             Some("pr84") => DiffsView::Pr84,
             Some("pr84-code-view") => DiffsView::Pr84CodeView,
+            Some("scroll-probe") => DiffsView::ScrollProbe,
             _ => DiffsView::Specimens,
         }
     });
@@ -146,6 +149,14 @@ pub fn DiffsFoundation() -> Element {
                 DiffsView::Specimens => rsx! { Specimens { options: current, expand_unchanged: expand_unchanged(), virtualized } },
                 DiffsView::Pr84 => rsx! { pr_diff::PrView { options: current, virtualized } },
                 DiffsView::Pr84CodeView => rsx! { pr_diff::PrCodeView { options: current, virtualized } },
+                // INSTR (kinetic scrolling): a plain nested scroller with no Pierre code.
+                DiffsView::ScrollProbe => rsx! {
+                    div { style: "height: 70vh; overflow-y: auto; border: 1px solid gray;",
+                        for i in 0..2000 {
+                            div { key: "{i}", style: "padding: 4px 8px; font-family: monospace;", "plain line {i}" }
+                        }
+                    }
+                },
             }
         }
     }
