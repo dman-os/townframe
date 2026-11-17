@@ -572,6 +572,10 @@ pub struct CartridgeConfig {
     grants: BTreeMap<GrantKey, DatumSlot<GrantBody>>,
     /// The settings datums, and grant-tagged datums whose slot is not a grant key.
     carried: BTreeMap<DatumKey, DatumRead>,
+    /// Grants in force for this boot only ("only this time", ADR 049 §4.2). Never read from or
+    /// written to the document: the node attaches them to each snapshot it resolves, so they merge
+    /// into [`Self::resolve_grants`] exactly as the datum grants do and end with the process.
+    boot_grants: BTreeMap<GrantKey, GrantBody>,
 }
 
 impl DatumStore for CartridgeConfig {
@@ -633,6 +637,11 @@ impl DatumStore for CartridgeConfig {
 impl CartridgeConfig {
     pub fn identity(&self) -> &DatumSlot<CartridgeConfigIdentity> {
         &self.identity
+    }
+
+    /// Replaces the grants in force for this boot only (see the field's note).
+    pub fn attach_boot_grants(&mut self, grants: BTreeMap<GrantKey, GrantBody>) {
+        self.boot_grants = grants;
     }
 
     /// The grants, by key, with whether each decoded.
@@ -710,38 +719,12 @@ impl CartridgeConfig {
                 }
                 DatumSlot::Accepted { value, .. } => value,
             };
-            if !grant.accepts(body) {
-                return Err(format!(
-                    "grant datum `{grant}` states a value that kind of grant does not take"
-                ));
-            }
-            let known_access = |access: &EntryAccess| {
-                access.known().ok_or_else(|| {
-                    format!(
-                        "unknown access level `{}` in grant `{grant}`",
-                        access.as_str()
-                    )
-                })
-            };
-            match grant {
-                GrantKey::Drawer(drawer_id) => {
-                    let access = known_access(body.access.as_ref().expect("checked by `accepts`"))?;
-                    resolved.drawers.insert(drawer_id.clone(), access);
-                }
-                GrantKey::Cartridge(cartridge_id) => {
-                    let access = known_access(body.access.as_ref().expect("checked by `accepts`"))?;
-                    resolved.cartridges.insert(cartridge_id.clone(), access);
-                }
-                GrantKey::Origin(origin) => {
-                    resolved.origins.insert(origin.clone());
-                }
-                GrantKey::Method(nsid) => {
-                    resolved.operations.operations.insert(nsid.clone());
-                }
-                GrantKey::Authority(prefix) => {
-                    resolved.operations.authorities.insert(prefix.clone());
-                }
-            }
+            resolved.apply(grant, body)?;
+        }
+        // A boot grant is one this node built, so it states a value its kind takes; one that
+        // gives more than the datum grant of the same thing widens it, never narrows it.
+        for (grant, body) in &self.boot_grants {
+            resolved.apply(grant, body)?;
         }
         Ok(resolved)
     }
@@ -758,6 +741,50 @@ pub struct ResolvedGrants {
     pub origins: BTreeSet<String>,
     /// The operations and authorities the cartridge may invoke through dispatch.
     pub operations: DispatchScope,
+}
+
+impl ResolvedGrants {
+    /// Adds one grant. Two grants of the same drawer or cartridge keep the wider access.
+    fn apply(&mut self, grant: &GrantKey, body: &GrantBody) -> Result<(), String> {
+        if !grant.accepts(body) {
+            return Err(format!(
+                "grant datum `{grant}` states a value that kind of grant does not take"
+            ));
+        }
+        let known_access = |access: &EntryAccess| {
+            access.known().ok_or_else(|| {
+                format!(
+                    "unknown access level `{}` in grant `{grant}`",
+                    access.as_str()
+                )
+            })
+        };
+        match grant {
+            GrantKey::Drawer(drawer_id) => {
+                let access = known_access(body.access.as_ref().expect("checked by `accepts`"))?;
+                let held = self.drawers.entry(drawer_id.clone()).or_insert(access);
+                *held = (*held).max(access);
+            }
+            GrantKey::Cartridge(cartridge_id) => {
+                let access = known_access(body.access.as_ref().expect("checked by `accepts`"))?;
+                let held = self
+                    .cartridges
+                    .entry(cartridge_id.clone())
+                    .or_insert(access);
+                *held = (*held).max(access);
+            }
+            GrantKey::Origin(origin) => {
+                self.origins.insert(origin.clone());
+            }
+            GrantKey::Method(nsid) => {
+                self.operations.operations.insert(nsid.clone());
+            }
+            GrantKey::Authority(prefix) => {
+                self.operations.authorities.insert(prefix.clone());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Whether the nodule member of `install` is enabled.
@@ -790,6 +817,11 @@ impl NoduleConfig {
     /// before. A cartridge without one resolves with no grants.
     pub fn attach_cartridge_docs(&mut self, docs: BTreeMap<CartridgeId, CartridgeConfig>) {
         self.cartridge_docs = docs;
+    }
+
+    /// The cartridge config documents attached, by cartridge.
+    pub fn cartridge_docs(&self) -> &BTreeMap<CartridgeId, CartridgeConfig> {
+        &self.cartridge_docs
     }
 
     /// The config document each installed cartridge names.
