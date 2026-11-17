@@ -141,3 +141,8 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
   admitted only on nodes where the editing user has write access to that drawer, i.e. their own devices. A cartridge
   installed elsewhere, or published, carries pinned sources, so nobody runs code that changes under them.
   Publishing pins the drawer's heads into a new version, and the AOT build runs then.
+- **Sandboxes as local state (agreed with nodules):** a sandbox is ADR 047's `localState` with a new kind,
+  `sandbox`: node-local, not synced, its lifecycle tied to the install, with a disk quota. Egress and mounts are
+  granted through the permbind/`uses` vocabulary. Import and export across the datum boundary are explicit
+  operations under the routine's grants. The datum filesystem shrinks to one live working-copy mount, next to
+  R19's granted host directories.
