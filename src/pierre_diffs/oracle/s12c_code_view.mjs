@@ -4,7 +4,8 @@
 // `recomputeLayout`, `findFirstVisibleIndex`, `findLastVisibleIndex`), the
 // option diffing of `setOptions` (the pending layout reset, the render option
 // revision, the render requests), `instanceChanged`, the selection, and the
-// per-item option callback wrappers (the selection ones).
+// per-item option callback wrappers (the selection ones and the shared ones),
+// including the item context every one of them appends to its arguments.
 //
 // The published `CodeView` is constructed over a bare `document` (it makes
 // three `div`s and writes styles on them; nothing renders) and never `setup`.
@@ -22,8 +23,9 @@
 // What this establishes: that the item bookkeeping, the layout arithmetic over
 // the items and the option diffing do the same thing as the published class for
 // the same inputs. What it cannot: anything with a root (`setup`, scrolling,
-// rendering: C3-C5), and the callback `context` argument, which the port omits
-// (parity/divergences.psv). Object-valued options compare by value in the port
+// rendering: C3-C5), and the context's `instance` (parity/divergences.psv; the
+// calls record the context's id, type, index, top, height, version, item
+// snapshot fields and whether an element is mounted). Object-valued options compare by value in the port
 // and by reference upstream, so a scenario names its `layout` and `itemMetrics`
 // values and reuses one object per name.
 
@@ -38,6 +40,9 @@ const LAYOUTS = {
 };
 const ID_POOL = ["a", "b", "c", "d", "e", "f"];
 const SELECTION_CALLBACKS = ["onLineSelected", "onLineSelectionStart", "onLineSelectionChange", "onLineSelectionEnd"];
+// Shared callbacks with a different argument shape, named only by the scenarios
+// that fire them (the random scenarios do not).
+const CONTEXT_CALLBACKS = ["onLineClick", "onLineEnter", "onGutterUtilityClick", "renderCustomHeader", "renderAnnotation"];
 const CALLBACK_NAMES = ["onSelectedLinesChange", ...SELECTION_CALLBACKS, "onLineClick", "header", "footer"];
 const LISTS = {
   A: [
@@ -73,12 +78,39 @@ async function runScenario(api, diffs, scenario) {
     const calls = [];
     const renders = [];
     const functions = new Map();
+    // What an option callback sees of the item: the trailing `context` argument.
+    const encodeContext = (context) => ({
+      type: context.type,
+      id: context.item.id,
+      itemVersion: context.item.version ?? null,
+      itemCollapsed: context.item.collapsed ?? null,
+      index: context.index,
+      top: context.top,
+      height: context.height,
+      version: context.version ?? null,
+      renderedOptionsRevision: context.renderedOptionsRevision,
+      mounted: context.element != null,
+    });
     const fn = (name) => {
       if (!functions.has(name)) {
-        const record =
-          name === "onSelectedLinesChange"
-            ? (selection) => calls.push([name, encodeSelection(selection)])
-            : (range) => calls.push([name, encodeRange(range)]);
+        let record;
+        if (name === "onSelectedLinesChange") record = (selection) => calls.push([name, encodeSelection(selection)]);
+        else if (SELECTION_CALLBACKS.includes(name) || name === "onGutterUtilityClick")
+          record = (range, context) => calls.push([name, encodeRange(range), encodeContext(context)]);
+        else if (name === "onLineClick" || name === "onLineEnter")
+          record = (props, context) => calls.push([name, props.lineNumber, encodeContext(context)]);
+        else if (name === "renderCustomHeader")
+          record = (fileDiff, context) => {
+            calls.push([name, fileDiff.name, encodeContext(context)]);
+            return undefined;
+          };
+        else if (name === "renderAnnotation")
+          record = (annotation, fileDiff, context) => {
+            calls.push([name, annotation.lineNumber, fileDiff.name, encodeContext(context)]);
+            return undefined;
+          };
+        else if (name === "header" || name === "footer") record = () => calls.push([name]);
+        else throw new Error(`unknown callback ${name}`);
         functions.set(name, record);
       }
       return functions.get(name);
@@ -193,10 +225,16 @@ async function runScenario(api, diffs, scenario) {
         case "clearSelectedLines":
           cv.clearSelectedLines();
           return null;
-        case "fire":
+        case "fire": {
           // The callback the item's instance holds under `key`.
-          cv.idToItem.get(step.id).instance.options[step.key](step.range ?? null);
+          const options = cv.idToItem.get(step.id).instance.options;
+          if (step.key === "onLineClick" || step.key === "onLineEnter") options[step.key]({ lineNumber: step.lineNumber });
+          else if (step.key === "renderCustomHeader") options[step.key](diffs[step.diff]);
+          else if (step.key === "renderAnnotation") options[step.key]({ side: "additions", lineNumber: step.lineNumber, metadata: 1 }, diffs[step.diff]);
+          else if (step.key === "onGutterUtilityClick") options[step.key](step.range);
+          else options[step.key](step.range ?? null);
           return null;
+        }
         case "firstVisible":
           return cv.findFirstVisibleIndex(step.top);
         case "lastVisible": {
@@ -366,6 +404,40 @@ function handwritten() {
     { op: "fire", id: "c", key: "onLineSelected", range },
     { op: "updateItemId", from: "c", to: "d" },
     { op: "fire", id: "d", key: "onLineSelectionEnd", range },
+  ]);
+  // The item context: every callback gets the item's record as it stands when the callback runs.
+  const contextOptions = { callbacks: ["onSelectedLinesChange", ...SELECTION_CALLBACKS, ...CONTEXT_CALLBACKS] };
+  add("callback context", contextOptions, [
+    { op: "setItems", items: abc },
+    { op: "fire", id: "a", key: "onLineClick", lineNumber: 3 },
+    recompute,
+    { op: "fire", id: "b", key: "onLineClick", lineNumber: 7 },
+    { op: "fire", id: "c", key: "onLineEnter", lineNumber: 1 },
+    { op: "fire", id: "a", key: "onGutterUtilityClick", range },
+    { op: "fire", id: "b", key: "renderCustomHeader", diff: "multi3" },
+    { op: "fire", id: "c", key: "renderAnnotation", diff: "gaps1", lineNumber: 4 },
+    { op: "fire", id: "b", key: "onLineSelected", range },
+    { op: "fire", id: "c", key: "onLineSelectionEnd", range: null },
+    { op: "setItems", items: [{ ...abc[0], version: 4, collapsed: true }, abc[2], abc[1]] },
+    recompute,
+    { op: "fire", id: "a", key: "onLineClick", lineNumber: 9 },
+    { op: "fire", id: "b", key: "onLineClick", lineNumber: 2 },
+    { op: "fire", id: "c", key: "onLineSelected", range },
+    { op: "updateItemId", from: "c", to: "renamed" },
+    { op: "fire", id: "renamed", key: "onLineClick", lineNumber: 5 },
+    { op: "fire", id: "renamed", key: "onLineSelectionStart", range },
+    { op: "updateItem", item: { ...abc[1], version: 2, collapsed: true } },
+    recompute,
+    { op: "fire", id: "b", key: "onGutterUtilityClick", range },
+  ]);
+  add("callback context with layout options", { ...contextOptions, layout: "roomy", itemMetrics: "fractional", diff: { diffStyle: "unified" } }, [
+    { op: "setItems", items: abc },
+    recompute,
+    { op: "fire", id: "c", key: "onLineClick", lineNumber: 0 },
+    { op: "setOptions", options: { ...contextOptions, layout: "tight" } },
+    recompute,
+    { op: "fire", id: "c", key: "onLineClick", lineNumber: 1 },
+    { op: "fire", id: "a", key: "renderCustomHeader", diff: "twoHunks" },
   ]);
   add("controlled selection", { ...selectionOptions, controlledSelection: true }, [
     { op: "setItems", items: abc },

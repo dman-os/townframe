@@ -8,8 +8,10 @@
 //! published run does: `render` is observed (the port's `render_calls`;
 //! upstream's is replaced on the instance by a recorder), and the `recompute`
 //! step is the layout half of `computeRenderRangeAndEmit` (`recompute_layout`
-//! over the dirty index and the pending reset, then both cleared). Test-only,
-//! original to this crate.
+//! over the dirty index and the pending reset, then both cleared). The option
+//! callbacks record their arguments and the item context they receive (the
+//! trailing argument; its `instance` is omitted, parity/divergences.psv).
+//! Test-only, original to this crate.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,8 +23,12 @@ use serde_json::Value;
 use serde_json::json;
 
 use super::CodeView;
+use super::options::CodeViewDiffItemContext;
 use super::options::CodeViewHunkSeparators;
 use super::options::CodeViewOptions;
+use super::options::ItemCallback;
+use super::options::ItemCallback2;
+use super::options::ItemSelectionCallback;
 use super::options::SelectedLinesChangeCallback;
 use super::state::CodeViewLineSelection;
 use crate::components::virtualized_file_diff::advanced::AdvancedVirtualizer;
@@ -32,9 +38,15 @@ use crate::components::virtualized_file_diff::layout_oracle_tests::Spec;
 use crate::components::virtualized_file_diff::layout_oracle_tests::options_from_spec;
 use crate::components::virtualized_file_diff::layout_oracle_tests::panic_message;
 use crate::components::virtualizer::InstanceRef;
+use crate::document::NodeKey;
 use crate::fake_interaction_dom::FakeDom;
 use crate::highlighter_types::PlainTextHighlighter;
 use crate::js_collections::PtrEq;
+use crate::managers::interaction_manager::LineEventBaseProps;
+use crate::managers::interaction_manager::LineEventKind;
+use crate::managers::interaction_manager::LineEventProps;
+use crate::managers::interaction_manager::PointerEventData;
+use crate::managers::interaction_manager::PointerType;
 use crate::managers::interaction_manager::SelectionCallback;
 use crate::managers::interaction_manager::SelectionWriteOptions;
 use crate::managers::resize_manager::ResizeObserverHub;
@@ -44,6 +56,7 @@ use crate::oracle_testing::load_golden;
 use crate::types::layout::CodeViewLayout;
 use crate::types::layout::VirtualFileMetrics;
 use crate::types::patch::FileDiffMetadata;
+use crate::types::view::AnnotationSide;
 use crate::types::view::CodeViewDiffItem;
 use crate::types::view::CodeViewItem;
 use crate::types::view::DiffLineAnnotation;
@@ -143,10 +156,13 @@ enum Step {
         notify: Option<bool>,
     },
     ClearSelectedLines,
+    #[serde(rename_all = "camelCase")]
     Fire {
         id: String,
         key: String,
         range: Option<SelectedLineRange>,
+        line_number: Option<i64>,
+        diff: Option<String>,
     },
     FirstVisible {
         top: f64,
@@ -166,9 +182,13 @@ enum Step {
 /// (a callback is compared by identity), each recording what it was called with.
 struct Callbacks {
     calls: Rc<RefCell<Vec<Value>>>,
-    selection: HashMap<&'static str, SelectionCallback>,
+    selection: HashMap<&'static str, ItemSelectionCallback<u8>>,
     on_selected_lines_change: SelectedLinesChangeCallback,
-    on_line_click: crate::managers::interaction_manager::LineCallback<crate::document::NodeKey>,
+    on_line_click: ItemCallback<u8, LineEventProps<NodeKey>>,
+    on_line_enter: ItemCallback<u8, LineEventProps<NodeKey>>,
+    on_gutter_utility_click: ItemCallback<u8, SelectedLineRange>,
+    render_custom_header: ItemCallback<u8, FileDiffMetadata, Option<u8>>,
+    render_annotation: ItemCallback2<u8, DiffLineAnnotation<u8>, FileDiffMetadata, Option<u8>>,
     header: PtrEq<dyn Fn() -> Option<u8>>,
     footer: PtrEq<dyn Fn() -> Option<u8>>,
 }
@@ -186,6 +206,23 @@ fn selection_json(selection: Option<&CodeViewLineSelection>) -> Value {
     )
 }
 
+/// What an option callback sees of the item: the trailing `context` argument,
+/// as the script's `encodeContext` records it.
+fn context_json(context: &CodeViewDiffItemContext<u8>) -> Value {
+    json!({
+        "type": "diff",
+        "id": context.item.id,
+        "itemVersion": context.item.version,
+        "itemCollapsed": context.item.collapsed,
+        "index": context.index,
+        "top": context.top,
+        "height": context.height,
+        "version": context.version,
+        "renderedOptionsRevision": context.rendered_options_revision,
+        "mounted": context.element.is_some(),
+    })
+}
+
 impl Callbacks {
     fn new() -> Self {
         let calls = Rc::new(RefCell::new(Vec::new()));
@@ -198,9 +235,11 @@ impl Callbacks {
         .into_iter()
         .map(|name| {
             let calls = Rc::clone(&calls);
-            let callback: SelectionCallback = Rc::new(move |range| {
-                calls.borrow_mut().push(json!([name, range_json(range)]));
-            });
+            let callback: ItemSelectionCallback<u8> = PtrEq(Rc::new(move |range, context| {
+                calls
+                    .borrow_mut()
+                    .push(json!([name, range_json(range), context_json(context)]));
+            }));
             (name, callback)
         })
         .collect();
@@ -210,11 +249,61 @@ impl Callbacks {
                 .borrow_mut()
                 .push(json!(["onSelectedLinesChange", selection_json(selection)]));
         });
+        let line_callback = |name: &'static str| -> ItemCallback<u8, LineEventProps<NodeKey>> {
+            let calls = Rc::clone(&calls);
+            PtrEq(Rc::new(move |props, context| {
+                calls.borrow_mut().push(json!([
+                    name,
+                    props.base.line_number,
+                    context_json(context)
+                ]));
+            }))
+        };
+        let on_line_click = line_callback("onLineClick");
+        let on_line_enter = line_callback("onLineEnter");
+        let gutter_calls = Rc::clone(&calls);
+        let on_gutter_utility_click: ItemCallback<u8, SelectedLineRange> =
+            PtrEq(Rc::new(move |range, context| {
+                gutter_calls.borrow_mut().push(json!([
+                    "onGutterUtilityClick",
+                    range_json(Some(range)),
+                    context_json(context)
+                ]));
+            }));
+        let header_calls = Rc::clone(&calls);
+        let render_custom_header: ItemCallback<u8, FileDiffMetadata, Option<u8>> =
+            PtrEq(Rc::new(move |file_diff, context| {
+                header_calls.borrow_mut().push(json!([
+                    "renderCustomHeader",
+                    file_diff.name,
+                    context_json(context)
+                ]));
+                None
+            }));
+        let annotation_calls = Rc::clone(&calls);
+        let render_annotation: ItemCallback2<
+            u8,
+            DiffLineAnnotation<u8>,
+            FileDiffMetadata,
+            Option<u8>,
+        > = PtrEq(Rc::new(move |annotation, file_diff, context| {
+            annotation_calls.borrow_mut().push(json!([
+                "renderAnnotation",
+                annotation.line_number,
+                file_diff.name,
+                context_json(context)
+            ]));
+            None
+        }));
         Self {
             calls,
             selection,
             on_selected_lines_change,
-            on_line_click: Rc::new(|_| {}),
+            on_line_click,
+            on_line_enter,
+            on_gutter_utility_click,
+            render_custom_header,
+            render_annotation,
             header: PtrEq(Rc::new(|| None)),
             footer: PtrEq(Rc::new(|| None)),
         }
@@ -248,6 +337,7 @@ fn build_options(
     });
     options.sticky_headers = spec.sticky_headers;
     options.diff.interaction.controlled_selection = spec.controlled_selection;
+    let selection = &callbacks.selection;
     options.item_metrics = spec
         .item_metrics
         .as_ref()
@@ -261,23 +351,36 @@ fn build_options(
                     Some(Rc::clone(&callbacks.on_selected_lines_change));
             }
             "onLineSelected" => {
-                options.diff.interaction.on_line_selected =
-                    Some(Rc::clone(&callbacks.selection["onLineSelected"]));
+                options.callbacks.on_line_selected = Some(selection["onLineSelected"].clone());
             }
             "onLineSelectionStart" => {
-                options.diff.interaction.on_line_selection_start =
-                    Some(Rc::clone(&callbacks.selection["onLineSelectionStart"]));
+                options.callbacks.on_line_selection_start =
+                    Some(selection["onLineSelectionStart"].clone());
             }
             "onLineSelectionChange" => {
-                options.diff.interaction.on_line_selection_change =
-                    Some(Rc::clone(&callbacks.selection["onLineSelectionChange"]));
+                options.callbacks.on_line_selection_change =
+                    Some(selection["onLineSelectionChange"].clone());
             }
             "onLineSelectionEnd" => {
-                options.diff.interaction.on_line_selection_end =
-                    Some(Rc::clone(&callbacks.selection["onLineSelectionEnd"]));
+                options.callbacks.on_line_selection_end =
+                    Some(selection["onLineSelectionEnd"].clone());
             }
             "onLineClick" => {
-                options.diff.interaction.on_line_click = Some(Rc::clone(&callbacks.on_line_click));
+                options.callbacks.on_line_click = Some(callbacks.on_line_click.clone())
+            }
+            "onLineEnter" => {
+                options.callbacks.on_line_enter = Some(callbacks.on_line_enter.clone())
+            }
+            "onGutterUtilityClick" => {
+                options.callbacks.on_gutter_utility_click =
+                    Some(callbacks.on_gutter_utility_click.clone());
+            }
+            "renderCustomHeader" => {
+                options.callbacks.render_custom_header =
+                    Some(callbacks.render_custom_header.clone());
+            }
+            "renderAnnotation" => {
+                options.callbacks.render_annotation = Some(callbacks.render_annotation.clone());
             }
             "header" => options.render_code_view_header = Some(callbacks.header.clone()),
             "footer" => options.render_code_view_footer = Some(callbacks.footer.clone()),
@@ -371,20 +474,108 @@ impl World {
                 view.clear_selected_lines(SelectionWriteOptions::default());
                 Value::Null
             }
-            Step::Fire { id, key, range } => {
+            Step::Fire {
+                id,
+                key,
+                range,
+                line_number,
+                diff,
+            } => {
                 let instance = self.instance_of(id);
-                let callback = {
-                    let options = instance.file_diff().options();
-                    let interaction = &options.interaction;
-                    match key.as_str() {
-                        "onLineSelected" => interaction.on_line_selected.clone(),
-                        "onLineSelectionStart" => interaction.on_line_selection_start.clone(),
-                        "onLineSelectionChange" => interaction.on_line_selection_change.clone(),
-                        "onLineSelectionEnd" => interaction.on_line_selection_end.clone(),
-                        other => panic!("unknown callback {other}"),
-                    }
+                let options = instance.file_diff().options();
+                let interaction = &options.interaction;
+                // Every callback is called with the options borrow released, as
+                // the instance does.
+                let selection = |callback: &Option<SelectionCallback>| {
+                    callback
+                        .clone()
+                        .expect("the instance holds the selection callbacks")
                 };
-                callback.expect("the instance holds the selection callbacks")(range.as_ref());
+                match key.as_str() {
+                    "onLineSelected" => {
+                        let callback = selection(&interaction.on_line_selected);
+                        drop(options);
+                        callback(range.as_ref());
+                    }
+                    "onLineSelectionStart" => {
+                        let callback = selection(&interaction.on_line_selection_start);
+                        drop(options);
+                        callback(range.as_ref());
+                    }
+                    "onLineSelectionChange" => {
+                        let callback = selection(&interaction.on_line_selection_change);
+                        drop(options);
+                        callback(range.as_ref());
+                    }
+                    "onLineSelectionEnd" => {
+                        let callback = selection(&interaction.on_line_selection_end);
+                        drop(options);
+                        callback(range.as_ref());
+                    }
+                    "onLineClick" | "onLineEnter" => {
+                        let callback = if key == "onLineClick" {
+                            interaction.on_line_click.clone()
+                        } else {
+                            interaction.on_line_enter.clone()
+                        }
+                        .expect("the instance holds the line callback");
+                        drop(options);
+                        let element = view.sticky_container;
+                        callback(&LineEventProps {
+                            base: LineEventBaseProps {
+                                kind: LineEventKind::DiffLine,
+                                line_element: element,
+                                line_number: line_number.expect("a line number"),
+                                number_column: false,
+                                number_element: element,
+                                annotation_side: None,
+                                line_type: None,
+                            },
+                            event: PointerEventData {
+                                pointer_id: 0,
+                                pointer_type: PointerType::Mouse,
+                                button: 0,
+                                shift_key: false,
+                                client_x: 0.0,
+                                client_y: 0.0,
+                                target: None,
+                            },
+                        });
+                    }
+                    "onGutterUtilityClick" => {
+                        let callback = interaction
+                            .on_gutter_utility_click
+                            .clone()
+                            .expect("the instance holds the gutter click callback");
+                        drop(options);
+                        callback(range.clone().expect("a range"));
+                    }
+                    "renderCustomHeader" => {
+                        let callback = options
+                            .render_custom_header
+                            .clone()
+                            .expect("the instance holds the header callback");
+                        drop(options);
+                        callback(&self.golden.diffs[diff.as_ref().expect("a diff")]);
+                    }
+                    "renderAnnotation" => {
+                        let callback = options
+                            .render_annotation
+                            .clone()
+                            .expect("the instance holds the annotation callback");
+                        drop(options);
+                        callback(
+                            &DiffLineAnnotation {
+                                side: AnnotationSide::Additions,
+                                line_number: usize::try_from(line_number.expect("a line number"))
+                                    .expect("a non-negative line number"),
+                                metadata: Some(1),
+                            },
+                            &self.golden.diffs[diff.as_ref().expect("a diff")],
+                        );
+                    }
+                    other => panic!("unknown callback {other}"),
+                }
                 Value::Null
             }
             Step::FirstVisible { top } => json!(view.find_first_visible_index(*top)),

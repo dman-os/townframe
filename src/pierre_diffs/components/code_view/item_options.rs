@@ -17,9 +17,10 @@
 //   lazily, as `callbackCache` is). Each resolves the item by its current id
 //   (`ItemOptionsState`) at call time and does nothing when the item is gone
 //   or its type differs, then calls CodeView's current callback.
-//   Divergence (parity/divergences.psv): the user callbacks do not receive the
-//   trailing `context` argument (`CodeViewDiffItemContext`) upstream appends;
-//   a Rust closure that needs the item captures its id.
+//   The user callbacks (`CodeViewOptions.callbacks`) receive the item context
+//   (`CodeViewDiffItemContext`) as their trailing argument, as upstream's do:
+//   the wrapper hands the item as it is when the callback runs (a snapshot:
+//   no borrow of the view's state is held across a user callback).
 // * The selection wrappers (`onLineSelected`, `onLineSelectionStart`,
 //   `onLineSelectionChange`, `onLineSelectionEnd`) are always installed, as
 //   upstream's accessors always return one.
@@ -31,8 +32,11 @@ use std::rc::Weak;
 
 use super::CodeView;
 use super::CodeViewHost;
-use super::options::CodeViewOptions;
+use super::options::CodeViewCallbacks;
+use super::options::CodeViewDiffItemContext;
+use super::options::ItemSelectionCallback;
 use super::state::CodeViewLineSelection;
+use super::state::ItemKind;
 use super::state::ItemOptionsState;
 use crate::components::file_diff::FileDiffOptions;
 use crate::components::file_diff::OnPostRenderCallback;
@@ -52,6 +56,10 @@ use crate::types::patch::FileDiffMetadata;
 use crate::types::view::CodeViewDiffItem;
 use crate::types::view::DiffLineAnnotation;
 use crate::types::view::SelectedLineRange;
+
+/// Reads one of the four user selection callbacks out of the callbacks.
+type SelectCallback<Rendered, LAnnotation> =
+    fn(&CodeViewCallbacks<Rendered, LAnnotation>) -> Option<ItemSelectionCallback<LAnnotation>>;
 
 /// `CodeViewItemCallbackCache`: the wrappers an item has handed out so far.
 pub struct ItemCallbackCache<Rendered, LAnnotation> {
@@ -97,22 +105,25 @@ impl<Rendered, LAnnotation> Default for ItemCallbackCache<Rendered, LAnnotation>
 }
 
 /// `defineItemSharedCallback`'s wrapper: a closure that runs CodeView's
-/// current callback `$($select)` of the options when the item is still
-/// registered, and returns the return type's default otherwise.
+/// current callback `$select` of `options.callbacks` with the item context
+/// appended to its arguments (`$pass` is what each parameter hands over: the
+/// `FileDiff` callback's argument, by reference where the user callback takes
+/// it so), when the item is still registered, and returns the return type's
+/// default otherwise.
 macro_rules! shared_wrapper {
-    ($code_view:ident, $state:ident, ($($arg:ident: $ty:ty),*) -> $ret:ty, $($select:ident).+) => {{
+    ($code_view:ident, $state:ident, ($($arg:ident: $ty:ty => $pass:expr),*) -> $ret:ty, $select:ident) => {{
         let weak = Weak::clone(&$code_view.weak_self);
         let state = Rc::clone($state);
         move |$($arg: $ty),*| -> $ret {
             let code_view = weak
                 .upgrade()
                 .expect("the CodeView outlives its items' callbacks");
-            if code_view.diff_item_id(&state).is_none() {
+            let Some(context) = code_view.item_context(&state) else {
                 return Default::default();
-            }
-            let callback = code_view.state.borrow().options.$($select).+.clone();
+            };
+            let callback = code_view.state.borrow().options.callbacks.$select.clone();
             match callback {
-                Some(callback) => (*callback)($($arg),*),
+                Some(callback) => (*callback)($($pass,)* &context),
                 None => Default::default(),
             }
         }
@@ -125,13 +136,27 @@ where
     Rendered: RenderedContent + 'static,
     LAnnotation: Clone + PartialEq + 'static,
 {
-    /// `getItemOptions(state, 'diff')`: the id of the item the state names,
-    /// when it is still registered as a diff.
-    pub(super) fn diff_item_id(&self, state: &ItemOptionsState) -> Option<String> {
+    /// `getItemOptions(state, 'diff')`: the item the state names, when it is
+    /// still registered as a diff, as the context a callback receives.
+    pub(super) fn item_context(
+        &self,
+        state: &ItemOptionsState,
+    ) -> Option<CodeViewDiffItemContext<LAnnotation>> {
         let id = state.id.borrow();
-        let state = self.state.borrow();
-        let item = state.id_to_item.get(id.as_str())?;
-        matches!(item.borrow().kind, super::state::ItemKind::Diff(_)).then(|| id.clone())
+        let view = self.state.borrow();
+        let item = view.id_to_item.get(id.as_str())?.borrow();
+        let ItemKind::Diff(diff) = &item.kind else {
+            return None;
+        };
+        Some(CodeViewDiffItemContext {
+            item: diff.item.clone(),
+            index: item.index,
+            top: item.top,
+            height: item.height,
+            element: item.element,
+            version: item.version,
+            rendered_options_revision: item.rendered_options_revision,
+        })
     }
 
     /// `defineItemSelectionCallback`'s wrapper for the callback `select` reads
@@ -139,7 +164,7 @@ where
     fn selection_wrapper(
         &self,
         state: &Rc<ItemOptionsState>,
-        select: fn(&CodeViewOptions<Rendered, LAnnotation>) -> Option<SelectionCallback>,
+        select: SelectCallback<Rendered, LAnnotation>,
     ) -> SelectionCallback {
         let weak = Weak::clone(&self.weak_self);
         let state = Rc::clone(state);
@@ -147,9 +172,10 @@ where
             let code_view = weak
                 .upgrade()
                 .expect("the CodeView outlives its items' callbacks");
-            let Some(id) = code_view.diff_item_id(&state) else {
+            let Some(context) = code_view.item_context(&state) else {
                 return;
             };
+            let id = &context.item.id;
             let selection = range.map(|range| CodeViewLineSelection {
                 id: id.clone(),
                 range: range.clone(),
@@ -169,7 +195,7 @@ where
                         .borrow()
                         .selected_lines
                         .as_ref()
-                        .is_some_and(|selected| selected.id == id))
+                        .is_some_and(|selected| selected.id == *id))
             {
                 code_view.apply_selected_lines(
                     selection.clone(),
@@ -188,9 +214,9 @@ where
             if let Some(on_selected_lines_change) = on_selected_lines_change {
                 on_selected_lines_change(selection.as_ref());
             }
-            let callback = select(&code_view.state.borrow().options);
+            let callback = select(&code_view.state.borrow().options.callbacks);
             if let Some(callback) = callback {
-                callback(range);
+                callback(range, &context);
             }
         })
     }
@@ -200,7 +226,7 @@ where
         &self,
         state: &Rc<ItemOptionsState>,
         slot: &mut Option<SelectionCallback>,
-        select: fn(&CodeViewOptions<Rendered, LAnnotation>) -> Option<SelectionCallback>,
+        select: SelectCallback<Rendered, LAnnotation>,
     ) -> SelectionCallback {
         Rc::clone(slot.get_or_insert_with(|| self.selection_wrapper(state, select)))
     }
@@ -225,12 +251,12 @@ where
         // wrapper is made on the first read.
         macro_rules! wrap_shared {
             ($field:ident, $cache:ident, $make:expr) => {
-                if diff.$field.is_some() {
+                if options.callbacks.$field.is_some() {
                     diff.$field = Some(cache.$cache.get_or_insert_with(|| $make).clone());
                 }
             };
             ($group:ident . $field:ident, $cache:ident, $make:expr) => {
-                if diff.$group.$field.is_some() {
+                if options.callbacks.$field.is_some() {
                     diff.$group.$field = Some(cache.$cache.get_or_insert_with(|| $make).clone());
                 }
             };
@@ -241,8 +267,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (file_diff: &FileDiffMetadata) -> Option<Rendered>,
-                diff.render_custom_header
+                (file_diff: &FileDiffMetadata => file_diff) -> Option<Rendered>,
+                render_custom_header
             )))
         );
         wrap_shared!(
@@ -251,8 +277,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (file_diff: &FileDiffMetadata) -> Option<Rendered>,
-                diff.render_header_prefix
+                (file_diff: &FileDiffMetadata => file_diff) -> Option<Rendered>,
+                render_header_prefix
             )))
         );
         wrap_shared!(
@@ -261,8 +287,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (file_diff: &FileDiffMetadata) -> Option<Rendered>,
-                diff.render_header_filename_suffix
+                (file_diff: &FileDiffMetadata => file_diff) -> Option<Rendered>,
+                render_header_filename_suffix
             )))
         );
         wrap_shared!(
@@ -271,8 +297,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (file_diff: &FileDiffMetadata) -> Option<Rendered>,
-                diff.render_header_metadata
+                (file_diff: &FileDiffMetadata => file_diff) -> Option<Rendered>,
+                render_header_metadata
             )))
         );
         wrap_shared!(
@@ -281,8 +307,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (annotation: &DiffLineAnnotation<LAnnotation>, file_diff: &FileDiffMetadata) -> Option<Rendered>,
-                diff.render_annotation
+                (annotation: &DiffLineAnnotation<LAnnotation> => annotation, file_diff: &FileDiffMetadata => file_diff) -> Option<Rendered>,
+                render_annotation
             )))
         );
         wrap_shared!(
@@ -291,8 +317,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (get_hovered_line: &dyn Fn() -> Option<GetHoveredLineResult>) -> Option<Rendered>,
-                diff.render_gutter_utility
+                (get_hovered_line: &dyn Fn() -> Option<GetHoveredLineResult> => get_hovered_line) -> Option<Rendered>,
+                render_gutter_utility
             )))
         );
         wrap_shared!(
@@ -301,8 +327,8 @@ where
             PtrEq(Rc::new(shared_wrapper!(
                 self,
                 state,
-                (element: &NodeKey, phase: PostRenderPhase) -> (),
-                diff.on_post_render
+                (element: &NodeKey => element, phase: PostRenderPhase => &phase) -> (),
+                on_post_render
             )))
         );
         wrap_shared!(
@@ -311,8 +337,8 @@ where
             Rc::new(shared_wrapper!(
                 self,
                 state,
-                (range: SelectedLineRange) -> (),
-                diff.interaction.on_gutter_utility_click
+                (range: SelectedLineRange => &range) -> (),
+                on_gutter_utility_click
             ))
         );
         wrap_shared!(
@@ -321,8 +347,8 @@ where
             Rc::new(shared_wrapper!(
                 self,
                 state,
-                (props: &LineEventProps<NodeKey>) -> (),
-                diff.interaction.on_line_click
+                (props: &LineEventProps<NodeKey> => props) -> (),
+                on_line_click
             ))
         );
         wrap_shared!(
@@ -331,8 +357,8 @@ where
             Rc::new(shared_wrapper!(
                 self,
                 state,
-                (props: &LineEventProps<NodeKey>) -> (),
-                diff.interaction.on_line_number_click
+                (props: &LineEventProps<NodeKey> => props) -> (),
+                on_line_number_click
             ))
         );
         wrap_shared!(
@@ -341,8 +367,8 @@ where
             Rc::new(shared_wrapper!(
                 self,
                 state,
-                (props: &LineEventProps<NodeKey>) -> (),
-                diff.interaction.on_line_enter
+                (props: &LineEventProps<NodeKey> => props) -> (),
+                on_line_enter
             ))
         );
         wrap_shared!(
@@ -351,8 +377,8 @@ where
             Rc::new(shared_wrapper!(
                 self,
                 state,
-                (props: &LineEventProps<NodeKey>) -> (),
-                diff.interaction.on_line_leave
+                (props: &LineEventProps<NodeKey> => props) -> (),
+                on_line_leave
             ))
         );
 
@@ -360,22 +386,22 @@ where
         diff.interaction.on_line_selected = Some(self.cached_selection_wrapper(
             state,
             &mut cache.on_line_selected,
-            |options| options.diff.interaction.on_line_selected.clone(),
+            |callbacks| callbacks.on_line_selected.clone(),
         ));
         diff.interaction.on_line_selection_start = Some(self.cached_selection_wrapper(
             state,
             &mut cache.on_line_selection_start,
-            |options| options.diff.interaction.on_line_selection_start.clone(),
+            |callbacks| callbacks.on_line_selection_start.clone(),
         ));
         diff.interaction.on_line_selection_change = Some(self.cached_selection_wrapper(
             state,
             &mut cache.on_line_selection_change,
-            |options| options.diff.interaction.on_line_selection_change.clone(),
+            |callbacks| callbacks.on_line_selection_change.clone(),
         ));
         diff.interaction.on_line_selection_end = Some(self.cached_selection_wrapper(
             state,
             &mut cache.on_line_selection_end,
-            |options| options.diff.interaction.on_line_selection_end.clone(),
+            |callbacks| callbacks.on_line_selection_end.clone(),
         ));
         diff
     }
