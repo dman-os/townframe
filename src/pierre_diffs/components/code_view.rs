@@ -18,18 +18,22 @@
 //   synchronous behind `DiffsHighlighter`, the Dioxus view is not
 //   component-managed (Q5), and nothing renders into React slots.
 //   `console.error`/`console.warn` on unknown ids return `false` without a log.
-// * The three divs the constructor makes are created here; their style writes,
-//   `setup` and the rest of the DOM shell are C4's. `syncLayout`'s three style
-//   writes are in C2 because `setOptions` runs without `setup`.
-// * `computeRenderRangeAndEmit` (C5) and the element pool (C4) are stubs that
-//   `todo!`; `render` queues the callback on the host's frames as upstream does,
-//   so a test host that never runs a frame never reaches them.
+// * The three divs the constructor makes are created here, with their scaffolding
+//   styles; `setup` and the rest of the DOM shell are `code_view/shell.rs`, the
+//   element pool `code_view/pool.rs` (C4). `syncLayout`'s three style writes
+//   are in C2 because `setOptions` runs without `setup`.
+// * `computeRenderRangeAndEmit` (C5) is a stub that `todo!`s; `render` queues the
+//   callback on the host's frames as upstream does, so a test host that never
+//   runs a frame never reaches it. Tests that call `setup` or a resize handler
+//   (an immediate `render`) switch `render_stub` on until C5 lands.
 
 mod item_options;
 mod items;
 mod layout;
 pub mod options;
+mod pool;
 mod scroll;
+mod shell;
 pub mod state;
 
 #[cfg(test)]
@@ -40,7 +44,11 @@ mod oracle_tests;
 mod scroll_oracle_tests;
 #[cfg(test)]
 mod scroll_upstream_tests;
+#[cfg(test)]
+mod shell_upstream_tests;
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -68,6 +76,7 @@ use crate::components::virtualizer::VirtualizerHost;
 use crate::document::NodeKey;
 use crate::highlighter_types::DiffsHighlighter;
 use crate::managers::resize_manager::ResizeObserverHub;
+use crate::managers::scroll_sync_manager::TimeoutId;
 use crate::managers::universal_rendering_manager::RenderCallback;
 use crate::managers::universal_rendering_manager::UniversalRenderingManager;
 use crate::types::layout::CodeViewLayout;
@@ -92,7 +101,79 @@ pub trait CodeViewHost: VirtualizedFileDiffHost {
     /// `utils/platform.ts` reads, as `new` needs it to choose the scroll
     /// rebase config (`isFirefox()`).
     fn platform_info(&self) -> PlatformInfo;
+    /// `Math.random()`, for the sticky slab's jitter (Q9). A host a test
+    /// scripts replays its sequence.
+    fn random(&self) -> f64;
+    /// `new ResizeObserver(this.handleResize)`: the viewer's own observer, as
+    /// distinct from the one `ResizeManager` shares. Its entries come back
+    /// through `CodeView::handle_resize`.
+    fn create_shell_observer(&self);
+    /// `resizeObserver.observe(element)`
+    fn shell_observe(&self, element: &NodeKey);
+    /// `resizeObserver.unobserve(element)`
+    fn shell_unobserve(&self, element: &NodeKey);
+    /// `resizeObserver.disconnect()`
+    fn shell_disconnect(&self);
+    /// `root.addEventListener` of `scroll` (`CodeView::handle_scroll`) and of
+    /// `wheel`, `touchstart`, `pointerdown` and `keydown`
+    /// (`CodeView::clear_pending_scroll`), all passive.
+    fn add_shell_listeners(&self, root: &NodeKey);
+    /// The matching `removeEventListener`s.
+    fn remove_shell_listeners(&self, root: &NodeKey);
+    /// `document.activeElement`
+    fn active_element(&self) -> Option<NodeKey>;
+    /// `element.shadowRoot?.activeElement`
+    fn shadow_active_element(&self, element: &NodeKey) -> Option<NodeKey>;
+    /// `root.focus({ preventScroll: true })`
+    fn focus_root(&self, root: &NodeKey);
+
+    // The sticky slab's writes, on their own narrow path: they happen on every
+    // frame the slab moves, so a host that renders the slab separately from the
+    // rest of the diff overrides these three. The defaults are the `Document`
+    // writes upstream makes.
+    /// `stickyOffset.style.height = `${height}px``; `None` is `= ''`.
+    fn write_slab_spacer(&self, spacer: NodeKey, height: Option<f64>) {
+        let document = VirtualizerHost::document(self);
+        match height {
+            Some(height) => document.set_style_property(spacer, "height", &css_px(height)),
+            None => document.remove_style_property(spacer, "height"),
+        }
+    }
+    /// `stickyContainer.style.top`/`.bottom`
+    fn write_slab_sticky(&self, slab: NodeKey, top: f64, bottom: f64) {
+        let document = VirtualizerHost::document(self);
+        document.set_style_property(slab, "top", &css_px(top));
+        document.set_style_property(slab, "bottom", &css_px(bottom));
+    }
+    /// `container.style.height = `${height}px``
+    fn write_container_height(&self, container: NodeKey, height: f64) {
+        VirtualizerHost::document(self).set_style_property(container, "height", &css_px(height));
+    }
 }
+
+/// `MOBILE_SAFARI`: a heuristic to detect mobile Safari only.
+fn is_mobile_safari(info: &PlatformInfo) -> bool {
+    let user_agent = info.user_agent.as_str();
+    let is_ios = ["iPhone", "iPad", "iPod"]
+        .iter()
+        .any(|device| user_agent.contains(device));
+    let is_ipad_os = info.platform.as_deref() == Some("MacIntel") && info.max_touch_points > 1;
+    (is_ios || is_ipad_os)
+        && user_agent.contains("AppleWebKit")
+        && user_agent.contains("Safari")
+        && !["CriOS", "FxiOS", "EdgiOS", "OPiOS"]
+            .iter()
+            .any(|browser| user_agent.contains(browser))
+}
+
+/// `${value}px`, with JavaScript's rendering of negative zero.
+pub(crate) fn css_px(value: f64) -> String {
+    format!("{}px", if value == 0.0 { 0.0 } else { value })
+}
+
+/// `CodeViewScrollListener`: called with the logical scroll top and the viewer.
+pub type ScrollListener<Host, Rendered, LAnnotation> =
+    Rc<dyn Fn(f64, &CodeView<Host, Rendered, LAnnotation>)>;
 
 /// The mutable fields of the class (see the header).
 pub(crate) struct State<Host, Rendered, LAnnotation>
@@ -114,10 +195,6 @@ where
     pub(crate) scroll_top: f64,
     /// How far the paged scroll window sits into the logical scroll range.
     pub(crate) scroll_page_offset: f64,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by scroll.rs, which C4 and C5 call")
-    )]
     pub(crate) scroll_rebase_config: ScrollRebaseConfig,
     pub(crate) scroll_dirty: bool,
     /// The cached viewport height, valid while `height_dirty` is false.
@@ -129,14 +206,26 @@ where
     pub(crate) pending_scroll_target: Option<PendingScrollTarget>,
     pub(crate) pending_layout_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_animation: Option<ScrollToAnimation>,
-    pub(crate) header: HeaderFooterHost,
-    pub(crate) footer: HeaderFooterHost,
+    pub(crate) header: HeaderFooterHost<Rendered>,
+    pub(crate) footer: HeaderFooterHost<Rendered>,
     pub(crate) options: CodeViewOptions<Rendered, LAnnotation>,
     pub(crate) root: Option<NodeKey>,
     /// `container: HTMLDivElement | undefined`: undefined after `cleanUp`.
     pub(crate) container: Option<NodeKey>,
+    /// The height last written to `container`, `-1` before the first write.
+    pub(crate) container_height: f64,
+    pub(crate) scroll_interaction_fix_timer: Option<TimeoutId>,
+    pub(crate) pointer_events_disabled: bool,
+    pub(crate) code_overflow_fix: bool,
+    pub(crate) should_fix_container_focus: bool,
+    /// `resizeObserver !== undefined`
+    pub(crate) resize_observing: bool,
     pub(crate) element_pool: Vec<NodeKey>,
     pub(crate) element_pool_version: u64,
+    /// `elementPoolTracker`: the pool version each live shell was made under.
+    pub(crate) element_pool_tracker: HashMap<NodeKey, u64>,
+    pub(crate) scroll_listeners: Vec<(u64, ScrollListener<Host, Rendered, LAnnotation>)>,
+    pub(crate) next_scroll_listener_id: u64,
 }
 
 pub struct CodeView<Host, Rendered, LAnnotation>
@@ -157,9 +246,14 @@ where
     /// virtualizer union (`overscrollSize: 200`).
     pub config: VirtualizerConfig,
     pub(crate) sticky_container: NodeKey,
-    #[expect(dead_code, reason = "C4 sets its height and mounts it")]
     pub(crate) sticky_offset: NodeKey,
+    /// `MOBILE_SAFARI`, from the host's `PlatformInfo`.
+    pub(crate) mobile_safari: bool,
     pub(crate) state: RefCell<State<Host, Rendered, LAnnotation>>,
+    /// Test-only: `render` records its call and does nothing, until C5's pass
+    /// exists for it to run.
+    #[cfg(test)]
+    pub(crate) render_stub: Cell<bool>,
     /// Test-only: the `immediate` argument of every `render` call, in order.
     #[cfg(test)]
     pub(crate) render_calls: RefCell<Vec<bool>>,
@@ -192,6 +286,18 @@ where
             document.create_element("div"),
             document.create_element("div"),
         );
+        document.set_style_property(sticky_offset, "contain", "layout size");
+        for (name, value) in [
+            ("position", "sticky"),
+            ("width", "100%"),
+            ("contain", "layout style inline-size"),
+            ("isolation", "isolate"),
+            ("display", "flex"),
+            ("flex-direction", "column"),
+        ] {
+            document.set_style_property(sticky_container, name, value);
+        }
+        let mobile_safari = is_mobile_safari(&host.platform_info());
         Rc::new_cyclic(|weak: &Weak<Self>| {
             let compute_weak = Weak::clone(weak);
             let compute_render_range_and_emit: RenderCallback = Rc::new(move |timestamp| {
@@ -214,6 +320,7 @@ where
                 },
                 sticky_container,
                 sticky_offset,
+                mobile_safari,
                 state: RefCell::new(State {
                     items: Vec::new(),
                     id_to_item: HashMap::new(),
@@ -240,9 +347,20 @@ where
                     options,
                     root: None,
                     container: Some(container),
+                    container_height: -1.0,
+                    scroll_interaction_fix_timer: None,
+                    pointer_events_disabled: false,
+                    code_overflow_fix: false,
+                    should_fix_container_focus: false,
+                    resize_observing: false,
                     element_pool: Vec::new(),
                     element_pool_version: 0,
+                    element_pool_tracker: HashMap::new(),
+                    scroll_listeners: Vec::new(),
+                    next_scroll_listener_id: 0,
                 }),
+                #[cfg(test)]
+                render_stub: Cell::new(false),
                 #[cfg(test)]
                 render_calls: RefCell::default(),
             }
@@ -290,7 +408,12 @@ where
     /// or run it now (cancelling the queued one).
     pub fn render(&self, immediate: bool) {
         #[cfg(test)]
-        self.render_calls.borrow_mut().push(immediate);
+        {
+            self.render_calls.borrow_mut().push(immediate);
+            if self.render_stub.get() {
+                return;
+            }
+        }
         if immediate {
             self.render_queue
                 .dequeue_render(&self.compute_render_range_and_emit);
@@ -304,19 +427,6 @@ where
     /// `computeRenderRangeAndEmit(timestamp = performance.now())`: C5.
     fn compute_render_range_and_emit(&self, _timestamp: Option<f64>) {
         todo!("C5: computeRenderRangeAndEmit (the render pass)")
-    }
-
-    /// `invalidateElementPool()`: pooled shells made under the old options are
-    /// stale. C4 owns the pool; nothing is queued in it before then.
-    pub(crate) fn invalidate_element_pool(&self) {
-        let mut state = self.state.borrow_mut();
-        state.element_pool_version += 1;
-        state.element_pool.clear();
-    }
-
-    /// `syncContainerHeight()`: C4.
-    pub(crate) fn sync_container_height(&self) {
-        todo!("C4: syncContainerHeight (container height and paged scroll scaffold)")
     }
 
     /// `syncLayout()`: the gap on the sticky container and the paddings as the

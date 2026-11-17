@@ -29,6 +29,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::item_options::ItemCallbackCache;
+use super::options::RenderCodeViewSlotCallback;
 use crate::components::file_diff::RenderedContent;
 use crate::components::virtualized_file_diff::instance::VirtualizedFileDiff;
 use crate::document::NodeKey;
@@ -170,11 +171,22 @@ pub struct ScrollToAnimation {
     pub last_timestamp: f64,
 }
 
-/// `HeaderFooterHost`: the always-rendered header or footer host. C2 only
-/// needs the measured height; C4 adds the element and its render callback.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct HeaderFooterHost {
+/// `HeaderFooterHost`: the always-rendered, non-virtualized header or footer
+/// host: its element, the last-used render callback and the measured height.
+pub struct HeaderFooterHost<Rendered> {
+    pub element: Option<NodeKey>,
+    pub render: Option<RenderCodeViewSlotCallback<Rendered>>,
     pub height: f64,
+}
+
+impl<Rendered> Default for HeaderFooterHost<Rendered> {
+    fn default() -> Self {
+        Self {
+            element: None,
+            render: None,
+            height: 0.0,
+        }
+    }
 }
 
 /// `renderState`

@@ -584,6 +584,14 @@ impl Document {
         });
     }
 
+    /// `element.style.getPropertyValue(name)`: `""` when unset.
+    pub fn get_style_property(&self, node: impl Borrow<NodeKey>, name: &str) -> String {
+        match &self.arena.borrow().node(*node.borrow()).data {
+            NodeData::Element { properties, .. } => properties.get_style_property(name),
+            _ => String::new(),
+        }
+    }
+
     /// `element.style.removeProperty(name)`
     pub fn remove_style_property(&self, node: impl Borrow<NodeKey>, name: &str) {
         let node = *node.borrow();

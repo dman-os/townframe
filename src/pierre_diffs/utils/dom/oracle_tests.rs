@@ -348,6 +348,7 @@ fn platform_detection_matches_the_published_functions() {
             user_agent_data_platform: case.info.user_agent_data_platform.clone(),
             user_agent: case.info.user_agent.clone(),
             has_safari_push_notification: case.info.has_safari_push_notification,
+            max_touch_points: 0,
         };
         let label = format!("{:?}", case.info.user_agent);
         assert_eq!(is_mac_like(&info), case.is_mac_like, "mac {label}");
