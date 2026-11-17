@@ -6,15 +6,25 @@
 //! patch (`DiffInput::from_patch`), so the multi-file text is split here and each file parsed
 //! on first selection and cached. A patch cannot expand its collapsed lines (the view needs the
 //! full file contents for that), so the options bar's expansion does not reach this view.
+//!
+//! `PrCodeView` is the same diff as one `CodeViewView`: every file in one virtualized scroller,
+//! parsed together once for the process, with buttons that reveal a file's first line.
 
 use dioxus::prelude::*;
+use pierre_diffs_dioxus::CodeViewFile;
+use pierre_diffs_dioxus::CodeViewView;
 use pierre_diffs_dioxus::DiffInput;
 use pierre_diffs_dioxus::DiffStyle;
 use pierre_diffs_dioxus::FileDiffView;
+use pierre_diffs_dioxus::PtrEq;
+use pierre_diffs_dioxus::Runtime;
+use pierre_diffs_dioxus::ScrollRequest;
+use pierre_diffs_dioxus::SelectionSide;
 use pierre_diffs_dioxus::Virtualization;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -90,7 +100,9 @@ async fn read_text() -> Result<(String, String), String> {
     use wasm_bindgen_futures::JsFuture;
 
     let unavailable = |why: String| {
-        format!("Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/dayframe.ts showcase-web`, which copies it beside the page.")
+        format!(
+            "Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/dayframe.ts showcase-web`, which copies it beside the page."
+        )
     };
     let window = web_sys::window().expect("the lab runs in a window");
     let response = JsFuture::from(window.fetch_with_str(FETCH_URL))
@@ -191,10 +203,9 @@ fn parsed(diff: &PrDiff, index: usize) -> (Result<DiffInput, String>, Duration) 
     })
 }
 
-#[component]
-pub fn PrView(options: DiffOptions, virtualized: Virtualization) -> Element {
-    // Loaded off the render path, once for the process; the resource resolves immediately on a
-    // later mount.
+/// The diff of the process, `None` while it loads. Loaded off the render path, once; the resource
+/// resolves immediately on a later mount.
+fn use_pr_diff() -> Option<&'static Result<PrDiff, String>> {
     let loaded = use_resource(|| async {
         if let Some(diff) = PR_DIFF.get() {
             return diff;
@@ -202,12 +213,93 @@ pub fn PrView(options: DiffOptions, virtualized: Virtualization) -> Element {
         let diff = load().await;
         PR_DIFF.get_or_init(|| diff)
     });
-    let Some(diff) = *loaded.read() else {
+    let diff = *loaded.read();
+    diff
+}
+
+#[component]
+pub fn PrView(options: DiffOptions, virtualized: Virtualization) -> Element {
+    let Some(diff) = use_pr_diff() else {
         return rsx! { p { class: "text-sm text-text-muted", "Loading the diff..." } };
     };
     match diff {
         Ok(diff) => rsx! { PrFiles { diff, options, virtualized } },
         Err(message) => rsx! { p { role: "alert", class: "text-sm text-foreground", "{message}" } },
+    }
+}
+
+/// Every file of the PR in one `CodeViewView`.
+#[component]
+pub fn PrCodeView(options: DiffOptions, virtualized: Virtualization) -> Element {
+    let Some(diff) = use_pr_diff() else {
+        return rsx! { p { class: "text-sm text-text-muted", "Loading the diff..." } };
+    };
+    match diff {
+        Ok(diff) => rsx! { PrCodeFiles { diff, options, virtualized } },
+        Err(message) => rsx! { p { role: "alert", class: "text-sm text-foreground", "{message}" } },
+    }
+}
+
+#[component]
+fn PrCodeFiles(
+    diff: &'static PrDiff,
+    options: DiffOptions,
+    virtualized: Virtualization,
+) -> Element {
+    // Parsed once per mount, all files together: the view compares each file's diff by identity.
+    let parsed = use_hook(|| {
+        let started = Instant::now();
+        let files = CodeViewFile::<()>::from_patch(&diff.text).map_err(|error| error.message);
+        Rc::new((files, started.elapsed()))
+    });
+    let runtime = use_hook(|| {
+        let start = Instant::now();
+        Runtime {
+            sleep: virtualized.sleep.clone(),
+            now: PtrEq::new(Rc::new(move || start.elapsed().as_secs_f64() * 1000.0)),
+        }
+    });
+    let mut serial = use_signal(|| 0_u64);
+    let mut reveal = use_signal(|| None::<ScrollRequest>);
+    let (files, parse) = &*parsed;
+    let files = match files {
+        Ok(files) => files,
+        Err(message) => {
+            return rsx! { p { role: "alert", class: "text-sm text-foreground", "{message}" } };
+        }
+    };
+    let ids: Vec<String> = [0, files.len() / 2, files.len() - 1]
+        .into_iter()
+        .map(|index| files[index].id.clone())
+        .collect();
+    rsx! {
+        div { class: "flex flex-col gap-3",
+            p { class: "text-sm text-text-muted",
+                "{files.len()} files in one scroller, parsed in {parse.as_secs_f64() * 1000.0:.0} ms."
+            }
+            div { class: "flex flex-wrap items-center gap-3",
+                for (label , id) in ["First file", "Middle file", "Last file"].into_iter().zip(ids) {
+                    button {
+                        key: "{label}",
+                        class: "min-h-12 cursor-pointer rounded-md border border-border bg-card px-4 font-sans text-foreground-muted hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus",
+                        onclick: move |_| {
+                            *serial.write() += 1;
+                            reveal.set(Some(ScrollRequest::to_line(serial(), id.clone(), SelectionSide::Additions, 1)));
+                        },
+                        "Reveal {label}"
+                    }
+                }
+            }
+            div { class: "min-w-0 overflow-hidden rounded-md border border-border",
+                CodeViewView::<()> {
+                    files: files.clone(),
+                    height: virtualized.height.clone(),
+                    runtime: runtime.clone(),
+                    diff_style: options.diff_style.unwrap_or(DiffStyle::Unified),
+                    scroll_to: reveal(),
+                }
+            }
+        }
     }
 }
 
