@@ -21,7 +21,6 @@ impl Deserialize < 'de > for big_cabinet_core::reference::DatumReference
 impl Deserialize < 'de > for big_cabinet_core::reference::DatumTag
 impl Deserialize < 'de > for big_cabinet_core::reference::Location
 impl Deserialize < 'de > for big_cabinet_core::reference::ReferenceDocId
-impl Eq for big_cabinet_core::reference::DocReference
 impl From < ContextError > for big_cabinet_core::doc::StoreError
 impl From < DrawerAccess > for big_cabinet_core::drawer::EntryAccess
 impl From < Vec < u8 > > for big_cabinet_core::dmeta::Bytes
@@ -33,10 +32,7 @@ impl FromStr for big_cabinet_core::drawer::MetaRoot
 impl FromStr for big_cabinet_core::reference::ActorUrl
 impl FromStr for big_cabinet_core::reference::DatumKey
 impl FromStr for big_cabinet_core::reference::DatumReference
-impl FromStr for big_cabinet_core::reference::DocReference
 impl FromStr for big_cabinet_core::reference::Location
-impl Hash for big_cabinet_core::reference::DocReference
-impl PartialEq for big_cabinet_core::reference::DocReference
 impl Serialize for big_cabinet_core::authority::Rights
 impl Serialize for big_cabinet_core::dmeta::Bytes
 impl Serialize for big_cabinet_core::dmeta::Cid
@@ -67,7 +63,6 @@ impl fmt :: Display for big_cabinet_core::reference::ActorUrl
 impl fmt :: Display for big_cabinet_core::reference::DatumKey
 impl fmt :: Display for big_cabinet_core::reference::DatumReference
 impl fmt :: Display for big_cabinet_core::reference::DatumTag
-impl fmt :: Display for big_cabinet_core::reference::DocReference
 impl fmt :: Display for big_cabinet_core::reference::Location
 impl schemars :: JsonSchema for big_cabinet_core::authority::Rights
 impl schemars :: JsonSchema for big_cabinet_core::dmeta::Bytes
@@ -241,13 +236,6 @@ pub impl big_cabinet_core::reference::DatumReference::fn parse_stored (value : &
 pub impl big_cabinet_core::reference::DatumReference::fn pinned (mut self , heads : impl IntoIterator < Item = ChangeHash >) -> Self
 pub impl big_cabinet_core::reference::DatumTag::fn as_str (& self) -> & str
 pub impl big_cabinet_core::reference::DatumTag::fn new (value : impl Into < String >) -> Result < Self , ReferenceError >
-pub impl big_cabinet_core::reference::DocReference::fn document (& self) -> & DocId
-pub impl big_cabinet_core::reference::DocReference::fn heads (& self) -> & [ChangeHash]
-pub impl big_cabinet_core::reference::DocReference::fn new (document : DocId) -> Self
-pub impl big_cabinet_core::reference::DocReference::fn parse (value : & str) -> Result < Self , ReferenceError >
-pub impl big_cabinet_core::reference::DocReference::fn pinned (mut self , heads : impl IntoIterator < Item = ChangeHash >) -> Self
-pub impl big_cabinet_core::reference::DocReference::fn via (& self) -> & [MultibaseKey]
-pub impl big_cabinet_core::reference::DocReference::fn with_via (mut self , via : impl IntoIterator < Item = MultibaseKey >) -> Self
 pub impl big_cabinet_core::reference::Location::fn fragment (& self) -> Option < & str >
 pub impl big_cabinet_core::reference::Location::fn into_reference (self) -> DatumReference
 pub impl big_cabinet_core::reference::Location::fn new (reference : DatumReference , fragment : Option < String > ,) -> Result < Self , ReferenceError >
@@ -382,7 +370,6 @@ pub struct big_cabinet_core::reference::DatumKey  {  }
 pub struct big_cabinet_core::reference::DatumPin  {  }
 pub struct big_cabinet_core::reference::DatumReference  {  }
 pub struct big_cabinet_core::reference::DatumTag  {  }
-pub struct big_cabinet_core::reference::DocReference  {  }
 pub struct big_cabinet_core::reference::Location  {  }
 pub struct big_cabinet_core::schema_compat::CompatibilityOutcome  { result: Compatibility, diagnostics: Vec < Diagnostic > }
 pub struct big_cabinet_core::schema_compat::CompatibilityReport  { json: CompatibilityOutcome, native_storage: CompatibilityOutcome, lexicon: CompatibilityOutcome }
@@ -509,3 +496,4 @@ pub use big_cabinet_core::reference::defs :: DEFS_NSID
 pub use big_cabinet_core::reference::defs :: LEXICON_REF
 pub use big_cabinet_core::reference::defs :: defs_lexicon
 pub use big_cabinet_core::reference::defs :: node_type_libraries
+pub use big_cabinet_core::reference::doc :: DocReference
