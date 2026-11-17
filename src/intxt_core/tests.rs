@@ -91,6 +91,7 @@ fn every_datum_declares_publishes_and_admits() {
             "org.example.intxt.work.gitCommit",
             "org.example.intxt.work.rewrite",
             "org.example.intxt.work.rewrittenFrom",
+            "org.example.intxt.work.githubPull",
             "org.example.intxt.work.gitRef",
             "org.example.intxt.work.jjOperation",
             "org.example.intxt.work.jjChange",
@@ -217,6 +218,17 @@ fn the_adr_examples_are_valid_datums() {
             {"path": "src/url.rs", "status": "renamed", "oldPath": "src/uri.rs"}
         ],
         "patchId": "3f9a1c0de4b2"
+    }));
+    codec_round_trip::<work::GithubPull>(json!({
+        "title": "Splits the reference parser", "body": "Intxt: dtxt:datum:z1/org.example.intxt/main",
+        "state": "merged", "head": "feat/refs", "base": "main",
+        "headSha": "4c1f0a", "baseSha": "9a0e11",
+        "updatedAt": "2026-11-17T10:00:00Z", "url": "https://github.com/o/r/pull/12"
+    }));
+    codec_round_trip::<work::GithubPull>(json!({
+        "title": "t", "body": "", "state": "draft", "head": "h", "base": "b",
+        "headSha": "1", "baseSha": "2", "updatedAt": "2026-11-17T10:00:00Z", "url": "u",
+        "reviewDecision": "approved"
     }));
     codec_round_trip::<work::Rewrite>(json!({"successor": "4c1f0a", "how": "patchId"}));
     codec_round_trip::<work::Rewrite>(json!({"successor": "4c1f0a", "how": "hook"}));
@@ -345,6 +357,12 @@ fn future_fields_and_vocabulary_values_are_carried() {
     let rewrite: work::Rewrite =
         serde_json::from_value(json!({"successor": "4c1f0a", "how": "jjChange"})).unwrap();
     assert_eq!(rewrite.how, work::RewriteHow::Unknown("jjChange".into()));
+    let pull: work::GithubPull = serde_json::from_value(json!({
+        "title": "t", "body": "", "state": "draft", "head": "h", "base": "b",
+        "headSha": "1", "baseSha": "2", "updatedAt": "2026-11-17T10:00:00Z", "url": "u"
+    }))
+    .unwrap();
+    assert_eq!(pull.state, work::PullState::Unknown("draft".into()));
 }
 
 /// A note's content is collaborative text, so a recorder's line splice merges with a concurrent
