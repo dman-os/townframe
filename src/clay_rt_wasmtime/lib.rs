@@ -599,20 +599,36 @@ fn compile_component(engine: &Engine, bytes: &[u8]) -> Result<Component, String>
     unsafe { Component::deserialize(engine, &compiled) }.map_err(|error| error.to_string())
 }
 
-/// `$DAYFRAME_COMPONENT_CACHE`, else the XDG/home cache, keyed by content and engine
-/// compatibility. `None` means the process has no cache location at all (no `HOME`, no
-/// `XDG_CACHE_HOME`); compilation then happens in memory only.
+/// Where compiled artifacts live, set once by a composition root that has app storage of its own.
+static CACHE_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keep compiled components under `directory` (created on first write). A composition root whose
+/// process has no `$HOME` or XDG cache, an Android app, sets this once before it loads a
+/// package; without it every start recompiles every guest. Setting it twice is a programming
+/// error, since artifacts would then be split between two directories.
+pub fn set_component_cache_directory(directory: PathBuf) {
+    CACHE_DIRECTORY
+        .set(directory)
+        .expect("the component cache directory is set once per process");
+}
+
+/// The directory set by [`set_component_cache_directory`], else `$DAYFRAME_COMPONENT_CACHE`,
+/// else the XDG/home cache, keyed by content and engine compatibility. `None` means the process
+/// has no cache location at all; compilation then happens in memory only.
 fn cache_path(engine: &Engine, bytes: &[u8]) -> Option<PathBuf> {
-    let directory = match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
-        Some(directory) => PathBuf::from(directory),
-        None => {
-            let base = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
-                })?;
-            base.join("dayframe").join("components")
-        }
+    let directory = match CACHE_DIRECTORY.get() {
+        Some(directory) => directory.clone(),
+        None => match std::env::var_os("DAYFRAME_COMPONENT_CACHE") {
+            Some(directory) => PathBuf::from(directory),
+            None => {
+                let base = std::env::var_os("XDG_CACHE_HOME")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                    })?;
+                base.join("dayframe").join("components")
+            }
+        },
     };
     let mut key = blake3::Hasher::new();
     key.update(bytes);
@@ -649,9 +665,43 @@ impl WasmPackage {
         Self::from_bytes(bytes).await
     }
 
-    pub async fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
+    /// Compile `bytes` off the polling thread and wait for it. Cranelift runs for seconds on a
+    /// phone, and the caller is a local future the shell polls on its UI thread; compiling in the
+    /// poll froze the frame (and with it the section's loading state) for the whole compile.
+    ///
+    /// Inside a tokio runtime the compile goes to its blocking pool, not a bare thread: a runtime
+    /// with a paused test clock auto-advances virtual time whenever every task is parked, and a
+    /// future parked on a bare thread's oneshot looks parked on nothing, so the clock jumped to the
+    /// next timer (a guest feed's 30 s long poll) while the compile was still running. Tokio
+    /// inhibits that auto-advance while a blocking task is in flight, which makes the compile a
+    /// real wait that a deterministic test clock respects. Without a runtime (the Android shell
+    /// polls on its own executor) a `wasm-compile` thread does the same job.
+    pub async fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
         let engine = engine()?;
-        let component = compile_component(&engine, bytes.as_ref())?;
+        let compile = {
+            let engine = engine.clone();
+            move || compile_component(&engine, &bytes)
+        };
+        let component = match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => runtime
+                .spawn_blocking(compile)
+                .await
+                .expect("the compile task does not panic")?,
+            Err(_) => {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                std::thread::Builder::new()
+                    .name("wasm-compile".into())
+                    .spawn(move || {
+                        // A closed receiver is the activation being cancelled mid-compile (the
+                        // micro was disabled); the finished artifact is already in the cache.
+                        sender.send(compile()).ok();
+                    })
+                    .expect("the OS can spawn a compile thread");
+                receiver
+                    .await
+                    .expect("the compile thread reports before it exits")?
+            }
+        };
         let linker = linker(&engine)?;
         Ok(Self {
             engine,
