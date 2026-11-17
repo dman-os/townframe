@@ -195,7 +195,7 @@ async fn installing_intxt_twice_changes_nothing() {
         let before = crate::cmds::intxt::call(
             client,
             GetCartridge {
-                id: intxt_core::cartridge::cartridge(&wasm).id,
+                id: intxt_core::cartridge::cartridge(&wasm).id.clone(),
             },
         )
         .await
