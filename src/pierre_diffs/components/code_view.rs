@@ -22,24 +22,34 @@
 //   styles; `setup` and the rest of the DOM shell are `code_view/shell.rs`, the
 //   element pool `code_view/pool.rs` (C4). `syncLayout`'s three style writes
 //   are in C2 because `setOptions` runs without `setup`.
-// * `computeRenderRangeAndEmit` (C5) is a stub that `todo!`s; `render` queues the
-//   callback on the host's frames as upstream does, so a test host that never
-//   runs a frame never reaches it. Tests that call `setup` or a resize handler
-//   (an immediate `render`) switch `render_stub` on until C5 lands.
+// * The render pass (`render`, `computeRenderRangeAndEmit`, `scrollTo`, C5) is
+//   `code_view/render.rs`; `render` queues the callback on the host's frames as
+//   upstream does.
 
 mod item_options;
 mod items;
 mod layout;
 pub mod options;
 mod pool;
+mod render;
 mod scroll;
 mod shell;
 pub mod state;
 
 #[cfg(test)]
+mod element_pooling_upstream_tests;
+#[cfg(test)]
+mod harness_tests;
+#[cfg(test)]
+mod header_footer_upstream_tests;
+#[cfg(test)]
+mod item_cases_upstream_tests;
+#[cfg(test)]
 mod items_upstream_tests;
 #[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod scroll_anchoring_upstream_tests;
 #[cfg(test)]
 mod scroll_oracle_tests;
 #[cfg(test)]
@@ -49,8 +59,6 @@ mod shell_oracle_tests;
 #[cfg(test)]
 mod shell_upstream_tests;
 
-#[cfg(test)]
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -106,6 +114,10 @@ pub trait CodeViewHost: VirtualizedFileDiffHost {
     /// `Math.random()`, for the sticky slab's jitter (Q9). A host a test
     /// scripts replays its sequence.
     fn random(&self) -> f64;
+    /// `performance.now()`: the clock the frame timestamps are on, for
+    /// `computeRenderRangeAndEmit`'s default timestamp and the start of a
+    /// smooth scroll's animation.
+    fn now(&self) -> f64;
     /// `new ResizeObserver(this.handleResize)`: the viewer's own observer, as
     /// distinct from the one `ResizeManager` shares. Its entries come back
     /// through `CodeView::handle_resize`.
@@ -252,10 +264,6 @@ where
     /// `MOBILE_SAFARI`, from the host's `PlatformInfo`.
     pub(crate) mobile_safari: bool,
     pub(crate) state: RefCell<State<Host, Rendered, LAnnotation>>,
-    /// Test-only: `render` records its call and does nothing, until C5's pass
-    /// exists for it to run.
-    #[cfg(test)]
-    pub(crate) render_stub: Cell<bool>,
     /// Test-only: the `immediate` argument of every `render` call, in order.
     #[cfg(test)]
     pub(crate) render_calls: RefCell<Vec<bool>>,
@@ -362,8 +370,6 @@ where
                     next_scroll_listener_id: 0,
                 }),
                 #[cfg(test)]
-                render_stub: Cell::new(false),
-                #[cfg(test)]
                 render_calls: RefCell::default(),
             }
         })
@@ -404,31 +410,6 @@ where
     /// `getSelectedLines()`
     pub fn get_selected_lines(&self) -> Option<CodeViewLineSelection> {
         self.state.borrow().selected_lines.clone()
-    }
-
-    /// `render(immediate)`: queue `computeRenderRangeAndEmit` on the next frame,
-    /// or run it now (cancelling the queued one).
-    pub fn render(&self, immediate: bool) {
-        #[cfg(test)]
-        {
-            self.render_calls.borrow_mut().push(immediate);
-            if self.render_stub.get() {
-                return;
-            }
-        }
-        if immediate {
-            self.render_queue
-                .dequeue_render(&self.compute_render_range_and_emit);
-            self.compute_render_range_and_emit(None);
-        } else {
-            self.render_queue
-                .queue_render(&self.compute_render_range_and_emit);
-        }
-    }
-
-    /// `computeRenderRangeAndEmit(timestamp = performance.now())`: C5.
-    fn compute_render_range_and_emit(&self, _timestamp: Option<f64>) {
-        todo!("C5: computeRenderRangeAndEmit (the render pass)")
     }
 
     /// `syncLayout()`: the gap on the sticky container and the paddings as the
