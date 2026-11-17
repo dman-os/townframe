@@ -165,8 +165,8 @@ fn each_native_mount_renders_in_its_own_scope_and_a_sibling_leaving_does_not_rer
     let counts = Rc::new(RefCell::new(Vec::<Signal<u64>>::new()));
     let (reference, _guard) = components
         .publish(&owner, {
-            let renders = renders.clone();
-            let counts = counts.clone();
+            let renders = Rc::clone(&renders);
+            let counts = Rc::clone(&counts);
             move || {
                 renders.set(renders.get() + 1);
                 let count = use_signal(|| 0_u64);
@@ -192,7 +192,8 @@ fn each_native_mount_renders_in_its_own_scope_and_a_sibling_leaving_does_not_rer
         }
     }
     let second = Rc::new(Cell::new(None));
-    let mut dom = VirtualDom::new_with_props(app, (components, owner, reference, second.clone()));
+    let mut dom =
+        VirtualDom::new_with_props(app, (components, owner, reference, Rc::clone(&second)));
     let mut tree = SurfaceTree::new();
     dom.rebuild(&mut tree);
     assert_eq!(tree.text_content(), "0;0;");
