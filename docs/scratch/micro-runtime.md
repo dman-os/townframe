@@ -128,8 +128,38 @@ language separately.
 
    Not found in Boa: streams, `crypto` and `Blob`. Boa's own (bare) engine also needs no C toolchain, which removes
    the spike's wasip3 build problem (`rquickjs-sys` and wasi-sdk). To decide: whether Boa builds as a p3 component
-   with Wizer pre-initialization, and its memory per micro against QuickJS's 1.45 MB. Audit wasm-rquickjs's shims
-   against the same WinterTC list.
+   with Wizer pre-initialization, and its memory per micro against QuickJS's 1.45 MB.
+
+   **wasm-rquickjs, audited 2026-11-17** (README and GitHub API, golemcloud/wasm-rquickjs):
+   - **Age and activity.** Created 2025-06-13, Apache-2.0, last pushed 2026-11-17. v0.5.3 came out on 2026-11-13,
+     after 10 releases in five weeks. There are two main maintainers (vigoo, about 1,870 commits; noise64, about
+     1,170) and a few others, and much of the recent work is co-authored with an agent account. 23 stars and 5
+     forks: its adoption is mostly Golem itself. `main` (0.5.x) targets Golem 2.0; `v0.4.x` is a maintenance line.
+   - **What it does.** It generates a Rust crate that wraps the JS on QuickJS-ng 0.16.2 (rquickjs 0.14, with
+     Golem's patched fork) and builds it into a component.
+   - **Component model: the heavy lifting is done.**
+     - WIT imports and exports, exported and imported resources, mapped `result` errors.
+     - Preview 3 is the only target (Preview 2 was removed in 0.5.3), including async exports and futures/streams
+       (with limits: a synchronous export can't return a `future` or `stream`).
+     - `.d.ts` generation from WIT.
+     - Wizer pre-initialization of p3 components, made deterministic and refusing external I/O during init.
+     - Stated limits: at most 26 parameters, no anonymous interfaces, no resources declared directly in a world.
+   - **WinterTC coverage is far beyond Boa's.**
+     - `fetch`, `Headers`, `Request`, `Response`, `FormData`, `Blob`, `File`, `URL` and `URLSearchParams`.
+     - The full WHATWG streams (readable, writable and transform, BYOB included).
+     - Timers, `AbortController`, `DOMException`, `TextEncoder`/`TextDecoder` and their stream forms.
+     - `MessageChannel`, `EventTarget`/`Event`, a subset of `Intl`, `crypto.getRandomValues` and `randomUUID`,
+       and `performance.now` on the WASI monotonic clock.
+     - A large Node 22 compatibility layer, checked against a vendored Node test suite and an npm library tracker.
+   - **Risks.** A small team whose roadmap is Golem's. It depends on forks of rquickjs and of wit-bindgen ("repaired
+     0.63"). Each JS program becomes a Rust crate build. That doesn't matter for us, because the spike ran one shared
+     engine that loads micro source as data, so there's one engine build and no per-micro Rust build. The spike's
+     wasip3 C-toolchain workaround still applies.
+
+   **Leaning: wasm-rquickjs.** It has already done the component-model and WinterTC work we would otherwise write
+   around Boa. Boa stays the fallback if the forks or the Golem coupling become a problem. Before committing, check
+   whether upstream will take our needs (the eval-module shape, `dispatch.local` egress) or whether we would carry a
+   fork.
 
 ## First spike (proposed)
 
