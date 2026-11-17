@@ -274,9 +274,9 @@ impl Snapshot {
                 })
                 .remove("")
                 .expect("the file is an item");
-                // Only an unstable Lexicon may be dropped: a stable one has data in drawers and
+                // Only an unstable Lexicon (the default) may be dropped: a stable one has data in drawers and
                 // may be named by other cartridges, so it is deprecated and keeps shipping.
-                if file.unstable.is_none() {
+                if file.is_stable() {
                     problems.evolution.push(format!(
                         "{nsid}: breaking change: the stable Lexicon is no longer published; there \
                          is no retirement path, deprecate it and keep shipping it"
@@ -423,5 +423,43 @@ mod tests {
                 .any(|line| line.contains("removed or renamed") && line.contains(&entry.nsid)),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn only_an_unstable_lexicon_may_stop_being_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = Snapshot::generate().unwrap();
+        snapshot.bless(dir.path()).unwrap();
+        let stale = |name: &str, lexicon: Value| {
+            std::fs::write(
+                dir.path().join(format!("lexicons/{name}.json")),
+                render(&lexicon),
+            )
+            .unwrap();
+            snapshot.problems(dir.path()).unwrap().evolution
+        };
+        let defs = json!({"main": {"type": "object", "properties": {}}});
+        let unstable = stale(
+            "x.dropped",
+            json!({"lexicon": 1, "id": "x.dropped", "defs": defs}),
+        );
+        assert!(unstable.is_empty(), "{unstable:?}");
+        let stable = stale(
+            "x.kept",
+            json!({"lexicon": 1, "id": "x.kept", "revision": 1, "defs": defs}),
+        );
+        assert!(
+            stable
+                .iter()
+                .any(|line| line.contains("x.kept") && line.contains("no retirement path")),
+            "{stable:?}"
+        );
+    }
+
+    #[test]
+    fn a_corpus_of_unstable_items_stabilizes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = Snapshot::generate().unwrap();
+        assert!(snapshot.stabilized(dir.path()).unwrap().is_empty());
     }
 }
