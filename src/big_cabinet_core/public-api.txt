@@ -180,10 +180,13 @@ pub impl big_cabinet_core::dmeta::Uuid7::fn unix_millis (& self) -> u64
 pub impl big_cabinet_core::doc::CommandId::fn as_str (& self) -> & str
 pub impl big_cabinet_core::doc::DatumKinds::fn allows (& self , key : & DatumKey) -> bool
 pub impl big_cabinet_core::doc::DatumKinds::fn covers (& self , other : & Self) -> bool
+pub impl big_cabinet_core::doc::DatumKinds::fn union (self , other : Self) -> Self
 pub impl big_cabinet_core::doc::DatumPatch::fn is_empty (& self) -> bool
 pub impl big_cabinet_core::doc::DocScope::fn ensure_doc_ids (& self) -> Result < () , DocsError >
 pub impl big_cabinet_core::doc::DocScope::fn read_all < I > (documents : I) -> BTreeMap < DocId , DatumKinds > where I : IntoIterator < Item = DocId > ,
 pub impl big_cabinet_core::doc::DocsError::fn ensure_doc_id (doc_id : & DocId) -> Result < () , Self >
+pub impl big_cabinet_core::doc::DrawerReach::fn all_kinds (access : DrawerAccess) -> Self
+pub impl big_cabinet_core::doc::DrawerReach::fn covers (& self , other : & Self) -> bool
 pub impl big_cabinet_core::drawer::Drawer::fn groups (& self) -> Option < DrawerGroups >
 pub impl big_cabinet_core::drawer::Drawer::fn self_doc () -> Self
 pub impl big_cabinet_core::drawer::Drawer::fn sensitive_root (& self) -> Option < DocId >
@@ -297,7 +300,8 @@ pub struct big_cabinet_core::doc::DatumPage  { events: Vec < DatumEvent >, throu
 pub struct big_cabinet_core::doc::DatumPatch  { set: BTreeMap < DatumKey , Json >, remove: BTreeSet < DatumKey > }
 pub struct big_cabinet_core::doc::DatumVersion  { heads: Vec < ChangeHash >, clock: u64 }
 pub struct big_cabinet_core::doc::DatumsRead  { heads: Vec < ChangeHash >, datums: BTreeMap < DatumKey , DatumRead > }
-pub struct big_cabinet_core::doc::DocScope  { read: BTreeMap < DocId , DatumKinds >, write: BTreeMap < DocId , DatumKinds >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerAccess > }
+pub struct big_cabinet_core::doc::DocScope  { read: BTreeMap < DocId , DatumKinds >, write: BTreeMap < DocId , DatumKinds >, create: BTreeSet < String >, drawers: BTreeMap < DocId , DrawerReach > }
+pub struct big_cabinet_core::doc::DrawerReach  { access: DrawerAccess, kinds: DatumKinds }
 pub struct big_cabinet_core::doc::ListDatums  { capability: CapId, doc_id: DocId, at: At, with_authors: bool }
 pub struct big_cabinet_core::doc::MergeDoc  { capability: CapId, command: Option < CommandId >, source_id: DocId, at: At, target_id: DocId }
 pub struct big_cabinet_core::doc::MintDocCapability  { scope: DocScope, rights: Rights, subject: Option < Uuid7 > }

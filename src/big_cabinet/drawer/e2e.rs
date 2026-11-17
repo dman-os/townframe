@@ -51,6 +51,8 @@ use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 const NOTE: &str = "org.example.note";
+/// A second datum kind, for the tests that narrow a drawer reach to one kind.
+const SECRET: &str = "org.example.secret";
 
 fn note(text: &str) -> (DatumKey, Value) {
     (
@@ -70,6 +72,13 @@ fn note_linking(text: &str, target_doc: &DocId) -> (DatumKey, Value) {
     )
 }
 
+fn secret(text: &str) -> (DatumKey, Value) {
+    (
+        format!("{SECRET}/main").parse().unwrap(),
+        json!({"$type": SECRET, "value": text}),
+    )
+}
+
 fn schemas() -> Arc<SchemaRepo> {
     let lexicon = json!({
         "lexicon": 1,
@@ -83,10 +92,22 @@ fn schemas() -> Arc<SchemaRepo> {
             }
         }}}
     });
+    let secret_lexicon = json!({
+        "lexicon": 1,
+        "id": SECRET,
+        "defs": {"main": {"type": "record", "key": "tid", "record": {
+            "type": "object",
+            "required": ["value"],
+            "properties": {"value": {"type": "string"}}
+        }}}
+    });
     Arc::new(
         SchemaRepo::open([crate::schema::SchemaRegistrationGroup::new(
             None,
-            [crate::schema::SchemaRegistration::new(NOTE, lexicon)],
+            [
+                crate::schema::SchemaRegistration::new(NOTE, lexicon),
+                crate::schema::SchemaRegistration::new(SECRET, secret_lexicon),
+            ],
             Vec::new(),
         )])
         .unwrap(),
