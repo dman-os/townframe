@@ -6,24 +6,20 @@
 //! counter's `increment` call, and the panel row it declares into the `layout.panels` collection,
 //! whose attachment is a lazy endpoint to the counter's `view`. The wasm guest reads only the
 //! constants; the composition root reads `manifest()`.
-use clay_mdk::Access;
-use clay_mdk::AttachmentDeclaration;
-use clay_mdk::BindingResolution;
-use clay_mdk::ConfigurationRequest;
-use clay_mdk::ContributionDeclaration;
-use clay_mdk::Entrypoints;
-use clay_mdk::FacetAccess;
+use clay_mdk::ComponentDecl;
+use clay_mdk::ConfigDecl;
+use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
-use clay_mdk::Nsid;
-use clay_mdk::PublicationDeclaration;
-use clay_mdk::PublicationKind;
-use clay_mdk::Request;
+use clay_mdk::PackageDecl;
 use clay_mdk::Sidecar;
-use micro_layout_manifest::PANELS;
-use micro_settings_manifest::SECTIONS;
+use micro_layout_manifest::LayoutPanels;
+use micro_layout_manifest::Panel;
+use micro_settings_manifest::Section;
+use micro_settings_manifest::SettingsSections;
 use micro_toolbar_manifest::ACTION_CONTRACT;
-use micro_toolbar_manifest::BUTTONS;
+use micro_toolbar_manifest::Button;
+use micro_toolbar_manifest::ToolbarButtons;
 
 pub const ID: &str = "dayframe.counter";
 pub const PACKAGE_VERSION: u32 = 1;
@@ -50,119 +46,68 @@ pub const TOOLBAR_BINDING: &str = "toolbar";
 /// The local binding name under which the counter contributes its layout panel.
 pub const PANELS_BINDING: &str = "panels";
 
+/// The counter package's identity.
+pub struct Counter;
+
+impl PackageDecl for Counter {
+    const ID: &'static str = ID;
+    const VERSION: u32 = PACKAGE_VERSION;
+    const AUTHORITY: &'static str = AUTHORITY;
+}
+
+/// The counter's configuration facet: the count, a plain `u64`.
+pub struct CounterConfig;
+
+impl ConfigDecl for CounterConfig {
+    const BINDING: &'static str = CONFIG_NAME;
+    const NSID: &'static str = CONFIG_TAG;
+    const KEY: &'static str = CONFIG_KEY;
+    type Value = u64;
+}
+
+/// The counter's full presentation, published as [`VIEW`].
+pub struct CounterView;
+
+impl ComponentDecl for CounterView {
+    const NAME: &'static str = VIEW;
+}
+
+/// The counter's compact presentation, published as [`BADGE`].
+pub struct CounterBadge;
+
+impl ComponentDecl for CounterBadge {
+    const NAME: &'static str = BADGE;
+}
+
 pub fn manifest() -> MicroManifest {
-    MicroManifest {
-        entrypoints: Entrypoints::micro_client(),
-        publications: vec![
-            PublicationDeclaration {
-                name: VIEW.into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-            PublicationDeclaration {
-                name: BADGE.into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-            PublicationDeclaration {
-                name: COUNT.into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal(COUNT_CONTRACT)),
-            },
-            PublicationDeclaration {
-                name: INCREMENT.into(),
-                kind: PublicationKind::Call,
-                contract: Some(Nsid::literal(ACTION_CONTRACT)),
-            },
-        ],
-        requires: vec![],
-        configuration_requests: vec![ConfigurationRequest {
-            binding: CONFIG_NAME.into(),
-            facets: vec![FacetAccess {
-                tag: Nsid::literal(CONFIG_TAG),
-                key_id: Some(CONFIG_KEY.into()),
-                read: true,
-                write: true,
-                create: false,
-                delete: false,
-            }],
-        }],
-        collection_contracts: vec![],
-        collection_requests: vec![
-            Request {
-                binding: SECTIONS_BINDING.into(),
-                contract: Nsid::literal(SECTIONS),
-                access: Some(Access::Write),
-                necessity: Necessity::Optional,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-            Request {
-                binding: TOOLBAR_BINDING.into(),
-                contract: Nsid::literal(BUTTONS),
-                access: Some(Access::Write),
-                necessity: Necessity::Optional,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-            Request {
-                binding: PANELS_BINDING.into(),
-                contract: Nsid::literal(PANELS),
-                access: Some(Access::Write),
-                necessity: Necessity::Optional,
-                resolution: BindingResolution::Configured,
-                min_revision: None,
-            },
-        ],
-        contributions: vec![
-            ContributionDeclaration {
-                id: "settings-section".into(),
-                binding: SECTIONS_BINDING.into(),
-                key: ID.into(),
-                payload: serde_json::json!({
-                    "title": "Counter (Wasm)",
-                    "detail": { "$attachment": 0 },
-                }),
-                attachments: vec![AttachmentDeclaration {
-                    index: 0,
-                    publication: VIEW.into(),
-                }],
-            },
-            ContributionDeclaration {
-                id: "toolbar-button".into(),
-                binding: TOOLBAR_BINDING.into(),
-                key: INCREMENT.into(),
-                payload: serde_json::json!({
-                    "label": "Increment",
-                    "icon": "plus",
-                    "action": { "$attachment": 0 },
-                }),
-                attachments: vec![AttachmentDeclaration {
-                    index: 0,
-                    publication: INCREMENT.into(),
-                }],
-            },
-            ContributionDeclaration {
-                id: "layout-panel".into(),
-                binding: PANELS_BINDING.into(),
-                key: ID.into(),
-                payload: serde_json::json!({
-                    "title": "Counter (Wasm)",
-                    "content": { "$attachment": 0 },
-                }),
-                attachments: vec![AttachmentDeclaration {
-                    index: 0,
-                    publication: VIEW.into(),
-                }],
-            },
-        ],
-        extra: Default::default(),
-    }
+    ManifestBuilder::new()
+        .component::<CounterView>()
+        .component::<CounterBadge>()
+        .call(COUNT, COUNT_CONTRACT)
+        .call(INCREMENT, ACTION_CONTRACT)
+        .config::<CounterConfig>()
+        .writes::<SettingsSections>(SECTIONS_BINDING, Necessity::Optional)
+        .writes::<ToolbarButtons>(TOOLBAR_BINDING, Necessity::Optional)
+        .writes::<LayoutPanels>(PANELS_BINDING, Necessity::Optional)
+        .contributes::<SettingsSections>("settings-section", ID, |at| Section {
+            title: "Counter (Wasm)".into(),
+            detail: at.own::<CounterView>(),
+        })
+        .contributes::<ToolbarButtons>("toolbar-button", INCREMENT, |at| Button {
+            label: "Increment".into(),
+            icon: "plus".into(),
+            action: at.by_name(INCREMENT),
+        })
+        .contributes::<LayoutPanels>("layout-panel", ID, |at| Panel {
+            title: "Counter (Wasm)".into(),
+            content: at.own::<CounterView>(),
+        })
+        .build()
 }
 
 /// The counter package as its sidecar carries it: identity, authority and manifest.
 pub fn sidecar() -> Sidecar {
-    Sidecar::new(ID, PACKAGE_VERSION, manifest()).with_authority(AUTHORITY)
+    Sidecar::of::<Counter>(manifest())
 }
 
 #[cfg(test)]

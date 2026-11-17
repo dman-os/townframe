@@ -38,6 +38,8 @@
     --df-color-on-accent: var(--scheme-color-on-secondary);
     --df-color-accent-container: var(--scheme-color-secondary-container);
     --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --df-color-selected: var(--scheme-color-secondary-container);
+    --df-color-on-selected: var(--scheme-color-on-secondary-container);
     --df-color-danger: var(--scheme-color-error);
     --df-color-on-danger: var(--scheme-color-on-error);
     --df-color-success: var(--scheme-color-tertiary);

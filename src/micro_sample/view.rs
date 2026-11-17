@@ -62,7 +62,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                                 value: "{config.greeting}",
                                 oninput: move |event| {
                                     let mut next = SampleConfig { enabled: config.enabled, greeting: event.value() };
-                                    next.greeting.truncate(120);
+                                    clamp_greeting(&mut next.greeting);
                                     match facet.write(next) {
                                         Ok(operation) => {
                                              track(operation);
@@ -101,5 +101,17 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                 p { role: "status", "Operation {receipt.id}: {receipt.status:?}" }
             }
         }
+    }
+}
+
+/// The most characters a greeting keeps. A byte limit would cut a multi-byte character in two,
+/// which `String::truncate` refuses by panicking: Bombadil typed one into the field in the
+/// browser build and the sample's view took the page's listener down with it.
+const GREETING_LIMIT: usize = 120;
+
+/// Cut `greeting` to [`GREETING_LIMIT`] characters.
+pub(crate) fn clamp_greeting(greeting: &mut String) {
+    if let Some((end, _)) = greeting.char_indices().nth(GREETING_LIMIT) {
+        greeting.truncate(end);
     }
 }

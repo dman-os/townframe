@@ -212,17 +212,19 @@ fn a_config_acl_naming_an_owner_plug_is_a_programming_error() {
         .mock_documents()
         .bind_config("alpha".into(), "a".into(), "main".into());
     let instance = host.start("alpha");
-    let _ = service.grant_config(
-        &host,
-        &instance,
-        "alpha",
-        vec![RoutineFacetAccess {
-            owner_plug_id: Some("beta".into()),
-            tag: "org.example.config".into(),
-            read: true,
-            ..Default::default()
-        }],
-    );
+    service
+        .grant_config(
+            &host,
+            &instance,
+            "alpha",
+            vec![RoutineFacetAccess {
+                owner_plug_id: Some("beta".into()),
+                tag: "org.example.config".into(),
+                read: true,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
 }
 
 #[test]

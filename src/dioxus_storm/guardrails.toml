@@ -1,0 +1,9 @@
+version = 1
+role = "foundation"
+dependency_reason = "test-only support for the UI crates (a dev-dependency of `ui` and `clay_dioxus_kit`): Dioxus and tokio only, never a backend or a renderer"
+allowed_dependencies = [
+]
+# Every public type is a Dioxus type (`VirtualDom`, `Element`) or a std one.
+allow_external_api_types = true
+
+[builds.native]

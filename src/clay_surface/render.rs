@@ -75,7 +75,7 @@ impl<C: Clone> SurfaceTree<C> {
                                 listener_name,
                                 self.revision,
                                 guest_node_id,
-                                dispatch.clone(),
+                                std::rc::Rc::clone(dispatch),
                             )
                             .expect("validated surface listener"),
                         );
@@ -215,7 +215,7 @@ macro_rules! expand_surface_event_listener {
         }
     };
     (@serialize Mounted, $data:ident, $platform:expr) => {{
-        let _ = $platform;
+        let _platform = $platform;
         "null".to_owned()
     }};
     (@serialize $group:ident, $data:ident, $platform:expr) => {{
