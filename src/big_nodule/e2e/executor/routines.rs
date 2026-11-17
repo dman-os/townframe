@@ -381,14 +381,12 @@ async fn a_local_initializer_target_is_served_with_its_implementing_routines_cap
     let mut cartridge = alpha(&[PING, SETUP], &[REMOTE, OTHER], &[]);
     uses(&mut cartridge, PING, REMOTE, RoutineUse::default());
     uses(&mut cartridge, SETUP, OTHER, RoutineUse::default());
-    nodule_mut(&mut cartridge).initialization.insert(
-        "setup".to_owned(),
-        Initializer {
-            target: SETUP.parse().unwrap(),
-            mode: RunMode::Once,
-            extra: Default::default(),
-        },
-    );
+    nodule_mut(&mut cartridge).initialization.push(Initializer {
+        key: "setup".to_owned(),
+        target: SETUP.parse().unwrap(),
+        mode: RunMode::Once,
+        extra: Default::default(),
+    });
     let (node, executor, _) = hosted(cartridge, &["org.example.remote"]).await;
     node.until(ALPHA, Readiness::Ready).await;
 
