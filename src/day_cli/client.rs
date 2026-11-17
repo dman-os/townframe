@@ -39,6 +39,7 @@ use method_core::Unary;
 use serde_json::Value;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use std::pin::Pin;
@@ -322,7 +323,7 @@ impl NodeClient {
                     method: http::Method::POST,
                     path: format!("xrpc/{nsid}"),
                     headers,
-                    body: serde_json::to_vec(input)?,
+                    body: XrpcBody::json(serde_json::to_vec(input)?),
                 }
             }
             HttpMethod::Get => XrpcRequest {
@@ -332,13 +333,13 @@ impl NodeClient {
                     serde_urlencoded::to_string(query_pairs(input)?)?
                 ),
                 headers: http::HeaderMap::new(),
-                body: Vec::new(),
+                body: XrpcBody::json(Vec::new()),
             },
         };
         let response = self.exchange(request).await?;
         Ok(Reply {
             status: response.status.as_u16(),
-            body: serde_json::from_slice(&response.body)?,
+            body: serde_json::from_slice(&json_bytes(response.body)?)?,
         })
     }
 
@@ -346,18 +347,19 @@ impl NodeClient {
     /// client serves itself. The one place either transport is spoken, for [`Self::call`] and
     /// for typed clients over [`HttpTransport`].
     async fn exchange(&self, request: XrpcRequest) -> Res<XrpcResponse> {
+        let body = json_bytes(request.body)?;
         match &self.transport {
             Transport::Socket(http) => {
                 let response = http
                     .request(request.method, format!("http://localhost/{}", request.path))
                     .headers(request.headers)
-                    .body(request.body)
+                    .body(body)
                     .send()
                     .await?;
                 Ok(XrpcResponse {
                     status: response.status(),
                     headers: response.headers().clone(),
-                    body: response.bytes().await?.to_vec(),
+                    body: XrpcBody::json(response.bytes().await?),
                 })
             }
             Transport::Holder(running) => {
@@ -370,14 +372,14 @@ impl NodeClient {
                 let response = running
                     .1
                     .clone()
-                    .oneshot(builder.body(axum::body::Body::from(request.body))?)
+                    .oneshot(builder.body(axum::body::Body::from(body))?)
                     .await
                     .unwrap_or_else(|never| match never {});
                 let (parts, body) = response.into_parts();
                 Ok(XrpcResponse {
                     status: parts.status,
                     headers: parts.headers,
-                    body: axum::body::to_bytes(body, MAX_BODY_BYTES).await?.to_vec(),
+                    body: XrpcBody::json(axum::body::to_bytes(body, MAX_BODY_BYTES).await?),
                 })
             }
         }
@@ -619,6 +621,15 @@ impl HttpTransport for &NodeClient {
             .map_err(|error| HttpTransportError {
                 message: format!("{error:#}"),
             })
+    }
+}
+
+/// The bytes of a JSON body: the node client's `exchange` carries JSON messages only. A byte body
+/// goes through [`NodeClient::call_raw`], which streams it, so one here is a caller's mistake.
+fn json_bytes(body: XrpcBody) -> Res<Vec<u8>> {
+    match body {
+        XrpcBody::Json(bytes) => Ok(bytes),
+        XrpcBody::Bytes(_) => eyre::bail!("a byte body goes through NodeClient::call_raw"),
     }
 }
 

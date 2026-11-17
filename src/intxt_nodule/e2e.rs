@@ -38,6 +38,7 @@ use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
 use service_utils_rs::ClientError;
@@ -69,6 +70,9 @@ struct Router(axum::Router);
 
 impl HttpTransport for Router {
     async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        let XrpcBody::Json(body) = request.body else {
+            panic!("intxt's methods carry JSON bodies only");
+        };
         let mut builder = http::Request::builder()
             .method(request.method)
             .uri(format!("/{}", request.path));
@@ -76,17 +80,14 @@ impl HttpTransport for Router {
         let response = self
             .0
             .clone()
-            .oneshot(builder.body(axum::body::Body::from(request.body)).unwrap())
+            .oneshot(builder.body(axum::body::Body::from(body)).unwrap())
             .await
             .unwrap_or_else(|never| match never {});
         let (parts, body) = response.into_parts();
         Ok(XrpcResponse {
             status: parts.status,
             headers: parts.headers,
-            body: axum::body::to_bytes(body, usize::MAX)
-                .await
-                .unwrap()
-                .to_vec(),
+            body: XrpcBody::json(axum::body::to_bytes(body, usize::MAX).await.unwrap()),
         })
     }
 }
@@ -216,7 +217,7 @@ async fn read(node: &TestNode, document: &DocId, datums: &[DatumKey]) -> BTreeMa
     let capability = capability(
         node,
         DocScope {
-            read: BTreeSet::from([document.clone()]),
+            read: DocScope::read_all([document.clone()]),
             ..DocScope::default()
         },
     )
