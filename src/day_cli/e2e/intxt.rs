@@ -1356,9 +1356,17 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         // 6. Resolved, the thread is gone, from both sides' inboxes.
         let resolved = reply(&operator, &root, None, Some(true)).await;
         assert!(resolved.contains("resolved"), "{resolved}");
+        // The thread is named by the shortest prefix that is unique now, which may be longer than
+        // the one `comment` printed before later ids existed, so the undo line is checked against
+        // the name this very answer gives the thread.
+        let thread = resolved
+            .strip_prefix("thread ")
+            .and_then(|rest| rest.split(' ').next())
+            .unwrap_or_else(|| panic!("{resolved}"));
+        assert!(thread.starts_with(&root), "{thread} is not {root}");
         assert!(
-            resolved.contains(&format!("undo: day x intxt reply {root} --reopen")),
-            "root {root:?}: {resolved}"
+            resolved.contains(&format!("undo: day x intxt reply {thread} --reopen")),
+            "{resolved}"
         );
         assert!(inbox(&operator).await.contains("nothing waiting"));
         assert!(inbox(&agent).await.contains("nothing waiting"));
