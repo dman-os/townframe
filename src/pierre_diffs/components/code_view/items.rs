@@ -354,10 +354,10 @@ where
     /// `syncItemRecord(item, nextItem)`
     pub(crate) fn sync_item_record(
         &self,
-        item: &ItemRef<Host, Rendered, LAnnotation>,
+        item_ref: &ItemRef<Host, Rendered, LAnnotation>,
         next_item: &CodeViewItem<LAnnotation>,
     ) -> bool {
-        let mut item = item.borrow_mut();
+        let mut item = item_ref.borrow_mut();
         assert!(
             item.has_type_of(next_item),
             "CodeView.syncItemRecord: type mismatch for id \"{}\"",
@@ -379,6 +379,12 @@ where
         }
         item.version = next_version;
         item.rendered_options_revision = -1;
+        drop(item);
+        // Upstream's per-item options read the record live (`collapsed`, the
+        // callbacks' item), so the instance sees the new snapshot at once: the
+        // anchor `reconcileItems` captures next asks the instance for its line
+        // positions, which a collapsed item does not have.
+        self.push_item_options(item_ref);
         true
     }
 

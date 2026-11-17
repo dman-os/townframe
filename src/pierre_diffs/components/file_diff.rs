@@ -1016,6 +1016,12 @@ impl<
         self.sync_interaction_options();
     }
 
+    /// `this.options = options` alone, for a CodeView that owns the options an
+    /// instance reads (`VirtualizedFileDiff::set_options_from_code_view`).
+    pub fn store_options(&self, options: FileDiffOptions<NodeKey, Rendered, LAnnotation>) {
+        *self.options.borrow_mut() = options;
+    }
+
     pub fn sync_interaction_options(&self) {
         let handle_expand_hunk: HunkExpandCallback = {
             let weak = Weak::clone(&self.weak_self);

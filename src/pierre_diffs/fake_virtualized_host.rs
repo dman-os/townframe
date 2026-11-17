@@ -26,6 +26,9 @@ use crate::fake_interaction_dom::FakeDom;
 
 /// Declared geometry: the window's scroll position and size, and each
 /// element's top in the document.
+/// What `Math.random()` answers once the scenario's script is used up.
+pub const UNSCRIPTED_RANDOM: f64 = 0.25;
+
 #[derive(Default)]
 pub struct VirtualWorld {
     pub scroll_top: f64,
@@ -37,6 +40,10 @@ pub struct VirtualWorld {
     /// The top and height of the `diffs-container` under the rules.
     pub container_top: f64,
     pub container_height: f64,
+    /// A scroll root that clamps its scroll position to the extent its first
+    /// child's style declares (`createClampingRoot` of the upstream harness)
+    /// instead of to `scroll_height`.
+    pub clamp_root: Option<NodeKey>,
 }
 
 /// The leading integer of a `data-line-index` (`"3,4"` is 3): JavaScript's
@@ -98,9 +105,58 @@ impl FakeDom {
 
     // The browser clamps programmatic scrolls to the scrollable range.
     fn scroll_world_to(&self, top: f64) {
-        let mut world = self.world.borrow_mut();
-        let max = (world.scroll_height - world.viewport_height).max(0.0);
-        world.scroll_top = top.clamp(0.0, max);
+        let max = self.max_scroll_top();
+        self.world.borrow_mut().scroll_top = top.clamp(0.0, max);
+    }
+
+    /// The scroller's container: the root's first element child that is not the
+    /// header host (`root.firstElementChild` of the upstream harness, which has
+    /// no header).
+    fn clamp_container(&self, root: NodeKey) -> Option<NodeKey> {
+        self.doc.children(root).into_iter().find(|child| {
+            !self
+                .doc
+                .has_attribute(*child, crate::constants::CODE_VIEW_HEADER_ATTRIBUTE)
+        })
+    }
+
+    /// What the root a case clamps is made of at a `scrollTo`: the spacer's
+    /// height (`root.firstElementChild.firstElementChild.style.height`).
+    fn record_scroll_write(&self, element: &NodeKey, top: f64) {
+        if self.world.borrow().clamp_root != Some(*element) {
+            return;
+        }
+        let spacer = self
+            .clamp_container(*element)
+            .and_then(|container| self.doc.children(container).first().copied())
+            .map_or(0.0, |spacer| {
+                self.doc
+                    .get_style_property(spacer, "height")
+                    .trim_end_matches("px")
+                    .parse::<f64>()
+                    .unwrap_or(0.0)
+            });
+        self.scroll_writes.borrow_mut().push((top, spacer));
+    }
+
+    /// The largest `scrollTop` a programmatic scroll can reach.
+    pub fn max_scroll_top(&self) -> f64 {
+        let world = self.world.borrow();
+        let Some(root) = world.clamp_root else {
+            return (world.scroll_height - world.viewport_height).max(0.0);
+        };
+        // `Number.parseFloat(style || '0')` of the container's height and margins.
+        let Some(container) = self.clamp_container(root) else {
+            return 0.0;
+        };
+        let px = |name: &str| {
+            self.doc
+                .get_style_property(container, name)
+                .trim_end_matches("px")
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        };
+        (px("height") + px("margin-top") + px("margin-bottom") - world.viewport_height).max(0.0)
     }
 
     fn name(&self, node: NodeKey) -> String {
@@ -135,10 +191,14 @@ impl VirtualizerHost for FakeDom {
 
     fn element_bounding_height(&self, element: &NodeKey) -> f64 {
         let world = self.world.borrow();
+        // A height the scenario declared wins; the rules answer for the rest.
+        if let Some(height) = self.heights.borrow().get(element) {
+            return *height;
+        }
         if world.rules {
             return rule_height(&self.doc, &world, *element);
         }
-        self.heights.borrow().get(element).copied().unwrap_or(0.0)
+        0.0
     }
 
     fn element_bounding_top(&self, element: &NodeKey) -> f64 {
@@ -171,6 +231,7 @@ impl VirtualizerHost for FakeDom {
             top,
             Self::behavior_name(behavior)
         ]));
+        self.record_scroll_write(element, top);
         self.scroll_world_to(top);
     }
 
@@ -256,11 +317,18 @@ impl crate::components::code_view::CodeViewHost for FakeDom {
         self.platform_info.borrow().clone()
     }
 
+    fn now(&self) -> f64 {
+        self.clock.get()
+    }
+
+    /// The scripted values in order, then `UNSCRIPTED_RANDOM`: the render pass
+    /// positions the slab and draws a value per call, which a scenario need not
+    /// script.
     fn random(&self) -> f64 {
         self.random_values
             .borrow_mut()
             .pop_front()
-            .expect("the scenario scripts a value for every Math.random() call")
+            .unwrap_or(UNSCRIPTED_RANDOM)
     }
 
     // The vocabulary of the jsdom world of `oracle/s12b_render.mjs`, which the

@@ -51,7 +51,6 @@ where
     }
 
     /// `acquireElement()`
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     pub(crate) fn acquire_element(&self) -> NodeKey {
         let document = self.document();
         let element = loop {
@@ -99,7 +98,6 @@ where
     }
 
     /// `fixContainerFocus()`
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     pub(crate) fn fix_container_focus(&self) {
         let (should_fix, root) = {
             let mut state = self.state.borrow_mut();
@@ -168,7 +166,6 @@ where
         self.clear_element_pool();
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     fn mark_element_pool_generation_current(&self, element: NodeKey) {
         let mut state = self.state.borrow_mut();
         let version = state.element_pool_version;
@@ -185,7 +182,6 @@ where
     /// reuse existing elements. Reused items may already be mounted elsewhere in
     /// the sticky container, so this moves them into the correct sibling
     /// position before rendering updates.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the render pass, C5"))]
     pub(crate) fn sync_rendered_item_order(&self, element: NodeKey, prev_element: Option<NodeKey>) {
         let document = self.document();
         match prev_element {

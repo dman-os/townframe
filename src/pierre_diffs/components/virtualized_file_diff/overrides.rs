@@ -287,7 +287,13 @@ where
         if are_options_equal(Some(&*self.file_diff().options()), Some(&options)) {
             return;
         }
-        self.file_diff().set_options(Some(options));
+        // Only the options object: upstream's live object is read wherever the
+        // instance reads `this.options`, and what `FileDiff.setOptions` adds on
+        // top (`clearReusableHeader`, the hunks renderer's and the interaction
+        // manager's copies) happens at the next render (`hunksRenderer.setOptions`,
+        // `syncInteractionOptions`) or not at all, so a header already rendered
+        // stays until the item re-renders (the render oracle, `stickyHeaders`).
+        self.file_diff().store_options(options);
     }
 
     pub fn set_theme_type(&self, theme_type: ThemeTypes) {
