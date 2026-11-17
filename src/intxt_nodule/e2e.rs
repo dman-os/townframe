@@ -57,7 +57,7 @@ fn operator(node: &TestNode, key: &str) -> Caller<Router> {
     let router = big_dispatch::xrpc_router(
         big_node.dispatch.client.clone(),
         big_dispatch::Anonymous::Acts(Authorization::identity(big_node.authority.root)),
-        16 * 1024 * 1024,
+        big_dispatch::Edge::Embedded,
     )
     .into_router();
     Caller::new(Router(router), RequestContext::root(), None, key.to_owned())
@@ -483,7 +483,7 @@ async fn create_intxt_under_one_idempotency_key_creates_one_drawer() {
                 json!({"title": "Retried"}),
                 InvocationContext {
                     idempotency_key: Some(key.to_owned()),
-                    http: None,
+                    ..Default::default()
                 },
                 RequestContext::root(),
             )
