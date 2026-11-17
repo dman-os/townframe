@@ -30,6 +30,7 @@ pub impl intxt_core::capture::Imported::fn is_empty (& self) -> bool
 pub impl intxt_core::client::Caller < H >::async fn actor (& self) -> Result < Uuid7 , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn add_part (& self , intxt : & DrawerId , part : & DatumReference ,) -> Result < Included , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn call < M : Unary > (& self , input : M) -> Result < M :: Output , IntxtError >
+pub impl intxt_core::client::Caller < H >::async fn commit_holders (& self , drawer : & DrawerId , sha : & str) -> Result < BTreeSet < DocId > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn datum_keys (& self , doc : & DocId) -> Result < BTreeSet < DatumKey > , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn doc_capability (& self , scope : DocScope) -> Result < CapId , IntxtError >
 pub impl intxt_core::client::Caller < H >::async fn include (& self , intxt : & DrawerId , mut set : BTreeMap < DatumKey , Value > , entries : & [DatumKey] ,) -> Result < Vec < Included > , IntxtError >
