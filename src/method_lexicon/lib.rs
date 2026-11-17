@@ -319,6 +319,11 @@ fn builtin_list() -> &'static [Builtin] {
             cartridges::SetCartridgeGrant,
             cartridges::ClearCartridgeConfig,
             cartridges::ListCartridgeInstalls,
+            cartridges::RequestCartridgeGrant,
+            cartridges::AwaitCartridgeGrantRequest,
+            cartridges::ListCartridgeGrantRequests,
+            cartridges::AnswerCartridgeGrantRequest,
+            cartridges::ListCartridgeGrants,
             cartridges::ObserveCartridgeInstalls,
         ]
     });
