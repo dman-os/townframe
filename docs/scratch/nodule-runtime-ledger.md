@@ -736,7 +736,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 ### Follow-ups from the 2026-11-17 session
 - **D50 (operator, 2026-11-17, second session):**
   - **Shelved to next week:** the atmosphere/PDS work (D48) and dpaths (FDR 001).
-  - **This week:** micro/nodule isomorphism, design and if possible implementation. The permission model is drafted with the claytxt lane in `docs/scratch/permission-model.md` (#155); "Clay on the node" (#129) is signed by this lane.
+  - **This week:** micro/nodule isomorphism, design and if possible implementation. The permission model is accepted as ADR 049 (with FDR 009), written with the claytxt lane; "Clay on the node" (#129) is signed by this lane.
   - **Sidecars are stored as JSON text** (ADR 021 §3 amendment): the full schemars output, so sidecars can grow JSON Schema features; the sidecar tag's own supplement states `contentSchema` = the 2020-12 meta-schema, which the node enforces.
   - **CI test output** stays out of job logs (volume broke the pipelines); the JUnit artifact stores failure output (#151).
   - **Clone bootstrap** (claytxt's gap 3) waits on the user-node composition ADR: sisters and mothers (ADR 038), whose vocabulary is to be settled by first enumerating the P2P forcing functions.
