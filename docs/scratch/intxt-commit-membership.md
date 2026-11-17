@@ -9,6 +9,8 @@ Revision 1 proposed `#keyRef` lists in the entries and `x-content-hash` on `gitC
 
 ## The PR names its intxts (operator, 2026-11-17)
 
+> **Superseded 2026-11-17 (operator):** no line grammar. The description carries a collapsed `<details>` block with a JSON code block naming the intxts; see `intxt-review-micro.md`, "The PR description block". The text below is kept for the record.
+
 The primary link is the PR description. A PR and its intxts are many to many, so the description carries one line per intxt:
 
 ```
@@ -70,6 +72,6 @@ Only what another machine needs is a datum. Everything else lives in the worktre
 ## Open
 
 1. ~~Where the commits document lives~~ Resolved 2026-11-17: its own content document in the intxt's drawer, named by `commitsDoc/main` in the descriptor; related intxts share it by adding it to their drawers.
-2. Should capture install git's `post-rewrite` in the clones it records, or only read the reflog after the fact? The hook is exact; the reflog gives only a ref's from/to, not per-commit pairs.
+2. ~~Hook or reflog~~ Resolved 2026-11-17 (operator): capture installs git's `post-rewrite` hook in the clones it records.
 3. **The query needs an anchor** (nodules lane, node-22). *Resolved 2026-11-17 (operator): the lookup becomes a cartridge index built by processors over local-state SQL; no root drawer. The rest of this item is kept for the reasoning.* `HasKey` alone is not one, and only a node-wide authority may send an unanchored predicate. A micro's or agent's capability must send `And[InDrawer{drawer, transitive, at_least: Read}, HasKey{gitCommit/<sha>}]`, and `Or` over drawers doesn't anchor. Proposed: a per-user root drawer for intxts that holds every intxt drawer (created on first `new`), so the phone sends one transitive query per commit. The answer is `PollDatums` with `after: 0, hold_ms: 0`: its events carry doc id, key, heads and version, not values, so it's already a light membership check.
 4. ~~Human edits~~ Deferred (operator, 2026-11-17) with the collaborative VCS work (D59's file documents).
