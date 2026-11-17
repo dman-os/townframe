@@ -17,7 +17,7 @@ trait Observe {
 impl Observe for Repo {
     fn observe(&self, state: &mut WorktreeState) -> Observation {
         let identity = identity::resolve(&self.root).unwrap().unwrap();
-        let (observation, next) = observe(state, identity, &[], &[]).unwrap();
+        let (observation, next) = observe(state, identity, &[]).unwrap();
         *state = next;
         observation
     }
@@ -182,7 +182,8 @@ fn snapshots_diff_into_changes_carrying_blob_ids() {
     let after_commit = repo.observe(&mut state);
     assert!(after_commit.changes.is_empty());
     assert_eq!(kinds(&after_commit.git.moves), [OpKind::Commit]);
-    let commit = &after_commit.git.commits[&sha];
+    // The commit datum `add` writes reads the same facts from git.
+    let commit = &crate::git::commit(&crate::git::Git::new(&repo.root), &sha).unwrap();
     let status = |path: &str| {
         commit
             .files
@@ -258,7 +259,7 @@ fn head_moves_are_classified_from_the_reflog() {
         Some("refs/heads/main")
     );
     assert!(baseline.git.refs.contains_key("refs/heads/main"));
-    assert!(baseline.git.commits.contains_key(&first));
+    assert_eq!(baseline.git.refs["refs/heads/main"].target, first);
     assert!(repo.observe(&mut state).git.moves.is_empty());
 
     // A commit.
@@ -272,7 +273,7 @@ fn head_moves_are_classified_from_the_reflog() {
     assert_eq!(mv.observation.head.as_deref(), Some(second.as_str()));
     assert_eq!(mv.observation.reference.as_deref(), Some("refs/heads/main"));
     assert_eq!(mv.observation.reflog.as_deref(), Some("commit: second"));
-    let datum = &observed.git.commits[&second];
+    let datum = crate::git::commit(&crate::git::Git::new(&repo.root), &second).unwrap();
     assert_eq!(datum.parents, std::slice::from_ref(&first));
     assert_eq!(datum.author.name, "Ada");
     assert_eq!(datum.committer.email, "grace@example.com");
@@ -289,7 +290,10 @@ fn head_moves_are_classified_from_the_reflog() {
         observed.git.moves[0].observation.from.as_deref(),
         Some(second.as_str())
     );
-    assert_eq!(observed.git.commits[&amended].message, "second, amended");
+    assert_eq!(
+        observed.git.moves[0].observation.to.as_deref(),
+        Some(amended.as_str())
+    );
 
     // A checkout of another branch, a commit on it, and back, in one observation.
     repo.git(&["checkout", "-q", "-b", "feat"]);
@@ -315,7 +319,10 @@ fn head_moves_are_classified_from_the_reflog() {
             Some("refs/heads/main")
         ]
     );
-    assert!(observed.git.commits.contains_key(&on_feat));
+    assert_eq!(
+        observed.git.moves[1].observation.to.as_deref(),
+        Some(on_feat.as_str())
+    );
     assert_eq!(
         observed.git.head.reference.as_deref(),
         Some("refs/heads/main")
@@ -384,7 +391,6 @@ fn a_run_of_rebase_steps_is_one_move() {
         mv.observation.reference.as_deref(),
         Some("refs/heads/topic")
     );
-    assert!(observed.git.commits.contains_key(&rebased));
     assert_eq!(
         observed.git.head.reference.as_deref(),
         Some("refs/heads/topic")
@@ -409,7 +415,6 @@ fn an_expired_reflog_is_reported_not_replayed() {
     assert_eq!(mv.observation.from.as_deref(), Some(first.as_str()));
     assert_eq!(mv.observation.to.as_deref(), Some(second.as_str()));
     assert_eq!(mv.observation.reflog, None);
-    assert!(observed.git.commits.contains_key(&second));
     // The next look resumes from an empty reflog without a gap.
     repo.write("a.txt", "three\n");
     repo.commit_all("third");
@@ -446,7 +451,6 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
         &linked_state,
         identity::resolve(&linked_root).unwrap().unwrap(),
         &[],
-        &[],
     )
     .unwrap();
     linked_state = next;
@@ -463,7 +467,6 @@ fn state_survives_serialization_and_a_second_worktree_has_its_own() {
     let (linked, _) = observe(
         &linked_state,
         identity::resolve(&linked_root).unwrap().unwrap(),
-        &[],
         &[],
     )
     .unwrap();
@@ -543,36 +546,4 @@ fn merges_cherry_picks_reverts_and_fast_forwards_are_told_apart() {
             OpKind::Revert
         ]
     );
-}
-
-/// Imported commits (history the reflog never showed, FDR 008 W6) are reported as commit datums
-/// and nothing else: no move, and the state carried forward is the one an observation without
-/// the import carries, so the next hook neither repeats nor misses anything.
-#[test]
-fn imported_commits_are_reported_as_commits_and_leave_the_state_alone() {
-    let repo = Repo::new();
-    repo.write("a.txt", "one\n");
-    let first = repo.commit_all("first");
-    repo.write("b.txt", "two\n");
-    let second = repo.commit_all("second");
-    let state = WorktreeState::default();
-    let identity = || identity::resolve(&repo.root).unwrap().unwrap();
-
-    let (plain, plain_next) = observe(&state, identity(), &[], &[]).unwrap();
-    assert_eq!(
-        plain.git.commits.keys().collect::<Vec<_>>(),
-        [&second],
-        "a baseline reports only the commit HEAD is at"
-    );
-
-    let (imported, imported_next) =
-        observe(&state, identity(), &[], &[first.clone(), second.clone()]).unwrap();
-    let mut wanted = [first, second];
-    wanted.sort();
-    assert_eq!(
-        imported.git.commits.keys().cloned().collect::<Vec<_>>(),
-        wanted
-    );
-    assert!(imported.git.moves.is_empty());
-    assert_eq!(imported_next, plain_next);
 }
