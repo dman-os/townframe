@@ -10,6 +10,7 @@ impl ProtocolHandler for big_node::peers::ServeBlobs
 impl std :: fmt :: Debug for big_node::peers::Accept
 pub big_node::async fn delete_secrets (secrets : & SecretStore , identity_seed : & [u8 ; 32]) -> Res < usize >
 pub big_node::fn node_id (identity_seed : & [u8 ; 32]) -> String
+pub big_node::fn schema_groups () -> Vec < (& 'static str , big_cabinet :: SchemaRegistrationGroup < 'static >) >
 pub big_node::peers::fn parse_ticket (ticket : & str) -> Res < iroh :: EndpointAddr >
 pub enum big_node::peers::Direction { Incoming, Outgoing }
 pub enum big_node::peers::PeersEvent { Connected { peer : PeerKey , direction : Direction , }, Disconnected { peer : PeerKey , reason : String , }, # [doc = " A document this node subscribes to was synced with `peer`."] DocSynced { peer : PeerKey , doc : ObjKey , }, # [doc = " Everything `peer` has in `part` has been synced."] PartSynced { peer : PeerKey , part : PartKey , }, # [doc = " `peer` has changes this node has not caught up with."] Stale { peer : PeerKey , } }

@@ -90,6 +90,7 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
                 datum_tag: datum.id.clone(),
                 lexicon: lexicon.file.clone(),
                 sidecar: Some(Arc::clone(&sidecar)),
+                supplement: None,
                 compiled,
             }),
         }
@@ -196,6 +197,8 @@ struct KnownSchema {
     datum_tag: String,
     lexicon: Value,
     sidecar: Option<Arc<OwnedSidecar>>,
+    /// The sidecar document a registration brought as data, for a group with no sidecar bundle.
+    supplement: Option<Value>,
     compiled: CompiledSchema,
 }
 
@@ -213,6 +216,25 @@ impl SchemaHandle {
     }
     pub fn compiled(&self) -> &CompiledSchema {
         &self.inner.compiled
+    }
+    /// The datum's sidecar JSON Schema document: the one its group's bundle renders, or the
+    /// supplement its registration carried. `None` for a datum with neither.
+    pub fn sidecar_document(&self) -> Option<Value> {
+        match (&self.inner.sidecar, &self.inner.supplement) {
+            // A bundle names a datum by its Rust type, not by the NSID the tag is.
+            (Some(sidecar), _) => {
+                let bundle = sidecar.borrowed();
+                let datum = bundle
+                    .cartridge
+                    .datums
+                    .iter()
+                    .find(|datum| datum.id == self.inner.datum_tag)?;
+                bundle
+                    .document(&datum.name)
+                    .map(|schema| serde_json::to_value(schema).expect("a schema is a JSON value"))
+            }
+            (None, supplement) => supplement.clone(),
+        }
     }
     pub fn sidecar(&self) -> Option<Bundle<'_>> {
         self.inner
@@ -326,6 +348,7 @@ impl KnownSchemas {
                             datum_tag: tag.clone(),
                             lexicon: registration.lexicon.clone(),
                             sidecar: sidecar.clone(),
+                            supplement: registration.supplement.clone(),
                             compiled,
                         }),
                     },
@@ -404,6 +427,11 @@ impl SchemaRepo {
             .write()
             .expect("schema repo lock is not poisoned")
             .retire(owner);
+    }
+
+    /// Every known schema, by tag: the snapshot generator publishes these as data.
+    pub fn schemas(&self) -> Vec<SchemaHandle> {
+        self.read().known.values().cloned().collect()
     }
 
     /// Whether `datum_tag` belongs to the boot set: known to the node itself rather than
