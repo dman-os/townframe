@@ -1,0 +1,26 @@
+version = 1
+role = "application"
+dependency_reason = "The node-holding half of a native Dayframe host's composition root: it boots the host's own big_node from its data directory and gives each Wasmtime micro its own actor and dispatch egress (Clay on the node sections 1 to 3)."
+allowed_dependencies = [
+    "big_cabinet_core",
+    "big_dispatch",
+    "big_dispatch_core",
+    "big_node",
+    "clay_guest_session",
+    "clay_host",
+    "clay_node_egress",
+    "clay_rt_wasmtime",
+    "clay_surface",
+    "day_node",
+    "secrets_rs",
+    "service_utils_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

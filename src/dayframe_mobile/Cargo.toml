@@ -12,7 +12,7 @@ anyrender_skia = { version = "0.11.0" }
 anyrender_vello = { version = "0.14.0" }
 anyrender_vello_cpu = { version = "0.17.0" }
 anyrender_vello_hybrid = { version = "0.10.0" }
-tokio = { version = "1", features = ["time", "rt"] }
+tokio = { version = "1", features = ["time", "rt", "sync"] }
 
 [features]
 default = ["desktop"]
@@ -26,6 +26,7 @@ desktop = ["dioxus/native"]
 dayframe_native = { workspace = true, features = ["blitz"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 dayframe_composition = { workspace = true }
+dayframe_node = { workspace = true }
 jni = "0.21"
 winit = { version = "0.31.0-beta.3", features = ["android-native-activity"] }
 

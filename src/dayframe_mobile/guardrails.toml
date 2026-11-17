@@ -4,6 +4,7 @@ dependency_reason = "dayframe microkernel layering: engine-neutral contracts at 
 allowed_dependencies = [
     "dayframe_composition",
     "dayframe_native",
+    "dayframe_node",
 ]
 allow_external_api_types = false
 
