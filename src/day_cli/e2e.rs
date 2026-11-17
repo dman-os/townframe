@@ -1400,32 +1400,6 @@ mod library {
             assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
             assert_eq!(commits().await, 3);
 
-            // Imported or captured, a commit datum is content-addressed: its slot is git's object
-            // id over its `raw`.
-            let (_, datums) = caller.read_datums(&repo_doc, None).await.unwrap();
-            for (key, read) in datums {
-                if key.tag().as_str() != work::GitCommit::ID {
-                    continue;
-                }
-                let big_cabinet_core::doc::DatumRead::Accepted { value, .. } = read else {
-                    panic!("{key} is not readable: {read:?}");
-                };
-                let commit: work::GitCommit = serde_json::from_value(value).unwrap();
-                let mut hash = std::process::Command::new("git")
-                    .args(["hash-object", "-t", "commit", "--stdin"])
-                    .current_dir(&repo)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .spawn()
-                    .unwrap();
-                hash.stdin
-                    .take()
-                    .unwrap()
-                    .write_all(commit.raw.as_slice())
-                    .unwrap();
-                let id = hash.wait_with_output().unwrap().stdout;
-                assert_eq!(id.trim_ascii(), key.slot_bytes(), "{key}");
-            }
         })
         .await;
     }

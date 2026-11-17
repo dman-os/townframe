@@ -205,7 +205,6 @@ fn the_adr_examples_are_valid_datums() {
         json!({"worktree": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.worktree/main"}),
     );
     codec_round_trip::<work::GitCommit>(json!({
-        "raw": {"$bytes": "dHJlZSA0YjgyNWRjNjQyY2I2ZWI5YTA2MGU1NGJmOGQ2OTI4OGZiZWU0OTA0Cg=="},
         "parents": ["9a0e"],
         "changeId": "kxqoltvm",
         "author": {"name": "dman-os", "email": "dman-os@example.org", "at": "2026-11-10T21:04:11Z"},
@@ -281,29 +280,6 @@ fn the_adr_examples_are_valid_datums() {
     codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
 }
 
-/// Carrying is not operating: a peer's future fields and vocabulary values survive the whole
-/// chain, and the typed seam reports the vocabulary value as unknown.
-/// A commit is keyed by git's object id over its `raw` bytes, so admission checks the slot and
-/// other datums can name the commit by key (`#keyRef`, ADR 035 §2.9).
-#[test]
-fn a_git_commit_is_keyed_by_its_object_id() {
-    let schema = admitted_schema(work::GitCommit::ID);
-    let content_hash = schema.content_hash().unwrap();
-    assert_eq!(
-        content_hash,
-        &big_cabinet_core::datum::ContentHash::GitObject {
-            object_type: "commit",
-            content: "raw".to_owned(),
-        }
-    );
-    // `git hash-object -t commit --literally` of these bytes.
-    let commit = json!({"raw": {"$bytes": "dHJlZSA0YjgyNWRjNjQyY2I2ZWI5YTA2MGU1NGJmOGQ2OTI4OGZiZWU0OTA0Cg=="}});
-    assert_eq!(
-        content_hash.slot_of(&commit).unwrap(),
-        "e43fc45fe9861f11199bfc430939749be99df922"
-    );
-}
-
 /// A PR description names the intxts it belongs to, one reference each, among any other text.
 #[test]
 fn a_pr_description_names_its_intxts() {
@@ -325,6 +301,8 @@ fn a_pr_description_names_its_intxts() {
     assert!(generic::Intxt::named_in("dtxt:datum:self/org.example.intxt/main").is_empty());
 }
 
+/// Carrying is not operating: a peer's future fields and vocabulary values survive the whole
+/// chain, and the typed seam reports the vocabulary value as unknown.
 #[test]
 fn future_fields_and_vocabulary_values_are_carried() {
     codec_round_trip::<annotation::Comment>(json!({

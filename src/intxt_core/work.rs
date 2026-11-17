@@ -5,7 +5,6 @@
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::Location;
-use big_cabinet_core::datum::Bytes;
 use big_cabinet_core::datum::Extra;
 use jiff::Timestamp;
 use schemars::JsonSchema;
@@ -196,21 +195,12 @@ pub struct File {
 
 /// A git commit (`gitCommit/<sha>`). Every recorder writes the same value to the same slot, and
 /// none rewrites it: a later fact about a commit goes into its own datum. Holds no pins; the op
-/// that observed the commit does.
-///
-/// The slot is a content hash: admission recomputes git's object id over `"commit <len>\0"` and
-/// `raw`'s bytes and refuses a value that doesn't hash to its slot. That is what lets another
-/// datum reference a commit by key (`#keyRef`) and have the node find it in any document that
-/// holds a copy (ADR 035 §2.9).
+/// that observed the commit does. The commit object itself travels in a pack (an entry's), where
+/// git checks it against its sha on import; this datum is the readable part.
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-#[schemars(extend("x-content-hash" = {"algorithm": "gitObject", "type": "commit", "content": "raw"}))]
 pub struct GitCommit {
-    /// The commit object as git stores it (`git cat-file commit <sha>`), signature and encoding
-    /// headers included. The slot is git's object id over it, so the datum is content-addressed
-    /// and checkable against its key; the fields below are read from it for convenience.
-    pub raw: Bytes,
     pub parents: Vec<String>,
     /// The jj change id, when the commit is known to jj.
     #[serde(default, skip_serializing_if = "Option::is_none")]

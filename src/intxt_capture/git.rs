@@ -342,7 +342,6 @@ fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
         });
     }
     Ok(GitCommit {
-        raw: git.run(&["cat-file", "commit", sha])?.into(),
         parents,
         change_id: None,
         author: ident(an, ae, at)?,
