@@ -55,6 +55,8 @@ use std::io::Write;
 
 /// The meta document that holds an intxt's annotations: `notes/annotations`.
 const NOTES_SLOT: &str = "notes/annotations";
+/// Where the drawer lists the commits document `add` makes (`metaDoc/commits/main`).
+const COMMITS_SLOT: &str = "commits/main";
 
 /// Which end of a commit's diff a line number counts on, as GitHub's `side` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -109,8 +111,8 @@ fn sorted_heads(version: &big_cabinet_core::doc::DatumVersion) -> Vec<String> {
 }
 
 impl Packaging<'_> {
-    /// The intxt's notes document, if anything has been written to it.
-    async fn notes_doc(&self, drawer: &DrawerId) -> Res<Option<DocId>> {
+    /// The drawer's meta document in `slot`, if it has one.
+    async fn meta_doc(&self, drawer: &DrawerId, slot: &str) -> Res<Option<DocId>> {
         let view = self
             .caller
             .call(GetDrawer {
@@ -121,8 +123,13 @@ impl Packaging<'_> {
         Ok(view
             .meta_docs
             .get(&MetaRoot::Sensitive)
-            .and_then(|docs| docs.get(NOTES_SLOT))
+            .and_then(|docs| docs.get(slot))
             .cloned())
+    }
+
+    /// The intxt's notes document, if anything has been written to it.
+    async fn notes_doc(&self, drawer: &DrawerId) -> Res<Option<DocId>> {
+        self.meta_doc(drawer, NOTES_SLOT).await
     }
 
     /// The notes document, made if the intxt has none yet, and the intxt's entry for it. The
@@ -364,7 +371,12 @@ impl Packaging<'_> {
                     }
                 );
                 // The commit's datum is in the intxt's commits document, written by `add`.
-                let commits_doc = self.ensure_commits_doc(&drawer).await?;
+                let commits_doc = self.meta_doc(&drawer, COMMITS_SLOT).await?.ok_or_else(|| {
+                    eyre::eyre!(
+                        "the intxt {} holds no commits: run `day x intxt add` first",
+                        shown(&intxts, &drawer.to_string())
+                    )
+                })?;
                 let blob = anchor::commit_blob(&git, &sha, &target.path)?
                     .ok_or_else(|| eyre::eyre!("{} has no {}", short_sha(&sha), target.path))?;
                 let location = Location::new(
