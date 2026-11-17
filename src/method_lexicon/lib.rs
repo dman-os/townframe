@@ -695,6 +695,23 @@ fn flatten_tagged(object: &Map<String, Value>) -> Option<Value> {
         .iter()
         .find(|(_, property)| property.get("const").is_some_and(Value::is_string))
         .map(|(name, _)| name.clone())?;
+    let nullable = |property: &Value| {
+        property["type"]
+            .as_array()
+            .is_some_and(|types| types.contains(&json!("null")))
+    };
+    // The property with `null` dropped from its type list: `["array", "null"]` is `"array"`.
+    let non_null = |property: &Value| {
+        let mut property = property.clone();
+        if let Some(types) = property["type"].as_array() {
+            let rest: Vec<Value> = types.iter().filter(|t| *t != "null").cloned().collect();
+            property["type"] = match <[Value; 1]>::try_from(rest) {
+                Ok([only]) => only,
+                Err(rest) => Value::Array(rest),
+            };
+        }
+        property
+    };
     let mut variants = Vec::new();
     let mut properties = Map::new();
     for branch in branches {
@@ -704,15 +721,22 @@ fn flatten_tagged(object: &Map<String, Value>) -> Option<Value> {
             if *name == tag {
                 continue;
             }
-            match properties.get(name) {
+            let merged = match properties.get(name) {
+                None => property.clone(),
+                Some(existing) if existing == property => continue,
+                // `T` in one variant and `Option<T>` in another (schemars' `"type": [T, "null"]`)
+                // agree on `T`; the nullable spelling admits both, and every flattened field is
+                // optional already.
+                Some(existing) if non_null(existing) == non_null(property) => {
+                    if nullable(existing) {
+                        continue;
+                    }
+                    property.clone()
+                }
                 // Variants that disagree about a field's type leave it any object.
-                Some(existing) if existing != property => {
-                    properties.insert(name.clone(), unknown());
-                }
-                _ => {
-                    properties.insert(name.clone(), property.clone());
-                }
-            }
+                Some(_) => unknown(),
+            };
+            properties.insert(name.clone(), merged);
         }
     }
     properties.insert(tag.clone(), json!({ "type": "string", "enum": variants }));
