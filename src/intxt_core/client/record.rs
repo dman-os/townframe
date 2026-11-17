@@ -1,0 +1,595 @@
+//! The recorder (ADR 039 §4): turns what one capture hook observed into the datums of ADR 040.
+//!
+//! The host calls it once per hook, holding every touched worktree's lock, so the calls for one
+//! worktree arrive one at a time and its op log stays single-writer. Every document is written
+//! at most once per call (`writeDatums` carries all of a document's datums), and every request is
+//! a function of the batch and the documents it names, with `AtCurrent` writes, so a retried
+//! call under the same idempotency key replays the same commands. A retry after a complete
+//! earlier success is answered without writing: the worktree datum is written last, and the
+//! batch counts as recorded when that datum lists the op log holding its last op and the op is
+//! there.
+//!
+//! Nothing here writes file content: an op carries the git blob ids the host recorded (ADR 040
+//! §3, §4), and the objects stay in git.
+//!
+//! Order within a worktree: identity documents, git layer, op logs, the worktree datum. The
+//! session is recorded before the worktrees, since an op's `cause` names a turn of the session
+//! document.
+
+use super::Caller;
+use super::to_value;
+use crate::capture::Batch;
+use crate::capture::Cause;
+use crate::capture::Imported;
+use crate::capture::RecordedIds;
+use crate::capture::RecordedWorktree;
+use crate::capture::WorktreeBatch;
+use crate::capture::WorktreeDocs;
+use crate::methods::IntxtError;
+use crate::work;
+use big_cabinet_core::ActorUrl;
+use big_cabinet_core::DatumKey;
+use big_cabinet_core::DocId;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::WriteDatums;
+use big_cabinet_core::doc::WriteMode;
+use big_cabinet_core::doc::WriteReceipt;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::drawer_placement;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::Location;
+use big_cabinet_core::reference::ReferenceDocId;
+use serde_json::Value;
+use service_client_core_rs::xrpc::HttpTransport;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+
+/// Ops per op-log document (ADR 040 §3).
+const OPS_PER_LOG: u64 = 256;
+
+fn invalid(reason: impl Into<String>) -> IntxtError {
+    IntxtError::Invalid(reason.into())
+}
+
+fn doc_id(text: &str) -> Result<DocId, IntxtError> {
+    text.parse()
+        .map_err(|error| invalid(format!("`{text}` is not a document id: {error}")))
+}
+
+fn key(tag: &str, slot: &str) -> Result<DatumKey, IntxtError> {
+    DatumKey::new(tag, slot.as_bytes()).map_err(|error| invalid(format!("{tag}/{slot}: {error}")))
+}
+
+fn reference(doc: &DocId, tag: &str, slot: &str) -> Result<DatumReference, IntxtError> {
+    Ok(DatumReference::new(
+        ReferenceDocId::Concrete(doc.clone()),
+        key(tag, slot)?,
+    ))
+}
+
+/// `value` at `slot` of record `tag`; the key names the type, so the value carries no tag.
+fn entry(value: Value, tag: &str, slot: &str) -> Result<(DatumKey, Value), IntxtError> {
+    Ok((key(tag, slot)?, value))
+}
+
+/// `text` with every byte outside a URL fragment's unreserved characters (RFC 3986's `pchar`
+/// without the sub-delimiters) percent-encoded.
+fn percent_encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' | b'@' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// The session documents a batch recorded, to name a cause's turn.
+struct SessionDocs {
+    main: Option<DocId>,
+    subagents: BTreeMap<String, DocId>,
+}
+
+impl SessionDocs {
+    /// The tool call a cause names, as a location in its session document: `toolCalls[id]` of
+    /// `promptTurn/<turn>`. None when the transcript did not show the call's turn yet.
+    fn cause(&self, cause: &Cause) -> Result<Option<Location>, IntxtError> {
+        let doc = match &cause.agent_id {
+            Some(agent) => self.subagents.get(agent),
+            None => self.main.as_ref(),
+        };
+        let (Some(doc), Some(turn)) = (doc, &cause.turn) else {
+            return Ok(None);
+        };
+        let reference = reference(doc, work::PromptTurn::ID, turn)?;
+        let fragment = format!(
+            "toolCalls/{}",
+            percent_encode(&format!("{{\"id\":\"{}\"}}", cause.tool_use_id))
+        );
+        Location::new(reference, Some(fragment))
+            .map(Some)
+            .map_err(|error| invalid(format!("the cause of {}: {error}", cause.tool_use_id)))
+    }
+}
+
+struct Recorder<'a, H> {
+    caller: &'a Caller<H>,
+    placement: String,
+    create_capability: CapId,
+    machine: &'a ActorUrl,
+}
+
+impl<H: HttpTransport> Recorder<'_, H> {
+    async fn create(
+        &self,
+        step: &str,
+        datums: BTreeMap<DatumKey, Value>,
+    ) -> Result<WriteReceipt, IntxtError> {
+        self.caller
+            .call(CreateDoc {
+                capability: self.create_capability,
+                command: self.caller.command(step, &datums)?,
+                placement: self.placement.clone(),
+                datums,
+            })
+            .await
+    }
+
+    /// One `writeDatums` to `doc` at its current heads: documents here have one writer.
+    async fn write(
+        &self,
+        step: &str,
+        doc: &DocId,
+        set: BTreeMap<DatumKey, Value>,
+    ) -> Result<WriteReceipt, IntxtError> {
+        let capability = self
+            .caller
+            .doc_capability(DocScope {
+                write: [doc.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        self.caller
+            .call(WriteDatums {
+                capability,
+                command: Some(self.caller.command(step, &set)?),
+                doc_id: doc.clone(),
+                mode: WriteMode::AtCurrent,
+                set,
+                remove: BTreeSet::new(),
+            })
+            .await
+    }
+
+    /// The accepted values of `keys` in `doc` now; a key the document lacks is absent.
+    async fn read(
+        &self,
+        doc: &DocId,
+        keys: &[DatumKey],
+    ) -> Result<BTreeMap<DatumKey, Value>, IntxtError> {
+        let capability = self
+            .caller
+            .doc_capability(DocScope {
+                read: [doc.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        let read = self
+            .caller
+            .call(ReadDatums {
+                capability,
+                doc_id: doc.clone(),
+                at: At::Current,
+                datums: Some(keys.iter().cloned().collect()),
+                optimistic: false,
+            })
+            .await?;
+        let mut present = BTreeMap::new();
+        for (key, read) in read.datums {
+            match read {
+                DatumRead::Accepted { value, .. } => {
+                    present.insert(key, value);
+                }
+                DatumRead::Absent { .. } => {}
+                other => {
+                    return Err(invalid(format!(
+                        "{key} in {doc} is not readable: {other:?}"
+                    )));
+                }
+            }
+        }
+        Ok(present)
+    }
+
+    /// Writes the datums of one transcript import into its session document, creating the
+    /// document when the host holds none. None when there is nothing to record.
+    async fn session_doc(
+        &self,
+        step: &str,
+        doc: Option<&str>,
+        imported: &Imported,
+    ) -> Result<Option<DocId>, IntxtError> {
+        let existing = doc.map(doc_id).transpose()?;
+        if imported.is_empty() {
+            return Ok(existing);
+        }
+        let mut set = BTreeMap::new();
+        if let Some(session) = &imported.session {
+            set.extend([entry(to_value(session), work::AgentSession::ID, "main")?]);
+        }
+        for (turn, value) in &imported.turns {
+            set.extend([entry(to_value(value), work::PromptTurn::ID, turn)?]);
+        }
+        if let Some(plan) = &imported.plan {
+            set.extend([entry(to_value(plan), work::Plan::ID, "main")?]);
+        }
+        Ok(Some(match existing {
+            Some(doc) => {
+                self.write(step, &doc, set).await?;
+                doc
+            }
+            None => self.create(step, set).await?.doc_id,
+        }))
+    }
+
+    async fn record_session(&self, batch: &Batch) -> Result<SessionDocs, IntxtError> {
+        let session = &batch.session;
+        let main = self
+            .session_doc("session", session.doc.as_deref(), &session.imported)
+            .await?;
+        let mut subagents = BTreeMap::new();
+        for agent in &session.subagents {
+            let step = format!("agent-{}", agent.agent_id);
+            if let Some(doc) = self
+                .session_doc(&step, agent.doc.as_deref(), &agent.imported)
+                .await?
+            {
+                subagents.insert(agent.agent_id.clone(), doc);
+            }
+        }
+        Ok(SessionDocs { main, subagents })
+    }
+}
+
+/// What the worktree's own datum says, and what a call changes in it.
+struct WorktreeState {
+    doc: DocId,
+    datum: work::Worktree,
+    changed: bool,
+}
+
+impl<H: HttpTransport> Recorder<'_, H> {
+    /// The repository, clone and worktree documents, created when missing. The repository's
+    /// `gitRepo` slot is its smallest root commit, which every clone of the project on every
+    /// machine derives alike (ledger D13); a repository with no commit yet has none, so it has no
+    /// repository document until it has one, and the clone's `repo` is set then.
+    async fn identity_docs(
+        &self,
+        worktree: &WorktreeBatch,
+    ) -> Result<(Option<DocId>, DocId, WorktreeState), IntxtError> {
+        let identity = &worktree.identity;
+        let step = |what: &str| format!("{}/{what}", identity.worktree_id);
+        let root = identity.roots.iter().min();
+        let repo = match (&worktree.docs.repo, root) {
+            (Some(doc), _) => Some(doc_id(doc)?),
+            (None, Some(root)) => {
+                let repo = work::GitRepo {
+                    roots: identity.roots.clone(),
+                    remotes: identity.remotes.clone(),
+                    extra: Default::default(),
+                };
+                Some(
+                    self.create(
+                        &step("repo"),
+                        [entry(to_value(&repo), work::GitRepo::ID, root)?].into(),
+                    )
+                    .await?
+                    .doc_id,
+                )
+            }
+            (None, None) => None,
+        };
+        let repo_ref = match (&repo, root) {
+            (Some(doc), Some(root)) => Some(reference(doc, work::GitRepo::ID, root)?),
+            (None, _) => None,
+            (Some(_), None) => return Err(invalid("a repository document without a root commit")),
+        };
+        let clone_datum = || {
+            entry(
+                to_value(&work::GitClone {
+                    repo: repo_ref.clone(),
+                    machine: self.machine.clone(),
+                    path: identity.clone_path.clone(),
+                    vcs: vec![work::Vcs::Git],
+                    extra: Default::default(),
+                }),
+                work::GitClone::ID,
+                &identity.clone_id,
+            )
+        };
+        let clone = match &worktree.docs.clone {
+            Some(doc) => {
+                let doc = doc_id(doc)?;
+                if worktree.docs.repo.is_none() && repo.is_some() {
+                    // The repository document is new: the clone points at it from now on.
+                    self.write(&step("clone-repo"), &doc, [clone_datum()?].into())
+                        .await?;
+                }
+                doc
+            }
+            None => {
+                self.create(&step("clone"), [clone_datum()?].into())
+                    .await?
+                    .doc_id
+            }
+        };
+        let worktree_key = key(work::Worktree::ID, "main")?;
+        let state = match &worktree.docs.worktree {
+            Some(doc) => {
+                let doc = doc_id(doc)?;
+                let mut read = self.read(&doc, std::slice::from_ref(&worktree_key)).await?;
+                let value = read
+                    .remove(&worktree_key)
+                    .ok_or_else(|| invalid(format!("{doc} holds no worktree datum")))?;
+                let datum = serde_json::from_value(value)
+                    .map_err(|error| invalid(format!("the worktree datum of {doc}: {error}")))?;
+                WorktreeState {
+                    doc,
+                    datum,
+                    changed: false,
+                }
+            }
+            None => {
+                let datum = work::Worktree {
+                    clone: reference(&clone, work::GitClone::ID, &identity.clone_id)?,
+                    id: identity.worktree_id.clone(),
+                    path: identity.root.clone(),
+                    op_logs: Vec::new(),
+                    extra: Default::default(),
+                };
+                let doc = self
+                    .create(&step("worktree"), [(worktree_key, to_value(&datum))].into())
+                    .await?
+                    .doc_id;
+                WorktreeState {
+                    doc,
+                    datum,
+                    changed: false,
+                }
+            }
+        };
+        Ok((repo, clone, state))
+    }
+
+    /// Whether an earlier call already recorded this batch completely: the worktree datum, which
+    /// a call writes last, lists the op log holding the batch's last op, and the op is there.
+    async fn already_recorded(
+        &self,
+        worktree: &WorktreeBatch,
+        state: &WorktreeState,
+    ) -> Result<bool, IntxtError> {
+        if worktree.ops.is_empty() {
+            return Ok(false);
+        }
+        let last = worktree.next_seq + worktree.ops.len() as u64 - 1;
+        let Some(log) = state.datum.op_logs.iter().rfind(|log| log.from <= last) else {
+            return Ok(false);
+        };
+        let op = key(work::WorktreeOp::ID, &last.to_string())?;
+        Ok(self
+            .read(&doc_id(&log.doc)?, std::slice::from_ref(&op))
+            .await?
+            .contains_key(&op))
+    }
+
+    /// The batch's commits into the repository document (a recorded commit is never rewritten)
+    /// and its refs into the clone's (ADR 040 §7).
+    async fn write_git(
+        &self,
+        worktree: &WorktreeBatch,
+        repo: Option<&DocId>,
+        clone: &DocId,
+    ) -> Result<(), IntxtError> {
+        let step = |what: &str| format!("{}/{what}", worktree.identity.worktree_id);
+        let commits = worktree
+            .commits
+            .iter()
+            .map(|(sha, commit)| Ok((key(work::GitCommit::ID, sha)?, to_value(commit))))
+            .collect::<Result<BTreeMap<_, _>, IntxtError>>()?;
+        if !commits.is_empty() {
+            let repo = repo.ok_or_else(|| {
+                invalid("commits were observed in a repository without a root commit")
+            })?;
+            let known = self
+                .read(repo, &commits.keys().cloned().collect::<Vec<_>>())
+                .await?;
+            let new: BTreeMap<_, _> = commits
+                .into_iter()
+                .filter(|(key, _)| !known.contains_key(key))
+                .collect();
+            if !new.is_empty() {
+                self.write(&step("commits"), repo, new).await?;
+            }
+        }
+        let refs = worktree
+            .refs
+            .iter()
+            .map(|(name, reference)| {
+                Ok((
+                    key(
+                        work::GitRef::ID,
+                        &format!("{}/{name}", worktree.identity.clone_id),
+                    )?,
+                    to_value(reference),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, IntxtError>>()?;
+        if !refs.is_empty() {
+            let known = self
+                .read(clone, &refs.keys().cloned().collect::<Vec<_>>())
+                .await?;
+            let moved: BTreeMap<_, _> = refs
+                .into_iter()
+                .filter(|(key, value)| known.get(key) != Some(value))
+                .collect();
+            if !moved.is_empty() {
+                self.write(&step("refs"), clone, moved).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the batch's ops as `worktreeOp/<seq>` from its next sequence number, a new op-log
+    /// document opened for each run of `OPS_PER_LOG` ops, and lists the new documents in the
+    /// worktree datum.
+    async fn write_ops(
+        &self,
+        worktree: &WorktreeBatch,
+        state: &mut WorktreeState,
+        sessions: &SessionDocs,
+    ) -> Result<(), IntxtError> {
+        let mut by_log: BTreeMap<u64, BTreeMap<DatumKey, Value>> = BTreeMap::new();
+        let mut first_seq: BTreeMap<u64, u64> = BTreeMap::new();
+        for (index, op) in worktree.ops.iter().enumerate() {
+            let seq = worktree.next_seq + index as u64;
+            let mut files = BTreeMap::new();
+            let mut deleted = Vec::new();
+            for change in &op.changes {
+                match &change.blob {
+                    Some(blob) => {
+                        files.insert(change.path.clone(), blob.clone());
+                    }
+                    None => deleted.push(change.path.clone()),
+                }
+            }
+            let value = work::WorktreeOp {
+                at: op.at,
+                kind: op.kind.clone(),
+                cause: op
+                    .cause
+                    .as_ref()
+                    .map(|cause| sessions.cause(cause))
+                    .transpose()?
+                    .flatten(),
+                files,
+                deleted,
+                git: op.git.clone(),
+                jj: None,
+                extra: Default::default(),
+            };
+            let log = seq / OPS_PER_LOG;
+            first_seq.entry(log).or_insert(seq);
+            by_log.entry(log).or_default().extend([entry(
+                to_value(&value),
+                work::WorktreeOp::ID,
+                &seq.to_string(),
+            )?]);
+        }
+        for (log, ops) in by_log {
+            let from = first_seq[&log];
+            let step = format!("{}/oplog-{log}", worktree.identity.worktree_id);
+            let existing = state
+                .datum
+                .op_logs
+                .last()
+                .filter(|last| last.from / OPS_PER_LOG == log)
+                .map(|last| doc_id(&last.doc))
+                .transpose()?;
+            match existing {
+                Some(doc) => {
+                    self.write(&step, &doc, ops).await?;
+                }
+                None => {
+                    let doc = self.create(&step, ops).await?.doc_id;
+                    state.datum.op_logs.push(work::OpLogDoc {
+                        doc: doc.to_string(),
+                        from,
+                        extra: Default::default(),
+                    });
+                    state.changed = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_worktree(
+        &self,
+        worktree: &WorktreeBatch,
+        sessions: &SessionDocs,
+    ) -> Result<RecordedWorktree, IntxtError> {
+        let (repo, clone, mut state) = self.identity_docs(worktree).await?;
+        let docs = WorktreeDocs {
+            worktree: Some(state.doc.to_string()),
+            clone: Some(clone.to_string()),
+            repo: repo.as_ref().map(ToString::to_string),
+            extra: Default::default(),
+        };
+        let recorded = RecordedWorktree {
+            docs,
+            next_seq: worktree.next_seq + worktree.ops.len() as u64,
+            extra: Default::default(),
+        };
+        if self.already_recorded(worktree, &state).await? {
+            return Ok(recorded);
+        }
+        self.write_git(worktree, repo.as_ref(), &clone).await?;
+        self.write_ops(worktree, &mut state, sessions).await?;
+        if state.changed {
+            self.write(
+                &format!("{}/worktree", worktree.identity.worktree_id),
+                &state.doc,
+                [entry(to_value(&state.datum), work::Worktree::ID, "main")?].into(),
+            )
+            .await?;
+        }
+        Ok(recorded)
+    }
+}
+
+/// [`Caller::record_observations`].
+pub(super) async fn record_observations<H: HttpTransport>(
+    caller: &Caller<H>,
+    drawer: &DrawerId,
+    machine: &ActorUrl,
+    batch: &Batch,
+) -> Result<RecordedIds, IntxtError> {
+    let placement = drawer_placement(drawer);
+    let create_capability = caller
+        .doc_capability(DocScope {
+            create: [placement.clone()].into(),
+            ..DocScope::default()
+        })
+        .await?;
+    let recorder = Recorder {
+        caller,
+        placement,
+        create_capability,
+        machine,
+    };
+    let sessions = recorder.record_session(batch).await?;
+    let mut worktrees = BTreeMap::new();
+    for worktree in &batch.worktrees {
+        worktrees.insert(
+            worktree.identity.root.clone(),
+            recorder.record_worktree(worktree, &sessions).await?,
+        );
+    }
+    Ok(RecordedIds {
+        session: sessions.main.map(|doc| doc.to_string()),
+        subagents: sessions
+            .subagents
+            .into_iter()
+            .map(|(agent, doc)| (agent, doc.to_string()))
+            .collect(),
+        worktrees,
+        extra: Default::default(),
+    })
+}
