@@ -221,7 +221,7 @@ fn the_adr_examples_are_valid_datums() {
         "patchId": "3f9a1c0de4b2"
     }));
     codec_round_trip::<work::GithubPull>(json!({
-        "title": "Splits the reference parser", "body": "Intxt: dtxt:datum:z1/org.example.intxt/main",
+        "title": "Splits the reference parser", "body": "Intxt: dtxt:doc:z1",
         "state": "merged", "head": "feat/refs", "base": "main",
         "headSha": "4c1f0a", "baseSha": "9a0e11",
         "updatedAt": "2026-11-17T10:00:00Z", "url": "https://github.com/o/r/pull/12"
@@ -309,19 +309,16 @@ fn a_pr_description_names_its_intxts() {
     let first: big_cabinet_core::DocId = "z11111111111111111111111111111111".parse().unwrap();
     let second: big_cabinet_core::DocId = "z11111111111111111111111111111112".parse().unwrap();
     let reference = generic::Intxt::reference(&first).to_string();
-    assert_eq!(
-        reference,
-        "dtxt:datum:z11111111111111111111111111111111/org.example.intxt/main"
-    );
+    assert_eq!(reference, "dtxt:doc:z11111111111111111111111111111111");
     let body = format!(
         "Splits the reference parser.\n\n\
          Intxt: {reference}.\n\
-         Also [the follow-up](dtxt:datum:{second}/org.example.intxt/main) and `{reference}` again.\n\
-         Not an intxt: dtxt:datum:{second}/org.example.intxt.title/main\n\
-         Not a reference: dtxt:datum:nope/org.example.intxt/main\n"
+         Also [the follow-up](dtxt:doc:{second}) and `{reference}` again.\n\
+         Not a doc: dtxt:datum:{second}/org.example.intxt/main\n\
+         Not a reference: dtxt:doc:nope\n"
     );
     assert_eq!(generic::Intxt::named_in(&body), [first, second]);
-    assert!(generic::Intxt::named_in("dtxt:datum:self/org.example.intxt/main").is_empty());
+    assert!(generic::Intxt::named_in("dtxt:doc:self").is_empty());
 }
 
 /// Carrying is not operating: a peer's future fields and vocabulary values survive the whole
