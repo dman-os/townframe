@@ -177,8 +177,6 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
 
 - `.agents/skills/blitz-dioxus-native-limits` — the upstream Blitz/dioxus-native limits that shape
   what the app can do at all.
-- `src/AGENTS.md` — Dioxus 0.8-alpha API notes (0.7 docs differ; `cx`/`Scope`/`use_state`
-  are gone).
 - `docs/fdrs/005-tiles-primitive.md`, `docs/adrs/016-dayframe-dx-architecture.md`.
 
 ## Recently bitten by
