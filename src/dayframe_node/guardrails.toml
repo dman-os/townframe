@@ -11,6 +11,7 @@ allowed_dependencies = [
     "clay_node_egress",
     "clay_rt_wasmtime",
     "clay_surface",
+    "method_core",
     "day_node",
     "secrets_rs",
     "service_utils_rs",

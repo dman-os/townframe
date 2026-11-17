@@ -17,9 +17,14 @@
 //! not share a host's UI loop, and the host's runtime flavor is not the node's business.
 
 use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use clay_guest_session::egress::DispatchEgress;
 use clay_node_egress::MicroEgress;
 use day_node::HeldNode;
@@ -38,17 +43,23 @@ use utils_rs::prelude::default;
 #[cfg(test)]
 mod e2e;
 
-/// One micro the composition installs, and the node methods it is granted.
+/// One micro the composition installs, and what node access it is granted.
 ///
 /// INTERIM: the permission model (per-micro `uses` intersected with the cartridge's grants, Clay
-/// on the node section 2) replaces `methods`. Until it lands, the composition names the granted
-/// NSIDs of each micro here, and this table is the only place that does; an empty set grants
-/// nothing, which is every micro's grant today.
+/// on the node section 2, and its 6.2 lowering of a domain handle) replaces both fields. Until it
+/// lands, the composition names the granted NSIDs and drawers of each micro here, and this table
+/// is the only place that does; empty grants nothing, which is every micro's grant today.
 #[derive(Debug, Clone)]
 pub struct MicroInstall {
     /// The micro's id text, `<did>/<name>`.
     pub micro: String,
+    /// The NSIDs of the node methods the micro may call over `dispatch.local`.
     pub methods: BTreeSet<String>,
+    /// The drawers whose documents the micro may read (`Read`) or read and write (`Write`).
+    /// A micro can only name a document capability to the docs methods it is granted in
+    /// `methods` (`readDatums`, `writeDatums`, ...), and cannot mint one, so the composition mints
+    /// one bound to the micro's actor over these drawers ([`NodeComposition::doc_capability`]).
+    pub drawers: Vec<(DrawerId, DrawerAccess)>,
 }
 
 /// The node methods each micro is granted, by its plug name (the `<name>` of `<did>/<name>`).
@@ -74,6 +85,7 @@ impl MicroInstall {
                     .map_or(&[][..], |(_, methods)| methods);
                 Self {
                     methods: granted.iter().map(|nsid| (*nsid).to_owned()).collect(),
+                    drawers: Vec::new(),
                     micro,
                 }
             })
@@ -96,8 +108,15 @@ pub struct NodeConfig {
 pub struct NodeComposition {
     /// Declared first, dropped last: the node's tasks run on it. See [`Self::stop`].
     runtime: tokio::runtime::Runtime,
-    egress: BTreeMap<String, Arc<MicroEgress>>,
+    installed: BTreeMap<String, Installed>,
     held: HeldNode,
+}
+
+/// What the composition holds for one installed micro.
+struct Installed {
+    egress: Arc<MicroEgress>,
+    /// The micro's document capability over its configured drawers; `None` for a micro with none.
+    doc_capability: Option<CapId>,
 }
 
 impl NodeComposition {
@@ -120,8 +139,8 @@ impl NodeComposition {
                 // No listeners: the holder is its own only client, and reaches the node through
                 // its dispatch client.
                 let held = HeldNode::boot(&root, &settings, default(), true).await?;
-                match install(&held.node, installs).await {
-                    Ok(egress) => Ok((held, egress)),
+                match install_all(&held.node, installs).await {
+                    Ok(installed) => Ok((held, installed)),
                     Err(error) => match held.stop().await {
                         Ok(()) => Err(error),
                         Err(stop) => {
@@ -133,9 +152,9 @@ impl NodeComposition {
             .await
             .expect(ERROR_TOKIO);
         match booted {
-            Ok((held, egress)) => Ok(Self {
+            Ok((held, installed)) => Ok(Self {
                 runtime,
-                egress,
+                installed,
                 held,
             }),
             Err(error) => {
@@ -152,9 +171,28 @@ impl NodeComposition {
     /// The `dispatch.local` egress for `micro` (its id text), to hand to its Wasmtime factory.
     /// `None` for a micro that was not in the install table: it gets no way out.
     pub fn egress(&self, micro: &str) -> Option<Arc<dyn DispatchEgress>> {
-        self.egress
+        self.installed
             .get(micro)
-            .map(|egress| Arc::clone(egress) as Arc<dyn DispatchEgress>)
+            .map(|installed| Arc::clone(&installed.egress) as Arc<dyn DispatchEgress>)
+    }
+
+    /// The document capability minted for `micro` over its configured drawers, bound to the
+    /// micro's actor: what the shell puts in the micro's configuration for the micro to name in
+    /// `readDatums` and the other docs methods. `None` for a micro with no drawers, or none
+    /// installed.
+    ///
+    /// INTERIM: see [`MicroInstall`].
+    pub fn doc_capability(&self, micro: &str) -> Option<CapId> {
+        self.installed.get(micro)?.doc_capability
+    }
+
+    /// Installs one more micro on the running node, replacing an earlier install of the same id
+    /// (its actor is reused; its capabilities are minted anew).
+    pub async fn install_micro(&mut self, install: MicroInstall) -> Res<()> {
+        let micro = install.micro.clone();
+        let installed = install_one(&self.held.node, install).await?;
+        self.installed.insert(micro, installed);
+        Ok(())
     }
 
     /// This node's dialable endpoint ticket: what another node puts in its bootstrap list to dial
@@ -173,10 +211,10 @@ impl NodeComposition {
     pub async fn stop(self) -> Res<()> {
         let Self {
             runtime,
-            egress,
+            installed,
             held,
         } = self;
-        drop(egress);
+        drop(installed);
         let stopped = runtime.spawn(held.stop()).await.expect(ERROR_TOKIO);
         // Dropping a runtime inside an async context panics; this does not wait for threads.
         runtime.shutdown_background();
@@ -199,13 +237,28 @@ fn prepare_settings(root: &Path, bootstrap: &[String]) -> Res<()> {
     })
 }
 
-/// Opens the `micros` subsystem actor and one actor per micro below it, and mints each micro's
-/// egress.
-async fn install(
+async fn install_all(
     node: &big_node::BigNode,
     installs: Vec<MicroInstall>,
-) -> Res<BTreeMap<String, Arc<MicroEgress>>> {
+) -> Res<BTreeMap<String, Installed>> {
+    let mut installed = BTreeMap::new();
+    for install in installs {
+        let micro = install.micro.clone();
+        installed.insert(micro, install_one(node, install).await?);
+    }
+    Ok(installed)
+}
+
+/// Opens the micro's actor below the `micros` subsystem actor, mints its egress and, when it has
+/// drawers, its document capability.
+async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Installed> {
+    let MicroInstall {
+        micro,
+        methods,
+        drawers,
+    } = install;
     let authority = &node.authority;
+    let minter = Authorization::identity(authority.root);
     let open = |parent, path: String, rights| {
         authority.client.call(
             RequestContext::root(),
@@ -217,30 +270,46 @@ async fn install(
         )
     };
     // A subsystem actor holds every right, as `big_node` opens `nodules`; a micro's own actor
-    // can only be used.
+    // can only be used. Opening an open actor is idempotent.
     let micros = open(authority.root, "micros".into(), Rights::all())
         .await
         .wrap_err("opening the micros subsystem actor")?;
-    let mut egress = BTreeMap::new();
-    for MicroInstall { micro, methods } in installs {
-        let actor: OpenedActor = open(
-            micros.capability,
-            format!("micros/{}", actor_segment(&micro)),
-            Rights::USE,
-        )
-        .await
-        .wrap_err_with(|| format!("opening the actor of micro {micro}"))?;
-        let installed = MicroEgress::install(
-            node.dispatch.client.clone(),
-            Authorization::identity(authority.root),
-            &actor,
-            methods,
-        )
+    let actor: OpenedActor = open(
+        micros.capability,
+        format!("micros/{}", actor_segment(&micro)),
+        Rights::USE,
+    )
+    .await
+    .wrap_err_with(|| format!("opening the actor of micro {micro}"))?;
+    let egress = MicroEgress::install(node.dispatch.client.clone(), minter, &actor, methods)
         .await
         .wrap_err_with(|| format!("minting the capability of micro {micro}"))?;
-        egress.insert(micro, Arc::new(installed));
-    }
-    Ok(egress)
+    let doc_capability = if drawers.is_empty() {
+        None
+    } else {
+        let minted = node
+            .docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                minter.metadata(),
+                MintDocCapability {
+                    scope: DocScope {
+                        drawers: drawers.into_iter().collect(),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                    subject: Some(actor.actor.actor_id),
+                },
+            )
+            .await
+            .wrap_err_with(|| format!("minting the document capability of micro {micro}"))?;
+        Some(minted.capability_id)
+    };
+    Ok(Installed {
+        egress: Arc::new(egress),
+        doc_capability,
+    })
 }
 
 /// The one path segment a micro's actor lives at below `micros`, by the nodules' rule (`big_nodule`

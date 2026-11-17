@@ -8,6 +8,19 @@ use crate::NodeComposition;
 use crate::NodeConfig;
 use crate::read_tickets;
 use async_trait::async_trait;
+use big_cabinet_core::DatumKey;
+use big_cabinet_core::DocId;
+use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::DrawerId;
 use big_dispatch::Caller;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
@@ -16,10 +29,12 @@ use big_dispatch::ProviderKind;
 use big_dispatch::ProviderState;
 use big_dispatch_core::Body;
 use big_dispatch_core::InvocationContext;
+use bytes::Bytes;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::DeclaredPublication;
 use clay_guest_session::capabilities::PublicationKind;
 use clay_guest_session::capabilities::presentation_component;
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::MicroId;
@@ -28,6 +43,9 @@ use clay_rt_wasmtime::WasmRuntime;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
 use clay_surface::SurfaceSink;
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use method_core::Method;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::RequestContext;
@@ -133,6 +151,7 @@ async fn run_fixture(composition: &NodeComposition) -> BTreeMap<String, String> 
 
 fn install(micro: &str, methods: &[&str]) -> MicroInstall {
     MicroInstall {
+        drawers: vec![],
         micro: micro.to_owned(),
         methods: methods
             .iter()
@@ -299,4 +318,142 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
     assert_eq!(settings.peers.unwrap().bootstrap, [host.address()]);
     phone.stop().await.unwrap();
     host.stop().await.unwrap();
+}
+
+const NOTE: &str = "org.example.note";
+
+/// Creates a note in `drawer` as the node's drawers actor does, and returns its id.
+async fn create_note(node: &big_node::BigNode, drawer: &DrawerId, text: &str) -> DocId {
+    let placement = format!("drawer {drawer}");
+    let capability = node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
+            MintDocCapability {
+                scope: DocScope {
+                    create: BTreeSet::from([placement.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    node.docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability,
+                command: CommandId::try_from(format!("create-{text}")).unwrap(),
+                placement,
+                datums: BTreeMap::from([(
+                    format!("{NOTE}/main").parse::<DatumKey>().unwrap(),
+                    json!({"$type": NOTE, "value": text}),
+                )]),
+            },
+        )
+        .await
+        .unwrap()
+        .doc_id
+}
+
+/// What a guest's `readDatums` is on the wire: a JSON `POST` to `dispatch.local`, answered by the
+/// micro's egress. Returns the HTTP status and the JSON body.
+async fn read_datums(
+    egress: &Arc<dyn DispatchEgress>,
+    capability: CapId,
+    doc_id: &DocId,
+) -> (u16, Value) {
+    let body = serde_json::to_vec(&ReadDatums {
+        capability,
+        doc_id: doc_id.clone(),
+        at: At::Current,
+        datums: None,
+        optimistic: false,
+    })
+    .unwrap();
+    let request = http::Request::post(format!(
+        "http://dispatch.local/xrpc/{}",
+        ReadDatums::XRPC.nsid
+    ))
+    .header(http::header::CONTENT_TYPE, "application/json")
+    .body(
+        Full::new(Bytes::from(body))
+            .map_err(|never| match never {})
+            .boxed_unsync(),
+    )
+    .unwrap();
+    let response = egress.send(request).await;
+    let status = response.status().as_u16();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+/// The interim document capability is bound to the micro's actor and scoped to the drawers its
+/// install names: the micro reads a document in a granted drawer through its egress with it, and
+/// is denied a document in a drawer it was not granted, even though the node holds both.
+#[tokio::test]
+async fn a_micro_reads_documents_only_from_its_granted_drawers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut composition = NodeComposition::boot(NodeConfig {
+        root: dir.path().to_owned(),
+        bootstrap: vec![],
+        installs: vec![],
+    })
+    .await
+    .unwrap();
+    let local = composition.node().drawers.local();
+    let (granted_drawer, other_drawer) = (local.present_id.clone(), local.originated_id.clone());
+    let granted_doc = create_note(composition.node(), &granted_drawer, "visible").await;
+    let other_doc = create_note(composition.node(), &other_drawer, "hidden").await;
+    assert!(
+        composition.doc_capability(FIXTURE).is_none(),
+        "nothing is minted for a micro that is not installed"
+    );
+
+    composition
+        .install_micro(MicroInstall {
+            drawers: vec![(granted_drawer, DrawerAccess::Read)],
+            ..install(FIXTURE, &[ReadDatums::XRPC.nsid])
+        })
+        .await
+        .unwrap();
+    let capability = composition
+        .doc_capability(FIXTURE)
+        .expect("a micro with drawers is minted a document capability");
+    let egress = composition.egress(FIXTURE).unwrap();
+
+    let (status, read) = read_datums(&egress, capability, &granted_doc).await;
+    assert_eq!(status, 200, "{read}");
+    let text = serde_json::to_string(&read).unwrap();
+    assert!(
+        text.contains("visible"),
+        "the granted drawer's note is read: {text}"
+    );
+    let (status, denied) = read_datums(&egress, capability, &other_doc).await;
+    assert_eq!(status, 403, "{denied}");
+    assert!(
+        denied.to_string().contains("Denied"),
+        "a drawer outside the install is denied by the docs service: {denied}"
+    );
+
+    // A micro with no drawers has no capability to present.
+    composition
+        .install_micro(install(
+            "did:example:clay-local/other",
+            &[ReadDatums::XRPC.nsid],
+        ))
+        .await
+        .unwrap();
+    assert!(
+        composition
+            .doc_capability("did:example:clay-local/other")
+            .is_none()
+    );
+    composition.stop().await.unwrap();
 }
