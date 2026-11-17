@@ -92,6 +92,13 @@ pub fn unified_diff(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    // stderr is drained on its own thread while stdout is read: git blocks once a pipe it
+    // writes to is full, so reading only stdout could wait forever on a chatty stderr.
+    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let drain = std::thread::spawn(move || {
+        let mut text = Vec::new();
+        stderr.read_to_end(&mut text).map(|_| text)
+    });
     let mut bytes = Vec::new();
     child
         .stdout
@@ -102,13 +109,15 @@ pub fn unified_diff(
     if bytes.len() as u64 > max_bytes {
         child.kill()?;
         child.wait()?;
+        drain.join().expect("the stderr drain does not panic")?;
         return Ok(None);
     }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
+    let status = child.wait()?;
+    let stderr = drain.join().expect("the stderr drain does not panic")?;
+    if !status.success() {
         return Err(Error::Git {
             args: args.join(" "),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
         });
     }
     Ok(Some(bytes))
