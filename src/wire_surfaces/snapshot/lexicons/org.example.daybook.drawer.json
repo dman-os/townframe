@@ -1,0 +1,21 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "layout": {
+          "refs": [
+            "org.example.daybook.drawer.selfDoc",
+            "org.example.daybook.drawer.singleGroup"
+          ],
+          "type": "union"
+        }
+      },
+      "required": [
+        "layout"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer",
+  "lexicon": 1
+}

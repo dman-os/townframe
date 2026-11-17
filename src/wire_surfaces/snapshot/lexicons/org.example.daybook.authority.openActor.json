@@ -1,0 +1,111 @@
+{
+  "defs": {
+    "OpenActor": {
+      "properties": {
+        "parent": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rights": {
+          "ref": "#Rights",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "parent",
+        "path",
+        "rights"
+      ],
+      "type": "object"
+    },
+    "OpenedActor": {
+      "nullable": [
+        "parentActorId"
+      ],
+      "properties": {
+        "actorId": {
+          "type": "string"
+        },
+        "capability": {
+          "type": "string"
+        },
+        "certificate": {
+          "type": "bytes"
+        },
+        "parentActorId": {
+          "type": "string"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actorId",
+        "url",
+        "publicKey",
+        "certificate",
+        "capability"
+      ],
+      "type": "object"
+    },
+    "Rights": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "InvalidCapability"
+        },
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "Escalation"
+        },
+        {
+          "name": "UnrecognizedActor"
+        },
+        {
+          "name": "InvalidActorPath"
+        },
+        {
+          "name": "ActorNotFound"
+        },
+        {
+          "name": "StateCorrupt"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Claim"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#OpenActor",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#OpenedActor",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.authority.openActor",
+  "lexicon": 1
+}

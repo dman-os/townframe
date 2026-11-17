@@ -1,0 +1,61 @@
+{
+  "$defs": {
+    "CartridgeInstall": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.install/<cartridgeId>`: what this node runs of a cartridge. It\nlives in the node config document and replaces the copied envelope of ADR 027 with a pin: the\nheads of `cartridge` select the revision, and holding the pin is what keeps that version.\n\nA component's member is present exactly when the pinned envelope contributes it, and each is\nenabled on its own.",
+      "properties": {
+        "cartridge": {
+          "description": "The pinned version datum (`org.example.daybook.cartridge/<version>`) in the cartridge's\nregistry document.",
+          "x-lexicon-ref": "org.example.daybook.defs#datumPin"
+        },
+        "configDoc": {
+          "description": "The cartridge's config document in the shared config drawer.",
+          "type": "string"
+        },
+        "micro": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentInstall"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "nodule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ComponentInstall"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "cartridge",
+        "configDoc"
+      ],
+      "title": "CartridgeInstall",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.install"
+    },
+    "ComponentInstall": {
+      "additionalProperties": true,
+      "description": "One component's state on this node.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/CartridgeInstall",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

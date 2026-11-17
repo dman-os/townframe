@@ -1,0 +1,54 @@
+{
+  "defs": {
+    "SetMethodRoute": {
+      "nullable": [
+        "provider"
+      ],
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Sets, or with `provider` absent clears, the node-local route of `pattern`: an exact NSID or an\nauthority prefix whose calls dispatch sends to the provider with that id, a built-in's or a\ncartridge's (ADR 045). The operator's route is also the consent of every dependent: the\nresolution locks of the requests it covers move to the routed provider. Served by the nodule\nservice only until the node has a per-node store of its own.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "name": "UnknownCartridge"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#SetMethodRoute",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.nodules.setMethodRoute",
+  "lexicon": 1
+}

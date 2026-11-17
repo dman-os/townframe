@@ -1,0 +1,37 @@
+{
+  "$defs": {
+    "SingleGroupLayout": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "docsGroup": {
+          "description": "The collection group included docs delegate access to.",
+          "type": "string"
+        },
+        "metaGroup": {
+          "description": "Authority over the descriptor, which is the public metadata root, and its roster.",
+          "type": "string"
+        },
+        "sensitiveGroup": {
+          "description": "Authority over the sensitive metadata root: its membership is withheld from a Relay\nprincipal, so plaintext inventories named there reach only Read+.",
+          "type": "string"
+        },
+        "sensitiveRoot": {
+          "description": "The sensitive metadata root doc. Its existence and id are public discovery facts; its\ncontents are not. It carries no descriptor, roster, doc entries or child entries.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "metaGroup",
+        "docsGroup",
+        "sensitiveGroup",
+        "sensitiveRoot"
+      ],
+      "title": "SingleGroupLayout",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer.singleGroup"
+    }
+  },
+  "$ref": "#/$defs/SingleGroupLayout",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

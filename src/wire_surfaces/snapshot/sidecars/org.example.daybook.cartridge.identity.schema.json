@@ -1,0 +1,22 @@
+{
+  "$defs": {
+    "CartridgeIdentity": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridge.identity/main`: the cartridge id a registry document is for. Written once\nwhen the document is created and removed with the cartridge, so a document without it is not a\ncartridge.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "CartridgeIdentity",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.identity"
+    }
+  },
+  "$ref": "#/$defs/CartridgeIdentity",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

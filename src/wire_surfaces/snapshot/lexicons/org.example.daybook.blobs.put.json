@@ -1,0 +1,72 @@
+{
+  "defs": {
+    "BlobInfo": {
+      "properties": {
+        "blobId": {
+          "type": "string"
+        },
+        "lengthOctets": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "blobId",
+        "lengthOctets"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "NotFound"
+        },
+        {
+          "description": "The item is over the node's size limit for one put (ADR 042 §6). For a batch import this is\nthe refusal of that item alone.",
+          "name": "TooLarge"
+        },
+        {
+          "description": "The body of a put failed while the node read it: the upload was cut off.",
+          "name": "Unreadable"
+        },
+        {
+          "description": "A read asked for a range that selects no octet of the blob.",
+          "name": "RangeNotSatisfiable"
+        },
+        {
+          "name": "InvalidInput"
+        },
+        {
+          "name": "Storage"
+        }
+      ],
+      "input": {
+        "encoding": "*/*"
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#BlobInfo",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "capability": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability"
+        ],
+        "type": "params"
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.blobs.put",
+  "lexicon": 1
+}

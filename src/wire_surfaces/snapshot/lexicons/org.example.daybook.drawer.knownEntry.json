@@ -1,0 +1,17 @@
+{
+  "defs": {
+    "main": {
+      "nullable": [
+        "mirror"
+      ],
+      "properties": {
+        "mirror": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.drawer.knownEntry",
+  "lexicon": 1
+}
