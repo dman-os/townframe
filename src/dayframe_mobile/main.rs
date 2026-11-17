@@ -21,9 +21,9 @@ mod android {
     use dayframe_native::PackageFiles;
     use dayframe_native::Shell;
     use dioxus::prelude::*;
+    use jni::JNIEnv;
     use jni::objects::JObject;
     use jni::objects::JValue;
-    use jni::JNIEnv;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::OnceLock;
@@ -66,16 +66,27 @@ mod android {
         let data_directory = app
             .internal_data_path()
             .expect("the activity has an internal data path");
-        DATA_DIRECTORY
-            .set(data_directory.clone())
-            .expect("android_main runs once");
-        EXTERNAL_DIRECTORY
-            .set(app.external_data_path())
-            .expect("android_main runs once");
+        // Android calls `android_main` again in the same process when it recreates the activity (for
+        // example on returning from the background), so the process-wide state is set by the first
+        // call only. A later activity must report the same paths, or it would be another app's data.
+        let first_activity = DATA_DIRECTORY.get().is_none();
+        let data_stored = DATA_DIRECTORY.get_or_init(|| data_directory.clone());
+        assert_eq!(
+            *data_stored, data_directory,
+            "a recreated activity keeps its internal data path"
+        );
+        let external = app.external_data_path();
+        let external_stored = EXTERNAL_DIRECTORY.get_or_init(|| external.clone());
+        assert_eq!(
+            *external_stored, external,
+            "a recreated activity keeps its external data path"
+        );
         // Android has no `$HOME` or XDG cache for Wasmtime to find, so without this every process
         // start recompiles every guest (6.5 s for a debug counter on a ZTE 8050). The artifacts
         // are regenerable, so they sit under the internal data dir and go with the app.
-        dayframe_native::set_component_cache_directory(data_directory.join("component-cache"));
+        if first_activity {
+            dayframe_native::set_component_cache_directory(data_directory.join("component-cache"));
+        }
         register_back_callback(&app);
         dioxus_native::set_android_app(app);
         dioxus::launch(App);

@@ -1406,13 +1406,21 @@ impl KeyhiveStorage<future_form::Sendable> for BigRepoKeyhiveStorage {
 
 /// Publishes the fully written `tmp` at `dest` only if nothing is there yet: atomic, the first
 /// writer wins, and a later writer gets `AlreadyExists` and keeps what is there (content-addressed
-/// blobs and the DEK rely on this). On Linux and Android this is `renameat2(RENAME_NOREPLACE)`:
-/// Android's SELinux policy refuses apps the `link` syscall on their own data files, so a hard link
-/// (the portable way to get the same no-clobber publish) fails there with `EACCES`. A filesystem
-/// without `RENAME_NOREPLACE` (`EINVAL`), and other platforms, publish with a hard link instead.
+/// blobs and the DEK rely on this).
+///
+/// Android's SELinux policy refuses apps the `link` syscall on their own data files (`EACCES`), so
+/// the portable no-clobber publish, a hard link, cannot be used there. On Linux and Android this is
+/// `renameat2(RENAME_NOREPLACE)`. Where that call is unavailable (a kernel or libc without it, a
+/// filesystem that rejects the flag, or a policy that refuses it), it is a check for `dest` and a
+/// plain `rename` under one process-wide lock. That is race-free because every keyhive write in
+/// this process goes through the lock, and only one process holds a node's directory (the holder
+/// lock). Other platforms publish with a hard link.
 async fn publish_no_replace(tmp: &Path, dest: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
+        static LOCKED_PUBLISH: std::sync::LazyLock<futures::lock::Mutex<()>> =
+            std::sync::LazyLock::new(|| futures::lock::Mutex::new(()));
+        static FALLBACK_REPORTED: std::sync::Once = std::sync::Once::new();
         let (from, to) = (tmp.to_owned(), dest.to_owned());
         let renamed = tokio::task::spawn_blocking(move || {
             rustix::fs::renameat_with(
@@ -1426,12 +1434,24 @@ async fn publish_no_replace(tmp: &Path, dest: &Path) -> io::Result<()> {
         .await
         .expect("the rename task does not panic");
         match renamed {
-            Ok(()) => return Ok(()),
-            Err(rustix::io::Errno::INVAL) => {}
-            Err(errno) => return Err(io::Error::from(errno)),
+            Ok(()) => Ok(()),
+            Err(rustix::io::Errno::EXIST) => Err(io::ErrorKind::AlreadyExists.into()),
+            Err(errno) => {
+                FALLBACK_REPORTED.call_once(|| {
+                    tracing::warn!(%errno, "renameat2(RENAME_NOREPLACE) unavailable; keyhive storage publishes with a locked check and rename");
+                });
+                let _publishing = LOCKED_PUBLISH.lock().await;
+                if tokio::fs::try_exists(dest).await? {
+                    return Err(io::ErrorKind::AlreadyExists.into());
+                }
+                tokio::fs::rename(tmp, dest).await
+            }
         }
     }
-    tokio::fs::hard_link(tmp, dest).await
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        tokio::fs::hard_link(tmp, dest).await
+    }
 }
 
 #[cfg(test)]
