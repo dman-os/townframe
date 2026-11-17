@@ -56,13 +56,30 @@ host embeds a webnode (ADR 038).
   admits because micro actors are the operator's descendants. The host takes the micro from its
   own incarnation table, never from anything the guest says, as `big_nodule` does with the
   workload table.
-- Durable access is grants on the micro's actor, recorded in the cartridge's configuration document
-  (ADR 044 §8, accepted): one datum per grant, `micro.grant/drawer:<drawerId>` → `{ access }` and
-  `micro.grant/method:<nsid or authority>` → `{}`, beside the nodule's `nodule.grant/…`; privilege
-  is refused at mint. They are re-minted into live, holder-bound capabilities when the host binds
-  the micro (ADR 037 §5), and the micro presents only its own handles (ADR 037 a1). A micro with no
-  grants can call nothing. The cartridge's settings datums are shared by its micro and nodule; the
-  micro reads and writes them, never its grants.
+- **Durable access follows ADR 047 (accepted 2026-11-13; revised here 2026-11-17 on the nodules
+  lane's review).** Grants are keyed by permbind, not by resource. They are recorded in the
+  cartridge's configuration document (ADR 044 §8), one datum per grant: `micro.grant/<permbind>`,
+  plus `micro.grant/<permbind>/<drawerId>` for the members of a `#drawers` set. They sit beside the
+  nodule's `nodule.grant/<permbind>`. Permbinds belong to the cartridge, so its micro and its nodule
+  draw on one list of permbinds and are granted separately per runtime. Privilege is refused at mint.
+- **A micro reaches only its declared `uses` that were granted.** A micro declares `uses` the way
+  a nodule routine does (ADR 047 §6). It has no routines, so it declares them once, per micro. They
+  are admitted by the same rule: each key must name one of the cartridge's permbinds and ask no more
+  than that permbind declares.
+  - The host mints one micro capability from `uses` ∩ grants when it binds the micro, as a
+    holder-bound capability (ADR 037 §5). It retracts and re-mints that capability whenever a
+    grant the micro uses changes, so revocation takes effect at the next call.
+  - The host hands that capability to every `dispatch.local` call the micro makes, as nodule egress
+    does. The micro presents only its own handles (ADR 037 a1).
+  - A micro with no granted `uses` can call nothing.
+- **Docs access is datum-kind scoped** (ADR 047 §6: `DocScope.read`/`write` map each doc to its
+  `DatumKinds`). A micro's docs access comes from its `#datum` and `#drawers` permbinds, and its
+  layer-1 calls (§4) carry that capability.
+- The cartridge's settings datums are shared by its micro and nodule; the micro reads and writes them, never its
+  grants.
+- The micro side of the permission model is written with the nodules lane this week, as one story from manifest
+  to grant to capability. It covers the micro side of `uses`, the consent and picker flows (ADR 047 §10; a
+  permbind with `resolution: atRuntime` is naturally a micro's picker) and the cartridge-level parent actor below.
 - Open (cartridge-authoring.md "next design topic"): whether a cartridge's micro and nodule should
   share a cartridge-level parent actor for consent. This draft keeps the two subsystems parallel;
   a later cartridge-consent ADR can add the parent without changing the call path.
@@ -93,6 +110,10 @@ where the two languages differ:
 - Rust shares the `method_core::Method` types.
 - TS gets its request and response types generated from the same Lexicons (`method_lexicon`). So a method's
   Lexicon is the single source for both clients, and a TS client is generated, never written by hand.
+  The generator must say what it drops: anything only the JSON Schema sidecar states, such as typed-map
+  refinements and storage forms. That is fine for request/response methods, but it must be reported, not lost
+  silently (nodules, 2026-11-17; their #139 fixed a tagged-union bug in `method_lexicon` that would have
+  reached TS).
 - Docs layer 1 (§4) is specified as Lexicon methods plus a thin client, so its TS twin is generated too.
 
 What to check before acceptance: one Lexicon generates both the Rust and the TS client for a test method, and
@@ -136,7 +157,7 @@ nodules and micros, but not the partial-sync collection machinery.**
   component, each enabled independently. One pin means a cartridge's micro and nodule always run
   the same revision.
 - Management is the cartridges service's (privileged): `install`, `setEnabled { component }`,
-  `uninstall` (keeps config), `setGrant { subsystem }`, `clearConfig`.
+  `uninstall` (keeps config), `setGrant { subsystem, permbind }` (a grant is keyed by the permbind it satisfies, ADR 047 §5), `clearConfig`.
 - The host reconciles the `micro` part of every install: `cartridges.listInstalls` and the
   `cartridges.observeInstalls` subscription for live enable/disable, then the pinned envelope's
   typed `MicroContribution` (its `component` artifact, `feat/cart-micros`) to load the component.
@@ -210,7 +231,8 @@ None from the first two rounds. The cartridge-level parent actor (§2) waits for
 consent ADR.
 
 Before acceptance (2026-11-17):
-- **Nodules sign-off.** Pending: sent to the nodules lane on 2026-11-17.
+- **Nodules sign-off.** §1 and §3–§6 are signed off (2026-11-17). §2 was revised to ADR 047 the same day, at their
+  request, and their sign-off on the revised §2 is pending.
 - **Placement list.** Which micros stay native under §6.
 
 Order (operator, 2026-11-17): this ADR is delivered before the TypeScript spike in `micro-runtime.md`, so the API
