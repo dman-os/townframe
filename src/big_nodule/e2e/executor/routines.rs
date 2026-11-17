@@ -19,8 +19,14 @@ use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::OpenedActor;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
+use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::DrawerAccess;
@@ -44,6 +50,7 @@ use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::Readiness;
 use serde_json::json;
+use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -206,10 +213,10 @@ async fn a_write_is_refused_for_the_routine_that_did_not_declare_it() {
     uses(&mut cartridge, SETUP, PREFS, writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
     let ping = executor.routine_capabilities()[PING]
-        .config
+        .docs
         .expect("ping writes notes");
     let setup = executor.routine_capabilities()[SETUP]
-        .config
+        .docs
         .expect("setup writes prefs");
 
     assert!(
@@ -335,7 +342,7 @@ async fn a_reconcile_that_changes_nothing_mints_and_retracts_nothing() {
         executor
             .routine_capabilities()
             .into_iter()
-            .map(|(routine, held)| (routine, [held.dispatch, held.config, held.drawers]))
+            .map(|(routine, held)| (routine, [held.dispatch, held.docs, held.drawers]))
             .collect::<BTreeMap<_, _>>()
     };
     let before = handles(&executor);
@@ -535,5 +542,189 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
         )
         .await
         .expect_err("a create use confers no write on an existing drawer");
+    node.shutdown().await;
+}
+
+/// A routine whose `uses` take a `#drawers` permbind and `#datum` kinds reaches the documents of
+/// each granted drawer for those kinds and no others (ADR 049 §2): a reader of one kind cannot
+/// read another or write the one it reads, a writer of that kind cannot write another, and a
+/// routine that names no `#datum` kind reaches no document in any drawer.
+#[tokio::test]
+async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
+    const LOG: &str = "org.example.alpha.log";
+    const SECRET: &str = "org.example.alpha.secret";
+    const PEEK: &str = "org.example.alpha.peek";
+    const KEEP: &str = "org.example.alpha.keep";
+    let mut cartridge = alpha(&[PING, SETUP, PEEK, KEEP], &[], &[]);
+    for kind in [LOG, SECRET] {
+        cartridge.with_lexicon(lexicon(json!({
+            "lexicon": 1,
+            "id": kind,
+            "defs": { "main": { "type": "object", "properties": {} } }
+        })));
+    }
+    cartridge.permbinds.insert(
+        "log".into(),
+        Permbind::Datum(PermbindDatum {
+            nsid: LOG.parse().unwrap(),
+            description: "log".into(),
+            read: Some(Necessity::Optional),
+            write: Some(Necessity::Optional),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    cartridge.permbinds.insert(
+        "drawers".into(),
+        Permbind::Drawers(PermbindDrawers {
+            description: "drawers".into(),
+            resolution: Default::default(),
+            read: Some(Necessity::Optional),
+            write: Some(Necessity::Optional),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    let reads = || RoutineUse {
+        read: true,
+        ..Default::default()
+    };
+    // PING reads log from the drawers, KEEP writes it, SETUP reads the drawers and names no
+    // datum kind, and PEEK reads log without any drawers permbind.
+    uses(&mut cartridge, PING, "drawers", reads());
+    uses(&mut cartridge, PING, "log", reads());
+    uses(&mut cartridge, KEEP, "drawers", writes());
+    uses(&mut cartridge, KEEP, "log", writes());
+    uses(&mut cartridge, SETUP, "drawers", reads());
+    uses(&mut cartridge, PEEK, "log", reads());
+    let (node, executor, _) = hosted(cartridge, &[]).await;
+    let present = node.drawers.local().present_id.clone();
+    crate::e2e::grant_drawer(
+        &node.drawers,
+        &node.drawers_actor,
+        &present,
+        node.nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
+    )
+    .await;
+    node.set_drawers(
+        ALPHA,
+        BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
+    )
+    .await;
+    let held = executor.routine_capabilities();
+    assert!(
+        held[SETUP].docs.is_none(),
+        "a drawers use without a datum kind reaches no document"
+    );
+    assert!(
+        held[PEEK].docs.is_none(),
+        "a datum kind that is not a settings kind reaches nothing without a drawers use"
+    );
+    let reader = held[PING].docs.expect("ping reads log from the drawers");
+    let keeper = held[KEEP].docs.expect("keep writes log into the drawers");
+
+    // The nodule's actor puts one document of each kind into the granted drawer.
+    let actor = node.actor_at(&id(ALPHA)).await;
+    let placement = format!("drawer {present}");
+    let create = node
+        .docs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(actor.capability).metadata(),
+            MintDocCapability {
+                scope: DocScope {
+                    create: BTreeSet::from([placement.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap();
+    let log_key = DatumKey::from_text(LOG, "main").unwrap();
+    let secret_key = DatumKey::from_text(SECRET, "main").unwrap();
+    let doc_id = node
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDoc {
+                capability: create.capability_id,
+                command: CommandId::try_from("drawer-doc".to_owned()).unwrap(),
+                placement,
+                datums: BTreeMap::from([
+                    (log_key.clone(), json!({ "$type": LOG })),
+                    (secret_key.clone(), json!({ "$type": SECRET })),
+                ]),
+            },
+        )
+        .await
+        .unwrap()
+        .doc_id;
+    let authorization = |capability| {
+        Authorization {
+            authority: capability,
+            signer: actor.capability,
+        }
+        .metadata()
+    };
+    let read = async |capability, datums: Option<BTreeSet<DatumKey>>| {
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization(capability),
+                ReadDatums {
+                    capability,
+                    doc_id: doc_id.clone(),
+                    at: At::Current,
+                    datums,
+                    optimistic: false,
+                },
+            )
+            .await
+    };
+    let write = async |capability, key: &DatumKey, kind: &str| {
+        node.docs
+            .client
+            .call_with(
+                RequestContext::root(),
+                authorization(capability),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: doc_id.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(key.clone(), json!({ "$type": kind }))]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+    };
+    let denied = ClientError::Method(big_cabinet_core::doc::DocsError::Denied);
+
+    // The reader sees the log kind of the drawer's document and not the secret kind.
+    let seen = read(reader, None).await.unwrap();
+    assert!(seen.datums.contains_key(&log_key));
+    assert!(!seen.datums.contains_key(&secret_key));
+    assert_eq!(
+        read(reader, Some(BTreeSet::from([secret_key.clone()])))
+            .await
+            .unwrap_err(),
+        denied
+    );
+    // Its drawers use only reads, so the log kind is not writable either.
+    assert_eq!(write(reader, &log_key, LOG).await.unwrap_err(), denied);
+    // The keeper writes the log kind and no other.
+    write(keeper, &log_key, LOG).await.unwrap();
+    assert_eq!(
+        write(keeper, &secret_key, SECRET).await.unwrap_err(),
+        denied
+    );
     node.shutdown().await;
 }
