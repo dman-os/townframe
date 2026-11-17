@@ -51,6 +51,8 @@ language separately.
        source to ship.
      - Because the build routine is deterministic, the registry can rebuild the bundle from the source and check
        that they match. Then the code a person reads is the code that runs.
+     - **Deferred (operator, 2026-11-17):** the on-device build routine comes after TS micros run. Start with the
+       shipping model only: bundles built ahead of time (as in the spike) plus the source.
 4. **Heavy or stable micros stay in Rust** (the diff view, virtualization, highlighting) and are composed into TS
    micros by embedding (`mount-component`), with data exchanged through collections. That is the Emacs C-primitive
    split.
