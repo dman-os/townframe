@@ -1,5 +1,5 @@
-//! The methods intxt's nodule serves, as their request, output and error types: `createIntxt` and
-//! `addToIntxt`. The handlers live in `intxt_nodule`; callers (the host's CLI, the cartridge,
+//! The methods intxt's nodule serves, as their request, output and error types: `createIntxt`,
+//! `addToIntxt` and `summarizeIntxts`. The handlers live in `intxt_nodule`; callers (the host's CLI, the cartridge,
 //! tests) need only these types. Recording what capture observed is not a method: it is the
 //! client library's recorder (`intxt_core::client`).
 
@@ -70,6 +70,69 @@ pub struct AddedToIntxt {
     pub entry: DatumReference,
 }
 
+/// The most drawers one [`SummarizeIntxts`] names.
+pub const MAX_SUMMARIZED: usize = 32;
+
+/// Summarizes the intxts in `drawers`, for callers with no egress beyond dispatch (a micro on a
+/// phone looking up the intxts a PR names). One result per drawer, in order; a drawer that cannot
+/// be summarized does not fail the call.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SummarizeIntxts {
+    /// At most [`MAX_SUMMARIZED`], each an intxt's drawer (its descriptor document's id).
+    pub drawers: Vec<DrawerId>,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntxtsSummarized {
+    pub results: Vec<IntxtSummary>,
+}
+
+/// What became of one drawer of a [`SummarizeIntxts`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntxtSummary {
+    pub drawer: DrawerId,
+    pub status: SummaryStatus,
+    /// Present when `found`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Present when `found` and the intxt has one. Markdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// How many entries the intxt's body lists. Present when `found`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<u32>,
+    /// The newest logical clock among the descriptor's datums, which rises with every write to
+    /// them: a change token, not a time. Present when `found`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<u64>,
+    /// [`crate::generic::Intxt::reference`] text, the line a PR description carries. Present when
+    /// `found`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// Why the drawer is `unreadable`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SummaryStatus {
+    /// The drawer is an intxt the caller can read.
+    Found,
+    /// The caller reads the drawer's descriptor and it holds no intxt marker.
+    NotFound,
+    /// A read failed (the caller may not read it, or the node does not hold it) or the intxt's
+    /// descriptor is malformed; `reason` says which.
+    Unreadable,
+}
+
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum IntxtError {
@@ -92,4 +155,5 @@ method_core::methods! {
     error = IntxtError, nsid_prefix = "org.example.intxt.";
     CreateIntxt => IntxtCreated, procedure, "createIntxt";
     AddToIntxt => AddedToIntxt, procedure, "addToIntxt";
+    SummarizeIntxts => IntxtsSummarized, procedure, "summarizeIntxts";
 }

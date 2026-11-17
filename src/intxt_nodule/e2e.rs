@@ -472,6 +472,89 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     node.stop().await;
 }
 
+/// `summarizeIntxts` answers one result per drawer, in order, and a drawer that is no intxt, or
+/// that the node does not hold, is its own result and never fails the call.
+#[tokio::test]
+async fn summarize_intxts_answers_each_drawer_in_order() {
+    use intxt_core::methods::IntxtSummary;
+    use intxt_core::methods::SummarizeIntxts;
+    use intxt_core::methods::SummaryStatus;
+
+    let node = boot().await;
+    let intxt = async |title: &str, description: Option<&str>| {
+        node.call(intxt_core::methods::CreateIntxt {
+            title: title.to_owned(),
+            description: description.map(str::to_owned),
+        })
+        .await
+        .unwrap()
+        .drawer_id
+    };
+    let first = intxt("first", Some("About *it*")).await;
+    let second = intxt("second", None).await;
+    // A document that exists and holds no intxt marker.
+    let plain = create_in(
+        &node,
+        &first,
+        [datum::<generic::Title>("main", json!({"title": "plain"}))].into(),
+    )
+    .await
+    .doc_id;
+    let unknown = DocId::new([9; 32]);
+
+    let summarized = node
+        .call(SummarizeIntxts {
+            drawers: vec![
+                second.clone(),
+                plain.clone(),
+                first.clone(),
+                unknown.clone(),
+                second.clone(),
+            ],
+        })
+        .await
+        .unwrap();
+    let statuses: Vec<_> = summarized
+        .results
+        .iter()
+        .map(|result| (result.drawer.clone(), result.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            (second.clone(), SummaryStatus::Found),
+            (plain, SummaryStatus::NotFound),
+            (first.clone(), SummaryStatus::Found),
+            (unknown, SummaryStatus::Unreadable),
+            (second.clone(), SummaryStatus::Found),
+        ],
+        "{summarized:?}"
+    );
+    let found = &summarized.results[2];
+    assert_eq!(found.title.as_deref(), Some("first"));
+    assert_eq!(found.description.as_deref(), Some("About *it*"));
+    assert_eq!(found.entries, Some(0));
+    assert!(found.updated.is_some());
+    assert_eq!(
+        found.link.as_deref(),
+        Some(generic::Intxt::reference(&first).to_string().as_str())
+    );
+    assert_eq!(found.reason, None);
+    let missing: &IntxtSummary = &summarized.results[3];
+    assert!(missing.reason.is_some() && missing.title.is_none());
+    assert_eq!(summarized.results[0].description, None);
+
+    // More drawers than the bound is the call's error.
+    let too_many = node
+        .call(SummarizeIntxts {
+            drawers: vec![first; intxt_core::methods::MAX_SUMMARIZED + 1],
+        })
+        .await
+        .unwrap_err();
+    assert!(format!("{too_many:?}").contains("at most"), "{too_many:?}");
+    node.stop().await;
+}
+
 /// Retrying `createIntxt` under one idempotency key reuses its commands, so it answers the same
 /// drawer instead of creating a second one; another key creates another.
 #[tokio::test]
