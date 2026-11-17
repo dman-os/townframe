@@ -42,7 +42,8 @@ impl DocsStub {
             Arc::new(move |scope: DocScope| {
                 let document = scope
                     .read
-                    .first()
+                    .keys()
+                    .next()
                     .expect("metadata scope reads one document")
                     .clone();
                 let write = scope.write.contains_key(&document);
