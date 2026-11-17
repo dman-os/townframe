@@ -1320,3 +1320,66 @@ fn a_supplement_from_data_is_checked_not_assumed() {
     });
     assert!(admit_lexicon(TAG, &primary, &[], Some(&widening)).is_err());
 }
+
+/// A string that carries a JSON document states what the document must be: the supplement's
+/// `contentSchema` is enforced, not left an annotation, so a stored sidecar is checked against the
+/// JSON Schema meta-schema as it is written.
+#[test]
+fn a_json_carrying_string_is_checked_against_its_content_schema() {
+    let compiled = Bundle::new(
+        &supplement(json!({"schema": {
+            "type": "string",
+            "contentMediaType": "application/schema+json",
+            "contentSchema": {"$ref": "https://json-schema.org/draft/2020-12/schema"},
+        }})),
+        Vec::new(),
+    )
+    .validate_lexicon(
+        TAG,
+        &record(json!({"schema": {"type": "string"}}), &[], &[]),
+        &[],
+    )
+    .unwrap();
+    // A schema naming `$bytes` and `$type` properties is ordinary text here.
+    let sidecar = json!({"type": "object", "properties": {
+        "raw": {"type": "object", "properties": {"$bytes": {"type": "string"}}},
+        "kind": {"type": "object", "properties": {"$type": {"const": "a"}}},
+    }});
+    assert!(accepts(&compiled, json!({"schema": sidecar.to_string()})));
+    assert!(
+        !accepts(&compiled, json!({"schema": r#"{"type": 7}"#})),
+        "not a JSON Schema"
+    );
+    assert!(
+        !accepts(&compiled, json!({"schema": "not json"})),
+        "not JSON"
+    );
+}
+
+#[test]
+fn a_content_schema_needs_a_json_media_type_on_a_string() {
+    let refused = |position: Value, primary: Value| {
+        Bundle::new(&supplement(json!({"value": position})), Vec::new())
+            .validate_lexicon(TAG, &record(json!({"value": primary}), &[], &[]), &[])
+            .unwrap_err()
+            .to_string()
+    };
+    let content = json!({"type": "object"});
+    for (position, primary) in [
+        (
+            json!({"type": "string", "contentSchema": content}),
+            json!({"type": "string"}),
+        ),
+        (
+            json!({"type": "string", "contentMediaType": "text/plain", "contentSchema": content}),
+            json!({"type": "string"}),
+        ),
+        (
+            json!({"type": "integer", "contentMediaType": "application/json", "contentSchema": content}),
+            json!({"type": "integer"}),
+        ),
+    ] {
+        let error = refused(position, primary);
+        assert!(error.contains("contentSchema is admitted only"), "{error}");
+    }
+}
