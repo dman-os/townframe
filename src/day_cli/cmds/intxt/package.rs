@@ -461,7 +461,8 @@ impl<'a> Packaging<'a> {
     /// amend, a rebase, a force-push seen from another machine): `rewrite/<old>` and
     /// `rewrittenFrom/<new>` are written beside them. Several matches name no single
     /// predecessor, so nothing is written and the line says so. A commit with a hook pair in the
-    /// capture drawer is never matched by patch id, whether or not the pair reached a held commit.
+    /// capture drawer whose chain reaches a held commit is not matched by patch id; one whose chain
+    /// reaches none still is.
     ///
     /// Answers how many commits were written and the lines to report.
     async fn write_commits(
@@ -522,7 +523,7 @@ impl<'a> Packaging<'a> {
             .into_iter()
             .filter(|(sha, _)| !in_range.contains(sha) && !rewritten.contains(sha))
             .collect();
-        let (hooked, with_pair) = match repo {
+        let hooked = match repo {
             Some(repo) => {
                 self.hooked_rewrites(
                     repo,
@@ -534,13 +535,15 @@ impl<'a> Packaging<'a> {
             None => Default::default(),
         };
         // A hook pair is exact: its commits are not matched by patch id, and a predecessor it
-        // claimed is not claimed again.
+        // claimed is not claimed again. A commit whose hook chain reached no held commit has no
+        // pair here and falls back to patch ids.
         for (old, _) in &hooked {
             predecessors.remove(old);
         }
+        let paired: BTreeSet<&String> = hooked.iter().map(|(_, successor)| successor).collect();
         let unpaired: BTreeMap<String, work::GitCommit> = new
             .iter()
-            .filter(|(sha, _)| !with_pair.contains(*sha))
+            .filter(|(sha, _)| !paired.contains(*sha))
             .map(|(sha, commit)| (sha.clone(), commit.clone()))
             .collect();
         let (matched, mut lines) = match_rewrites(&unpaired, &predecessors);
@@ -594,21 +597,20 @@ impl<'a> Packaging<'a> {
 
     /// The exact rewrites of `new` commits that git's `post-rewrite` hook reported, from the
     /// capture drawer's repository document `repo`: the (old, new) pairs whose old commit is one
-    /// of `held` (held by the intxt, outside the range, not rewritten yet), and every commit of
-    /// `new` that has a hook pair at all.
+    /// of `held` (held by the intxt, outside the range, not rewritten yet).
     ///
     /// Each commit's `rewrittenFrom/<sha>` is read for all of them in one read; the answer's
     /// predecessors that are not held are asked in the next read, since an amend repeated between
     /// two `add`s leaves a chain (held -> amended -> amended again -> new) of which the intxt
     /// holds the first. So a hop is one read however many commits are walking, at most
-    /// `MAX_REWRITE_HOPS` of them, and a chain that never reaches a held commit pairs nothing.
+    /// `MAX_REWRITE_HOPS` of them, and a chain that never reaches a held commit pairs nothing, which leaves the commit to patch-id
+    /// matching.
     async fn hooked_rewrites(
         &self,
         repo: &DocId,
         new: &[String],
         held: &BTreeMap<String, Option<String>>,
-    ) -> Res<(Vec<(String, String)>, BTreeSet<String>)> {
-        let mut with_pair = BTreeSet::new();
+    ) -> Res<Vec<(String, String)>> {
         let mut pairs = Vec::new();
         // The commit each new commit's walk is at.
         let mut walking: BTreeMap<String, String> =
@@ -632,7 +634,6 @@ impl<'a> Packaging<'a> {
                     Some(other) => eyre::bail!("{from_key} in {repo} is not readable: {other:?}"),
                 };
                 let from: work::RewrittenFrom = serde_json::from_value(value)?;
-                with_pair.insert(sha.clone());
                 if held.contains_key(&from.predecessor) {
                     pairs.push((from.predecessor, sha));
                 } else if seen.insert(from.predecessor.clone()) {
@@ -641,7 +642,7 @@ impl<'a> Packaging<'a> {
             }
             walking = next;
         }
-        Ok((pairs, with_pair))
+        Ok(pairs)
     }
 
     /// Remembers `drawer` so the node lists it, which is what makes an intxt live.

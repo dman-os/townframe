@@ -1039,6 +1039,31 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
             .await
             .unwrap();
         assert_eq!(from, json!({"predecessor": first, "how": "hook"}));
+
+        // A hook pair whose chain reaches no held commit does not stop patch-id matching: this
+        // reworded amend has the held commit's patch, and the hook (made to name a commit the
+        // intxt does not hold) says something else.
+        let before = rev(&repo, "feat/x");
+        git(&repo, &["commit", "-q", "--amend", "-m", "reworded"]);
+        let reworded = rev(&repo, "feat/x");
+        let unrelated = rev(&repo, "main");
+        capture::git_rewrite(
+            client,
+            &node_root,
+            &repo,
+            &format!("{unrelated} {reworded}\n"),
+        )
+        .await
+        .unwrap();
+        let added = add().await;
+        assert!(
+            added.contains(&format!(
+                "rewrite    {} replaces {} (same patch id)",
+                &reworded[..7],
+                &before[..7]
+            )),
+            "{added}"
+        );
     })
     .await;
 }
