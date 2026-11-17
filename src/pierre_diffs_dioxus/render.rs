@@ -14,6 +14,12 @@
 //!   `slot` attribute is `x`, as fallback content of the slot element, which shows them whether
 //!   or not the slot is live. The model never holds Dioxus elements.
 //! * A `SlotContent` placeholder (see `slot.rs`) renders as the caller's Dioxus `Element`.
+//!
+//! A code view adds a fourth: its container, spacer and slab render as `SlabNode` components, not
+//! as plain elements. The slab's per-frame writes are not `Document` edits but a `Signal` of the
+//! host (`host/code_view.rs`), and a component is the unit Dioxus re-runs when a signal it reads
+//! changes: a node's `style` is patched by that component alone, while its `children` (the
+//! shells) are the very element the parent render made, which Dioxus finds unchanged and skips.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -23,10 +29,14 @@ use std::sync::LazyLock;
 use dioxus::prelude::*;
 use pierre_diffs::document::Document;
 use pierre_diffs::document::NodeKey;
+use pierre_diffs::js_collections::PtrEq;
 use pierre_diffs::utils::dom::css_wrappers::wrap_core_css;
 
 use crate::events::Dispatch;
 use crate::events::Pointers;
+use crate::host::DioxusHost;
+use crate::host::SlabRole;
+use crate::host::SlabStyle;
 use crate::slot::SlotTable;
 
 /// The core stylesheet in the layer order the port's theme CSS expects, built once.
@@ -55,8 +65,11 @@ pub(crate) struct Renderer<'a> {
     /// The view's event wiring: a node the host registered for resize, visibility or scroll
     /// renders with that listener.
     pub(crate) dispatch: &'a Rc<Dispatch>,
-    /// The pointer handlers of the nodes the interaction manager listens through.
-    pub(crate) pointers: &'a Rc<Pointers>,
+    /// The pointer handlers of the nodes the interaction manager listens through; a view with
+    /// no interaction has none.
+    pub(crate) pointers: Option<&'a Rc<Pointers>>,
+    /// A code view's slab signal, which its three wrapper nodes render their `style` from.
+    pub(crate) slab: Option<Signal<SlabStyle>>,
 }
 
 impl Renderer<'_> {
@@ -73,6 +86,30 @@ impl Renderer<'_> {
         }
         let document = self.document;
         let key_id = key.as_u64();
+        if let Some(style) = self.slab
+            && let Some(role) = self
+                .dispatch
+                .host
+                .code_view()
+                .and_then(|code_view| code_view.slab_role(key))
+        {
+            let children: Vec<Element> = document
+                .child_nodes(key)
+                .into_iter()
+                .map(|child| self.node(child, host))
+                .collect();
+            return rsx! {
+                SlabNode {
+                    key: "{key_id}",
+                    host: PtrEq::new(Rc::clone(&self.dispatch.host)),
+                    dispatch: PtrEq::new(Rc::clone(self.dispatch)),
+                    node: key,
+                    role,
+                    style,
+                    children: rsx! { {children.into_iter()} },
+                }
+            };
+        }
         let tag = document.tag_name(key);
         if tag.is_empty() {
             let text = document.text_content(key);
@@ -87,7 +124,9 @@ impl Renderer<'_> {
             .map(|(name, value)| Attribute::new(attribute_name(&name), value, None, false))
             .collect();
         attributes.extend(self.dispatch.listeners(key));
-        attributes.extend(self.pointers.listeners(key));
+        if let Some(pointers) = self.pointers {
+            attributes.extend(pointers.listeners(key));
+        }
         let children: Vec<Element> = if let Some(shadow_root) = document.shadow_root(key) {
             attributes.push(Attribute::new("data-dioxus-shadow", "", None, false));
             // Dioxus rejects a literal key, hence the interpolation.
@@ -163,5 +202,40 @@ fn element(tag: &str, key: NodeKey, attributes: Vec<Attribute>, children: Vec<El
         "symbol" => symbol,
         "path" => path,
         "use" => r#use,
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct SlabNodeProps {
+    host: PtrEq<DioxusHost>,
+    dispatch: PtrEq<Dispatch>,
+    node: NodeKey,
+    role: SlabRole,
+    style: Signal<SlabStyle>,
+    children: Element,
+}
+
+/// One of a code view's container, spacer and slab: the node's attributes from the `Document`,
+/// with the declarations the host's slab signal owns appended to its `style`. This component is
+/// the only reader of the signal, so a scrolled frame re-runs these three and nothing else.
+#[component]
+fn SlabNode(props: SlabNodeProps) -> Element {
+    let slab: SlabStyle = *props.style.read();
+    let document = props.host.0.document();
+    let mut attributes: Vec<Attribute> = Vec::new();
+    let mut style = String::new();
+    for (name, value) in document.attributes(props.node) {
+        if name == "style" {
+            style = value;
+        } else {
+            attributes.push(Attribute::new(attribute_name(&name), value, None, false));
+        }
+    }
+    // Later declarations win, and the `Document` holds none of the signal's properties.
+    style.push_str(&slab.declarations(props.role));
+    attributes.push(Attribute::new("style", style, None, false));
+    attributes.extend(props.dispatch.0.listeners(props.node));
+    rsx! {
+        div { ..attributes, {props.children.clone()} }
     }
 }

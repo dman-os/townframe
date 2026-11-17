@@ -64,20 +64,30 @@ use pierre_diffs::managers::universal_rendering_manager::AnimationFrames;
 use pierre_diffs::managers::universal_rendering_manager::FrameId;
 use pierre_diffs::utils::dom::scrollbar_gutter::ScrollbarGutterHost;
 
+mod code_view;
 mod pointer;
 
 use crate::geometry::Geometry;
 use crate::geometry::ScrollSample;
+pub(crate) use code_view::CodeViewHostState;
+pub use code_view::Environment;
+pub(crate) use code_view::SlabRole;
+pub(crate) use code_view::SlabStyle;
 use pointer::PointerState;
+
+/// The pace of a code view's frames: the follow-up of a pass that has more to do (a spring
+/// that has not settled, a `fitPerfectly` fill) runs this long after the pass.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// What an embedder supplies for timers: a future that resolves after the duration.
 pub type SleepFuture = Pin<Box<dyn std::future::Future<Output = ()>>>;
 
-/// The scroller a virtualized view renders: the `Virtualizer`'s root, its content wrapper, and
-/// the embedder's clock.
+/// The scroller a virtualized view renders: the `Virtualizer`'s root, its content wrapper (the
+/// `CodeView`'s root has none: the viewer builds its own container in it), and the embedder's
+/// clock.
 pub(crate) struct Scroller {
     pub(crate) root: NodeKey,
-    pub(crate) content: NodeKey,
+    pub(crate) content: Option<NodeKey>,
     pub(crate) sleep: Rc<dyn Fn(Duration) -> SleepFuture>,
 }
 
@@ -107,8 +117,9 @@ struct Frames {
 pub(crate) struct DioxusHost {
     weak_self: Weak<Self>,
     document: Document,
-    /// The `diffs-container` element `FileDiff` renders into.
-    container: NodeKey,
+    /// The `diffs-container` element `FileDiff` renders into; a code view has none (every item
+    /// renders into a shell of its own).
+    container: Option<NodeKey>,
     /// The topmost node, so "connected" means "reachable from it": the container for a static
     /// view, the scroller's root for a virtualized one.
     top: NodeKey,
@@ -119,6 +130,9 @@ pub(crate) struct DioxusHost {
     frames: RefCell<Frames>,
     timers: RefCell<HashMap<TimeoutId, Task>>,
     next_timeout: Cell<TimeoutId>,
+    /// What a `CodeView` asks of its platform beyond a virtualized diff's reads (see
+    /// `host/code_view.rs`); present on a code view host only.
+    code_view: Option<CodeViewHostState>,
     /// What the `InteractionManager`'s listeners and hit-testing need (see `host/pointer.rs`).
     pub(crate) pointer: PointerState,
 }
@@ -128,7 +142,7 @@ impl DioxusHost {
     pub(crate) fn new_static() -> Rc<Self> {
         let document = Document::new();
         let container = document.create_element(pierre_diffs::constants::DIFFS_TAG_NAME);
-        Self::build(document, container, container, None, 0.0)
+        Self::build(document, Some(container), container, None, 0.0, None)
     }
 
     /// An interactive host: `root > content > container`, with `root` a scroll container of
@@ -158,23 +172,25 @@ impl DioxusHost {
         document.append_child(root, content);
         Self::build(
             document,
-            container,
+            Some(container),
             root,
             Some(Scroller {
                 root,
-                content,
+                content: Some(content),
                 sleep,
             }),
             line_height,
+            None,
         )
     }
 
     fn build(
         document: Document,
-        container: NodeKey,
+        container: Option<NodeKey>,
         top: NodeKey,
         scroller: Option<Scroller>,
         line_height: f64,
+        code_view: Option<CodeViewHostState>,
     ) -> Rc<Self> {
         Rc::new_cyclic(|weak_self| Self {
             weak_self: Weak::clone(weak_self),
@@ -188,12 +204,23 @@ impl DioxusHost {
             frames: RefCell::default(),
             timers: RefCell::default(),
             next_timeout: Cell::new(0),
+            code_view,
             pointer: PointerState::default(),
         })
     }
 
+    pub(crate) fn document(&self) -> &Document {
+        &self.document
+    }
+
+    /// The `diffs-container` a diff host renders into.
     pub(crate) fn container(&self) -> NodeKey {
         self.container
+            .expect("only a diff host has a container; a code view renders a shell per item")
+    }
+
+    pub(crate) fn is_container(&self, node: NodeKey) -> bool {
+        self.container == Some(node)
     }
 
     /// The node the view renders from.
@@ -223,6 +250,10 @@ impl DioxusHost {
         registrations.resize_manager.contains(&node)
             || registrations.resize_virtualizer.contains(&node)
             || self.is_measured(node)
+            || self
+                .code_view
+                .as_ref()
+                .is_some_and(|code_view| code_view.observes_shell(node))
     }
 
     /// Whether this host keeps row heights: a virtualized one always (the port reads them), a
@@ -253,7 +284,7 @@ impl DioxusHost {
     /// one (hit-testing, the scroll fix's tops) are off by its height without a measurement.
     fn is_measured(&self, node: NodeKey) -> bool {
         self.measures_rows()
-            && (node == self.container
+            && (self.is_container(node)
                 || [
                     "data-line",
                     "data-line-annotation",
@@ -294,6 +325,9 @@ impl DioxusHost {
         registrations
             .scroll
             .retain(|node, _| document.exists(*node));
+        if let Some(code_view) = &self.code_view {
+            code_view.prune(document);
+        }
     }
 
     // What the handlers record.
@@ -314,8 +348,14 @@ impl DioxusHost {
     // Frames.
 
     /// The end of a dispatch: runs every callback queued so far. A callback that queues another
-    /// frame is flushed on the next executor tick.
+    /// frame is flushed on the next executor tick (a code view's, a frame interval later).
     pub(crate) fn flush_frames(&self) {
+        // A code view's passes write the root's scroll position through `MountedData`, which
+        // exists from `onmounted` on: its frames wait for the root, and its `onmounted` handler
+        // ends in this flush.
+        if self.code_view.is_some() && !self.mounted.borrow().contains_key(&self.scroller_root()) {
+            return;
+        }
         let pending = {
             let mut frames = self.frames.borrow_mut();
             #[cfg(test)]
@@ -324,36 +364,54 @@ impl DioxusHost {
             }
             std::mem::take(&mut frames.pending)
         };
-        // No consumer reads the timestamp (the render queues ignore it) and standard Dioxus has
-        // no clock to read one from.
+        // A diff view's render queues ignore the timestamp (and standard Dioxus has no clock to
+        // read one from); a code view's smooth scroll steps its spring by it, on the embedder's
+        // clock (`now()`).
+        let timestamp = self
+            .code_view
+            .as_ref()
+            .map_or(0.0, |code_view| (code_view.now)());
         for (_, callback) in pending {
-            callback(0.0);
+            callback(timestamp);
         }
+        self.schedule_flush();
+    }
 
-        let should_schedule = {
+    /// Runs the queue on a spawned task when there is something to run and no task is waiting.
+    ///
+    /// A callback can queue the render queue's follow-up frame. If no browser event arrives, it
+    /// still needs a dispatch, so schedule one executor tick later (a code view: after a frame
+    /// interval, because its spring requeues a pass every frame until it settles and a tick
+    /// later is not a frame later). The flag stays set until the task starts: an event may flush
+    /// the queue before then, and must not create a second task. This is a spawned task rather
+    /// than a loop in the flush because a callback could queue another frame forever.
+    pub(crate) fn schedule_flush(&self) {
+        {
             let mut frames = self.frames.borrow_mut();
             if frames.pending.is_empty() || frames.scheduled_flush {
-                false
-            } else {
-                frames.scheduled_flush = true;
-                true
+                return;
             }
-        };
-        if should_schedule {
-            // A callback can queue the render queue's follow-up frame. If no browser event arrives,
-            // it still needs a dispatch, so schedule one executor tick later. The flag stays set
-            // until that task starts: an event may flush the queue before then, and must not create
-            // a second task. This is a spawned task rather than a loop in this flush because a
-            // callback could queue another frame forever.
-            let host = self
-                .weak_self
-                .upgrade()
-                .expect("the host is alive while a frame flush is scheduled");
-            spawn(async move {
-                host.frames.borrow_mut().scheduled_flush = false;
-                host.flush_frames();
-            });
+            frames.scheduled_flush = true;
         }
+        let host = self
+            .weak_self
+            .upgrade()
+            .expect("the host is alive while a frame flush is scheduled");
+        let pace = self.code_view.as_ref().map(|_| FRAME_INTERVAL);
+        spawn(async move {
+            if let Some(pace) = pace {
+                let sleep = Rc::clone(
+                    &host
+                        .scroller
+                        .as_ref()
+                        .expect("a code view host has a scroller")
+                        .sleep,
+                );
+                sleep(pace).await;
+            }
+            host.frames.borrow_mut().scheduled_flush = false;
+            host.flush_frames();
+        });
     }
 
     /// Whether a flush would run anything; tests read it to see the queue drain.
@@ -592,7 +650,8 @@ impl VirtualizerHost for DioxusHost {
         let content = self
             .scroller
             .as_ref()
-            .and_then(|scroller| geometry.measured_size(scroller.content));
+            .and_then(|scroller| scroller.content)
+            .and_then(|content| geometry.measured_size(content));
         content.unwrap_or_else(|| geometry.scroll(*element).scroll_height)
     }
 
@@ -615,7 +674,7 @@ impl VirtualizerHost for DioxusHost {
             return 0.0;
         }
         let geometry = self.geometry.borrow();
-        geometry.top_in_content(&self.document, self.container, *element)
+        geometry.top_in_content(&self.document, self.container(), *element)
             - geometry.scroll(root).top
     }
 

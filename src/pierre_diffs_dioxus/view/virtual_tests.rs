@@ -46,12 +46,12 @@ const VIEWPORT: f64 = 600.0;
 
 /// An element whose scroll commands are recorded, standing in for the engine's.
 #[derive(Default)]
-struct Scripted {
-    offset: Cell<(f64, f64)>,
-    log: RefCell<Vec<String>>,
+pub(crate) struct Scripted {
+    pub(crate) offset: Cell<(f64, f64)>,
+    pub(crate) log: RefCell<Vec<String>>,
 }
 
-struct ScriptedElement(Rc<Scripted>);
+pub(crate) struct ScriptedElement(pub(crate) Rc<Scripted>);
 
 impl RenderedElementBacking for ScriptedElement {
     fn as_any(&self) -> &dyn Any {
@@ -86,12 +86,12 @@ impl RenderedElementBacking for ScriptedElement {
 
 /// A clock the test winds by hand: each `sleep` is a channel the test fires.
 #[derive(Default, Clone)]
-struct Clock(Rc<RefCell<Vec<Sleeper>>>);
+pub(crate) struct Clock(pub(crate) Rc<RefCell<Vec<Sleeper>>>);
 
-type Sleeper = (Duration, oneshot::Sender<()>);
+pub(crate) type Sleeper = (Duration, oneshot::Sender<()>);
 
 impl Clock {
-    fn sleep(&self) -> Rc<dyn Fn(Duration) -> SleepFuture> {
+    pub(crate) fn sleep(&self) -> Rc<dyn Fn(Duration) -> SleepFuture> {
         let clock = self.clone();
         Rc::new(move |duration| {
             let (sender, receiver) = oneshot::channel();
@@ -105,7 +105,7 @@ impl Clock {
         })
     }
 
-    fn fire(&self, index: usize) -> Duration {
+    pub(crate) fn fire(&self, index: usize) -> Duration {
         let (duration, sender) = self.0.borrow_mut().remove(index);
         sender.send(()).expect("the sleeping task is alive");
         duration
@@ -212,7 +212,13 @@ impl Rig {
 
     fn nodes(&self) -> (NodeKey, NodeKey, NodeKey) {
         let scroller = self.view.host.scroller().expect("a scrolling host");
-        (scroller.root, scroller.content, self.view.host.container())
+        (
+            scroller.root,
+            scroller
+                .content
+                .expect("a diff host's scroller has a content wrapper"),
+            self.view.host.container(),
+        )
     }
 
     /// Runs `events` as one dispatch would (in the runtime, so handlers can spawn), then lets
@@ -281,7 +287,7 @@ impl Rig {
 }
 
 /// Lets spawned tasks run: one poll of the dom's work future runs every ready task.
-fn run_tasks(dom: &mut VirtualDom) {
+pub(crate) fn run_tasks(dom: &mut VirtualDom) {
     for _ in 0..3 {
         let _polled: Option<()> = dom.wait_for_work().now_or_never();
     }
@@ -635,7 +641,12 @@ fn a_height_change_above_the_viewport_reads_the_offset_then_scrolls_by_the_delta
     let stack = stack(&host);
     let (root, content) = {
         let scroller = host.scroller().expect("a scrolling host");
-        (scroller.root, scroller.content)
+        (
+            scroller.root,
+            scroller
+                .content
+                .expect("a diff host's scroller has a content wrapper"),
+        )
     };
     let queue = UniversalRenderingManager::new(Rc::clone(&host));
     let virtualizer = Virtualizer::new(Rc::clone(&host), queue, VirtualizerConfig::default());

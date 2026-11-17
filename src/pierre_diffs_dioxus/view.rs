@@ -394,6 +394,7 @@ impl<A: Clone + PartialEq + 'static> View<A> {
         let dispatch = Rc::new(Dispatch {
             host: Rc::clone(&host),
             managers,
+            code_view: None,
             batch: RefCell::default(),
         });
         Self {
@@ -426,7 +427,12 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             compute_virtual_file_metrics(metrics).line_height,
         );
         let scroller = host.scroller().expect("a scrolling host has a scroller");
-        let (root, content) = (scroller.root, scroller.content);
+        let (root, content) = (
+            scroller.root,
+            scroller
+                .content
+                .expect("a diff host's scroller has a content wrapper"),
+        );
         let hub = ResizeObserverHub::new(Rc::clone(&host));
         let queue = UniversalRenderingManager::new(Rc::clone(&host));
         let virtualizer = Virtualizer::new(
@@ -545,7 +551,8 @@ impl<A: Clone + PartialEq + 'static> View<A> {
             document,
             slots: &self.slots,
             dispatch: &self.dispatch,
-            pointers: &self.pointers,
+            pointers: Some(&self.pointers),
+            slab: None,
         }
         .render(self.host.top())
     }
@@ -582,7 +589,7 @@ pub fn FileDiffView<A: Clone + PartialEq + 'static>(props: FileDiffViewProps<A>)
 #[cfg(test)]
 mod interaction_tests;
 #[cfg(test)]
-mod virtual_tests;
+pub(crate) mod virtual_tests;
 
 #[cfg(test)]
 mod tests {
