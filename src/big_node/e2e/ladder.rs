@@ -7,6 +7,10 @@
 
 use super::harness::Cluster;
 use super::harness::Topology;
+use big_blobs_core::Blob;
+use big_blobs_core::CipherBlob;
+use big_cabinet_core::datum::DatumMember;
+use serde_json::json;
 
 /// Alice and Bob, unconnected, with a drawer Alice made and both mirror.
 async fn alice_and_bob() -> Cluster {
@@ -53,12 +57,27 @@ async fn a_note_written_before_connecting_replicates() {
 async fn a_blob_added_before_connecting_replicates() {
     let mut cluster = alice_and_bob().await;
     let drawer = cluster.share_drawer(0, &[1]).await;
-    let blob = cluster.add_blob(0, &drawer, b"a blob added alone").await;
+    let (doc, blob) = cluster.add_blob(0, &drawer, b"a blob added alone").await;
     cluster.connect(Topology::Pair).await;
     assert_eq!(
         cluster.blob_arrives(1, &drawer, blob).await,
         b"a blob added alone"
     );
+    // Bob's copy of the document carries the Blob datum as Alice authored it, and the ciphertext
+    // representation her encryption worker published beside it (ADR 003 §19) before connecting.
+    let notes = cluster.converged(&doc).await;
+    let (alice, bob) = (&notes[0], &notes[1]);
+    assert_eq!(
+        bob.accepted(Blob::ID).into_values().collect::<Vec<_>>(),
+        vec![json!({
+            "mime": "application/octet-stream",
+            "digest": blob.digest_str(),
+            "lengthOctets": b"a blob added alone".len(),
+        })]
+    );
+    let cipher = bob.accepted(CipherBlob::ID);
+    assert_eq!(cipher.len(), 1, "one ciphertext representation: {cipher:?}");
+    assert_eq!(cipher, alice.accepted(CipherBlob::ID));
     cluster.stop_all().await;
 }
 
@@ -78,7 +97,7 @@ async fn a_blob_added_while_connected_replicates() {
     cluster.connect(Topology::Pair).await;
     let drawer = cluster.share_drawer(0, &[1]).await;
     cluster.mirror_blobs(1, &drawer.id).await;
-    let blob = cluster.add_blob(0, &drawer, b"a blob added live").await;
+    let (_, blob) = cluster.add_blob(0, &drawer, b"a blob added live").await;
     assert_eq!(
         cluster.blob_arrives(1, &drawer, blob).await,
         b"a blob added live"

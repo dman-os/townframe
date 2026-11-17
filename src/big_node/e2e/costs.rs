@@ -561,7 +561,8 @@ async fn long_test_cost_table() {
                     "put 64 KiB blob and publish it in the drawer",
                     cluster.add_blob(0, &drawer, &bytes),
                 )
-                .await,
+                .await
+                .1,
         );
     }
     for blob in &blobs {
