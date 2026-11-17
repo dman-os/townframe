@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "MethodGrant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.grant.method/<nsid>`: the cartridge may invoke the one\noperation through dispatch.",
+      "properties": {
+        "empty": {
+          "description": "A member with nothing to say states `true` (the empty-member convention).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "MethodGrant",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.grant.method"
+    }
+  },
+  "$ref": "#/$defs/MethodGrant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
