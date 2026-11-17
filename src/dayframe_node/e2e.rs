@@ -360,6 +360,17 @@ const NOTE: &str = "org.example.note";
 /// Creates a drawer of its own as the node's drawers actor does. (The node's two required local
 /// drawers hold every document, so a document in one is in the other.)
 async fn create_drawer(node: &big_node::BigNode, name: &str) -> DrawerId {
+    node.drawer_access
+        .grants()
+        .grant(
+            &RequestContext::root(),
+            node.drawers_actor.actor.actor_id,
+            big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT.into(),
+            Rights::USE,
+            None,
+        )
+        .await
+        .unwrap();
     let capability = node
         .drawers
         .client
