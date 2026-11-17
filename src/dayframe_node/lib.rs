@@ -29,12 +29,18 @@ use clay_guest_session::egress::DispatchEgress;
 use clay_node_egress::MicroEgress;
 use day_node::HeldNode;
 use day_node::NodeSettings;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tower::ServiceExt;
 use utils_rs::prelude::ERROR_TOKIO;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::WrapErr;
@@ -321,6 +327,39 @@ impl NodeComposition {
         Ok(())
     }
 
+    /// A transport that calls this node's methods as its operator, for typed clients
+    /// (`service_client_core_rs`). Operator-only: it presents no capability and acts as the
+    /// node's root authority, so it is for the host's own installs at boot and is never handed to
+    /// a micro (a micro's only way out is its [`Self::egress`]).
+    pub fn operator_transport(&self) -> OperatorTransport {
+        let node = &self.held.node;
+        OperatorTransport {
+            router: big_dispatch::xrpc_router(
+                node.dispatch.client.clone(),
+                big_dispatch::Anonymous::Acts(Authorization::identity(node.authority.root)),
+                big_dispatch::Edge::Embedded,
+            )
+            .into_router(),
+        }
+    }
+
+    /// Installs intxt on this node from its handler component `guest_wasm` and enables it, as the
+    /// node's operator, so the node admits intxt's datum Lexicons and serves its methods (the
+    /// review micro's `summarizeIntxts`). Idempotent by cartridge version, so a host calls it at
+    /// every boot.
+    pub async fn install_intxt(
+        &self,
+        guest_wasm: &[u8],
+    ) -> Result<intxt_core::install::Installed, intxt_core::methods::IntxtError> {
+        let operator = intxt_core::client::Caller::new(
+            self.operator_transport(),
+            RequestContext::root(),
+            None,
+            "intxt-install".to_owned(),
+        );
+        intxt_core::install::install(&operator, guest_wasm).await
+    }
+
     /// This node's dialable endpoint ticket: what another node puts in its bootstrap list to dial
     /// it. Always present, since the composition always attaches the peers service.
     pub fn address(&self) -> String {
@@ -345,6 +384,52 @@ impl NodeComposition {
         // Dropping a runtime inside an async context panics; this does not wait for threads.
         runtime.shutdown_background();
         stopped
+    }
+}
+
+/// The node's own XRPC router, served in process: what a host's typed clients speak over, as the
+/// node's operator. Built by [`NodeComposition::operator_transport`]; see there for why it is
+/// operator-only. It is the router the `day` CLI serves for the node it holds, so a request takes
+/// the path a CLI command's does (`big_dispatch::xrpc_router`), not a second one.
+#[derive(Clone)]
+pub struct OperatorTransport {
+    router: axum::Router,
+}
+
+/// The largest JSON answer the transport reads, as the CLI's in-process client bounds it.
+const MAX_ANSWER_OCTETS: usize = 16 * 1024 * 1024;
+
+impl HttpTransport for OperatorTransport {
+    async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        let failed = |error: &dyn std::fmt::Display| HttpTransportError {
+            message: error.to_string(),
+        };
+        let mut builder = http::Request::builder()
+            .method(request.method)
+            .uri(format!("/{}", request.path));
+        *builder
+            .headers_mut()
+            .expect("a builder with a valid method and URI has headers") = request.headers;
+        let body = match request.body {
+            XrpcBody::Json(bytes) => axum::body::Body::from(bytes),
+            XrpcBody::Bytes(stream) => axum::body::Body::from_stream(stream),
+        };
+        let response = self
+            .router
+            .clone()
+            .oneshot(builder.body(body).map_err(|error| failed(&error))?)
+            .await
+            .unwrap_or_else(|never| match never {});
+        let (parts, body) = response.into_parts();
+        Ok(XrpcResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: XrpcBody::json(
+                axum::body::to_bytes(body, MAX_ANSWER_OCTETS)
+                    .await
+                    .map_err(|error| failed(&error))?,
+            ),
+        })
     }
 }
 

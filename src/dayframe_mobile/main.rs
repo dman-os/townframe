@@ -58,6 +58,9 @@ mod android {
     static PACKAGES: Asset = asset!("/packages");
     const PACKAGE_NAMES: [&str; 3] = ["counter", "layout", "review"];
 
+    /// intxt's nodule handler component, staged beside the packages (`x/dayframe.ts android`).
+    const INTXT_GUEST_FILE: &str = "intxt.guest.wasm";
+
     #[no_mangle]
     fn android_main(app: dioxus_native::AndroidApp) {
         let data_directory = app
@@ -172,9 +175,8 @@ mod android {
             bootstrap,
             // The node learns the datum vocabulary of intxt (the PR and intxt datums the review
             // micro reads) from intxt's cartridge, whose Lexicons it admits when the cartridge is
-            // installed. SEAM: `intxt_core::install::install` (stack/intxt-21-install-lib) goes
-            // after this boot, over the node's own client, with the intxt guest wasm bundled in
-            // the APK. The review config datum is Clay's, not the node's, and needs no schema.
+            // installed below. The review config datum is Clay's, not the node's, and needs no
+            // schema here.
             schemas: Arc::new(
                 big_cabinet::SchemaRepo::open(std::iter::empty())
                     .expect("no registrations is a valid schema repo"),
@@ -183,6 +185,15 @@ mod android {
         })
         .await
         .map_err(|error| format!("cannot boot the node: {error:#}"))?;
+        // intxt's handler component ships in the APK beside the packages. The install is
+        // idempotent by cartridge version, so every boot runs it; the first one writes.
+        let guest_path = format!("{PACKAGES}/{INTXT_GUEST_FILE}");
+        let guest = dioxus::asset_resolver::read_asset_bytes(&guest_path)
+            .await
+            .map_err(|error| format!("cannot read bundled asset {guest_path}: {error}"))?;
+        node.install_intxt(&guest)
+            .await
+            .map_err(|error| format!("cannot install intxt on the node: {error}"))?;
         let address = node.address();
         for directory in pairing_directories {
             let path = directory.join(ADDRESS_FILE);

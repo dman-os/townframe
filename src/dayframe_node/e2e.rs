@@ -672,3 +672,87 @@ async fn a_review_install_file_configures_the_micro_and_no_file_leaves_it_unconf
     );
     composition.stop().await.unwrap();
 }
+
+/// Where intxt's handler component is built: `INTXT_GUEST_WASM`, else the `wasm_utils_rs`
+/// workspace's release output (the same lookup `day_cli`'s e2e uses).
+fn intxt_guest() -> Vec<u8> {
+    let path = std::env::var_os("INTXT_GUEST_WASM")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../wasm_utils_rs/target/wasm32-wasip3/release/intxt_nodule_guest.wasm")
+        });
+    std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "{}: {error}; build it with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release` or set INTXT_GUEST_WASM",
+            path.display()
+        )
+    })
+}
+
+/// What the phone does at boot: install intxt from its bundled handler over the composition's own
+/// operator transport. The review micro's actor then reaches `summarizeIntxts` through its
+/// egress (it could not before: the node did not serve the method), and the install is
+/// idempotent, so the next boot's call writes nothing.
+#[tokio::test]
+async fn installing_intxt_at_boot_makes_summarize_intxts_reachable_for_the_review_micro() {
+    let wasm = intxt_guest();
+    let dir = tempfile::tempdir().unwrap();
+    let mut composition = NodeComposition::boot(NodeConfig {
+        root: dir.path().to_owned(),
+        bootstrap: vec![],
+        schemas: no_schemas(),
+        installs: vec![],
+    })
+    .await
+    .unwrap();
+    let drawer = create_drawer(composition.node(), "intxt").await;
+    let installs = MicroInstall::interim([REVIEW.to_owned()], |_| Ok(None)).unwrap();
+    for install in installs {
+        composition.install_micro(install).await.unwrap();
+    }
+    let egress = composition.egress(REVIEW).unwrap();
+    let summarize = |drawers: Vec<String>| {
+        let egress = Arc::clone(&egress);
+        async move {
+            let body = serde_json::to_vec(&json!({ "drawers": drawers })).unwrap();
+            let request =
+                http::Request::post("http://dispatch.local/xrpc/org.example.intxt.summarizeIntxts")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(
+                        Full::new(Bytes::from(body))
+                            .map_err(|never| match never {})
+                            .boxed_unsync(),
+                    )
+                    .unwrap();
+            let response = egress.send(request).await;
+            let status = response.status().as_u16();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<Value>(&body).unwrap())
+        }
+    };
+    let (status, before) = summarize(vec![]).await;
+    assert_ne!(status, 200, "intxt is not installed yet: {before}");
+
+    let installed = composition.install_intxt(&wasm).await.unwrap();
+    assert!(!installed.already_installed);
+    let (status, empty) = summarize(vec![]).await;
+    assert_eq!((status, &empty), (200, &json!({ "results": [] })));
+    let (status, one) = summarize(vec![drawer.to_string()]).await;
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(
+        one["results"][0]["drawer"],
+        json!(drawer.to_string()),
+        "a drawer that holds no intxt is answered, not failed: {one}"
+    );
+
+    assert!(
+        composition
+            .install_intxt(&wasm)
+            .await
+            .unwrap()
+            .already_installed,
+        "a second boot's install is a no-op"
+    );
+    composition.stop().await.unwrap();
+}
