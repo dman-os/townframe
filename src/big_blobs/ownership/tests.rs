@@ -431,8 +431,10 @@ async fn upload_holds_expire_after_their_grace_period_and_a_re_put_renews() -> R
         "the re-put's hold keeps the bytes"
     );
 
-    // Once that one is past its grace too, nothing keeps them.
-    assert_eq!(h.ownership.expire_uploads(now + 1).await?, 1);
+    // Once that one is past its grace too, nothing keeps them. The cutoff is read after the
+    // second hold was staged: `now` was read before it, and on a loaded machine more than a
+    // second can pass in between, which left the hold at or after `now + 1`.
+    assert_eq!(h.ownership.expire_uploads(unix_now() + 1).await?, 1);
     assert!(!h.ownership.contains(&id).await?);
     assert!(!h.rooted("owned", &id).await?);
     assert_eq!(h.ownership.expire_uploads(now + 1).await?, 0);
