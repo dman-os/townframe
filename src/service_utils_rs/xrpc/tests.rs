@@ -49,6 +49,7 @@ const QUERY_OPERATION: XrpcMethod = XrpcMethod {
     output_encoding: method_core::Encoding::Json,
     local_only: false,
     handle: None,
+    stability: method_core::Stability::UNANNOTATED,
 };
 const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.write",
@@ -62,6 +63,7 @@ const PROCEDURE_OPERATION: XrpcMethod = XrpcMethod {
     output_encoding: method_core::Encoding::Json,
     local_only: false,
     handle: None,
+    stability: method_core::Stability::UNANNOTATED,
 };
 const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     nsid: "org.example.test.numeric",
@@ -75,6 +77,7 @@ const NUMERIC_QUERY_OPERATION: XrpcMethod = XrpcMethod {
     output_encoding: method_core::Encoding::Json,
     local_only: false,
     handle: None,
+    stability: method_core::Stability::UNANNOTATED,
 };
 const LONG_POLL_OPERATION: XrpcMethod = XrpcMethod::query("org.example.test.poll").long_poll();
 
@@ -1834,6 +1837,7 @@ async fn unsupported_subscription_is_explicit() {
         output_encoding: method_core::Encoding::Json,
         local_only: false,
         handle: None,
+        stability: method_core::Stability::UNANNOTATED,
     };
     let mut router = XrpcRouter::new(1024);
     assert_eq!(
