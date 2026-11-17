@@ -131,7 +131,7 @@ impl HttpTransport for WasiHttp {
             }
             drop(body_tx);
             // A host that stopped reading the request has dropped the trailers future too.
-            _ = trailers_tx.write(Ok(None)).await;
+            let _undelivered = trailers_tx.write(Ok(None)).await;
         });
 
         let response = client::send(outgoing)
