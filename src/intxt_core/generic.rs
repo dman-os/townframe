@@ -11,7 +11,6 @@
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
 use big_cabinet_core::DocReference;
-use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::Extra;
 use schemars::JsonSchema;
 use serde::Deserialize;
