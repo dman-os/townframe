@@ -345,6 +345,13 @@ _: {
               wasmBindgenCli
             ];
           shellHook = ''
+            # bindgen (v4l2-sys-mit under daybook_ffi's nokhwa) searches the host's LLVM installs
+            # when LIBCLANG_PATH is unset, and a GitHub runner's /usr/lib/llvm-* libclang cannot
+            # load inside this shell (it misses the host libstdc++). Point it at the flake's.
+            export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
+            ''}
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
             if [ "$(uname -s)" = "Darwin" ]; then
               export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
