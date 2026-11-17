@@ -37,28 +37,29 @@ is just "instantiate this component with these datums". Zena, Lua or Hoot would 
 settled micro can be promoted to an AOT tier (StarlingMonkey with weval, Porffor, scriptc) by another build
 routine, against the same micro interface (survey, "Tiered JS").
 
-## 2. A datum-backed filesystem over WASI
+## 2. Getting files to toolchains (revised 2026-11-17)
 
-Toolchains (tsc, esbuild-wasm, the Zena compiler) and agents expect a filesystem. Proposal: `wasi:filesystem`
-preopens backed by datums, so a drawer appears as a directory tree. A toolchain then runs unmodified over a
-cartridge's source and writes artifacts back as datums. Open points:
-- the path-to-datum mapping and how it relates to ADR 035 datum references;
-- whether writes are transactional per build;
-- watching for changes, so incremental builds and editor reloads work;
-- capability scoping: a build routine sees only the drawers it was granted.
+The first draft proposed a full `wasi:filesystem` backed by datums. The operator's framing of sandboxes as local
+resources (section 3) makes that unnecessary for toolchains and agents, which work on the sandbox's own disk, with
+source imported in and artifacts exported out. What's left is the live working copy: an editor and an agent should
+see the same files while a micro is being edited. That can be one mounted directory backed by the working drawer,
+not a general datum filesystem. Small build routines that run as plain wasm guests (TS type stripping in the
+engine) need no filesystem at all.
 
 ## 3. The sandbox (agents, toolchains, builds)
 
-Agents need a POSIX environment, and so do real toolchains. One sandbox serves both. Platform split:
-- **Desktop:** a microVM, which smolvm provides: libkrun VMs that boot OCI images in under 200 ms; virtiofs mounts;
-  networking off by default with egress allow-lists; branch and checkpoint of a live VM; an embeddable Rust SDK
-  (`smolmachines`); Apache-2.0. It needs hardware virtualization on every host (KVM, HVF or WHP), and its docs don't
-  mention Android.
-- **Android:** ordinary apps don't get hardware virtualization; only some devices expose the Android
-  Virtualization Framework. A phone needs a wasm-based POSIX environment, which has yet to be surveyed.
-- **What both share:** the datum-backed filesystem (section 2) under both, mounted into the VM through virtiofs on
-  desktop. A sandbox's egress follows the same grant model as micros and nodules, which is being designed with
-  nodules.
+A sandbox is a **resource, like local state**: a container with its own disk, local to one device, not synced,
+created and destroyed as a unit (operator, 2026-11-17). Agents and toolchains get an ordinary POSIX filesystem
+inside it, at native speed. Their scratch files, `node_modules` and build caches never become datums.
+- **Crossing the datum boundary** is explicit: source is imported into the sandbox, and artifacts and patches are
+  exported back as datums. smolvm's "staged" mounts work this way: copy in on first boot, sync back on stop.
+- **Platforms:**
+  - Desktop: a microVM through smolvm (libkrun; boots OCI images in under 200 ms; virtiofs mounts; networking off
+    by default, with egress allow-lists; branch and checkpoint; an embeddable Rust SDK; Apache-2.0). It needs
+    hardware virtualization on every host (KVM, HVF or WHP).
+  - Android: ordinary apps get no hardware virtualization, so the phone needs Linux or a POSIX userland inside
+    wasm. Survey in progress: `.claude/scratch/linux-in-wasm-survey.md`.
+- **Egress** follows the same grant model as micros and nodules.
 
 ## 4. Forks, overlays and lineage
 
