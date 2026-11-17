@@ -612,6 +612,21 @@ pub struct RepoEntry {
     pub extra: Extra,
 }
 
+/// An intxt's commits document (`commitsDoc/main`, on the intxt's descriptor): the content
+/// document, in the intxt's drawer, that holds `gitCommit/<sha>` for every commit the intxt
+/// references and the `rewrite`/`rewrittenFrom` links between them. It is not an entry: it is
+/// reached from the descriptor, not listed in the body. Related intxts name the same document
+/// (`day x intxt new --with`), which is then in each of their drawers. A document id is text, as
+/// in [`OpLogDoc`], because a datum reference names a datum and this names a whole document.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitsDoc {
+    pub doc: String,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// An intxt includes a worktree's capture (`worktreeEntry/<worktree uuid>`).
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
