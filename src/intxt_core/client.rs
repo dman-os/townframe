@@ -50,12 +50,15 @@ use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
+use method_core::ByteBody;
 use method_core::Unary;
 use serde::Serialize;
 use serde_json::Value;
 use service_client_core_rs::Client;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::Xrpc;
+use service_core_rs::Body;
+use service_core_rs::Envelope;
 use service_core_rs::HttpMetadata;
 use service_core_rs::RequestContext;
 use service_core_rs::xrpc::bearer_header_value;
@@ -151,14 +154,42 @@ impl<H: HttpTransport> Caller<H> {
     /// Calls `input` presenting the caller's capability, if it has one, as the authority of the
     /// call.
     pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, IntxtError> {
-        let metadata = HttpMetadata {
+        self.send(Envelope::with_metadata(
+            self.context.next_hop(),
+            self.metadata(),
+            input,
+        ))
+        .await
+    }
+
+    /// [`Self::call`] for a method whose request body is bytes (ADR 042): `body` is the raw body
+    /// and `input` the parameters that travel on the query string. The transport streams it as it
+    /// is pulled, so it is never collected here.
+    pub async fn call_with_bytes<M: Unary>(
+        &self,
+        input: M,
+        body: ByteBody,
+    ) -> Result<M::Output, IntxtError> {
+        self.send(
+            Envelope::with_metadata(self.context.next_hop(), self.metadata(), input)
+                .with_body(Body::Bytes(body)),
+        )
+        .await
+    }
+
+    fn metadata(&self) -> HttpMetadata {
+        HttpMetadata {
             authorization: self.capability.as_deref().map(bearer_header_value),
             idempotency_key: None,
             range: None,
-        };
+        }
+    }
+
+    async fn send<M: Unary>(&self, request: Envelope<M>) -> Result<M::Output, IntxtError> {
         self.client
-            .call_with(self.context.next_hop(), metadata, input)
+            .call_with_metadata(request)
             .await
+            .map(|response| response.output)
             .map_err(|error| IntxtError::Upstream {
                 operation: M::XRPC.nsid.to_owned(),
                 reason: error.to_string(),

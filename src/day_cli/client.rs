@@ -83,22 +83,13 @@ impl Mode {
 /// bytes, which moves neither as JSON.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Raw<'a> {
-    /// The raw request body.
-    pub upload: Option<Upload<'a>>,
+    /// A file sent as the raw request body, streamed so a procedure's input is never held whole.
+    pub upload: Option<&'a std::path::Path>,
     /// The value of a `Range` request header, for a method that serves part of its answer.
     pub range: Option<&'a str>,
     /// Where an answer that is bytes is streamed to. An answer that is JSON, such as a method's
     /// own error, is returned as the [`Reply`] whatever this says.
     pub download: Option<&'a std::path::Path>,
-}
-
-/// Where the raw request body of a byte-bodied call comes from.
-#[derive(Debug, Clone, Copy)]
-pub enum Upload<'a> {
-    /// A file, streamed so a procedure's input is never held whole.
-    File(&'a std::path::Path),
-    /// Bytes the caller already holds.
-    Bytes(&'a [u8]),
 }
 
 /// What the node answered: the HTTP status and the JSON body, whatever the transport. A
@@ -347,9 +338,12 @@ impl NodeClient {
     /// client serves itself. The one place either transport is spoken, for [`Self::call`] and
     /// for typed clients over [`HttpTransport`].
     async fn exchange(&self, request: XrpcRequest) -> Res<XrpcResponse> {
-        let body = json_bytes(request.body)?;
         match &self.transport {
             Transport::Socket(http) => {
+                let body = match request.body {
+                    XrpcBody::Json(bytes) => reqwest::Body::from(bytes),
+                    XrpcBody::Bytes(stream) => reqwest::Body::wrap_stream(stream),
+                };
                 let response = http
                     .request(request.method, format!("http://localhost/{}", request.path))
                     .headers(request.headers)
@@ -369,10 +363,14 @@ impl NodeClient {
                 *builder
                     .headers_mut()
                     .expect("a builder with a valid method and URI has headers") = request.headers;
+                let body = match request.body {
+                    XrpcBody::Json(bytes) => axum::body::Body::from(bytes),
+                    XrpcBody::Bytes(stream) => axum::body::Body::from_stream(stream),
+                };
                 let response = running
                     .1
                     .clone()
-                    .oneshot(builder.body(axum::body::Body::from(body))?)
+                    .oneshot(builder.body(body)?)
                     .await
                     .unwrap_or_else(|never| match never {});
                 let (parts, body) = response.into_parts();
@@ -400,9 +398,9 @@ impl NodeClient {
         use tokio::io::AsyncWriteExt;
         ensure_nsid(nsid)?;
         let query = query_pairs(params)?;
-        // Either source is sent as a stream of chunks, so the two transports below share one path.
+        // The file is sent as a stream of chunks, so the two transports below share one path.
         let upload = match raw.upload {
-            Some(Upload::File(path)) => {
+            Some(path) => {
                 let file = tokio::fs::File::open(path)
                     .await
                     .wrap_err_with(|| format!("opening {}", path.display()))?;
@@ -410,10 +408,6 @@ impl NodeClient {
                     Box::pin(file) as Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>
                 ))
             }
-            Some(Upload::Bytes(bytes)) => Some(tokio_util::io::ReaderStream::new(Box::pin(
-                std::io::Cursor::new(bytes.to_vec()),
-            )
-                as Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>)),
             None => None,
         };
         let header = |headers: &http::HeaderMap, name: http::HeaderName| {
@@ -624,12 +618,12 @@ impl HttpTransport for &NodeClient {
     }
 }
 
-/// The bytes of a JSON body: the node client's `exchange` carries JSON messages only. A byte body
-/// goes through [`NodeClient::call_raw`], which streams it, so one here is a caller's mistake.
+/// The bytes of a JSON answer: the node's JSON answers are never byte streams, so one is a
+/// protocol violation.
 fn json_bytes(body: XrpcBody) -> Res<Vec<u8>> {
     match body {
         XrpcBody::Json(bytes) => Ok(bytes),
-        XrpcBody::Bytes(_) => eyre::bail!("a byte body goes through NodeClient::call_raw"),
+        XrpcBody::Bytes(_) => eyre::bail!("the node answered a JSON call with a byte stream"),
     }
 }
 
