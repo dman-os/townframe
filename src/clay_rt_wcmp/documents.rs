@@ -88,7 +88,10 @@ pub(super) async fn initialize(
     } = context;
     // `wasi:http/client` to `dispatch.local` is not hosted in the browser engine yet (Clay on the
     // node §3): a composition must not hand it an egress that would be silently unreachable.
-    assert!(egress.is_none(), "the wcmp engine hosts no dispatch.local egress");
+    assert!(
+        egress.is_none(),
+        "the wcmp engine hosts no dispatch.local egress"
+    );
     if let Some(activator) = activator {
         active.store.data().capabilities.attach_activator(activator);
     }
