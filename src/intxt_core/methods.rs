@@ -111,7 +111,7 @@ pub struct IntxtSummary {
     /// them: a change token, not a time. Present when `found`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated: Option<u64>,
-    /// [`crate::generic::Intxt::reference`] text, the line a PR description carries. Present when
+    /// [`crate::generic::Intxt::reference`] text, the `ref` of an entry in the PR description block. Present when
     /// `found`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
