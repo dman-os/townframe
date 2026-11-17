@@ -493,6 +493,9 @@ fn future_fields_and_vocabulary_values_are_carried() {
     codec_round_trip::<work::GitClone>(json!({
         "repo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRepo/r", "machine": "dtxt:actor:z11111111111111111111111111111111/recorders/git", "path": "p", "vcs": ["pijul"]
     }));
+    let hooked: work::Rewrite =
+        serde_json::from_value(json!({"successor": "4c1f0a", "how": "hook"})).unwrap();
+    assert_eq!(hooked.how, work::RewriteHow::Hook);
     let rewrite: work::Rewrite =
         serde_json::from_value(json!({"successor": "4c1f0a", "how": "jjChange"})).unwrap();
     assert_eq!(rewrite.how, work::RewriteHow::Unknown("jjChange".into()));
