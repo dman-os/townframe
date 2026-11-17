@@ -139,7 +139,7 @@ Legend: **[settled]** operator agreed · **[proposed]** awaiting operator · **[
   - A companion doc that only carries cipherBlobs is rejected. Read-only is a general blocker: you will eventually want edits beyond encryption, and a branch handles all of them.
   - Adopting someone else's public doc into your sponsored set is the same act: branch it.
   - The branch is an ordinary writable doc, so encryption is in-doc (§3). Resolution needs no extra mechanism.
-  - Cabinet already has this: `BranchDoc` in `big_cabinet_core::doc`, and the `org.example.daybook.branch` datum with parent refs and pinned fork heads (ADR 007).
+  - Cabinet already has this: `BranchDoc` in `big_cabinet_core::doc`, and the `org.example.daybook.branch` datum with parent refs and pinned fork heads (ADR 034).
 - **[proposed]** The branch records **why** it exists: a reason on the branch datum such as `forkReason: readOnlyOrigin`, a string vocabulary that stays open. Tools can then show "your writable copy of X" and offer to re-sync from the origin.
 - **[flag]** The relay stores the branch as its own sedimentree, so the origin's history is retained twice if both are sponsored. That is acceptable, and noted for quota accounting.
 - **[flag]** If the origin's owner already encrypted (an in-doc slot exists on the origin), sponsoring the **origin** works without a branch: we can read its cipherBlobs and pin them.
@@ -202,7 +202,7 @@ Legend: **[settled]** operator agreed · **[proposed]** awaiting operator · **[
   - the account doc names one root sponsorship drawer instead of `S_docs`;
   - adoption follows the drawer closure transitively and reads inventories.
 - **ADR 019 / `drawer.md`:** the publicness contract (§7), plus `metaDoc` references, their projection, their reach, and the delegation check at admission (§4).
-- **ADR 007:** an optional branch reason (§5).
+- **ADR 034:** an optional branch reason (§5).
 
 ## 10. Defects and follow-ups noted during the discussion
 
@@ -412,7 +412,7 @@ Amendments made alongside ADRs 023–026:
 - ADR 001: inventories are drawer meta docs; the `blob_inventories` group and the default inventory doc are withdrawn; partitions use drawer groups.
 - ADR 003: §19's key documents, `keyScope`, `grp:` domains, the staging steps and `Blob.urls` resolution are withdrawn; the JWK is co-located.
 - ADR 005: the account doc names one root sponsorship drawer instead of `S_docs`, and adoption walks the drawer closure and reads inventories.
-- ADR 007: an optional branch reason.
+- ADR 034: an optional branch reason.
 - `CONTRIBUTING.md`: a pointer to ADR 023 for cursor consumption.
 - [big-blobs-replacement-plan.md](./big-blobs-replacement-plan.md): the drawer-native observation and permission sections point at ADRs 023–026.
 

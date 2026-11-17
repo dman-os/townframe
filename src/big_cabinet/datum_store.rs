@@ -26,11 +26,11 @@ use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use futures::FutureExt;
 use futures::StreamExt;
-use service_utils_rs::Client;
+use method_core::ContextError;
+use method_core::EventStream;
+use service_client_core_rs::ClientStream;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
-use service_utils_rs::ClientStream;
-use service_utils_rs::ContextError;
-use service_utils_rs::EventStream;
 use service_utils_rs::RequestContext;
 use service_utils_rs::Spawner;
 use service_utils_rs::StopToken;
@@ -431,12 +431,12 @@ impl<S: DatumStore> StoreOwner<S> {
                 self.needs_full_refresh = true;
                 return Err(StoreError::DocsUnavailable(message));
             }
-            Ok(Err(ClientError::Operation(DocsError::Context(error))))
+            Ok(Err(ClientError::Method(DocsError::Context(error))))
             | Err(StoreError::Docs(DocsError::Context(error))) => {
                 self.needs_full_refresh = true;
                 return Err(StoreError::Docs(DocsError::Context(error)));
             }
-            Ok(Err(ClientError::Operation(DocsError::Denied))) => {
+            Ok(Err(ClientError::Method(DocsError::Denied))) => {
                 return Err(self.classify_write_denied().await);
             }
             Ok(Err(error)) => return Err(map_client_error(error)),
@@ -531,13 +531,12 @@ impl<S: DatumStore> StoreOwner<S> {
         }
     }
 
-    /// Flattens a page into observed datums. An `enter` restates the document's whole selected
-    /// state, which `should_apply_observed` dedups against what is already read.
+    /// Flattens a page into observed datums. A move-in restates a document's selected rows,
+    /// which `should_apply_observed` dedups against what is already read.
     fn page_batch(&self, page: DatumPage) -> Vec<(DatumKey, ObservedDatum)> {
         let mut batch = Vec::new();
         for event in page.events {
             match event {
-                DatumEvent::Enter { datums, .. } => batch.extend(datums),
                 DatumEvent::Datum {
                     datum_key, datum, ..
                 } => batch.push((datum_key, datum)),
@@ -857,15 +856,15 @@ where
 
 fn map_client_error(error: ClientError<DocsError>) -> StoreError {
     match error {
-        ClientError::Operation(error) => StoreError::Docs(error),
+        ClientError::Method(error) => StoreError::Docs(error),
         ClientError::Transport { message, .. } => StoreError::DocsUnavailable(message),
     }
 }
 
 fn map_stream_error(error: ClientError<DocsError>) -> StoreError {
     match error {
-        ClientError::Operation(DocsError::Denied) => StoreError::AccessLost,
-        ClientError::Operation(error) => StoreError::Docs(error),
+        ClientError::Method(DocsError::Denied) => StoreError::AccessLost,
+        ClientError::Method(error) => StoreError::Docs(error),
         ClientError::Transport { message, .. } => StoreError::DocsUnavailable(message),
     }
 }

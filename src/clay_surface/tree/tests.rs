@@ -602,8 +602,8 @@ fn recycled_elements_have_distinct_host_keys_and_clearing_does_not_reset_identit
     let mut dom = dioxus_core::VirtualDom::new_with_props(
         app,
         Props {
-            tree: tree.clone(),
-            keys: keys.clone(),
+            tree: Rc::clone(&tree),
+            keys: Rc::clone(&keys),
         },
     );
     let mut host_tree = SurfaceTree::new();

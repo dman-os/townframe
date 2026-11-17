@@ -1,14 +1,14 @@
 use super::*;
 use futures::StreamExt;
 use futures::stream;
-use service_utils_rs::EventStream;
+use method_core::EventStream;
 
 impl Handler<ObserveCapability> for AuthorityService {
     async fn call(
         &self,
         request: Envelope<ObserveCapability>,
     ) -> Result<
-        ResponseEnvelope<EventStream<CapabilityStatus, AuthorityServiceError>>,
+        ResponseEnvelope<EventStream<CapabilityChange, AuthorityServiceError>>,
         AuthorityServiceError,
     > {
         let capability = request.params.capability;
@@ -27,17 +27,28 @@ impl Handler<ObserveCapability> for AuthorityService {
             let status = cap::ask(&ledger, |reply| cap::Command::Resolve(capability, reply)).await;
             match status {
                 Ok(_) => Some((
-                    Ok(CapabilityStatus::Live),
+                    Ok(CapabilityChange {
+                        status: CapabilityStatus::Live,
+                    }),
                     Some((ledger, revisions, changes)),
                 )),
-                Err(AuthorityError::InvalidCapability) => {
-                    Some((Ok(CapabilityStatus::Retracted), None))
-                }
+                Err(AuthorityError::InvalidCapability) => Some((
+                    Ok(CapabilityChange {
+                        status: CapabilityStatus::Retracted,
+                    }),
+                    None,
+                )),
                 Err(error) => Some((Err(error.into()), None)),
             }
         });
-        let events: EventStream<CapabilityStatus, AuthorityServiceError> =
-            Box::pin(stream::once(async { Ok(CapabilityStatus::Live) }).chain(updates));
+        let events: EventStream<CapabilityChange, AuthorityServiceError> = Box::pin(
+            stream::once(async {
+                Ok(CapabilityChange {
+                    status: CapabilityStatus::Live,
+                })
+            })
+            .chain(updates),
+        );
         Ok(events.into())
     }
 }
@@ -56,6 +67,7 @@ mod tests {
             .expect("secret store");
         boot(
             &secrets,
+            "test-node",
             sqlite_rs::test_support::db(&[])
                 .expect("authority database")
                 .clone(),
@@ -82,6 +94,7 @@ mod tests {
                     dependencies: Vec::new(),
                     object: "observed object".into(),
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await
@@ -96,7 +109,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
         authority
             .client
             .call(
@@ -108,7 +126,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
         authority
             .client
             .call(
@@ -120,7 +143,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Retracted)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Retracted
+            }))
+        );
         assert_eq!(events.next().await, None);
         stop.stop().await;
     }
@@ -197,7 +225,7 @@ mod tests {
                 .subscribe(RequestContext::root(), ObserveCapability { capability })
                 .await
             {
-                Err(ClientError::Operation(error)) => assert_eq!(error, expected),
+                Err(ClientError::Method(error)) => assert_eq!(error, expected),
                 Err(error) => panic!("unexpected subscription failure: {error:?}"),
                 Ok(_) => panic!("invalid observation was admitted"),
             }
@@ -214,7 +242,7 @@ mod tests {
                     }
                 )
                 .await,
-            Err(ClientError::Operation(
+            Err(ClientError::Method(
                 AuthorityServiceError::InvalidCapability
             ))
         ));
@@ -229,7 +257,7 @@ mod tests {
                     }
                 )
                 .await,
-            Err(ClientError::Operation(AuthorityServiceError::Unauthorized))
+            Err(ClientError::Method(AuthorityServiceError::Unauthorized))
         ));
         assert!(!changes.has_changed().unwrap());
         stop.stop().await;
@@ -260,8 +288,18 @@ mod tests {
             .await
             .unwrap();
         let mut events = response.output;
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
-        assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Retracted)));
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Live
+            }))
+        );
+        assert_eq!(
+            events.next().await,
+            Some(Ok(CapabilityChange {
+                status: CapabilityStatus::Retracted
+            }))
+        );
         assert_eq!(events.next().await, None);
         stop.stop().await;
     }

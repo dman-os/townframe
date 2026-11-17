@@ -102,6 +102,7 @@ pub fn Sheet(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -198,5 +199,25 @@ mod tests {
         assert_eq!(*dismissals.borrow(), 0);
         page.key(dialog, Key::Named(NamedKey::Escape));
         assert_eq!(*dismissals.borrow(), 1);
+    }
+
+    fn owner() -> Element {
+        let mut open = use_signal(|| true);
+        rsx! {
+            button { onclick: move |_| open.set(true), "Open" }
+            if open() {
+                Sheet {
+                    name: "Pick",
+                    placement: SheetPlacement::Bottom,
+                    on_dismiss: move |()| open.set(false),
+                    button { "Choose" }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sheet_survives_any_order_of_events() {
+        Storm::of(owner).run_seeds(0..64);
     }
 }

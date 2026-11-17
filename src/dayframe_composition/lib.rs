@@ -62,6 +62,7 @@ use clay_store::StoreError;
 use dioxus::prelude::*;
 pub use micro_shell::HostInputs;
 pub use micro_shell::Insets;
+pub use micro_shell::Renderer;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cell::RefCell;

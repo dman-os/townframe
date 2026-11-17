@@ -114,7 +114,7 @@ static STANDALONE_COUNTED: GlobalSignal<u64> = Signal::global(|| 0);
 /// The counter's model and view in one render: `render` runs in a component scope of its own for
 /// each mount (see [`Context::publish`]), so the signals here belong to one surface.
 fn view(counter: Counter) -> Element {
-    let _ = STANDALONE_COUNTED();
+    let _: u64 = STANDALONE_COUNTED();
     let mut operation = use_signal(|| None::<Operation>);
     let mut error = use_signal(|| None::<String>);
     let snapshot = counter.facet.as_ref().map(use_facet);

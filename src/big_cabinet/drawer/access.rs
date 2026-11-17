@@ -13,9 +13,10 @@ use crate::doc::AccessFuture;
 use crate::doc::AccessRequest;
 use crate::doc::DocAccess;
 use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Namespace;
-use big_cabinet_core::authority::ResolveActor;
+use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::DocsProtocol;
@@ -24,8 +25,9 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::drawer_object;
 use big_repo::SharedBigRepo;
-use service_utils_rs::Client;
-use service_utils_rs::ContextError;
+use method_core::ContextError;
+use service_client_native_rs::Client;
+use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 use sqlite_rs::Database;
@@ -278,10 +280,8 @@ impl Core {
                 }
                 targets.sort();
                 targets.dedup();
-                for drawer in &targets {
-                    self.enter(context, drawer, &document, Access::Admin)
-                        .await?;
-                }
+                self.enter(context, &targets, &document, Access::Admin)
+                    .await?;
             }
         }
         Ok(())
@@ -303,19 +303,30 @@ impl DrawerAccess {
     /// `issuer` is DrawerService's own actor capability, carrying `use` and `delegate`. `sql` is
     /// the projection and ledger store; DocsRepo may share the same `Database`. `datum_set` is
     /// where drawer docs that arrived by sync are discovered: a doc carrying the drawer datum is
-    /// a drawer this node can project without anyone having remembered it.
+    /// a drawer this node can project without anyone having remembered it. `operator` is the
+    /// authority's root identity: it reaches every drawer without a standing grant.
     pub async fn open(
         big_repo: SharedBigRepo,
         authority: Client<AuthorityProtocol>,
         issuer: CapId,
         namespace: Namespace,
+        operator: Uuid7,
         sql: Database,
         datum_set: Arc<crate::index::DatumSetStore>,
     ) -> Result<(Arc<Self>, DrawerProvider, StopToken), DrawersError> {
         let actor = authority
-            .call(RequestContext::root(), ResolveActor { capability: issuer })
+            .call(
+                RequestContext::root(),
+                ResolveAuthority { capability: issuer },
+            )
             .await
-            .map_err(authority_error)?;
+            .map_err(authority_error)?
+            .actor
+            .ok_or_else(|| {
+                authority_error(ClientError::Method(
+                    AuthorityServiceError::UnrecognizedActor,
+                ))
+            })?;
         let state = State::open(sql.clone()).await?;
         let grants = Arc::new(
             crate::grants::Grants::open(sql.clone(), authority.clone(), namespace)
@@ -335,6 +346,7 @@ impl DrawerAccess {
             issuer,
             namespace,
             actor,
+            operator,
             state,
             datum_set,
             ledger,

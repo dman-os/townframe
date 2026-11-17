@@ -331,17 +331,17 @@ pub fn sample_columns() -> Vec<Column> {
 
 #[component]
 pub fn TilesDemo(viewport: (f64, f64)) -> Element {
-    let columns = use_signal(sample_columns);
+    // Never written, so a hook value rather than a signal: no guard to hold across the render.
+    let columns = use_hook(sample_columns);
     let mut column_offset = use_signal(|| 0usize);
     let mut column_scroll_lock = use_signal(|| None::<Instant>);
     // Which tile is open at each depth, per peer column. The strip is derived
     // from this, so the model stays a tree of lists and the flat column list is
     // only ever a rendering of it.
-    let mut open = use_signal(move || seeded_path(columns.read().len()));
+    let mut open = use_signal(|| seeded_path(columns.len()));
 
-    let columns_read = columns.read();
     let opened = open.read().clone();
-    let strip = strip(&columns_read, &opened);
+    let strip = strip(&columns, &opened);
     let strip_len = strip.len();
 
     // Rust decides how many columns are on screen; nothing else does, and nothing
@@ -903,5 +903,22 @@ mod tests {
     fn a_dangling_index_truncates_the_path() {
         let strip = strip(&sample_columns(), &[vec![0, 99], vec![], vec![]]);
         assert_eq!(titles(&strip), ["Frame", "Daybook", "Home", "Widgets"]);
+    }
+}
+
+/// Every listener fed every event kind in seeded random order (see `dioxus_storm`).
+#[cfg(test)]
+mod storm {
+    use super::*;
+
+    fn app() -> Element {
+        rsx! { TilesDemo { viewport: (1100.0, 760.0) } }
+    }
+
+    #[test]
+    fn the_tiles_demo_survives_any_order_of_events() {
+        dioxus_storm::Storm::of(app)
+            .viewport(1100.0, 760.0)
+            .run_seeds(0..32);
     }
 }

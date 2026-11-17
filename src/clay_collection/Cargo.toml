@@ -20,3 +20,6 @@ serde_json.workspace = true
 sqlite_rs.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

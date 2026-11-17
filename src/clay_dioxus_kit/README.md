@@ -94,8 +94,9 @@ the rest are enforced by review.
   mode come from one function (`NavButtonMode::label`), so every mount reads the same.
 - **KIT-051** Decorative graphics are `aria-hidden`. A covered pane (the list under compact
   details) is `aria-hidden` too.
-- **KIT-052** Activation uses native `<button>`s. A widget that needs `tabindex` takes an opt-in
-  prop (`Split::keyboard`); the web build opts in and carries the keyboard tests. (The Blitz
+- **KIT-052** Activation uses native `<button>`s. A widget that needs `tabindex` is gated on
+  `Renderer::takes_focus` (set through `Split::renderer`); browser engines opt in and the web
+  build carries the keyboard tests. (The Blitz
   `tabindex` panic that motivated the gate is fixed in the pinned dioxus fork; K7 ledger notes.)
   Focus is neither trapped nor restored anywhere yet; Blitz has `set_focus` and Tab traversal but
   no `inert` and no focus events for programmatic focus (K7 ledger notes); `Sheet` is not
@@ -203,7 +204,11 @@ named after it.
   find its target by role and name has found a missing role or name: fix the component.
 - **KIT-071** Tests are deterministic: no sleeps, no timeouts, no polling. A gesture is a
   sequence of dispatched events. Tests that need to promote the harness to other crates turn
-  `testing` into a `testing` cargo feature then, not earlier.
+  `testing` into a `testing` cargo feature then, not earlier. The one cross-crate harness that
+  exists is `dioxus_storm` (a dev-dependency, no retained DOM and no wire vocabulary check):
+  each headless module ends with a `storm` test that feeds every listener every event kind in
+  seeded random order under a real owner, with animation timers on a paused clock, so it is
+  still deterministic and sleep-free. A seed that finds a panic stays as a regression case.
 - **KIT-072** Every component has a headless test module; a styled part with logic of its own
   (width to placement) has a skin test.
 - **KIT-080** Every component has a specimen in `dayframe_showcase/kit.rs`, at a compact and an
@@ -232,7 +237,7 @@ named after it.
 - Keyboard and focus tests belong in the browser build (Playwright): arrow-key resizing, Escape,
   and the missing focus trap/restore for `Sheet` (KIT-052).
 - Renderer capability facts (can this renderer take `tabindex`?) must come from the host; a guest
-  micro cannot know which renderer mounts it. The shell has to decide how `Split::keyboard`
+  micro cannot know which renderer mounts it. The shell has to decide how `Split::renderer`
   reaches guests.
 - The tile list lands with home (ADR 032 section 7).
 
@@ -253,7 +258,7 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | KIT-011 | `conventions::styled_parts_use_semantic_tokens_only` (no palette or `white`/`black` utilities, no `[...]` except the `data-[state=...]` variant and its `group-` form) |
 | KIT-012 | `conventions::styled_components_take_no_class_or_style` |
 | KIT-040 | `conventions::breakpoints_live_in_width_rs_and_nothing_measures_the_dom` (no `600.0`/`840.0` outside `width.rs`; no `get_client_rect`, `onmounted`, `use_window`, `web_sys`, ...) |
-| KIT-052 | `conventions::tabindex_is_only_the_keyboard_opt_in` (`tabindex` only in `headless/sections.rs`, gated on `.keyboard`; no `autofocus`/`set_focus`/`.focus(`) |
+| KIT-052 | `conventions::tabindex_is_only_the_renderer_focus_gate` (`tabindex` only in `headless/sections.rs`, gated on `.takes_focus()`; no `autofocus`/`set_focus`/`.focus(`) |
 | KIT-053 | the harness panics on a tag, attribute or style property outside the guest vocabulary |
 | KIT-071 | `conventions::tests_neither_sleep_nor_wait` (no sleeps, timers, clocks, threads, async runtimes) |
 | KIT-072 | `conventions::a_component_is_a_public_headless_module_and_a_private_styled_one` (every `headless/<name>.rs` has a `#[test]`) |

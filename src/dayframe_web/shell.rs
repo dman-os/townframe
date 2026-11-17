@@ -7,6 +7,7 @@ use clay_mdk::host::factory;
 use dayframe_composition::CompositionRuntime;
 use dayframe_composition::HostInputs;
 use dayframe_composition::Insets;
+use dayframe_composition::Renderer;
 use dayframe_composition::InstalledMicro;
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -19,7 +20,7 @@ use wasm_bindgen_futures::JsFuture;
 
 /// One entry of `packages/index.json`: where the component lives, the BLAKE3 digest the shell
 /// must verify after fetching, and the package's sidecar JSON (identity, authority, manifest).
-/// STAND-IN until `big_plugs` delivers manifests.
+/// STAND-IN until `big_cartridges` delivers manifests.
 #[derive(Clone, Deserialize)]
 struct PackageIndexEntry {
     location: String,
@@ -314,7 +315,7 @@ fn use_host_inputs() -> HostInputs {
         insets: insets.into(),
         platform_back,
         can_back,
-        keyboard: true,
+        renderer: Renderer::Browser,
         start: None,
     }
 }

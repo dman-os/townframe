@@ -2,10 +2,7 @@ use super::*;
 use crate::index::DatumRefQuery;
 use crate::index::DatumRefStore;
 use automerge::transaction::Transactable;
-use big_cabinet_core::datum::Bundle;
-use big_cabinet_core::datum::DatumDecl;
 use big_cabinet_core::datum::DatumMember;
-use big_cabinet_core::datum::Universe;
 use big_cabinet_core::dmeta::BranchPath;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
@@ -25,7 +22,7 @@ fn key(name: &str) -> DatumKey {
     format!("{NOTE}/{name}").parse().unwrap()
 }
 
-/// A repo whose `org.example.note` declares a `reference` position: the settle, removal, and
+/// A repo whose `org.example.note` declares a `datumRef` position: the settle, removal, and
 /// backfill paths extract and clear edges only for tags whose schema is known to declare one.
 fn ref_schemas() -> Arc<SchemaRepo> {
     let lexicon = serde_json::json!({
@@ -36,30 +33,13 @@ fn ref_schemas() -> Arc<SchemaRepo> {
             "required": ["value"],
             "properties": {
                 "value": {"type": "string"},
-                "link": {"type": "string"}
+                "link": {"type": "ref", "ref": "org.example.daybook.defs#datumRef"}
             }
         }}}
     });
-    let supplement = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "value": {"type": "string"},
-            "link": {"type": "string", "x-automerge": "reference"}
-        }
-    });
-    let universe = Universe {
-        datums: vec![DatumDecl {
-            id: NOTE.to_owned(),
-            name: "Note".to_owned(),
-            schema: schemars::Schema::try_from(supplement).unwrap(),
-            flags: Vec::new(),
-        }],
-        types: Vec::new(),
-    };
-    let bundle = Bundle::new(&universe, Vec::new());
     Arc::new(
         SchemaRepo::open([crate::schema::SchemaRegistrationGroup::new(
-            Some(bundle),
+            None,
             [crate::schema::SchemaRegistration::new(NOTE, lexicon)],
             Vec::new(),
         )])
@@ -779,18 +759,16 @@ fn changed(
 }
 
 async fn boot_repo() -> (SharedBigRepo, big_repo::BigRepoStopToken) {
-    big_repo::BigRepo::boot(
-        Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-        big_repo::Config {
-            node_identity_seed: [31; 32],
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: "datum-set-test".into(),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        },
-    )
+    big_repo::BigRepo::boot(big_repo::Config {
+        node_identity_seed: [31; 32],
+        storage: big_repo::Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default()))
+            .unwrap(),
+        scope_key: "datum-set-test".into(),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
     .await
     .unwrap()
 }
@@ -1165,7 +1143,7 @@ fn a_value_the_gate_does_not_accept_publishes_no_edges() {
     tx.put(
         &unsigned,
         "link",
-        format!("db+datum:/{}/{NOTE}/main", DocId::new([2; 32])),
+        format!("dtxt:datum:{}/{NOTE}/main", DocId::new([2; 32])),
     )
     .unwrap();
     tx.commit();

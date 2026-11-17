@@ -102,7 +102,7 @@ impl GuestDom {
 
         dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
         let mounts = std::rc::Rc::new(std::cell::RefCell::new(Vec::<MountEntry>::new()));
-        let root_mounts = mounts.clone();
+        let root_mounts = std::rc::Rc::clone(&mounts);
         let setup = std::rc::Rc::new(setup);
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {

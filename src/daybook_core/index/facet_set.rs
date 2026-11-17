@@ -466,7 +466,7 @@ impl FacetSetRevisionStore {
     /// The plaintext digests one Blob facet's value names, via the same
     /// helper the reconcile reads Blob facets with (`plaintext_blob_id`): the
     /// value's `digest` field in either ADR 003 §3 spelling, falling back to
-    /// the digest a `db+blob` URL path names. `None` defers the revision the
+    /// the digest a `dtxt:blob:` URL path names. `None` defers the revision the
     /// way an unresolved identity does; an absent or untypable value indexes
     /// no digest rather than failing the machine, because the value is
     /// peer-authored content the route projection must not stall on.

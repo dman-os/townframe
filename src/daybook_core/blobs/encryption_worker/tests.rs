@@ -55,11 +55,7 @@ async fn stage_document_with_blob(
                     // writer produces.
                     digest: blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!(
-                        "{}:///{}",
-                        crate::blobs::BLOB_SCHEME,
-                        plaintext
-                    )]),
+                    urls: Some(vec![crate::blobs::blob_url(&plaintext)]),
                 })),
             )]
             .into(),
@@ -1888,7 +1884,7 @@ async fn a_rotation_request_runs_on_the_facet_machine_and_leaves_it_walking() ->
     Ok(())
 }
 
-/// The key document's doc id out of a `db+facet:///{doc_id}/{facet}` ref.
+/// The key document's doc id out of a `dtxt:datum:{doc_id}/{facet}` ref.
 fn parse_facet_ref_doc_id(key_ref: &str) -> Res<DocId> {
     daybook_types::url::parse_facet_ref_str(key_ref)
         .map_err(|err| eyre::eyre!("keyRef {key_ref:?} is not a facet reference: {err}"))

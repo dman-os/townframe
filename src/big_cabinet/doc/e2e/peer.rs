@@ -105,6 +105,12 @@ async fn observation_fetches_remote_document_without_manual_document_sync() {
             .await,
         expected,
     );
+    // The author is read from the evidence that synced with the document: the reader's own actor
+    // registry has never heard of the owner's writer.
+    assert_eq!(
+        super::authors::authors_of(&expected),
+        [super::authors::author(&writer)]
+    );
     assert_eq!(
         reader_net.worker.snapshot().await.unwrap().peer_parts,
         HashMap::from([(owner.repo.local_peer_id(), HashMap::new())])

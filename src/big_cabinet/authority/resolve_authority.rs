@@ -10,11 +10,7 @@ impl AuthorityService {
         let actor = match resolved.actor {
             Some(actor_id) => {
                 let row = self.cached_actor_row(actor_id).await?;
-                Some(actor::public_actor(
-                    &self.node_public_key(),
-                    &row,
-                    request.capability,
-                )?)
+                Some(actor::public_actor(&self.node_public_key(), &row)?)
             }
             None => None,
         };

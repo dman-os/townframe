@@ -73,6 +73,20 @@ pub enum RefStatus {
     Revoked,
 }
 
+impl RefStatus {
+    /// Why the reference's provider cannot serve it right now, worded for the person looking at
+    /// the action or section it backs; `None` while it can (live, or dormant and startable).
+    pub fn blocked_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Live | Self::Dormant => None,
+            Self::Disabled => Some("its micro is disabled"),
+            Self::Faulted => Some("its micro faulted"),
+            Self::Unavailable => Some("its micro does not offer it"),
+            Self::Revoked => Some("it was revoked"),
+        }
+    }
+}
+
 /// A local write's acknowledgement state (ADR 015 §4).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperationStatus {

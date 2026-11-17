@@ -13,6 +13,7 @@
 
 use crate::interlude::*;
 
+use crate::keyhive_files::KeyhiveFiles;
 use crate::store::sqlite::SecretBlobKind;
 use crate::store::sqlite::SqliteBigRepoStore;
 use crate::store::sqlite::SqliteBigRepoStoreError;
@@ -37,9 +38,6 @@ use subduction_keyhive::storage::KeyhiveStorage;
 use subduction_keyhive::storage::MemoryKeyhiveStorage;
 use subduction_keyhive::storage::StorageHash;
 use utils_rs::prelude::eyre;
-
-/// Subdirectory of the repo data dir holding keyhive state.
-pub(crate) const KEYHIVE_SUBDIR: &str = "keyhive";
 
 const ARCHIVES_SUBDIR: &str = "archives";
 const LOCAL_SECRETS_SUBDIR: &str = "local-secrets";
@@ -83,6 +81,25 @@ const DEK_ALGORITHM_KEYRING: &str = "keyring";
 const DEK_ALGORITHM_FILE: &str = "file";
 /// Monotonic per-process counter for temp filenames.
 static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Creates the directories a keyhive storage root holds.
+///
+/// The legacy filesystem layout is still created so the one-time import
+/// (`import_legacy_secrets_if_empty`) can read it; new writes never touch the
+/// legacy secret dirs.
+pub(crate) fn create_layout(root: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(root.join(ARCHIVES_SUBDIR))?;
+    for subdir in [LOCAL_SECRETS_SUBDIR, RESERVATIONS_SUBDIR, TMP_SUBDIR] {
+        let dir = root.join(subdir);
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
 
 /// Where the DEK lives for a filesystem-backed storage. Secret material
 /// itself always persists to sqlite (encrypted under the DEK); this only
@@ -144,6 +161,7 @@ impl std::fmt::Debug for FsKeyhiveStorage {
 impl FsKeyhiveStorage {
     /// Create the storage root and its subdirs. Secret material persists to
     /// sqlite encrypted under a file-fallback DEK (no OS keyring required).
+    #[cfg(test)]
     pub(crate) fn new(root: PathBuf, store: SqliteBigRepoStore) -> io::Result<Self> {
         Self::new_with_secret_key_source(root, store, SecretKeySource::FileDek)
     }
@@ -151,6 +169,7 @@ impl FsKeyhiveStorage {
     /// Same layout as [`FsKeyhiveStorage::new`], but key material is sourced
     /// from the OS keyring via the shared `SecretStore`. Secret blobs still
     /// persist to sqlite (encrypted); the keyring never holds blobs.
+    #[cfg(test)]
     pub(crate) fn with_secret_store(
         root: PathBuf,
         store: SqliteBigRepoStore,
@@ -170,38 +189,13 @@ impl FsKeyhiveStorage {
         matches!(self.secret_key_source, SecretKeySource::Keyring { .. })
     }
 
+    #[cfg(test)]
     fn new_with_secret_key_source(
         root: PathBuf,
         store: SqliteBigRepoStore,
         secret_key_source: SecretKeySource,
     ) -> io::Result<Self> {
-        std::fs::create_dir_all(root.join(ARCHIVES_SUBDIR))?;
-        // The legacy filesystem layout is still created so the one-time
-        // import (import_legacy_secrets_if_empty) can read it; new writes
-        // never touch these dirs.
-        let secrets_dir = root.join(LOCAL_SECRETS_SUBDIR);
-        std::fs::create_dir_all(&secrets_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&secrets_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let reservations_dir = root.join(RESERVATIONS_SUBDIR);
-        std::fs::create_dir_all(&reservations_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&reservations_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-        std::fs::create_dir_all(root.join(TMP_SUBDIR))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                root.join(TMP_SUBDIR),
-                std::fs::Permissions::from_mode(0o700),
-            )?;
-        }
+        create_layout(&root)?;
         Ok(Self {
             root,
             store,
@@ -928,8 +922,25 @@ impl BigRepoKeyhiveStorage {
         })
     }
 
-    pub(crate) async fn fs(events: SqliteBigRepoStore, root: PathBuf) -> eyre::Result<Self> {
-        let archives = FsKeyhiveStorage::new(root, events.clone())?;
+    /// Archives in the opened `files`, with the secret blobs in `events`' database.
+    pub(crate) async fn files(
+        events: SqliteBigRepoStore,
+        files: KeyhiveFiles,
+    ) -> eyre::Result<Self> {
+        let KeyhiveFiles { root, secrets } = files;
+        let secret_key_source = match secrets {
+            Some(store) => SecretKeySource::Keyring { store },
+            None => SecretKeySource::FileDek,
+        };
+        let archives = FsKeyhiveStorage {
+            root,
+            store: events.clone(),
+            secret_key_source,
+        };
+        tracing::debug!(
+            uses_keyring_secrets = archives.uses_keyring_secrets(),
+            "keyhive secret material key source"
+        );
         archives.import_legacy_secrets_if_empty().await?;
         Ok(Self::new(BigRepoKeyhiveStorageInner::Fs {
             events,
@@ -937,42 +948,19 @@ impl BigRepoKeyhiveStorage {
         }))
     }
 
-    /// [`fs`] variant sourcing the DEK from the OS keyring; same on-disk
-    /// layout for archives. Falls back to `fs` if the keyring cannot be
-    /// initialised (headless systems).
+    #[cfg(test)]
+    pub(crate) async fn fs(events: SqliteBigRepoStore, root: PathBuf) -> eyre::Result<Self> {
+        Self::files(events, KeyhiveFiles::open(root, None)?).await
+    }
+
+    /// [`Self::files`] with the data-encryption keys in the (mock) OS keyring.
+    #[cfg(test)]
     pub(crate) async fn fs_with_secret_store(
         events: SqliteBigRepoStore,
         root: PathBuf,
     ) -> eyre::Result<Self> {
-        match SecretStore::boot().await {
-            Ok(secret_store) => {
-                let archives = FsKeyhiveStorage::with_secret_store(
-                    root,
-                    events.clone(),
-                    Arc::new(secret_store),
-                )?;
-                tracing::debug!(
-                    flavor = "keyring",
-                    uses_keyring_secrets = archives.uses_keyring_secrets(),
-                    "keyhive secret material stored in OS keyring"
-                );
-                archives.import_legacy_secrets_if_empty().await?;
-                Ok(Self::new(BigRepoKeyhiveStorageInner::Fs {
-                    events,
-                    archives,
-                }))
-            }
-            Err(err) => {
-                tracing::warn!(
-                    error = ?err,
-                    "keyring-backed secret storage unavailable; \
-                     falling back to file-based keyhive secret persistence"
-                );
-                Self::fs(events, root).await.map_err(|err| {
-                    eyre::eyre!("file-based keyhive storage fallback failed: {err:#}")
-                })
-            }
-        }
+        let secrets = Arc::new(SecretStore::boot().await?);
+        Self::files(events, KeyhiveFiles::open(root, Some(secrets))?).await
     }
 
     pub(crate) async fn save_prekey_secrets(&self, bytes: Vec<u8>) -> io::Result<()> {

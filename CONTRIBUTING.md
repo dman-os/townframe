@@ -46,8 +46,6 @@ cargo x guardrails check-matrix --target wasm32-wasip3
 cargo x guardrails check-matrix --target wasm32-unknown-unknown
 # run pre commit hooks
 prek -a
-# type check kotlin app 
-./x/check-dayb.ts
 
 # build a plug OCI package
 # goes into ./target/oci

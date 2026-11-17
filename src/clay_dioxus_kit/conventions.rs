@@ -366,10 +366,10 @@ fn breakpoints_live_in_width_rs_and_nothing_measures_the_dom() {
     assert_no_violations(violations);
 }
 
-/// `KIT-052`: `tabindex` (which panics Blitz) is set only by the opt-in `Split::keyboard` path,
+/// `KIT-052`: `tabindex` (which panics Blitz) is set only by the `Split::renderer` path (`Renderer::takes_focus`),
 /// and nothing moves focus programmatically.
 #[test]
-fn tabindex_is_only_the_keyboard_opt_in() {
+fn tabindex_is_only_the_renderer_focus_gate() {
     let mut violations = Vec::new();
     for source in all_sources() {
         // The test harness lists `tabindex` among the attributes a guest may name (`KIT-053`).
@@ -378,10 +378,10 @@ fn tabindex_is_only_the_keyboard_opt_in() {
         }
         violations.extend(source.violations("KIT-052", |line| {
             if line.contains("tabindex") && source.path != "headless/sections.rs" {
-                return Some("`tabindex` outside the Sections opt-in".into());
+                return Some("`tabindex` outside the Sections renderer gate".into());
             }
-            if line.contains("let tabindex") && !line.contains(".keyboard") {
-                return Some("`tabindex` not gated on the `keyboard` prop".into());
+            if line.contains("let tabindex") && !line.contains(".takes_focus()") {
+                return Some("`tabindex` not gated on `Renderer::takes_focus`".into());
             }
             ["autofocus", "set_focus", ".focus(", "focus_next"]
                 .iter()

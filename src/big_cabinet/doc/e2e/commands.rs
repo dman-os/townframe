@@ -128,7 +128,7 @@ async fn the_boot_pass_settles_interrupted_writes_from_their_commit_message() {
                 &command(name),
                 Kind::Write,
                 [0; 32],
-                alice.actor_id,
+                alice.actor.actor_id,
                 Some(document),
                 None,
                 None,
@@ -165,7 +165,7 @@ async fn the_boot_pass_fails_on_a_repository_error_and_leaves_the_row_for_the_ne
             &command("committed"),
             Kind::Write,
             [0; 32],
-            alice.actor_id,
+            alice.actor.actor_id,
             Some(document),
             None,
             None,
@@ -209,11 +209,11 @@ async fn the_boot_pass_places_a_committed_create_and_abandons_an_uncommitted_one
                 &command(name),
                 Kind::Create,
                 [0; 32],
-                alice.actor_id,
+                alice.actor.actor_id,
                 None,
                 Some(PLACEMENT),
                 Some(&Detail::Create {
-                    owner_id: Some(alice.actor_id),
+                    owner_id: Some(alice.actor.actor_id),
                 }),
             )
             .await

@@ -19,6 +19,7 @@ pub use drawer::Drawer;
 pub use headless::list_details::ListDetailsActions;
 pub use headless::list_details::use_list_details;
 pub use headless::nav_button::NavButtonMode;
+pub use headless::sections::Renderer;
 pub use headless::sections::SectionPane;
 pub use headless::sections::SizeRule;
 pub use headless::sections::Snap;

@@ -3,17 +3,19 @@ use crate::dmeta::DatumClaim;
 use crate::dmeta::MultibaseKey;
 use crate::dmeta::SignedDatumClaim;
 use crate::dmeta::Uuid7;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
+use service_core_rs::HttpMetadata;
 use service_core_rs::declare_service_protocol;
+use service_core_rs::xrpc::bearer_header_value;
+use service_core_rs::xrpc::bearer_token;
 
 pub const OPERATOR_OBJECT: &str = "is operator";
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CapId(uuid::Uuid);
@@ -138,6 +140,22 @@ impl Serialize for Rights {
     }
 }
 
+/// A list of right names, as `Serialize` writes it.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Rights {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Rights".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Rights").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "array", "items": { "type": "string" } })
+    }
+}
+
 impl<'de> Deserialize<'de> for Rights {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let names = Vec::<String>::deserialize(deserializer)?;
@@ -152,6 +170,7 @@ impl<'de> Deserialize<'de> for Rights {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Authorization {
@@ -166,8 +185,108 @@ impl Authorization {
             signer: capability,
         }
     }
+
+    /// The wire text of a capability id.
+    pub fn id_text(id: CapId) -> String {
+        match serde_json::to_value(id).expect("a capability id serializes") {
+            serde_json::Value::String(text) => text,
+            other => unreachable!("a capability id serializes as a string, not {other}"),
+        }
+    }
+
+    /// The caller's credential as an HTTP `Authorization: Bearer <authority>.<signer>` header
+    /// value, as atproto XRPC presents one. The token is the authority and signer capability ids
+    /// joined by a dot (`<uuid>.<uuid>`), which are token68-safe. Like any bearer token it is a
+    /// secret: whoever holds both ids acts with that capability.
+    pub fn header_value(&self) -> String {
+        bearer_header_value(&format!(
+            "{}.{}",
+            Self::id_text(self.authority),
+            Self::id_text(self.signer)
+        ))
+    }
+
+    /// Parses a header value written by [`Self::header_value`]; `None` for any other scheme or a
+    /// malformed token.
+    pub fn from_header_value(value: &str) -> Option<Self> {
+        let id = |text: &str| -> Option<CapId> {
+            serde_json::from_value(serde_json::Value::String(text.to_owned())).ok()
+        };
+        let token = bearer_token(value)?;
+        let (authority, signer) = token.split_once('.')?;
+        Some(Self {
+            authority: id(authority)?,
+            signer: id(signer)?,
+        })
+    }
+
+    /// The HTTP metadata of a request made by this caller: the credential the request context
+    /// travels with, in the header the XRPC server parses it from.
+    pub fn metadata(&self) -> HttpMetadata {
+        HttpMetadata {
+            authorization: Some(self.header_value()),
+            idempotency_key: None,
+        }
+    }
+
+    /// The caller's credential carried by a request. Absent or unparseable is
+    /// [`ContextError::Unauthenticated`], which every service error carries through
+    /// `From<ContextError>`.
+    pub fn from_metadata(metadata: &HttpMetadata) -> Result<Self, ContextError> {
+        metadata
+            .authorization
+            .as_deref()
+            .and_then(Self::from_header_value)
+            .ok_or(ContextError::Unauthenticated)
+    }
 }
 
+#[cfg(test)]
+mod bearer_tests {
+    use super::*;
+
+    #[test]
+    fn a_bearer_header_round_trips_an_authorization_and_rejects_anything_else() {
+        let authorization = Authorization {
+            authority: CapId::new_random(),
+            signer: CapId::new_random(),
+        };
+        let header = authorization.header_value();
+        assert_eq!(
+            Authorization::from_header_value(&header),
+            Some(authorization)
+        );
+        assert_eq!(
+            Authorization::from_header_value(&header.replacen("Bearer", "bearer", 1)),
+            Some(authorization)
+        );
+        assert_eq!(
+            Authorization::from_metadata(&authorization.metadata()),
+            Ok(authorization)
+        );
+        assert_eq!(
+            Authorization::from_metadata(&HttpMetadata::default()),
+            Err(ContextError::Unauthenticated)
+        );
+        let token = header.strip_prefix("Bearer ").unwrap();
+        for malformed in [
+            token.to_owned(),
+            format!("Basic {token}"),
+            "Bearer ".to_owned(),
+            "Bearer not-a-uuid.not-a-uuid".to_owned(),
+            format!("Bearer {token}.{token}"),
+            format!("Bearer {}", token.replace('.', ":")),
+        ] {
+            assert_eq!(
+                Authorization::from_header_value(&malformed),
+                None,
+                "{malformed}"
+            );
+        }
+    }
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedAuthority {
@@ -175,18 +294,21 @@ pub struct ResolvedAuthority {
     pub actor: Option<Actor>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveAuthority {
     pub capability: CapId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObserveCapability {
     pub capability: CapId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CapabilityStatus {
@@ -194,6 +316,15 @@ pub enum CapabilityStatus {
     Retracted,
 }
 
+/// One event of [`ObserveCapability`]: the capability's state after a change.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityChange {
+    pub status: CapabilityStatus,
+}
+
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
@@ -201,8 +332,14 @@ pub struct Capability {
     pub object: String,
     pub rights: Rights,
     pub issuer_id: Uuid7,
+    /// The public id of the actor this handle is bound to. An actor's identity capability has
+    /// that actor as its subject, a handle derived from it inherits the subject, and an
+    /// introduction (a mint naming a subject) binds it to another actor. Namespace roots have
+    /// none.
+    pub subject: Option<Uuid7>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Namespace {
@@ -210,6 +347,7 @@ pub struct Namespace {
     pub capability: CapId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Actor {
@@ -218,9 +356,21 @@ pub struct Actor {
     pub public_key: MultibaseKey,
     pub certificate: Bytes,
     pub parent_actor_id: Option<Uuid7>,
+}
+
+/// What `OpenActor` returns: the actor, and the identity capability that was issued (or
+/// reused) for the open. The capability is the opener's own secret handle, so it is returned
+/// here and nowhere else; resolving an actor by id gives only the public [`Actor`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedActor {
+    #[serde(flatten)]
+    pub actor: Actor,
     pub capability: CapId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum AuthorityServiceError {
     #[error("request context failed: {0}")]
@@ -245,6 +395,7 @@ pub enum AuthorityServiceError {
     Claim(String),
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenActor {
@@ -252,11 +403,13 @@ pub struct OpenActor {
     pub path: String,
     pub rights: Rights,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveActor {
-    pub capability: CapId,
+    pub actor_id: Uuid7,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintCapability {
@@ -265,52 +418,58 @@ pub struct MintCapability {
     pub dependencies: Vec<CapId>,
     pub object: String,
     pub rights: Rights,
+    /// The actor the new handle is bound to. `None` inherits the subject of `parent` (of
+    /// `issuer` when there is no parent). A `Some` that differs from the inherited subject is
+    /// an introduction: the parent (or issuer) must carry `Rights::DELEGATE`, the handle also
+    /// depends on that actor's liveness, and an actor with no live identity capability is
+    /// `ActorNotFound`. A handle is trusted for its own subject's descendants and nothing else,
+    /// so the named actor must be a strict descendant of the inherited subject; a sibling, an
+    /// ancestor, an unrelated actor, or any actor when the source has no subject is
+    /// `Escalation`.
+    pub subject: Option<Uuid7>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttenuateCapability {
     pub capability: CapId,
     pub rights: Rights,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectCapability {
     pub capability: CapId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetractCapability {
     pub via: CapId,
     pub capability: CapId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignDatumClaim {
-    pub actor: CapId,
+    /// The handle to sign with: it must carry `USE` and be bound to the claim's actor.
+    pub via: CapId,
     pub claim: DatumClaim,
 }
 
-macro_rules! operation {
-    ($request:ident => $output:ty, $kind:ident, $nsid:literal) => {
-        impl Operation for $request {
-            type Output = $output;
-            type Error = AuthorityServiceError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.authority.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(AuthorityServiceError));
-        }
-    };
+method_core::methods! {
+    error = AuthorityServiceError, nsid_prefix = "org.example.daybook.authority.";
+    OpenActor => OpenedActor, procedure, "openActor";
+    ResolveActor => Actor, query, "resolveActor";
+    ResolveAuthority => ResolvedAuthority, query, "resolveAuthority";
+    MintCapability => Capability, procedure, "mintCapability";
+    AttenuateCapability => Capability, procedure, "attenuateCapability";
+    InspectCapability => Capability, query, "inspectCapability";
+    RetractCapability => (), procedure, "retractCapability";
+    SignDatumClaim => SignedDatumClaim, procedure, "signDatumClaim";
 }
-operation!(OpenActor => Actor, procedure, "openActor");
-operation!(ResolveActor => Actor, query, "resolveActor");
-operation!(ResolveAuthority => ResolvedAuthority, query, "resolveAuthority");
-operation!(MintCapability => Capability, procedure, "mintCapability");
-operation!(AttenuateCapability => Capability, procedure, "attenuateCapability");
-operation!(InspectCapability => Capability, query, "inspectCapability");
-operation!(RetractCapability => (), procedure, "retractCapability");
-operation!(SignDatumClaim => SignedDatumClaim, procedure, "signDatumClaim");
 
-service_core_rs::service_operation!(ObserveCapability => stream CapabilityStatus, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
+service_core_rs::service_method!(ObserveCapability => stream CapabilityChange, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
 
 declare_service_protocol! {
     pub enum AuthorityProtocol => AuthorityMessage {

@@ -5,7 +5,7 @@ use super::Bytes;
 use super::Codec;
 use super::CompiledSchema;
 use super::Counter;
-use super::Float64;
+use super::F64;
 use super::Stored;
 use super::Text;
 use super::hydrate_value;
@@ -46,8 +46,8 @@ struct Stored0 {
     #[schemars(extend("x-automerge" = "list"))]
     plain: Vec<u8>,
     many: Vec<Bytes>,
-    fraction: Float64,
-    maybe: Option<Float64>,
+    fraction: F64,
+    maybe: Option<F64>,
     // a bare `f64` derives a plain number; the opt-out is stated by the field, and the statement
     // is in the schema it derives
     #[schemars(extend("x-automerge" = "number"))]
@@ -100,8 +100,8 @@ fn value() -> (Stored0, Value) {
         // of numbers is what it meant, on purpose
         plain: vec![1, 2, 3, 4],
         many: vec![Bytes(vec![9]), Bytes(vec![8, 7])],
-        fraction: Float64(0.1),
-        maybe: Some(Float64(30.0)),
+        fraction: F64(0.1),
+        maybe: Some(F64(30.0)),
         plain_number: 1.5,
     };
     let json = serde_json::to_value(&value).unwrap();

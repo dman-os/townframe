@@ -363,7 +363,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
         }
     })?;
     context.publish::<Detail>(move || {
-        let _ = &shown;
+        let _shown = &shown;
         dioxus_core::VNode::empty()
     })?;
     context.publish::<Slot>({

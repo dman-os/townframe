@@ -6,7 +6,6 @@ use super::GroupKey;
 use super::LayoutKind;
 use super::MetaRoot;
 use crate::authority::AuthorityServiceError;
-use crate::authority::Authorization;
 use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
@@ -16,22 +15,28 @@ use crate::doc::CommandId;
 use crate::doc::DocsError;
 use crate::doc::WriteReceipt;
 use automerge::ChangeHash;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 
+pub use super::listing::KnownDrawer;
+pub use super::listing::KnownDrawers;
+pub use super::listing::ListedDoc;
+pub use super::listing::ListedDocs;
+pub use super::listing::ListedDrawer;
+pub use super::listing::ListedDrawers;
+
 pub type DrawerId = DocId;
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalDrawers {
     pub present_id: DrawerId,
     pub originated_id: DrawerId,
-    pub registry_id: DrawerId,
+    pub known_drawers_id: DrawerId,
     pub config_id: DrawerId,
 }
 
@@ -41,6 +46,7 @@ impl LocalDrawers {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DrawerRecord {
@@ -58,6 +64,7 @@ impl DrawerRecord {
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum DrawersError {
     #[error("request context failed: {0}")]
@@ -78,6 +85,9 @@ pub enum DrawersError {
     Storage(String),
     #[error("{0} is not a drawer this node knows")]
     UnknownDrawer(DrawerId),
+    /// A peer this node has not met: its keyhive identity arrives with a live connection.
+    #[error("unknown peer {0}")]
+    UnknownPeer(GroupKey),
     #[error("{0} is a self-doc drawer: it holds only itself and cannot take entries or members")]
     SelfDoc(DrawerId),
     #[error("{0} is already a drawer")]
@@ -105,6 +115,7 @@ pub enum DrawersError {
     SuccessorSelf { drawer_id: DrawerId },
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "layout",
@@ -115,6 +126,7 @@ pub enum CreateLayout {
     SelfDoc { doc_id: DocId },
     SingleGroup,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DrawerScope {
@@ -122,14 +134,20 @@ pub struct DrawerScope {
     pub create: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintDrawerCapability {
-    pub authorization: Authorization,
     pub scope: DrawerScope,
     pub rights: Rights,
+    /// The actor the new handle is bound to; `None` binds it to the presented handle's own
+    /// subject. Naming another actor is an introduction: the presented handle needs
+    /// `Rights::DELEGATE`, and the actor must be live and a strict descendant of the presented
+    /// handle's subject in the actor tree (anyone else is `Escalation`).
+    pub subject: Option<Uuid7>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDrawer {
@@ -138,21 +156,32 @@ pub struct CreateDrawer {
     #[serde(flatten)]
     pub layout: CreateLayout,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DrawerCreated {
     pub drawer_id: DrawerId,
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
 }
+/// Enters `doc_id` in `drawer_id`'s roster at `access`. Two authorities are checked, because
+/// two different things are given away: `capability` must hold Write on the drawer (Admin to
+/// confer Admin), and `reach` must reach the document at `access` or above, since entering it
+/// delegates that access to the drawer's members. They are separate so a service can enter a
+/// document into a drawer it owns using a handle its caller lent it for the document alone; a
+/// caller holding both passes the same handle twice.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddDoc {
     pub capability: CapId,
+    pub reach: CapId,
     pub command: CommandId,
     pub drawer_id: DrawerId,
     pub doc_id: DocId,
     pub access: Access,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateMetaDoc {
@@ -167,6 +196,7 @@ pub struct CreateMetaDoc {
     /// new doc and the group whose delegation admits the reference in projection.
     pub root: MetaRoot,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaDocCreated {
@@ -175,8 +205,10 @@ pub struct MetaDocCreated {
     pub name: String,
     pub root: MetaRoot,
     pub doc_id: DocId,
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub heads: Vec<ChangeHash>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveDoc {
@@ -185,6 +217,7 @@ pub struct RemoveDoc {
     pub drawer_id: DrawerId,
     pub doc_id: DocId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddChild {
@@ -194,6 +227,7 @@ pub struct AddChild {
     pub child_id: DrawerId,
     pub access: Access,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveChild {
@@ -202,12 +236,14 @@ pub struct RemoveChild {
     pub parent_id: DrawerId,
     pub child_id: DrawerId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetDrawer {
     pub capability: CapId,
     pub drawer_id: DrawerId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetDrawerPolicy {
@@ -217,6 +253,7 @@ pub struct SetDrawerPolicy {
 }
 /// Publish a successor pointer on a drawer's descriptor-bearing doc. Write+ on that drawer;
 /// the successor itself is never granted or copied by this operation.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetDrawerSuccessor {
@@ -226,12 +263,14 @@ pub struct SetDrawerSuccessor {
 }
 /// Follow the successor chain with Read access at every hop; stop with AccessRequired before
 /// reading an inaccessible hop. Cycle-checked; creates nothing.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolveDrawerSuccessor {
     pub capability: CapId,
     pub drawer_id: DrawerId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -243,6 +282,7 @@ pub enum SuccessorResolution {
     Resolved { drawer_id: DrawerId },
     AccessRequired { drawer_id: DrawerId },
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DrawerView {
@@ -257,6 +297,7 @@ pub struct DrawerView {
     /// sensitive root name different docs.
     pub meta_docs: BTreeMap<MetaRoot, BTreeMap<String, DocId>>,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDocs {
@@ -267,14 +308,7 @@ pub struct ListDocs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListedDoc {
-    pub doc_id: DocId,
-    pub access: Access,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub via: Option<DrawerId>,
-}
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RememberDrawer {
@@ -283,36 +317,26 @@ pub struct RememberDrawer {
     #[serde(default)]
     pub mirror: bool,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForgetDrawer {
     pub capability: CapId,
     pub drawer_id: DrawerId,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListKnownDrawers {
     pub capability: CapId,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnownDrawer {
-    pub drawer_id: DrawerId,
-    pub mirror: bool,
-}
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDrawers {
     pub capability: CapId,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListedDrawer {
-    pub drawer_id: DrawerId,
-    pub layout: DrawerLayout,
-    pub descriptor: Drawer,
-    pub access: Access,
-}
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrantDrawer {
@@ -321,6 +345,7 @@ pub struct GrantDrawer {
     pub subject_id: Uuid7,
     pub access: Access,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevokeDrawer {
@@ -328,6 +353,7 @@ pub struct RevokeDrawer {
     pub drawer_id: DrawerId,
     pub subject_id: Uuid7,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -338,6 +364,7 @@ pub enum Principal {
     Peer { peer_id: GroupKey },
     Group { group_id: GroupKey },
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvitePrincipal {
@@ -346,6 +373,7 @@ pub struct InvitePrincipal {
     pub principal: Principal,
     pub access: Access,
 }
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevokePrincipal {
@@ -354,18 +382,8 @@ pub struct RevokePrincipal {
     pub principal: Principal,
 }
 
-macro_rules! operations {
-    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = DrawersError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.drawers.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(DrawersError));
-        }
-    )*};
-}
-operations! {
+method_core::methods! {
+    error = DrawersError, nsid_prefix = "org.example.daybook.drawers.";
     MintDrawerCapability => Capability, procedure, "mintDrawerCapability";
     CreateDrawer => DrawerCreated, procedure, "createDrawer";
     AddDoc => WriteReceipt, procedure, "addDoc";
@@ -374,14 +392,14 @@ operations! {
     AddChild => WriteReceipt, procedure, "addChild";
     RemoveChild => WriteReceipt, procedure, "removeChild";
     GetDrawer => DrawerView, query, "getDrawer";
-    ListDocs => Vec<ListedDoc>, procedure, "listDocs";
+    ListDocs => ListedDocs, procedure, "listDocs";
     RememberDrawer => (), procedure, "rememberDrawer";
     ForgetDrawer => (), procedure, "forgetDrawer";
-    ListKnownDrawers => Vec<KnownDrawer>, query, "listKnownDrawers";
+    ListKnownDrawers => KnownDrawers, query, "listKnownDrawers";
     SetDrawerPolicy => (), procedure, "setDrawerPolicy";
     SetDrawerSuccessor => (), procedure, "setDrawerSuccessor";
     ResolveDrawerSuccessor => SuccessorResolution, query, "resolveDrawerSuccessor";
-    ListDrawers => Vec<ListedDrawer>, query, "listDrawers";
+    ListDrawers => ListedDrawers, query, "listDrawers";
     GrantDrawer => (), procedure, "grantDrawer";
     RevokeDrawer => (), procedure, "revokeDrawer";
     InvitePrincipal => (), procedure, "invitePrincipal";

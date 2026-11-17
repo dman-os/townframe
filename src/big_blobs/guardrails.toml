@@ -8,6 +8,7 @@ allowed_dependencies = [
     "big_repo",
     "big_sync",
     "big_sync_core",
+    "service_client_native_rs",
     "service_utils_rs",
     "sqlite_rs",
     "utils_rs",

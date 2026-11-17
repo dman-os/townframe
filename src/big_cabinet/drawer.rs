@@ -35,6 +35,7 @@ mod known;
 mod ledger;
 mod list;
 mod list_docs;
+mod mirror;
 mod principal;
 mod remove_child;
 mod remove_doc;
@@ -53,6 +54,7 @@ pub use self::access::DrawerProvider;
 pub use self::access::DrawerWorker;
 pub use self::discovery::DrawerMetadataObservation;
 pub use self::discovery::MetadataRootStatus;
+pub use self::mirror::Mirrored;
 pub use big_cabinet_core::drawer::Drawer;
 pub use big_cabinet_core::drawer::DrawerLayout;
 pub use big_cabinet_core::drawer::LayoutKind;
@@ -122,11 +124,14 @@ use big_cabinet_core::drawer::protocol::GetDrawer;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::InvitePrincipal;
 use big_cabinet_core::drawer::protocol::KnownDrawer;
+use big_cabinet_core::drawer::protocol::KnownDrawers;
 use big_cabinet_core::drawer::protocol::ListDocs;
 use big_cabinet_core::drawer::protocol::ListDrawers;
 use big_cabinet_core::drawer::protocol::ListKnownDrawers;
 use big_cabinet_core::drawer::protocol::ListedDoc;
+use big_cabinet_core::drawer::protocol::ListedDocs;
 use big_cabinet_core::drawer::protocol::ListedDrawer;
+use big_cabinet_core::drawer::protocol::ListedDrawers;
 use big_cabinet_core::drawer::protocol::LocalDrawers;
 use big_cabinet_core::drawer::protocol::MetaDocCreated;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
@@ -146,7 +151,8 @@ use big_repo::BigKeyhiveGroup;
 use big_repo::SharedBigRepo;
 use big_repo::keyhive_core::access::Access as KeyhiveAccess;
 use serde::Serialize;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -173,6 +179,9 @@ pub(crate) struct Projection {
     pub(crate) capabilities: DomainCapabilities,
     pub(crate) grants: Arc<Grants>,
     pub(crate) actor: Actor,
+    /// The authority's root identity, the node operator (ADR 033 section 5). It holds no
+    /// standing grants and needs none: see [`Projection::granted`].
+    pub(crate) operator: Uuid7,
     pub(crate) state: State,
     pub(crate) datum_set: Arc<crate::index::DatumSetStore>,
     pub(crate) ledger: Ledger,
@@ -221,6 +230,7 @@ impl std::ops::Deref for Core {
 }
 
 /// The booted service.
+#[derive(Clone)]
 pub struct Drawers {
     pub host: Arc<Host<DrawersHandler>>,
     pub client: Client<DrawersProtocol>,
@@ -245,20 +255,21 @@ impl Drawers {
         rights: Rights,
     ) -> Result<Capability, DrawersError> {
         self.client
-            .call(
+            .call_with(
                 context.child(),
+                authorization.metadata(),
                 MintDrawerCapability {
-                    authorization,
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), access)]),
                         create: false,
                     },
                     rights,
+                    subject: None,
                 },
             )
             .await
             .map_err(|error| match error {
-                ClientError::Operation(error) => error,
+                ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => {
                     DrawersError::AuthorityUnavailable(message)
                 }
@@ -272,10 +283,11 @@ impl Handler<MintDrawerCapability> for DrawerService {
         request: Envelope<MintDrawerCapability>,
     ) -> Result<ResponseEnvelope<Capability>, DrawersError> {
         let params = request.params;
+        let authorization = Authorization::from_metadata(&request.metadata)?;
         let caller = self
             .core
             .capabilities
-            .source::<DrawerScope>(&request.context, params.authorization)
+            .source::<DrawerScope>(&request.context, authorization)
             .await
             .map_err(authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !params.rights.is_subset_of(caller.rights) {
@@ -314,8 +326,8 @@ impl Handler<MintDrawerCapability> for DrawerService {
             .capabilities
             .mint(
                 &request.context,
-                params.authorization.authority,
                 &caller,
+                params.subject,
                 params.scope,
                 params.rights,
                 dependencies,
@@ -375,13 +387,13 @@ pub(crate) fn keyhive_access(access: Access) -> KeyhiveAccess {
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> DrawersError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => DrawersError::Denied,
-        ClientError::Operation(error) => DrawersError::Authority(error),
+        ClientError::Method(error) => DrawersError::Authority(error),
         ClientError::Transport { message, .. } => DrawersError::AuthorityUnavailable(message),
     }
 }
@@ -395,8 +407,8 @@ pub(crate) fn grant_error(error: GrantError) -> DrawersError {
 
 pub(crate) fn docs_error(error: ClientError<DocsError>) -> DrawersError {
     match error {
-        ClientError::Operation(DocsError::Context(error)) => error.into(),
-        ClientError::Operation(error) => DrawersError::Docs(error),
+        ClientError::Method(DocsError::Context(error)) => error.into(),
+        ClientError::Method(error) => DrawersError::Docs(error),
         ClientError::Transport { message, .. } => DrawersError::DocsUnavailable(message),
     }
 }
@@ -428,37 +440,44 @@ impl Core {
     }
 
     /// Run `request` against the docs service under a capability narrowed to `scope` and
-    /// signed as `signer`, minted for this call and retracted once it returns. The drawer
-    /// service holds doc authority over every drawer it projects, so a handle per request
-    /// is how it narrows that authority; retracting it keeps the authority's handle table
-    /// from growing with every roster read.
+    /// signed through the handle `signer`, minted for this call and retracted once it returns.
+    /// The drawer service holds doc authority over every drawer it projects, so a handle per
+    /// request is how it narrows that authority; retracting it keeps the authority's handle
+    /// table from growing with every roster read. The minted handle stays bound to the drawer
+    /// service (no introduction), and `signer` is only the handle the docs service signs
+    /// through: the drawer service's own identity (`self.issuer`) for its own writes, or the
+    /// handle a caller presented when the write is the caller's. `request` receives the
+    /// [`Authorization`] to attach to the docs call that signs; a call that signs as the drawer
+    /// service needs only its `authority`.
     pub(crate) async fn as_signer<T, F>(
         &self,
         context: &RequestContext,
         signer: CapId,
         scope: DocScope,
-        request: impl FnOnce(CapId) -> F,
+        request: impl FnOnce(Authorization) -> F,
     ) -> Result<T, DrawersError>
     where
         F: Future<Output = Result<T, DrawersError>>,
     {
         let capability = self
             .docs()
-            .call(
+            .call_with(
                 context.child(),
+                Authorization::identity(self.issuer).metadata(),
                 MintDocCapability {
-                    authorization: Authorization {
-                        authority: self.issuer,
-                        signer,
-                    },
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await
             .map_err(docs_error)?
             .capability_id;
-        let result = request(capability).await;
+        let result = request(Authorization {
+            authority: capability,
+            signer,
+        })
+        .await;
         self.capabilities
             .retract(context, capability)
             .await
@@ -474,6 +493,20 @@ impl Projection {
         actor: Uuid7,
         bounds: BTreeMap<DrawerId, state::Reach>,
     ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
+        // The operator is the cabinet's superuser: it holds Admin on every drawer this node
+        // projects without a standing grant, so what it reaches is what Admin on each bounding
+        // drawer reaches (a doc at the level it is entered, a drawer through its links). That is
+        // what lets the operator turn its own standing into a handle on a drawer that synced in
+        // from a peer, where no local grant exists for anyone. Its proof is the identity
+        // capability it presents, which every minted handle already depends on, so there is no
+        // grant to cite here.
+        if actor == self.operator {
+            return Ok(bounds
+                .values()
+                .filter_map(|bound| bound.apply(Access::Admin))
+                .max()
+                .map(|access| (access, Vec::new())));
+        }
         let candidates: Vec<_> = bounds
             .iter()
             .flat_map(|(drawer, bound)| {
@@ -632,6 +665,9 @@ impl Core {
         authority: &DomainAuthority<DrawerScope>,
     ) -> Result<Vec<CapId>, DrawersError> {
         match authority {
+            // The operator creates drawers without a grant, as it reaches every drawer without
+            // one (see `Projection::granted`).
+            DomainAuthority::Identity(actor) if *actor == self.operator => Ok(Vec::new()),
             DomainAuthority::Identity(actor) => {
                 let proof = self
                     .grants
@@ -683,7 +719,10 @@ impl Core {
                 write: [drawer.clone()].into(),
                 ..Default::default()
             },
-            |capability| async move {
+            |Authorization {
+                 authority: capability,
+                 ..
+             }| async move {
                 self.docs()
                     .call(
                         context.child(),
@@ -783,7 +822,10 @@ impl Core {
                     read: [doc.clone()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -890,7 +932,10 @@ impl Core {
                         read: [drawer_id.clone()].into(),
                         ..Default::default()
                     },
-                    |capability| {
+                    |Authorization {
+                         authority: capability,
+                         ..
+                     }| {
                         let drawer_id = &drawer_id;
                         async move {
                             match self
@@ -910,7 +955,7 @@ impl Core {
                                 .await
                             {
                                 Ok(read) => Ok(Some(read)),
-                                Err(ClientError::Operation(
+                                Err(ClientError::Method(
                                     DocsError::DocNotFound | DocsError::Pending { .. },
                                 )) => Ok(None),
                                 Err(error) => Err(docs_error(error)),
@@ -1058,7 +1103,7 @@ pub async fn boot(config: DrawerConfig<'_>) -> Result<(Drawers, StopToken), Draw
         .sync_discovered(&RequestContext::root())
         .await?;
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(DrawersBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(DrawersBinding::new(Arc::clone(&host))));
     Ok((
         Drawers {
             host,

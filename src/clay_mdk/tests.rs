@@ -759,7 +759,7 @@ impl presentation::HostMountPoint for TestHost {
         if !granted.alive.load(Ordering::Acquire) {
             return Ok(Err(PresentationError::Revoked));
         }
-        let alive = granted.alive.clone();
+        let alive = Arc::clone(&granted.alive);
         let root = granted.root;
         let backend = match root {
             Some(_) => Backend::Blitz { revisions: 0 },
@@ -927,7 +927,7 @@ fn sdk_each_mount_runs_its_own_render_scope_and_mounting_one_does_not_rerun_anot
     }
 
     let renders = Rc::new(Cell::new(0));
-    let mut dom = crate::GuestDom::new_with_props(counter, renders.clone());
+    let mut dom = crate::GuestDom::new_with_props(counter, Rc::clone(&renders));
     // No mount, no render: a presentation is rendered only for the surfaces that show it.
     assert_eq!(renders.get(), 0);
     let first = dom.mount_target(100);
@@ -1027,7 +1027,7 @@ fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     struct Shared(Signal<u64>);
 
     let external = Rc::new(Cell::new(None));
-    let published = external.clone();
+    let published = Rc::clone(&external);
     let mut dom = crate::GuestDom::with_setup(
         move || {
             let count = use_hook(|| {
@@ -1258,7 +1258,7 @@ async fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() ->
     let placement = store
         .data_mut()
         .table
-        .push(Placement::synthetic(first_lifetime.clone()))?;
+        .push(Placement::synthetic(Arc::clone(&first_lifetime)))?;
     let surface = events
         .call_mount(&mut store, "view", Resource::new_borrow(placement.rep()))
         .await?
@@ -1357,7 +1357,7 @@ async fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
         let placement = store
             .data_mut()
             .table
-            .push(Placement::synthetic(alive.clone()))?;
+            .push(Placement::synthetic(Arc::clone(&alive)))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
             .call_mount(&mut store, "view", Resource::new_borrow(placement.rep()))

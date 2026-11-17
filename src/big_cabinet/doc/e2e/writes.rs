@@ -105,6 +105,7 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
                     .unwrap(),
                 doc_id: document.clone(),
                 at: At::Current,
+                with_authors: false,
             },
         )
         .await)

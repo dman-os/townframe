@@ -163,6 +163,7 @@ pub fn ListDetails(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -319,6 +320,43 @@ mod tests {
                 "{width:?}: the list lost its state\n{}",
                 page.outline()
             );
+        }
+    }
+
+    use crate::headless::list_row::ListRow;
+
+    /// The shell's role: it owns which row is open and answers `on_open` / `on_back`.
+    fn owner(width: WidthClass) -> Element {
+        let mut open = use_signal(|| None::<String>);
+        rsx! {
+            ListDetails {
+                width,
+                list_name: "Settings",
+                list: rsx! {
+                    ListRow { id: "inbox", name: "Inbox", "Inbox" }
+                    ListRow { id: "sent", name: "Sent", "Sent" }
+                },
+                details_name: "Details",
+                details: open().map(|key| rsx! { Close {} "{key}" }),
+                current: open(),
+                split: Split::new(vec![1.0, 2.0], 900.0),
+                on_resize: |_| {},
+                on_open: move |key| open.set(Some(key)),
+                on_back: move |()| open.set(None),
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_details_scaffold_survives_any_order_of_events_at_every_width() {
+        for width in [
+            WidthClass::Compact,
+            WidthClass::Medium,
+            WidthClass::Expanded,
+        ] {
+            Storm::with_props(owner, width)
+                .viewport(900.0, 600.0)
+                .run_seeds(0..32);
         }
     }
 }

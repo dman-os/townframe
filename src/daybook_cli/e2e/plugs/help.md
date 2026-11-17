@@ -30,7 +30,7 @@ Import a plug from a doc id, facet ref, OCI registry ref, or local OCI layout
 Usage: daybook_cli plugs import [OPTIONS] <TARGET>
 
 Arguments:
-  <TARGET>  db+facet:// ref, bare doc id, oci://<registry-ref>, or a local OCI layout path
+  <TARGET>  dtxt:datum: ref, bare doc id, oci://<registry-ref>, or a local OCI layout path
 
 Options:
       --no-enable      Leave the plug known but not enabled
@@ -44,7 +44,7 @@ Enable a plug by facet ref or doc id
 Usage: daybook_cli plugs enable [OPTIONS] <TARGET>
 
 Arguments:
-  <TARGET>  db+facet:// ref or bare manifest doc id
+  <TARGET>  dtxt:datum: ref or bare manifest doc id
 
 Options:
       --heads <HEADS>  Pin to explicit heads (pipe-separated) instead of current main

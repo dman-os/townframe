@@ -6,11 +6,11 @@ use big_cabinet_core::datum::Stored;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::datum::reconcile_json_atomic;
 use big_sync_core::ObjKey;
+use method_core::Method;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
-use service_core_rs::Operation;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
@@ -214,7 +214,7 @@ fn blob_known_and_future_fields_survive_the_full_codec_chain() {
         "lengthOctets": 4,
         "digest": BlobId::new([3; 32]).digest_str(),
         "inline": [0, 1, 2, 255],
-        "urls": ["db+blob:///zContent", "future+blob:unrecognized"],
+        "urls": ["dtxt:blob:zContent", "https://example.invalid/unrecognized"],
         "futureField": {"entries": [null, true, "untouched"], "fraction": "1.25"}
     }));
     codec_round_trip::<Blob>(json!({
@@ -241,7 +241,7 @@ fn cipher_value() -> Value {
     json!({
         "representation": {"digest": BlobId::new([9; 32]).digest_str(), "lengthOctets": 125337},
         "contentEncoding": "aes128gcm",
-        "keyRef": "db+facet:/zKeyDocument/org.example.daybook.jwk/relay",
+        "keyRef": "dtxt:datum:zKeyDocument/org.example.daybook.jwk/relay",
         "keyRefHeads": ["a".repeat(64), "b".repeat(64)],
         "encodingParameters": {"recordSize": 65536, "padding": "padme"}
     })
@@ -258,7 +258,7 @@ fn cipher_blob_preserves_uri_heads_and_future_codec_without_interpreting_them() 
     let mut future = cipher_value();
     future["representation"]["futureLocation"] = json!({"shards": ["first", "second"]});
     future["contentEncoding"] = json!("future-encoding");
-    future["keyRef"] = json!("future+key:opaque-key-reference");
+    future["keyRef"] = json!("urn:example:opaque-key-reference");
     future["encodingParameters"] = json!({
         "recordSize": 32768,
         "padding": "future-padding",
@@ -380,7 +380,7 @@ fn protocol_wire<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(
 
 #[test]
 fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
-    fn unary<P: service_core_rs::Unary, Proto: irpc::Service>()
+    fn unary<P: method_core::Unary, Proto: irpc::Service>()
     where
         service_core_rs::Envelope<P>: irpc::Channels<Proto, Tx = service_core_rs::Reply<P>>,
     {
@@ -388,12 +388,12 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
     unary::<PutBlob, BlobsProtocol>();
     unary::<ReadBlob, BlobsProtocol>();
     unary::<StatBlob, BlobsProtocol>();
-    let _: Option<<PutBlob as service_core_rs::Operation>::Output> = None::<BlobInfo>;
+    let _: Option<<PutBlob as method_core::Method>::Output> = None::<BlobInfo>;
     assert_eq!(
-        BlobsProtocol::OPERATIONS.unary,
+        BlobsProtocol::METHODS.unary,
         [PutBlob::XRPC, ReadBlob::XRPC, StatBlob::XRPC]
     );
-    assert!(BlobsProtocol::OPERATIONS.stream.is_empty());
+    assert!(BlobsProtocol::METHODS.stream.is_empty());
     for (operation, nsid, output) in [
         (PutBlob::XRPC, "org.example.daybook.blobs.put", "BlobInfo"),
         (
@@ -401,11 +401,7 @@ fn protocol_operations_and_channels_match_the_bounded_unary_contract() {
             "org.example.daybook.blobs.read",
             "BlobRange",
         ),
-        (
-            StatBlob::XRPC,
-            "org.example.daybook.blobs.stat",
-            "Option<BlobInfo>",
-        ),
+        (StatBlob::XRPC, "org.example.daybook.blobs.stat", "BlobStat"),
     ] {
         assert!(big_cabinet_core::datum::is_nsid(operation.nsid));
         assert_eq!(operation.nsid, nsid);
@@ -484,7 +480,17 @@ fn protocol_requests_results_and_errors_round_trip() {
         serde_json::to_value(&info).unwrap(),
         json!({"blobId": blob_id.to_string(), "lengthOctets": u64::MAX})
     );
-    protocol_wire(info);
+    // An absent `info` is elided from the JSON body (atproto has no null), which a
+    // non-self-describing codec cannot read back, so the result is checked as JSON only.
+    let stat = BlobStat { info: None };
+    assert_eq!(serde_json::to_value(&stat).unwrap(), json!({}));
+    assert_eq!(serde_json::from_value::<BlobStat>(json!({})).unwrap(), stat);
+    protocol_wire(info.clone());
+    let stat = BlobStat { info: Some(info) };
+    assert_eq!(
+        serde_json::from_value::<BlobStat>(serde_json::to_value(&stat).unwrap()).unwrap(),
+        stat
+    );
     protocol_wire(BlobRange {
         bytes: vec![0, 255],
         length_octets: 123456789,
@@ -495,7 +501,7 @@ fn protocol_requests_results_and_errors_round_trip() {
         length_octets: 0,
     }));
     for error in [
-        BlobsError::Context(service_core_rs::ContextError::Cancelled),
+        BlobsError::Context(method_core::ContextError::Cancelled),
         BlobsError::Denied,
         BlobsError::NotFound,
         BlobsError::InvalidInput {

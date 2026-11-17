@@ -16,6 +16,7 @@ use automerge::ChangeHash;
 use big_blobs_core::Blob;
 use big_blobs_core::BlobId;
 use big_blobs_core::BlobPin;
+use big_blobs_core::BlobUrl;
 use big_blobs_core::CipherBlob;
 use big_blobs_core::Jwk;
 use big_blobs_core::Representation;
@@ -23,6 +24,7 @@ use big_blobs_core::Rfc8188EncodingParameters;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DatumReference;
 use big_cabinet_core::DocId;
+use big_cabinet_core::ReferenceDocId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
@@ -41,7 +43,7 @@ use iroh_blobs::HashAndFormat;
 use iroh_blobs::api::Store;
 use iroh_blobs::api::TempTag;
 use serde_json::Value;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
@@ -267,21 +269,11 @@ impl DocumentBlobs {
             let blob: Blob = serde_json::from_value(value.clone())?;
             let plaintext = plaintext_id(&blob)?;
             let (jwk_key, default_cipher_key) = representation_keys(blob_key)?;
-            let via_keys = match resolution_keys(doc_id, &blob, &plaintext) {
-                Ok(keys) => keys,
-                Err(reason) => {
-                    report.deferred.push(DocumentDeferral {
-                        datum_key: Some(blob_key.clone()),
-                        reason,
-                    });
-                    continue;
-                }
-            };
             // Resolution order (ADR 026 §§2-3): the naming-convention slot
-            // in this doc first, then any `?via=` hint left on the Blob,
-            // then the legacy hashed representation slot. New writes only
-            // ever create the naming-convention slot; the other two are
-            // read fallbacks for documents written before ADR 026.
+            // in this doc first, then the legacy hashed representation
+            // slot. New writes only ever create the naming-convention slot;
+            // the legacy one is a read fallback for documents written before
+            // ADR 026. A blob URL carries no `via` hint (ADR 035 §3).
             let mut cipher_keys: Vec<DatumKey> = Vec::new();
             let push_key = |key: DatumKey, keys: &mut Vec<DatumKey>| {
                 if !keys.contains(&key) {
@@ -295,9 +287,6 @@ impl DocumentBlobs {
             };
             if present(&default_cipher_key) {
                 push_key(default_cipher_key.clone(), &mut cipher_keys);
-            }
-            for key in via_keys {
-                push_key(key, &mut cipher_keys);
             }
             let (_, legacy_cipher_key) = legacy_representation_keys(doc_id, blob_key, &plaintext)?;
             if present(&legacy_cipher_key) {
@@ -527,7 +516,8 @@ impl DocumentBlobs {
                 extra: Default::default(),
             },
             content_encoding: CONTENT_ENCODING_AES128GCM.into(),
-            key_ref: format!("db+facet:///{doc_id}/{jwk_key}"),
+            key_ref: DatumReference::new(ReferenceDocId::Concrete(doc_id.clone()), jwk_key.clone())
+                .to_string(),
             key_ref_heads: key_heads,
             encoding_parameters: Rfc8188EncodingParameters {
                 record_size: encoding.record_size,
@@ -564,8 +554,7 @@ impl DocumentBlobs {
         cipher_version: &DatumVersion,
         cipher: &CipherBlob,
     ) -> Attempt<MasterKey> {
-        let Some((key_doc, jwk_key, query_heads)) = legacy_reference(doc_id, &cipher.key_ref)
-        else {
+        let Some((key_doc, jwk_key)) = key_reference(doc_id, &cipher.key_ref) else {
             return Ok(Err(DeferralReason::UnsupportedReference));
         };
         if jwk_key.tag().as_str() != Jwk::ID {
@@ -582,9 +571,6 @@ impl DocumentBlobs {
                 == Some(&jwk_key);
         let (at, read_doc) = if cipher.key_ref_heads.is_empty() {
             if !in_doc_naming {
-                return Ok(Err(DeferralReason::UnsupportedReference));
-            }
-            if query_heads.is_some() {
                 return Ok(Err(DeferralReason::UnsupportedReference));
             }
             // Empty heads on an in-doc reference mean "the same heads as
@@ -609,9 +595,6 @@ impl DocumentBlobs {
                 .collect::<Result<Vec<_>, _>>()?;
             heads.sort();
             heads.dedup();
-            if query_heads.is_some_and(|query| query != heads) {
-                return Ok(Err(DeferralReason::UnsupportedReference));
-            }
             (At::Heads(heads), key_doc.clone())
         };
         let read = match self
@@ -645,7 +628,7 @@ impl DocumentBlobs {
         plaintext: &BlobId,
         cipher_key: &DatumKey,
     ) -> Attempt<RetainedRepresentation> {
-        let Some(DatumRead::Accepted { value, version }) = read.datums.get(cipher_key) else {
+        let Some(DatumRead::Accepted { value, version, .. }) = read.datums.get(cipher_key) else {
             return Ok(Err(DeferralReason::DatumUnavailable {
                 doc_id: doc_id.clone(),
                 datum_key: cipher_key.clone(),
@@ -800,7 +783,7 @@ impl DocumentBlobs {
 
 fn document_error<T>(doc_id: &DocId, error: ClientError<DocsError>) -> Attempt<T> {
     match error {
-        ClientError::Operation(
+        ClientError::Method(
             error @ (DocsError::Denied
             | DocsError::DocNotFound
             | DocsError::UnknownHeads { .. }
@@ -904,109 +887,37 @@ fn master_key(value: &Value) -> Option<MasterKey> {
 }
 
 fn plaintext_id(blob: &Blob) -> Res<BlobId> {
-    if let Ok(id) = blob.digest.parse() {
-        return Ok(id);
-    }
-    for value in blob.urls.as_deref().unwrap_or_default() {
-        let Ok(url) = Url::parse(value) else {
-            continue;
-        };
-        if matches!(url.scheme(), "db+blob" | "daybook-blob")
-            && url.host_str().is_none()
-            && let Ok(id) = url.path().trim_start_matches('/').parse()
-        {
-            return Ok(id);
-        }
-    }
-    eyre::bail!("accepted Blob has no supported plaintext digest")
+    blob.digest
+        .parse()
+        .ok()
+        .or_else(|| url_blob_id(blob))
+        .ok_or_else(|| eyre::eyre!("accepted Blob has no supported plaintext digest"))
 }
 
-fn legacy_reference(
-    owner: &DocId,
-    value: &str,
-) -> Option<(DocId, DatumKey, Option<Vec<ChangeHash>>)> {
-    let url = Url::parse(value).ok()?;
-    if url.scheme() != "db+facet"
-        || url.host_str().is_some()
-        || !url.username().is_empty()
-        || url.port().is_some()
-        || url.fragment().is_some()
-    {
-        return None;
-    }
-    let raw = value.split_once(':')?.1.split('?').next()?;
-    let path = raw.strip_prefix("///").or_else(|| raw.strip_prefix('/'))?;
-    let reference = DatumReference::parse(&format!("db+datum:/{path}")).ok()?;
-    let mut heads = None;
-    let mut branch_seen = false;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "branch" if !branch_seen && value == "main" => branch_seen = true,
-            "at" if heads.is_none() => {
-                let mut parsed = value
-                    .split('|')
-                    .map(str::parse::<ChangeHash>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                if parsed.is_empty() {
-                    return None;
-                }
-                parsed.sort();
-                parsed.dedup();
-                heads = Some(parsed);
+/// The plaintext id a legacy `Blob.urls` entry names: `dtxt:blob:<multihash>`, or the older
+/// `daybook-blob` spelling some documents still carry.
+pub(crate) fn url_blob_id(blob: &Blob) -> Option<BlobId> {
+    blob.urls
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find_map(|text| {
+            if let Ok(url) = text.parse::<BlobUrl>() {
+                return Some(url.id());
             }
-            _ => return None,
-        }
-    }
-    Some((
-        reference.document().resolve(owner),
-        reference.key().clone(),
-        heads,
-    ))
+            let url = Url::parse(text).ok()?;
+            if url.scheme() != "daybook-blob" || url.host_str().is_some() {
+                return None;
+            }
+            url.path().trim_start_matches('/').parse().ok()
+        })
 }
 
-fn resolution_keys(
-    doc_id: &DocId,
-    blob: &Blob,
-    plaintext: &BlobId,
-) -> Result<BTreeSet<DatumKey>, DeferralReason> {
-    let mut keys = BTreeSet::new();
-    for value in blob.urls.as_deref().unwrap_or_default() {
-        let Ok(url) = Url::parse(value) else {
-            continue;
-        };
-        if !matches!(url.scheme(), "db+blob" | "daybook-blob")
-            || url.host_str().is_some()
-            || url
-                .path()
-                .trim_start_matches('/')
-                .parse::<BlobId>()
-                .ok()
-                .as_ref()
-                != Some(plaintext)
-        {
-            continue;
-        }
-        for (_, via) in url.query_pairs().filter(|(key, _)| key == "via") {
-            let key = if via.starts_with("db+facet:") {
-                let Some((owner, key, heads)) = legacy_reference(doc_id, &via) else {
-                    return Err(DeferralReason::UnsupportedReference);
-                };
-                if owner != *doc_id || heads.is_some() {
-                    return Err(DeferralReason::UnsupportedReference);
-                }
-                key
-            } else {
-                via.parse()
-                    .map_err(|_| DeferralReason::UnsupportedReference)?
-            };
-            if key.tag().as_str() != CipherBlob::ID {
-                return Err(DeferralReason::UnsupportedReference);
-            }
-            keys.insert(key);
-        }
-    }
-    Ok(keys)
+/// The document and key a stored `keyRef` names, with `self` resolved against `owner`. The
+/// stored form carries no query: the pin is the sibling `keyRefHeads`.
+fn key_reference(owner: &DocId, value: &str) -> Option<(DocId, DatumKey)> {
+    let reference = DatumReference::parse_stored(value).ok()?;
+    Some((reference.document().resolve(owner), reference.key().clone()))
 }
 
 #[cfg(test)]

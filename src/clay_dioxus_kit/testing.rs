@@ -745,10 +745,25 @@ impl Page {
     /// A pointer event (`pointerdown`, `pointermove`, `pointerup`, `pointerleave`,
     /// `pointercancel`) at document x `page_x`. The page coordinate is the only one the kit reads
     /// during a gesture (Blitz skill: the target changes mid-gesture, the page space does not).
+    ///
+    /// The primary button is held for a press and a move, as in a drag, and not for the events
+    /// that end one; [`Self::pointer_without_buttons`] is a move after a release the page never
+    /// saw.
     pub(crate) fn pointer(&mut self, node: Node, name: &str, page_x: f64) {
+        let held = matches!(name, "pointerdown" | "pointermove");
+        self.pointer_holding(node, name, page_x, u16::from(held));
+    }
+
+    /// A `pointermove` at `page_x` with no button held.
+    pub(crate) fn pointer_without_buttons(&mut self, node: Node, page_x: f64) {
+        self.pointer_holding(node, "pointermove", page_x, 0);
+    }
+
+    fn pointer_holding(&mut self, node: Node, name: &str, page_x: f64, buttons: u16) {
         let point = SerializedPointInteraction {
             page_x,
             client_x: page_x,
+            buttons,
             ..Default::default()
         };
         let mut json = serde_json::to_value(point).expect("point serializes");
