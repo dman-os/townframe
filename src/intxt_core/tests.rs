@@ -89,6 +89,8 @@ fn every_datum_declares_publishes_and_admits() {
             "org.example.intxt.work.worktreeOp",
             "org.example.intxt.work.file",
             "org.example.intxt.work.gitCommit",
+            "org.example.intxt.work.rewrite",
+            "org.example.intxt.work.rewrittenFrom",
             "org.example.intxt.work.gitRef",
             "org.example.intxt.work.jjOperation",
             "org.example.intxt.work.jjChange",
@@ -213,8 +215,12 @@ fn the_adr_examples_are_valid_datums() {
         "files": [
             {"path": "src/big_cabinet_core/reference.rs", "status": "modified"},
             {"path": "src/url.rs", "status": "renamed", "oldPath": "src/uri.rs"}
-        ]
+        ],
+        "patchId": "3f9a1c0de4b2"
     }));
+    codec_round_trip::<work::Rewrite>(json!({"successor": "4c1f0a", "how": "patchId"}));
+    codec_round_trip::<work::Rewrite>(json!({"successor": "4c1f0a", "how": "hook"}));
+    codec_round_trip::<work::RewrittenFrom>(json!({"predecessor": "9a0e11", "how": "patchId"}));
     codec_round_trip::<work::GitRef>(json!({"target": "4c1f", "base": "9a0e"}));
     codec_round_trip::<work::JjOperation>(json!({
         "parents": ["d00d"],
@@ -336,6 +342,9 @@ fn future_fields_and_vocabulary_values_are_carried() {
     codec_round_trip::<work::GitClone>(json!({
         "repo": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRepo/r", "machine": "dtxt:actor:z11111111111111111111111111111111/recorders/git", "path": "p", "vcs": ["pijul"]
     }));
+    let rewrite: work::Rewrite =
+        serde_json::from_value(json!({"successor": "4c1f0a", "how": "jjChange"})).unwrap();
+    assert_eq!(rewrite.how, work::RewriteHow::Unknown("jjChange".into()));
 }
 
 /// A note's content is collaborative text, so a recorder's line splice merges with a concurrent
