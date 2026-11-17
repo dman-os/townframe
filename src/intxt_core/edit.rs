@@ -406,16 +406,10 @@ impl EditDocument {
             members.push(format!("  \"description\": {}", json(description)));
         }
         if let Some(entries) = &self.entries {
-            members.push(list(
-                "entries",
-                entries.iter().map(|entry| json(entry)).collect(),
-            ));
+            members.push(list("entries", entries.iter().map(json).collect()));
         }
         if !self.errors.is_empty() {
-            members.push(list(
-                "errors",
-                self.errors.iter().map(|error| json(error)).collect(),
-            ));
+            members.push(list("errors", self.errors.iter().map(json).collect()));
         }
         format!("{{\n{}\n}}\n", members.join(",\n"))
     }
