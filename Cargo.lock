@@ -5294,7 +5294,7 @@ dependencies = [
 [[package]]
 name = "dioxus-ssr"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "askama_escape",
  "dioxus-core",
