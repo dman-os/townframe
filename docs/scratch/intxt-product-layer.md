@@ -32,3 +32,8 @@ The data layer is deliberately unopinionated: it works with whatever harnesses, 
 
 1. Is "thread" the product's word for a session, a line of work, or a request and everything done for it?
 2. Should the ledger practice itself be what agents record into an intxt? Its decisions, findings and sources are already structured by hand.
+
+---
+
+more ideas
+- use the big ephemeral based streaming of some live metadata about the environment that's houses the worktree on like resource usage
