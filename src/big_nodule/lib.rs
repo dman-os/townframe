@@ -660,8 +660,14 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
                     // shared config drawer holds the cartridge config documents, which are
                     // created, read and written.
                     drawers: BTreeMap::from([
-                        (config.registry_drawer.clone(), Access::Read),
-                        (config.shared_config_drawer.clone(), Access::Write),
+                        (
+                            config.registry_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                        ),
+                        (
+                            config.shared_config_drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                        ),
                     ]),
                     ..DocScope::default()
                 },

@@ -672,7 +672,10 @@ pub async fn boot(config: CartridgesConfig) -> Res<(Cartridges, StopToken)> {
             Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
                 scope: DocScope {
-                    drawers: BTreeMap::from([(config.registry_drawer.clone(), Access::Write)]),
+                    drawers: BTreeMap::from([(
+                        config.registry_drawer.clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(Access::Write),
+                    )]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,

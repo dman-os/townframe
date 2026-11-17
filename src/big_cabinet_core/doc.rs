@@ -349,6 +349,46 @@ impl DatumKinds {
             (Self::Only(held), Self::Only(requested)) => requested.is_subset(held),
         }
     }
+
+    /// The kinds permitted by either grant. A document reached through two grants (two drawers
+    /// that both hold it) is held at the union of what each lets through.
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Only(mut held), Self::Only(more)) => {
+                held.extend(more);
+                Self::Only(held)
+            }
+            _ => Self::All,
+        }
+    }
+}
+
+/// What a document scope reaches through one granted drawer: the access it holds on the drawer
+/// and the datum kinds it may read or write in every document the drawer contains. The drawer's
+/// access is the ceiling on what the documents can be reached for; `kinds` narrows what in those
+/// documents is visible or writable, the same way `DocScope.read`/`write` narrow a named document.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DrawerReach {
+    pub access: DrawerAccess,
+    pub kinds: DatumKinds,
+}
+
+impl DrawerReach {
+    /// Builds a reach that admits every datum kind: broad access, an explicit choice.
+    pub fn all_kinds(access: DrawerAccess) -> Self {
+        Self {
+            access,
+            kinds: DatumKinds::All,
+        }
+    }
+
+    /// Returns whether the requested reach is covered by this one: no stronger drawer access
+    /// and no kind this reach does not hold.
+    pub fn covers(&self, other: &Self) -> bool {
+        self.access >= other.access && self.kinds.covers(&other.kinds)
+    }
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -358,7 +398,7 @@ pub struct DocScope {
     pub read: BTreeMap<DocId, DatumKinds>,
     pub write: BTreeMap<DocId, DatumKinds>,
     pub create: BTreeSet<String>,
-    pub drawers: BTreeMap<DocId, DrawerAccess>,
+    pub drawers: BTreeMap<DocId, DrawerReach>,
 }
 
 impl DocScope {
@@ -627,5 +667,76 @@ declare_service_protocol! {
         stream {
             ObserveDocAvailability(ObserveDocAvailability)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn only(tags: &[&str]) -> DatumKinds {
+        DatumKinds::Only(
+            tags.iter()
+                .map(|tag| DatumTag::new(*tag).unwrap())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_drawer_reach_covers_only_no_stronger_access_and_no_wider_kinds() {
+        let held = DrawerReach {
+            access: DrawerAccess::Write,
+            kinds: only(&["org.example.a", "org.example.b"]),
+        };
+        for (requested, covered) in [
+            (DrawerReach::all_kinds(DrawerAccess::Read), false),
+            (
+                DrawerReach {
+                    access: DrawerAccess::Read,
+                    kinds: only(&["org.example.a"]),
+                },
+                true,
+            ),
+            (
+                DrawerReach {
+                    access: DrawerAccess::Write,
+                    kinds: only(&["org.example.a", "org.example.b"]),
+                },
+                true,
+            ),
+            (
+                DrawerReach {
+                    access: DrawerAccess::Write,
+                    kinds: only(&["org.example.c"]),
+                },
+                false,
+            ),
+            (
+                DrawerReach {
+                    access: DrawerAccess::Admin,
+                    kinds: only(&["org.example.a"]),
+                },
+                false,
+            ),
+        ] {
+            assert_eq!(held.covers(&requested), covered, "{requested:?}");
+        }
+        assert!(DrawerReach::all_kinds(DrawerAccess::Write).covers(&held));
+    }
+
+    #[test]
+    fn kinds_union_is_the_widest_of_both() {
+        assert_eq!(
+            only(&["org.example.a"]).union(only(&["org.example.b"])),
+            only(&["org.example.a", "org.example.b"])
+        );
+        assert_eq!(
+            only(&["org.example.a"]).union(DatumKinds::All),
+            DatumKinds::All
+        );
+        assert_eq!(
+            DatumKinds::All.union(only(&["org.example.a"])),
+            DatumKinds::All
+        );
     }
 }
