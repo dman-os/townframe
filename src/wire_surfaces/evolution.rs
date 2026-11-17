@@ -221,7 +221,8 @@ fn item_violations(
                 named(path)
             )),
             Some(after) => {
-                if before.since != after.since {
+                // The file's own `since` is its `revision` when it has no sidecar, which moves.
+                if !path.is_empty() && before.since != after.since {
                     found.push(format!(
                         "{nsid}: {} is stable and changed its `since` from {:?} to {:?}",
                         named(path),
