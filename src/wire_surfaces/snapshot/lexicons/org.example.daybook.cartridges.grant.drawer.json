@@ -1,9 +1,6 @@
 {
   "defs": {
     "main": {
-      "nullable": [
-        "access"
-      ],
       "properties": {
         "access": {
           "knownValues": [
@@ -13,14 +10,14 @@
             "Admin"
           ],
           "type": "string"
-        },
-        "privileged": {
-          "type": "boolean"
         }
       },
+      "required": [
+        "access"
+      ],
       "type": "object"
     }
   },
-  "id": "org.example.daybook.micro.grant",
+  "id": "org.example.daybook.cartridges.grant.drawer",
   "lexicon": 1
 }
