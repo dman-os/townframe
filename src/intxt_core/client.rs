@@ -62,6 +62,9 @@ use service_core_rs::xrpc::bearer_header_value;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+/// How many rewrites deep [`Caller::commit_holders`] follows a commit back.
+const MAX_REWRITE_HOPS: usize = 16;
+
 /// What a caller needs to call cabinet methods on behalf of whoever it presents the authority of:
 /// the transport to the node, the capability it presents (none when the node already admits the
 /// connection as its operator), and the base of the command ids.
@@ -219,16 +222,63 @@ impl<H: HttpTransport> Caller<H> {
 
     /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha`: an
     /// intxt's commits document holds `gitCommit/<sha>` for every commit the intxt holds, so a
-    /// hit is membership. The query is anchored on the drawer (`And[InDrawer, HasKey]`), which
-    /// is what lets a capability of less than node-wide authority ask it, and the caller needs
-    /// Read on the drawer. It is a poll from the start with no hold, paged until caught up, and
-    /// asks only for the one key, so a page carries no values.
+    /// hit is membership. When no document holds it, the commit may be a rewrite of one that is:
+    /// `add` writes `rewrittenFrom/<new sha>` beside a matched predecessor, so the lookup follows
+    /// those back (each hop the same query on the new slot) and answers the holders of the
+    /// nearest predecessors that have any. A rewrite chain is followed at most
+    /// `MAX_REWRITE_HOPS` deep, and a commit met twice is not asked again, so a cycle ends.
+    ///
+    /// The query is anchored on the drawer (`And[InDrawer, HasKey]`), which is what lets a
+    /// capability of less than node-wide authority ask it, and the caller needs Read on the
+    /// drawer.
     pub async fn commit_holders(
         &self,
         drawer: &DrawerId,
         sha: &str,
     ) -> Result<BTreeSet<DocId>, IntxtError> {
-        let commit = key(work::GitCommit::ID, sha)?;
+        let mut seen = BTreeSet::from([sha.to_owned()]);
+        let mut wanted = vec![sha.to_owned()];
+        for _ in 0..=MAX_REWRITE_HOPS {
+            let mut holders = BTreeSet::new();
+            let mut predecessors = Vec::new();
+            for sha in &wanted {
+                let held = self
+                    .key_holders(drawer, key(work::GitCommit::ID, sha)?)
+                    .await?;
+                if !held.is_empty() {
+                    holders.extend(held);
+                    continue;
+                }
+                let from = key(work::RewrittenFrom::ID, sha)?;
+                for doc in self.key_holders(drawer, from.clone()).await? {
+                    let Some(value) = self.try_read(&doc, &from).await?.1 else {
+                        continue;
+                    };
+                    let from: work::RewrittenFrom =
+                        serde_json::from_value(value).map_err(|error| {
+                            IntxtError::Invalid(format!("rewrittenFrom/{sha}: {error}"))
+                        })?;
+                    if seen.insert(from.predecessor.clone()) {
+                        predecessors.push(from.predecessor);
+                    }
+                }
+            }
+            if !holders.is_empty() || predecessors.is_empty() {
+                return Ok(holders);
+            }
+            wanted = predecessors;
+        }
+        Ok(BTreeSet::new())
+    }
+
+    /// The documents in `drawer`, and in the drawers it reaches, that hold the datum `commit`:
+    /// a poll from the start with no hold, paged until caught up, asking only for the one key,
+    /// so a page carries no values.
+    async fn key_holders(
+        &self,
+        drawer: &DrawerId,
+        commit: DatumKey,
+    ) -> Result<BTreeSet<DocId>, IntxtError> {
         let predicate = Predicate::And {
             clauses: vec![
                 Predicate::InDrawer {
@@ -243,7 +293,7 @@ impl<H: HttpTransport> Caller<H> {
         };
         let datums = DatumSelection::Of {
             tags: BTreeSet::new(),
-            keys: [commit].into(),
+            keys: [commit.clone()].into(),
         };
         let capability = self
             .doc_capability(DocScope {
@@ -291,7 +341,7 @@ impl<H: HttpTransport> Caller<H> {
             }
             if page.through <= after {
                 return Err(IntxtError::Invalid(format!(
-                    "the poll for {sha} in {drawer} is not caught up and made no progress past {after}"
+                    "the poll for {commit} in {drawer} is not caught up and made no progress past {after}"
                 )));
             }
             after = page.through;

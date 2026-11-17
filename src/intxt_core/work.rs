@@ -209,6 +209,11 @@ pub struct GitCommit {
     pub committer: GitIdent,
     pub message: String,
     pub files: Vec<CommitFile>,
+    /// `git patch-id --stable` of the commit against its first parent: equal for a commit and its
+    /// rebased or amended-without-change successor, which is how `add` matches a rewrite. Absent
+    /// for a merge, a root, and a commit that changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub patch_id: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -254,6 +259,41 @@ pub enum FileStatus {
     Copied,
     #[datum(other)]
     Unknown(String),
+}
+
+/// How a rewrite was recognised.
+#[macros::datum(open_string)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RewriteHow {
+    /// The commits have the same `git patch-id --stable`, which is what `git range-diff` uses.
+    #[serde(rename = "patchId")]
+    PatchId,
+    #[datum(other)]
+    Unknown(String),
+}
+
+/// A commit the intxt holds was rewritten (`rewrite/<old sha>`), written in the commits document
+/// that holds the old commit. [`RewrittenFrom`] is its reverse, under the successor's slot, so
+/// that following a rewrite in either direction is a slot query.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Rewrite {
+    pub successor: String,
+    pub how: RewriteHow,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The reverse of [`Rewrite`] (`rewrittenFrom/<new sha>`): the commit it replaced.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RewrittenFrom {
+    pub predecessor: String,
+    pub how: RewriteHow,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 /// A ref of one clone (`gitRef/<clone uuid>/<ref name>`). One writer: the clone's recorder.

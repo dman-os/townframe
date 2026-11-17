@@ -192,6 +192,41 @@ pub(super) fn commit_key(sha: &str) -> String {
     format!("{}/{sha}", work::GitCommit::ID)
 }
 
+/// Which `predecessors` (held commits outside the range, with their patch ids) the `new` commits
+/// rewrote: (old sha, new sha) pairs, and a line for each patch id that names no single pair. A
+/// pair needs the patch id to be unique on both sides: several held commits with it leave the
+/// predecessor unknown, and several new commits with it would each claim the same predecessor.
+fn match_rewrites(
+    new: &BTreeMap<String, work::GitCommit>,
+    predecessors: &BTreeMap<String, Option<String>>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    let mut held: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for (sha, patch_id) in predecessors {
+        if let Some(patch_id) = patch_id {
+            held.entry(patch_id).or_default().push(sha);
+        }
+    }
+    let mut added: BTreeMap<&str, Vec<&String>> = BTreeMap::new();
+    for (sha, commit) in new {
+        if let Some(patch_id) = &commit.patch_id {
+            added.entry(patch_id).or_default().push(sha);
+        }
+    }
+    let (mut pairs, mut lines) = (Vec::new(), Vec::new());
+    for (patch_id, successors) in added {
+        match (held.get(patch_id).map(Vec::as_slice), successors.as_slice()) {
+            (None, _) => {}
+            (Some([old]), [successor]) => pairs.push(((*old).clone(), (*successor).clone())),
+            (Some(olds), successors) => lines.push(format!(
+                "  rewrite    {} matches {} held commit(s) by patch id and names no single predecessor: nothing written",
+                successors.iter().map(|sha| short_sha(sha)).collect::<Vec<_>>().join(", "),
+                olds.len()
+            )),
+        }
+    }
+    (pairs, lines)
+}
+
 /// The sha a commit key names.
 pub(super) fn sha_of(commit_key: &str) -> &str {
     commit_key.rsplit('/').next().unwrap_or(commit_key)
@@ -358,41 +393,104 @@ impl<'a> Packaging<'a> {
     /// document, so the document holding the key is what says the intxt holds the commit (the
     /// membership query of `which`). A commit is the same value wherever it is read, so one the
     /// document holds already is left alone, which makes adding again, or adding a range that
-    /// overlaps, write only what is new. Answers how many were written.
-    async fn write_commits(&self, drawer: &DrawerId, resolved: &Resolved) -> Res<usize> {
+    /// overlaps, write only what is new.
+    ///
+    /// A new commit whose patch id matches exactly one commit the document already holds from
+    /// outside the range is a rewrite of it (an amend, a rebase, a force-push seen from another
+    /// machine): `rewrite/<old>` and `rewrittenFrom/<new>` are written beside them. Several
+    /// matches name no single predecessor, so nothing is written and the line says so.
+    ///
+    /// Answers how many commits were written and the lines to report.
+    async fn write_commits(
+        &self,
+        drawer: &DrawerId,
+        resolved: &Resolved,
+    ) -> Res<(usize, Vec<String>)> {
         if resolved.commits.is_empty() {
-            return Ok(0);
+            return Ok((0, Vec::new()));
         }
         let doc = self.ensure_commits_doc(drawer).await?;
-        let held = self.caller.datum_keys(&doc).await?;
-        let mut missing = Vec::new();
-        for sha in &resolved.commits {
-            let commit = key(work::GitCommit::ID, sha)?;
-            if !held.contains(&commit) {
-                missing.push((sha.clone(), commit));
+        // One read of the document gives the held commits and their patch ids.
+        let (_, datums) = self.caller.read_datums(&doc, None).await?;
+        let mut held: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut rewritten = BTreeSet::new();
+        for (datum_key, read) in datums {
+            let slot = String::from_utf8_lossy(datum_key.slot_bytes()).into_owned();
+            let DatumRead::Accepted { value, .. } = read else {
+                eyre::bail!("{datum_key} in {doc} is not readable: {read:?}");
+            };
+            match datum_key.tag().as_str() {
+                work::GitCommit::ID => {
+                    let commit: work::GitCommit = serde_json::from_value(value)?;
+                    held.insert(slot, commit.patch_id);
+                }
+                work::Rewrite::ID => {
+                    rewritten.insert(slot);
+                }
+                _ => {}
             }
         }
+        let missing: Vec<String> = resolved
+            .commits
+            .iter()
+            .filter(|sha| !held.contains_key(*sha))
+            .cloned()
+            .collect();
         if missing.is_empty() {
-            return Ok(0);
+            return Ok((0, Vec::new()));
         }
         let (git_dir, change_id) = (resolved.git_dir.clone(), resolved.change_id.clone());
-        let read = tokio::task::spawn_blocking(move || -> Res<BTreeMap<DatumKey, Value>> {
+        let new = tokio::task::spawn_blocking(move || -> Res<BTreeMap<String, work::GitCommit>> {
             let git = Git::new(&git_dir);
             missing
                 .into_iter()
-                .map(|(sha, key)| {
+                .map(|sha| {
                     let mut commit = intxt_capture::git::commit(&git, &sha)?;
                     commit.change_id = change_id.clone();
-                    Ok::<_, eyre::Report>((key, to_value(&commit)))
+                    Ok::<_, eyre::Report>((sha, commit))
                 })
                 .collect()
         })
         .await??;
-        let written = read.len();
+        // The predecessors are held commits outside the range, that no rewrite replaced yet.
+        let in_range: BTreeSet<&String> = resolved.commits.iter().collect();
+        let predecessors: BTreeMap<String, Option<String>> = held
+            .into_iter()
+            .filter(|(sha, _)| !in_range.contains(sha) && !rewritten.contains(sha))
+            .collect();
+        let (pairs, mut lines) = match_rewrites(&new, &predecessors);
+        let mut write = BTreeMap::new();
+        for (old, successor) in &pairs {
+            write.insert(
+                key(work::Rewrite::ID, old)?,
+                to_value(&work::Rewrite {
+                    successor: successor.clone(),
+                    how: work::RewriteHow::PatchId,
+                    extra: Default::default(),
+                }),
+            );
+            write.insert(
+                key(work::RewrittenFrom::ID, successor)?,
+                to_value(&work::RewrittenFrom {
+                    predecessor: old.clone(),
+                    how: work::RewriteHow::PatchId,
+                    extra: Default::default(),
+                }),
+            );
+            lines.push(format!(
+                "  rewrite    {} replaces {} (same patch id)",
+                short_sha(successor),
+                short_sha(old)
+            ));
+        }
+        let written = new.len();
+        for (sha, commit) in &new {
+            write.insert(key(work::GitCommit::ID, sha)?, to_value(commit));
+        }
         self.caller
-            .write_datums(&doc, read, BTreeSet::new())
+            .write_datums(&doc, write, BTreeSet::new())
             .await?;
-        Ok(written)
+        Ok((written, lines))
     }
 
     /// Remembers `drawer` so the node lists it, which is what makes an intxt live.
@@ -906,12 +1004,13 @@ impl<'a> Packaging<'a> {
 
         // Written even when the entry is already in, so an intxt that holds a range from before
         // its commits document existed gets its commits by adding the range again.
-        let wrote_commits = self.write_commits(&drawer, &resolved).await?;
+        let (wrote_commits, commit_lines) = self.write_commits(&drawer, &resolved).await?;
         if wrote_commits > 0 {
             plan.lines.push(format!(
                 "  commit data {wrote_commits} commit(s) in the intxt's commits document"
             ));
         }
+        plan.lines.extend(commit_lines);
         let mut written = plan.written.clone();
         if !written.is_empty() {
             self.caller
@@ -1276,6 +1375,69 @@ mod tests {
         for short in ["z", "zq", "zyxwvutsrqponmk", "kz"] {
             assert_eq!(full_drawer_id(short), None, "{short}");
         }
+    }
+
+    #[test]
+    fn an_amended_commit_keeps_its_patch_id_and_a_changed_patch_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.org"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let read = || {
+            let sha = git(&["rev-parse", "HEAD"]);
+            intxt_capture::git::commit(&Git::new(dir.path()), &sha).unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(dir.path().join("a"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+        std::fs::write(dir.path().join("b"), "two\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "work"]);
+        let before = read();
+        git(&["commit", "-q", "--amend", "-m", "work, reworded"]);
+        let reworded = read();
+        assert_eq!(before.patch_id, reworded.patch_id);
+        assert_ne!(before.message, reworded.message);
+        std::fs::write(dir.path().join("b"), "three\n").unwrap();
+        git(&["commit", "-q", "-a", "--amend", "-m", "work, changed"]);
+        assert_ne!(before.patch_id, read().patch_id);
+
+        let patch_id = before.patch_id.clone();
+        let held = |shas: &[&str]| -> BTreeMap<String, Option<String>> {
+            shas.iter()
+                .map(|sha| ((*sha).to_owned(), patch_id.clone()))
+                .collect()
+        };
+        let added = BTreeMap::from([("new".to_owned(), reworded.clone())]);
+        let (pairs, lines) = match_rewrites(&added, &held(&["old"]));
+        assert_eq!(pairs, [("old".to_owned(), "new".to_owned())]);
+        assert!(lines.is_empty());
+
+        // Two held commits with the patch id: no single predecessor.
+        let (pairs, lines) = match_rewrites(&added, &held(&["old1", "old2"]));
+        assert!(pairs.is_empty());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        // Two new commits with it would claim one predecessor: also nothing.
+        let both = BTreeMap::from([
+            ("new1".to_owned(), reworded.clone()),
+            ("new2".to_owned(), reworded),
+        ]);
+        let (pairs, lines) = match_rewrites(&both, &held(&["old"]));
+        assert!(pairs.is_empty());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        // A held commit without a patch id (an older datum) matches nothing.
+        let unknown = BTreeMap::from([("old".to_owned(), None)]);
+        let (pairs, lines) = match_rewrites(&added, &unknown);
+        assert!(pairs.is_empty() && lines.is_empty());
     }
 
     fn op(cause: Option<&str>, files: &[(&str, &str)]) -> work::WorktreeOp {
