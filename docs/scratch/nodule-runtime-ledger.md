@@ -734,6 +734,14 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
 
 ### Follow-ups from the 2026-11-17 session
+- **D50 (operator, 2026-11-17, second session):**
+  - **Shelved to next week:** the atmosphere/PDS work (D48) and dpaths (FDR 001).
+  - **This week:** micro/nodule isomorphism, design and if possible implementation. The permission model is drafted with the claytxt lane in `docs/scratch/permission-model.md` (#155); "Clay on the node" (#129) is signed by this lane.
+  - **Sidecars are stored as JSON text** (ADR 021 §3 amendment): the full schemars output, so sidecars can grow JSON Schema features; the sidecar tag's own supplement states `contentSchema` = the 2020-12 meta-schema, which the node enforces.
+  - **CI test output** stays out of job logs (volume broke the pipelines); the JUnit artifact stores failure output (#151).
+  - **Clone bootstrap** (claytxt's gap 3) waits on the user-node composition ADR: sisters and mothers (ADR 038), whose vocabulary is to be settled by first enumerating the P2P forcing functions.
+- [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
+- [todo] `big_ndk`'s `export_nodule!` routes with an if-chain of awaits in one async block, the frame shape #143 removed from the route macros; it matters most on a wasm guest's small stack. `big_node`'s boot block is also a 226 KB debug frame.
 - [todo] Typed initializer input record (trigger: install/upgrade/start; previous and current revision) for ADR 047 initializers (D47). Initializers receive `{}` until then.
 - [below-the-cabinet] `wal_checkpoint(TRUNCATE)` every 5 min in big_repo maintenance (`5a0f4aad`, #41): fights Litestream, small win; plus the catch-and-log at `native.rs:2484`. Goes with the keyhive lane's refactor.
 - [keyhive lane, from the old design chat] `INSERT OR IGNORE` is too broad in `insert_commit`/`insert_fragment`; the conflict-identity invariant test is missing; the keyhive archive loads everything at startup (`keyhive_storage.rs:11` FIXME).
