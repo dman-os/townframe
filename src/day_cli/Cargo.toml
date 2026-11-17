@@ -22,15 +22,22 @@ method_core.workspace = true
 utils_rs.workspace = true
 sqlite_rs.workspace = true
 secrets_rs.workspace = true
+service_client_core_rs.workspace = true
 service_utils_rs.workspace = true
 big_node.workspace = true
 big_dispatch.workspace = true
 big_dispatch_core.workspace = true
 big_nodule_core.workspace = true
+# `test-support` for the fixture namespace intxt's cartridge sits under, which signs it.
+big_cartridges_core = { workspace = true, features = ["test-support"] }
 big_repo.workspace = true
+big_blobs_core.workspace = true
 big_cabinet.workspace = true
 big_cartridges_core.workspace = true
 big_cabinet_core = { workspace = true, features = ["manifest"] }
+intxt_capture.workspace = true
+intxt_core = { workspace = true, features = ["cartridge", "client"] }
+short_ids.workspace = true
 
 #
 # cli
