@@ -429,9 +429,12 @@ jobs:
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
+      # `cache-on-failure`: a failed run on main must still save the target dir, or the next run
+      # rebuilds every crate from scratch again.
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: Setup wash CLI
         uses: wasmCloud/setup-wash-action@v2.1.0
         with:
@@ -441,9 +444,16 @@ jobs:
       - name: Install dependencies
         run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/dayframe_web
       # ADR 018 migration steps 6–7: the shared composition + counter guest on `dayframe_web`.
-      # Playwright's webServer runs `x/dayframe-web.ts`, which prepares the guest component,
-      # builds the wasm32 host, runs wasm-bindgen, copies the guest asset, and serves the site
-      # (bundle size is printed there for the §7 budget).
+      # `x/dayframe-web.ts` prepares the guest component, builds the wasm32 host, runs
+      # wasm-bindgen, copies the guest asset (bundle size is printed there for the §7 budget),
+      # and serves the site. Building here first keeps the cold compile, about 20 minutes on an
+      # empty cache, out of Playwright's 20-minute webServer timeout: the webServer's own run of
+      # the script then finds every crate built. DAYFRAME_WEB_TRAPPER matches what
+      # `playwright.config.ts` sets, so the build includes the same packages it serves.
+      - name: Build dayframe web
+        run: nix develop .#ci-desktop --command deno run --allow-all ./x/dayframe-web.ts --build
+        env:
+          DAYFRAME_WEB_TRAPPER: "1"
       - name: Run dayframe web e2e
         run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
 
