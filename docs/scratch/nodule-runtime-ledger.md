@@ -745,7 +745,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   2. **Evolution check:** a change against the checked-in copy is compatible (new optional field, new known value, new open-union member; the revision must bump) or breaking (removed or renamed field, type change, new required field, closed enum shrinking), and a breaking change fails unless it comes with a new NSID (operator rule 2026-11-06).
   3. **Manifest snapshot:** every cartridge manifest the repo ships rendered to JSON (permbinds, `uses`, routines), the input ADR 049's risk analysis reads.
   4. **Datum slot registry:** slot prefixes declared through one constructor, collected, overlaps fail.
-  Items 1–2 run as a Sonnet lane on top of the stack (2026-11-17).
+  Items 1–2 landed as #170 (2026-11-17). Next, per the ADR 021 stability amendment (operator, 2026-11-17): per-item `since`/`deprecated`/`unstable` annotations with the revision derived from them, sidecar classification, and item 3 (the manifest-contents snapshot), as one Sonnet lane.
 - [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
 - [todo] `big_ndk`'s `export_nodule!` routes with an if-chain of awaits in one async block, the frame shape #143 removed from the route macros; it matters most on a wasm guest's small stack. `big_node`'s boot block is also a 226 KB debug frame.
 - [todo] Typed initializer input record (trigger: install/upgrade/start; previous and current revision) for ADR 047 initializers (D47). Initializers receive `{}` until then.
