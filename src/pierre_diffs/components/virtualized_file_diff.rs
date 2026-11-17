@@ -20,11 +20,11 @@ mod advanced_upstream_tests;
 #[cfg(test)]
 mod integration_upstream_tests;
 #[cfg(test)]
-mod layout_oracle_tests;
+pub(crate) mod layout_oracle_tests;
 #[cfg(test)]
 mod layout_test_instance;
 #[cfg(test)]
-mod layout_upstream_tests;
+pub(crate) mod layout_upstream_tests;
 #[cfg(test)]
 mod padding_upstream_tests;
 #[cfg(test)]
