@@ -27,9 +27,18 @@ use big_dispatch_core::HttpForm;
 use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Invoke;
 use big_dispatch_core::Origin;
+use bytes::Bytes;
+use futures::StreamExt;
 use http::HeaderMap;
 use http::Method;
 use http::StatusCode;
+use http_body::Frame;
+use http_body_util::BodyExt;
+use http_body_util::Full;
+use http_body_util::Limited;
+use http_body_util::StreamBody;
+use http_body_util::combinators::UnsyncBoxBody;
+use method_core::ByteBody;
 use method_core::ContextError;
 use serde_json::Value;
 use serde_json::json;
@@ -40,11 +49,116 @@ use service_core_rs::xrpc::request_context;
 use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
 
+/// Message bodies larger than this fail the call, in both directions: a handler's response and a
+/// guest's outgoing request into dispatch. Either is a JSON value held in memory (several times
+/// its encoded size once parsed) and carried over a service call, so it is capped at 4 MiB;
+/// anything bigger belongs in a blob that the operation passes or returns an id for.
+pub const MAX_MESSAGE_OCTETS: usize = 4 * 1024 * 1024;
+
+/// The body of a guest's request or of dispatch's answer, as an executor's transport carries it.
+pub type HttpBody = UnsyncBoxBody<Bytes, std::io::Error>;
+
 fn json_response(status: StatusCode, body: Value) -> (StatusCode, XrpcBody) {
     (
         status,
         XrpcBody::json(serde_json::to_vec(&body).expect("a JSON value serializes")),
     )
+}
+
+/// [`call`] for an executor whose transport speaks `http` types: reads `request`'s body (a JSON
+/// body in full, under [`MAX_MESSAGE_OCTETS`]; any other as the pull-based byte stream ADR 042 §2
+/// describes) and takes its method, target and headers. Every executor adapts its request this
+/// one way, so the body rules are not restated per transport.
+pub async fn call_http<B>(
+    dispatch: &Client<DispatchProtocol>,
+    signer: Option<CapId>,
+    request: http::Request<B>,
+) -> (StatusCode, XrpcBody)
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: std::fmt::Debug,
+{
+    let (parts, body) = request.into_parts();
+    let content_type = parts
+        .headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let is_json =
+        parts.method == Method::GET || content_type.is_some_and(method_core::is_json_content_type);
+    let body = if is_json {
+        let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
+            return json_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({
+                    "error": "InvalidRequest",
+                    "message": "the request body failed or is too large"
+                }),
+            );
+        };
+        XrpcBody::Json(body.to_bytes().to_vec())
+    } else {
+        let mut bytes = ByteBody::new(
+            body.into_data_stream()
+                .map(|chunk| chunk.map_err(|error| std::io::Error::other(format!("{error:?}")))),
+        );
+        if let Some(mime) = content_type {
+            bytes = bytes.with_mime(mime.to_owned());
+        }
+        if let Some(length) = parts
+            .headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+        {
+            bytes = bytes.with_length(length);
+        }
+        XrpcBody::Bytes(bytes)
+    };
+    call(
+        dispatch,
+        signer,
+        &parts.method,
+        parts
+            .uri
+            .path_and_query()
+            .map_or(parts.uri.path(), |target| target.as_str()),
+        &parts.headers,
+        body,
+    )
+    .await
+}
+
+/// [`call`]'s answer as an `http` response: a JSON answer in full, a byte answer as a stream
+/// that keeps its MIME and known length.
+pub fn http_response(status: StatusCode, body: XrpcBody) -> http::Response<HttpBody> {
+    let (body, mime, length) = match body {
+        XrpcBody::Json(body) => {
+            let length = body.len() as u64;
+            (
+                Full::new(Bytes::from(body))
+                    .map_err(|never| match never {})
+                    .boxed_unsync(),
+                Some("application/json".to_owned()),
+                Some(length),
+            )
+        }
+        XrpcBody::Bytes(body) => {
+            let (mime, length) = (body.mime.clone(), body.length);
+            (
+                StreamBody::new(body.map(|chunk| chunk.map(Frame::data))).boxed_unsync(),
+                mime,
+                length,
+            )
+        }
+    };
+    let mut builder = http::Response::builder().status(status);
+    if let Some(mime) = mime {
+        builder = builder.header(http::header::CONTENT_TYPE, mime);
+    }
+    if let Some(length) = length {
+        builder = builder.header(http::header::CONTENT_LENGTH, length);
+    }
+    builder.body(body).expect("a well-formed response")
 }
 
 /// Runs a handler's outgoing request through dispatch. A malformed request is answered like an

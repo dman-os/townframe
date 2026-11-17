@@ -27,6 +27,8 @@ sqlite_rs.workspace = true
 method_core.workspace = true
 
 bytes.workspace = true
+http-body = "1"
+http-body-util = "0.1"
 #
 # identity
 blake3.workspace = true

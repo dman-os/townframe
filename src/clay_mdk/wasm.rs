@@ -12,6 +12,7 @@ use crate::native::CollectionBindings;
 use crate::native::Resources;
 use clay_guest_session::InitialContext;
 use clay_guest_session::capabilities::CapabilityPublication;
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::ComponentRef;
 use clay_host::Factory;
 use clay_host::Host;
@@ -92,18 +93,23 @@ impl Engine for Wasmtime {
 /// source error (fetch, compile, missing artifact) is an initialization failure the supervisor
 /// retains as `Faulted` until retried, never a shell panic. The composition root calls this;
 /// micro crates never build factories themselves.
+///
+/// `egress` answers the guest's `wasi:http` requests to `dispatch.local` as this micro's actor
+/// (see [`DispatchEgress`]); with `None` every such request is refused and the micro can call no
+/// node method.
 pub fn factory<Fut>(
     resources: Resources,
     micro: MicroId,
     manifest: MicroManifest,
     bindings: CollectionBindings,
+    egress: Option<Arc<dyn DispatchEgress>>,
     package: impl Fn() -> Fut + 'static,
 ) -> Rc<dyn Factory<CapabilityPublication>>
 where
     Fut: Future<Output = Result<WasmPackage, String>> + 'static,
 {
     let package: PackageSource<Wasmtime> = Rc::new(move || Box::pin(package()));
-    crate::engine::factory::<Wasmtime>(resources, micro, manifest, bindings, package)
+    crate::engine::factory::<Wasmtime>(resources, micro, manifest, bindings, package, egress)
 }
 
 #[cfg(test)]

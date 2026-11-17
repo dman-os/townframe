@@ -22,8 +22,10 @@ use crate::manifest::Access;
 use crate::manifest::Request;
 use crate::rows::Minter;
 use crate::rows::Writer;
+use method_core::Unary;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use service_core_rs::ClientError;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -700,6 +702,18 @@ impl Backend {
         }
     }
 
+    async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
+        match self {
+            #[cfg(feature = "in_process")]
+            Self::InProcess(_) => unimplemented!(
+                "an in-process micro has no node transport yet: only guest micros call node \
+                 methods (over wasi:http to dispatch.local)"
+            ),
+            #[cfg(feature = "guest")]
+            Self::Guest(_) => crate::guest::call(input).await,
+        }
+    }
+
     fn spawn(&self, future: LocalFuture<()>) {
         match self {
             #[cfg(feature = "in_process")]
@@ -850,6 +864,19 @@ impl Context {
                 })
             }),
         )
+    }
+
+    /// Calls node method `M` and awaits its answer: the call API nodules have (`big_ndk::Cx::call`),
+    /// over the same transport (Clay on the node §3). A guest's call is a `wasi:http` request to
+    /// `dispatch.local`, which its host answers as this micro's actor, presenting the micro's own
+    /// capability. The micro holds no credential and names no identity; what it may call is what
+    /// the host granted it, and anything else is [`ClientError::Method`] carrying dispatch's
+    /// denial.
+    ///
+    /// Only an async context may call. The synchronous `mount` and `dispatch` exports cannot
+    /// suspend, so an event handler spawns the call with [`Self::spawn`].
+    pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
+        self.0.backend.call(input).await
     }
 
     /// Run `future` as incarnation-owned local work: it is dropped when this instance closes,

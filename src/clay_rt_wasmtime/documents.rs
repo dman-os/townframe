@@ -94,7 +94,9 @@ pub(super) async fn initialize(
         publications: declared,
         micro,
         activator,
+        egress,
     } = context;
+    active.store.data_mut().http_hooks.egress = egress;
     if let Some(activator) = activator {
         active.store.data().capabilities.attach_activator(activator);
     }

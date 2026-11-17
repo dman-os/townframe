@@ -60,6 +60,7 @@ members = [
   "./src/clay_dioxus",
   "./src/clay_mdk",
   "./src/clay_rt_wasmtime",
+  "./src/clay_node_egress",
   "./src/clay_rt_wcmp",
   "./src/clay_rt_wcmp_wasmi",
   "./src/clay_guest_session",
@@ -167,6 +168,7 @@ clay_dioxus_kit = { path = "./src/clay_dioxus_kit" }
 pierre_diffs_dioxus = { path = "./src/pierre_diffs_dioxus" }
 dioxus_storm = { path = "./src/dioxus_storm" }
 clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
+clay_node_egress = { path = "./src/clay_node_egress" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
 # Lives in the `src/wasm_utils_rs` workspace (it is the only root-workspace consumer), but

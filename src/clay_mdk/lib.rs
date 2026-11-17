@@ -536,6 +536,10 @@ pub use decl::RootRow;
 pub use decl::ShellRoots;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod context;
+// What a micro names to call a node method with [`Context::call`]: the method trait and the
+// error a call fails with, the same types a nodule uses.
+pub use method_core;
+pub use service_core_rs::ClientError;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod rows;
 #[cfg(feature = "contract")]

@@ -175,7 +175,9 @@ pub fn wasmtime_engine(
     bindings: CollectionBindings,
     bytes: Vec<u8>,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, move || {
+    // No micro has a `dispatch.local` egress until the composition boots the node and supplies one
+    // per micro (Clay on the node §3).
+    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, None, move || {
         let bytes = bytes.clone();
         async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
     })
