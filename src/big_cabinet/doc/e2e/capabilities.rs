@@ -1325,7 +1325,7 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
 
     struct Policy {
         sql: Database,
-        drawers: BTreeMap<DocId, DrawerAccess>,
+        drawers: BTreeMap<DocId, big_cabinet_core::doc::DrawerReach>,
         selector: DocId,
         denied: DocId,
         origins: BTreeSet<DocId>,
@@ -1369,7 +1369,14 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
             documents: Option<&'a BTreeSet<DocId>>,
         ) -> AccessFuture<'a, BTreeMap<DocId, DrawerAccess>> {
             Box::pin(async move {
-                assert_eq!(drawers, &self.drawers);
+                assert_eq!(
+                    drawers,
+                    &self
+                        .drawers
+                        .iter()
+                        .map(|(drawer, reach)| (drawer.clone(), reach.access))
+                        .collect::<BTreeMap<_, _>>()
+                );
                 let documents = documents.expect("reference authorization must be bounded");
                 self.calls.lock().unwrap().push(documents.clone());
                 if documents == &BTreeSet::from([self.denied.clone()]) {
@@ -1423,7 +1430,10 @@ async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
     let datum_ref = Arc::new(DatumRefStore::new(index_sql.clone()).await.unwrap());
     let policy = Arc::new(Policy {
         sql: index_sql.clone(),
-        drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
+        drawers: BTreeMap::from([(
+            drawer.clone(),
+            big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Read),
+        )]),
         selector: selector.clone(),
         denied: denied.clone(),
         origins: BTreeSet::from([first_origin.clone(), second_origin]),
@@ -1698,7 +1708,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     let mut unsupported = scope.clone();
     unsupported.drawers.insert(
         DocId::new([73; 32]),
-        big_cabinet_core::drawer::DrawerAccess::Read,
+        big_cabinet_core::doc::DrawerReach::all_kinds(big_cabinet_core::drawer::DrawerAccess::Read),
     );
     assert_eq!(
         node.capability(&owner, unsupported.clone()).await,
@@ -2335,7 +2345,10 @@ async fn a_document_id_that_is_not_32_bytes_is_refused_and_the_node_keeps_servin
                 ..DocScope::default()
             },
             DocScope {
-                drawers: BTreeMap::from([(bad.clone(), DrawerAccess::Read)]),
+                drawers: BTreeMap::from([(
+                    bad.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(DrawerAccess::Read),
+                )]),
                 ..DocScope::default()
             },
         ] {
