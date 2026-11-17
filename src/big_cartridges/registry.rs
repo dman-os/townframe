@@ -840,9 +840,12 @@ impl Registry {
             );
         }
         for (nsid, sidecar) in params.sidecars {
+            // Stored as its JSON text (see `schema_groups`), read back by `resolve`.
             payload.insert(
                 sidecar_key(&version, &nsid),
-                serde_json::to_value(sidecar).expect("a sidecar serializes"),
+                serde_json::json!({
+                    "schema": serde_json::to_string(&sidecar).expect("a sidecar serializes"),
+                }),
             );
         }
         for (key, component) in params.components {
@@ -1071,13 +1074,19 @@ async fn resolve_envelope(
     for (nsid, pin) in &envelope.sidecars {
         let key = sidecar_key(&envelope.version, nsid);
         let value = read_pinned(docs, capability, envelope, doc, &key, pin).await?;
+        // A sidecar is stored as its JSON text (see `schema_groups`). A registry document can
+        // arrive by sync, so a value that is not that text is reported, like any unreadable pin.
+        let invalid = |reason: String| CartridgesError::PinnedDatumInvalid {
+            id: envelope.id.clone(),
+            version: Box::new(envelope.version.clone()),
+            key: key.to_string(),
+            reason,
+        };
+        let text = value["schema"]
+            .as_str()
+            .ok_or_else(|| invalid("the sidecar datum holds no schema text".into()))?;
         let file: big_cabinet_core::datum::Extra =
-            serde_json::from_value(value).map_err(|error| CartridgesError::PinnedDatumInvalid {
-                id: envelope.id.clone(),
-                version: Box::new(envelope.version.clone()),
-                key: key.to_string(),
-                reason: error.to_string(),
-            })?;
+            serde_json::from_str(text).map_err(|error| invalid(error.to_string()))?;
         sidecars.insert(nsid.clone(), file);
     }
     let mut components = BTreeMap::new();
