@@ -65,7 +65,7 @@ pub trait SubscribedInstance {
 
 pub type InstanceRef = Rc<dyn SubscribedInstance>;
 
-fn instance_key(instance: &InstanceRef) -> usize {
+pub(crate) fn instance_key(instance: &InstanceRef) -> usize {
     Rc::as_ptr(instance).cast::<()>() as usize
 }
 

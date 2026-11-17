@@ -2,6 +2,7 @@
 //! file (snake_case of the upstream name). The logic lives here against a host
 //! trait; the browser wiring is in the `pierre_diffs_dioxus` crate.
 
+pub mod code_view;
 pub mod file_diff;
 pub mod virtualized_file_diff;
 pub mod virtualizer;

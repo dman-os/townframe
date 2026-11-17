@@ -116,6 +116,10 @@ pub struct FakeDom {
     /// The scroll geometry the `VirtualizerHost` half answers (see
     /// `fake_virtualized_host.rs`).
     pub world: RefCell<crate::fake_virtualized_host::VirtualWorld>,
+    /// `window.devicePixelRatio` (`CodeViewHost`).
+    pub device_pixel_ratio: Cell<f64>,
+    /// `matchMedia('(prefers-reduced-motion: reduce)').matches` (`CodeViewHost`).
+    pub prefers_reduced_motion: Cell<bool>,
 }
 
 impl Default for FakeDom {
@@ -171,6 +175,8 @@ impl Default for FakeDom {
             heights: RefCell::default(),
             next_timer: Cell::new(0),
             world: RefCell::default(),
+            device_pixel_ratio: Cell::new(1.0),
+            prefers_reduced_motion: Cell::new(false),
         }
     }
 }

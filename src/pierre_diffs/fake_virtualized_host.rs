@@ -242,3 +242,13 @@ impl VirtualizerHost for FakeDom {
         self.emit(json!(["log", message, size_change, new_size]));
     }
 }
+
+impl crate::components::code_view::CodeViewHost for FakeDom {
+    fn device_pixel_ratio(&self) -> f64 {
+        self.device_pixel_ratio.get()
+    }
+
+    fn prefers_reduced_motion(&self) -> bool {
+        self.prefers_reduced_motion.get()
+    }
+}

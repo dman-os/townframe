@@ -21,6 +21,8 @@
 
 //! Annotation, selection and CodeView item/scroll-target types.
 
+use std::rc::Rc;
+
 use crate::types::patch::FileContents;
 use crate::types::patch::FileDiffMetadata;
 use serde::Deserialize;
@@ -102,9 +104,14 @@ pub struct CodeViewFileItem<Metadata> {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodeViewDiffItem<Metadata> {
     pub id: String,
-    pub file_diff: FileDiffMetadata,
+    /// `Rc` because upstream's `fileDiff` is an object whose identity the
+    /// layout and render caches key on (`updateCodeViewLayout` compares it by
+    /// reference); the wire shape is unchanged (serde's `rc` feature).
+    pub file_diff: Rc<FileDiffMetadata>,
+    /// `Rc` for the same reason: the array's identity is the annotations'
+    /// change signal (`LineAnnotations`).
     #[serde(default = "Option::default", skip_serializing_if = "Option::is_none")]
-    pub annotations: Option<Vec<DiffLineAnnotation<Metadata>>>,
+    pub annotations: Option<Rc<Vec<DiffLineAnnotation<Metadata>>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -269,6 +269,27 @@ where
         }
     }
 
+    /// What CodeView does in place of `setOptions` (which throws in advanced
+    /// mode): upstream hands the instance an options object that reads the
+    /// viewer's live options, so nothing is pushed, and the viewer owns every
+    /// side effect `setOptions` would have had (`pendingLayoutReset` and
+    /// `renderOptionsRevision`, which drive the layout-cache reset and the
+    /// re-render). Here the viewer builds the item's options and pushes them
+    /// when they differ; no layout reset, no `instanceChanged`.
+    pub fn set_options_from_code_view(
+        &self,
+        options: FileDiffOptions<NodeKey, Rendered, LAnnotation>,
+    ) {
+        assert!(
+            self.virtualizer().is_advanced(),
+            "VirtualizedFileDiff.setOptionsFromCodeView is only for instances CodeView owns"
+        );
+        if are_options_equal(Some(&*self.file_diff().options()), Some(&options)) {
+            return;
+        }
+        self.file_diff().set_options(Some(options));
+    }
+
     pub fn set_theme_type(&self, theme_type: ThemeTypes) {
         assert!(
             !self.virtualizer().is_advanced(),
