@@ -173,7 +173,9 @@ impl ServiceProvider {
     /// [`method_lexicon::builtin_methods`], or one that does not compile, is a programming error
     /// and panics: a built-in that dispatch could not check would be served unchecked.
     pub fn register(self, router: &Router, provider_id: &str) {
-        let lexicons: BTreeMap<_, _> = method_lexicon::builtin_methods().collect();
+        let lexicons: BTreeMap<_, _> = method_lexicon::builtin_methods()
+            .map(|(nsid, _, assemble)| (nsid, assemble))
+            .collect();
         let operations: Vec<_> = self
             .routes
             .iter()
