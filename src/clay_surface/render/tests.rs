@@ -800,7 +800,7 @@ fn visible_events_reach_a_guest_onvisible_handler() {
         listener_app,
         ListenerProps {
             tree,
-            events: events.clone(),
+            events: Rc::clone(&events),
         },
     );
     let mut host_tree: SurfaceTree = SurfaceTree::new();
@@ -832,7 +832,7 @@ fn visible_events_reach_a_guest_onvisible_handler() {
             div { onvisible: move |event| *props.0.borrow_mut() = Some(event.data()) }
         }
     }
-    let mut guest = VirtualDom::new_with_props(guest_app, GuestProps(seen.clone()));
+    let mut guest = VirtualDom::new_with_props(guest_app, GuestProps(Rc::clone(&seen)));
     let mut guest_edits: SurfaceTree = SurfaceTree::new();
     guest.rebuild(&mut guest_edits);
     let guest_element = guest_edits
