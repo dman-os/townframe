@@ -999,14 +999,16 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
         );
 
         let caller = Caller::new(client, RequestContext::root(), None, "test-hook".to_owned());
-        let [commits_doc] = caller
-            .commit_holders(&drawer, &first)
-            .await
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+        // The descriptor names the commits document.
+        let (_, descriptor) = read_at(
+            client,
+            &drawer,
+            &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        let commits_doc: big_cabinet_core::DocId =
+            descriptor["doc"].as_str().unwrap().parse().unwrap();
         let slot = |tag: &str, sha: &str| format!("{tag}/{sha}").parse().unwrap();
         let (_, rewrite) = caller
             .read(&commits_doc, &slot(work::Rewrite::ID, &held))
