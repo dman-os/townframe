@@ -18,6 +18,7 @@ pub mod capture;
 pub mod cartridge;
 #[cfg(feature = "client")]
 pub mod client;
+pub mod edit;
 pub mod generic;
 #[cfg(feature = "install")]
 pub mod install;
