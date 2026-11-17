@@ -14,23 +14,28 @@
 // `ResizeObserver`, `addEventListener` tracing for the five root events, a
 // scripted `Math.random`, scripted geometry (`getBoundingClientRect`,
 // `scrollTop`, `scrollTo` that clamps like a browser) and a scripted
-// `document.activeElement`. `render` is replaced on the instance by a recorder:
-// the render pass is C5, and the port's `render_stub` does the same. Item
-// shells are mounted by the `mount` step (`acquireElement` and
-// `syncRenderedItemOrder`, which is a module function upstream, so it is copied
-// here) because the render pass that does it is C5. Each step records its value,
+// `document.activeElement`. `render` is observed on the instance (the calls are
+// recorded) and forwarded: the render pass runs, over item instances with the
+// synchronous renderer semantics of the port. Item shells can also be mounted
+// by the `mount` step (`acquireElement` and `syncRenderedItemOrder`, which is a
+// module function upstream, so it is copied here), to set up pool states the
+// scripted geometry would not reach. Each step records its value,
 // the trace slice, the observable state, the tree of the root and the pool. The
 // Rust port replays them in `components/code_view/shell_oracle_tests.rs`.
 //
+// Debugging a mismatch: `S12E_ONLY=<scenario name>` runs one scenario, `S12_FULL=1`
+// snapshots every shell in full instead of by hash (the port's `snapshot_outline`
+// answers the same variable), so two runs' trees can be diffed.
+//
 // What this establishes: the shell's DOM writes, observer and listener calls,
 // timers and state transitions for the same inputs. What it cannot: layout (the
-// geometry is declared) and anything the render pass decides (C5).
+// geometry is declared). The render pass as a whole is `s12f_code_view_render.mjs`.
 
 import { clone } from "./s11a_cases.mjs";
 import { buildOptions } from "./s12a_file_diff.mjs";
 import { METRICS, QUERY_DIFFS_SMALL, buildDiffPool } from "./s12b_layout.mjs";
 import { LAYOUTS } from "./s12c_code_view.mjs";
-import { snapshotTree, withWorld } from "./s12b_render.mjs";
+import { installSynchronousRenderer, snapshotOutline, withWorld } from "./s12b_render.mjs";
 
 const CHROME = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const IPHONE =
@@ -45,7 +50,26 @@ const SHADOW_KINDS = {
   header: ["div", [["data-diffs-header", ""]]],
 };
 // The header and footer callbacks a scenario names: by identity, as upstream.
+// The diffs the render pass is given: a partial diff carries no line arrays to render
+// (a loader hydrates it; none runs here), and the published renderer would read
+// `undefined` lines from it.
+let POOL = QUERY_DIFFS_SMALL;
+// The layouts a scenario names; `huge` puts a million pixels between items, to cross the
+// scroll rebase thresholds with a few of them.
+const LAYOUT_TABLE = { ...LAYOUTS, huge: { paddingTop: 8, paddingBottom: 8, gap: 1000000 } };
+const UNSCRIPTED_RANDOM = 0.25;
+const INTERACTION_EVENTS = new Set(["click", "pointerdown", "pointermove", "pointerleave"]);
 const SLOT_CALLBACKS = { a: 11, b: 12, c: null };
+
+// The height of a rendered row in the render scenarios (`env.rules`): the line rules of
+// `s12b_virtualized.mjs`, repeated by `FakeDom`'s `rule_height`.
+function ruleHeight(element) {
+  if (element.hasAttribute("data-line-annotation")) return 30;
+  if (element.hasAttribute("data-no-newline")) return 16;
+  const value = element.getAttribute("data-line-index");
+  if (value === null) return 0;
+  return (Number.parseInt(value, 10) || 0) % 5 === 0 ? 40 : 20;
+}
 
 function encode(value) {
   return value === undefined ? null : JSON.parse(JSON.stringify(value));
@@ -103,26 +127,49 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
       clock = target;
     };
 
+    install("performance", { now: () => clock });
+    // Frames run when a step says so, at the clock's time.
+    const frames = new Map();
+    let nextFrame = 0;
+    world.requestAnimationFrame = (callback) => {
+      const id = ++nextFrame;
+      frames.set(id, callback);
+      world.trace.push(["raf.request", id]);
+      return id;
+    };
+    world.cancelAnimationFrame = (id) => {
+      world.trace.push(["raf.cancel", id]);
+      frames.delete(id);
+    };
+    const runFrames = (rounds) => {
+      for (let round = 0; round < rounds && frames.size > 0; round++) {
+        const pending = [...frames.values()];
+        frames.clear();
+        for (const callback of pending) callback(clock);
+      }
+    };
+
     // Scripted `Math.random`.
     const randoms = [];
     const savedRandom = Math.random;
-    Math.random = () => {
-      if (randoms.length === 0) throw new Error("unscripted Math.random");
-      return randoms.shift();
-    };
+    // The render pass positions the slab, which draws a value per call; a
+    // scenario that does not script it gets `UNSCRIPTED_RANDOM` (the port's
+    // `FakeDom::random` answers the same).
+    Math.random = () => (randoms.length === 0 ? UNSCRIPTED_RANDOM : randoms.shift());
 
     // Geometry.
     const geometry = { scrollTop: 0, scrollHeight: 0, viewportHeight: 0, heights: new Map() };
     const elementProto = world.document.defaultView.Element.prototype;
     const savedRect = elementProto.getBoundingClientRect;
     elementProto.getBoundingClientRect = function () {
-      return { height: geometry.heights.get(this) ?? 0 };
+      return { height: geometry.heights.get(this) ?? (env.rules ? ruleHeight(this) : 0) };
     };
     // The five root listeners (the world traces `scroll` adds and every removal).
     const proto = world.document.defaultView.EventTarget.prototype;
     const worldAdd = proto.addEventListener;
     proto.addEventListener = function (type, ...rest) {
-      if (["wheel", "touchstart", "pointerdown", "keydown"].includes(type)) world.trace.push(["listener.add", world.nameOf(this), type]);
+      // The viewer's own five root events (the items' managers listen elsewhere).
+      if (world.nameOf(this) === "root" && ["wheel", "touchstart", "pointerdown", "keydown"].includes(type)) world.trace.push(["listener.add", world.nameOf(this), type]);
       return worldAdd.call(this, type, ...rest);
     };
     // `document.activeElement` and a shadow root's.
@@ -136,9 +183,12 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
     try {
       const options = (spec) => {
         const built = buildOptions(spec.diff ?? {}, new Map());
+        // The port's word diff is `similar`'s, not jsdiff's (PARITY.md, diffWordsWithSpace), so
+        // the renders compared here carry no intra-line diff spans.
+        built.lineDiffType ??= "none";
         if (spec.pointerEventsOnScroll !== undefined) built.pointerEventsOnScroll = spec.pointerEventsOnScroll;
         if (spec.itemMetrics !== undefined) built.itemMetrics = clone(METRICS[spec.itemMetrics]);
-        if (spec.layout !== undefined) built.layout = clone(LAYOUTS[spec.layout]);
+        if (spec.layout !== undefined) built.layout = clone(LAYOUT_TABLE[spec.layout]);
         if (spec.stickyHeaders !== undefined) built.stickyHeaders = spec.stickyHeaders;
         return built;
       };
@@ -151,9 +201,22 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
         return built;
       };
       const cv = new CodeView(withSlots(options(scenario.options), scenario.options));
+      // `render` is observed and forwarded: the render pass runs.
       const renders = [];
+      const render = cv.render.bind(cv);
       cv.render = (immediate = false) => {
         renders.push(immediate);
+        render(immediate);
+      };
+      // The highlighter-readiness gate is not ported (`isReady`, dropped.psv): the
+      // port's highlights backend is synchronous, so the pass always runs.
+      cv.isReady = () => true;
+      // Item instances render with the synchronous renderer semantics of the port.
+      const createItem = cv.createItem.bind(cv);
+      cv.createItem = (...args) => {
+        const created = createItem(...args);
+        installSynchronousRenderer(created.instance, modules);
+        return created;
       };
       let root;
       const nodes = {};
@@ -176,7 +239,13 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
         }
       };
       const itemAt = (index) => cv.items[index];
-      const item = (entry) => ({ id: entry.id, type: "diff", fileDiff: diffs[entry.diff] });
+      const item = (entry) => ({
+        id: entry.id,
+        type: "diff",
+        fileDiff: diffs[entry.diff],
+        ...(entry.version !== undefined ? { version: entry.version } : {}),
+        ...(entry.collapsed !== undefined ? { collapsed: entry.collapsed } : {}),
+      });
       const sticky = (name) => target(name);
       const windowOf = (value) => (value == null ? undefined : { top: value.top, bottom: value.bottom });
       const syncRenderedItemOrder = (container, element, prevElement) => {
@@ -196,7 +265,15 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
             Object.defineProperty(root, "scrollTop", { configurable: true, get: () => geometry.scrollTop, set: (value) => (geometry.scrollTop = value) });
             root.scrollTo = ({ top, behavior }) => {
               world.trace.push(["element.scrollTo", "root", top, behavior]);
-              geometry.scrollTop = Math.min(Math.max(top, 0), Math.max(0, geometry.scrollHeight - geometry.viewportHeight));
+              const extent = env.clamp
+                ? (() => {
+                    const px = (name) => Number.parseFloat(cv.container.style[name] || "0");
+                    return px("height") + px("marginTop") + px("marginBottom");
+                  })()
+                : env.unclamped
+                  ? Number.POSITIVE_INFINITY
+                  : geometry.scrollHeight;
+              geometry.scrollTop = Math.min(Math.max(top, 0), Math.max(0, extent - geometry.viewportHeight));
             };
             geometry.heights.set(root, geometry.viewportHeight);
             root.focus = () => world.trace.push(["focus", "root"]);
@@ -214,6 +291,28 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
             return null;
           case "setItems":
             cv.setItems(step.items.map(item));
+            return null;
+          case "addItems":
+            cv.addItems(step.items.map(item));
+            return null;
+          case "updateItem":
+            return cv.updateItem(item(step.item));
+          case "removeItem":
+            return cv.removeItem(step.id);
+          case "updateItemId":
+            return cv.updateItemId(step.from, step.to);
+          case "scrollTo":
+            cv.scrollTo(clone(step.target));
+            return null;
+          case "render":
+            cv.render(step.immediate ?? false);
+            return null;
+          case "frames":
+            runFrames(step.rounds ?? 1);
+            return null;
+          case "viewport":
+            geometry.viewportHeight = step.height;
+            geometry.heights.set(root, step.height);
             return null;
           case "recompute":
             if (cv.layoutDirtyIndex != null) {
@@ -355,11 +454,13 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
         scrollAnimation: encode(cv.scrollAnimation),
         pendingLayoutAnchor: encode(cv.pendingLayoutAnchor),
         items: cv.items.map((record) => [record.item.id, record.top, record.height, record.element != null]),
-        root: root === undefined ? null : snapshotTree(root),
-        pool: cv.elementPool.map((element) => snapshotTree(element)),
+        root: root === undefined ? null : snapshotOutline(root),
+        pool: cv.elementPool.map((element) => snapshotOutline(element)),
         hasContainer: cv.container != null,
         renders: [...renders],
         clock,
+        domScrollTop: geometry.scrollTop,
+        pendingFrames: frames.size,
       });
 
       const steps = [];
@@ -371,7 +472,11 @@ async function runScenario(modules, JSDOM, diffs, scenario, oracle) {
         } catch (error) {
           result = { throws: error.message };
         }
-        steps.push({ ...result, trace: world.trace.splice(0), state: state() });
+        // The items' interaction managers remove their own listeners (`click`,
+        // `pointerdown`, ...) too; the port records those in the vocabulary of the
+        // interaction oracle, so the shell's trace is the viewer's own (the root's).
+        const trace = world.trace.splice(0).filter(([kind, name, type]) => !(kind === "listener.remove" && name !== "root" && INTERACTION_EVENTS.has(type)));
+        steps.push({ ...result, trace, state: state() });
       }
       return steps;
     } finally {
@@ -587,7 +692,7 @@ function reconcileAndFix() {
 
 function pool() {
   const scenarios = [];
-  const many = (count) => Array.from({ length: count }, (_, index) => spec(`i${index}`, QUERY_DIFFS_SMALL[index % QUERY_DIFFS_SMALL.length]));
+  const many = (count) => Array.from({ length: count }, (_, index) => spec(`i${index}`, POOL[index % POOL.length]));
   // Release into a pool of limit 8 (default metrics, a 600 px viewport: 600 + 400 over 44 is 24).
   for (const viewportHeight of [100, 600]) {
     const steps = [{ op: "setItems", items: many(30) }, recompute, { op: "world", scrollTop: 0, scrollHeight: 20000, viewportHeight }, { op: "setup" }, call("getElementPoolLimit")];
@@ -673,7 +778,7 @@ function randomScenario(random, index) {
   const pick = random.pick;
   const ids = Array.from({ length: 6 }, (_, at) => `i${at}`);
   // The first three are always there: the render state the steps write stays inside the list.
-  const items = () => ids.filter((_, at) => at < 3 || random.next() < 0.8).map((id) => spec(id, pick(QUERY_DIFFS_SMALL)));
+  const items = () => ids.filter((_, at) => at < 3 || random.next() < 0.8).map((id) => spec(id, pick(POOL)));
   const noRender = { op: "setState", state: { renderState: { firstIndex: -1, lastIndex: -1 } } };
   const steps = [{ op: "setItems", items: items() }, recompute, { op: "world", scrollTop: random.int(1000), scrollHeight: 2000 + random.int(5000), viewportHeight: 200 + random.int(600) }, { op: "setup" }];
   const mounted = new Set();
@@ -709,23 +814,39 @@ function randomScenario(random, index) {
   return { name: `random${index}`, options: { header: pick([undefined, "a"]), footer: pick([undefined, "b"]) }, steps };
 }
 
-export async function buildS12eCodeViewShell(oracle, random, corpusMocks) {
+/**
+ * Runs `makeScenarios({ random, diffs, pool })` over the published class in this world and
+ * returns the golden's content. `pool` is the names of the diffs a render may be given.
+ */
+export async function runScenarios(oracle, random, corpusMocks, makeScenarios) {
   const { JSDOM } = await import(oracle.jsdom);
   const modules = {
     ...(await import(oracle.pierre("components/CodeView.js"))),
     ...(await import(oracle.pierre("managers/ResizeManager.js"))),
     ...(await import(oracle.pierre("managers/UniversalRenderingManager.js"))),
     ...(await import(oracle.pierre("utils/platform.js"))),
+    ...(await import(oracle.pierre("constants.js"))),
+    ...(await import(oracle.pierre("utils/isDiffPlainText.js"))),
+    ...(await import(oracle.pierre("utils/renderDiffWithHighlighter.js"))),
   };
   const diffs = await buildDiffPool(oracle, random, corpusMocks);
-  const scenarios = [...pointerEvents(), ...hosts(), ...slab(), ...reconcileAndFix(), ...pool()];
-  for (let index = 0; index < 80; index++) scenarios.push(randomScenario(random, index));
+  POOL = QUERY_DIFFS_SMALL.filter((name) => !diffs[name].isPartial);
+  const scenarios = makeScenarios({ random, diffs, pool: POOL });
   const cases = [];
   for (const scenario of scenarios) {
+    if (process.env.S12E_ONLY && scenario.name !== process.env.S12E_ONLY) continue;
     const own = {};
-    for (const step of scenario.steps) for (const entry of step.items ?? []) own[entry.diff] ??= clone(diffs[entry.diff]);
+    for (const step of scenario.steps) for (const entry of step.items ?? [step.item].filter(Boolean)) own[entry.diff] ??= clone(diffs[entry.diff]);
     cases.push({ scenario: clone(scenario), steps: await runScenario(modules, JSDOM, own, scenario, oracle) });
   }
   const metrics = Object.fromEntries(Object.entries(METRICS).filter(([, value]) => value !== undefined));
-  return { diffs, metrics, layouts: LAYOUTS, slots: SLOT_CALLBACKS, cases };
+  return { diffs, metrics, layouts: LAYOUT_TABLE, slots: SLOT_CALLBACKS, cases };
+}
+
+export function buildS12eCodeViewShell(oracle, random, corpusMocks) {
+  return runScenarios(oracle, random, corpusMocks, ({ random: draws }) => {
+    const scenarios = [...pointerEvents(), ...hosts(), ...slab(), ...reconcileAndFix(), ...pool()];
+    for (let index = 0; index < 80; index++) scenarios.push(randomScenario(draws, index));
+    return scenarios;
+  });
 }
