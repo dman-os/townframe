@@ -174,7 +174,14 @@ fn check_delta(
             (Some(DMETA_KEY), Some("datums"), Some(key)) | (Some(key), _, _)
                 if key != DMETA_KEY =>
             {
-                keys.extend(key.parse::<DatumKey>().ok());
+                // A merge brings history synced from elsewhere, so a key that does not parse
+                // is not skipped: it is held to every kind, like a change naming no datum.
+                match key.parse::<DatumKey>() {
+                    Ok(key) => {
+                        keys.insert(key);
+                    }
+                    Err(_) => whole = true,
+                }
             }
             _ => {}
         }
