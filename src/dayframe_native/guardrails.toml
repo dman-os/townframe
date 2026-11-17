@@ -20,4 +20,7 @@ allowed_dependencies = [
 ]
 allow_external_api_types = false
 
+# Both the Wry-only build (no features: desktop must not compile Blitz) and the Blitz build (Android, Blitz desktop).
 [builds.native]
+features = ["blitz"]
+powerset = true
