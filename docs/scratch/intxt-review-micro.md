@@ -8,12 +8,42 @@ Scope: What the review micro shows, what it calls, and which pieces of infrastru
 ## The flow
 
 1. Open a PR in the review micro (from the PRs the node holds, or by URL).
-2. The micro reads the PR's description and finds the intxts it links to: any ADR 035 `doc` URL naming an intxt's descriptor document, `dtxt:doc:<drawer>`. The drawer id is the intxt's descriptor document id, global, so the URL is all a PR needs. There is no line grammar to learn: an `intxt:` prefix is decoration, and `Intxt::named_in` finds the URLs anywhere in the text (golden vectors in #146).
-3. The micro shows a row per linked intxt (title, description, link) and opens one on tap: its guide, its threads, and the diff of each entry, rendered by CodeView with intxt's threads in its annotation slots.
+2. The micro reads the PR's description block (below) and gets the intxts it names: `dtxt:doc:<drawer>` URLs, the drawer id being the intxt's descriptor document id (global), with a `via=` hint of where to find it.
+3. The micro shows a row per named intxt (title, description, link) and opens one on tap: its guide, its threads, and the diff of each entry, rendered by CodeView with intxt's threads in its annotation slots.
 
-The other direction is a datum: `day x intxt github pull` writes a `githubPullEntry/<owner>/<repo>/<n>` into every intxt the PR links to (#150), so an intxt lists its PRs.
+This is for reading **other people's** intxts. The user's own intxts come from the intxt list, which is where intxts are created; an intxt names its refs, commits and PRs (`githubPullEntry/<owner>/<repo>/<n>`, written by `day x intxt github pull`, #150). There is no "create an intxt for this PR?" flow (operator, 2026-11-17).
 
-PRs that link to no intxt show none. Finding intxts by commit is deferred to a cartridge index built by processors (ledger, 2026-11-17).
+PRs without a block show no intxts. Finding intxts by commit is deferred to a cartridge index built by processors over local state, the baseline for cartridge-specific lookups (ledger, 2026-11-17).
+
+## The PR description block (operator, 2026-11-17)
+
+No custom grammar: a collapsed `<details>` holding a JSON code block. `$type` names the shape, so it can grow (more fields, tickets) without a parser change, and unknown fields are carried, as Lexicon open types are. What the author's tooling writes at the end of the description:
+
+````markdown
+<details>
+<summary>intxt</summary>
+
+```json
+{
+  "$type": "org.example.intxt.prLinks",
+  "intxts": [
+    {
+      "ref": "dtxt:doc:z5KdV9aHq3vXr2M8sT1bNcE7wYpJfLgU4oQiZkDxR6m?via=z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH|z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+      "title": "intxt: commits live with the intxt",
+      "refs": ["refs/heads/stack/intxt-16-capture-records-commits"]
+    },
+    {
+      "ref": "dtxt:doc:z9QaW2bTn5yLk8P3vR7cHdF1xMsJgEoU6iZpKfDqA4t?via=z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH",
+      "title": "review micro: the PR on the phone"
+    }
+  ]
+}
+```
+
+</details>
+````
+
+On GitHub it renders as one collapsed "intxt" line. The reader finds the first ```` ```json ```` block inside a `<details>` whose `$type` is `org.example.intxt.prLinks`, and reads `intxts[].ref` (required; parsed as an ADR 035 `doc` URL) and the optional `title` and `refs` (a hint for readers without access; the intxt itself is the truth). A malformed block names nothing and is reported, not guessed at. The writer (`day x intxt github push`, or a printed block to paste) replaces its own block on each write and leaves the rest of the description alone.
 
 ## What exists and what doesn't (2026-11-17 survey of the stack)
 
@@ -48,7 +78,7 @@ PRs that link to no intxt show none. Finding intxts by commit is deferred to a c
 
 ## Open (for the operator)
 
-1. **Where the intxt can be found: a `via=` query key (ADR 035 extension).** A reader of the PR needs to know which nodes hold the intxt, and ADR 035 deliberately puts no locator in identity (§2.2: any node holding a document can serve it). Its settled points (2026-11-10) say "locators are query keys if ever needed", and the old `db+blob` URL had `?via=`. Proposed: `via=<node key>|<node key>` (the multibase node keys of `dtxt:actor`, sorted, `|`-joined like `heads=`), on any `dtxt:` kind:
+1. **Accepted 2026-11-17 (operator): as sketched, a general-purpose requirement for other systems too; tickets may be added later.** Where the intxt can be found: a `via=` query key (ADR 035 extension). A reader of the PR needs to know which nodes hold the intxt, and ADR 035 deliberately puts no locator in identity (§2.2: any node holding a document can serve it). Its settled points (2026-11-10) say "locators are query keys if ever needed", and the old `db+blob` URL had `?via=`. Proposed: `via=<node key>|<node key>` (the multibase node keys of `dtxt:actor`, sorted, `|`-joined like `heads=`), on any `dtxt:` kind:
 
    ```
    dtxt:doc:z5Kd…?via=zNodeA…|zRelay…
