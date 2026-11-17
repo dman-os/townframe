@@ -20,7 +20,11 @@ use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_dispatch::Caller;
 use big_dispatch::Operation;
 use big_dispatch::Provider;
@@ -353,6 +357,42 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
 
 const NOTE: &str = "org.example.note";
 
+/// Creates a drawer of its own as the node's drawers actor does. (The node's two required local
+/// drawers hold every document, so a document in one is in the other.)
+async fn create_drawer(node: &big_node::BigNode, name: &str) -> DrawerId {
+    let capability = node
+        .drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    create: true,
+                    ..DrawerScope::default()
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap()
+        .capability_id;
+    node.drawers
+        .client
+        .call(
+            RequestContext::root(),
+            CreateDrawer {
+                capability,
+                command: CommandId::try_from(format!("create-drawer-{name}")).unwrap(),
+                layout: CreateLayout::SingleGroup,
+            },
+        )
+        .await
+        .unwrap()
+        .drawer_id
+}
+
 /// Creates a note in `drawer` as the node's drawers actor does, and returns its id.
 async fn create_note(node: &big_node::BigNode, drawer: &DrawerId, text: &str) -> DocId {
     let placement = format!("drawer {drawer}");
@@ -439,8 +479,8 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
     })
     .await
     .unwrap();
-    let local = composition.node().drawers.local();
-    let (granted_drawer, other_drawer) = (local.present_id.clone(), local.originated_id.clone());
+    let granted_drawer = create_drawer(composition.node(), "granted").await;
+    let other_drawer = create_drawer(composition.node(), "other").await;
     let granted_doc = create_note(composition.node(), &granted_drawer, "visible").await;
     let other_doc = create_note(composition.node(), &other_drawer, "hidden").await;
     assert!(
