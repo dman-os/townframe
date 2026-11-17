@@ -1,6 +1,6 @@
 # intxt without a GUI: the terminal and agent experience
 
-Status: Sketch, for the operator's review
+Status: Sketch, for the operator's review (revision 2: mutations through $EDITOR, D64)
 Owner: intxt lane
 Updated: 2026-11-18
 Scope: How a person at a shell, and an agent with only a shell, use intxt end to end with no app: set up, record, package, publish to a PR, find and read someone's intxt, review, and pick up a review. It builds on FDR 008 (packaging), `intxt-review-surface.md` (review, GitHub) and this week's decisions (ledger: the PR description block, `github pull`, `summarizeIntxts`, the `post-rewrite` hook, D63, `doctor`). It marks what exists today and what is missing. It doesn't change a decision.
@@ -109,19 +109,61 @@ $ day x intxt inbox m4 --wait --json
 
 A rebase or amend between rounds: the `post-rewrite` hook records old→new pairs, `add` carries them into the intxt, and comments follow (R4). `which <commit>` names the intxts on this node holding a commit, following rewrites. **Exists.** The cross-node version (which intxts anywhere hold this commit) waits for the cartridge index on processors.
 
+## Mutations go through `$EDITOR` (operator, 2026-11-18, ledger D64)
+
+The verbs above that change an intxt (carving, `link`, `guide`, `add --session`, `rm`, editing the title and description) collapse into **one editable document per intxt**, as `git rebase -i` does for history. The CLI keeps a small set of commands for reading and recording (`show`, `which`, `github pull/ls/show`, `capture`, `record`, `install`, `doctor`) and gains `edit`.
+
+### The format: structured first, friendly later
+
+The document is **JSON** for now, so one model serves `--print`, `--apply`, `--json` and the review micro. A JSON Schema ships with it, so editors validate and complete. A human-friendly syntax comes later as a second rendering of the same model; the JSON stays the interface agents and scripts use.
+
+```json
+{
+  "$type": "org.example.intxt.edit",
+  "intxt": "dtxt:doc:z4knqqZq…",
+  "base": ["zHeadA…", "zHeadB…"],
+  "title": "intxt: install the cartridge as a library call",
+  "description": "The phone composition installs intxt at boot.",
+  "entries": [
+    { "id": "s", "commits": "1e26cf9..c91468a" },
+    { "id": "o", "githubPull": "dman-os/townframe#179" },
+    { "add": { "branch": "feat/x" } },
+    { "add": { "session": "k7" } }
+  ]
+}
+```
+
+- **Saving applies the difference** between the document as printed and as saved: an entry that disappeared is removed, an `add` is resolved (git ranges, branches and jj changes are resolved to commits then, as `add` does today), and changed fields are written.
+- **`base`** holds the heads the document was printed at. Applying it is refused if the intxt changed since (ADR 012's rule: a reviewed plan's assumptions are rechecked before applying it), with the current state printed for a re-edit.
+- **Applying the same document twice changes nothing.**
+- **Errors** come back with the document. In `$EDITOR` mode it is reopened with an `"errors"` member next to the offending entry, as `git commit` reopens with comment lines; in `--apply` mode they print and the exit code is non-zero.
+
+### Interactive and not
+
+```
+$ day x intxt edit m                      # $EDITOR, as git does: edit, save, quit
+$ day x intxt edit m --print > m.json     # the document, for an agent or a script
+$ day x intxt edit m --apply m.json       # or `-` for stdin; prints what changed and how to undo it
+```
+
+An agent never needs an interactive editor: it prints, edits the file with its own tools, and applies. `EDITOR=<script> day x intxt edit m` also works, as `GIT_SEQUENCE_EDITOR` does.
+
+### Grows to
+
+The same document gains `links` (stacks on, follows up, supersedes), `guide` (sections targeting commits, paths and turns), and carving (`split`: a new intxt from part of this one's entries). Each of these is a member of the document, not a new verb.
+
 ## What to build, in order
 
-1. **`github ls` / `github show`** (in progress, Luna lane): the CLI twin of the micro.
-2. **`read`:** the terminal reader. It's the biggest gap: today a person can see what an intxt holds but not read it.
-3. **`github push`** (or `pr-block --into`): no more pasting.
-4. **`doctor`:** setup visibility.
-5. **`inbox --wait` and `--json` on `show`/`read`/`inbox`:** the agent loop.
-6. **`guide`, `add --session`, `link`:** FDR 008 and R1 leftovers.
-7. **Carving (`new --from`):** larger; FDR 008's open question 2 (turn granularity) first.
+1. **`github ls` / `github show`:** done (#185).
+2. **`edit` (JSON, `--print`/`--apply`/`$EDITOR`)** covering title, description and entries (remove, and add commits, branch, change or session). It replaces `rm`, and later `link`, `guide` and carving.
+3. **A reading view for an entry** (its commits and the diff blob, a session's turns), through `$PAGER`: the smallest form of FDR 008's `read`, without designing the whole `read` surface yet.
+4. **`github push`** (or `pr-block --into`): no more pasting.
+5. **`doctor`.**
+6. **`inbox --wait` and `--json`:** the agent loop.
 
 ## Open
 
-1. Is `read` one command with a target (an intxt, an entry, a session), or `read` plus `diff`?
-2. `github push`: only the description block, or also publishing comments that map to the PR's commits (R5)? Proposed: the block first, comments later.
-3. A TUI (a ratatui reader over the same `read` model), or the pager only? Proposed: the pager first, and a TUI only if review in the terminal turns out to be the daily path.
-4. `--json` shapes: the datums as stored, or a reading model (the same view-model as the micro)? Proposed: the micro's view-model, so the CLI, agents and the GUI agree.
+1. A reading view for an entry: `show m s` (show narrowed to one entry), or something else? (FDR 008's `read` is too large a surface for now.)
+2. `github push`: the description block only first, comments later (R5)?
+3. The human-friendly syntax: later, after the JSON model settles.
+4. Does `edit` own comments too (a review as a document, replies and resolutions as edits), or do comments stay `comment`/`reply`? Proposed: they stay commands for now, since they are appends and not mutations of a plan.
