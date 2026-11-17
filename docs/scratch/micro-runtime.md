@@ -78,7 +78,11 @@ language separately.
   Deno, Cloudflare Workers, Bun and Node align on), wherever possible. That means `fetch`, `URL`, `TextEncoder`
   and `TextDecoder`, streams, `AbortController`, timers, `crypto.getRandomValues`, `structuredClone` and
   `console`. `fetch` is the `wasi:http` transport, so egress is limited to `dispatch.local` as for Rust micros
-  (`clay-on-the-node.md` §3). QuickJS ships none of these; the engine component provides them.
+  (`clay-on-the-node.md` §3). Most of these are pure JS-level APIs with no host I/O (`URL`, `TextEncoder`,
+  `structuredClone`, `atob`), so the engine should bring them itself. Only `fetch`, timers and `console` need host
+  hooks. Bare QuickJS has none of them. The spike's wasm-rquickjs adds Node and web shims on top (its `fetch` is
+  always imported), but which WinterTC APIs those shims cover hasn't been audited. Boa ships them in Rust; see
+  open question 6.
 - **The DOM layer must outlive any one framework.** The lasting contract is the presentation wire, not Solid. The
   JS MDK exposes a small DOM-like node API over the wire: create, insert before an anchor, remove, set an attribute
   or property, set text, listen. Solid's universal renderer, React's `react-reconciler` host config and Vue's
@@ -111,9 +115,21 @@ language separately.
 3. Set aside for now.
 4. Fuel: QuickJS interpreter steps versus wasm fuel. Which budget does a user see?
 5. Answered: explicit node ids, with Dioxus lowered onto them (see "Consequences").
-6. The engine: QuickJS (via wasm-rquickjs) or Boa. Boa is pure Rust and embeds directly, but we have not measured
-   its speed against QuickJS, and the survey found no published comparison. Which WinterTC APIs `boa_runtime`
-   ships is unverified. Decide with a measurement before hardening either engine.
+6. The engine: QuickJS (via wasm-rquickjs) or Boa. The operator's interest in Boa (2026-11-17) is its WinterTC
+   coverage, not its speed, since both run inside wasm. Boa is pure Rust and embeds directly. `boa_runtime` 0.22
+   (2026-10-20; docs.rs read 2026-11-17) and the separate `boa_wintertc` crate implement, in Rust:
+   - `console` (behind a `Logger` trait);
+   - `URL` (feature `url`, on by default);
+   - `TextEncoder` and `TextDecoder`;
+   - `structuredClone`, `queueMicrotask` and `atob`/`btoa`;
+   - the timers and `AbortController`;
+   - `fetch` with `Headers`, `Request` and `Response`. Its JS side is in Rust; the network goes through a host
+     `Fetcher` trait, where we would plug in `wasi:http` to `dispatch.local`.
+
+   Not found in Boa: streams, `crypto` and `Blob`. Boa's own (bare) engine also needs no C toolchain, which removes
+   the spike's wasip3 build problem (`rquickjs-sys` and wasi-sdk). To decide: whether Boa builds as a p3 component
+   with Wizer pre-initialization, and its memory per micro against QuickJS's 1.45 MB. Audit wasm-rquickjs's shims
+   against the same WinterTC list.
 
 ## First spike (proposed)
 
