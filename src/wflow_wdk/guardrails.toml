@@ -1,0 +1,16 @@
+version = 1
+role = "interface"
+dependency_reason = "shared workflow development kit authoring interface"
+allowed_dependencies = [
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip3]
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []

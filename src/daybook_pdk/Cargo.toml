@@ -10,7 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-wflow_sdk = { workspace = true }
+wflow_wdk = { workspace = true }
 url.workspace = true
 serde.workspace = true
 serde_json.workspace = true

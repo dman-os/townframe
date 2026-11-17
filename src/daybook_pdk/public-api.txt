@@ -4,8 +4,8 @@
 # exposed_external_crates: [url]
 
 pub const daybook_pdk::COMMAND_SCHEME: & str
-pub daybook_pdk::async fn invoke_command_effect < 'a , F > (cx : & mut wflow_sdk :: WflowCtx , request : & 'a InvokeCommandRequest , invoke : F ,) -> Result < InvokeCommandAccepted , wflow_sdk :: JobErrorX > where F : FnOnce (& 'a InvokeCommandRequest ,) -> Result < wflow_sdk :: Json < InvokeCommandAccepted > , wflow_sdk :: JobErrorX > ,
-pub daybook_pdk::async fn wait_command_reply (cx : & mut wflow_sdk :: WflowCtx ,) -> Result < InvokeCommandReply , wflow_sdk :: JobErrorX >
+pub daybook_pdk::async fn invoke_command_effect < 'a , F > (cx : & mut wflow_wdk :: WflowCtx , request : & 'a InvokeCommandRequest , invoke : F ,) -> Result < InvokeCommandAccepted , wflow_wdk :: JobErrorX > where F : FnOnce (& 'a InvokeCommandRequest ,) -> Result < wflow_wdk :: Json < InvokeCommandAccepted > , wflow_wdk :: JobErrorX > ,
+pub daybook_pdk::async fn wait_command_reply (cx : & mut wflow_wdk :: WflowCtx ,) -> Result < InvokeCommandReply , wflow_wdk :: JobErrorX >
 pub daybook_pdk::fn build_command_url (plug_id : & str , command_name : & str) -> Result < url :: Url , CommandUrlError >
 pub daybook_pdk::fn parse_command_url (url : & url :: Url) -> Result < CommandRef , CommandUrlError >
 pub daybook_pdk::fn parse_command_url_str (url : & str) -> Result < CommandRef , CommandUrlError >

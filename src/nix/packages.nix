@@ -8,6 +8,7 @@
     let
       inherit (pkgs) lib;
       tools = import ./toolchains.nix { inherit pkgs; };
+      formalTools = import ./formal-tools.nix { inherit pkgs; };
       witDeps = import ./wit-deps.nix { inherit pkgs; };
       repoRoot = ../..;
 
@@ -270,6 +271,7 @@
     {
       packages = {
         inherit daybook-cli;
+        quint = formalTools;
         wit-deps = witDeps;
         cargo-vendor-dir = cargoVendorDir;
       };

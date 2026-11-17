@@ -113,6 +113,55 @@ jobs:
       - name: pre-commit hooks
         run: |
           nix develop .#ci-desktop --command prek --color=always run --all-files
+      # The wflow authority model is a source-only check like the hooks above, so
+      # it rides this job instead of paying its own runner setup. Typecheck and
+      # simulation take seconds; the Apalache proof is the only long step
+      # (6.5-7.5 min measured locally). On main (run 43848942334) this job took
+      # ~10.5 min against ~33.5 min for `tests`, which bounds the workflow's wall
+      # clock, so the proof fits in the slack. `!cancelled()` keeps the
+      # model's verdict visible when a hook fails. The authority's Rust
+      # conformance tests and the native/Wasm parity test are not run here: the
+      # `tests` job already builds their `test_wflows` fixture and runs them with
+      # the rest of the workspace.
+      - name: wflow model typecheck and simulation
+        if: ${{ !cancelled() }}
+        run: |
+          nix develop .#ci-desktop --command quint typecheck src/wflow_core/partition/authority.qnt
+          # `--invariant=invariant` is what makes this a safety check: without it
+          # `quint run` explores traces and asserts nothing about them.
+          nix develop .#ci-desktop --command quint run src/wflow_core/partition/authority.qnt --main=bounded --max-samples=100 --max-steps=16 --seed=0x678b2 --invariant=invariant --verbosity=1
+      # Apalache 0.62.1 (quint 0.33.0's built-in default) rejected this model
+      # before checking anything: quint hands the flattened spec to the Apalache
+      # server as a single string inside the JSON-RPC config, and 0.62.1 parses
+      # that config with Jackson's 20 MB default string cap, while this model
+      # flattens to ~20.05 MB ("<RPC configuration>: Invalid strict JSON: String
+      # value length (20051112) exceeds the maximum allowed"). 0.62.4 raises the
+      # JSON content limits to 1 GB (apalache-mc/apalache#3494), so the version
+      # is pinned explicitly here; the wrapper ships only that distribution.
+      # Note the server: `quint verify` reuses anything already listening on
+      # localhost:8822 and only spawns its own Apalache if nothing answers, so a
+      # stale local server with an old version would still reject the model.
+      #
+      # The bound is three transitions, not four. Three checks the whole depth-3
+      # tree in 6.5-7.5 minutes (Apalache reported 391874 ms and 448429 ms on two
+      # local runs). Four does not fit: Apalache checks each of the ~25 states
+      # reachable at a step separately,
+      # and every state one step deeper costs ~100 s of invariant queries (~13 s
+      # per invariant), so a fourth transition needs 50+ minutes. Shrinking the
+      # constants does not help — `module boundedVerify` (1 key, 1 worker, 1
+      # message id, all 38 actions still reachable) has the same ~25 enabled
+      # transitions per step and was measured at 103 s for its first depth-4
+      # state group. What that leaves unproven: a violation that first appears
+      # after four transitions (e.g. submit -> grant -> commitStep -> complete)
+      # is not proven absent, and no trace of length 5 or more is covered. The
+      # simulation step above samples up to 16 steps but asserts only on the
+      # traces it draws. Recovering the fourth transition needs the model, not
+      # the instance: fewer actions per step, or an inductive invariant (quint
+      # 0.33 rejects this model's --inductive-invariant with "state is used
+      # before it is assigned").
+      - name: wflow model safety through three transitions
+        if: ${{ !cancelled() }}
+        run: nix develop .#ci-desktop --command quint verify src/wflow_core/partition/authority.qnt --main=bounded --init=init --step=step --invariant=invariant --max-steps=3 --apalache-version=0.62.4 --verbosity=1
   e2e-cli:
     name: E2E (CLI)
     runs-on: ubuntu-latest
@@ -207,6 +256,8 @@ jobs:
           wash-version: v2.6.1
       - name: fetch WIT dependencies
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
+      # `test_wflows` is also the guest fixture of `wflow`'s native/Wasm
+      # parity test, which finds it in src/wasm_utils_rs/target.
       - name: builds
         run: |
           nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip3 --release

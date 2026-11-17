@@ -20,21 +20,21 @@ impl FacetWriteTarget<'_> {
         data: &str,
         update_context: &str,
         create_context: &str,
-    ) -> Result<(), wflow_sdk::JobErrorX> {
+    ) -> Result<(), wflow_wdk::JobErrorX> {
         match self {
             Self::Update(token) => token
                 .update(data.to_string())
                 .await
-                .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("{update_context}: {err:?}")))?
+                .map_err(|err| wflow_wdk::JobErrorX::Terminal(ferr!("{update_context}: {err:?}")))?
                 .map_err(|err| {
-                    wflow_sdk::JobErrorX::Terminal(ferr!("{update_context}: {err:?}"))
+                    wflow_wdk::JobErrorX::Terminal(ferr!("{update_context}: {err:?}"))
                 })?,
             Self::Create(token, key_id) => {
                 token
                     .create(key_id.to_string(), data.to_string())
                     .await
                     .map_err(|err| {
-                        wflow_sdk::JobErrorX::Terminal(ferr!("{create_context}: {err:?}"))
+                        wflow_wdk::JobErrorX::Terminal(ferr!("{create_context}: {err:?}"))
                     })?;
             }
         }
@@ -74,7 +74,7 @@ pub(crate) async fn resolve_facet_write_target<'a>(
     facet_key: &str,
     facet_tag: &str,
     context: &str,
-) -> Result<FacetWriteTarget<'a>, wflow_sdk::JobErrorX> {
+) -> Result<FacetWriteTarget<'a>, wflow_wdk::JobErrorX> {
     use crate::wit::townframe::daybook::capabilities::FacetRights;
 
     if let Some(token) = find_facet_token(facets, facet_key, FacetRights::UPDATE).await {
@@ -88,7 +88,7 @@ pub(crate) async fn resolve_facet_write_target<'a>(
         ));
     }
 
-    Err(wflow_sdk::JobErrorX::Terminal(ferr!(
+    Err(wflow_wdk::JobErrorX::Terminal(ferr!(
         "{context} facet token with update/create rights not found"
     )))
 }

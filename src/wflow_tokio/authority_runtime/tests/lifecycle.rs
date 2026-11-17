@@ -1,0 +1,1119 @@
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use wflow_wdk::StepKind;
+use wflow_wdk::StepMeta;
+
+use super::*;
+use crate::authority_runtime::session::Host;
+use crate::authority_runtime::session::Session;
+use crate::authority_runtime::session::SpawnError;
+
+#[derive(Default)]
+struct DropProbe {
+    dropped: AtomicU64,
+    changed: Notify,
+}
+
+impl DropProbe {
+    async fn wait_for(&self, count: u64) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.dropped.load(Ordering::SeqCst) >= count {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+struct ScriptSession {
+    yields: VecDeque<SessionYield>,
+    next_gate: Option<Arc<Gate>>,
+    resume: bool,
+    deliver: bool,
+    dropped: Option<Arc<DropProbe>>,
+}
+
+impl ScriptSession {
+    fn new(yields: impl IntoIterator<Item = SessionYield>) -> Self {
+        Self {
+            yields: yields.into_iter().collect(),
+            next_gate: None,
+            resume: true,
+            deliver: true,
+            dropped: None,
+        }
+    }
+
+    fn blocked(mut self, gate: Arc<Gate>) -> Self {
+        self.next_gate = Some(gate);
+        self
+    }
+
+    fn resume_fails(mut self) -> Self {
+        self.resume = false;
+        self
+    }
+
+    fn deliver_fails(mut self) -> Self {
+        self.deliver = false;
+        self
+    }
+
+    fn observed_drop(mut self, dropped: Arc<DropProbe>) -> Self {
+        self.dropped = Some(dropped);
+        self
+    }
+}
+
+impl Drop for ScriptSession {
+    fn drop(&mut self) {
+        if let Some(dropped) = &self.dropped {
+            dropped.dropped.fetch_add(1, Ordering::SeqCst);
+            dropped.changed.notify_waiters();
+        }
+    }
+}
+
+#[async_trait]
+impl Session for ScriptSession {
+    async fn next_yield(&mut self) -> Option<SessionYield> {
+        if let Some(gate) = self.next_gate.take() {
+            gate.pass().await;
+        }
+        self.yields.pop_front()
+    }
+
+    fn resume(&self) -> bool {
+        self.resume
+    }
+
+    fn deliver(&self, _value_json: Arc<str>) -> bool {
+        self.deliver
+    }
+}
+
+enum SpawnPlan {
+    Session(Box<dyn Session>),
+    Blocked {
+        gate: Arc<Gate>,
+        session: Box<dyn Session>,
+    },
+    /// The host cannot start this invocation now but might later.
+    Unavailable,
+    /// The host will never start this workflow as configured.
+    Rejected,
+    Panic,
+}
+
+#[derive(Default)]
+struct ScriptHost {
+    plans: Mutex<HashMap<String, VecDeque<SpawnPlan>>>,
+    replay_lengths: Mutex<HashMap<String, Vec<usize>>>,
+    forgotten: Mutex<Vec<String>>,
+    registered: AtomicBool,
+}
+
+impl ScriptHost {
+    fn registered() -> Arc<Self> {
+        Arc::new(Self {
+            registered: AtomicBool::new(true),
+            ..Self::default()
+        })
+    }
+
+    fn push(&self, wflow: &str, plan: SpawnPlan) {
+        self.plans
+            .lock()
+            .unwrap()
+            .entry(wflow.to_owned())
+            .or_default()
+            .push_back(plan);
+    }
+
+    fn replay_lengths(&self, wflow: &str) -> Vec<usize> {
+        self.replay_lengths
+            .lock()
+            .unwrap()
+            .get(wflow)
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl Host for ScriptHost {
+    fn contains_wflow(&self, _key: &str) -> bool {
+        self.registered.load(Ordering::SeqCst)
+    }
+
+    async fn spawn(
+        &self,
+        _job_id: Arc<str>,
+        wflow_key: &str,
+        _args_json: String,
+        replay: Vec<ReplayStep>,
+    ) -> Result<Box<dyn Session>, SpawnError> {
+        self.replay_lengths
+            .lock()
+            .unwrap()
+            .entry(wflow_key.to_owned())
+            .or_default()
+            .push(replay.len());
+        let plan = self
+            .plans
+            .lock()
+            .unwrap()
+            .get_mut(wflow_key)
+            .and_then(VecDeque::pop_front)
+            .unwrap_or(SpawnPlan::Unavailable);
+        match plan {
+            SpawnPlan::Session(session) => Ok(session),
+            SpawnPlan::Blocked { gate, session } => {
+                gate.pass().await;
+                Ok(session)
+            }
+            SpawnPlan::Unavailable => Err(SpawnError::Unavailable {
+                message: format!("engine for {wflow_key} is not ready"),
+            }),
+            SpawnPlan::Rejected => Err(SpawnError::Rejected {
+                message: format!("workflow {wflow_key} is not registered"),
+            }),
+            SpawnPlan::Panic => panic!("host spawn panic"),
+        }
+    }
+
+    fn forget_job(&self, job_id: &str) {
+        self.forgotten.lock().unwrap().push(job_id.to_owned());
+    }
+}
+
+async fn start_script(host: Arc<ScriptHost>) -> AuthorityRuntime {
+    let store = MemoryStore::default();
+    AuthorityRuntime::start(store.writer().unwrap(), 0, host)
+        .await
+        .unwrap()
+}
+
+async fn start_script_counted(
+    store: &MemoryStore,
+    host: Arc<ScriptHost>,
+) -> (AuthorityRuntime, watch::Receiver<u64>) {
+    let (commits, counter) = watch::channel(0);
+    let writer = CountingWriter {
+        inner: store.writer().unwrap(),
+        commits,
+    };
+    let runtime = AuthorityRuntime::start(writer, 0, host).await.unwrap();
+    (runtime, counter)
+}
+
+/// A session that reached `steps` durable boundaries and returned `value`.
+fn complete(steps: u64, value: u64) -> SessionYield {
+    SessionYield::Complete {
+        steps,
+        result: ok(value),
+    }
+}
+
+fn persist(value: &str) -> SessionYield {
+    persist_at(0, value)
+}
+
+fn persist_at(step_id: u64, value: &str) -> SessionYield {
+    SessionYield::PersistStep {
+        step_id,
+        start_at: Timestamp::now(),
+        end_at: Timestamp::now(),
+        value_json: Arc::from(value),
+        meta: StepMeta::new(StepKind::Effect, None),
+    }
+}
+
+fn receive() -> SessionYield {
+    SessionYield::WaitStep {
+        step_id: 0,
+        start_at: Timestamp::now(),
+        deets: WaitYield::Message { wait_id: 0 },
+        meta: StepMeta::new(StepKind::Recv, None),
+    }
+}
+
+/// A timer whose deadline the durable model cannot record: a durable wait keeps
+/// `fire_at_ms` as an unsigned offset from the unix epoch, and this instant is a
+/// millisecond before it.
+fn unrepresentable_timer() -> SessionYield {
+    SessionYield::WaitStep {
+        step_id: 0,
+        start_at: Timestamp::now(),
+        deets: WaitYield::Timer {
+            wait_id: 0,
+            fire_at: Timestamp::from_millisecond(-1)
+                .expect("a millisecond before the epoch is a representable instant"),
+        },
+        meta: StepMeta::new(StepKind::Sleep, None),
+    }
+}
+
+#[test]
+fn submission_uses_canonical_finite_defaults() {
+    let submission = Submission::new("job", "workflow", "null");
+    assert_eq!(
+        submission.policy,
+        RetryPolicy::CappedExponential {
+            base_ms: 100,
+            cap_ms: 30_000,
+        }
+    );
+    assert_eq!(
+        submission.budget,
+        RetryBudget {
+            max_retries: Some(8),
+            max_restarts: Some(3),
+        }
+    );
+}
+
+#[tokio::test]
+async fn slow_spawn_does_not_block_unrelated_work_and_late_session_is_dropped() {
+    let host = ScriptHost::registered();
+    let spawn_gate = Arc::new(Gate::default());
+    spawn_gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "slow",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&spawn_gate),
+            session: Box::new(
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
+            ),
+        },
+    );
+    host.push(
+        "fast",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 2)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+
+    runtime
+        .submit(Submission::new("slow", "slow", "null"))
+        .await
+        .unwrap();
+    runtime
+        .submit(Submission::new("fast", "fast", "null"))
+        .await
+        .unwrap();
+    assert_eq!(runtime.await_result("fast").await, Some(ok(2)));
+    runtime.cancel("slow", "stop").await.unwrap();
+    assert!(matches!(
+        runtime.await_result("slow").await,
+        Some(Err(types::JobError::Terminal(_)))
+    ));
+
+    spawn_gate.open();
+    dropped.wait_for(1).await;
+    assert_eq!(host.replay_lengths("slow"), vec![0]);
+    assert!(
+        transitions(&runtime, "slow")
+            .await
+            .iter()
+            .all(|event| !matches!(event, authority::Transition::Revoked { .. })),
+        "a terminal late spawn must not consume restart budget"
+    );
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn host_spawn_panic_propagates_without_spending_restart_budget() {
+    let host = ScriptHost::registered();
+    host.push("panics", SpawnPlan::Panic);
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "panics", "null"))
+        .await
+        .unwrap();
+
+    let panic = runtime
+        .actor
+        .clone()
+        .await
+        .expect_err("a Host::spawn panic must fail the actor");
+    assert!(panic.is_panic());
+    assert!(panic.to_string().contains("host spawn panic"));
+    let history = transitions(&runtime, "job").await;
+    assert!(
+        history
+            .iter()
+            .all(|event| !matches!(event, authority::Transition::Revoked { .. }))
+    );
+}
+
+#[tokio::test]
+async fn concurrent_stop_survives_cancellation_of_first_waiter() {
+    let host = ScriptHost::registered();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&gate),
+            session: Box::new(
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
+            ),
+        },
+    );
+    let runtime = start_script(host).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+    gate.entered.notified().await;
+
+    {
+        let mut first_stop = Box::pin(runtime.stop());
+        assert!(futures::poll!(first_stop.as_mut()).is_pending());
+    }
+    tokio::join!(runtime.stop(), runtime.stop());
+    dropped.wait_for(1).await;
+    assert!(runtime.reader.snapshot().await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn stop_aborts_a_pending_host_spawn_before_completing() {
+    let host = ScriptHost::registered();
+    let spawn_gate = Arc::new(Gate::default());
+    spawn_gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&spawn_gate),
+            session: Box::new(
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
+            ),
+        },
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+
+    spawn_gate.entered.notified().await;
+    runtime.stop().await;
+    dropped.wait_for(1).await;
+    assert_eq!(host.replay_lengths("blocked"), vec![0]);
+}
+
+#[tokio::test]
+async fn cancellation_aborts_a_session_parked_in_next_yield() {
+    let host = ScriptHost::registered();
+    let yield_gate = Arc::new(Gate::default());
+    yield_gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Session(Box::new(
+            ScriptSession::new([complete(0, 1)])
+                .blocked(Arc::clone(&yield_gate))
+                .observed_drop(Arc::clone(&dropped)),
+        )),
+    );
+    let runtime = start_script(host).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+
+    runtime.cancel("job", "stop").await.unwrap();
+    dropped.wait_for(1).await;
+    assert!(matches!(
+        runtime.await_result("job").await,
+        Some(Err(types::JobError::Terminal(_)))
+    ));
+    yield_gate.open();
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn cancellation_drops_a_parked_wait_and_rejects_late_delivery() {
+    let host = ScriptHost::registered();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "waiting",
+        SpawnPlan::Session(Box::new(
+            ScriptSession::new([receive()]).observed_drop(Arc::clone(&dropped)),
+        )),
+    );
+    let store = MemoryStore::default();
+    let (runtime, mut commits) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("job", "waiting", "null"))
+        .await
+        .unwrap();
+    committed(&mut commits, 4).await;
+
+    runtime.cancel("job", "stop").await.unwrap();
+    dropped.wait_for(1).await;
+    assert_eq!(
+        runtime.send_message("job", "late", "1").await,
+        Err(SendError::AlreadyTerminal)
+    );
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn cancellation_clears_a_durable_retry_deadline() {
+    let host = ScriptHost::registered();
+    host.push(
+        "retrying",
+        SpawnPlan::Session(Box::new(ScriptSession::new([SessionYield::Complete {
+            steps: 0,
+            result: Err(types::JobError::Transient(types::TransientJobError {
+                retry_policy: None,
+                error_json: "retry".into(),
+            })),
+        }]))),
+    );
+    let store = MemoryStore::default();
+    let (runtime, mut commits) = start_script_counted(&store, host).await;
+    runtime
+        .submit(
+            Submission::new("job", "retrying", "null")
+                .policy(RetryPolicy::Fixed { delay_ms: 60_000 }),
+        )
+        .await
+        .unwrap();
+    committed(&mut commits, 4).await;
+
+    runtime.cancel("job", "stop").await.unwrap();
+    assert!(matches!(
+        runtime.await_result("job").await,
+        Some(Err(types::JobError::Terminal(_)))
+    ));
+    assert_eq!(host_spawn_count(&runtime, "job").await, 1);
+    runtime.stop().await;
+}
+
+async fn host_spawn_count(runtime: &AuthorityRuntime, key: &str) -> usize {
+    transitions(runtime, key)
+        .await
+        .iter()
+        .filter(|event| matches!(event, authority::Transition::Granted { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn current_session_loss_is_revoked_and_replayed() {
+    let host = ScriptHost::registered();
+    host.push("loss", SpawnPlan::Session(Box::new(ScriptSession::new([]))));
+    host.push(
+        "loss",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 7)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "loss", "null"))
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.await_result("job").await, Some(ok(7)));
+    let history = transitions(&runtime, "job").await;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Revoked { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(host.replay_lengths("loss"), vec![0, 0]);
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn resume_loss_after_step_commit_replays_durable_progress() {
+    let host = ScriptHost::registered();
+    host.push(
+        "resume",
+        SpawnPlan::Session(Box::new(ScriptSession::new([persist("1")]).resume_fails())),
+    );
+    host.push(
+        "resume",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1, 9)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "resume", "null"))
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.await_result("job").await, Some(ok(9)));
+    assert_eq!(host.replay_lengths("resume"), vec![0, 1]);
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn deliver_loss_after_wait_resolution_replays_durable_progress() {
+    let host = ScriptHost::registered();
+    host.push(
+        "deliver",
+        SpawnPlan::Session(Box::new(ScriptSession::new([receive()]).deliver_fails())),
+    );
+    host.push(
+        "deliver",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(1, 11)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "deliver", "null"))
+        .await
+        .unwrap();
+    runtime.send_message("job", "message", "3").await.unwrap();
+
+    assert_eq!(runtime.await_result("job").await, Some(ok(11)));
+    assert_eq!(host.replay_lengths("deliver"), vec![0, 1]);
+    runtime.stop().await;
+}
+
+/// Every attempt now waits out the wheel's backoff (100 + 200 + 400 ms), so the
+/// restart budget still bounds a host that never comes back, only at the pace of
+/// the backoff rather than in a hot loop.
+#[tokio::test]
+async fn repeated_spawn_loss_exhausts_the_finite_restart_budget() {
+    let host = ScriptHost::registered();
+    for _ in 0..4 {
+        host.push("missing-host", SpawnPlan::Unavailable);
+    }
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "missing-host", "null"))
+        .await
+        .unwrap();
+
+    let Some(Err(types::JobError::Terminal(failure))) = runtime.await_result("job").await else {
+        panic!("spawn loss did not settle terminally");
+    };
+    let failure: JobFailure = serde_json::from_str(&failure).unwrap();
+    assert_eq!(
+        failure,
+        JobFailure::RestartsExhausted {
+            restarts: 4,
+            max_restarts: 3,
+        }
+    );
+    assert_eq!(host.replay_lengths("missing-host"), vec![0, 0, 0, 0]);
+    runtime.stop().await;
+}
+
+/// A host spawn failure is classified, not discarded: the deterministic case
+/// settles with the host's own diagnosis and no retry, and the transient case is
+/// re-granted behind the deadline wheel's backoff instead of hot-looping through
+/// the restart budget.
+///
+/// The two classes lead to different durable outcomes, so they are asserted
+/// separately: a rejection must leave the restart budget untouched (one grant,
+/// no revoke), while an unavailable host must be retried only after the wheel's
+/// deadlines — the elapsed-time floor below is what a hot loop cannot satisfy.
+#[tokio::test]
+async fn a_rejected_spawn_faults_with_its_cause_and_an_unavailable_one_retries_with_backoff() {
+    // A: the host will never instantiate this workflow as configured.
+    let host = ScriptHost::registered();
+    host.push("rejected", SpawnPlan::Rejected);
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "rejected", "null"))
+        .await
+        .unwrap();
+    let receipt = runtime.handle("job").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&receipt),
+        &JobFailure::ActivationFailed {
+            message: "workflow rejected is not registered".into(),
+        }
+    );
+    let history = transitions(&runtime, "job").await;
+    assert_eq!(host.replay_lengths("rejected"), vec![0], "one attempt only");
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Granted { .. }))
+            .count(),
+        1,
+        "a rejection must not consume the restart budget"
+    );
+    assert!(
+        history
+            .iter()
+            .all(|event| !matches!(event, authority::Transition::Revoked { .. })),
+        "a rejection settles under the lease it failed to use"
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+
+    // B: the host cannot start the workflow yet. Two failures, then a session:
+    // the re-grants are 100 ms and 200 ms out, so nothing is attempted until
+    // each deadline passes.
+    let host = ScriptHost::registered();
+    host.push("backoff", SpawnPlan::Unavailable);
+    host.push("backoff", SpawnPlan::Unavailable);
+    host.push(
+        "backoff",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    let started = Instant::now();
+    runtime
+        .submit(Submission::new("job", "backoff", "null"))
+        .await
+        .unwrap();
+    assert_eq!(runtime.await_result("job").await, Some(ok(1)));
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "the re-grants were not deferred behind the wheel: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        host.replay_lengths("backoff"),
+        vec![0, 0, 0],
+        "exactly one attempt per grant, and no attempt while a backoff is armed"
+    );
+    let history = transitions(&runtime, "job").await;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Granted { .. }))
+            .count(),
+        3,
+        "two failures, then the successful re-grant"
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event, authority::Transition::Revoked { .. }))
+            .count(),
+        2,
+        "each transient failure releases the lease the backoff replaces"
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+/// A sleep the durable model cannot record faults the job that asked for it.
+///
+/// Two shapes reach the same class of request. A session hands the authority a
+/// timer deadline before the unix epoch, which is the only way the durable
+/// unsigned `fire_at_ms` can fail to represent it (this used to be an `expect`
+/// that exited the daemon). And a guest can ask for
+/// `Duration::from_millis(u64::MAX)`, which is not a representable instant at
+/// all, so the adapter catches the overflow while the workflow runs and the job
+/// faults with the run's own diagnosis. Neither may abort the actor or settle
+/// the job as completed.
+#[tokio::test]
+async fn a_sleep_the_durable_model_cannot_record_faults_one_job() {
+    let host = ScriptHost::registered();
+    host.push(
+        "pre-epoch",
+        SpawnPlan::Session(Box::new(ScriptSession::new([unrepresentable_timer()]))),
+    );
+    host.push(
+        "healthy",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 7)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    for key in ["pre-epoch", "healthy"] {
+        runtime
+            .submit(Submission::new(key, key, "null"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(runtime.await_result("healthy").await, Some(ok(7)));
+    let receipt = runtime.handle("pre-epoch").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&receipt),
+        &JobFailure::TimerOutOfRange { fire_at_ms: -1 }
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+
+    let store = MemoryStore::default();
+    let native = LocalNativeHost::new();
+    native.register_typed("oversleeping", |cx, (): ()| {
+        Box::pin(async move {
+            cx.sleep(Duration::from_millis(u64::MAX)).await?;
+            Ok::<u64, JobErrorX>(1)
+        })
+    });
+    let (runtime, _) = start(&store, &native).await;
+    runtime
+        .submit(Submission::new("job", "oversleeping", "null"))
+        .await
+        .unwrap();
+    let receipt = runtime.handle("job").await_receipt().await.unwrap();
+    assert!(
+        matches!(receipt.outcome, authority::Outcome::Faulted(_)),
+        "an unrepresentable sleep must fault, committed {:?}",
+        receipt.outcome
+    );
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+#[tokio::test]
+async fn result_waiters_race_permanent_receipt_publication() {
+    let host = ScriptHost::registered();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    host.push(
+        "waiter",
+        SpawnPlan::Session(Box::new(
+            ScriptSession::new([complete(0, 13)]).blocked(Arc::clone(&gate)),
+        )),
+    );
+    let runtime = start_script(host).await;
+    let (_, handle) = runtime
+        .submit_handle(Submission::new("job", "waiter", "null"))
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.await_result().await }
+    });
+
+    gate.open();
+    assert_eq!(waiting.await.unwrap(), Some(ok(13)));
+    assert_eq!(handle.await_result().await, Some(ok(13)));
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn recovery_rejects_an_unregistered_workflow() {
+    let store = MemoryStore::default();
+    let host = ScriptHost::registered();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    host.push(
+        "configured",
+        SpawnPlan::Session(Box::new(
+            ScriptSession::new([complete(0, 1)]).blocked(Arc::clone(&gate)),
+        )),
+    );
+    let runtime_host = Arc::clone(&host);
+    let runtime = AuthorityRuntime::start(store.writer().unwrap(), 0, runtime_host)
+        .await
+        .unwrap();
+    runtime
+        .submit(Submission::new("job", "configured", "null"))
+        .await
+        .unwrap();
+    runtime.stop().await;
+
+    host.registered.store(false, Ordering::SeqCst);
+    let error = match AuthorityRuntime::start(store.writer().unwrap(), 0, host).await {
+        Ok(_) => panic!("recovery accepted a missing workflow"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("is not registered"), "{error:?}");
+    gate.open();
+}
+
+#[tokio::test(start_paused = true)]
+async fn snapshot_follows_the_dirtying_timer_without_sleeping() {
+    let host = ScriptHost::registered();
+    host.push(
+        "timed",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+    );
+    let store = MemoryStore::default();
+    let (runtime, mut commits) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("timed", "timed", "null"))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(runtime.reader.snapshot().await.unwrap().is_none());
+
+    tokio::time::advance(Duration::from_secs(60)).await;
+    let snapshot = published_snapshot(&runtime, &mut commits).await;
+    assert!(snapshot.cut > 0);
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn snapshot_after_transition_threshold_reclaims_in_bounded_pages() {
+    let host = ScriptHost::registered();
+    for _ in 0..34 {
+        host.push(
+            "counted",
+            SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+        );
+    }
+    let store = MemoryStore::default();
+    let (counter, mut commits) = watch::channel(0);
+    let writer = CountingWriter {
+        inner: store.writer().unwrap(),
+        commits: counter,
+    };
+    let runtime = AuthorityRuntime::start_with_config(
+        writer,
+        0,
+        host,
+        AuthorityRuntimeConfig {
+            compaction_page_size: NonZeroUsize::new(1).unwrap(),
+            ..AuthorityRuntimeConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    for index in 0..34 {
+        let key = format!("counted-{index}");
+        runtime
+            .submit(Submission::new(key, "counted", "null"))
+            .await
+            .unwrap();
+    }
+
+    let snapshot = fully_reclaimed(&runtime, &mut commits).await;
+    assert!(snapshot.cut >= SNAPSHOT_TRANSITIONS);
+    assert_eq!(snapshot.compacted_through, snapshot.cut);
+    let stale = runtime
+        .reader
+        .read(1, NonZeroUsize::new(1).unwrap())
+        .await
+        .unwrap_err();
+    assert!(stale.downcast_ref::<StaleReaderError>().is_some());
+    runtime.stop().await;
+}
+
+#[tokio::test]
+async fn graceful_stop_publishes_the_latest_snapshot() {
+    let host = ScriptHost::registered();
+    host.push(
+        "final",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+    );
+    let store = MemoryStore::default();
+    let (runtime, _) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("final", "final", "null"))
+        .await
+        .unwrap();
+    let reader = runtime.reader.clone();
+    runtime.stop().await;
+    let snapshot = reader.snapshot().await.unwrap().unwrap();
+    assert!(snapshot.cut > 0);
+}
+
+#[tokio::test]
+async fn dropping_runtime_drains_spawns_and_publishes_final_snapshot() {
+    let host = ScriptHost::registered();
+    let gate = Arc::new(Gate::default());
+    gate.close();
+    let dropped = Arc::new(DropProbe::default());
+    host.push(
+        "blocked",
+        SpawnPlan::Blocked {
+            gate: Arc::clone(&gate),
+            session: Box::new(
+                ScriptSession::new([complete(0, 1)]).observed_drop(Arc::clone(&dropped)),
+            ),
+        },
+    );
+    let store = MemoryStore::default();
+    let mut commits = store.subscribe();
+    let (runtime, _) = start_script_counted(&store, host).await;
+    runtime
+        .submit(Submission::new("job", "blocked", "null"))
+        .await
+        .unwrap();
+    gate.entered.notified().await;
+    let reader = runtime.reader.clone();
+    drop(runtime);
+    dropped.wait_for(1).await;
+    loop {
+        if let Some(snapshot) = reader.snapshot().await.unwrap() {
+            assert!(snapshot.cut > 0);
+            break;
+        }
+        commits.changed().await.unwrap();
+    }
+}
+
+/// A timer wait whose declared boundary kind contradicts the yield.
+///
+/// The meta is the guest's own: `wash_plugin_wflow` stores whatever the
+/// component passed to the public `host.next-step(job-id, meta)` entry point, so
+/// a stale or hand-written component can declare `effect` and then sleep.
+fn mislabelled_sleep() -> SessionYield {
+    SessionYield::WaitStep {
+        step_id: 0,
+        start_at: Timestamp::now(),
+        deets: WaitYield::Timer {
+            wait_id: 0,
+            fire_at: Timestamp::now()
+                .checked_add(Duration::from_secs(3600))
+                .expect("an hour from now is a representable instant"),
+        },
+        meta: StepMeta::new(StepKind::Effect, None),
+    }
+}
+
+/// A run whose boundaries disagree with its durable record faults that job, and
+/// only that job: neither a guest-declared kind nor a rewritten value is allowed
+/// to abort the single-writer actor.
+#[tokio::test]
+async fn divergent_yields_fault_one_job_while_another_completes() {
+    let host = ScriptHost::registered();
+    host.push(
+        "mislabelled",
+        SpawnPlan::Session(Box::new(ScriptSession::new([mislabelled_sleep()]))),
+    );
+    host.push(
+        "rewritten",
+        SpawnPlan::Session(Box::new(ScriptSession::new([
+            persist_at(0, "1"),
+            persist_at(0, "2"),
+        ]))),
+    );
+    host.push(
+        "good",
+        SpawnPlan::Session(Box::new(ScriptSession::new([persist("7"), complete(1, 7)]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    for key in ["mislabelled", "rewritten", "good"] {
+        runtime
+            .submit(Submission::new(key, key, "null"))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(runtime.await_result("good").await, Some(ok(7)));
+    let mislabelled = runtime.handle("mislabelled").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&mislabelled),
+        &JobFailure::ReplayDiverged {
+            step: 0,
+            replayed: StepKind::Sleep,
+        }
+    );
+    // The run offered a different value for a boundary the log already holds,
+    // which is the same fork from the other side.
+    let rewritten = runtime.handle("rewritten").await_receipt().await.unwrap();
+    assert_eq!(
+        fault_of(&rewritten),
+        &JobFailure::ReplayDiverged {
+            step: 0,
+            replayed: StepKind::Effect,
+        }
+    );
+    // `stop` panics on a failed actor task, so surviving both divergences is
+    // itself the "no actor panic" assertion.
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+/// The authority models a repeated step commit as idempotent; the runtime must
+/// honour the acknowledgement it returns instead of aborting the actor.
+#[tokio::test]
+async fn a_redelivered_step_commit_is_honoured_and_the_job_completes() {
+    let host = ScriptHost::registered();
+    host.push(
+        "redelivered",
+        SpawnPlan::Session(Box::new(ScriptSession::new([
+            persist_at(0, "1"),
+            persist_at(0, "1"),
+            complete(1, 4),
+        ]))),
+    );
+    let runtime = start_script(Arc::clone(&host)).await;
+    runtime
+        .submit(Submission::new("job", "redelivered", "null"))
+        .await
+        .unwrap();
+
+    assert_eq!(runtime.await_result("job").await, Some(ok(4)));
+    let steps = transitions(&runtime, "job")
+        .await
+        .iter()
+        .filter(|transition| matches!(transition, authority::Transition::StepCommitted { .. }))
+        .count();
+    assert_eq!(steps, 1, "the redelivery committed nothing");
+    runtime.stop().await;
+    runtime.actor.clone().await.unwrap();
+}
+
+/// Stopping answers the callers whose commands were already queued, and a send
+/// to a stopped runtime is a typed outcome rather than a panic.
+#[tokio::test]
+async fn stop_answers_every_queued_caller_with_a_typed_outcome() {
+    let host = ScriptHost::registered();
+    host.push(
+        "job",
+        SpawnPlan::Session(Box::new(ScriptSession::new([complete(0, 1)]))),
+    );
+    let store = MemoryStore::default();
+    let gate = Arc::new(Gate::default());
+    let runtime = AuthorityRuntime::start(
+        GatedWriter {
+            inner: store.writer().unwrap(),
+            gate: Arc::clone(&gate),
+        },
+        0,
+        host,
+    )
+    .await
+    .unwrap();
+
+    // Hold the actor inside its first durable write, so everything below is
+    // queued behind a command that has already been accepted.
+    gate.close();
+    let mut accepted = Box::pin(runtime.submit(Submission::new("job", "job", "null")));
+    assert!(futures::poll!(accepted.as_mut()).is_pending());
+    gate.entered.notified().await;
+
+    // Shutdown goes in first; the three commands behind it are never served.
+    let mut stopping = Box::pin(runtime.stop());
+    assert!(futures::poll!(stopping.as_mut()).is_pending());
+    let mut queued_submit = Box::pin(runtime.submit(Submission::new("late", "job", "null")));
+    let mut queued_message = Box::pin(runtime.send_message("job", "m1", "1"));
+    let mut queued_cancel = Box::pin(runtime.cancel("job", "stop"));
+    assert!(futures::poll!(queued_submit.as_mut()).is_pending());
+    assert!(futures::poll!(queued_message.as_mut()).is_pending());
+    assert!(futures::poll!(queued_cancel.as_mut()).is_pending());
+    gate.open();
+
+    let (accepted, _stopped, submit, message, cancel) = tokio::join!(
+        accepted,
+        stopping,
+        queued_submit,
+        queued_message,
+        queued_cancel
+    );
+    let ack = accepted.unwrap();
+    assert_eq!(ack.disposition, authority::Disposition::Admitted);
+    assert_eq!(submit, Err(SubmitError::Stopped));
+    assert_eq!(message, Err(SendError::Stopped));
+    assert_eq!(cancel, Err(CancelError::Stopped));
+    runtime.actor.clone().await.unwrap();
+
+    // And a caller that arrives after the mailbox closed gets the same answer.
+    assert_eq!(
+        runtime
+            .submit(Submission::new("later", "job", "null"))
+            .await,
+        Err(SubmitError::Stopped)
+    );
+    assert_eq!(
+        runtime.send_message("job", "m2", "1").await,
+        Err(SendError::Stopped)
+    );
+    assert_eq!(
+        runtime.cancel("job", "stop").await,
+        Err(CancelError::Stopped)
+    );
+}

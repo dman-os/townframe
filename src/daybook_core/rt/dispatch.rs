@@ -22,6 +22,9 @@ fn dispatch_status_active() -> DispatchStatus {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum DispatchStatus {
     Waiting,
+    /// The dispatch intent is durable, but authority admission has not been acknowledged yet.
+    /// Boot reconciles this state before installing receipt waiters.
+    AdmissionPending,
     Active,
     Succeeded,
     Failed,
@@ -48,10 +51,6 @@ pub enum DispatchOnSuccessHook {
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveDispatchDeets {
     Wflow {
-        #[serde(default)]
-        wflow_partition_id: Option<String>,
-        #[serde(default)]
-        entry_id: Option<u64>,
         plug_id: String,
         #[serde(default)]
         routine_name: String,
@@ -152,7 +151,6 @@ struct DispatchState {
     active_dispatches: HashMap<String, Arc<ActiveDispatch>>,
     wflow_to_dispatch: HashMap<String, String>,
     cancelled_dispatches: HashSet<String>,
-    wflow_partition_frontier: HashMap<String, u64>,
     dispatch_head_index: HashMap<automerge::ChangeHash, String>,
 }
 
@@ -299,34 +297,19 @@ impl DispatchRepo {
         self.get(id).await
     }
 
-    pub async fn get_wflow_part_frontier(&self, wflow_part_id: &str) -> Option<u64> {
-        self.state
-            .lock()
-            .await
-            .wflow_partition_frontier
-            .get(wflow_part_id)
-            .copied()
-    }
-
-    pub async fn set_wflow_part_frontier(&self, wflow_part_id: String, frontier: u64) -> Res<()> {
-        queries::set_wflow_part_frontier(
-            &self.repo_sql,
-            wflow_part_id.clone(),
-            i64::try_from(frontier).expect("frontier exceeds sqlite INTEGER range"),
-        )
-        .await?;
-
-        let mut state = self.state.lock().await;
-        state
-            .wflow_partition_frontier
-            .insert(wflow_part_id, frontier);
-        Ok(())
-    }
-
     pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<ActiveDispatch>> {
         let state = self.state.lock().await;
         let dispatch_id = state.wflow_to_dispatch.get(job_id)?;
-        let found = state.active_dispatches.get(dispatch_id).map(Arc::clone);
+        // AdmissionPending is durable callback context: authority may start the
+        // workflow before the admission transition is acknowledged locally.  A
+        // Waiting intent and terminal dispatches remain unavailable to hosts.
+        let found = state.dispatches.get(dispatch_id).and_then(|dispatch| {
+            matches!(
+                dispatch.status,
+                DispatchStatus::AdmissionPending | DispatchStatus::Active
+            )
+            .then(|| Arc::clone(dispatch))
+        });
         if let Some(dispatch) = found.as_ref() {
             let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
             debug!(
@@ -490,6 +473,23 @@ impl DispatchRepo {
         Ok(old)
     }
 
+    /// Returns dispatches that can still submit or receive authority receipts.
+    pub async fn list_inflight(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
+        self.state
+            .lock()
+            .await
+            .dispatches
+            .iter()
+            .filter(|(_, dispatch)| {
+                matches!(
+                    dispatch.status,
+                    DispatchStatus::AdmissionPending | DispatchStatus::Active
+                )
+            })
+            .map(|(id, dispatch)| (id.clone(), Arc::clone(dispatch)))
+            .collect()
+    }
+
     pub async fn list(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
         self.state
             .lock()
@@ -506,11 +506,17 @@ impl DispatchRepo {
         let Some(dispatch) = state.dispatches.get(id) else {
             eyre::bail!("dispatch not found under {id}");
         };
+        if matches!(
+            dispatch.status,
+            DispatchStatus::Succeeded | DispatchStatus::Failed | DispatchStatus::Cancelled
+        ) {
+            return Ok(false);
+        }
         if !matches!(
             dispatch.status,
-            DispatchStatus::Active | DispatchStatus::Waiting
+            DispatchStatus::Active | DispatchStatus::AdmissionPending | DispatchStatus::Waiting
         ) {
-            eyre::bail!("dispatch not active/waiting under {id}");
+            eyre::bail!("dispatch not active/waiting/pending under {id}");
         }
         if state.cancelled_dispatches.contains(id) {
             return Ok(false);
@@ -608,6 +614,26 @@ impl DispatchRepo {
         if ready { Ok(Some(updated)) } else { Ok(None) }
     }
 
+    /// Returns durable submissions that still need authority admission.
+    pub async fn list_pending_admissions(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
+        self.state
+            .lock()
+            .await
+            .dispatches
+            .iter()
+            .filter(|(_, dispatch)| dispatch.status == DispatchStatus::AdmissionPending)
+            .map(|(id, dispatch)| (id.clone(), Arc::clone(dispatch)))
+            .collect()
+    }
+
+    pub async fn is_cancelled(&self, dispatch_id: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .cancelled_dispatches
+            .contains(dispatch_id)
+    }
+
     pub async fn activate_waiting(
         &self,
         dispatch_id: &str,
@@ -630,7 +656,7 @@ impl DispatchRepo {
         }
 
         let mut updated = (*cur).clone();
-        updated.status = DispatchStatus::Active;
+        updated.status = DispatchStatus::AdmissionPending;
         updated.deets = deets;
         let updated = Arc::new(updated);
 
@@ -648,9 +674,6 @@ impl DispatchRepo {
         }
         state
             .dispatches
-            .insert(dispatch_id.to_string(), Arc::clone(&updated));
-        state
-            .active_dispatches
             .insert(dispatch_id.to_string(), Arc::clone(&updated));
         if let ActiveDispatchDeets::Wflow {
             wflow_job_id: Some(job),
@@ -674,6 +697,67 @@ impl DispatchRepo {
             origin: self.local_origin(),
         }]);
 
+        Ok(updated)
+    }
+
+    /// Marks a durably recorded submission intent as admitted.  This is the
+    /// commit after authority submission; a crash before it leaves the intent
+    /// for the boot reconciler to submit idempotently.
+    pub async fn mark_admitted(&self, dispatch_id: &str) -> Res<Arc<ActiveDispatch>> {
+        let _transition_guard = self.transition_mutex.lock().await;
+        let state = self.state.lock().await;
+        let cur = state
+            .dispatches
+            .get(dispatch_id)
+            .map(Arc::clone)
+            .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
+        if cur.status != DispatchStatus::AdmissionPending {
+            // Concurrent reconcilers share the permanent authority identity.
+            // Never resurrect a dispatch already admitted or completed.
+            if cur.status == DispatchStatus::Waiting {
+                eyre::bail!("dispatch is not pending admission: {dispatch_id}");
+            }
+            return Ok(cur);
+        }
+        drop(state);
+        let mut updated = (*cur).clone();
+        updated.status = DispatchStatus::Active;
+        let updated = Arc::new(updated);
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
+        // A cancellation mark remains an outbox entry until the durable
+        // authority receipt is post-processed and complete() clears it. Writing
+        // Cancelled here would lose recovery if authority cancellation has not
+        // committed yet.
+        tx.commit().await?;
+
+        let mut state = self.state.lock().await;
+        state
+            .dispatches
+            .insert(dispatch_id.to_string(), Arc::clone(&updated));
+        state
+            .active_dispatches
+            .insert(dispatch_id.to_string(), Arc::clone(&updated));
+        if let ActiveDispatchDeets::Wflow {
+            wflow_job_id: Some(job),
+            ..
+        } = &updated.deets
+        {
+            state
+                .wflow_to_dispatch
+                .insert(job.clone(), dispatch_id.to_string());
+        }
+        state
+            .dispatch_head_index
+            .entry(dispatch_head_for_dispatch(dispatch_id, &updated))
+            .or_insert_with(|| dispatch_id.to_string());
+        let heads = dispatch_heads_for_dispatches(state.dispatches.iter());
+        drop(state);
+        self.registry.notify([DispatchEvent::DispatchUpdated {
+            id: dispatch_id.to_string(),
+            heads,
+            origin: self.local_origin(),
+        }]);
         Ok(updated)
     }
 
@@ -866,22 +950,6 @@ async fn load_state(repo_sql: &Database) -> Res<DispatchState> {
         .into_iter()
         .collect();
 
-    for queries::ListWflowPartFrontiersRow {
-        wflow_partition_id: part_id,
-        frontier,
-    } in queries::list_wflow_part_frontiers(repo_sql).await?
-    {
-        let frontier = match u64::try_from(frontier) {
-            Ok(value) => value,
-            Err(_) => {
-                eyre::bail!(
-                    "invalid negative frontier row in sqlite: part_id={part_id} frontier={frontier}"
-                );
-            }
-        };
-        state.wflow_partition_frontier.insert(part_id, frontier);
-    }
-
     Ok(state)
 }
 
@@ -917,6 +985,9 @@ async fn clear_cancelled_mark_tx(tx: &sqlite_rs::Tx, dispatch_id: &str) -> Res<(
 }
 
 #[cfg(test)]
+mod admission_tests;
+
+#[cfg(test)]
 mod tests {
     use automerge::transaction::Transactable;
 
@@ -924,7 +995,7 @@ mod tests {
     use crate::repos::Repo;
     use crate::repos::SubscribeOpts;
 
-    async fn setup_repo_with_sql(
+    pub(super) async fn setup_repo_with_sql(
         repo_sql: Database,
     ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPathBuf)> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
@@ -942,11 +1013,9 @@ mod tests {
         Ok((repo, local_user_path))
     }
 
-    fn active_dispatch(job_id: &str) -> Arc<ActiveDispatch> {
+    pub(super) fn active_dispatch(job_id: &str) -> Arc<ActiveDispatch> {
         Arc::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
-                wflow_partition_id: Some("part-a".into()),
-                entry_id: None,
                 plug_id: "@test/plug".into(),
                 routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
@@ -980,8 +1049,6 @@ mod tests {
     fn waiting_dispatch(job_id: &str, waits_on: &[&str]) -> Arc<ActiveDispatch> {
         Arc::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
-                wflow_partition_id: None,
-                entry_id: None,
                 plug_id: "@test/plug".into(),
                 routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
@@ -1036,7 +1103,7 @@ mod tests {
                 .await
                 .as_ref()
                 .map(|dispatch| &dispatch.deets),
-            Some(ActiveDispatchDeets::Wflow { entry_id: None, .. })
+            Some(ActiveDispatchDeets::Wflow { .. })
         ));
         assert!(repo.get_by_wflow_job("job-1").await.is_some());
 
@@ -1085,8 +1152,6 @@ mod tests {
         repo.activate_waiting(
             "wait-1",
             ActiveDispatchDeets::Wflow {
-                wflow_partition_id: Some("part-b".into()),
-                entry_id: Some(9),
                 plug_id: "@test/plug".into(),
                 routine_name: "routine".into(),
                 bundle_name: "bundle".into(),
@@ -1095,13 +1160,22 @@ mod tests {
             },
         )
         .await?;
+        assert!(repo.get_active("wait-1").await.is_none());
+        assert_eq!(
+            repo.get_any("wait-1")
+                .await
+                .as_ref()
+                .map(|dispatch| &dispatch.status),
+            Some(&DispatchStatus::AdmissionPending),
+        );
+        repo.mark_admitted("wait-1").await?;
         assert!(repo.get_active("wait-1").await.is_some());
         assert!(repo.get_by_wflow_job("job-wait-1").await.is_some());
         Ok(())
     }
 
     #[tokio::test]
-    async fn sqlite_reload_persists_dispatch_rows_and_frontier() -> Res<()> {
+    async fn sqlite_reload_persists_dispatch_rows() -> Res<()> {
         let temp = tempfile::tempdir()?;
         let sql_cfg = crate::app::SqlConfig::file(temp.path().join("dispatch.sqlite"));
         let runtime = sqlite_rs::SqliteRuntime::new(default());
@@ -1109,7 +1183,6 @@ mod tests {
         let sql = crate::app::open_database(&runtime, sql_cfg.clone()).await?;
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
         repo.add("disp-a".into(), active_dispatch("job-a")).await?;
-        repo.set_wflow_part_frontier("part-1".into(), 44).await?;
         assert!(repo.mark_cancelled("disp-a").await?);
         drop(repo);
         drop(sql);
@@ -1121,7 +1194,6 @@ mod tests {
             .await
             .ok_or_else(|| eyre::eyre!("missing persisted dispatch"))?;
         assert_eq!(loaded.status, DispatchStatus::Active);
-        assert_eq!(repo.get_wflow_part_frontier("part-1").await, Some(44));
         assert!(!repo.mark_cancelled("disp-a").await?);
         assert!(matches!(
             repo.events_for_init().await?.first(),

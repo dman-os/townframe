@@ -1,8 +1,0 @@
-package townframe:wflow-sdk;
-
-world sdk {
-    include townframe:api-utils/imports;
-
-    import townframe:wflow/types;
-    import townframe:wflow/host;
-}

@@ -13,9 +13,9 @@ use plug_plabels_manifest::tuple_list_get;
 use plug_plabels_manifest::types::PlabelFacetTag;
 use plug_plabels_manifest::types::PseudoLabelCandidatesFacet;
 use plug_plabels_manifest::types::pseudo_label_candidates_key;
-use wflow_sdk::JobErrorX;
-use wflow_sdk::Json;
-use wflow_sdk::WflowCtx;
+use wflow_wdk::JobErrorX;
+use wflow_wdk::Json;
+use wflow_wdk::WflowCtx;
 
 const NOMIC_TEXT_MODEL_ID: &str = "nomic-ai/nomic-embed-text-v1.5";
 const CANDIDATE_SET_CONFIG_FACET_ID: &str = "label-candidates";

@@ -3,14 +3,14 @@ use crate::wflows::label_engine::LabelRequest;
 use crate::wflows::label_engine::{self};
 use plug_plabels_manifest::tuple_list_get;
 use plug_plabels_manifest::types::PlabelFacetTag;
-use wflow_sdk::WflowCtx;
+use wflow_wdk::WflowCtx;
 
 const NOMIC_VISION_MODEL_ID: &str = "nomic-ai/nomic-embed-vision-v1.5";
 const IMAGE_LABEL_ALGORITHM_TAG: &str = "label-image/embed-gauntlet-nomic-v1";
 const LOCAL_STATE_KEY: &str = "@daybook/plabels/label-classifier";
 const CANDIDATE_SET_ID: &str = "label-candidates";
 
-pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
+pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_wdk::JobErrorX> {
     use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
@@ -38,7 +38,7 @@ pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     )
     .await
     .ok_or_else(|| {
-        wflow_sdk::JobErrorX::Terminal(ferr!(
+        wflow_wdk::JobErrorX::Terminal(ferr!(
             "embedding facet key '{}' not found with read rights",
             embedding_facet_key
         ))
@@ -46,7 +46,7 @@ pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
 
     let sqlite_connection =
         tuple_list_get(&args.sqlite_connections, LOCAL_STATE_KEY).ok_or_else(|| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("missing sqlite connection '{LOCAL_STATE_KEY}'"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("missing sqlite connection '{LOCAL_STATE_KEY}'"))
         })?;
 
     let config_facet_key =
@@ -80,15 +80,15 @@ pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     .await?;
 
     let embedding_raw = embedding_facet_token.get().await.map_err(|err| {
-        wflow_sdk::JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}"))
+        wflow_wdk::JobErrorX::Terminal(ferr!("error reading embedding facet: {err:?}"))
     })?;
     let embedding_json: daybook_types::doc::FacetRaw = serde_json::from_str(&embedding_raw)
         .map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}"))
+            wflow_wdk::JobErrorX::Terminal(ferr!("error parsing embedding facet json: {err}"))
         })?;
     let embedding = match WellKnownFacet::from_json(embedding_json, WellKnownFacetTag::Embedding)
         .map_err(|err| {
-            wflow_sdk::JobErrorX::Terminal(err.wrap_err("input facet is not embedding"))
+            wflow_wdk::JobErrorX::Terminal(err.wrap_err("input facet is not embedding"))
         })? {
         WellKnownFacet::Embedding(value) => value,
         _ => unreachable!("embedding tag must parse as embedding facet"),
@@ -115,7 +115,7 @@ pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
     }
 
     let vector_json = daybook_types::doc::embedding_f32_bytes_to_json(&embedding.vector, 768)
-        .map_err(wflow_sdk::JobErrorX::Terminal)?;
+        .map_err(wflow_wdk::JobErrorX::Terminal)?;
 
     cx.effect(async || {
         label_engine::apply_labeling(LabelRequest {
@@ -131,7 +131,7 @@ pub async fn run(cx: &mut WflowCtx) -> Result<(), wflow_sdk::JobErrorX> {
             candidate_set_id: CANDIDATE_SET_ID,
         })
         .await
-        .map(wflow_sdk::Json)
+        .map(wflow_wdk::Json)
     })
     .await?;
 

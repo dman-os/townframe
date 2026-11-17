@@ -103,7 +103,7 @@ oci-spec = "0.8.4"
 
 #
 # wasm
-wash-runtime = { workspace = true }
+wash-runtime.workspace = true
 wasmtime = { workspace = true }
 
 #
@@ -150,7 +150,7 @@ subduction_iroh.workspace = true
 big_sync = { workspace = true, features = ["test-support"] }
 secrets_rs = { workspace = true, features = ["test-support"] }
 tokio-util = { workspace = true }
-wflow = { workspace = true, features = ["test-harness"] }
+wflow.workspace = true
 insta = { workspace = true, features = ["json"] }
 tempfile.workspace = true
 loom.workspace = true

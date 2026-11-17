@@ -1,13 +1,14 @@
 mod interlude {
-    pub use utils_rs::prelude::*;
+    pub use utils_rs::prelude::Arc;
+    pub use utils_rs::prelude::Deserialize;
+    pub use utils_rs::prelude::Res;
+    pub use utils_rs::prelude::Serialize;
+    pub use utils_rs::prelude::async_trait;
+    pub use utils_rs::prelude::eyre;
+    pub use utils_rs::prelude::ferr;
+    pub use utils_rs::prelude::tokio;
 }
 
-use crate::interlude::*;
-
-#[expect(unused)]
 pub mod r#gen;
 pub mod kvstore;
-pub mod log;
-pub mod metastore;
 pub mod partition;
-pub mod snapstore;

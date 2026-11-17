@@ -16,14 +16,22 @@ serde = []
 [lib]
 path = "lib.rs"
 
+[[bench]]
+name = "authority"
+path = "bench.rs"
+harness = false
+
 [dependencies]
 #
 # internal
 wflow_core.workspace = true
+wflow_wdk.workspace = true
+wflow_wdk_native.workspace = true
 utils_rs.workspace = true
 
 #
 # encoding
+serde.workspace = true
 serde_json.workspace = true
 
 #
@@ -39,3 +47,6 @@ tokio.workspace = true
 #
 # log
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

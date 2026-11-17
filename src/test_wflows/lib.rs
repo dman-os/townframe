@@ -22,8 +22,8 @@ mod wit {
 
             "townframe:api-utils/utils": wasm_utils_rs::wit::utils,
 
-            "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
-            "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
+            "townframe:wflow/types": wflow_wdk_wasm::wit::townframe::wflow::types,
+            "townframe:wflow/host": wflow_wdk_wasm::wit::townframe::wflow::host,
             "townframe:wflow/bundle": generate,
         }
     });
@@ -33,9 +33,9 @@ use crate::interlude::*;
 
 use crate::wit::exports::townframe::wflow::bundle::JobResult;
 use std::time::Duration;
-use wflow_sdk::JobErrorX;
-use wflow_sdk::Json;
-use wflow_sdk::WflowCtx;
+use wflow_wdk::JobErrorX;
+use wflow_wdk::Json;
+use wflow_wdk::WflowCtx;
 
 wit::export!(Component with_types_in wit);
 
@@ -43,7 +43,8 @@ struct Component;
 
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
     async fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
-        wflow_sdk::route_wflows!(args, {
+        wflow_wdk_wasm::route_wflows!(args, {
+            "authority_probe" => |cx, args: AuthorityProbeArgs| authority_probe(cx, args),
             "fails_once" => |cx, args: FailsOnceArgs| fails_once(cx, args),
             "fails_until_told" => |cx, args: FailsUntilToldArgs| fails_until_told(cx, args),
             "effect_chain" => |cx, args: EffectChainArgs| effect_chain(cx, args),
@@ -51,9 +52,42 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "recv_message" => |cx, args: RecvMessageArgs| recv_message(cx, args),
             "recv_message_then_effect" => |cx, args: RecvMessageThenEffectArgs| recv_message_then_effect(cx, args),
             "sleep_then_effect" => |cx, args: SleepThenEffectArgs| sleep_then_effect(cx, args),
+            "nondeterministic_replay" => |cx, args: NondeterministicReplayArgs| nondeterministic_replay(cx, args),
         })
         .await
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthorityProbeArgs {
+    key: String,
+    millis: u64,
+}
+
+async fn authority_probe(cx: &mut WflowCtx, args: AuthorityProbeArgs) -> Result<String, JobErrorX> {
+    use wasm_utils_rs::wit::wasi::keyvalue::store;
+
+    let count: u64 = cx
+        .effect(async || {
+            let bucket =
+                store::open("default").map_err(|err| JobErrorX::Terminal(ferr!("{err:?}")))?;
+            let bytes = bucket
+                .get(&args.key)
+                .map_err(|err| JobErrorX::Terminal(ferr!("{err:?}")))?
+                .unwrap_or_default();
+            let count = bytes.len() as u64 + 1;
+            let mut bytes = bytes;
+            bytes.push(1);
+            bucket
+                .set(&args.key, &bytes)
+                .map_err(|err| JobErrorX::Terminal(ferr!("{err:?}")))?;
+            Ok(Json(count))
+        })
+        .await?;
+    let Json(message) = cx.recv::<Json<String>>().await?;
+    cx.sleep(Duration::from_millis(args.millis)).await?;
+    cx.effect(async || Ok(Json(format!("{count}:{message}"))))
+        .await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,7 +110,7 @@ async fn fails_once(cx: &mut WflowCtx, args: FailsOnceArgs) -> Result<(), JobErr
                 err
             ))),
             Ok(None) => match bucket.set(key, &VALUE.to_le_bytes()) {
-                Ok(()) => Err(ferr!("first run, woohoo!").into()),
+                Ok(()) => Err(JobErrorX::Transient(ferr!("first run, woohoo!"))),
                 Err(err) => Err(JobErrorX::Terminal(ferr!(
                     "error setting keyvalue: {:?}",
                     err
@@ -85,7 +119,7 @@ async fn fails_once(cx: &mut WflowCtx, args: FailsOnceArgs) -> Result<(), JobErr
             Ok(Some(bytes)) => {
                 // Parse as u64 (little-endian, 8 bytes)
                 if bytes.len() != 8 {
-                    return Err(ferr!("not u64").into());
+                    return Err(JobErrorX::Transient(ferr!("not u64")));
                 }
                 let mut buf = [0u8; 8];
                 buf.copy_from_slice(&bytes);
@@ -123,7 +157,7 @@ async fn fails_until_told(cx: &mut WflowCtx, args: FailsUntilToldArgs) -> Result
             ))),
             Ok(None) => {
                 // Key doesn't exist, fail transiently
-                Err(ferr!("waiting for flag to be set").into())
+                Err(JobErrorX::Transient(ferr!("waiting for flag to be set")))
             }
             Ok(Some(bytes)) => {
                 // Check if the value is true (1 byte with value 1)
@@ -132,7 +166,7 @@ async fn fails_until_told(cx: &mut WflowCtx, args: FailsUntilToldArgs) -> Result
                     Ok(Json(()))
                 } else {
                     // Flag is not set or wrong value, fail transiently
-                    Err(ferr!("flag not set yet").into())
+                    Err(JobErrorX::Transient(ferr!("flag not set yet")))
                 }
             }
         }
@@ -147,11 +181,12 @@ struct EffectChainArgs {
     steps: u64,
 }
 
-async fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
+async fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<Vec<u64>, JobErrorX> {
+    let mut values = Vec::new();
     for ii in 0..args.steps {
-        cx.effect(async || Ok(Json(ii))).await?;
+        values.push(cx.effect(async || Ok(Json(ii))).await?);
     }
-    Ok(())
+    Ok(values)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -181,11 +216,11 @@ struct RecvMessageThenEffectArgs {}
 async fn recv_message_then_effect(
     cx: &mut WflowCtx,
     _args: RecvMessageThenEffectArgs,
-) -> Result<(), JobErrorX> {
-    let Json(_value) = cx.recv::<Json<serde_json::Value>>().await?;
+) -> Result<serde_json::Value, JobErrorX> {
+    let Json(value) = cx.recv::<Json<serde_json::Value>>().await?;
     cx.effect(async || Ok(Json(serde_json::json!({"ok": true}))))
         .await?;
-    Ok(())
+    Ok(value)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -198,4 +233,45 @@ async fn sleep_then_effect(cx: &mut WflowCtx, args: SleepThenEffectArgs) -> Resu
     cx.effect(async || Ok(Json(serde_json::json!({"slept": true}))))
         .await?;
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct NondeterministicReplayArgs {
+    key: String,
+}
+
+async fn nondeterministic_replay(
+    cx: &mut WflowCtx,
+    args: NondeterministicReplayArgs,
+) -> Result<(), JobErrorX> {
+    use wasm_utils_rs::wit::wasi::keyvalue::store;
+
+    let flipped = {
+        let bucket = store::open("default")
+            .map_err(|err| JobErrorX::Terminal(ferr!("error opening bucket: {err:?}")))?;
+        match bucket.get(&args.key) {
+            Err(err) => {
+                return Err(JobErrorX::Terminal(ferr!(
+                    "error getting keyvalue: {err:?}"
+                )));
+            }
+            Ok(None) => {
+                bucket
+                    .set(&args.key, &[1])
+                    .map_err(|err| JobErrorX::Terminal(ferr!("error setting keyvalue: {err:?}")))?;
+                false
+            }
+            Ok(Some(_)) => true,
+        }
+    };
+
+    if !flipped {
+        cx.named_effect("step-alpha", async || Ok(Json(1_u64)))
+            .await?;
+        Err(JobErrorX::Transient(ferr!("force replay after step-alpha")))
+    } else {
+        cx.named_effect("step-beta", async || Ok(Json(1_u64)))
+            .await?;
+        Ok(())
+    }
 }

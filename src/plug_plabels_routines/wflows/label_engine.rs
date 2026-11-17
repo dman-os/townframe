@@ -23,7 +23,7 @@ use plug_plabels_manifest::types::PseudoLabelCandidatesFacet;
 use plug_plabels_manifest::types::PseudoLabelEntry;
 use plug_plabels_manifest::types::PseudoLabelError;
 use plug_plabels_manifest::types::pseudo_label_candidates_key;
-use wflow_sdk::JobErrorX;
+use wflow_wdk::JobErrorX;
 
 pub struct LabelRequest<'a> {
     pub sqlite_connection: &'a crate::wit::townframe::sqlite::sqlite_connection::Connection,

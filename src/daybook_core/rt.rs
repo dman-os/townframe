@@ -16,13 +16,10 @@ use wash_runtime::host::Host as WashHost;
 use wash_runtime::host::HostApi;
 use wash_runtime::types::Component;
 use wash_runtime::wit::WitInterface;
-use wflow::wflow_core::partition::RetryPolicy;
-use wflow::wflow_core::partition::job_events::JobError;
-use wflow::wflow_core::partition::job_events::JobRunResult;
-use wflow::wflow_core::partition::log::PartitionLogEntry;
-use wflow::wflow_tokio::partition::PartitionLogRef;
-use wflow::wflow_tokio::partition::TokioPartitionWorkerHandle;
-use wflow::wflow_tokio::partition::state::PartitionWorkingState;
+use wflow::wflow_tokio::authority_runtime::SendError;
+
+#[cfg(test)]
+mod receipt_tests;
 
 pub mod dispatch;
 pub mod init;
@@ -91,11 +88,10 @@ pub struct Rt {
     pub plugs_repo: Arc<PlugsRepo>,
     pub drawer: Arc<DrawerRepo>,
     pub config_repo: Arc<ConfigRepo>,
-    pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
+    pub authority: Arc<wflow::AuthorityRuntime>,
     pub dispatch_repo: Arc<dispatch::DispatchRepo>,
     pub init_repo: Arc<InitRepo>,
     pub progress_repo: Arc<crate::progress::ProgressRepo>,
-    pub wflow_part_state: Arc<PartitionWorkingState>,
     pub wcx: wflow::Ctx,
     pub wash_host: Arc<WashHost>,
     pub wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
@@ -106,7 +102,8 @@ pub struct Rt {
     pub doc_facet_set_index_repo: Arc<DocFacetSetIndexRepo>,
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
-    local_wflow_part_id: String,
+    result_watchers: Arc<tokio_util::task::TaskTracker>,
+    waiter_jobs: Arc<std::sync::Mutex<HashSet<String>>>,
     /// Sender half of the §15 rotation trigger (`rotation_channel()`); held
     /// only when blob workers spawn. `None` otherwise — a rotation request on a
     /// repo that runs no encryption worker is an error at the call site, not a
@@ -116,9 +113,8 @@ pub struct Rt {
 }
 
 pub struct RtStopToken {
-    wflow_part_handle: TokioPartitionWorkerHandle,
     rt: Arc<Rt>,
-    partition_watcher: tokio::task::JoinHandle<()>,
+    result_watchers: Arc<tokio_util::task::TaskTracker>,
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
     blob_pin_worker_stop: Option<crate::repos::RepoStopToken>,
     blob_pins_part_worker_stop: Option<crate::repos::RepoStopToken>,
@@ -133,8 +129,8 @@ impl RtStopToken {
     pub async fn stop(self) -> Res<()> {
         self.rt.cancel_token.cancel();
 
-        utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
-            .await?;
+        self.result_watchers.close();
+        self.result_watchers.wait().await;
         self.doc_processor_stop.stop().await?;
 
         self.plugs_manifest_consumer_stop.stop().await?;
@@ -178,13 +174,7 @@ impl RtStopToken {
             );
         }
 
-        // Stop wflow partition worker
-        if let Err(err) = self.wflow_part_handle.stop().await {
-            warn!(
-                ?err,
-                "error stopping wflow_part_handle during shutdown - continuing"
-            );
-        }
+        self.rt.authority.stop().await;
 
         if let Err(err) = Arc::clone(&self.rt.wash_host).stop().await.to_eyre() {
             warn!(
@@ -488,9 +478,7 @@ impl Rt {
         )
         .await?;
 
-        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
-            &wcx.metastore,
-        )));
+        let wflow_plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new());
         let daybook_plugin = Arc::new(wash_plugin::DaybookPlugin::new(
             Arc::clone(&drawer),
             Arc::clone(&dispatch_repo),
@@ -501,7 +489,7 @@ impl Rt {
         ));
         let stateless_view_plugin = Arc::new(wash_plugin::StatelessViewPlugin::new());
         let sqlite_plugin = Arc::new(wash_plugin_sqlite::SqlPlugin::new());
-        let wash_host = wflow::build_wash_host(vec![
+        let wash_host = build_wash_host(vec![
             #[expect(clippy::clone_on_ref_ptr)]
             wflow_plugin.clone(),
             #[expect(clippy::clone_on_ref_ptr)]
@@ -526,7 +514,7 @@ impl Rt {
         .await?;
 
         let mut bundles_to_load: HashSet<(String, String)> = default();
-        for (_dispatch_id, dispach) in dispatch_repo.list().await {
+        for (_dispatch_id, dispach) in dispatch_repo.list_inflight().await {
             match &dispach.deets {
                 ActiveDispatchDeets::Wflow {
                     plug_id,
@@ -548,8 +536,8 @@ impl Rt {
             })?;
 
             let _workload_id = ensure_bundle_workload_running(
-                &wcx,
                 &wash_host,
+                &wflow_plugin,
                 &blobs_repo,
                 plug_id,
                 bundle_name,
@@ -566,31 +554,19 @@ impl Rt {
             .await?;
         }
 
-        let part_idx = 0;
-        let (wflow_part_handle, wflow_part_state) =
-            wflow::start_partition_worker(&wcx, Arc::clone(&wflow_plugin), part_idx).await?;
-        Self::emit_startup_progress_status(
-            &progress_repo,
-            startup_progress_task_id.as_deref(),
-            "rt boot: partition worker started".to_string(),
-        )
-        .await?;
-        let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
-        let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
-            part_log,
-            Arc::clone(&wcx.metastore),
-        ));
-        let local_wflow_part_id = format!("{}/{part_idx}", config.device_id);
+        let authority_host = Arc::clone(&wflow_plugin);
+        let authority = Arc::new(wcx.start_authority_runtime(0, authority_host).await?);
+        let result_watchers = Arc::new(tokio_util::task::TaskTracker::new());
+        let waiter_jobs = Arc::new(std::sync::Mutex::new(HashSet::new()));
 
         let rt = Arc::new(Self {
             config,
-            local_wflow_part_id,
             doc_rotation_tx: doc_rotation_tx_sender,
             cancel_token,
             plugs_repo,
             drawer,
             rcx,
-            wflow_ingress,
+            authority,
             dispatch_repo,
             init_repo,
             progress_repo,
@@ -605,7 +581,8 @@ impl Rt {
             doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
             sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
             config_repo,
-            wflow_part_state,
+            result_watchers: Arc::clone(&result_watchers),
+            waiter_jobs,
         });
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
@@ -667,17 +644,27 @@ impl Rt {
         )
         .await?;
 
-        let partition_watcher = tokio::spawn({
-            let repo = Arc::clone(&rt);
-            async move { repo.keep_up_with_partition().await.unwrap() }
-        });
+        // Admission is a durable outbox transition: reconcile intents before
+        // installing receipt waiters, so a crash between submit and the active
+        // transition cannot leave a waiter for a job that was never admitted.
+        rt.reconcile_workflow_intents().await?;
+        for (dispatch_id, dispatch) in rt.dispatch_repo.list().await {
+            if dispatch.status == dispatch::DispatchStatus::Active
+                && let ActiveDispatchDeets::Wflow {
+                    wflow_job_id: Some(job_id),
+                    ..
+                } = &dispatch.deets
+            {
+                rt.install_wflow_waiter(dispatch_id, job_id.clone());
+            }
+        }
 
         cancel_on_boot_error.0.take();
         Ok((
             Arc::clone(&rt),
             RtStopToken {
+                result_watchers,
                 rt,
-                partition_watcher,
                 doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
@@ -686,7 +673,6 @@ impl Rt {
                 plugs_config_consumer_stop,
                 plugs_manifest_consumer_stop,
                 doc_facet_ref_index_stop,
-                wflow_part_handle,
             },
         ))
     }
@@ -1018,77 +1004,6 @@ impl Rt {
         })
     }
 
-    #[tracing::instrument(
-        level = "debug",
-        skip_all,
-        err(Debug),
-        fields(worker = "rt-partition-watcher")
-    )]
-    async fn keep_up_with_partition(&self) -> Res<()> {
-        use futures::StreamExt;
-
-        // let dispatch = self
-        //     .dispatch_repo
-        //     .get(dispatch_id)
-        //     .await
-        //     .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
-        //
-        // match &dispatch.deets {
-        //     ActiveDispatchDeets::Wflow {
-        //         entry_id,
-        //         wflow_job_id,
-        //         ..
-        //     } => {}
-        // }
-        let part_log = PartitionLogRef::new(Arc::clone(&self.wcx.logstore));
-        let last_seen_idx = self
-            .dispatch_repo
-            .get_wflow_part_frontier(&self.local_wflow_part_id)
-            .await
-            .unwrap_or(0);
-        let mut stream = part_log.tail(last_seen_idx);
-
-        loop {
-            let entry = tokio::select! {
-                biased;
-                _ = self.cancel_token.cancelled() => {
-                    debug!("cancel token lit");
-                    break;
-                }
-                entry = stream.next() => {
-                    entry
-                }
-            };
-            let Some(entry) = entry else {
-                warn!("log stream closed");
-                // Stream ended
-                break;
-            };
-            let (idx, entry) = entry?;
-            if let Some(entry) = entry
-                && let Err(err) = self.handle_wflow_entry(idx, entry).await
-            {
-                if self.cancel_token.is_cancelled() {
-                    debug!(error = %err, "ignoring wflow entry error during shutdown");
-                    break;
-                }
-                return Err(err);
-            };
-            if let Err(err) = self
-                .dispatch_repo
-                .set_wflow_part_frontier(self.local_wflow_part_id.clone(), idx)
-                .await
-            {
-                if self.cancel_token.is_cancelled() {
-                    debug!(error = %err, "ignoring frontier write error during shutdown");
-                    break;
-                }
-                return Err(err);
-            }
-        }
-        Ok(())
-    }
-
     fn ensure_rt_live(&self) -> Res<()> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("rt is shutting down");
@@ -1157,7 +1072,7 @@ impl Rt {
     }
 
     async fn ensure_plug_init_dispatches(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         startup_progress_task_id: Option<&str>,
         total_started: Option<std::time::Instant>,
@@ -1279,370 +1194,320 @@ impl Rt {
         }
         Ok(unresolved_init_dispatch_ids)
     }
-    #[tracing::instrument(skip(self, entry))]
-    async fn handle_wflow_entry(&self, entry_id: u64, entry: PartitionLogEntry) -> Res<()> {
-        let PartitionLogEntry::JobEffectResult(event) = entry else {
-            return Ok(());
+
+    async fn reconcile_workflow_dispatch(
+        self: &Arc<Self>,
+        dispatch_id: &str,
+        dispatch: &Arc<ActiveDispatch>,
+    ) -> Res<Arc<ActiveDispatch>> {
+        let ActiveDispatchDeets::Wflow {
+            wflow_key,
+            wflow_job_id: Some(job_id),
+            ..
+        } = &dispatch.deets
+        else {
+            eyre::bail!("pending dispatch missing workflow job identity: {dispatch_id}");
         };
-        let Some((dispatch_id, _)) = event.job_id.rsplit_once('-') else {
-            return Ok(());
+        let args_json = match &dispatch.args {
+            ActiveDispatchArgs::FacetRoutine(args) => args
+                .wflow_args_json
+                .clone()
+                .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
         };
-        let Some(dispatch) = self.dispatch_repo.get_active(dispatch_id).await else {
+        // Admission and cancellation are separate durable stores. Always replay
+        // the same identity, then honor a cancellation mark before acknowledging
+        // admission. The mark remains recoverable until receipt post-processing.
+        self.authority
+            .submit(wflow::Submission::new(
+                job_id.clone(),
+                wflow_key.clone(),
+                args_json,
+            ))
+            .await
+            .map_err(|err| ferr!("error scheduling job for dispatch {dispatch_id}: {err:?}"))?;
+        if self.dispatch_repo.is_cancelled(dispatch_id).await {
+            match self
+                .authority
+                .cancel(
+                    job_id.clone(),
+                    format!("cancellation requested for dispatch {dispatch_id}"),
+                )
+                .await
+            {
+                Ok(_) | Err(wflow::CancelError::AlreadyTerminal) => {}
+                Err(err) => {
+                    return Err(ferr!(
+                        "error cancelling admitted dispatch {dispatch_id}: {err:?}"
+                    ));
+                }
+            }
+        }
+        self.dispatch_repo.mark_admitted(dispatch_id).await
+    }
+
+    async fn reconcile_workflow_intents(self: &Arc<Self>) -> Res<()> {
+        for (dispatch_id, dispatch) in self.dispatch_repo.list_inflight().await {
+            if dispatch.status == dispatch::DispatchStatus::AdmissionPending
+                || self.dispatch_repo.is_cancelled(&dispatch_id).await
+            {
+                self.reconcile_workflow_dispatch(&dispatch_id, &dispatch)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn install_wflow_waiter(self: &Arc<Self>, dispatch_id: String, job_id: String) {
+        // Boot reconciliation and live scheduling may discover the same
+        // permanent job identity. They share one tracked receipt waiter.
+        if !self
+            .waiter_jobs
+            .lock()
+            .expect(ERROR_MUTEX)
+            .insert(job_id.clone())
+        {
+            return;
+        }
+        let rt = Arc::clone(self);
+        self.result_watchers.spawn(async move {
+            let handle = rt.authority.handle(job_id.clone());
+            tokio::select! {
+                _ = rt.cancel_token.cancelled() => {
+                    assert!(rt.waiter_jobs.lock().expect(ERROR_MUTEX).remove(&job_id));
+                }
+                receipt = handle.await_receipt() => {
+                    let receipt = receipt.expect("active persisted workflow dispatch lost its authority receipt");
+                    rt.handle_wflow_receipt(dispatch_id, job_id.clone(), receipt).await.unwrap();
+                    assert!(rt.waiter_jobs.lock().expect(ERROR_MUTEX).remove(&job_id));
+                }
+            }
+        });
+    }
+
+    #[tracing::instrument(skip(self, receipt), err(Debug))]
+    async fn handle_wflow_receipt(
+        self: &Arc<Self>,
+        dispatch_id: String,
+        job_id: String,
+        receipt: wflow::wflow_core::partition::authority::Receipt,
+    ) -> Res<()> {
+        let Some(dispatch) = self.dispatch_repo.get_active(&dispatch_id).await else {
             return Ok(());
         };
         let ActiveDispatchDeets::Wflow {
-            wflow_job_id,
+            wflow_job_id: Some(active_job_id),
             wflow_key,
             ..
-        } = &dispatch.deets;
-        let Some(wflow_job_id) = wflow_job_id.as_ref() else {
+        } = &dispatch.deets
+        else {
             return Ok(());
         };
-        if wflow_job_id.as_str() != event.job_id.as_ref() {
-            debug!(
-                %dispatch_id,
-                active_job_id = %wflow_job_id,
-                completed_job_id = %event.job_id,
-                wflow_key = %wflow_key,
-                "ignoring stale job result for replaced dispatch"
-            );
+        if active_job_id != &job_id {
+            debug!(%dispatch_id, %job_id, active_job_id, %wflow_key, "ignoring stale authority receipt");
             return Ok(());
         }
+        let result = match &receipt.outcome {
+            wflow::wflow_core::partition::authority::Outcome::Completed(terminal) => {
+                match serde_json::from_str::<wflow::wflow_wdk::types::JobResult>(&terminal.value)
+                    .wrap_err("authority completed receipt contained invalid JobResult")?
+                {
+                    Ok(value_json) => DaybookWflowOutcome::Success {
+                        value_json: value_json.into(),
+                    },
+                    Err(wflow::wflow_wdk::types::JobError::Terminal(error_json)) => {
+                        DaybookWflowOutcome::WorkflowTerminal {
+                            error_json: error_json.into(),
+                        }
+                    }
+                    Err(wflow::wflow_wdk::types::JobError::Transient(_)) => {
+                        unreachable!(
+                            "authority completed receipt contained a transient workflow result"
+                        )
+                    }
+                }
+            }
+            wflow::wflow_core::partition::authority::Outcome::Faulted(fault) => {
+                match &fault.failure {
+                    wflow::wflow_core::partition::JobFailure::Cancelled { .. } => {
+                        DaybookWflowOutcome::Cancelled
+                    }
+                    failure => DaybookWflowOutcome::AuthorityFailure {
+                        message: format!("{failure:?}"),
+                    },
+                }
+            }
+        };
+        let (severity, message) = match &result {
+            DaybookWflowOutcome::Success { .. } => (
+                crate::progress::ProgressSeverity::Info,
+                "dispatch completed successfully".to_string(),
+            ),
+            DaybookWflowOutcome::Cancelled => (
+                crate::progress::ProgressSeverity::Warn,
+                "dispatch aborted".to_string(),
+            ),
+            DaybookWflowOutcome::AuthorityFailure { message } => (
+                crate::progress::ProgressSeverity::Error,
+                format!("authority fault: {message}"),
+            ),
+            DaybookWflowOutcome::WorkflowTerminal { error_json } => (
+                crate::progress::ProgressSeverity::Error,
+                format!("terminal error: {error_json}"),
+            ),
+        };
+        self.progress_repo
+            .add_update(
+                &dispatch_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: None,
+                    deets: crate::progress::ProgressUpdateDeets::Status { severity, message },
+                },
+            )
+            .await?;
 
-        // Get staging branch path from dispatch
+        let succeeded = matches!(&result, DaybookWflowOutcome::Success { .. });
+        // The permanent receipt lets boot replay staging and hooks while the
+        // dispatch remains active after a crash or merge error. These operations
+        // must be idempotent; dependency release below has its own bookkeeping.
+        self.settle_dispatch_staging(&dispatch_id, &dispatch, succeeded)
+            .await?;
+        self.run_dispatch_completion_hooks(&dispatch_id, &dispatch, &result, succeeded)
+            .await?;
+        let final_status = if succeeded {
+            dispatch::DispatchStatus::Succeeded
+        } else if matches!(&result, DaybookWflowOutcome::Cancelled) {
+            dispatch::DispatchStatus::Cancelled
+        } else {
+            dispatch::DispatchStatus::Failed
+        };
+        self.progress_repo
+            .add_update(
+                &dispatch_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: None,
+                    deets: crate::progress::ProgressUpdateDeets::Completed {
+                        state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
+                            crate::progress::ProgressFinalState::Succeeded
+                        } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
+                            crate::progress::ProgressFinalState::Cancelled
+                        } else {
+                            crate::progress::ProgressFinalState::Failed
+                        },
+                        message: None,
+                    },
+                },
+            )
+            .await?;
+        self.dispatch_repo
+            .complete(dispatch_id.clone(), final_status.clone())
+            .await?;
+        self.release_waiting_dispatches(
+            &dispatch_id,
+            matches!(final_status, dispatch::DispatchStatus::Succeeded),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn settle_dispatch_staging(
+        &self,
+        dispatch_id: &str,
+        dispatch: &ActiveDispatch,
+        succeeded: bool,
+    ) -> Res<()> {
         let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+            doc_id,
+            branch_path: target_branch_path,
             staging_branch_path,
             ..
         }) = &dispatch.args;
-
-        let is_done = match &event.result {
-            JobRunResult::Success { value_json } => {
-                info!(?value_json, "success on dispatch wflow");
-                self.progress_repo
-                    .add_update(
-                        dispatch_id,
-                        crate::progress::ProgressUpdate {
-                            at: jiff::Timestamp::now(),
-                            title: None,
-                            deets: crate::progress::ProgressUpdateDeets::Status {
-                                severity: crate::progress::ProgressSeverity::Info,
-                                message: "dispatch completed successfully".to_string(),
-                            },
-                        },
-                    )
-                    .await?;
-                true
-            }
-            JobRunResult::Aborted => {
-                info!("dispatch wflow aborted");
-                self.progress_repo
-                    .add_update(
-                        dispatch_id,
-                        crate::progress::ProgressUpdate {
-                            at: jiff::Timestamp::now(),
-                            title: None,
-                            deets: crate::progress::ProgressUpdateDeets::Status {
-                                severity: crate::progress::ProgressSeverity::Warn,
-                                message: "dispatch aborted".to_string(),
-                            },
-                        },
-                    )
-                    .await?;
-                true
-            }
-            JobRunResult::WorkerErr(err) => {
-                error!(?err, "worker error on dispatch wflow");
-                self.progress_repo
-                    .add_update(
-                        dispatch_id,
-                        crate::progress::ProgressUpdate {
-                            at: jiff::Timestamp::now(),
-                            title: None,
-                            deets: crate::progress::ProgressUpdateDeets::Status {
-                                severity: crate::progress::ProgressSeverity::Error,
-                                message: format!("worker error: {err:?}"),
-                            },
-                        },
-                    )
-                    .await?;
-                true
-            }
-            JobRunResult::WflowErr(JobError::Terminal { error_json }) => {
-                error!(?error_json, "terminal error on dispatch wflow");
-                self.progress_repo
-                    .add_update(
-                        dispatch_id,
-                        crate::progress::ProgressUpdate {
-                            at: jiff::Timestamp::now(),
-                            title: None,
-                            deets: crate::progress::ProgressUpdateDeets::Status {
-                                severity: crate::progress::ProgressSeverity::Error,
-                                message: format!("terminal error: {error_json}"),
-                            },
-                        },
-                    )
-                    .await?;
-                true
-            }
-            JobRunResult::WflowErr(JobError::Transient {
-                error_json,
-                retry_policy: None,
-            })
-            | JobRunResult::WflowErr(JobError::Transient {
-                error_json,
-                retry_policy: Some(RetryPolicy::Immediate),
-            }) => {
-                warn!("transient error on dispatch wflow: {error_json:?}");
-                self.progress_repo
-                    .add_update(
-                        dispatch_id,
-                        crate::progress::ProgressUpdate {
-                            at: jiff::Timestamp::now(),
-                            title: None,
-                            deets: crate::progress::ProgressUpdateDeets::Status {
-                                severity: crate::progress::ProgressSeverity::Warn,
-                                message: format!("transient error, retrying: {error_json}"),
-                            },
-                        },
-                    )
-                    .await?;
-                false
-            }
-            JobRunResult::StepEffect(..) | JobRunResult::StepWait(..) => false,
-        };
-        if is_done {
-            // Handle staging branch cleanup based on success/failure
-            let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-                doc_id,
-                branch_path: target_branch_path,
-                ..
-            }) = &dispatch.args;
-
-            let merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
-
-            if merged_successfully {
-                // Merge staging branch into target branch
-                info!(
-                    %dispatch_id,
-                    %entry_id,
-                    ?doc_id,
-                    ?staging_branch_path,
-                    ?target_branch_path,
-                    "merging staging branch into target"
-                );
-                match self
-                    .drawer
-                    .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
-                    .await
+        if succeeded {
+            // Merge staging into the target before deleting it. A missing
+            // staging branch means no facet changes, or a replay after deletion.
+            info!(%dispatch_id, ?doc_id, ?staging_branch_path, ?target_branch_path,
+                "merging staging branch into target");
+            match self
+                .drawer
+                .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::drawer::types::DrawerError::BranchNotFound { name })
+                    if name == staging_branch_path.as_str() =>
                 {
-                    Ok(()) => {}
-                    Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
-                        debug!(
-                            %dispatch_id,
-                            %entry_id,
-                            ?doc_id,
-                            ?name,
-                            ?staging_branch_path,
-                            ?target_branch_path,
-                            "staging branch missing during merge; wflow made no facet changes"
-                        );
-                    }
-                    Err(err) => {
-                        error!(
-                            %dispatch_id,
-                            %entry_id,
-                            ?doc_id,
-                            ?staging_branch_path,
-                            ?target_branch_path,
-                            ?err,
-                            "staging merge returned error"
-                        );
-                        return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
-                    }
+                    debug!(%dispatch_id, ?doc_id, ?name, ?staging_branch_path,
+                        "staging branch missing during merge");
                 }
-
-                if merged_successfully {
-                    // Delete the staging branch after successful merge
-                    info!(
-                        %dispatch_id,
-                        %entry_id,
-                        ?doc_id,
-                        ?staging_branch_path,
-                        "deleting staging branch after successful merge"
-                    );
-                    self.drawer
-                        .delete_branch(doc_id, staging_branch_path, None)
-                        .await
-                        .or_else(|err| match err {
-                            crate::drawer::types::DrawerError::BranchNotFound { .. } => {
-                                debug!(
-                                    %dispatch_id,
-                                    %entry_id,
-                                    ?doc_id,
-                                    ?staging_branch_path,
-                                    "staging branch already removed after successful merge"
-                                );
-                                Ok(false)
-                            }
-                            other => Err(other),
-                        })
-                        .wrap_err("error deleting staging branch after merge")?;
+                Err(err) => {
+                    return Err(eyre::eyre!(err).wrap_err("error merging staging branch"));
                 }
             }
-            if !merged_successfully {
-                // Delete staging branch on failure if it exists.
-                info!(
-                    %dispatch_id,
-                    %entry_id,
-                    ?doc_id,
-                    ?staging_branch_path,
-                    "deleting staging branch due to failure"
-                );
-                self.drawer
-                    .delete_branch(doc_id, staging_branch_path, None)
-                    .await
-                    .or_else(|err| match err {
-                        crate::drawer::types::DrawerError::BranchNotFound { .. } => Ok(false),
-                        other => Err(other),
-                    })
-                    .wrap_err("error deleting staging branch")?;
-                for hook in &dispatch.on_success_hooks {
-                    match hook {
-                        DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
-                            self.init_repo
-                                .clear_running_dispatch(init_id, dispatch_id)
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::ProcessorRunLog { .. } => {}
-                        DispatchOnSuccessHook::CommandInvokeReply {
-                            parent_wflow_job_id,
-                            request_id,
-                        } => {
-                            let reply = {
-                                let (status, value_json, error_json) =
-                                    command_invoke_reply_from_result(
-                                        &event.result,
-                                        dispatch_id,
-                                        merged_successfully,
-                                    );
-                                daybook_pdk::InvokeCommandReply {
-                                    request_id: request_id.clone(),
-                                    status,
-                                    value_json,
-                                    error_json,
-                                }
-                            };
-                            self.wflow_ingress
-                                .send_message(
-                                    Arc::from(parent_wflow_job_id.as_str()),
-                                    Arc::from(request_id.as_str()),
-                                    serde_json::to_string(&reply).expect(ERROR_JSON),
-                                )
-                                .await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
-                        }
+        }
+        // Delete staging after a successful merge or on workflow failure. This
+        // is idempotent so an active dispatch can replay receipt post-processing.
+        info!(%dispatch_id, ?doc_id, ?staging_branch_path, succeeded,
+            "deleting staging branch after workflow settlement");
+        self.drawer
+            .delete_branch(doc_id, staging_branch_path, None)
+            .await
+            .or_else(|err| match err {
+                crate::drawer::types::DrawerError::BranchNotFound { .. } => Ok(false),
+                other => Err(other),
+            })
+            .wrap_err("error deleting staging branch")?;
+        Ok(())
+    }
+
+    async fn run_dispatch_completion_hooks(
+        &self,
+        dispatch_id: &str,
+        dispatch: &ActiveDispatch,
+        result: &DaybookWflowOutcome,
+        succeeded: bool,
+    ) -> Res<()> {
+        for hook in &dispatch.on_success_hooks {
+            match hook {
+                DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
+                    if succeeded {
+                        self.init_repo.mark_done(run_mode, init_id).await?;
                     }
+                    self.init_repo
+                        .clear_running_dispatch(init_id, dispatch_id)
+                        .await?;
                 }
-            } else {
-                for hook in &dispatch.on_success_hooks {
-                    match hook {
-                        DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
-                            self.init_repo.mark_done(run_mode, init_id).await?;
-                            self.init_repo
-                                .clear_running_dispatch(init_id, dispatch_id)
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::ProcessorRunLog {
-                            doc_id,
-                            processor_full_id,
-                            done_token,
-                        } => {
-                            self.record_processor_runlog_done(
-                                doc_id,
-                                processor_full_id,
-                                done_token,
-                            )
+                DispatchOnSuccessHook::ProcessorRunLog {
+                    doc_id,
+                    processor_full_id,
+                    done_token,
+                } => {
+                    if succeeded {
+                        self.record_processor_runlog_done(doc_id, processor_full_id, done_token)
                             .await?;
-                        }
-                        DispatchOnSuccessHook::CommandInvokeReply {
-                            parent_wflow_job_id,
-                            request_id,
-                        } => {
-                            let reply = {
-                                let (status, value_json, error_json) =
-                                    command_invoke_reply_from_result(
-                                        &event.result,
-                                        dispatch_id,
-                                        merged_successfully,
-                                    );
-                                daybook_pdk::InvokeCommandReply {
-                                    request_id: request_id.clone(),
-                                    status,
-                                    value_json,
-                                    error_json,
-                                }
-                            };
-                            self.wflow_ingress
-                                .send_message(
-                                    Arc::from(parent_wflow_job_id.as_str()),
-                                    Arc::from(request_id.as_str()),
-                                    serde_json::to_string(&reply).expect(ERROR_JSON),
-                                )
-                                .await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
-                        }
                     }
                 }
+                DispatchOnSuccessHook::CommandInvokeReply {
+                    parent_wflow_job_id,
+                    request_id,
+                } => {
+                    let (status, value_json, error_json) =
+                        command_invoke_reply_from_result(result, dispatch_id, succeeded);
+                    let reply = daybook_pdk::InvokeCommandReply {
+                        request_id: request_id.clone(),
+                        status,
+                        value_json,
+                        error_json,
+                    };
+                    send_command_invoke_reply(&self.authority, parent_wflow_job_id, reply).await?;
+                }
             }
-
-            let final_status = if merged_successfully {
-                dispatch::DispatchStatus::Succeeded
-            } else if matches!(&event.result, JobRunResult::Aborted) {
-                dispatch::DispatchStatus::Cancelled
-            } else {
-                dispatch::DispatchStatus::Failed
-            };
-            self.progress_repo
-                .add_update(
-                    dispatch_id,
-                    crate::progress::ProgressUpdate {
-                        at: jiff::Timestamp::now(),
-                        title: None,
-                        deets: crate::progress::ProgressUpdateDeets::Completed {
-                            state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
-                                crate::progress::ProgressFinalState::Succeeded
-                            } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
-                                crate::progress::ProgressFinalState::Cancelled
-                            } else {
-                                crate::progress::ProgressFinalState::Failed
-                            },
-                            message: None,
-                        },
-                    },
-                )
-                .await?;
-            self.dispatch_repo
-                .complete(dispatch_id.into(), final_status.clone())
-                .await?;
-            self.release_waiting_dispatches(
-                dispatch_id,
-                matches!(final_status, dispatch::DispatchStatus::Succeeded),
-            )
-            .await?;
         }
         Ok(())
     }
 
     async fn release_waiting_dispatches(
-        &self,
+        self: &Arc<Self>,
         completed_dispatch_id: &str,
         is_success: bool,
     ) -> Res<()> {
@@ -1692,18 +1557,8 @@ impl Rt {
                                 value_json: None,
                                 error_json: Some(error_json.to_string()),
                             };
-                            self.wflow_ingress
-                                .send_message(
-                                    Arc::from(parent_wflow_job_id.as_str()),
-                                    Arc::from(request_id.as_str()),
-                                    serde_json::to_string(&reply).expect(ERROR_JSON),
-                                )
-                                .await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending failed command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
+                            send_command_invoke_reply(&self.authority, parent_wflow_job_id, reply)
+                                .await?;
                         }
                     }
                 }
@@ -1738,21 +1593,15 @@ impl Rt {
     }
 
     async fn start_waiting_dispatch(
-        &self,
+        self: &Arc<Self>,
         dispatch_id: String,
         waiting_dispatch: Arc<ActiveDispatch>,
     ) -> Res<()> {
         let ActiveDispatchDeets::Wflow {
             plug_id,
-            routine_name,
             bundle_name,
-            wflow_key,
-            wflow_job_id,
             ..
         } = &waiting_dispatch.deets;
-        let Some(job_id) = wflow_job_id.as_ref() else {
-            eyre::bail!("waiting dispatch missing job id: {dispatch_id}");
-        };
         let plug_man = self
             .plugs_repo
             .get(plug_id)
@@ -1764,72 +1613,33 @@ impl Rt {
             .ok_or_else(|| {
                 ferr!("bundle not found in plug manifest: plug={plug_id} bundle={bundle_name}")
             })?;
-        let key: daybook_types::manifest::KeyGeneric = wflow_key.clone().into();
-        let job_args_json = match &waiting_dispatch.args {
-            ActiveDispatchArgs::FacetRoutine(facet_args) => facet_args
-                .wflow_args_json
-                .clone()
-                .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON)),
-        };
-        let _workload_id = ensure_bundle_workload_running(
-            &self.wcx,
+        ensure_bundle_workload_running(
             &self.wash_host,
+            &self.wflow_plugin,
             &self.blobs_repo,
             plug_id.clone(),
             bundle_name.clone(),
             bundle_man,
         )
         .await?;
-        let initial_deets = ActiveDispatchDeets::Wflow {
-            wflow_partition_id: None,
-            entry_id: None,
-            plug_id: plug_id.clone(),
-            routine_name: routine_name.clone(),
-            bundle_name: bundle_name.clone(),
-            wflow_key: wflow_key.clone(),
-            wflow_job_id: Some(job_id.clone()),
-        };
-        self.dispatch_repo
-            .activate_waiting(&dispatch_id, initial_deets)
-            .await?;
-        let entry_id = match self
-            .wflow_ingress
-            .add_job(job_id.clone().into(), &key, job_args_json, None)
-            .await
-        {
-            Ok(value) => value,
-            Err(err) => {
-                self.dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await?;
-                return Err(err).wrap_err_with(|| {
-                    format!("error scheduling deferred job for dispatch {dispatch_id}")
-                });
-            }
-        };
-        let deets = ActiveDispatchDeets::Wflow {
-            wflow_partition_id: Some(self.local_wflow_part_id.clone()),
-            entry_id: Some(entry_id),
-            plug_id: plug_id.clone(),
-            routine_name: routine_name.clone(),
-            bundle_name: bundle_name.clone(),
-            wflow_key: wflow_key.clone(),
-            wflow_job_id: Some(job_id.clone()),
-        };
-        if let Err(err) = self
+        let pending_dispatch = self
             .dispatch_repo
-            .update_active_deets(&dispatch_id, deets)
-            .await
-        {
-            self.wflow_ingress
-                .cancel_job(
-                    Arc::from(job_id.as_ref()),
-                    format!("rollback scheduling for dispatch {dispatch_id}"),
-                )
-                .await
-                .inspect_err(|err| warn!("error cancelling job: {err}"))
-                .ok();
-            return Err(err);
+            .activate_waiting(&dispatch_id, waiting_dispatch.deets.clone())
+            .await?;
+        // Keep the intent pending on an admission error, including an unknown
+        // commit outcome. Boot can safely retry the same permanent job key.
+        let admitted = self
+            .reconcile_workflow_dispatch(&dispatch_id, &pending_dispatch)
+            .await?;
+        if admitted.status == dispatch::DispatchStatus::Active {
+            let ActiveDispatchDeets::Wflow {
+                wflow_job_id: Some(job_id),
+                ..
+            } = &admitted.deets
+            else {
+                unreachable!("admitted dispatch has a workflow job identity");
+            };
+            self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
         }
         self.progress_repo
             .add_update(
@@ -1848,7 +1658,7 @@ impl Rt {
     }
 
     pub async fn dispatch(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -1857,7 +1667,7 @@ impl Rt {
     }
 
     pub async fn invoke_command_from_wflow_job(
-        &self,
+        self: &Arc<Self>,
         parent_wflow_job_id: &str,
         target_command_url: &str,
         request: daybook_pdk::InvokeCommandRequest,
@@ -1983,7 +1793,7 @@ impl Rt {
     }
 
     async fn dispatch_raw(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -2006,7 +1816,7 @@ impl Rt {
     }
 
     async fn dispatch_no_gate(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -2027,7 +1837,7 @@ impl Rt {
 
     #[expect(clippy::too_many_arguments)]
     async fn dispatch_no_gate_internal(
-        &self,
+        self: &Arc<Self>,
         plug_id: &str,
         routine_name: &str,
         args: DispatchArgs,
@@ -2235,7 +2045,9 @@ impl Rt {
                 && existing.waiting_on_dispatch_ids == waiting_on_dispatch_ids;
             let reuse_status_ok = matches!(
                 existing.status,
-                dispatch::DispatchStatus::Waiting | dispatch::DispatchStatus::Active
+                dispatch::DispatchStatus::Waiting
+                    | dispatch::DispatchStatus::AdmissionPending
+                    | dispatch::DispatchStatus::Active
             );
             if can_reuse && reuse_status_ok {
                 warn!(?dispatch_id, "dispatch already exists with same identity");
@@ -2259,7 +2071,7 @@ impl Rt {
                 bundle: bundle_name,
             } => {
                 // let fqk = format!("{workload_id}/{key}");
-                let job_id = format!("{dispatch_id}-{id}", id = Uuid::new_v4().bs58());
+                let job_id = format!("{dispatch_id}-job");
                 let staging_branch_path =
                     daybook_types::doc::BranchPathBuf::from(format!("/tmp/{}", job_id));
 
@@ -2277,8 +2089,6 @@ impl Rt {
             }
         };
         let deets = ActiveDispatchDeets::Wflow {
-            wflow_partition_id: None,
-            entry_id: None,
             plug_id: plug_id.into(),
             routine_name: routine_name.to_string(),
             bundle_name: bundle_name.clone(),
@@ -2291,7 +2101,7 @@ impl Rt {
             status: if is_waiting {
                 dispatch::DispatchStatus::Waiting
             } else {
-                dispatch::DispatchStatus::Active
+                dispatch::DispatchStatus::AdmissionPending
             },
             waiting_on_dispatch_ids,
             on_success_hooks,
@@ -2306,155 +2116,36 @@ impl Rt {
             heads = ?am_utils_rs::serialize_commit_heads(args.heads.as_ref()),
             "dispatch_no_gate_internal prepared dispatch args"
         );
-        if let Err(add_err) = self
-            .dispatch_repo
-            .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
-            .await
-        {
-            let ActiveDispatchDeets::Wflow {
-                wflow_job_id,
-                entry_id,
-                ..
-            } = &active_dispatch.deets;
-            if entry_id.is_some()
-                && let Some(wflow_job_id) = wflow_job_id.as_ref()
-                    && let Err(cancel_err) = self
-                        .wflow_ingress
-                        .cancel_job(
-                            Arc::from(wflow_job_id.as_ref()),
-                            format!(
-                                "rollback scheduling for dispatch {dispatch_id} after dispatch store failure"
-                            ),
-                        )
-                        .await
-                    {
-                        warn!(
-                            %dispatch_id,
-                            %wflow_job_id,
-                            ?cancel_err,
-                            "failed to rollback queued wflow job after dispatch add failure"
-                        );
-                    }
-            return Err(add_err);
-        }
-
-        if !is_waiting {
+        if is_waiting {
+            self.dispatch_repo
+                .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
+                .await?;
+        } else {
             let Some(bundle_man) = plug_man.wflow_bundles.get(bundle_name.as_str()) else {
-                if let Err(cleanup_err) = self
-                    .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        ?cleanup_err,
-                        "failed to mark dispatch failed after missing bundle error"
-                    );
-                }
                 return Err(ferr!(
                     "bundle not found in plug manifest: routine={plug_id}/{routine_name} bundle={bundle_name} key={wflow_key}"
                 ));
             };
-            if let Err(err) = ensure_bundle_workload_running(
-                &self.wcx,
+            ensure_bundle_workload_running(
                 &self.wash_host,
+                &self.wflow_plugin,
                 &self.blobs_repo,
-                plug_id.into(),
+                plug_id.to_owned(),
                 bundle_name.clone(),
                 bundle_man,
             )
-            .await
-            {
-                if let Err(cleanup_err) = self
-                    .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        ?cleanup_err,
-                        "failed to mark dispatch failed after workload start error"
-                    );
-                }
-                return Err(err);
-            }
-
-            let wflow_args_json = {
-                let ActiveDispatchArgs::FacetRoutine(ref facet_args) = active_dispatch.args;
-                facet_args
-                    .wflow_args_json
-                    .clone()
-                    .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON))
-            };
-            let entry_id = match self
-                .wflow_ingress
-                .add_job(
-                    job_id.clone().into(),
-                    wflow_key.as_str(),
-                    wflow_args_json,
-                    None,
-                )
-                .await
-            {
-                Ok(value) => value,
-                Err(err) => {
-                    if let Err(cleanup_err) = self
-                        .dispatch_repo
-                        .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                        .await
-                    {
-                        warn!(
-                            %dispatch_id,
-                            ?cleanup_err,
-                            "failed to mark dispatch failed after job scheduling error"
-                        );
-                    }
-                    return Err(err).wrap_err_with(|| {
-                        format!("error scheduling job for {plug_id}/{routine_name}")
-                    });
-                }
-            };
-            let deets = ActiveDispatchDeets::Wflow {
-                wflow_partition_id: Some(self.local_wflow_part_id.clone()),
-                entry_id: Some(entry_id),
-                plug_id: plug_id.into(),
-                routine_name: routine_name.to_string(),
-                bundle_name: bundle_name.clone(),
-                wflow_key: wflow_key.clone(),
-                wflow_job_id: Some(job_id.clone()),
-            };
-            if let Err(err) = self
-                .dispatch_repo
-                .update_active_deets(&dispatch_id, deets)
-                .await
-            {
-                if let Err(cancel_err) = self
-                    .wflow_ingress
-                    .cancel_job(
-                        Arc::from(job_id.as_str()),
-                        format!("rollback scheduling for dispatch {dispatch_id}"),
-                    )
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        %job_id,
-                        ?cancel_err,
-                        "failed to rollback queued wflow job after dispatch deets update failure"
-                    );
-                }
-                if let Err(cleanup_err) = self
-                    .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        ?cleanup_err,
-                        "failed to mark dispatch failed after deets update error"
-                    );
-                }
-                return Err(err);
+            .await?;
+            // Record the complete intent before admission.  If the process dies
+            // after authority accepts the job, boot can submit the same job id
+            // and complete the pending transition.
+            self.dispatch_repo
+                .add(dispatch_id.clone(), Arc::clone(&active_dispatch))
+                .await?;
+            let admitted = self
+                .reconcile_workflow_dispatch(&dispatch_id, &active_dispatch)
+                .await?;
+            if admitted.status == dispatch::DispatchStatus::Active {
+                self.install_wflow_waiter(dispatch_id.clone(), job_id.clone());
             }
         }
         let mut tags = vec![
@@ -2494,7 +2185,7 @@ impl Rt {
         Ok(dispatch_id)
     }
 
-    pub async fn cancel_dispatch(&self, dispatch_id: &str) -> Res<()> {
+    pub async fn cancel_dispatch(self: &Arc<Self>, dispatch_id: &str) -> Res<()> {
         self.ensure_rt_live()?;
 
         let dispatch = self
@@ -2510,9 +2201,10 @@ impl Rt {
         ) {
             return Ok(());
         }
+        let admission_pending = dispatch.status == dispatch::DispatchStatus::AdmissionPending;
         if matches!(dispatch.status, dispatch::DispatchStatus::Waiting) {
             self.dispatch_repo
-                .complete(dispatch_id.into(), dispatch::DispatchStatus::Cancelled)
+                .complete(dispatch_id.to_string(), dispatch::DispatchStatus::Cancelled)
                 .await?;
             self.release_waiting_dispatches(dispatch_id, false).await?;
             self.progress_repo
@@ -2532,48 +2224,52 @@ impl Rt {
         }
         let marked_now = self.dispatch_repo.mark_cancelled(dispatch_id).await?;
         if !marked_now {
-            debug!(%dispatch_id, "cancel already requested; skipping duplicate cancel");
             return Ok(());
         }
-        match &dispatch.deets {
-            ActiveDispatchDeets::Wflow {
-                wflow_job_id,
-                entry_id,
-                ..
-            } => {
-                let Some(wflow_job_id) = wflow_job_id.as_ref() else {
-                    return Ok(());
-                };
-                if entry_id.is_none() {
-                    return Ok(());
+        let ActiveDispatchDeets::Wflow {
+            wflow_job_id: Some(job_id),
+            ..
+        } = &dispatch.deets
+        else {
+            eyre::bail!("dispatch {dispatch_id} has no workflow job id");
+        };
+        self.progress_repo
+            .add_update(
+                dispatch_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: None,
+                    deets: crate::progress::ProgressUpdateDeets::Status {
+                        severity: crate::progress::ProgressSeverity::Warn,
+                        message: "cancellation requested".to_string(),
+                    },
+                },
+            )
+            .await?;
+        match self
+            .authority
+            .cancel(
+                job_id.clone(),
+                format!("cancel requested for dispatch {dispatch_id}"),
+            )
+            .await
+        {
+            Ok(_) | Err(wflow::CancelError::AlreadyTerminal) => {
+                // Cancellation and admission share the same receipt waiter.
+                // Never run post-processing directly here: that would race a
+                // concurrently installed waiter through merge and hooks.
+                let admitted = self.dispatch_repo.mark_admitted(dispatch_id).await?;
+                if admitted.status == dispatch::DispatchStatus::Active {
+                    self.install_wflow_waiter(dispatch_id.to_string(), job_id.clone());
                 }
-                self.progress_repo
-                    .add_update(
-                        dispatch_id,
-                        crate::progress::ProgressUpdate {
-                            at: jiff::Timestamp::now(),
-                            title: None,
-                            deets: crate::progress::ProgressUpdateDeets::Status {
-                                severity: crate::progress::ProgressSeverity::Warn,
-                                message: "cancellation requested".to_string(),
-                            },
-                        },
-                    )
-                    .await?;
-                self.wflow_ingress
-                    .cancel_job(
-                        Arc::from(wflow_job_id.as_ref()),
-                        format!("cancel requested for dispatch {dispatch_id}"),
-                    )
-                    .await
-                    .wrap_err_with(|| format!("error cancelling dispatch {dispatch_id}"))?;
             }
+            Err(wflow::CancelError::UnknownJob) if admission_pending => {}
+            Err(err) => return Err(ferr!("error cancelling dispatch {dispatch_id}: {err:?}")),
         }
         Ok(())
     }
 
-    /// Wait until a log entry matches the provided condition
-    /// The callback receives (entry_id, log_entry) and should return true when the condition is met
+    /// Wait until a dispatch reaches a terminal state.
     pub async fn wait_for_dispatch_end(
         &self,
         dispatch_id: &str,
@@ -2685,8 +2381,39 @@ fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
     }
 }
 
+async fn send_command_invoke_reply(
+    authority: &wflow::AuthorityRuntime,
+    parent_job: &str,
+    reply: daybook_pdk::InvokeCommandReply,
+) -> Res<()> {
+    match authority
+        .send_message(
+            parent_job,
+            &reply.request_id,
+            serde_json::to_string(&reply).expect(ERROR_JSON),
+        )
+        .await
+    {
+        // Receipt replay can follow the parent's consumption of this reply and
+        // terminal outcome. It no longer has a waiter, so delivery is settled.
+        Ok(_) | Err(SendError::AlreadyTerminal) => Ok(()),
+        Err(err) => Err(ferr!(
+            "error sending command invoke reply {} to parent job {parent_job}: {err:?}",
+            reply.request_id
+        )),
+    }
+}
+
+#[derive(Debug)]
+enum DaybookWflowOutcome {
+    Success { value_json: Arc<str> },
+    WorkflowTerminal { error_json: Arc<str> },
+    Cancelled,
+    AuthorityFailure { message: String },
+}
+
 fn command_invoke_reply_from_result(
-    result: &JobRunResult,
+    result: &DaybookWflowOutcome,
     dispatch_id: &str,
     merged_successfully: bool,
 ) -> (
@@ -2707,43 +2434,28 @@ fn command_invoke_reply_from_result(
         );
     }
     match result {
-        JobRunResult::Success { value_json } => (
+        DaybookWflowOutcome::Success { value_json } => (
             daybook_pdk::InvokeCommandStatus::Succeeded,
             Some(value_json.to_string()),
             None,
         ),
-        JobRunResult::Aborted => (daybook_pdk::InvokeCommandStatus::Cancelled, None, None),
-        JobRunResult::WflowErr(JobError::Terminal { error_json }) => (
+        DaybookWflowOutcome::Cancelled => (daybook_pdk::InvokeCommandStatus::Cancelled, None, None),
+        DaybookWflowOutcome::WorkflowTerminal { error_json } => (
             daybook_pdk::InvokeCommandStatus::Failed,
             None,
             Some(error_json.to_string()),
         ),
-        JobRunResult::WorkerErr(err) => {
+        DaybookWflowOutcome::AuthorityFailure { message } => {
             let error_json = serde_json::json!({
-                "kind": "worker-error",
+                "kind": "authority-error",
                 "dispatch_id": dispatch_id,
-                "error": format!("{err:?}"),
+                "error": message,
             });
             (
                 daybook_pdk::InvokeCommandStatus::Failed,
                 None,
                 Some(error_json.to_string()),
             )
-        }
-        JobRunResult::WflowErr(JobError::Transient { error_json, .. }) => {
-            let wrapped = serde_json::json!({
-                "kind": "transient-exhausted",
-                "dispatch_id": dispatch_id,
-                "error_json": error_json,
-            });
-            (
-                daybook_pdk::InvokeCommandStatus::Failed,
-                None,
-                Some(wrapped.to_string()),
-            )
-        }
-        JobRunResult::StepEffect(_) | JobRunResult::StepWait(_) => {
-            unreachable!("non-terminal result reached terminal invoke reply")
         }
     }
 }
@@ -2793,6 +2505,15 @@ async fn load_bundle_components(
     Ok(components)
 }
 
+async fn build_wash_host(plugins: Vec<Arc<dyn wash_runtime::plugin::HostPlugin>>) -> Res<WashHost> {
+    let engine = wash_runtime::engine::Engine::builder().build().to_eyre()?;
+    let mut host = wash_runtime::host::HostBuilder::new().with_engine(engine);
+    for plugin in plugins {
+        host = host.with_plugin(plugin).to_eyre()?;
+    }
+    host.build().to_eyre()
+}
+
 fn stateless_view_host_interfaces() -> Vec<WitInterface> {
     vec![
         WitInterface::from("townframe:wflow/host"),
@@ -2809,65 +2530,16 @@ fn stateless_view_host_interfaces() -> Vec<WitInterface> {
 }
 
 async fn ensure_bundle_workload_running(
-    wcx: &wflow::Ctx,
     wash_host: &WashHost,
+    wflow_plugin: &Arc<wash_plugin_wflow::WflowPlugin>,
     blobs_repo: &BlobsRepo,
     plug_id: String,
     bundle_name: String,
     bundle_man: &manifest::WflowBundleManifest,
 ) -> Res<String> {
     let workload_id = format!("{plug_id}/{bundle_name}");
-    for key in &bundle_man.keys {
-        use wflow::wflow_core::metastore::*;
-        match wcx.metastore.get_wflow(key).await? {
-            Some(meta) => {
-                if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                    workload_id: meta_workload_id,
-                }) = &meta.service
-                {
-                    if meta_workload_id != &workload_id {
-                        eyre::bail!(
-                            "wflow under key '{key}' in metatstore '{meta:?}' doesn't match workload id '{workload_id}'",
-                        );
-                    }
-                } else {
-                    eyre::bail!(
-                        "wflow under key '{key}' in metatstore '{meta:?}' doesn't match workload type for workload '{workload_id}'",
-                    );
-                }
-            }
-            None => {
-                if let Err(err) = wcx
-                    .metastore
-                    .set_wflow(
-                        &key[..],
-                        &WflowMeta {
-                            key: key.0.clone(),
-                            service: WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                                workload_id: workload_id.clone(),
-                            }),
-                        },
-                    )
-                    .await
-                {
-                    if let Some(meta) = wcx.metastore.get_wflow(key).await? {
-                        if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta {
-                            workload_id: meta_workload_id,
-                        }) = &meta.service
-                        {
-                            if meta_workload_id != &workload_id {
-                                return Err(err);
-                            }
-                        } else {
-                            return Err(err);
-                        }
-                    } else {
-                        return Err(err);
-                    }
-                }
-            }
-        }
-    }
+    // Workload startup invokes the plugin's bind/resolve path, which owns key
+    // collision detection. Never recreate that ownership in a metadata adapter.
     loop {
         let status = wash_host
             .workload_status(wash_runtime::types::WorkloadStatusRequest {
@@ -2899,6 +2571,12 @@ async fn ensure_bundle_workload_running(
                 eyre::bail!("unexpected workload status for {workload_id}: {status:?}");
             }
         }
+    }
+    for key in &bundle_man.keys {
+        eyre::ensure!(
+            wflow_plugin.contains_workflow(key),
+            "wflow key '{key}' was not registered by workload '{workload_id}'"
+        );
     }
     Ok(workload_id)
 }
@@ -3006,6 +2684,154 @@ mod tests {
             big_sync::SqlitePartStore::new(sql, "rt-test", big_sync_core::BuckId::MAX_LEVEL)
                 .await?;
         Ok((std::sync::Arc::new(store), part_id))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_reconciles_admitted_submission_intent() -> Res<()> {
+        let test_cx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
+        crate::test_support::import_and_enable_test_plug(&test_cx).await?;
+
+        let doc_id = test_cx
+            .drawer_repo
+            .add(daybook_types::doc::AddDocArgs {
+                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                // Seed a label so the automatic label processor cannot race the
+                // manually admitted job whose recovery this test exercises.
+                facets: [
+                    (
+                        daybook_types::doc::FacetKey::from(
+                            daybook_types::doc::WellKnownFacetTag::Note,
+                        ),
+                        daybook_types::doc::WellKnownFacet::Note("reconcile".into()).into(),
+                    ),
+                    (
+                        daybook_types::doc::FacetKey::from(
+                            daybook_types::doc::WellKnownFacetTag::LabelGeneric,
+                        ),
+                        daybook_types::doc::WellKnownFacet::LabelGeneric("seed".into()).into(),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+                idempotency_key: None,
+            })
+            .await?;
+        let branch_path = daybook_types::doc::BranchPathBuf::from("main");
+        let heads = test_cx
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, &branch_path)
+            .await?
+            .ok_or_eyre("missing test document branch")?;
+        let plug = test_cx
+            .rt
+            .plugs_repo
+            .get("@daybook/test")
+            .await
+            .ok_or_eyre("test plug was not imported")?;
+        let routine = plug
+            .routines
+            .get("test-label")
+            .ok_or_eyre("test-label routine was not imported")?;
+        let bundle = plug
+            .wflow_bundles
+            .get("plug_test")
+            .ok_or_eyre("plug_test workflow bundle was not imported")?;
+        ensure_bundle_workload_running(
+            &test_cx.rt.wash_host,
+            &test_cx.rt.wflow_plugin,
+            &test_cx.rt.blobs_repo,
+            "@daybook/test".to_string(),
+            "plug_test".to_string(),
+            bundle,
+        )
+        .await?;
+
+        let dispatch_id = "runtime-reconcile-dispatch";
+        let job_id = format!("{dispatch_id}-job");
+        let staging_branch_path = daybook_types::doc::BranchPathBuf::from(format!("/tmp/{job_id}"));
+        let tokens = dispatch::DocFacetTokens {
+            doc_id: doc_id.clone(),
+            branch_path: branch_path.clone(),
+            staging_branch_path: staging_branch_path.clone(),
+            heads: heads.clone(),
+            facet_acl: routine.facet_acl().to_vec(),
+        };
+        let dispatch = Arc::new(dispatch::ActiveDispatch {
+            deets: dispatch::ActiveDispatchDeets::Wflow {
+                plug_id: "@daybook/test".into(),
+                routine_name: "test-label".into(),
+                bundle_name: "plug_test".into(),
+                wflow_key: "test-label".into(),
+                wflow_job_id: Some(job_id.clone()),
+            },
+            args: dispatch::ActiveDispatchArgs::FacetRoutine(dispatch::FacetRoutineArgs {
+                doc_id,
+                branch_path,
+                staging_branch_path,
+                heads,
+                invocation: dispatch::RoutineInvocation::Command,
+                primary_doc: tokens,
+                config_docs: vec![],
+                local_state_acl: vec![],
+                command_invoke_acl_snapshot: vec![],
+                wflow_args_json: None,
+            }),
+            status: dispatch::DispatchStatus::AdmissionPending,
+            waiting_on_dispatch_ids: vec![],
+            on_success_hooks: vec![],
+        });
+        test_cx
+            .dispatch_repo
+            .add(dispatch_id.into(), Arc::clone(&dispatch))
+            .await?;
+
+        // Simulate the crash boundary: authority accepted the deterministic job,
+        // but the durable dispatch transition was not committed yet.
+        test_cx
+            .rt
+            .authority
+            .submit(wflow::Submission::new(job_id.clone(), "test-label", "null"))
+            .await
+            .unwrap();
+        assert!(
+            test_cx
+                .dispatch_repo
+                .get_active(dispatch_id)
+                .await
+                .is_none()
+        );
+
+        test_cx.rt.reconcile_workflow_intents().await?;
+        assert!(
+            test_cx
+                .dispatch_repo
+                .get_active(dispatch_id)
+                .await
+                .is_some()
+        );
+        test_cx
+            .rt
+            .install_wflow_waiter(dispatch_id.into(), job_id.clone());
+        test_cx
+            .rt
+            .wait_for_dispatch_end(dispatch_id, std::time::Duration::from_secs(90))
+            .await?;
+        let result = test_cx.rt.authority.get_result(&job_id).await?;
+        assert!(
+            matches!(&result, Some(Ok(_))),
+            "workflow result: {result:?}"
+        );
+        assert_eq!(
+            test_cx
+                .dispatch_repo
+                .get_any(dispatch_id)
+                .await
+                .unwrap()
+                .status,
+            dispatch::DispatchStatus::Succeeded
+        );
+        test_cx.stop().await?;
+        Ok(())
     }
 
     #[tokio::test]

@@ -92,7 +92,7 @@ const PILOT_API_PACKAGES: &[&str] = &[
     "daybook_ffi",
     "daybook_pdk",
     "daybook_types",
-    "wflow_sdk",
+    "wflow_wdk",
 ];
 
 fn infer_role(name: &str) -> LayerRole {
@@ -101,7 +101,7 @@ fn infer_role(name: &str) -> LayerRole {
             LayerRole::Foundation
         }
         "daybook_types" | "big_sync_core" | "wflow_core" => LayerRole::Domain,
-        "daybook_pdk" | "wflow_sdk" | "daybook_ffi" => LayerRole::Interface,
+        "daybook_pdk" | "wflow_wdk" | "wflow_wdk_wasm" | "daybook_ffi" => LayerRole::Interface,
         "plug_test" | "plug_plabels" | "plug_dayledger" | "test_wflows" => LayerRole::Plugin,
         "daybook_cli" | "btress_sysadmin" => LayerRole::Application,
         "xtask" => LayerRole::Tooling,

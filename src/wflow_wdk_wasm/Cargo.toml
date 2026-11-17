@@ -1,0 +1,19 @@
+[package]
+name = "wflow_wdk_wasm"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs.workspace = true
+wasm_utils_rs.workspace = true
+wflow_wdk.workspace = true
+
+serde.workspace = true
+
+wit-bindgen.workspace = true

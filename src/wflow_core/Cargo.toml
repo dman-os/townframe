@@ -18,23 +18,19 @@ test-harness = []
 path = "lib.rs"
 
 [dependencies]
-#
 # internal
 utils_rs.workspace = true
+wflow_wdk.workspace = true
 
-#
 # encoding
 serde.workspace = true
 serde_json.workspace = true
 
-#
 # async
 futures.workspace = true
 async-trait.workspace = true
 
-#
-# log
-tracing.workspace = true
-
 [dev-dependencies]
-loom.workspace = true
+anyhow.workspace = true
+proptest.workspace = true
+quint-connect.workspace = true

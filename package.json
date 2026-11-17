@@ -1,5 +1,6 @@
 {
   "devDependencies": {
+    "@informalsystems/quint": "0.33.0",
     "syncpack": "^13.0.4",
     "typescript": "~5.9.3"
   },
