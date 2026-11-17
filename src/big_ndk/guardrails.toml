@@ -11,4 +11,6 @@ features = []
 
 [builds.native]
 
+[builds.wasm32-unknown-unknown]
+
 [builds.wasm32-wasip3]

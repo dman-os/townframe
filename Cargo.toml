@@ -64,6 +64,7 @@ members = [
   "./src/clay_dioxus",
   "./src/clay_mdk",
   "./src/clay_rt_wasmtime",
+  "./src/clay_node_egress",
   "./src/clay_rt_wcmp",
   "./src/clay_rt_wcmp_wasmi",
   "./src/clay_guest_session",

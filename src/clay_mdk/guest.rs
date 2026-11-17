@@ -57,7 +57,12 @@ use clay_collection::Transaction;
 use clay_collection::Version;
 use clay_collection::WriteBasis;
 use dioxus::prelude::*;
+use method_core::Unary;
 use serde::de::DeserializeOwned;
+use service_client_core_rs::Client;
+use service_client_core_rs::xrpc::Xrpc;
+use service_core_rs::ClientError;
+use service_core_rs::RequestContext;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -898,4 +903,14 @@ impl From<documents::OperationReceipt> for OperationReceipt {
             },
         }
     }
+}
+
+/// Calls node method `M` over `wasi:http` to `dispatch.local`: the transport a nodule's
+/// `big_ndk::Cx::call` uses, the same [`big_ndk::WasiHttp`] value. The request carries no
+/// credential: the host drops any `authorization` a guest sets and presents the micro's own
+/// capability as the micro's actor.
+pub(crate) async fn call<M: Unary>(input: M) -> Result<M::Output, ClientError<M::Error>> {
+    Client::new(Xrpc(big_ndk::WasiHttp))
+        .call(RequestContext::root(), input)
+        .await
 }

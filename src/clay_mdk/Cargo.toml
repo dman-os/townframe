@@ -26,6 +26,12 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [[example]]
+name = "dispatch"
+path = "dispatch_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["guest"]
+
+[[example]]
 name = "trapper"
 path = "trapper_fixture.rs"
 crate-type = ["cdylib"]
@@ -49,6 +55,15 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [dependencies]
+#
+# internal
+method_core.workspace = true
+service_core_rs.workspace = true
+service_client_core_rs = { workspace = true, optional = true }
+# The guest's `Context::call` is the nodule transport itself: `big_ndk`'s `wasi:http` client to
+# `dispatch.local`, not a second implementation.
+big_ndk = { workspace = true, optional = true }
+
 clay_collection = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "async-spawn", "inter-task-wakeup"] }
 serde_json.workspace = true
@@ -118,7 +133,7 @@ package = ["dep:blake3"]
 # The guest backend: the same `Context` authoring surface over the WIT imports a wasm micro is
 # linked against, the Dioxus guest VirtualDom adapter (GuestDom, WireMutations), and the
 # `export_micro!` entry point.
-guest = ["wit", "contract", "dep:clay_surface", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
+guest = ["wit", "contract", "dep:big_ndk", "dep:service_client_core_rs", "dep:clay_surface", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html", "dep:ciborium", "dep:thiserror"]
 
 [lints]
 workspace = true
