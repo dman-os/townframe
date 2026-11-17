@@ -36,6 +36,10 @@ pub mod state;
 mod items_upstream_tests;
 #[cfg(test)]
 mod oracle_tests;
+#[cfg(test)]
+mod scroll_oracle_tests;
+#[cfg(test)]
+mod scroll_upstream_tests;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

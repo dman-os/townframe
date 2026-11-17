@@ -33,7 +33,7 @@ import { clone } from "./s11a_cases.mjs";
 import { buildOptions } from "./s12a_file_diff.mjs";
 import { METRICS, QUERY_DIFFS_SMALL, buildDiffPool } from "./s12b_layout.mjs";
 
-const LAYOUTS = {
+export const LAYOUTS = {
   tight: { paddingTop: 2, paddingBottom: 3, gap: 1 },
   roomy: { paddingTop: 12, paddingBottom: 20, gap: 16 },
   fractional: { paddingTop: 3.5, paddingBottom: 9.25, gap: 6.5 },
@@ -44,7 +44,7 @@ const SELECTION_CALLBACKS = ["onLineSelected", "onLineSelectionStart", "onLineSe
 // that fire them (the random scenarios do not).
 const CONTEXT_CALLBACKS = ["onLineClick", "onLineEnter", "onGutterUtilityClick", "renderCustomHeader", "renderAnnotation"];
 const CALLBACK_NAMES = ["onSelectedLinesChange", ...SELECTION_CALLBACKS, "onLineClick", "header", "footer"];
-const LISTS = {
+export const LISTS = {
   A: [
     { side: "additions", lineNumber: 0, metadata: 1 },
     { side: "deletions", lineNumber: 3, metadata: 1 },
