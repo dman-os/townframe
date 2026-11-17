@@ -40,7 +40,7 @@ routine, against the same micro interface (survey, "Tiered JS").
 ## 2. Files for toolchains: dpaths, volumes and containers (revised again 2026-11-17)
 
 Withdrawn: the earlier datum-backed `wasi:filesystem` and the working-copy mount. Materializing datums as files
-is **dpaths**, which the nodules lane already owns and has designed. Toolchains and agents get files through
+is **dpaths** (FDR 001, `docs/fdrs/001-dpaths.md` on `feat/dpaths`; pre-`dtxt:` terminology), which the nodules lane owns. Toolchains and agents get files through
 Docker-shaped local resources (operator):
 - a **filesystem volume** (VFS) as a local-state resource;
 - a **sandbox/container** as a named local-state resource, which mounts volumes and dpaths.
@@ -117,7 +117,7 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
 ## Order
 
 1. Seams and the cartridge identity/lineage model, now, alongside the cartridge-authoring work with nodules.
-2. The datum-backed filesystem and language cartridges: they decide the data model.
+2. Language cartridges and the volume/sandbox resource kinds: they decide the data model.
 3. Live-update semantics.
 4. Tooling and the sandbox, once the language is committed. The Android sandbox needs a survey first.
 5. Permissions, after nodules' permission model.
