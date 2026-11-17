@@ -555,7 +555,8 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
     const SECRET: &str = "org.example.alpha.secret";
     const PEEK: &str = "org.example.alpha.peek";
     const KEEP: &str = "org.example.alpha.keep";
-    let mut cartridge = alpha(&[PING, SETUP, PEEK, KEEP], &[], &[]);
+    const SPLIT: &str = "org.example.alpha.split";
+    let mut cartridge = alpha(&[PING, SETUP, PEEK, KEEP, SPLIT], &[], &[]);
     for kind in [LOG, SECRET] {
         cartridge.with_lexicon(lexicon(json!({
             "lexicon": 1,
@@ -563,18 +564,20 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
             "defs": { "main": { "type": "object", "properties": {} } }
         })));
     }
-    cartridge.permbinds.insert(
-        "log".into(),
-        Permbind::Datum(PermbindDatum {
-            nsid: LOG.parse().unwrap(),
-            description: "log".into(),
-            read: Some(Necessity::Optional),
-            write: Some(Necessity::Optional),
-            create: None,
-            delete: None,
-            extra: Default::default(),
-        }),
-    );
+    for (binding, kind) in [("log", LOG), ("secret", SECRET)] {
+        cartridge.permbinds.insert(
+            binding.into(),
+            Permbind::Datum(PermbindDatum {
+                nsid: kind.parse().unwrap(),
+                description: binding.into(),
+                read: Some(Necessity::Optional),
+                write: Some(Necessity::Optional),
+                create: None,
+                delete: None,
+                extra: Default::default(),
+            }),
+        );
+    }
     cartridge.permbinds.insert(
         "drawers".into(),
         Permbind::Drawers(PermbindDrawers {
@@ -599,6 +602,10 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
     uses(&mut cartridge, KEEP, "log", writes());
     uses(&mut cartridge, SETUP, "drawers", reads());
     uses(&mut cartridge, PEEK, "log", reads());
+    // SPLIT reads log and writes secret: the kinds are held per direction.
+    uses(&mut cartridge, SPLIT, "drawers", writes());
+    uses(&mut cartridge, SPLIT, "log", reads());
+    uses(&mut cartridge, SPLIT, "secret", writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
     let present = node.drawers.local().present_id.clone();
     crate::e2e::grant_drawer(
@@ -625,6 +632,7 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
     );
     let reader = held[PING].docs.expect("ping reads log from the drawers");
     let keeper = held[KEEP].docs.expect("keep writes log into the drawers");
+    let split = held[SPLIT].docs.expect("split reads log and writes secret");
 
     // The nodule's actor puts one document of each kind into the granted drawer.
     let actor = node.actor_at(&id(ALPHA)).await;
@@ -726,5 +734,12 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
         write(keeper, &secret_key, SECRET).await.unwrap_err(),
         denied
     );
+    // The split routine reads log, writes secret, and is refused writing log (which it only
+    // reads) and reading secret (which it only writes).
+    let seen = read(split, None).await.unwrap();
+    assert!(seen.datums.contains_key(&log_key));
+    assert!(!seen.datums.contains_key(&secret_key));
+    write(split, &secret_key, SECRET).await.unwrap();
+    assert_eq!(write(split, &log_key, LOG).await.unwrap_err(), denied);
     node.shutdown().await;
 }
