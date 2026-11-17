@@ -162,7 +162,7 @@ How the datums above split into documents. Each split has a reason: one writer p
 
 | Document | Holds | Writers | How many |
 |---|---|---|---|
-| Repo | `gitRepo/<root sha>`, `gitCommit/<sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
+| Repo | `gitRepo/<root sha>`, `gitCommit/<sha>`, and the hook-reported `rewrite/<old sha>`, `rewrittenFrom/<new sha>` | every recorder of the project (commits are content-addressed, so concurrent writes are identical) | one per project; commits shard into more repo docs past ~400 |
 | Commits | `gitCommit/<sha>` for the commits one intxt references, `rewrite/<sha>`, `rewrittenFrom/<sha>` | the commands that add commits to the intxt (`day x intxt add`) | one per intxt, in its drawer; shared by related intxts |
 | Clone | `gitClone/<uuid>`, `gitRef/<clone>/<name>`, `jjOperation`, `jjChange` | that clone's recorder | one per clone |
 | Worktree | `worktree/main` (lists op-log docs) | that worktree's recorder | one per worktree |
@@ -173,6 +173,8 @@ How the datums above split into documents. Each split has a reason: one writer p
 For example, one day of this lane's work (one repo, one clone, one worktree, 30 changed files, a main session and five subagents) is about 10 documents: 1 repo, 1 clone, 1 worktree, 1–2 op-log and 6 session documents, plus the intxt's descriptor, a shared notes document (ADR 041) and the pack (§4).
 
 **Changed 2026-11-17 (operator):** the repository document is the capture drawer's record of every commit the recorder saw. It stays in the capture drawer and is never shipped: an intxt is not given it, because it holds commits the intxt does not reference. An intxt holds the commits it references in its own commits document (above), written by `add`, whose descriptor names it (`commitsDoc/main`). It is a content document, placed in the intxt's drawer, so related intxts share it by adding the same document to their drawers (`day x intxt new --with`).
+
+**Changed 2026-11-17 (operator): rewrites from git's hook.** Capture installs `post-rewrite` in the clones it records (ADR 039 §4); the exact old → new pairs of an amend or a rebase are written to the repository document as `rewrite/<old>` `{successor, how: hook}` and `rewrittenFrom/<new>` `{predecessor, how: hook}`, beside the `gitCommit` datums and never shipped. `add` copies them into the intxt's commits document for a commit it writes whose predecessor (following the pairs back, so repeated amends between two `add`s still reach it) the intxt holds, and a commit with a hook pair is not matched by patch id. The first recorded successor of an old commit stands; when git reports several old commits for one new one (a squash), `rewrittenFrom` names the first listed.
 
 **Readers must expect gaps.** An intxt spread over many documents, some in other drawers, is never guaranteed to arrive whole or at once: an object may be missing from the pack, a session may be private, a pin may name heads not yet synced. Readers render what resolves and mark the rest, as a browser renders a page with a broken image (ADR 036 §1, ADR 035 §2.1).
 
