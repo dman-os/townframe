@@ -154,8 +154,8 @@ impl NodeClient {
                 Ok(lock) => {
                     let booted = Booted::boot(dir, lock, LockRole::Command).await?;
                     let router = big_dispatch::xrpc_router(
-                        booted.node.dispatch.client.clone(),
-                        Anonymous::Acts(Authorization::identity(booted.node.authority.root)),
+                        booted.node().dispatch.client.clone(),
+                        Anonymous::Acts(Authorization::identity(booted.node().authority.root)),
                         Edge::Embedded,
                     )
                     .into_router();
@@ -225,7 +225,7 @@ impl NodeClient {
     #[cfg(test)]
     pub(crate) fn booted_node(&self) -> &big_node::BigNode {
         match &self.transport {
-            Transport::Holder(running) => &running.0.node,
+            Transport::Holder(running) => running.0.node(),
             Transport::Socket(_) => panic!("the node is held by another process"),
         }
     }
@@ -493,7 +493,7 @@ impl NodeClient {
         };
         let envelope = service_utils_rs::Envelope::with_metadata(
             service_utils_rs::RequestContext::root(),
-            Authorization::identity(running.0.node.authority.root).metadata(),
+            Authorization::identity(running.0.node().authority.root).metadata(),
             Invoke::json(operation, parameters.clone(), InvocationContext::default()),
         )
         .with_body(Body::Descriptors(
@@ -501,7 +501,7 @@ impl NodeClient {
         ));
         let response = running
             .0
-            .node
+            .node()
             .dispatch
             .client
             .call_with_metadata(envelope)
@@ -526,14 +526,14 @@ impl NodeClient {
                 // No new client is accepted from here on; the ones already connected finish.
                 #[cfg(unix)]
                 booted
-                    .node
+                    .node()
                     .fd_clients
                     .as_ref()
                     .expect("a holder boots with its descriptor socket attached")
                     .drain()
                     .await?;
                 booted
-                    .node
+                    .node()
                     .unix_clients
                     .as_ref()
                     .expect("a holder boots with its socket attached")

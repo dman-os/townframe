@@ -19,8 +19,8 @@ use crate::interlude::*;
 
 use big_node::BigNode;
 use big_node::Listeners;
-use secrets_rs::SecretStore;
-use sqlite_rs::SqliteRuntime;
+use day_node::HeldNode;
+pub use day_node::NodeSettings;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
 
@@ -77,145 +77,6 @@ pub struct NodeDir {
     socket_dir: PathBuf,
 }
 
-/// What `day node init` records. The identity seed is the node's keyhive identity and, through it, its
-/// node id (ADR 033 section 6: one node key).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeSettings {
-    version: u32,
-    /// 32 bytes, lowercase hex.
-    identity_seed: String,
-    /// The node's network attachment. Absent: the daemon attaches none, so the node neither
-    /// dials nor can be dialed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub peers: Option<PeerSettings>,
-    /// Run the node as a relay (ADR 038 section 3): accept any peer and mirror every drawer the
-    /// node is a member of, which a user grants with `day drawers add-member`. A relay needs the
-    /// network attachment, so this requires a `peers` section.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub relay: bool,
-    /// Development hooks, all off unless set here by hand (a command can't turn one on, since
-    /// the node reads this file at boot).
-    #[serde(default, skip_serializing_if = "DevSettings::is_default")]
-    pub dev: DevSettings,
-}
-
-/// The `dev` section of `node.json`. Keys are snake_case, as the file's other top-level keys are.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DevSettings {
-    /// Lets `day carts dev-takeover` run an installed dev build as another installed cartridge,
-    /// with its actor, data and grants (ADR 045 section 5). Never a side effect of anything
-    /// else: with it off the node refuses to set a takeover and does not honor one found in
-    /// its config document.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub allow_slot_takeover: bool,
-}
-
-impl DevSettings {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
-/// The `peers` section of `node.json`: its presence is what makes the daemon attach the peers
-/// service (the Iroh endpoint, keyed by the node's identity).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct PeerSettings {
-    /// Peers dialed as soon as the daemon starts and redialed with backoff when the connection
-    /// drops, as endpoint tickets (the `address` a node's `getNodeInfo` reports). Which nodes
-    /// belong here is the composition's policy, not the node's: a user node lists its own other
-    /// devices and a relay, a relay lists none.
-    #[serde(default)]
-    pub bootstrap: Vec<String>,
-    /// Bind the loopback interface only, with relays off (see
-    /// `big_node::peers::PeersConfig::loopback_only`).
-    #[serde(default)]
-    pub loopback_only: bool,
-}
-
-impl PeerSettings {
-    /// The id (lowercase hex) of the endpoint a bootstrap ticket names.
-    fn ticket_node_id(ticket: &str) -> Res<String> {
-        let addr = big_node::peers::parse_ticket(ticket)?;
-        Ok(data_encoding::HEXLOWER.encode(addr.id.as_bytes()))
-    }
-
-    /// Adds `ticket`, replacing an entry for the same endpoint (so a node that changed its
-    /// addresses is re-added, not duplicated). Returns whether the list changed.
-    pub fn add_bootstrap(&mut self, ticket: &str) -> Res<bool> {
-        let id = Self::ticket_node_id(ticket)?;
-        for existing in &mut self.bootstrap {
-            if Self::ticket_node_id(existing)? == id {
-                let changed = existing != ticket;
-                ticket.clone_into(existing);
-                return Ok(changed);
-            }
-        }
-        self.bootstrap.push(ticket.to_owned());
-        Ok(true)
-    }
-
-    /// The peers config the daemon boots with: dial the bootstrap list under the default
-    /// mirroring policy, or under the relay policy when the node is a relay.
-    fn peers_config(&self, relay: bool) -> Res<big_node::peers::PeersConfig> {
-        let dial = self
-            .bootstrap
-            .iter()
-            .map(|ticket| big_node::peers::parse_ticket(ticket))
-            .collect::<Res<Vec<_>>>()?;
-        Ok(big_node::peers::PeersConfig {
-            loopback_only: self.loopback_only,
-            policy: if relay {
-                big_node::peers::PolicyChoice::Custom(Arc::new(big_node::peers::RelayPolicy::new(
-                    dial,
-                )))
-            } else {
-                big_node::peers::PolicyChoice::Mirror(big_node::peers::MirrorPolicy { dial })
-            },
-            ..default()
-        })
-    }
-}
-
-impl NodeSettings {
-    const VERSION: u32 = 1;
-
-    pub fn seed(&self) -> [u8; 32] {
-        let bytes = data_encoding::HEXLOWER
-            .decode(self.identity_seed.as_bytes())
-            .expect("node.json holds a hex identity seed");
-        <[u8; 32]>::try_from(bytes.as_slice()).expect("node.json holds a 32 byte identity seed")
-    }
-
-    /// The node's id: the public half of the identity seed, as the repo derives its own peer id.
-    pub fn node_id(&self) -> String {
-        big_node::node_id(&self.seed())
-    }
-
-    /// The nodes a reference to something this node holds can name as holders (the `via=` hint,
-    /// ADR 035): this node, then the peers its daemon dials at start (its other devices and the
-    /// relay it syncs through, `peers.bootstrap`). Read from `node.json`, so it names what the
-    /// node is configured to sync with, not whoever is connected at the moment.
-    pub fn via_keys(&self) -> Res<Vec<big_cabinet_core::dmeta::MultibaseKey>> {
-        let own = big_node::node_id(&self.seed());
-        let own = data_encoding::HEXLOWER.decode(own.as_bytes())?;
-        let bootstrap = self.peers.iter().flat_map(|peers| &peers.bootstrap);
-        std::iter::once(Ok(own))
-            .chain(bootstrap.map(|ticket| {
-                let addr = big_node::peers::parse_ticket(ticket)?;
-                Ok(addr.id.as_bytes().to_vec())
-            }))
-            .map(|key: Res<Vec<u8>>| {
-                Ok(big_cabinet_core::dmeta::MultibaseKey::try_from(
-                    key?.as_slice(),
-                )?)
-            })
-            .collect()
-    }
-}
-
 /// The state of the daemon's socket file, learned by connecting to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -244,10 +105,6 @@ impl NodeDir {
 
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    fn settings_path(&self) -> PathBuf {
-        self.root.join("node.json")
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -295,86 +152,21 @@ impl NodeDir {
     }
 
     pub fn is_initialized(&self) -> bool {
-        self.settings_path().is_file()
+        NodeSettings::exists(&self.root)
     }
 
-    /// Creates the directory and `node.json` with a fresh identity. The settings file is created
-    /// exclusively, so an existing node is refused here and never overwritten, whoever else is
-    /// initializing the same directory at the same time.
+    /// Creates the directory and `node.json` with a fresh identity; an existing node is refused.
     pub fn init(&self) -> Res<NodeSettings> {
-        use rand::RngCore;
-        std::fs::create_dir_all(&self.root)
-            .wrap_err_with(|| format!("creating {}", self.root.display()))?;
-        let mut seed = [0_u8; 32];
-        rand::rng().fill_bytes(&mut seed);
-        let settings = NodeSettings {
-            version: NodeSettings::VERSION,
-            identity_seed: data_encoding::HEXLOWER.encode(&seed),
-            peers: None,
-            relay: false,
-            dev: DevSettings::default(),
-        };
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(self.settings_path())
-            .wrap_err_with(|| format!("creating {}", self.settings_path().display()))?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&settings)?)?;
-        Ok(settings)
+        NodeSettings::create(&self.root)
     }
 
     pub fn settings(&self) -> Res<NodeSettings> {
-        let path = self.settings_path();
-        let bytes = std::fs::read(&path).wrap_err_with(|| {
-            format!(
-                "reading {}; is there a node here? (`day node init`)",
-                path.display()
-            )
-        })?;
-        let settings: NodeSettings = serde_json::from_slice(&bytes)
-            .wrap_err_with(|| format!("parsing {}", path.display()))?;
-        eyre::ensure!(
-            settings.version == NodeSettings::VERSION,
-            "{} is version {}, this day understands version {}",
-            path.display(),
-            settings.version,
-            NodeSettings::VERSION
-        );
-        eyre::ensure!(
-            !settings.relay || settings.peers.is_some(),
-            "{}: a relay needs a `peers` section (it is reached over the network)",
-            path.display()
-        );
-        if let Some(peers) = &settings.peers {
-            // Fail on a bad ticket whichever command reads the settings, not when a daemon
-            // happens to boot it.
-            peers
-                .peers_config(settings.relay)
-                .wrap_err_with(|| format!("{}: bootstrap list", path.display()))?;
-        }
-        Ok(settings)
+        NodeSettings::load(&self.root)
     }
 
-    /// Rewrites `node.json` with `change` applied. The new file is written beside it and renamed
-    /// over it, so a reader (a daemon booting) sees the old settings or the new, never half.
-    /// Whether the node is serving does not matter: settings are read once, at boot.
+    /// Rewrites `node.json` with `change` applied (see [`NodeSettings::update`]).
     pub fn update_settings<T>(&self, change: impl FnOnce(&mut NodeSettings) -> Res<T>) -> Res<T> {
-        let mut settings = self.settings()?;
-        let out = change(&mut settings)?;
-        let staging = self.root.join("node.json.new");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&staging)
-            .wrap_err_with(|| format!("creating {}", staging.display()))?;
-        std::io::Write::write_all(&mut file, &serde_json::to_vec_pretty(&settings)?)?;
-        file.sync_all()?;
-        std::fs::rename(&staging, self.settings_path())
-            .wrap_err_with(|| format!("replacing {}", self.settings_path().display()))?;
-        Ok(out)
+        NodeSettings::update(&self.root, change)
     }
 
     /// Creates `run/` (the daemon's log) and the socket directory, each owner-only.
@@ -599,9 +391,7 @@ impl std::fmt::Display for LockHeld {
 
 /// A node booted in this process, with everything it must stop in order.
 pub struct Booted {
-    pub node: BigNode,
-    stop: big_node::StopToken,
-    secrets: Arc<SecretStore>,
+    held: HeldNode,
     // Held to the end: the node's storage is this process's alone while it is booted.
     _lock: NodeLock,
 }
@@ -613,64 +403,27 @@ impl Booted {
     /// must not dial or hold the node's endpoint. The lock announces it is serving once the
     /// socket accepts connections.
     pub async fn boot(dir: &NodeDir, mut lock: NodeLock, role: LockRole) -> Res<Self> {
-        let settings = dir.settings()?;
         let listeners = Listeners {
             unix_socket: Some(dir.socket_path()?),
             ..default()
         };
-        let peers = match role {
-            LockRole::Daemon => settings
-                .peers
-                .as_ref()
-                .map(|peers| peers.peers_config(settings.relay))
-                .transpose()?,
-            LockRole::Command => None,
-        };
-        let runtime = Arc::new(SqliteRuntime::new(default()));
-        let bindings = big_node::Bindings::in_directory(&runtime, dir.root(), None).await?;
-        let secrets = Arc::new(SecretStore::boot().await?);
-        let config = big_node::Config {
-            repo: big_repo::Config {
-                node_identity_seed: settings.seed(),
-                storage: bindings.repo,
-                scope_key: "day".into(),
-                hidden_parts: default(),
-                automerge_frontier_group_scope: default(),
-                causal_checkpoint_group_scope: default(),
-                group_part_group_scope: default(),
-            },
-            sql: bindings.sql,
-            schemas: Arc::new(big_cabinet::SchemaRepo::open(std::iter::empty())?),
-            secrets: Arc::clone(&secrets),
-            index_concurrency: std::num::NonZeroUsize::new(2).expect("two is not zero"),
-            blob_storage: bindings.blobs,
+        let held = HeldNode::boot(
+            dir.root(),
+            &dir.settings()?,
             listeners,
-            peers,
-            allow_slot_takeover: settings.dev.allow_slot_takeover,
-        };
-        let (node, stop) = BigNode::boot(config).await?;
+            role == LockRole::Daemon,
+        )
+        .await?;
         lock.serving()?;
-        Ok(Self {
-            node,
-            stop,
-            secrets,
-            _lock: lock,
-        })
+        Ok(Self { held, _lock: lock })
+    }
+
+    pub fn node(&self) -> &BigNode {
+        &self.held.node
     }
 
     pub async fn stop(self) -> Res<()> {
-        let Self {
-            node,
-            stop,
-            secrets,
-            _lock,
-        } = self;
-        drop(node);
-        stop.stop().await?;
-        // The node's config held the other reference and went with the boot.
-        Arc::try_unwrap(secrets)
-            .unwrap_or_else(|_| panic!("the stopped node still holds the secret store"))
-            .stop()
-            .await
+        let Self { held, _lock } = self;
+        held.stop().await
     }
 }

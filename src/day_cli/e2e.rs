@@ -100,7 +100,7 @@ mod library {
                     &dir,
                     |booted| {
                         ready_tx
-                            .send(booted.node.peers.clone())
+                            .send(booted.node().peers.clone())
                             .map_err(|_| eyre::eyre!("test is gone"))
                     },
                     async {
@@ -177,7 +177,7 @@ mod library {
         let (_tmp, dir) = new_node();
         let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
         let booted = Booted::boot(&dir, lock, LockRole::Command).await.unwrap();
-        let peer = booted.node.repo.local_peer_id().to_bytes32().unwrap();
+        let peer = booted.node().repo.local_peer_id().to_bytes32().unwrap();
         assert_eq!(
             dir.settings().unwrap().node_id(),
             data_encoding::HEXLOWER.encode(&peer)
@@ -592,7 +592,7 @@ mod library {
     async fn a_daemon_dials_its_bootstrap_peer_and_both_report_the_connection() {
         let loopback = |dir: &NodeDir| {
             dir.update_settings(|settings| {
-                settings.peers = Some(crate::context::PeerSettings {
+                settings.peers = Some(day_node::PeerSettings {
                     loopback_only: true,
                     ..default()
                 });
