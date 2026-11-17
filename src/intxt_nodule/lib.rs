@@ -1,4 +1,4 @@
-//! intxt's nodule: the handlers of `createIntxt` and `addToIntxt`, whose
+//! intxt's nodule: the handlers of `createIntxt`, `addToIntxt` and `summarizeIntxts`, whose
 //! request, output and error types are `intxt_core::methods`. `intxt_nodule_guest` exports
 //! [`Intxt`] as the wasm component, and this crate's native tests serve the same value, so both
 //! backends run one implementation. The crate has no host-only code and builds for both targets
@@ -19,6 +19,7 @@
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
@@ -33,6 +34,11 @@ use intxt_core::methods::AddedToIntxt;
 use intxt_core::methods::CreateIntxt;
 use intxt_core::methods::IntxtCreated;
 use intxt_core::methods::IntxtError;
+use intxt_core::methods::IntxtSummary;
+use intxt_core::methods::IntxtsSummarized;
+use intxt_core::methods::MAX_SUMMARIZED;
+use intxt_core::methods::SummarizeIntxts;
+use intxt_core::methods::SummaryStatus;
 use method_core::ContextError;
 use method_core::Method;
 use serde_json::Value;
@@ -51,6 +57,9 @@ impl big_ndk::Nodule for Intxt {
         }
         if nsid == AddToIntxt::XRPC.nsid {
             return Some(big_ndk::invoke::<Self, AddToIntxt>(self, cx, body).await);
+        }
+        if nsid == SummarizeIntxts::XRPC.nsid {
+            return Some(big_ndk::invoke::<Self, SummarizeIntxts>(self, cx, body).await);
         }
         None
     }
@@ -154,6 +163,94 @@ impl big_ndk::Handler<AddToIntxt> for Intxt {
     async fn call(&self, cx: &big_ndk::Cx, input: AddToIntxt) -> Result<AddedToIntxt, IntxtError> {
         let AddToIntxt { intxt, part } = input;
         Ok(caller(cx)?.add_part(&intxt, &part).await?.into())
+    }
+}
+
+impl big_ndk::Handler<SummarizeIntxts> for Intxt {
+    /// One read of each drawer's descriptor document (the drawer's id), sequentially and in
+    /// order. A drawer's failure is its own `unreadable` result, with the reason, and never the
+    /// call's.
+    async fn call(
+        &self,
+        cx: &big_ndk::Cx,
+        input: SummarizeIntxts,
+    ) -> Result<IntxtsSummarized, IntxtError> {
+        if input.drawers.len() > MAX_SUMMARIZED {
+            return Err(IntxtError::Invalid(format!(
+                "{} drawers named, at most {MAX_SUMMARIZED}",
+                input.drawers.len()
+            )));
+        }
+        let caller = caller(cx)?;
+        let mut results = Vec::with_capacity(input.drawers.len());
+        for drawer in input.drawers {
+            results.push(summarize(&caller, drawer).await);
+        }
+        Ok(IntxtsSummarized { results })
+    }
+}
+
+/// The summary of `drawer`: found when its descriptor carries the intxt marker, not found when
+/// it does not, unreadable when a read fails or the descriptor of an intxt is not what
+/// `createIntxt` writes.
+async fn summarize(
+    caller: &Caller<big_ndk::HttpHandle>,
+    drawer: big_cabinet_core::drawer::protocol::DrawerId,
+) -> IntxtSummary {
+    let summary = |status: SummaryStatus| IntxtSummary {
+        drawer: drawer.clone(),
+        status,
+        title: None,
+        description: None,
+        entries: None,
+        updated: None,
+        link: None,
+        reason: None,
+    };
+    let unreadable = |reason: String| IntxtSummary {
+        reason: Some(reason),
+        ..summary(SummaryStatus::Unreadable)
+    };
+    let key = |tag: &str| DatumKey::new(tag, b"main").expect("`main` is a valid slot");
+    let keys = [
+        key(generic::Intxt::ID),
+        key(generic::Title::ID),
+        key(generic::Body::ID),
+    ];
+    let mut read = match caller
+        .read_datums(&drawer, Some(keys.iter().cloned().collect()))
+        .await
+    {
+        Ok((_, read)) => read,
+        Err(error) => return unreadable(error.to_string()),
+    };
+    // The marker decides what the drawer is; the rest of the descriptor is then required.
+    match read.remove(&keys[0]) {
+        Some(DatumRead::Accepted { .. }) => {}
+        Some(DatumRead::Absent { .. }) | None => return summary(SummaryStatus::NotFound),
+        Some(other) => return unreadable(format!("the intxt marker is not readable: {other:?}")),
+    }
+    let mut accepted = |key: &DatumKey| match read.remove(key) {
+        Some(DatumRead::Accepted { value, version, .. }) => Ok((value, version.clock)),
+        other => Err(format!("{key} is not readable: {other:?}")),
+    };
+    let described = (|| {
+        let (title, title_clock) = accepted(&keys[1])?;
+        let (body, body_clock) = accepted(&keys[2])?;
+        let title: generic::Title = serde_json::from_value(title).map_err(|e| e.to_string())?;
+        let body: generic::Body = serde_json::from_value(body).map_err(|e| e.to_string())?;
+        Ok::<_, String>((title, body, title_clock.max(body_clock)))
+    })();
+    match described {
+        Ok((title, body, clock)) => IntxtSummary {
+            title: Some(title.title),
+            description: title.description,
+            entries: Some(u32::try_from(body.order.len()).unwrap_or(u32::MAX)),
+            updated: Some(clock),
+            link: Some(generic::Intxt::reference(&drawer).to_string()),
+            ..summary(SummaryStatus::Found)
+        },
+        Err(reason) => unreadable(reason),
     }
 }
 
