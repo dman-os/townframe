@@ -9,6 +9,7 @@ use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
 use clay_store::OrderedStore;
+#[cfg(feature = "blitz")]
 use dayframe_composition::Application;
 pub use dayframe_composition::CompositionRuntime;
 #[cfg(feature = "blitz")]
