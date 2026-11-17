@@ -117,8 +117,12 @@ async function main() {
       allSchemeKeys.add(tokenName);
       lines.push(`  --scheme-color-${tokenName}: ${toOklch(value)};`);
     }
+    // A scheme also applies to the root element when a theme root of that mode is in the
+    // document, so the document's canvas can take the theme's page background (tokens.css).
     const selector =
-      schemeName === "light" ? ":root,\n.light" : `.${schemeName}`;
+      schemeName === "light"
+        ? ":root,\n.light"
+        : `.${schemeName},\n:root:has(.df-theme.${schemeName})`;
     schemeVarBlocks.push(`${selector} {\n${lines.join("\n")}\n}`);
   }
 

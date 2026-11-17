@@ -1457,7 +1457,8 @@
   --scheme-color-surface-container-high: oklch(93.182% 0.011 297.617);
   --scheme-color-surface-container-highest: oklch(91.44% 0.011 303.101);
 }
-.light-medium-contrast {
+.light-medium-contrast,
+:root:has(.df-theme.light-medium-contrast) {
   --scheme-color-primary: oklch(33.94% 0.093 273.224);
   --scheme-color-surface-tint: oklch(48.629% 0.09 276.331);
   --scheme-color-on-primary: oklch(100% 0 0);
@@ -1508,7 +1509,8 @@
   --scheme-color-surface-container-high: oklch(89.809% 0.01 299.225);
   --scheme-color-surface-container-highest: oklch(86.233% 0.011 303.087);
 }
-.light-high-contrast {
+.light-high-contrast,
+:root:has(.df-theme.light-high-contrast) {
   --scheme-color-primary: oklch(29.817% 0.095 272.119);
   --scheme-color-surface-tint: oklch(48.629% 0.09 276.331);
   --scheme-color-on-primary: oklch(100% 0 0);
@@ -1559,7 +1561,8 @@
   --scheme-color-surface-container-high: oklch(87.079% 0.011 297.598);
   --scheme-color-surface-container-highest: oklch(82.742% 0.011 297.583);
 }
-.dark {
+.dark,
+:root:has(.df-theme.dark) {
   --scheme-color-primary: oklch(83.193% 0.085 278.485);
   --scheme-color-surface-tint: oklch(83.193% 0.085 278.485);
   --scheme-color-on-primary: oklch(31.698% 0.094 272.665);
@@ -1610,7 +1613,8 @@
   --scheme-color-surface-container-high: oklch(28.339% 0.011 285.684);
   --scheme-color-surface-container-highest: oklch(32.737% 0.011 285.805);
 }
-.dark-medium-contrast {
+.dark-medium-contrast,
+:root:has(.df-theme.dark-medium-contrast) {
   --scheme-color-primary: oklch(89.776% 0.051 281.66);
   --scheme-color-surface-tint: oklch(83.193% 0.085 278.485);
   --scheme-color-on-primary: oklch(27.171% 0.096 271.203);
@@ -1661,7 +1665,8 @@
   --scheme-color-surface-container-high: oklch(31.949% 0.011 285.786);
   --scheme-color-surface-container-highest: oklch(36.229% 0.01 285.878);
 }
-.dark-high-contrast {
+.dark-high-contrast,
+:root:has(.df-theme.dark-high-contrast) {
   --scheme-color-primary: oklch(95.487% 0.023 288.667);
   --scheme-color-surface-tint: oklch(83.193% 0.085 278.485);
   --scheme-color-on-primary: oklch(0% 0 0);
@@ -1814,9 +1819,27 @@
   *, *::before, *::after {
     box-sizing: border-box;
   }
+
+  /* The document is the scroller of an app that lays out in the page, so what shows past its
+     content (the touchpad's overscroll, a not-yet-rendered gap) is the root element's canvas:
+     it takes the theme's page background and color scheme, not the browser's white. The
+     theme's variables live on `.df-theme` and the scheme's on its mode class, so the root reads
+     them through `:has` (the scheme blocks of material.css name this selector too). */
+  :root:has(.df-theme) {
+    background-color: var(--df-color-canvas);
+  }
+
+  :root:has(.df-theme.light) {
+    color-scheme: light;
+  }
+
+  :root:has(.df-theme.dark) {
+    color-scheme: dark;
+  }
 }
 @layer theme {
-  .df-theme {
+  .df-theme,
+  :root:has(.df-theme) {
     --df-color-canvas: var(--scheme-color-background);
     --df-color-surface: var(--scheme-color-surface-container-low);
     --df-color-surface-raised: var(--scheme-color-surface-container);
