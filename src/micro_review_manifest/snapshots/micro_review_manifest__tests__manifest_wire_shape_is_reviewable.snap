@@ -14,10 +14,33 @@ publications:
     kind: presentation
     contract: ~
 requires: []
-configuration_requests: []
+configuration_requests:
+  - binding: review
+    facets:
+      - tag: org.example.dayframe.review.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
 collection_contracts: []
-collection_requests: []
-contributions: []
+collection_requests:
+  - binding: panels
+    contract: org.example.dayframe.layout.panels
+    access: write
+    necessity: optional
+contributions:
+  - id: layout-panel
+    binding: panels
+    key: dayframe.review
+    payload:
+      content:
+        $attachment: 0
+      title: Review
+    attachments:
+      - index: 0
+        publication: view
 interimMethods:
   - org.example.intxt.summarizeIntxts
   - org.example.daybook.docs.readDatums
+  - org.example.daybook.docs.pollDatums
