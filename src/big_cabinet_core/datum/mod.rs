@@ -9,7 +9,6 @@
 //! The `datum` macro in the `macros` crate does the refusing, because refusing means reading the
 //! item's attributes and a derive cannot do that.
 
-mod content_hash;
 mod grammar;
 pub mod operation;
 mod value;
@@ -35,8 +34,6 @@ mod universe;
 #[cfg(all(test, feature = "schemars"))]
 mod e2e;
 
-pub use content_hash::ContentHash;
-pub use content_hash::ContentHashError;
 pub use datum_core::DatumMember;
 pub use datum_core::DatumShape;
 pub use datum_core::Extra;
@@ -93,8 +90,6 @@ pub use codec::DeclaredReference;
 pub use codec::F64;
 #[cfg(feature = "schemars")]
 pub use codec::KEYWORD;
-#[cfg(feature = "schemars")]
-pub use codec::ReferenceTarget;
 #[cfg(feature = "schemars")]
 pub use codec::Stored;
 #[cfg(feature = "schemars")]
