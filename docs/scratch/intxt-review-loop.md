@@ -284,3 +284,19 @@ What the stress test asks of Clay, beyond the needs table:
   (wasmi runtime, 6 hide/show rounds). It takes 59 s alone on the mothership, 75 s (passing on retry) and 111 s in
   #80's pre-merge CI, and it timed out at 120 s under load. Not caused by the main merge. Instrument where the time
   goes before tuning anything.
+- **CSS prefix is `ct` (claytxt), not `df` (operator, 2026-11-17).** Rename `--df-*` tokens, `df-*` utilities and
+  classes, `x/design-tokens.ts` output and the compiled CSS (about 808 occurrences in 16 files). This is a
+  mechanical Luna lane after #80 merges, since it touches #80's files.
+- **#80 review follow-ups (the operator accepted the drafted replies, 2026-11-17)**, each its own PR after #80:
+  - Kit ADR plus `docs/design-language/` entries, with the KIT-100..109 rules that conflict with the guidelines
+    listed for a ruling.
+  - Styling contract: runtime values as CSS custom properties, stable part names, cascade layers with user CSS
+    last; Rust-baked skins as a poor fit for end-user customization. Skins become a `const` beside the headless
+    part, with no styled wrapper modules.
+  - Keyboard model: modern-web-guidance rules, roving focus, focus restore, a command and shortcut registry.
+  - `ListRow` folded into the tile column when it lands.
+  - Check upstream wasi-libc/wit-bindgen for #884 and task context without `std` before dropping the MDK hooks.
+  - Ask whether a systemd-style lifecycle ADR (inspectable graph, restart policies) is wanted.
+  - Delete the sidecar manifest emitters once hosts load micros from the cartridge catalog.
+- **Sandbox design handed to nodules (operator, 2026-11-17):** they explore fzakaria's trynix and related work as
+  the sandbox base and take over that thread. claytxt stays out unless it touches micros or Clay.
