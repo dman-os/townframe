@@ -135,20 +135,22 @@ impl Node {
     /// The micro's own actor, under the `micros` subsystem actor, as the host opens one per
     /// installed micro (Clay on the node §2).
     async fn open_micro_actor(&self, name: &str) -> OpenedActor {
-        let open = |parent, path: &str| {
+        let open = |parent, path: &str, rights| {
             self.authority.client.call(
                 RequestContext::root(),
                 OpenActor {
                     parent,
                     path: path.into(),
-                    rights: Rights::USE,
+                    rights,
                 },
             )
         };
-        let micros = open(self.authority.root, "micros")
+        // A subsystem actor holds every right, as `big_node` opens `nodules`; a micro's own
+        // actor can only be used.
+        let micros = open(self.authority.root, "micros", Rights::all())
             .await
             .expect("the micros subsystem actor");
-        open(micros.capability, &format!("micros/{name}"))
+        open(micros.capability, &format!("micros/{name}"), Rights::USE)
             .await
             .expect("the micro's actor")
     }
