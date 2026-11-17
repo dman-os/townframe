@@ -199,11 +199,12 @@ type Assemble = fn() -> Result<Value, MethodLexiconError>;
 /// Every built-in method with the function that assembles its Lexicon. One list, so a method
 /// added to a service is one line here; a router that registers a built-in operation missing from
 /// it refuses to start (`big_dispatch::ServiceProvider::register`), so a new method cannot go
-/// unlisted unnoticed.
-pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
+/// unlisted unnoticed. Each is `(nsid, owning crate, assemble)`: the owner is the crate that
+/// defines the method type, which is how the wire-surface snapshot attributes a Lexicon.
+pub fn builtin_methods() -> impl Iterator<Item = (&'static str, &'static str, Assemble)> {
     builtin_list()
         .iter()
-        .map(|(method, assemble, _)| (method.nsid, *assemble))
+        .map(|(method, owner, assemble, _)| (method.nsid, *owner, *assemble))
 }
 
 /// The built-in method `nsid` names, as its service declares it: what a runtime reads the
@@ -211,11 +212,16 @@ pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
 pub fn builtin_method(nsid: &str) -> Option<method_core::XrpcMethod> {
     builtin_list()
         .iter()
-        .find(|(method, _, _)| method.nsid == nsid)
-        .map(|(method, _, _)| *method)
+        .find(|(method, _, _, _)| method.nsid == nsid)
+        .map(|(method, _, _, _)| *method)
 }
 
-type Builtin = (method_core::XrpcMethod, Assemble, fn() -> MethodSchemas);
+type Builtin = (
+    method_core::XrpcMethod,
+    &'static str,
+    Assemble,
+    fn() -> MethodSchemas,
+);
 
 /// [`builtin_methods`] with each method's schemas too, which the tests read the error enums from.
 fn builtin_list() -> &'static [Builtin] {
@@ -223,6 +229,10 @@ fn builtin_list() -> &'static [Builtin] {
         macro_rules! group {
                 ($($method:path),* $(,)?) => { vec![$((
                     <$method as Method>::XRPC,
+                    std::any::type_name::<$method>()
+                        .split("::")
+                        .next()
+                        .expect("a type name starts with its crate"),
                     lexicon::<$method> as Assemble,
                     <$method as MethodSchema>::schemas as fn() -> MethodSchemas,
                 )),*] };

@@ -91,6 +91,11 @@ repos:
         language: system
         entry: cargo x guardrails api --all --check
         pass_filenames: false
+      - id: guardrails-wire
+        name: check the wire-surface snapshot (published Lexicons and sidecars) and how each evolved
+        language: system
+        entry: cargo x guardrails wire
+        pass_filenames: false
       - id: guardrails-doctor
         name: check build flags and toolchain configuration
         language: system

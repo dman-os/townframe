@@ -19765,6 +19765,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wire_surfaces"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet",
+ "big_cabinet_core",
+ "big_node",
+ "clap",
+ "method_lexicon",
+ "serde_json",
+ "tempfile",
+ "utils_rs",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
