@@ -661,7 +661,11 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
     let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
     let slot = Rc::new(RefCell::new(None));
     let factory = SurfaceFactory(Rc::new({
-        let (slot, replies, host_calls) = (slot.clone(), replies.clone(), host_calls.clone());
+        let (slot, replies, host_calls) = (
+            Rc::clone(&slot),
+            Rc::clone(&replies),
+            Rc::clone(&host_calls),
+        );
         move |_mount, writer| {
             writer.apply(&[
                 Mutation::PushId(0),
@@ -672,7 +676,7 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
                 Mutation::Pop,
             ])?;
             *slot.borrow_mut() = Some(writer.clone());
-            let (replies, host_calls) = (replies.clone(), host_calls.clone());
+            let (replies, host_calls) = (Rc::clone(&replies), Rc::clone(&host_calls));
             Ok(SurfaceSession::new(move |event| {
                 if event.name == ELEMENT_REPLY {
                     replies
@@ -741,7 +745,7 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
         "mounted",
         dioxus_core::Event::new(
             Rc::new(dioxus_html::PlatformEventData::new(Box::new(
-                RecordingElement(host_calls.clone()),
+                RecordingElement(Rc::clone(&host_calls)),
             ))) as Rc<dyn std::any::Any>,
             false,
         ),
@@ -784,10 +788,10 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
     let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
     let slot = Rc::new(RefCell::new(None));
     let factory = SurfaceFactory(Rc::new({
-        let (slot, replies) = (slot.clone(), replies.clone());
+        let (slot, replies) = (Rc::clone(&slot), Rc::clone(&replies));
         move |_mount, writer| {
             *slot.borrow_mut() = Some(writer);
-            let replies = replies.clone();
+            let replies = Rc::clone(&replies);
             Ok(SurfaceSession::new(move |event| {
                 if event.name == ELEMENT_REPLY {
                     replies
@@ -838,7 +842,7 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
             "mounted",
             dioxus_core::Event::new(
                 Rc::new(dioxus_html::PlatformEventData::new(Box::new(
-                    RecordingElement(host_calls.clone()),
+                    RecordingElement(Rc::clone(&host_calls)),
                 ))) as Rc<dyn std::any::Any>,
                 false,
             ),
@@ -959,7 +963,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
     let parent_events = Rc::new(RefCell::new(Vec::new()));
     let (reference, _child_surface) = components
         .publish_surface(&child, {
-            let child_events = child_events.clone();
+            let child_events = Rc::clone(&child_events);
             move |_, writer| {
                 writer.apply(&[
                     Mutation::PushId(0),
@@ -970,7 +974,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
                     Mutation::AppendChildren(1),
                     Mutation::Pop,
                 ])?;
-                let child_events = child_events.clone();
+                let child_events = Rc::clone(&child_events);
                 Ok(SurfaceSession::new(move |event| {
                     child_events.borrow_mut().push(event.name);
                     EventResponse::default()
@@ -980,7 +984,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
         .unwrap();
     let (parent, _parent_surface) = components
         .publish_surface(&layout, {
-            let parent_events = parent_events.clone();
+            let parent_events = Rc::clone(&parent_events);
             move |_, writer| {
                 writer.apply(&[
                     Mutation::PushId(0),
@@ -993,7 +997,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
                     Mutation::AppendChildren(1),
                     Mutation::Pop,
                 ])?;
-                let parent_events = parent_events.clone();
+                let parent_events = Rc::clone(&parent_events);
                 Ok(SurfaceSession::new(move |event| {
                     parent_events.borrow_mut().push(event.name);
                     EventResponse::default()
