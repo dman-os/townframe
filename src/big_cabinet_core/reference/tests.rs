@@ -499,9 +499,15 @@ fn doc_via_hints_round_trip_sorted_and_canonical() {
     let both = DocReference::new(doc())
         .pinned([head(1)])
         .with_via([high.clone(), low.clone()]);
-    let text = format!("dtxt:doc:{DOC}?heads={}&via={low}|{high}", head_text(&head(1)));
+    let text = format!(
+        "dtxt:doc:{DOC}?heads={}&via={low}|{high}",
+        head_text(&head(1))
+    );
     assert_eq!(both.to_string(), text);
-    let swapped = format!("dtxt:doc:{DOC}?via={high}|{low}&heads={}", head_text(&head(1)));
+    let swapped = format!(
+        "dtxt:doc:{DOC}?via={high}|{low}&heads={}",
+        head_text(&head(1))
+    );
     let parsed = DocReference::parse(&swapped).unwrap();
     assert_eq!(parsed.to_string(), text);
     assert_eq!(parsed.heads(), [head(1)]);
@@ -517,7 +523,12 @@ fn doc_via_is_a_hint_that_identity_ignores() {
     let state = std::collections::hash_map::RandomState::new();
     assert_eq!(state.hash_one(&bare), state.hash_one(&hinted));
     // The pin still distinguishes, with or without a hint.
-    assert_ne!(hinted, DocReference::new(doc()).pinned([head(1)]).with_via([node_key()]));
+    assert_ne!(
+        hinted,
+        DocReference::new(doc())
+            .pinned([head(1)])
+            .with_via([node_key()])
+    );
     assert_eq!(hinted.via(), [node_key()]);
     assert!(bare.via().is_empty());
 }
@@ -551,8 +562,10 @@ fn malformed_via_hints_are_refused() {
     ));
     // `datum` references take no `via` for now.
     assert!(
-        DatumReference::parse(&format!("dtxt:datum:{DOC}/org.example.note/main?via={good}"))
-            .is_err()
+        DatumReference::parse(&format!(
+            "dtxt:datum:{DOC}/org.example.note/main?via={good}"
+        ))
+        .is_err()
     );
 }
 
