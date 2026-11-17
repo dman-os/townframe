@@ -17,6 +17,7 @@ use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
 use service_core_rs::xrpc::NODULE_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_CONFIG_DOC_HEADER;
+use service_core_rs::xrpc::NODULE_BLOBS_CAPABILITY_HEADER;
 use service_core_rs::xrpc::NODULE_DRAWER_CAPABILITY_HEADER;
 use service_core_rs::xrpc::bearer_header_value;
 use service_utils_rs::HttpMetadata;
@@ -75,6 +76,14 @@ pub fn delivery_headers(
     if let Some(capability) = capabilities.drawers {
         headers.insert(
             NODULE_DRAWER_CAPABILITY_HEADER,
+            Authorization::id_text(capability)
+                .parse()
+                .expect("a capability id is a valid header value"),
+        );
+    }
+    if let Some(capability) = capabilities.blobs {
+        headers.insert(
+            NODULE_BLOBS_CAPABILITY_HEADER,
             Authorization::id_text(capability)
                 .parse()
                 .expect("a capability id is a valid header value"),
