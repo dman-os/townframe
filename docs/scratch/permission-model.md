@@ -27,7 +27,8 @@ nodules lane 2026-11-17).
    - The CLI has a pending-requests queue the person can accept or decline.
    - Missing authority is a conventional error that propagates: when cartridge X's micro calls
      cartridge Y's routine and Y lacks a grant, X can tell the person "Y needs permission for this".
-3. **"Only this time" lasts until the current boot ends.**
+3. **"Only this time" lasts until the current boot ends.** A boot is one run of the app and its
+   node, from start to exit, not a restart of the machine.
 4. **`atRuntime` as a permbind property goes away.** Any permbind can be requested at runtime under
    items 1–2; claytxt's §5 one-shot-versus-remember question is answered by items 2–3.
 5. **Permbinds must also cover network access**: talking to an origin (fetch). Rich external
@@ -191,7 +192,14 @@ Access can be requested while the cartridge runs, not only at install (operator 
 - **One queue, every surface.** Pending requests are node state the shell shows, the micro's host
   shows, and the CLI lists (`day grants pending`, `accept`, `decline`). A person answers it once,
   wherever they are.
-- **"Only this time"** is a grant that ends with the current boot. "Allow" writes the grant datum.
+- **"Only this time"** is a grant that ends with the current boot: this run of the app and its node
+  (operator, 2026-11-17), not a machine restart. "Allow" writes the grant datum.
+- **A declined request stays declined for the boot** (operator, 2026-11-17): the same permbind is
+  not asked again until the app and node next start, so a routine that retries cannot prompt in a
+  loop.
+- **Requests are explicit.** Nothing files a request implicitly on a failed call (operator,
+  2026-11-17): a micro or routine may decide to go on without the access, so only it can decide to
+  ask.
 - **Who waits.** A micro awaits the answer (a future from its host service). A workflow waits as
   workflows do. A plain routine files the request and fails its call at once with the
   missing-authority error below; the caller retries once the person has answered.
@@ -393,11 +401,16 @@ Answered by the operator's review: `#datum` narrows inside granted drawers (§2)
 states the handle part it needs beside its definition in `method_core` (§6.2); the authoring surface
 is the existing manifest code behind a builder (§2).
 
+Answered 2026-11-17 (operator, second pass):
+- Drawer "types" are out of scope; drawer labels (sensitive and the like) come later and will be
+  what a permbind names beyond a drawer id.
+- A declined request stays declined until the app and node next start (§4.2).
+- Requests are explicit only; the MDK never files one on a failed call (§4.2, §5).
+- Invisible requesters: a pending panel for permission requests and other human-in-the-loop work,
+  plus notifications (§5).
+
 Still open:
-1. The vocabulary that names a drawer in a permbind beyond a drawer id: drawer "types" and "the
-   drawers of cartridge Y" (§2) need a definition of what a drawer type is.
-2. How long a declined runtime request suppresses the same request (§4.2), so a routine retrying
-   does not ask the person in a loop.
+1. Where a UI sink checks its handle (micro question 1 below): undecided.
 
 Micro side [claytxt]:
 
@@ -407,6 +420,5 @@ access question by item 8, and the nodule `atRuntime` question by §4.2 (one que
    call the host makes for the micro? This decides how `<img>` of a blob works on Wry and Blitz.
 2. **Embedding as a `#method` reach** (§3 asymmetry 4): is a presentation an operation of Y's, for the permbind and
    the analysis, or does it need its own kind?
-3. **Explicit requests only** (§5): should the MDK ever file a request on a failed call, or always leave it to the
-   micro?
-4. **Prompts for invisible requesters** (§5): pending list only, or a system notification on Android and desktop?
+3. **Explicit requests only** (§5): answered, explicit only.
+4. **Prompts for invisible requesters** (§5): answered, a pending panel for human-in-the-loop work plus notifications.
