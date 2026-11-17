@@ -1,0 +1,12 @@
+version = 1
+role = "tooling"
+dependency_reason = "Renders every wire shape the corpus publishes (datum and method Lexicons, sidecars) as checked-in data, and judges how a change evolves them; lives outside xtask so xtask keeps compiling fast."
+allowed_dependencies = ["big_cabinet", "big_cabinet_core", "big_node", "method_lexicon", "utils_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

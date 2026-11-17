@@ -302,7 +302,7 @@ impl BigNode {
         // Boxed: booting every service inline makes this future large enough (in debug builds); a caller awaiting it, such as a test that reboots a node, overflows its stack.
 
         let boot: Res<Self> = Box::pin(async {
-            let schemas = Arc::new(config.schemas.with_groups(node_schema_groups())?);
+            let schemas = Arc::new(config.schemas.with_groups(schema_groups().into_iter().map(|(_, group)| group))?);
             let node_id = node_id(&config.repo.node_identity_seed);
             let authority = boot_authority(&config, &node_id, &mut stop).await?;
             let (docs_actor, docs_namespace) = open_actor(&authority, "documents").await?;
@@ -596,14 +596,19 @@ async fn boot_cartridges(
     Ok(cartridges)
 }
 
-/// The schema groups the node's own services declare: blobs, nodules and the cartridge registry.
-fn node_schema_groups() -> impl Iterator<Item = big_cabinet::SchemaRegistrationGroup<'static>> {
-    [
-        big_blobs::schema::registration(),
-        big_nodule::schema_group(),
-    ]
-    .into_iter()
-    .chain(big_cartridges::schema_groups())
+/// The schema groups the node's own services declare, each with the crate that owns it: blobs,
+/// nodules and the cartridge registry. The owner names the group in the wire-surface snapshot.
+pub fn schema_groups() -> Vec<(&'static str, big_cabinet::SchemaRegistrationGroup<'static>)> {
+    let mut groups = vec![
+        ("big_blobs", big_blobs::schema::registration()),
+        ("big_nodule", big_nodule::schema_group()),
+    ];
+    groups.extend(
+        big_cartridges::schema_groups()
+            .into_iter()
+            .map(|group| ("big_cartridges", group)),
+    );
+    groups
 }
 
 /// Opens the drawer access policy the docs service consults, as the drawers actor. The

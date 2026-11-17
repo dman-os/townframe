@@ -64,6 +64,12 @@ pub enum GuardrailsCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Check or bless the wire-surface snapshot (every published Lexicon and sidecar) and judge
+    /// how each Lexicon evolved against the checked-in copy.
+    Wire {
+        #[arg(long)]
+        bless: bool,
+    },
     /// Record a source-bound validation receipt around a command execution.
     Record {
         #[arg(long)]
@@ -169,6 +175,7 @@ pub fn dispatch(root: &Path, cmd: GuardrailsCmd) -> Res<()> {
             check: _,
             json,
         } => contracts::api(&root, package.as_deref(), all, bless, json)?,
+        GuardrailsCmd::Wire { bless } => contracts::wire(&root, bless)?,
         GuardrailsCmd::Record { output, command } => validation::record(&root, &output, &command)?,
         GuardrailsCmd::Verify { receipt } => validation::verify(&root, &receipt)?,
         GuardrailsCmd::Doctor { json } => validation::doctor(&root, json)?,
