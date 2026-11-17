@@ -11,8 +11,10 @@ path = "lib.rs"
 #
 # internal
 clay_mdk = { workspace = true, features = ["contract"] }
+micro_layout_manifest = { workspace = true }
 #
 # external
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
