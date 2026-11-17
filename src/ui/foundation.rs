@@ -39,7 +39,7 @@ pub fn ThemeRoot(family: String, mode: ThemeMode, children: Element) -> Element 
     rsx! {
         FoundationStyles {}
         div {
-            class: "df-theme theme-{family} {mode.class_name()}",
+            class: "ct-theme theme-{family} {mode.class_name()}",
             {children}
         }
     }

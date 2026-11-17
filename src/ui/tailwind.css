@@ -18,4 +18,4 @@
    arbitrary property and would emit an invalid rule. */
 @source not inline("[wasi:http/handler@0.3.0]");
 
-@source inline("df-button-default df-button-secondary df-button-outline df-button-ghost df-button-destructive df-button-sm df-button-md df-button-lg");
+@source inline("ct-button-default ct-button-secondary ct-button-outline ct-button-ghost ct-button-destructive ct-button-sm ct-button-md ct-button-lg");

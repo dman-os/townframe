@@ -11,14 +11,14 @@
  * (INTERACTION-007).
  */
 @theme {
-  --animate-fade-in: kit-fade-in var(--df-motion-duration-fade)
-    var(--df-motion-easing-enter) both;
+  --animate-fade-in: kit-fade-in var(--ct-motion-duration-fade)
+    var(--ct-motion-easing-enter) both;
   --animate-slide-in-leading: kit-slide-in-leading
-    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
+    var(--ct-motion-duration-enter) var(--ct-motion-easing-enter) both;
   --animate-slide-in-trailing: kit-slide-in-trailing
-    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
-  --animate-slide-in-bottom: kit-slide-in-bottom var(--df-motion-duration-enter)
-    var(--df-motion-easing-enter) both;
+    var(--ct-motion-duration-enter) var(--ct-motion-easing-enter) both;
+  --animate-slide-in-bottom: kit-slide-in-bottom var(--ct-motion-duration-enter)
+    var(--ct-motion-easing-enter) both;
 
   @keyframes kit-fade-in {
     from {
