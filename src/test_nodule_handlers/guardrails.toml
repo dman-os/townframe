@@ -1,0 +1,9 @@
+version = 1
+role = "plugin"
+dependency_reason = "the test nodule's handlers, written on the nodule development kit and shared by the wasm guest and the native test harness"
+allowed_dependencies = ["big_ndk", "method_core", "service_client_core_rs", "service_core_rs"]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip3]

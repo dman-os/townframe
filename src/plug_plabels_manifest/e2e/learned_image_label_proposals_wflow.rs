@@ -141,7 +141,7 @@ async fn add_blob_image_doc(
         length_octets: image_bytes.len() as u64,
         digest: daybook_core::blobs::blob_id_to_digest_str(blob_hash.clone()),
         inline: None,
-        urls: Some(vec![format!("db+blob:///{blob_hash}")]),
+        urls: Some(vec![format!("dtxt:blob:{blob_hash}")]),
     };
 
     test_cx

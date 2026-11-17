@@ -18,7 +18,6 @@ use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteReceipt;
-use big_repo::StorageConfig;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStore;
@@ -30,8 +29,18 @@ use std::collections::BTreeSet;
 
 mod blob_discovery;
 mod blobs;
+mod cartridges;
+mod costs;
+mod dispatch;
+mod harness;
+mod ladder;
+mod listeners;
+mod many_nodes;
+mod network;
 mod nodule_wasm;
-mod plugs;
+mod peers;
+mod relay;
+mod stress;
 
 const NOTE: &str = "org.example.note";
 
@@ -61,19 +70,13 @@ fn schemas() -> Arc<SchemaRepo> {
     )
 }
 
-async fn secrets() -> SecretStore {
+async fn secrets() -> Arc<SecretStore> {
     let keyring = keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
-    SecretStore::boot_with_store(keyring).await.unwrap()
+    Arc::new(SecretStore::boot_with_store(keyring).await.unwrap())
 }
 
-fn config<'a>(
-    secrets: &'a SecretStore,
-    runtime: &Arc<SqliteRuntime>,
-    sql: Database,
-    storage: StorageConfig,
-) -> Config<'a> {
+fn config(secrets: Arc<SecretStore>, sql: Database, storage: big_repo::Storage) -> Config {
     Config {
-        sqlite_runtime: Arc::clone(runtime),
         repo: big_repo::Config {
             node_identity_seed: [47; 32],
             storage,
@@ -87,23 +90,26 @@ fn config<'a>(
         schemas: schemas(),
         secrets,
         index_concurrency: NonZeroUsize::new(2).unwrap(),
-        blob_storage: big_blobs::Storage::Memory,
-        nodule_operations: big_nodule_core::dispatch::DispatchScope {
+        blob_storage: big_blobs::Storage::memory().unwrap(),
+        nodule_operations: big_dispatch_core::DispatchScope {
             authorities: ["org.example".to_owned()].into(),
             ..Default::default()
         },
+        listeners: Default::default(),
+        peers: None,
     }
 }
 
 async fn capability(node: &BigNode, scope: DocScope) -> CapId {
     node.docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope,
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -203,7 +209,7 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     let docs = Arc::downgrade(&node.docs.host);
     let drawers = Arc::downgrade(&node.drawers.host);
     let nodules = Arc::downgrade(&node.nodules.host);
-    let plugs = Arc::downgrade(&node.plugs.host);
+    let cartridges = Arc::downgrade(&node.cartridges.host);
     let policy = Arc::downgrade(&node.drawer_access);
     let authority = Arc::downgrade(&node.authority.host);
     let authority_service = Arc::downgrade(&node.authority.service);
@@ -216,7 +222,7 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     assert_eq!(indexes.live_tasks(), 0);
     drop(indexes);
     assert!(nodules.upgrade().is_none());
-    assert!(plugs.upgrade().is_none());
+    assert!(cartridges.upgrade().is_none());
     assert!(docs.upgrade().is_none());
     assert!(drawers.upgrade().is_none());
     assert!(policy.upgrade().is_none());
@@ -231,10 +237,9 @@ async fn memory_boot_owns_and_joins_every_component() {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
     let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     ))
     .await
     .unwrap();
@@ -258,22 +263,19 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     let secrets = secrets().await;
     let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
     let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Disk {
-            path: repo_path.clone(),
-        },
+        big_repo::Storage::in_directory(&runtime, &repo_path.clone(), None).unwrap(),
     ))
     .await
     .unwrap();
     let identity = (
         node.repo.local_peer_id(),
         node.authority.node_issuer.clone(),
-        node.docs_actor.actor_id,
-        node.docs_actor.public_key.clone(),
-        node.drawers_actor.actor_id,
-        node.drawers_actor.public_key.clone(),
+        node.docs_actor.actor.actor_id,
+        node.docs_actor.actor.public_key.clone(),
+        node.drawers_actor.actor.actor_id,
+        node.drawers_actor.actor.public_key.clone(),
         node.docs_namespace.namespace_id,
         node.drawers_namespace.namespace_id,
     );
@@ -314,10 +316,9 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     );
     drop(persisted);
     let (node, stop) = BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Disk { path: repo_path },
+        big_repo::Storage::in_directory(&runtime, &repo_path, None).unwrap(),
     ))
     .await
     .unwrap();
@@ -325,10 +326,10 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
         (
             node.repo.local_peer_id(),
             node.authority.node_issuer.clone(),
-            node.docs_actor.actor_id,
-            node.docs_actor.public_key.clone(),
-            node.drawers_actor.actor_id,
-            node.drawers_actor.public_key.clone(),
+            node.docs_actor.actor.actor_id,
+            node.docs_actor.actor.public_key.clone(),
+            node.drawers_actor.actor.actor_id,
+            node.drawers_actor.actor.public_key.clone(),
             node.docs_namespace.namespace_id,
             node.drawers_namespace.namespace_id,
         ),
@@ -365,10 +366,9 @@ async fn failed_docs_recovery_unwinds_the_partial_node() {
         .await
         .unwrap();
     let error = match BigNode::boot(config(
-        &secrets,
-        &runtime,
+        Arc::clone(&secrets),
         sql.clone(),
-        StorageConfig::Memory,
+        big_repo::Storage::memory(&runtime).unwrap(),
     ))
     .await
     {

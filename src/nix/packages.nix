@@ -73,10 +73,6 @@
           "sha256-LoNc7m7mRsK/lEOfibaji+ya+PXk5GOkZzSpFQ1GSho=";
         "git+https://github.com/dman-os/iroh-blobs?rev=b3d641036c807b30d9fc62fd22a83801a38386d3#b3d641036c807b30d9fc62fd22a83801a38386d3" =
           "sha256-9S3fDD2eMHVECWvnX32I+RnPUNd2lRp3S6+TPZRBYGw=";
-        "git+https://github.com/dman-os/keyhive?rev=1063446711dcca3848430044f239830dc948290c#1063446711dcca3848430044f239830dc948290c" =
-          "sha256-wCLRhV509AWZzI2IHlyChesSTSkV3exI57iuwqVdoHs=";
-        "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" =
-          "sha256-zogYtiZrpVSQF6D4t6bvDBshjvvODzImh9Cs3aQn9/I=";
       };
       # wash-runtime comes from our fork (dman-os/wasmCloud, branch
       # townframe-changes); its pinned commit is on a branch, so it needs no

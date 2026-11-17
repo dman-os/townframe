@@ -19,6 +19,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 /// One clause of a document predicate.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "clause",
@@ -99,6 +100,7 @@ impl Anchor {
 ///
 /// A predicate with no anchor is not an error: it is a request only a node-wide authority may
 /// make, and the service answers `Denied` for anyone else.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(
     tag = "reason",
@@ -245,6 +247,7 @@ impl Predicate {
 ///
 /// `All` is spelled out rather than left to an empty set, so a selection built by accident
 /// cannot silently widen to every datum of every matching document.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "selection",

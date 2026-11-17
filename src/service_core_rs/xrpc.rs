@@ -4,14 +4,120 @@ use http::StatusCode;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const TRACEPARENT_HEADER: &str = "traceparent";
 pub const AUTHORIZATION_HEADER: &str = "authorization";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 pub const TIMEOUT_HEADER: &str = "x-timeout-ms";
+/// Carries the nodule's own dispatch capability as a bare id, set by the host on every delivery
+/// to a nodule that was granted operations.
+pub const NODULE_CAPABILITY_HEADER: &str = "x-nodule-capability";
 pub const DOMAIN_ERROR_FIELD: &str = "operationError";
 pub const DOMAIN_ERROR_STATUS: StatusCode = StatusCode::BAD_REQUEST;
+/// The `Authorization` scheme of every XRPC hop, including its separating space.
+const BEARER_SCHEME: &str = "Bearer ";
+
+/// The `Authorization` header value presenting `token` as a bearer credential.
+pub fn bearer_header_value(token: &str) -> String {
+    format!("{BEARER_SCHEME}{token}")
+}
+
+/// The token of an `Authorization: Bearer <token>` header value; the scheme is matched case
+/// insensitively (RFC 9110). `None` for any other scheme. This is the one parser of the scheme,
+/// shared by every XRPC server and by guests.
+pub fn bearer_token(value: &str) -> Option<&str> {
+    value
+        .get(..BEARER_SCHEME.len())
+        .filter(|scheme| scheme.eq_ignore_ascii_case(BEARER_SCHEME))
+        .map(|_| &value[BEARER_SCHEME.len()..])
+}
+
+/// The name of a method error as atproto declares it: the outer variant of the error enum,
+/// which is the entry in the method Lexicon's `errors` list. serde's externally tagged form
+/// carries it as the single key of an object, or as the string of a unit variant. The variant
+/// that carries [`method_core::ContextError`] (`Context`) is how the common errors reach every
+/// method's enum and the Lexicon lists none of them per method, so it is named by the common
+/// error inside (`DeadlineExceeded`, `Unauthenticated`, ...), as the refusals dispatch answers
+/// before a method runs are. A shape that is neither is an error type serde does not tag
+/// externally, which method errors must.
+pub fn error_name(error: &Value) -> &str {
+    match error {
+        Value::String(name) => name,
+        Value::Object(variant) if variant.len() == 1 => {
+            let (name, payload) = variant.iter().next().expect("one entry");
+            if name == CONTEXT_VARIANT {
+                return error_name(payload);
+            }
+            name
+        }
+        other => panic!("method errors are externally tagged enums, found {other}"),
+    }
+}
+
+/// The variant of every method error enum that wraps [`method_core::ContextError`].
+const CONTEXT_VARIANT: &str = "Context";
+
+/// Encodes a typed method error as the standard XRPC error envelope: `error` is the error's
+/// variant name ([`error_name`]), `message` its `Display` text, and the serialized error travels
+/// under [`DOMAIN_ERROR_FIELD`], answered with [`DOMAIN_ERROR_STATUS`]. A non-serializable error
+/// is a programming error in the error type.
+pub fn domain_error_envelope<E>(error: &E) -> XrpcErrorEnvelope
+where
+    E: Serialize + std::fmt::Display,
+{
+    let value = serde_json::to_value(error).expect("method errors must serialize");
+    XrpcErrorEnvelope::new(
+        error_name(&value).to_owned(),
+        Some(error.to_string()),
+        BTreeMap::from([(DOMAIN_ERROR_FIELD.to_owned(), value)]),
+    )
+    .expect("method error detail is not reserved")
+}
+
+/// Parses the headers every XRPC hop carries into the call's context and metadata; the inverse
+/// of `service_client_core_rs::xrpc::write_context_headers`. The budget is the relative
+/// `x-timeout-ms`, started from this hop's own clock.
+pub fn request_context(
+    headers: &HeaderMap,
+) -> Result<(crate::RequestContext, crate::HttpMetadata), String> {
+    let mut context = crate::RequestContext::root();
+    if let Some(value) = header_string(headers, REQUEST_ID_HEADER)? {
+        context.request_id = value
+            .parse()
+            .map_err(|_| "x-request-id must be a UUID".to_owned())?;
+    }
+    context.trace = crate::TraceContext::from_headers(
+        header_string(headers, TRACEPARENT_HEADER)?.as_deref(),
+        header_string(headers, "tracestate")?.as_deref(),
+    );
+    if let Some(value) = header_string(headers, TIMEOUT_HEADER)? {
+        let millis = value
+            .parse::<u64>()
+            .map_err(|_| "x-timeout-ms must be an unsigned integer".to_owned())?;
+        context = context.with_time_budget(Duration::from_millis(millis));
+    }
+    Ok((
+        context,
+        crate::HttpMetadata {
+            authorization: header_string(headers, AUTHORIZATION_HEADER)?,
+            idempotency_key: header_string(headers, IDEMPOTENCY_KEY_HEADER)?,
+        },
+    ))
+}
+
+fn header_string(headers: &HeaderMap, name: &str) -> Result<Option<String>, String> {
+    headers
+        .get(name)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| format!("{name} must be valid UTF-8 HTTP text"))
+        })
+        .transpose()
+}
 
 impl crate::ResponseMetadata {
     pub fn write_headers(&self, headers: &mut HeaderMap) {

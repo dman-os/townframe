@@ -174,7 +174,7 @@ mod tests {
 
     fn facet_ref(id: &str) -> FacetRef {
         FacetRef {
-            r#ref: format!("db+facet:///doc/{id}/main").parse().unwrap(),
+            r#ref: format!("dtxt:datum:doc/{id}/main").parse().unwrap(),
             heads: vec!["head".into()],
         }
     }

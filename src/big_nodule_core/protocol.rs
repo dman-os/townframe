@@ -1,21 +1,20 @@
 //! The nodule management protocol (ADR 027 §4, §6): the wire contract between the node-side
 //! nodule service and whoever administers it.
 //!
-//! Every operation names its caller by an [`Authorization`]: either the operator's own identity
+//! Every operation names its caller by the request's `Authorization: Bearer` credential (the
+//! envelope's HTTP metadata, `Authorization::from_metadata`), never by a body field; a request
+//! without one fails with `ContextError::Unauthenticated`. The credential is either the operator's own identity
 //! capability, or a handle this domain minted through [`MintNoduleCapability`] that carries a
 //! [`NoduleScope`]. Identity is not access by itself: an arbitrary actor presenting its identity
 //! is refused, only the operator's identity and scoped handles narrowed from it administer
 //! nodules. Nothing here serves a handler; a record reports readiness so a caller can see that
 //! execution is unavailable rather than be told a dispatch succeeded.
 
-use crate::dispatch::DispatchScope;
 use crate::inventory::ArtifactState;
 use crate::inventory::FilledBy;
 use crate::inventory::InventoryError;
-use crate::inventory::Readiness;
 use crate::providers::RequestStatus;
 use big_cabinet_core::authority::AuthorityServiceError;
-use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -23,138 +22,139 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::Revision;
-use big_plugs_core::Version;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Revision;
+use big_cartridges_core::Version;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::Readiness;
 use indexmap::IndexMap;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use service_core_rs::ContextError;
-use service_core_rs::Operation;
-use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-/// What a minted management handle may do. `plugs` names the packages the holder may read, and
+/// What a minted management handle may do. `cartridges` names the packages the holder may read, and
 /// whose enablement and settings it may change. `admit` additionally lets it install or upgrade
-/// those same packages and no others, so a handle can never introduce a plug id it was not minted
+/// those same packages and no others, so a handle can never introduce a cartridge id it was not minted
 /// for. The operator's identity is unrestricted without a scope.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NoduleScope {
     #[serde(default)]
     pub admit: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub plugs: BTreeSet<PlugId>,
+    pub cartridges: BTreeSet<CartridgeId>,
 }
 
 impl NoduleScope {
     pub fn covers(&self, other: &Self) -> bool {
-        (self.admit || !other.admit) && other.plugs.is_subset(&self.plugs)
+        (self.admit || !other.admit) && other.cartridges.is_subset(&self.cartridges)
     }
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MintNoduleCapability {
-    pub authorization: Authorization,
     pub scope: NoduleScope,
     pub rights: Rights,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdmitNodule {
-    pub authorization: Authorization,
-    pub plug: Plug,
+    pub cartridge: Cartridge,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigureNodule {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub settings: IndexMap<String, Value>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleEnabled {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub enabled: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleDrawerGrants {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub drawers: BTreeMap<DrawerId, DrawerAccess>,
 }
 
 /// Replaces the operations the nodule's actor may invoke through dispatch. The service mints one
 /// dispatch capability for the actor from it (see [`NoduleOperationGrantStatus`]); an empty scope
 /// revokes it.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleOperationGrants {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub operations: DispatchScope,
 }
 
-/// Confirms that the nodule's request `binding` is to be served by the plug that now provides its
+/// Confirms that the nodule's request `binding` is to be served by the cartridge that now provides its
 /// contract, replacing the one the operator consented to earlier (ADR 028 §3). Refused unless the
 /// request is held at `ProviderChanged`, so a confirmation cannot be applied to a state the
 /// operator did not see.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmNoduleResolution {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub binding: String,
 }
 
-/// Sets, or with `by` absent clears, the node-local substitution of slot `plug_id`: the plug `by`
-/// (installed, and holding the slot's authority or none) is run *as* `plug_id` (ADR 028 §3). The
-/// caller must manage both plugs, since `by`'s code runs with the slot's grants.
+/// Sets, or with `by` absent clears, the node-local substitution of slot `cartridge_id`: the cartridge `by`
+/// (installed, and holding the slot's authority or none) is run *as* `cartridge_id` (ADR 028 §3). The
+/// caller must manage both cartridges, since `by`'s code runs with the slot's grants.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetNoduleSubstitution {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub by: Option<PlugId>,
+    pub by: Option<CartridgeId>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UninstallNodule {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetNodule {
-    pub authorization: Authorization,
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListNodules {
-    pub authorization: Authorization,
-}
+pub struct ListNodules {}
 
 /// The durable actor an installed nodule acts as. Its capability is not here: the service holds
 /// it, and a caller that could read it could sign as the nodule.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleActor {
@@ -164,6 +164,7 @@ pub struct NoduleActor {
 }
 
 /// Desired and effective state of one local drawer grant binding for a nodule.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleGrantStatus {
@@ -176,6 +177,7 @@ pub struct NoduleGrantStatus {
 /// Desired and effective state of the dispatch capability a nodule's operation grants mint.
 /// `desired` is the configured grants bounded by the manifest: only operations the nodule
 /// requests (see [`crate::Nodule::bind_operations`]).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleOperationGrantStatus {
@@ -190,6 +192,7 @@ pub struct NoduleOperationGrantStatus {
 }
 
 /// How a nodule's initializers have fared in its current start (see [`NoduleRecord::init`]).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleInitStatus {
@@ -207,18 +210,27 @@ pub struct NoduleInitStatus {
     pub waiting_on: Option<String>,
 }
 
+/// The result of [`ListNodules`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoduleList {
+    pub nodules: Vec<NoduleRecord>,
+}
+
 /// One installed nodule as the management surface reports it.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoduleRecord {
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<Version>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<Revision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NoduleActor>,
-    /// The plug whose code runs in this slot under a substitution. `version` and `revision`
+    /// The cartridge whose code runs in this slot under a substitution. `version` and `revision`
     /// above are then the filler's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filled_by: Option<FilledBy>,
@@ -233,7 +245,7 @@ pub struct NoduleRecord {
     /// Absent when the nodule has no operation grants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operations: Option<NoduleOperationGrantStatus>,
-    /// Where each operation request stands, by binding, and the lockfile entry (provider plug
+    /// Where each operation request stands, by binding, and the lockfile entry (provider cartridge
     /// id, version and Lexicon revision) it is pinned to. Node-local and durable; empty while
     /// the nodule is disabled or refused. Data and schema requests are not listed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -242,13 +254,16 @@ pub struct NoduleRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init: Option<NoduleInitStatus>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub observed_heads: Vec<ChangeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<Vec<String>>"))]
     pub applied_heads: Option<Vec<ChangeHash>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum NodulesError {
     #[error("request context failed: {0}")]
@@ -263,36 +278,26 @@ pub enum NodulesError {
     Storage(String),
     #[error("the package was refused: {0}")]
     Rejected(String),
-    #[error("nodule for plug `{0}` is not installed")]
-    UnknownPlug(PlugId),
-    #[error("nodule for plug `{0}` declares no config schema")]
-    NoConfigSchema(PlugId),
+    #[error("nodule for cartridge `{0}` is not installed")]
+    UnknownCartridge(CartridgeId),
+    #[error("nodule for cartridge `{0}` declares no config schema")]
+    NoConfigSchema(CartridgeId),
 }
 
 /// Inventory refusals cross the wire as text: the caller gets the reason, not the
-/// inventory's error tree, except the two it can act on by naming a different plug.
+/// inventory's error tree, except the two it can act on by naming a different cartridge.
 impl From<InventoryError> for NodulesError {
     fn from(error: InventoryError) -> Self {
         match error {
-            InventoryError::UnknownPlug(id) => NodulesError::UnknownPlug(id),
+            InventoryError::UnknownCartridge(id) => NodulesError::UnknownCartridge(id),
             InventoryError::NoConfigSchema(id) => NodulesError::NoConfigSchema(id),
             other => NodulesError::Rejected(other.to_string()),
         }
     }
 }
 
-macro_rules! operations {
-    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
-        impl Operation for $request {
-            type Output = $output;
-            type Error = NodulesError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.nodules.", $nsid))
-                    .with_schemas(stringify!($output), stringify!(NodulesError));
-        }
-    )*};
-}
-operations! {
+method_core::methods! {
+    error = NodulesError, nsid_prefix = "org.example.daybook.nodules.";
     MintNoduleCapability => Capability, procedure, "mintNoduleCapability";
     AdmitNodule => NoduleRecord, procedure, "admitNodule";
     ConfigureNodule => NoduleRecord, procedure, "configureNodule";
@@ -303,7 +308,7 @@ operations! {
     SetNoduleSubstitution => NoduleRecord, procedure, "setNoduleSubstitution";
     UninstallNodule => (), procedure, "uninstallNodule";
     GetNodule => NoduleRecord, query, "getNodule";
-    ListNodules => Vec<NoduleRecord>, query, "listNodules";
+    ListNodules => NoduleList, query, "listNodules";
 }
 
 declare_service_protocol! {

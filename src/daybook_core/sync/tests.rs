@@ -504,7 +504,7 @@ async fn long_af_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
                         length_octets: payload.len() as u64,
                         digest: hash.clone(),
                         inline: None,
-                        urls: Some(vec![format!("db+blob:///{hash}")]),
+                        urls: Some(vec![format!("dtxt:blob:{hash}")]),
                     })),
                 )]
                 .into(),
@@ -586,7 +586,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
                     length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
+                    urls: Some(vec![format!("dtxt:blob:{hash}")]),
                 })),
             )]
             .into(),
@@ -692,7 +692,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
                     length_octets: payload.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                    urls: Some(vec![format!("dtxt:blob:{plaintext}")]),
                 })),
             )]
             .into(),
@@ -1078,7 +1078,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
                     length_octets: blob_payloads.last().expect("just pushed").1.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
+                    urls: Some(vec![format!("dtxt:blob:{hash}")]),
                 })),
             )]
             .into(),
@@ -2324,20 +2324,19 @@ async fn init_told_sync_node(
         let identity = crate::secrets::load_identity(&secret_store, &checkout_id.clone())
             .await?
             .ok_or_else(|| eyre::eyre!("told node identity missing from the secret store"))?;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
-            Arc::clone(&sqlite_runtime),
-            big_repo::Config {
-                node_identity_seed: identity.iroh_secret_key.to_bytes(),
-                storage: big_repo::StorageConfig::Disk {
-                    path: layout.big_repo_root.clone(),
-                },
-                scope_key: Arc::from("daybook-core"),
-                hidden_parts: default(),
-                automerge_frontier_group_scope: default(),
-                causal_checkpoint_group_scope: default(),
-                group_part_group_scope: default(),
-            },
-        )
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: identity.iroh_secret_key.to_bytes(),
+            storage: big_repo::Storage::in_directory(
+                &sqlite_runtime,
+                &layout.big_repo_root,
+                Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+            )?,
+            scope_key: Arc::from("daybook-core"),
+            hidden_parts: default(),
+            automerge_frontier_group_scope: default(),
+            causal_checkpoint_group_scope: default(),
+            group_part_group_scope: default(),
+        })
         .await?;
         let parts = crate::repo::RepoCtxParts {
             layout: layout.clone(),
@@ -2577,7 +2576,7 @@ async fn long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory
                     length_octets: payload.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                    urls: Some(vec![format!("dtxt:blob:{plaintext}")]),
                 })),
             )]
             .into(),
@@ -3003,7 +3002,7 @@ async fn relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_a
                     length_octets: payload.len() as u64,
                     digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                    urls: Some(vec![format!("dtxt:blob:{plaintext}")]),
                 })),
             )]
             .into(),

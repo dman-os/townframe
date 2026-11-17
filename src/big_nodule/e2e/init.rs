@@ -7,40 +7,42 @@ use super::dispatch::not_ready;
 use super::executor::FakeExecutor;
 use super::id;
 use super::lexicon;
-use crate::dispatch::Caller;
-use crate::dispatch::Provider;
-use crate::dispatch::ProviderError;
-use crate::dispatch::ProviderKind;
-use crate::dispatch::ProviderState;
 use async_trait::async_trait;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::operation::OperationKind;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::Digest;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::example_cartridge;
+use big_cartridges_core::request::Necessity;
+use big_cartridges_core::request::Request;
+use big_dispatch::Caller;
+use big_dispatch::Operation;
+use big_dispatch::Provider;
+use big_dispatch::ProviderError;
+use big_dispatch::ProviderKind;
+use big_dispatch::ProviderState;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::NotReadyReason;
+use big_dispatch_core::Readiness;
 use big_nodule_core::Handler;
 use big_nodule_core::Initializer;
 use big_nodule_core::Nodule;
 use big_nodule_core::RunMode;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::NotReadyReason;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::NoduleInitStatus;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
-use big_plugs_core::Artifact;
-use big_plugs_core::Contribution;
-use big_plugs_core::Digest;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::example_plug;
-use big_plugs_core::request::Necessity;
-use big_plugs_core::request::Request;
 use serde_json::Value;
 use serde_json::json;
+use service_utils_rs::RequestContext;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
@@ -49,7 +51,7 @@ use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 
-const ALPHA: &str = example_plug!("alpha");
+const ALPHA: &str = example_cartridge!("alpha");
 pub(super) const PING: &str = "org.example.alpha.ping";
 const SETUP: &str = "org.example.alpha.setup";
 const WARM: &str = "org.example.alpha.warm";
@@ -125,6 +127,7 @@ impl Provider for Probe {
         &self,
         caller: &Caller,
         operation: &str,
+        _request: &RequestContext,
         context: &InvocationContext,
         _input: Value,
     ) -> Result<Value, ProviderError> {
@@ -169,13 +172,13 @@ fn query(nsid: &str) -> serde_json::Map<String, Value> {
 /// A package `<example did>/<name>` whose nodule `org.example.<name>` serves `serves` (all under its
 /// authority), requires `requires`, and declares `inits` as `(key, target, mode)` in order.
 /// Each `version` has a handler of its own, so each is a revision of its own.
-pub(super) fn init_plug(
+pub(super) fn init_cartridge(
     name: &str,
     version: &str,
     serves: &[&str],
     requires: &[&str],
     inits: &[(&str, &str, RunMode)],
-) -> Plug {
+) -> Cartridge {
     let mut nodule = Nodule::default();
     for nsid in serves {
         nodule.lexicons.push(lexicon(Value::Object(query(nsid))));
@@ -206,25 +209,26 @@ pub(super) fn init_plug(
         })
         .collect();
     let bytes = format!("{name}-{version}");
-    let mut plug = Plug::new(
-        big_plugs_core::test_support::plug_id(name),
+    let mut cartridge = Cartridge::new(
+        big_cartridges_core::test_support::cartridge_id(name),
         version.parse().unwrap(),
     );
-    plug.authority = Some(format!("org.example.{name}"));
-    plug.artifacts.push(Artifact {
+    cartridge.authority = Some(format!("org.example.{name}"));
+    cartridge.artifacts.push(Artifact {
         key: "handler".into(),
         digest: Digest::of(bytes.as_bytes()),
         size: Some(bytes.len() as u64),
         media_type: Some("application/wasm".into()),
         extra: Default::default(),
     });
-    plug.contributions
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: lexicon(serde_json::to_value(nodule).unwrap()),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
 /// Alpha with a `setup` initializer in `mode` and its provider already hosted.
@@ -233,7 +237,7 @@ async fn alpha_node(mode: RunMode) -> (Node, Arc<Probe>) {
     let node = node_hosting(&probe).await;
     node.admit(
         node.operator(),
-        init_plug(
+        init_cartridge(
             "alpha",
             "1.0.0",
             &[PING, SETUP],
@@ -259,12 +263,12 @@ fn initializing() -> DispatchError {
 }
 
 impl Node {
-    /// Reads `plug_id` until `readiness` shows. Every read is a round trip through the state
+    /// Reads `cartridge_id` until `readiness` shows. Every read is a round trip through the state
     /// actor, which handles an initializer's result as a message of its own, so this ends once
     /// the awaited result has been applied; it waits on no clock.
-    async fn until(&self, plug_id: &str, readiness: Readiness) -> NoduleRecord {
+    async fn until(&self, cartridge_id: &str, readiness: Readiness) -> NoduleRecord {
         loop {
-            let record = self.get(self.operator(), plug_id).await.unwrap();
+            let record = self.get(self.operator(), cartridge_id).await.unwrap();
             if record.readiness == readiness {
                 return record;
             }
@@ -274,47 +278,52 @@ impl Node {
 
     /// A config change that touches nothing: every config mutation reconciles once, which is
     /// what retries a failed initializer.
-    async fn touch(&self, plug_id: &str) -> NoduleRecord {
-        self.call(SetNoduleDrawerGrants {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            drawers: BTreeMap::new(),
-        })
+    async fn touch(&self, cartridge_id: &str) -> NoduleRecord {
+        self.call(
+            self.operator(),
+            SetNoduleDrawerGrants {
+                cartridge_id: id(cartridge_id),
+                drawers: BTreeMap::new(),
+            },
+        )
         .await
         .unwrap()
     }
 
-    pub(super) async fn set_enabled_record(&self, plug_id: &str) -> NoduleRecord {
-        self.call(SetNoduleEnabled {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            enabled: true,
-        })
+    pub(super) async fn set_enabled_record(&self, cartridge_id: &str) -> NoduleRecord {
+        self.call(
+            self.operator(),
+            SetNoduleEnabled {
+                cartridge_id: id(cartridge_id),
+                enabled: true,
+            },
+        )
         .await
         .unwrap()
     }
 
     async fn list_records(&self) -> Vec<NoduleRecord> {
-        self.call(ListNodules {
-            authorization: self.operator(),
-        })
-        .await
-        .unwrap()
+        self.call(self.operator(), ListNodules {})
+            .await
+            .unwrap()
+            .nodules
     }
 
     pub(super) async fn grant_operations(
         &self,
-        plug_id: &str,
+        cartridge_id: &str,
         authorities: &[&str],
     ) -> NoduleRecord {
-        self.call(SetNoduleOperationGrants {
-            authorization: self.operator(),
-            plug_id: id(plug_id),
-            operations: DispatchScope {
-                authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
-                ..Default::default()
+        self.call(
+            self.operator(),
+            SetNoduleOperationGrants {
+                cartridge_id: id(cartridge_id),
+                operations: DispatchScope {
+                    authorities: authorities.iter().map(|a| (*a).to_owned()).collect(),
+                    ..Default::default()
+                },
             },
-        })
+        )
         .await
         .unwrap()
     }
@@ -376,7 +385,7 @@ async fn once_runs_once_per_node_revision_and_every_start_runs_on_each_start() {
     ];
     node.admit(
         operator,
-        init_plug("alpha", "1.0.0", &[PING, SETUP, WARM], &[], &inits),
+        init_cartridge("alpha", "1.0.0", &[PING, SETUP, WARM], &[], &inits),
     )
     .await
     .unwrap();
@@ -401,7 +410,7 @@ async fn once_runs_once_per_node_revision_and_every_start_runs_on_each_start() {
     // revision is a new `Once`.
     node.admit(
         operator,
-        init_plug("alpha", "1.1.0", &[PING, SETUP, WARM], &[], &inits),
+        init_cartridge("alpha", "1.1.0", &[PING, SETUP, WARM], &[], &inits),
     )
     .await
     .unwrap();
@@ -459,7 +468,7 @@ async fn a_failing_initializer_is_reported_and_retried_on_the_next_config_change
 }
 
 #[tokio::test]
-async fn the_idempotency_key_names_the_plug_revision_and_initializer() {
+async fn the_idempotency_key_names_the_cartridge_revision_and_initializer() {
     let (node, probe) = alpha_node(RunMode::EveryStart).await;
     let record = node.set_enabled_record(ALPHA).await;
     let revision = record.revision.unwrap();
@@ -479,7 +488,7 @@ async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operation
     let operator = node.operator();
     node.admit(
         operator,
-        init_plug(
+        init_cartridge(
             "alpha",
             "1.0.0",
             &[PING],
@@ -504,13 +513,19 @@ async fn a_foreign_initializer_goes_through_dispatch_under_the_nodules_operation
     let nodule_actor = record.actor.unwrap().actor_id;
     let revision = record.revision.unwrap();
 
-    node.dispatch.router.register(
-        "remote",
-        [(REMOTE.to_owned(), Some(OperationKind::Query))],
-        ProviderState::Ready(ProviderKind::BuiltIn(
-            Arc::clone(&remote) as Arc<dyn Provider>
-        )),
-    );
+    node.dispatch
+        .router
+        .register(
+            "remote",
+            [(
+                REMOTE.to_owned(),
+                Operation::unchecked(Some(OperationKind::Query)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(
+                Arc::clone(&remote) as Arc<dyn Provider>
+            )),
+        )
+        .unwrap();
     // Without a grant dispatch refuses the nodule's actor, and the provider is never entered.
     node.touch(ALPHA).await;
     let record = node.until(ALPHA, Readiness::InitFailed).await;
@@ -550,8 +565,8 @@ async fn a_result_from_a_superseded_revision_is_dropped() {
     let probe = Probe::new();
     let mut node = node_hosting(&probe).await;
     let operator = node.operator();
-    let plug = |version| {
-        init_plug(
+    let cartridge = |version| {
+        init_cartridge(
             "alpha",
             version,
             &[PING, SETUP],
@@ -559,13 +574,13 @@ async fn a_result_from_a_superseded_revision_is_dropped() {
             &[("setup", SETUP, RunMode::Once)],
         )
     };
-    node.admit(operator, plug("1.0.0")).await.unwrap();
+    node.admit(operator, cartridge("1.0.0")).await.unwrap();
 
     let first = probe.hold();
     node.set_enabled(ALPHA, true).await;
     probe.entered(1).await;
     let second = probe.hold();
-    node.admit(operator, plug("1.1.0")).await.unwrap();
+    node.admit(operator, cartridge("1.1.0")).await.unwrap();
     probe.entered(2).await;
 
     // The first revision's call returns while the second's is still running. Its result names
@@ -603,7 +618,7 @@ async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle
     let beta_ping = "org.example.beta.ping";
     node.admit(
         operator,
-        init_plug(
+        init_cartridge(
             "alpha",
             "1.0.0",
             &[alpha_ping],
@@ -615,7 +630,7 @@ async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle
     .unwrap();
     node.admit(
         operator,
-        init_plug(
+        init_cartridge(
             "beta",
             "1.0.0",
             &[beta_ping],
@@ -626,7 +641,7 @@ async fn initializers_that_wait_on_each_other_are_reported_as_a_dependency_cycle
     .await
     .unwrap();
     node.set_enabled(ALPHA, true).await;
-    node.set_enabled(example_plug!("beta"), true).await;
+    node.set_enabled(example_cartridge!("beta"), true).await;
 
     // Each saw the other unregistered or not blocked yet; the next reconcile sees both waiting
     // on each other, and each reports it.
@@ -649,7 +664,7 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
     let beta_ping = "org.example.beta.ping";
     node.admit(
         operator,
-        init_plug(
+        init_cartridge(
             "alpha",
             "1.0.0",
             &[PING],
@@ -660,9 +675,12 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
     .await
     .unwrap();
     // Beta is installed after alpha but stays disabled, so nobody provides its operation.
-    node.admit(operator, init_plug("beta", "1.0.0", &[beta_ping], &[], &[]))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        init_cartridge("beta", "1.0.0", &[beta_ping], &[], &[]),
+    )
+    .await
+    .unwrap();
     node.grant_operations(ALPHA, &["org.example.beta"]).await;
     let record = node.set_enabled_record(ALPHA).await;
     assert_eq!(record.readiness, Readiness::Initializing);
@@ -671,22 +689,22 @@ async fn a_waiting_initializer_proceeds_when_its_provider_becomes_ready_by_any_p
     // Enabling beta is the only change: its transition to ready wakes alpha, whose
     // initializer then runs through dispatch (alpha sorts before beta, so a plain reconcile
     // would have looked at beta too early).
-    node.set_enabled(example_plug!("beta"), true).await;
+    node.set_enabled(example_cartridge!("beta"), true).await;
     node.until(ALPHA, Readiness::Ready).await;
     assert_eq!(probe.operations(), [beta_ping]);
     node.shutdown().await;
 }
 
-/// `plug` with its nodule's requests replaced by `requests`, for tests of what a request does
-/// to the nodule (`init_plug` states its requests as optional).
-pub(super) fn with_requests(mut plug: Plug, requests: Vec<Request>) -> Plug {
-    let Some(Contribution::Nodule(nodule)) = plug.contributions.first_mut() else {
-        panic!("init plugs carry a nodule");
+/// `cartridge` with its nodule's requests replaced by `requests`, for tests of what a request does
+/// to the nodule (`init_cartridge` states its requests as optional).
+pub(super) fn with_requests(mut cartridge: Cartridge, requests: Vec<Request>) -> Cartridge {
+    let Some(Contribution::Nodule(nodule)) = cartridge.contributions.first_mut() else {
+        panic!("init cartridges carry a nodule");
     };
     nodule
         .description
         .insert("requires".into(), serde_json::to_value(requests).unwrap());
-    plug
+    cartridge
 }
 
 pub(super) fn necessity(nsid: &str, necessity: Necessity) -> Request {
@@ -703,7 +721,7 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     node.admit(
         operator,
         with_requests(
-            init_plug("alpha", "1.0.0", &[PING], &[], &[]),
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
             vec![necessity(REMOTE, Necessity::Optional)],
         ),
     )
@@ -715,18 +733,20 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     // Granted: the requested operation (under a covering prefix), a prefix that covers nothing
     // requested, and an operation nobody requested.
     let record = node
-        .call(SetNoduleOperationGrants {
-            authorization: operator,
-            plug_id: id(ALPHA),
-            operations: DispatchScope {
-                operations: ["org.example.mail.send".to_owned()].into(),
-                authorities: [
-                    "org.example.remote".to_owned(),
-                    "org.example.other".to_owned(),
-                ]
-                .into(),
+        .call(
+            operator,
+            SetNoduleOperationGrants {
+                cartridge_id: id(ALPHA),
+                operations: DispatchScope {
+                    operations: ["org.example.mail.send".to_owned()].into(),
+                    authorities: [
+                        "org.example.remote".to_owned(),
+                        "org.example.other".to_owned(),
+                    ]
+                    .into(),
+                },
             },
-        })
+        )
         .await
         .unwrap();
     let operations = record.operations.unwrap();
@@ -750,7 +770,10 @@ async fn a_grant_beyond_the_requests_is_not_applied_and_is_reported() {
     // Grants alone confer nothing: with no request they are all reported and none minted.
     node.admit(
         operator,
-        with_requests(init_plug("alpha", "1.1.0", &[PING], &[], &[]), Vec::new()),
+        with_requests(
+            init_cartridge("alpha", "1.1.0", &[PING], &[], &[]),
+            Vec::new(),
+        ),
     )
     .await
     .unwrap();
@@ -772,7 +795,7 @@ async fn a_required_request_needs_configuration_until_granted_and_an_optional_on
     node.admit(
         operator,
         with_requests(
-            init_plug("alpha", "1.0.0", &[PING], &[], &[]),
+            init_cartridge("alpha", "1.0.0", &[PING], &[], &[]),
             vec![necessity(REMOTE, Necessity::Required)],
         ),
     )
@@ -781,7 +804,7 @@ async fn a_required_request_needs_configuration_until_granted_and_an_optional_on
     node.admit(
         operator,
         with_requests(
-            init_plug("beta", "1.0.0", &[beta_ping], &[], &[]),
+            init_cartridge("beta", "1.0.0", &[beta_ping], &[], &[]),
             vec![necessity(REMOTE, Necessity::Optional)],
         ),
     )
@@ -789,11 +812,17 @@ async fn a_required_request_needs_configuration_until_granted_and_an_optional_on
     .unwrap();
 
     // A native provider of the requested operation, so only the grant is missing.
-    node.dispatch.router.register(
-        "remote",
-        [(REMOTE.to_owned(), Some(OperationKind::Query))],
-        ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
-    );
+    node.dispatch
+        .router
+        .register(
+            "remote",
+            [(
+                REMOTE.to_owned(),
+                Operation::unchecked(Some(OperationKind::Query)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Probe::new() as Arc<dyn Provider>)),
+        )
+        .unwrap();
 
     // The required request has no grant: not ready, not a fault, and callers get the
     // retryable not-ready. The optional one has no readiness effect.
@@ -806,7 +835,7 @@ async fn a_required_request_needs_configuration_until_granted_and_an_optional_on
             Readiness::NeedsConfiguration
         )))
     );
-    let beta = node.set_enabled_record(example_plug!("beta")).await;
+    let beta = node.set_enabled_record(example_cartridge!("beta")).await;
     assert_eq!(beta.readiness, Readiness::Ready);
 
     // A grant that covers the request makes it ready and serving; one that does not does not.

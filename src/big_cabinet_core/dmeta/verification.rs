@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedDatumClaim {

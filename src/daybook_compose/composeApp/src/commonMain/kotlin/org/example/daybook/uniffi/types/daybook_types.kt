@@ -2678,7 +2678,7 @@ public object FfiConverterTypePending: FfiConverterRustBuffer<Pending> {
 
 data class PlugsConfig (
     /**
-     * full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
+     * full ref: dtxt:datum:<doc-id>/org.example.daybook.plugManifest/main
      * ?branch=<branch>&at=<head1>|<head2>
      */
     var `enabled`: Map<kotlin.String, Url>

@@ -486,7 +486,7 @@ struct ListenerProps {
 }
 
 fn listener_app(props: ListenerProps) -> Element {
-    let captured = props.events.clone();
+    let captured = Rc::clone(&props.events);
     let dispatch: SurfaceEventHandler = Rc::new(move |event| {
         captured.borrow_mut().push(event);
         EventResponse {
@@ -516,7 +516,7 @@ fn listener_events_carry_guest_identity_revision_and_serialized_data() {
         listener_app,
         ListenerProps {
             tree,
-            events: events.clone(),
+            events: Rc::clone(&events),
         },
     );
     let mut host_tree: SurfaceTree = SurfaceTree::new();

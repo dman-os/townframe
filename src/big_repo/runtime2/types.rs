@@ -262,18 +262,38 @@ pub(crate) fn handle_validity(
     }
 }
 
+/// A local commit refused because this node's keyhive access on the document is
+/// not writable: it holds Read (or nothing), or its write access was revoked.
+///
+/// This is the one commit refusal that names the caller's standing rather than a
+/// repository fault, so callers that front an access model (the cabinet docs
+/// service) map it to their own denial instead of a repository failure. The
+/// commit never persisted: the worker's write-access gate refuses before any
+/// storage is touched, and the handle's bundle is invalidated so the unpersisted
+/// in-memory change is discarded on re-acquire. It travels inside the commit's
+/// `eyre::Report`; callers find it with `downcast_ref::<NoWriteAccess>()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("document write rejected: local access is not writable (revoked or read-only)")]
+pub struct NoWriteAccess;
+
 /// The refusal to hand back for a commit that failed the handle-validity gate,
 /// or `None` when the commit may proceed.
 ///
 /// The worker's commit gate and a handle's own fast-fail path both render their
-/// refusal through here, so the wording has exactly one definition.
-pub(crate) fn invalid_handle_message(validity: HandleValidity) -> Option<&'static str> {
+/// refusal through here, so the wording has exactly one definition. A bundle
+/// broken by an earlier no-write-access rejection refuses with [`NoWriteAccess`]
+/// under its own wording: a concurrent write on the same handle was refused for
+/// the same standing, and must surface as the same typed refusal.
+pub(crate) fn invalid_handle_error(validity: HandleValidity) -> Option<eyre::Report> {
     match validity {
         HandleValidity::Valid => None,
-        HandleValidity::StaleHandle => {
-            Some("document write rejected: commit from a stale handle; re-acquire the document")
+        HandleValidity::StaleHandle => Some(ferr!(
+            "document write rejected: commit from a stale handle; re-acquire the document"
+        )),
+        HandleValidity::Broken(reason @ BrokenReason::CommitRejectedNoWriteAccess) => {
+            Some(eyre::Report::new(NoWriteAccess).wrap_err(reason.refusal_message()))
         }
-        HandleValidity::Broken(reason) => Some(reason.refusal_message()),
+        HandleValidity::Broken(reason) => Some(ferr!("{}", reason.refusal_message())),
     }
 }
 
@@ -784,18 +804,22 @@ mod tests {
         // A healthy bundle is not a refusal at all.
         let valid = handle_validity(Some(7), 7, None);
         assert_eq!(valid, HandleValidity::Valid);
-        assert!(invalid_handle_message(valid).is_none());
+        assert!(invalid_handle_error(valid).is_none());
 
         // A handle that predates a reload of the document names the reload.
         let stale = handle_validity(Some(9), 7, None);
         assert_eq!(stale, HandleValidity::StaleHandle);
-        let stale_message = invalid_handle_message(stale).expect("a stale handle is refused");
+        let stale_message = invalid_handle_error(stale)
+            .expect("a stale handle is refused")
+            .to_string();
         assert!(stale_message.contains("stale handle"), "{stale_message}");
 
         // Teardown is not a rejected commit.
         let dropped = handle_validity(Some(7), 7, Some(BrokenReason::WorkerDropped));
         assert_eq!(dropped, HandleValidity::Broken(BrokenReason::WorkerDropped));
-        let dropped_message = invalid_handle_message(dropped).expect("a broken bundle is refused");
+        let dropped_message = invalid_handle_error(dropped)
+            .expect("a broken bundle is refused")
+            .to_string();
         assert!(
             !dropped_message.contains("earlier rejected commit"),
             "a teardown must not be reported as a rejected commit: {dropped_message}"
@@ -804,18 +828,23 @@ mod tests {
 
         // Both commit-rejection reasons keep the rejected-commit wording and
         // stay distinguishable from each other.
-        let no_access = invalid_handle_message(handle_validity(
+        let no_access = invalid_handle_error(handle_validity(
             Some(7),
             7,
             Some(BrokenReason::CommitRejectedNoWriteAccess),
         ))
         .expect("refused");
-        let no_key = invalid_handle_message(handle_validity(
+        let no_key = invalid_handle_error(handle_validity(
             Some(7),
             7,
             Some(BrokenReason::CommitRejectedKeyUnavailable),
         ))
         .expect("refused");
+        // Only the no-write-access break carries the typed refusal: a caller maps
+        // it to a denial, and a key or teardown break is not about standing.
+        assert_eq!(no_access.downcast_ref::<NoWriteAccess>(), Some(&NoWriteAccess));
+        assert!(no_key.downcast_ref::<NoWriteAccess>().is_none());
+        let (no_access, no_key) = (no_access.to_string(), no_key.to_string());
         assert!(no_access.contains("no write access"), "{no_access}");
         assert!(no_key.contains("document key unavailable"), "{no_key}");
         assert_ne!(no_access, no_key);

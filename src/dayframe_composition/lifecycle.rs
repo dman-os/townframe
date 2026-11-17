@@ -12,7 +12,6 @@ use crate::CompositionRuntime;
 use crate::InstalledMicro;
 use clay_host::MicroId as SupervisorId;
 use clay_host::MicroState;
-use clay_mdk::host::factory;
 use clay_mdk::Access;
 use clay_mdk::AttachmentDeclaration;
 use clay_mdk::BindingResolution;
@@ -27,6 +26,7 @@ use clay_mdk::PublicationDeclaration;
 use clay_mdk::PublicationKind;
 use clay_mdk::Request;
 use clay_mdk::Sidecar;
+use clay_mdk::host::factory;
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -115,7 +115,7 @@ fn LifecyclePanel() -> Element {
             }
         }
     });
-    let _ = states();
+    let _: u64 = states();
     let mut failure = use_signal(|| None::<String>);
     // Micros whose toggle is being written; the button is inert until the datum is stored.
     let mut toggling = use_signal(BTreeSet::<MicroId>::new);

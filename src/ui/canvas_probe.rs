@@ -252,3 +252,20 @@ pub fn CanvasProbe(viewport: (f64, f64)) -> Element {
         }
     }
 }
+
+/// Every listener fed every event kind in seeded random order (see `dioxus_storm`).
+#[cfg(test)]
+mod storm {
+    use super::*;
+
+    fn app() -> Element {
+        rsx! { CanvasProbe { viewport: (1100.0, 760.0) } }
+    }
+
+    #[test]
+    fn the_canvas_probe_survives_any_order_of_events() {
+        dioxus_storm::Storm::of(app)
+            .viewport(1100.0, 760.0)
+            .run_seeds(0..32);
+    }
+}

@@ -32,3 +32,6 @@ winit = { version = "0.31.0-beta.3", features = ["android-native-activity"] }
 [[bin]]
 name = "dayframe_mobile"
 path = "main.rs"
+
+[lints]
+workspace = true

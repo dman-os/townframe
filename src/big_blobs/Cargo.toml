@@ -16,6 +16,7 @@ big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
 big_repo.workspace = true
 big_sync.workspace = true
 big_sync_core.workspace = true
+service_client_native_rs.workspace = true
 service_utils_rs.workspace = true
 sqlite_rs.workspace = true
 utils_rs = { workspace = true, features = ["hash"] }

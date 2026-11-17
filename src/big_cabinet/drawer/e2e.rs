@@ -14,9 +14,7 @@ use crate::schema::SchemaRepo;
 use automerge::ChangeHash;
 use big_cabinet_core::DatumTag;
 use big_cabinet_core::authority::OpenActor;
-use big_cabinet_core::datum::Bundle;
-use big_cabinet_core::datum::DatumDecl;
-use big_cabinet_core::datum::Universe;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DatumEvent;
@@ -38,7 +36,7 @@ use big_cabinet_core::query::Predicate;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use big_sync_core::keyed_frontier::FrontierEntry;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
@@ -67,7 +65,7 @@ fn note_linking(text: &str, target_doc: &DocId) -> (DatumKey, Value) {
         json!({
             "$type": NOTE,
             "value": text,
-            "link": format!("db+datum:/{target_doc}/{NOTE}/main"),
+            "link": format!("dtxt:datum:{target_doc}/{NOTE}/main"),
         }),
     )
 }
@@ -81,30 +79,13 @@ fn schemas() -> Arc<SchemaRepo> {
             "required": ["value"],
             "properties": {
                 "value": {"type": "string"},
-                "link": {"type": "string"}
+                "link": {"type": "ref", "ref": "org.example.daybook.defs#datumRef"}
             }
         }}}
     });
-    let supplement = json!({
-        "type": "object",
-        "properties": {
-            "value": {"type": "string"},
-            "link": {"type": "string", "x-automerge": "reference"}
-        }
-    });
-    let universe = Universe {
-        datums: vec![DatumDecl {
-            id: NOTE.to_owned(),
-            name: "Note".to_owned(),
-            schema: schemars::Schema::try_from(supplement).unwrap(),
-            flags: Vec::new(),
-        }],
-        types: Vec::new(),
-    };
-    let bundle = Bundle::new(&universe, Vec::new());
     Arc::new(
         SchemaRepo::open([crate::schema::SchemaRegistrationGroup::new(
-            Some(bundle),
+            None,
             [crate::schema::SchemaRegistration::new(NOTE, lexicon)],
             Vec::new(),
         )])
@@ -119,9 +100,9 @@ fn command(name: &str) -> CommandId {
 struct Node {
     authority: Authority,
     authority_stop: Option<StopToken>,
-    docs_actor: Actor,
+    docs_actor: OpenedActor,
     docs_namespace: Namespace,
-    drawers_actor: Actor,
+    drawers_actor: OpenedActor,
     drawers_namespace: Namespace,
     repo: SharedBigRepo,
     repo_stop: Option<BigRepoStopToken>,
@@ -149,7 +130,7 @@ impl Node {
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
         let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (authority, authority_stop) =
-            crate::authority::boot(&secrets, runtime.ephemeral(&[]).unwrap())
+            crate::authority::boot(&secrets, "test-node", runtime.ephemeral(&[]).unwrap())
                 .await
                 .unwrap();
         let open = |path: &str| {
@@ -166,26 +147,23 @@ impl Node {
         let drawers_actor = open("drawers").await.unwrap();
         let docs_namespace = authority
             .service
-            .open_namespace(docs_actor.actor_id)
+            .open_namespace(docs_actor.actor.actor_id)
             .await
             .unwrap();
         let drawers_namespace = authority
             .service
-            .open_namespace(drawers_actor.actor_id)
+            .open_namespace(drawers_actor.actor.actor_id)
             .await
             .unwrap();
-        let (repo, repo_stop) = BigRepo::boot(
-            Arc::clone(&runtime),
-            Config {
-                node_identity_seed: [seed; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "drawers-e2e".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [seed; 32],
+            storage: Storage::memory(&runtime).unwrap(),
+            scope_key: "drawers-e2e".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let sql = runtime.ephemeral(&[]).unwrap();
@@ -234,6 +212,7 @@ impl Node {
             self.authority.client.clone(),
             self.drawers_actor.capability,
             self.drawers_namespace,
+            self.authority.service.operator_uuid(),
             self.sql.clone(),
             Arc::clone(&self.datum_set),
         )
@@ -309,13 +288,13 @@ impl Node {
         self.docs_namespace = self
             .authority
             .service
-            .open_namespace(self.docs_actor.actor_id)
+            .open_namespace(self.docs_actor.actor.actor_id)
             .await
             .unwrap();
         self.drawers_namespace = self
             .authority
             .service
-            .open_namespace(self.drawers_actor.actor_id)
+            .open_namespace(self.drawers_actor.actor.actor_id)
             .await
             .unwrap();
         self.start().await
@@ -338,29 +317,40 @@ impl Node {
     }
 
     /// A fresh actor holding nothing but its own capability.
-    async fn actor(&self, path: &str) -> Actor {
+    async fn actor(&self, path: &str) -> OpenedActor {
+        self.sub_actor(self.authority.root, path).await
+    }
+
+    /// A fresh actor at `path` under the actor whose identity capability is `parent`: its
+    /// descendant, which is the only kind of actor a handle can be introduced to.
+    async fn sub_actor(&self, parent: CapId, path: &str) -> OpenedActor {
         self.authority
             .client
             .call(
                 RequestContext::root(),
                 OpenActor {
-                    parent: self.authority.root,
+                    parent,
                     path: path.into(),
-                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    rights: Rights::USE | Rights::NARROW | Rights::DELEGATE | Rights::MINT_CHILD,
                 },
             )
             .await
             .unwrap()
     }
 
-    async fn mint_drawer(&self, actor: &Actor, scope: DrawerScope) -> Result<CapId, DrawersError> {
+    async fn mint_drawer(
+        &self,
+        actor: &OpenedActor,
+        scope: DrawerScope,
+    ) -> Result<CapId, DrawersError> {
         self.drawers()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDrawerCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                    subject: None,
                 },
             )
             .await
@@ -370,14 +360,14 @@ impl Node {
 
     async fn drawer_capability(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         drawers: &[&DrawerId],
     ) -> Result<CapId, DrawersError> {
         let mut scope = DrawerScope::default();
         for drawer in drawers {
             let (access, _) = self
                 .core()
-                .effective(&RequestContext::root(), actor.actor_id, drawer)
+                .effective(&RequestContext::root(), actor.actor.actor_id, drawer)
                 .await?
                 .ok_or(DrawersError::Denied)?;
             scope.drawers.insert((*drawer).clone(), access);
@@ -385,14 +375,15 @@ impl Node {
         self.mint_drawer(actor, scope).await
     }
 
-    async fn mint_doc(&self, actor: &Actor, scope: DocScope) -> Result<CapId, DocsError> {
+    async fn mint_doc(&self, actor: &OpenedActor, scope: DocScope) -> Result<CapId, DocsError> {
         self.docs()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await
@@ -401,13 +392,13 @@ impl Node {
     }
 
     /// An actor allowed to create collection drawers.
-    async fn creator(&self, path: &str) -> Actor {
+    async fn creator(&self, path: &str) -> OpenedActor {
         let actor = self.actor(path).await;
         self.core()
             .grants
             .grant(
                 &RequestContext::root(),
-                actor.actor_id,
+                actor.actor.actor_id,
                 CREATE_DRAWER_OBJECT.into(),
                 Rights::USE,
                 None,
@@ -417,7 +408,7 @@ impl Node {
         actor
     }
 
-    async fn collection(&self, actor: &Actor, name: &str) -> DrawerId {
+    async fn collection(&self, actor: &OpenedActor, name: &str) -> DrawerId {
         self.drawers()
             .call(
                 RequestContext::root(),
@@ -441,7 +432,7 @@ impl Node {
             .drawer_id
     }
 
-    async fn self_doc(&self, actor: &Actor, home: &DrawerId, name: &str) -> DrawerId {
+    async fn self_doc(&self, actor: &OpenedActor, home: &DrawerId, name: &str) -> DrawerId {
         let doc_id = self.create_doc(actor, home, name).await.unwrap();
         self.drawers()
             .call(
@@ -459,7 +450,7 @@ impl Node {
 
     async fn create_doc(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         drawer: &DrawerId,
         name: &str,
     ) -> Result<DocId, DocsError> {
@@ -487,7 +478,7 @@ impl Node {
             .map_err(docs_op)
     }
 
-    async fn read_note(&self, actor: &Actor, doc: &DocId) -> Result<Value, DocsError> {
+    async fn read_note(&self, actor: &OpenedActor, doc: &DocId) -> Result<Value, DocsError> {
         let (key, _) = note("");
         let read = self
             .docs()
@@ -543,7 +534,12 @@ impl Node {
         }
     }
 
-    async fn write_note(&self, actor: &Actor, doc: &DocId, text: &str) -> Result<(), DocsError> {
+    async fn write_note(
+        &self,
+        actor: &OpenedActor,
+        doc: &DocId,
+        text: &str,
+    ) -> Result<(), DocsError> {
         let (key, value) = note(text);
         self.docs()
             .call(
@@ -606,7 +602,11 @@ impl Node {
             .collect()
     }
 
-    async fn view(&self, actor: &Actor, drawer: &DrawerId) -> Result<DrawerView, DrawersError> {
+    async fn view(
+        &self,
+        actor: &OpenedActor,
+        drawer: &DrawerId,
+    ) -> Result<DrawerView, DrawersError> {
         self.drawers()
             .call(
                 RequestContext::root(),
@@ -621,7 +621,7 @@ impl Node {
 
     async fn add_doc(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         name: &str,
         drawer: &DrawerId,
         doc: &DocId,
@@ -637,17 +637,19 @@ impl Node {
         for root in roots.keys() {
             if let Some((access, _)) = self
                 .core()
-                .effective(&RequestContext::root(), actor.actor_id, root)
+                .effective(&RequestContext::root(), actor.actor.actor_id, root)
                 .await?
             {
                 scope.drawers.insert(root.clone(), access);
             }
         }
+        let capability = self.mint_drawer(actor, scope).await?;
         self.drawers()
             .call(
                 RequestContext::root(),
                 AddDoc {
-                    capability: self.mint_drawer(actor, scope).await?,
+                    capability,
+                    reach: capability,
                     command: command(name),
                     drawer_id: drawer.clone(),
                     doc_id: doc.clone(),
@@ -666,7 +668,7 @@ impl Node {
 
     async fn invite(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         drawer: &DrawerId,
         principal: Principal,
         access: Access,
@@ -687,7 +689,7 @@ impl Node {
 
     async fn remove_doc(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         name: &str,
         drawer: &DrawerId,
         doc: &DocId,
@@ -706,14 +708,20 @@ impl Node {
             .map_err(op)
     }
 
-    async fn grant(&self, actor: &Actor, drawer: &DrawerId, subject: &Actor, access: Access) {
+    async fn grant(
+        &self,
+        actor: &OpenedActor,
+        drawer: &DrawerId,
+        subject: &OpenedActor,
+        access: Access,
+    ) {
         self.drawers()
             .call(
                 RequestContext::root(),
                 GrantDrawer {
                     capability: self.drawer_capability(actor, &[drawer]).await.unwrap(),
                     drawer_id: drawer.clone(),
-                    subject_id: subject.actor_id,
+                    subject_id: subject.actor.actor_id,
                     access,
                 },
             )
@@ -723,7 +731,7 @@ impl Node {
 
     async fn list_docs(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         drawer: &DrawerId,
         offset: u64,
         limit: Option<u64>,
@@ -739,16 +747,17 @@ impl Node {
                 },
             )
             .await
+            .map(|listed| listed.docs)
             .map_err(op)
     }
 
-    async fn remember(&self, actor: &Actor, drawer: &DrawerId, mirror: bool) {
+    async fn remember(&self, actor: &OpenedActor, drawer: &DrawerId, mirror: bool) {
         self.drawers()
             .call(
                 RequestContext::root(),
                 RememberDrawer {
                     capability: self
-                        .drawer_capability(actor, &[&self.local().registry_id])
+                        .drawer_capability(actor, &[&self.local().known_drawers_id])
                         .await
                         .unwrap(),
                     drawer_id: drawer.clone(),
@@ -761,7 +770,7 @@ impl Node {
 
     async fn set_successor(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         drawer: &DrawerId,
         successor: &DrawerId,
     ) -> Result<(), DrawersError> {
@@ -795,13 +804,13 @@ impl Node {
             .map_err(op)
     }
 
-    async fn forget(&self, actor: &Actor, drawer: &DrawerId) {
+    async fn forget(&self, actor: &OpenedActor, drawer: &DrawerId) {
         self.drawers()
             .call(
                 RequestContext::root(),
                 ForgetDrawer {
                     capability: self
-                        .drawer_capability(actor, &[&self.local().registry_id])
+                        .drawer_capability(actor, &[&self.local().known_drawers_id])
                         .await
                         .unwrap(),
                     drawer_id: drawer.clone(),
@@ -811,7 +820,7 @@ impl Node {
             .unwrap();
     }
 
-    async fn known_map(&self, actor: &Actor) -> std::collections::BTreeMap<DrawerId, bool> {
+    async fn known_map(&self, actor: &OpenedActor) -> std::collections::BTreeMap<DrawerId, bool> {
         self.known(actor)
             .await
             .into_iter()
@@ -819,19 +828,20 @@ impl Node {
             .collect()
     }
 
-    async fn known(&self, actor: &Actor) -> Vec<KnownDrawer> {
+    async fn known(&self, actor: &OpenedActor) -> Vec<KnownDrawer> {
         self.drawers()
             .call(
                 RequestContext::root(),
                 ListKnownDrawers {
                     capability: self
-                        .drawer_capability(actor, &[&self.local().registry_id])
+                        .drawer_capability(actor, &[&self.local().known_drawers_id])
                         .await
                         .unwrap(),
                 },
             )
             .await
             .unwrap()
+            .drawers
     }
 
     /// The Keyhive level `group` holds on `membered` (a doc or another group).
@@ -879,7 +889,7 @@ impl Node {
 
 fn op<T>(error: ClientError<T>) -> T {
     match error {
-        ClientError::Operation(error) => error,
+        ClientError::Method(error) => error,
         ClientError::Transport { message, .. } => panic!("transport: {message}"),
     }
 }

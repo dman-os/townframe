@@ -82,6 +82,7 @@ pub fn Drawer(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -158,5 +159,23 @@ mod tests {
         assert_eq!(*dismissals.borrow(), 0);
         page.key(dialog, Key::Named(NamedKey::Escape));
         assert_eq!(*dismissals.borrow(), 1);
+    }
+
+    fn owner() -> Element {
+        let mut open = use_signal(|| false);
+        rsx! {
+            button { onclick: move |_| open.toggle(), "Toggle" }
+            Drawer {
+                name: "Sidebar",
+                open: open(),
+                on_dismiss: move |()| open.set(false),
+                button { "Inside" }
+            }
+        }
+    }
+
+    #[test]
+    fn a_drawer_survives_any_order_of_events() {
+        Storm::of(owner).run_seeds(0..64);
     }
 }

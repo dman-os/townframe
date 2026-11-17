@@ -53,6 +53,7 @@ pub fn AppBar(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
 
     fn app(with_slots: bool) -> Element {
         rsx! {
@@ -94,5 +95,21 @@ mod tests {
         let page = Page::with_props(app, false);
         assert!(page.has_role("heading", "Settings"));
         assert!(!page.has_role("button", "Back"));
+    }
+
+    fn bar() -> Element {
+        let mut presses = use_signal(|| 0u32);
+        rsx! {
+            AppBar {
+                title: "Settings",
+                leading: Some(rsx! { button { onclick: move |_| presses += 1, "Menu {presses}" } }),
+                trailing: Some(rsx! { button { onclick: move |_| presses.set(0), "More" } }),
+            }
+        }
+    }
+
+    #[test]
+    fn an_app_bar_with_actions_survives_any_order_of_events() {
+        Storm::of(bar).run_seeds(0..16);
     }
 }

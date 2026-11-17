@@ -5,8 +5,6 @@
 use crate::Nodules;
 use crate::NodulesConfig;
 use crate::boot;
-use crate::dispatch::Dispatch;
-use crate::dispatch::DispatchConfig;
 use crate::executor::NoduleExecutor;
 use big_cabinet::Authority;
 use big_cabinet::DocAccess;
@@ -22,10 +20,10 @@ use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
@@ -42,12 +40,19 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Contribution;
+use big_cartridges_core::NoduleContribution;
+use big_cartridges_core::example_cartridge;
+use big_dispatch::Dispatch;
+use big_dispatch::DispatchConfig;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::MintDispatchCapability;
+use big_dispatch_core::Readiness;
 use big_nodule_core::Config;
 use big_nodule_core::Nodule;
 use big_nodule_core::config::NoduleSettings;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::MintDispatchCapability;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::GetNodule;
@@ -62,24 +67,19 @@ use big_nodule_core::protocol::NodulesProtocol;
 use big_nodule_core::protocol::SetNoduleDrawerGrants;
 use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::UninstallNodule;
-use big_plugs_core::Contribution;
-use big_plugs_core::NoduleContribution;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::example_plug;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use indexmap::IndexMap;
 use irpc::Channels;
 use irpc::WithChannels;
 use irpc::channel::none::NoReceiver;
+use method_core::Method;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
-use service_utils_rs::Operation;
 use service_utils_rs::Reply;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
@@ -103,7 +103,7 @@ const NOTE: &str = "org.example.note";
 
 /// A package whose nodule declares one record lexicon and, when `settings` is set, a config
 /// schema with one boolean `thumbnails` setting defaulting to `true`.
-fn plug(id: &str, version: &str, settings: bool) -> Plug {
+fn cartridge(id: &str, version: &str, settings: bool) -> Cartridge {
     let nodule_id = format!("org.example.{}", id.rsplit('/').next().unwrap());
     let mut nodule = Nodule::default();
     nodule.lexicons.push(lexicon(json!({
@@ -134,15 +134,16 @@ fn plug(id: &str, version: &str, settings: bool) -> Plug {
             extra: Default::default(),
         });
     }
-    let mut plug = Plug::new(id.parse().unwrap(), version.parse().unwrap());
-    plug.authority = Some(nodule_id);
-    plug.contributions
+    let mut cartridge = Cartridge::new(id.parse().unwrap(), version.parse().unwrap());
+    cartridge.authority = Some(nodule_id);
+    cartridge
+        .contributions
         .push(Contribution::Nodule(NoduleContribution {
             schema: Nodule::ID.into(),
             description: lexicon(serde_json::to_value(nodule).unwrap()),
             extra: Default::default(),
         }));
-    plug
+    cartridge
 }
 
 fn lexicon(value: Value) -> IndexMap<String, Value> {
@@ -186,20 +187,26 @@ fn test_schemas() -> Arc<SchemaRepo> {
     )
 }
 
-/// The operator grants the nodule service dispatch over [`OPERATIONS_CEILING`], to mint the
-/// nodules' own handles from.
-async fn grant_nodule_dispatch(authority: &Authority, dispatch: &Dispatch) -> CapId {
+/// The operator introduces the nodule service to dispatch over [`OPERATIONS_CEILING`]: a handle
+/// bound to `nodules_actor`, with `DELEGATE` so the service can bind each nodule's own handle
+/// to that nodule.
+async fn grant_nodule_dispatch(
+    authority: &Authority,
+    dispatch: &Dispatch,
+    nodules_actor: big_cabinet_core::dmeta::Uuid7,
+) -> CapId {
     dispatch
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
             MintDispatchCapability {
-                authorization: Authorization::identity(authority.root),
                 scope: DispatchScope {
                     authorities: [OPERATIONS_CEILING.to_owned()].into(),
                     ..Default::default()
                 },
-                rights: Rights::USE | Rights::NARROW,
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(nodules_actor),
             },
         )
         .await
@@ -207,8 +214,8 @@ async fn grant_nodule_dispatch(authority: &Authority, dispatch: &Dispatch) -> Ca
         .capability_id
 }
 
-fn id(plug_id: &str) -> PlugId {
-    plug_id.parse().unwrap()
+fn id(cartridge_id: &str) -> CartridgeId {
+    cartridge_id.parse().unwrap()
 }
 
 struct Node {
@@ -221,8 +228,8 @@ struct Node {
     worker: Option<DrawerWorker>,
     worker_stop: StopToken,
     drawers_stop: StopToken,
-    drawers_actor: Actor,
-    nodules_actor: Actor,
+    drawers_actor: OpenedActor,
+    nodules_actor: OpenedActor,
     docs: DocsRepo,
     drawers: Drawers,
     sql: TestDb,
@@ -261,9 +268,10 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         .expect("mock keyring");
     let sql = test_support::db(&[]).expect("database");
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
-    let (authority, authority_stop) = big_cabinet::authority::boot(&secrets, sql.clone())
-        .await
-        .expect("authority boot");
+    let (authority, authority_stop) =
+        big_cabinet::authority::boot(&secrets, "test-node", sql.clone())
+            .await
+            .expect("authority boot");
     let open = |path: &str| {
         authority.client.call(
             RequestContext::root(),
@@ -280,36 +288,33 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
     let dispatch_actor = open("dispatch").await.expect("dispatch actor");
     let dispatch_namespace = authority
         .service
-        .open_namespace(dispatch_actor.actor_id)
+        .open_namespace(dispatch_actor.actor.actor_id)
         .await
         .expect("dispatch namespace");
-    let (dispatch, dispatch_stop) = crate::dispatch::boot(DispatchConfig {
+    let (dispatch, dispatch_stop) = big_dispatch::boot(DispatchConfig {
         authority: authority.client.clone(),
         namespace: dispatch_namespace,
         operator: authority.service.operator_uuid(),
     });
     let docs_namespace = authority
         .service
-        .open_namespace(docs_actor.actor_id)
+        .open_namespace(docs_actor.actor.actor_id)
         .await
         .expect("docs namespace");
     let drawers_namespace = authority
         .service
-        .open_namespace(drawers_actor.actor_id)
+        .open_namespace(drawers_actor.actor.actor_id)
         .await
         .expect("drawers namespace");
-    let (repo, repo_stop) = BigRepo::boot(
-        runtime,
-        big_repo::Config {
-            node_identity_seed: [19; 32],
-            storage: StorageConfig::Memory,
-            scope_key: "big-nodule-e2e".into(),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        },
-    )
+    let (repo, repo_stop) = BigRepo::boot(big_repo::Config {
+        node_identity_seed: [19; 32],
+        storage: Storage::memory(&runtime).unwrap(),
+        scope_key: "big-nodule-e2e".into(),
+        hidden_parts: Default::default(),
+        automerge_frontier_group_scope: Default::default(),
+        causal_checkpoint_group_scope: Default::default(),
+        group_part_group_scope: Default::default(),
+    })
     .await
     .expect("repo boot");
     let schemas = test_schemas();
@@ -326,6 +331,7 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         authority.client.clone(),
         drawers_actor.capability,
         drawers_namespace,
+        authority.service.operator_uuid(),
         (*sql).clone(),
         Arc::clone(&indexes.datum_set),
     )
@@ -354,10 +360,11 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
         &drawers,
         &drawers_actor,
         &drawers.local().config_id,
-        nodules_actor.actor_id,
+        nodules_actor.actor.actor_id,
     )
     .await;
-    let dispatch_authority = grant_nodule_dispatch(&authority, &dispatch).await;
+    let dispatch_authority =
+        grant_nodule_dispatch(&authority, &dispatch, nodules_actor.actor.actor_id).await;
     let (nodules, stop) = boot_nodules(
         &authority,
         &docs,
@@ -398,21 +405,22 @@ async fn node_with(executor: Option<Arc<dyn NoduleExecutor>>) -> Node {
 
 async fn grant_drawer_admin(
     drawers: &Drawers,
-    grantor: &Actor,
+    grantor: &OpenedActor,
     drawer_id: &DrawerId,
     subject_id: big_cabinet_core::dmeta::Uuid7,
 ) {
     let cap = drawers
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(grantor.capability).metadata(),
             MintDrawerCapability {
-                authorization: Authorization::identity(grantor.capability),
                 scope: DrawerScope {
                     drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                     create: false,
                 },
                 rights: Rights::USE | Rights::DELEGATE,
+                subject: None,
             },
         )
         .await
@@ -440,7 +448,7 @@ async fn boot_nodules(
     authority: &Authority,
     docs: &DocsRepo,
     drawers: &Drawers,
-    nodules_actor: &Actor,
+    nodules_actor: &OpenedActor,
     dispatch: &Dispatch,
     dispatch_authority: CapId,
     sql: &TestDb,
@@ -449,7 +457,7 @@ async fn boot_nodules(
 ) -> Result<(Nodules, StopToken), NodulesError> {
     let namespace = authority
         .service
-        .open_namespace(nodules_actor.actor_id)
+        .open_namespace(nodules_actor.actor.actor_id)
         .await
         .expect("nodules namespace");
     boot(NodulesConfig {
@@ -511,19 +519,23 @@ impl Node {
         Authorization::identity(self.authority.root)
     }
 
-    async fn call<P>(&self, params: P) -> Result<P::Output, NodulesError>
+    async fn call<P>(
+        &self,
+        authorization: Authorization,
+        params: P,
+    ) -> Result<P::Output, NodulesError>
     where
-        P: Operation<Output: service_utils_rs::Wire, Error = NodulesError>,
+        P: Method<Output: method_core::Wire, Error = NodulesError>,
         NodulesProtocol: From<Envelope<P>>,
         NodulesMessage: From<WithChannels<Envelope<P>, NodulesProtocol>>,
         Envelope<P>: Channels<NodulesProtocol, Tx = Reply<P>, Rx = NoReceiver>,
     {
         self.nodules
             .client
-            .call(RequestContext::root(), params)
+            .call_with(RequestContext::root(), authorization.metadata(), params)
             .await
             .map_err(|error| match error {
-                ClientError::Operation(error) => error,
+                ClientError::Method(error) => error,
                 ClientError::Transport { message, .. } => panic!("transport failed: {message}"),
             })
     }
@@ -531,34 +543,39 @@ impl Node {
     async fn admit(
         &self,
         authorization: Authorization,
-        plug: Plug,
+        cartridge: Cartridge,
     ) -> Result<NoduleRecord, NodulesError> {
-        self.call(AdmitNodule {
+        self.call(
             authorization,
-            plug,
-            drawers: None,
-        })
+            AdmitNodule {
+                cartridge,
+                drawers: None,
+            },
+        )
         .await
     }
 
     async fn get(
         &self,
         authorization: Authorization,
-        plug_id: &str,
+        cartridge_id: &str,
     ) -> Result<NoduleRecord, NodulesError> {
-        self.call(GetNodule {
+        self.call(
             authorization,
-            plug_id: id(plug_id),
-        })
+            GetNodule {
+                cartridge_id: id(cartridge_id),
+            },
+        )
         .await
     }
 
-    async fn list(&self, authorization: Authorization) -> Result<Vec<PlugId>, NodulesError> {
+    async fn list(&self, authorization: Authorization) -> Result<Vec<CartridgeId>, NodulesError> {
         Ok(self
-            .call(ListNodules { authorization })
+            .call(authorization, ListNodules {})
             .await?
+            .nodules
             .into_iter()
-            .map(|record| record.plug_id)
+            .map(|record| record.cartridge_id)
             .collect())
     }
 
@@ -588,11 +605,7 @@ impl Node {
         rights: Rights,
     ) -> Result<Authorization, NodulesError> {
         let capability = self
-            .call(MintNoduleCapability {
-                authorization,
-                scope,
-                rights,
-            })
+            .call(authorization, MintNoduleCapability { scope, rights })
             .await?;
         Ok(Authorization {
             authority: capability.capability_id,
@@ -602,14 +615,17 @@ impl Node {
 
     /// The actor the nodule path names right now, opened by the test through the subsystem
     /// actor it holds, so a record's actor can be checked without the service's handle.
-    async fn actor_at(&self, plug_id: &PlugId) -> Actor {
+    async fn actor_at(&self, cartridge_id: &CartridgeId) -> OpenedActor {
         self.authority
             .client
             .call(
                 RequestContext::root(),
                 OpenActor {
                     parent: self.nodules_actor.capability,
-                    path: format!("{NODULES_PATH}/{}", crate::store::actor_segment(plug_id)),
+                    path: format!(
+                        "{NODULES_PATH}/{}",
+                        crate::store::actor_segment(cartridge_id)
+                    ),
                     rights: Rights::USE | Rights::NARROW,
                 },
             )
@@ -618,10 +634,10 @@ impl Node {
     }
 }
 
-fn scope(admit: bool, plugs: &[&str]) -> NoduleScope {
+fn scope(admit: bool, cartridges: &[&str]) -> NoduleScope {
     NoduleScope {
         admit,
-        plugs: plugs.iter().map(|plug| id(plug)).collect(),
+        cartridges: cartridges.iter().map(|cartridge| id(cartridge)).collect(),
     }
 }
 
@@ -631,102 +647,134 @@ async fn admission_provisions_a_durable_actor_and_management_state_persists() {
     let operator = node.operator();
 
     let record = node
-        .admit(operator, plug(example_plug!("photos"), "1.0.0", true))
+        .admit(
+            operator,
+            cartridge(example_cartridge!("photos"), "1.0.0", true),
+        )
         .await
         .unwrap();
-    assert_eq!(record.plug_id, id(example_plug!("photos")));
+    assert_eq!(record.cartridge_id, id(example_cartridge!("photos")));
     assert!(!record.enabled);
     assert_eq!(record.readiness, Readiness::Disabled);
     assert_eq!(record.config, Some(settings_of(true)));
     assert_eq!(record.error, None);
     assert!(!record.observed_heads.is_empty());
     assert_eq!(record.applied_heads.as_ref(), Some(&record.observed_heads));
-    let actor = node.actor_at(&id(example_plug!("photos"))).await;
+    let actor = node.actor_at(&id(example_cartridge!("photos"))).await;
     let record_actor = record.actor.as_ref().expect("provisioned actor");
-    assert_eq!(record_actor.actor_id, actor.actor_id);
-    assert_eq!(record_actor.public_key, actor.public_key);
-    assert_eq!(actor.parent_actor_id, Some(node.nodules_actor.actor_id));
+    assert_eq!(record_actor.actor_id, actor.actor.actor_id);
+    assert_eq!(record_actor.public_key, actor.actor.public_key);
+    assert_eq!(
+        actor.actor.parent_actor_id,
+        Some(node.nodules_actor.actor.actor_id)
+    );
 
     let enabled = node
-        .call(SetNoduleEnabled {
-            authorization: operator,
-            plug_id: id(example_plug!("photos")),
-            enabled: true,
-        })
+        .call(
+            operator,
+            SetNoduleEnabled {
+                cartridge_id: id(example_cartridge!("photos")),
+                enabled: true,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(enabled.readiness, Readiness::Ready);
     let configured = node
-        .call(ConfigureNodule {
-            authorization: operator,
-            plug_id: id(example_plug!("photos")),
-            settings: settings_of(false),
-        })
+        .call(
+            operator,
+            ConfigureNodule {
+                cartridge_id: id(example_cartridge!("photos")),
+                settings: settings_of(false),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(configured.config, Some(settings_of(false)));
     assert!(matches!(
-        node.call(ConfigureNodule {
-            authorization: operator,
-            plug_id: id(example_plug!("photos")),
-            settings: [("thumbnails".to_owned(), json!("no"))]
-                .into_iter()
-                .collect(),
-        })
+        node.call(
+            operator,
+            ConfigureNodule {
+                cartridge_id: id(example_cartridge!("photos")),
+                settings: [("thumbnails".to_owned(), json!("no"))]
+                    .into_iter()
+                    .collect(),
+            }
+        )
         .await,
         Err(NodulesError::Rejected(_))
     ));
-    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "0.1.0", false),
+    )
+    .await
+    .unwrap();
     assert!(matches!(
-        node.call(ConfigureNodule {
-            authorization: operator,
-            plug_id: id(example_plug!("schema")),
-            settings: IndexMap::new(),
-        })
+        node.call(
+            operator,
+            ConfigureNodule {
+                cartridge_id: id(example_cartridge!("schema")),
+                settings: IndexMap::new(),
+            }
+        )
         .await,
         Err(NodulesError::NoConfigSchema(_))
     ));
     assert!(matches!(
-        node.get(operator, example_plug!("missing")).await,
-        Err(NodulesError::UnknownPlug(_))
+        node.get(operator, example_cartridge!("missing")).await,
+        Err(NodulesError::UnknownCartridge(_))
     ));
 
     // An upgrade keeps the nodule's actor and the operator's settings.
     let upgraded = node
-        .admit(operator, plug(example_plug!("photos"), "1.1.0", true))
+        .admit(
+            operator,
+            cartridge(example_cartridge!("photos"), "1.1.0", true),
+        )
         .await
         .unwrap();
     assert_eq!(upgraded.version, Some("1.1.0".parse().unwrap()));
     assert_eq!(
         upgraded.actor.as_ref().expect("provisioned actor").actor_id,
-        actor.actor_id
+        actor.actor.actor_id
     );
     assert!(upgraded.enabled);
     assert_eq!(upgraded.config, Some(settings_of(false)));
 
     node.restart_nodules().await.unwrap();
-    let recovered = node.get(operator, example_plug!("photos")).await.unwrap();
+    let recovered = node
+        .get(operator, example_cartridge!("photos"))
+        .await
+        .unwrap();
     assert_eq!(recovered, upgraded);
     assert_eq!(
         node.list(operator).await.unwrap(),
-        vec![id(example_plug!("photos")), id(example_plug!("schema"))]
+        vec![
+            id(example_cartridge!("photos")),
+            id(example_cartridge!("schema"))
+        ]
     );
-    let schema = node.get(operator, example_plug!("schema")).await.unwrap();
+    let schema = node
+        .get(operator, example_cartridge!("schema"))
+        .await
+        .unwrap();
     assert!(!schema.enabled);
     assert_eq!(schema.config, None);
     node.shutdown().await;
 }
 
 #[tokio::test]
-async fn an_enabled_plug_holds_its_authority_against_equal_and_nested_prefixes() {
+async fn an_enabled_cartridge_holds_its_authority_against_equal_and_nested_prefixes() {
     let node = node().await;
     let operator = node.operator();
-    node.admit(operator, plug(example_plug!("photos"), "1.0.0", false))
-        .await
-        .unwrap();
-    node.set_enabled(example_plug!("photos"), true).await;
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("photos"), "1.0.0", false),
+    )
+    .await
+    .unwrap();
+    node.set_enabled(example_cartridge!("photos"), true).await;
 
     // `org.example.photos` holds itself and everything under it, in either direction.
     for (name, authority) in [
@@ -735,8 +783,8 @@ async fn an_enabled_plug_holds_its_authority_against_equal_and_nested_prefixes()
         ("parent", "org.example"),
     ] {
         // A nodule that declares nothing, so only its authority is in question.
-        let mut rival = Plug::new(
-            big_plugs_core::test_support::plug_id(name),
+        let mut rival = Cartridge::new(
+            big_cartridges_core::test_support::cartridge_id(name),
             "1.0.0".parse().unwrap(),
         );
         rival
@@ -748,15 +796,17 @@ async fn an_enabled_plug_holds_its_authority_against_equal_and_nested_prefixes()
             }));
         rival.authority = Some(authority.into());
         // Installing a rival is not holding: the prefix is refused at enablement, which is what
-        // lets a substitute for a plug be installed beside it.
+        // lets a substitute for a cartridge be installed beside it.
         let rival_id = rival.id.clone();
         node.admit(operator, rival).await.unwrap();
         let refused = node
-            .call(SetNoduleEnabled {
-                authorization: operator,
-                plug_id: rival_id,
-                enabled: true,
-            })
+            .call(
+                operator,
+                SetNoduleEnabled {
+                    cartridge_id: rival_id,
+                    enabled: true,
+                },
+            )
             .await
             .unwrap_err()
             .to_string();
@@ -769,7 +819,7 @@ async fn an_enabled_plug_holds_its_authority_against_equal_and_nested_prefixes()
     // Whole segments only: a sibling that merely shares a string prefix is no conflict.
     node.admit(
         operator,
-        plug(example_plug!("photosynthesis"), "1.0.0", false),
+        cartridge(example_cartridge!("photosynthesis"), "1.0.0", false),
     )
     .await
     .unwrap();
@@ -781,16 +831,25 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     let node = node().await;
     let operator = node.operator();
     let bystander = node.bystander().await;
-    node.admit(operator, plug(example_plug!("photos"), "1.0.0", true))
-        .await
-        .unwrap();
-    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("photos"), "1.0.0", true),
+    )
+    .await
+    .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "0.1.0", false),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
-        node.admit(bystander, plug(example_plug!("intruder"), "1.0.0", false))
-            .await,
+        node.admit(
+            bystander,
+            cartridge(example_cartridge!("intruder"), "1.0.0", false)
+        )
+        .await,
         Err(NodulesError::Denied)
     );
     assert_eq!(node.list(bystander).await, Err(NodulesError::Denied));
@@ -802,31 +861,40 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     let photos_only = node
         .mint(
             operator,
-            scope(false, &[example_plug!("photos")]),
+            scope(false, &[example_cartridge!("photos")]),
             Rights::USE | Rights::NARROW,
         )
         .await
         .unwrap();
     assert_eq!(
         node.list(photos_only).await.unwrap(),
-        vec![id(example_plug!("photos"))]
+        vec![id(example_cartridge!("photos"))]
     );
-    assert!(node.get(photos_only, example_plug!("photos")).await.is_ok());
+    assert!(
+        node.get(photos_only, example_cartridge!("photos"))
+            .await
+            .is_ok()
+    );
     assert_eq!(
-        node.get(photos_only, example_plug!("schema")).await,
+        node.get(photos_only, example_cartridge!("schema")).await,
         Err(NodulesError::Denied)
     );
     assert_eq!(
-        node.admit(photos_only, plug(example_plug!("photos"), "1.1.0", true))
-            .await,
+        node.admit(
+            photos_only,
+            cartridge(example_cartridge!("photos"), "1.1.0", true)
+        )
+        .await,
         Err(NodulesError::Denied)
     );
     assert!(
-        node.call(SetNoduleEnabled {
-            authorization: photos_only,
-            plug_id: id(example_plug!("photos")),
-            enabled: true,
-        })
+        node.call(
+            photos_only,
+            SetNoduleEnabled {
+                cartridge_id: id(example_cartridge!("photos")),
+                enabled: true,
+            }
+        )
         .await
         .is_ok()
     );
@@ -835,7 +903,7 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     assert_eq!(
         node.mint(
             photos_only,
-            scope(true, &[example_plug!("photos")]),
+            scope(true, &[example_cartridge!("photos")]),
             Rights::USE
         )
         .await,
@@ -844,7 +912,10 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     assert_eq!(
         node.mint(
             photos_only,
-            scope(false, &[example_plug!("photos"), example_plug!("schema")]),
+            scope(
+                false,
+                &[example_cartridge!("photos"), example_cartridge!("schema")]
+            ),
             Rights::USE
         )
         .await,
@@ -853,33 +924,37 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
     let read_only = node
         .mint(
             photos_only,
-            scope(false, &[example_plug!("photos")]),
+            scope(false, &[example_cartridge!("photos")]),
             Rights::USE,
         )
         .await
         .unwrap();
     assert_eq!(
         node.list(read_only).await.unwrap(),
-        vec![id(example_plug!("photos"))]
+        vec![id(example_cartridge!("photos"))]
     );
     assert!(matches!(
         node.mint(read_only, scope(false, &[]), Rights::USE).await,
         Err(NodulesError::Authority(_))
     ));
     assert_eq!(
-        node.call(SetNoduleDrawerGrants {
-            authorization: photos_only,
-            plug_id: id(example_plug!("schema")),
-            drawers: BTreeMap::new(),
-        })
+        node.call(
+            photos_only,
+            SetNoduleDrawerGrants {
+                cartridge_id: id(example_cartridge!("schema")),
+                drawers: BTreeMap::new(),
+            }
+        )
         .await,
         Err(NodulesError::Denied)
     );
     assert_eq!(
-        node.call(UninstallNodule {
-            authorization: photos_only,
-            plug_id: id(example_plug!("schema")),
-        })
+        node.call(
+            photos_only,
+            UninstallNodule {
+                cartridge_id: id(example_cartridge!("schema")),
+            }
+        )
         .await,
         Err(NodulesError::Denied)
     );
@@ -887,40 +962,55 @@ async fn only_the_operator_and_handles_it_narrowed_administer_nodules() {
 }
 
 #[tokio::test]
-async fn an_admit_scoped_handle_admits_only_its_own_plugs() {
+async fn an_admit_scoped_handle_admits_only_its_own_cartridges() {
     let node = node().await;
     let operator = node.operator();
     let photos_admin = node
         .mint(
             operator,
-            scope(true, &[example_plug!("photos")]),
+            scope(true, &[example_cartridge!("photos")]),
             Rights::USE | Rights::NARROW,
         )
         .await
         .unwrap();
 
-    // Install and upgrade of the named plug pass; any other plug id is denied, installed or not.
-    node.admit(photos_admin, plug(example_plug!("photos"), "1.0.0", true))
-        .await
-        .unwrap();
-    node.admit(photos_admin, plug(example_plug!("photos"), "1.1.0", true))
-        .await
-        .unwrap();
+    // Install and upgrade of the named cartridge pass; any other cartridge id is denied, installed or not.
+    node.admit(
+        photos_admin,
+        cartridge(example_cartridge!("photos"), "1.0.0", true),
+    )
+    .await
+    .unwrap();
+    node.admit(
+        photos_admin,
+        cartridge(example_cartridge!("photos"), "1.1.0", true),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        node.admit(photos_admin, plug(example_plug!("schema"), "0.1.0", false))
-            .await,
+        node.admit(
+            photos_admin,
+            cartridge(example_cartridge!("schema"), "0.1.0", false)
+        )
+        .await,
         Err(NodulesError::Denied)
     );
-    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "0.1.0", false),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        node.admit(photos_admin, plug(example_plug!("schema"), "0.2.0", false))
-            .await,
+        node.admit(
+            photos_admin,
+            cartridge(example_cartridge!("schema"), "0.2.0", false)
+        )
+        .await,
         Err(NodulesError::Denied)
     );
     assert_eq!(
-        node.get(operator, example_plug!("schema"))
+        node.get(operator, example_cartridge!("schema"))
             .await
             .unwrap()
             .version,
@@ -929,18 +1019,18 @@ async fn an_admit_scoped_handle_admits_only_its_own_plugs() {
     node.shutdown().await;
 }
 
-/// `plug(.., true)` whose settings schema also requires a string `endpoint`, so settings written
+/// `cartridge(.., true)` whose settings schema also requires a string `endpoint`, so settings written
 /// against the plain revision no longer conform to it.
-fn plug_requiring_endpoint(id: &str, version: &str) -> Plug {
-    let mut plug = plug(id, version, true);
-    let Some(Contribution::Nodule(contribution)) = plug.contributions.first_mut() else {
-        panic!("test plugs carry a nodule contribution");
+fn cartridge_requiring_endpoint(id: &str, version: &str) -> Cartridge {
+    let mut cartridge = cartridge(id, version, true);
+    let Some(Contribution::Nodule(contribution)) = cartridge.contributions.first_mut() else {
+        panic!("test cartridges carry a nodule contribution");
     };
     let settings = &mut contribution.description["lexicons"][1]["defs"]["main"];
     settings["required"] = json!(["endpoint"]);
     settings["properties"]["endpoint"] = json!({ "type": "string" });
     contribution.description["config"]["defaults"]["endpoint"] = json!("https://example.org");
-    plug
+    cartridge
 }
 
 #[tokio::test]
@@ -953,24 +1043,28 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
         &node.drawers,
         &node.drawers_actor,
         &present,
-        node.nodules_actor.actor_id,
+        node.nodules_actor.actor.actor_id,
     )
     .await;
     let v1 = node
-        .call(AdmitNodule {
-            authorization: operator,
-            plug: plug(example_plug!("photos"), "1.0.0", true),
-            drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
-        })
+        .call(
+            operator,
+            AdmitNodule {
+                cartridge: cartridge(example_cartridge!("photos"), "1.0.0", true),
+                drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(v1.error, None);
     assert!(v1.drawers[&present].granted);
-    node.call(ConfigureNodule {
-        authorization: operator,
-        plug_id: id(example_plug!("photos")),
-        settings: settings_of(false),
-    })
+    node.call(
+        operator,
+        ConfigureNodule {
+            cartridge_id: id(example_cartridge!("photos")),
+            settings: settings_of(false),
+        },
+    )
     .await
     .unwrap();
 
@@ -978,7 +1072,7 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
     let refused = node
         .admit(
             operator,
-            plug_requiring_endpoint(example_plug!("photos"), "2.0.0"),
+            cartridge_requiring_endpoint(example_cartridge!("photos"), "2.0.0"),
         )
         .await
         .unwrap();
@@ -994,11 +1088,13 @@ async fn an_upgrade_that_invalidates_settings_is_refused_and_repaired_without_lo
     let mut repaired = settings_of(false);
     repaired.insert("endpoint".into(), json!("https://example.org"));
     let record = node
-        .call(ConfigureNodule {
-            authorization: operator,
-            plug_id: id(example_plug!("photos")),
-            settings: repaired.clone(),
-        })
+        .call(
+            operator,
+            ConfigureNodule {
+                cartridge_id: id(example_cartridge!("photos")),
+                settings: repaired.clone(),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(record.error, None);
@@ -1020,11 +1116,13 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     // Admit with a desired grant on `present` before `nodules_actor` has Admin on `present`:
     // the desired grant is persisted in config, but the binding is reported as blocked.
     let blocked = node
-        .call(AdmitNodule {
-            authorization: operator,
-            plug: plug(example_plug!("photos"), "1.0.0", true),
-            drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
-        })
+        .call(
+            operator,
+            AdmitNodule {
+                cartridge: cartridge(example_cartridge!("photos"), "1.0.0", true),
+                drawers: Some(BTreeMap::from([(present.clone(), DrawerAccess::Write)])),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(blocked.applied_heads, None);
@@ -1039,23 +1137,24 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     );
     assert!(blocked.drawers[&present].error.is_some());
 
-    let actor = node.actor_at(&id(example_plug!("photos"))).await;
+    let actor = node.actor_at(&id(example_cartridge!("photos"))).await;
     assert!(matches!(
         node.docs
             .client
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope: DocScope {
                         create: BTreeSet::from([placement.clone()]),
                         ..DocScope::default()
                     },
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
 
     // Once the operator grants `nodules_actor` Admin on `present`, reconciliation applies the
@@ -1064,10 +1163,13 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
         &node.drawers,
         &node.drawers_actor,
         &present,
-        node.nodules_actor.actor_id,
+        node.nodules_actor.actor.actor_id,
     )
     .await;
-    let applied = node.get(operator, example_plug!("photos")).await.unwrap();
+    let applied = node
+        .get(operator, example_cartridge!("photos"))
+        .await
+        .unwrap();
     assert_eq!(applied.error, None);
     assert_eq!(
         applied.applied_heads.as_ref(),
@@ -1085,15 +1187,16 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     let create_cap = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(actor.capability),
                 scope: DocScope {
                     create: BTreeSet::from([placement.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1119,11 +1222,13 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
     // Downgrading to Read retracts the Edit source capability (invalidating `create_cap`) and
     // leaves only Read access.
     let downgraded = node
-        .call(SetNoduleDrawerGrants {
-            authorization: operator,
-            plug_id: id(example_plug!("photos")),
-            drawers: BTreeMap::from([(present.clone(), DrawerAccess::Read)]),
-        })
+        .call(
+            operator,
+            SetNoduleDrawerGrants {
+                cartridge_id: id(example_cartridge!("photos")),
+                drawers: BTreeMap::from([(present.clone(), DrawerAccess::Read)]),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1150,20 +1255,21 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 },
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     let read_cap = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(actor.capability),
                 scope: DocScope {
                     read: BTreeSet::from([receipt.doc_id.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -1185,21 +1291,26 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
 
     // Restarting nodules preserves the applied Read grant across restarts.
     node.restart_nodules().await.unwrap();
-    let after_restart = node.get(operator, example_plug!("photos")).await.unwrap();
+    let after_restart = node
+        .get(operator, example_cartridge!("photos"))
+        .await
+        .unwrap();
     assert_eq!(after_restart, downgraded);
 
     // Uninstalling removes the config datums and retracts the Read grant capability, while
-    // re-admitting the same plug reopens the same durable actor.
-    node.call(UninstallNodule {
-        authorization: operator,
-        plug_id: id(example_plug!("photos")),
-    })
+    // re-admitting the same cartridge reopens the same durable actor.
+    node.call(
+        operator,
+        UninstallNodule {
+            cartridge_id: id(example_cartridge!("photos")),
+        },
+    )
     .await
     .unwrap();
     assert!(node.list(operator).await.unwrap().is_empty());
     assert!(matches!(
-        node.get(operator, example_plug!("photos")).await,
-        Err(NodulesError::UnknownPlug(_))
+        node.get(operator, example_cartridge!("photos")).await,
+        Err(NodulesError::UnknownCartridge(_))
     ));
     assert!(matches!(
         node.docs
@@ -1215,10 +1326,13 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
                 },
             )
             .await,
-        Err(ClientError::Operation(DocsError::Denied))
+        Err(ClientError::Method(DocsError::Denied))
     ));
     let readmitted = node
-        .admit(operator, plug(example_plug!("photos"), "1.0.0", true))
+        .admit(
+            operator,
+            cartridge(example_cartridge!("photos"), "1.0.0", true),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1227,7 +1341,7 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
             .as_ref()
             .expect("provisioned actor")
             .actor_id,
-        actor.actor_id
+        actor.actor.actor_id
     );
     node.shutdown().await;
 }
@@ -1236,34 +1350,42 @@ async fn drawer_grants_apply_downgrade_revoke_and_uninstall_cleanly() {
 async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     let node = node().await;
     let operator = node.operator();
-    node.admit(operator, plug(example_plug!("photos"), "1.0.0", true))
-        .await
-        .unwrap();
-    node.admit(operator, plug(example_plug!("schema"), "0.1.0", false))
-        .await
-        .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("photos"), "1.0.0", true),
+    )
+    .await
+    .unwrap();
+    node.admit(
+        operator,
+        cartridge(example_cartridge!("schema"), "0.1.0", false),
+    )
+    .await
+    .unwrap();
 
     // Simulate an invalid imported settings datum written directly to the config drawer doc.
     let config_doc = DocId::from(node.drawers.local().config_id.clone());
     let doc_cap = node
         .docs
         .client
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(node.drawers_actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(node.drawers_actor.capability),
                 scope: DocScope {
                     write: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
         .unwrap();
-    let bad_settings_key: DatumKey = format!("{}/{}", NoduleSettings::ID, example_plug!("photos"))
-        .parse()
-        .unwrap();
+    let bad_settings_key: DatumKey =
+        format!("{}/{}", NoduleSettings::ID, example_cartridge!("photos"))
+            .parse()
+            .unwrap();
     let bad_receipt = node
         .docs
         .client
@@ -1288,7 +1410,10 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
         .unwrap();
 
     let refused = loop {
-        let record = node.get(operator, example_plug!("photos")).await.unwrap();
+        let record = node
+            .get(operator, example_cartridge!("photos"))
+            .await
+            .unwrap();
         if record.observed_heads == bad_receipt.heads {
             break record;
         }
@@ -1296,17 +1421,22 @@ async fn invalid_imported_config_is_refused_per_nodule_and_repairable() {
     };
     assert_eq!(refused.readiness, Readiness::Refused);
     assert!(refused.error.is_some());
-    let healthy = node.get(operator, example_plug!("schema")).await.unwrap();
+    let healthy = node
+        .get(operator, example_cartridge!("schema"))
+        .await
+        .unwrap();
     assert_eq!(healthy.readiness, Readiness::Disabled);
     assert_eq!(healthy.error, None);
 
     // Repairing the settings via ConfigureNodule restores the nodule to Admitted.
     let repaired = node
-        .call(ConfigureNodule {
-            authorization: operator,
-            plug_id: id(example_plug!("photos")),
-            settings: settings_of(false),
-        })
+        .call(
+            operator,
+            ConfigureNodule {
+                cartridge_id: id(example_cartridge!("photos")),
+                settings: settings_of(false),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(repaired.readiness, Readiness::Disabled);

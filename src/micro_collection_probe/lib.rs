@@ -158,7 +158,7 @@ impl micro_lifecycle::Guest for CollectionProbe {
             log: Vec::new(),
         }));
         STATE.with_borrow_mut(|slot| {
-            assert!(slot.replace(state.clone()).is_none());
+            assert!(slot.replace(Rc::clone(&state)).is_none());
         });
         wit_bindgen::spawn_local(read_loop(state));
         Ok(micro_lifecycle::Initialized {
@@ -244,7 +244,7 @@ impl presentation_events::Guest for CollectionProbe {
     }
 
     fn dispatch(surface: &presentation::Surface, event: Event) -> EventResponse {
-        let state = with_state(|state| state.clone());
+        let state = with_state(Rc::clone);
         let mut write = false;
         let mut cap_write = false;
         let mut cap_close = false;
@@ -313,16 +313,16 @@ impl presentation_events::Guest for CollectionProbe {
             }
         };
         if write {
-            wit_bindgen::spawn_local(write_scenario(state.clone()));
+            wit_bindgen::spawn_local(write_scenario(Rc::clone(&state)));
         }
         if cap_write {
-            wit_bindgen::spawn_local(cap_write_scenario(state.clone()));
+            wit_bindgen::spawn_local(cap_write_scenario(Rc::clone(&state)));
         }
         if cap_close {
-            wit_bindgen::spawn_local(cap_close_scenario(state.clone()));
+            wit_bindgen::spawn_local(cap_close_scenario(Rc::clone(&state)));
         }
         if redeem {
-            wit_bindgen::spawn_local(cap_redeem(state.clone(), surface.identity()));
+            wit_bindgen::spawn_local(cap_redeem(Rc::clone(&state), surface.identity()));
         }
         if restart {
             state.borrow_mut().running = true;
@@ -768,11 +768,12 @@ async fn read_loop(state: Rc<RefCell<State>>) {
 
         let (lease, ticket, committed) = {
             let state = state.borrow();
-            let lease = state
-                .lease
-                .as_ref()
-                .expect("collection lease missing")
-                .clone();
+            let lease = Rc::clone(
+                state
+                    .lease
+                    .as_ref()
+                    .expect("collection lease missing"),
+            );
             let ticket = state.mirror.borrow_mut().begin_read();
             let committed = ticket.committed().cloned();
             (lease, ticket, committed)
@@ -873,7 +874,7 @@ async fn acquire(
     loop {
         let (reader, selector) = {
             let state = state.borrow();
-            (state.reader.clone(), state.selector.clone())
+            (Rc::clone(&state.reader), state.selector.clone())
         };
         let requested = resume.clone();
         match reader

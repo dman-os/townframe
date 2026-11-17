@@ -1148,7 +1148,12 @@ async fn a_slot_opened_on_a_disabled_micro_mounts_once_it_is_enabled() {
         runtime.set_enabled(&id(COUNTER), false).await;
         reaches(&runtime, &id(COUNTER), MicroState::Disabled).await;
         let (mut dom, mut tree) = counter_slot(&runtime).await;
-        slot_shows(&mut dom, &mut tree, "Section unavailable: its micro is disabled.").await;
+        slot_shows(
+            &mut dom,
+            &mut tree,
+            "Section unavailable: its micro is disabled.",
+        )
+        .await;
         // The same slot, not a remounted one, picks the micro up.
         runtime.set_enabled(&id(COUNTER), true).await;
         slot_shows(&mut dom, &mut tree, "stub counter").await;

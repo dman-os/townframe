@@ -59,6 +59,7 @@ pub fn NavButton(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -104,5 +105,26 @@ mod tests {
         page.click(button);
         page.click(button);
         assert_eq!(*clicks.borrow(), 2);
+    }
+
+    fn owner() -> Element {
+        let mut mode = use_signal(|| NavButtonMode::Sidebar);
+        rsx! {
+            NavButton {
+                mode: mode(),
+                onclick: move |()| {
+                    mode.set(match mode() {
+                        NavButtonMode::Back => NavButtonMode::Sidebar,
+                        NavButtonMode::Sidebar => NavButtonMode::Back,
+                    });
+                },
+                "icon"
+            }
+        }
+    }
+
+    #[test]
+    fn a_nav_button_survives_any_order_of_events() {
+        Storm::of(owner).run_seeds(0..16);
     }
 }

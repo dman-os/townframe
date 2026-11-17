@@ -4,13 +4,13 @@
 //! mounts other micros' presentations through capabilities it redeems itself, so what that
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
-use super::composed;
-use super::press_platform_back;
 use super::HeadlessDom;
 use super::Launch;
+use super::composed;
+use super::press_platform_back;
+use crate::composition::CompositionRuntime;
 use crate::composition::assemble;
 use crate::composition::desktop_runtime;
-use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
@@ -80,10 +80,12 @@ impl Layout {
             serde_json::json!({ "visible": visible }),
         );
         let launch = Launch::new(runtime.clone(), super::WIDE_PX);
-        let host = launch.host.clone();
+        let host = std::rc::Rc::clone(&launch.host);
         let mut ui = HeadlessDom::new(composed, launch);
-        ui.wait_until("home offers the layout", |ui| ui.find(OPEN_LAYOUT).is_some())
-            .await;
+        ui.wait_until("home offers the layout", |ui| {
+            ui.find(OPEN_LAYOUT).is_some()
+        })
+        .await;
         ui.click(OPEN_LAYOUT);
         // The toggles list the installed panels, which the guest reads from its mirror of the
         // collection: they appear once the layout is running and bootstrapped.
@@ -245,9 +247,10 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
         ui.text("section[aria-label=\"ghost panel\"] p[role=\"status\"]"),
         "Panel ghost is not installed."
     );
-    assert!(ui
-        .text("section[aria-label=\"Counter (Wasm) panel\"] p[role=\"alert\"]")
-        .contains("unavailable"));
+    assert!(
+        ui.text("section[aria-label=\"Counter (Wasm) panel\"] p[role=\"alert\"]")
+            .contains("unavailable")
+    );
     assert_eq!(stored_arrangement(&runtime), Some(stored.clone()));
 
     // Enabling the provider mounts its panel where the placeholder was; the unregistered id
@@ -257,9 +260,10 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
         ui.find(COUNTER_INCREMENT).is_some()
     })
     .await;
-    assert!(ui
-        .find("section[aria-label=\"ghost panel\"] p[role=\"status\"]")
-        .is_some());
+    assert!(
+        ui.find("section[aria-label=\"ghost panel\"] p[role=\"status\"]")
+            .is_some()
+    );
     assert_eq!(stored_arrangement(&runtime), Some(stored));
 }
 
@@ -327,14 +331,20 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
 #[tokio::test(flavor = "current_thread")]
 async fn hiding_a_native_panel_leaves_the_layout_mounted() {
     let Layout { mut ui, .. } = Layout::start_on(wasmi_runtime().await, &["dayframe.sample"]).await;
-    ui.wait_until("the sample's panel is mounted", |ui| ui.find(SAMPLE_FLAG).is_some())
-        .await;
+    ui.wait_until("the sample's panel is mounted", |ui| {
+        ui.find(SAMPLE_FLAG).is_some()
+    })
+    .await;
     for _round in 0..6 {
         ui.click(HIDE_SAMPLE);
-        ui.wait_until("the sample's panel is gone", |ui| ui.find(SAMPLE_PANEL).is_none())
-            .await;
-        ui.wait_until("the layout offers the panel again", |ui| ui.find(SHOW_SAMPLE).is_some())
-            .await;
+        ui.wait_until("the sample's panel is gone", |ui| {
+            ui.find(SAMPLE_PANEL).is_none()
+        })
+        .await;
+        ui.wait_until("the layout offers the panel again", |ui| {
+            ui.find(SHOW_SAMPLE).is_some()
+        })
+        .await;
         ui.click(SHOW_SAMPLE);
         ui.wait_until("the sample's panel is mounted again", |ui| {
             ui.find(SAMPLE_FLAG).is_some()

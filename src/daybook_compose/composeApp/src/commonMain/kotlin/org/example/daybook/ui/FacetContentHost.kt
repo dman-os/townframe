@@ -437,10 +437,10 @@ private fun ImageFacetError(message: String) {
 private fun blobHash(blob: Blob): String? {
     val fromUrl =
         blob.urls?.firstNotNullOfOrNull { url ->
-            if (!url.startsWith("db+blob:///")) {
+            if (!url.startsWith("dtxt:blob:")) {
                 null
             } else {
-                val hashValue = url.removePrefix("db+blob:///")
+                val hashValue = url.removePrefix("dtxt:blob:")
                 if (hashValue.isBlank()) null else hashValue
             }
         }

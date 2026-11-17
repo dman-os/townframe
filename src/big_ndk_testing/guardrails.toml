@@ -1,0 +1,33 @@
+version = 1
+role = "tooling"
+dependency_reason = "The native test harness for nodule authors: it boots a real in-memory node and serves their big_ndk handlers in-process in place of the wasm component, so tests exercise the real install, grant, dispatch and egress paths without building wasm. Test support only, never a production path."
+allowed_dependencies = [
+    "big_blobs",
+    "big_cabinet",
+    "big_cabinet_core",
+    "big_dispatch",
+    "big_dispatch_core",
+    "big_ndk",
+    "big_node",
+    "big_nodule",
+    "big_nodule_core",
+    "big_cartridges_core",
+    "big_repo",
+    "method_core",
+    "secrets_rs",
+    "service_client_core_rs",
+    "service_client_native_rs",
+    "service_core_rs",
+    "service_utils_rs",
+    "sqlite_rs",
+    "test_nodule_handlers",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]
