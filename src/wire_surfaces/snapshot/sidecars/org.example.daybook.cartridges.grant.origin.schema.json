@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "OriginGrant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.cartridges.grant.origin/<origin>`: the cartridge may talk to services at\nthe origin. Nothing enforces it yet: there is no `#origin` permbind.",
+      "properties": {
+        "empty": {
+          "description": "A member with nothing to say states `true` (the empty-member convention).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "OriginGrant",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridges.grant.origin"
+    }
+  },
+  "$ref": "#/$defs/OriginGrant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
