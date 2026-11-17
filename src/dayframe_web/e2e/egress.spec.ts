@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { watchFailures } from "./shell";
+import { expect, test, type Request } from "@playwright/test";
+import { installDeepQuery, showCounterPanel, watchFailures } from "./shell";
 
 // The web host's egress controls (`clay_surface` value policy, the presentation box, and the CSP
 // in `x/dayframe-web.ts`). The guest vocabulary refuses hostile values before they reach the DOM,
@@ -12,9 +12,15 @@ test("the app boots under the CSP and a DOM-injected remote image, css url() and
   page,
 }) => {
   const failures = watchFailures(page);
-  const foreignRequests: string[] = [];
+  await installDeepQuery(page);
+  // Chromium announces a CSP-blocked request with a `request` event and then fails it with the
+  // error text `csp` (observed on the pinned chromium-1248 headless shell) before it leaves the
+  // renderer, so a `request` event alone does not mean a fetch. A request that reached the network instead fails with a connection error
+  // (nothing listens on the discard port) or finishes, so any foreign request whose failure is
+  // not the CSP block counts as an egress.
+  const foreignRequests: Request[] = [];
   page.on("request", (request) => {
-    if (request.url().startsWith(FOREIGN)) foreignRequests.push(request.url());
+    if (request.url().startsWith(FOREIGN)) foreignRequests.push(request);
   });
 
   const response = await page.goto("/");
@@ -32,6 +38,8 @@ test("the app boots under the CSP and a DOM-injected remote image, css url() and
   await expect(
     page.getByRole("button", { name: "Open Settings", exact: true }),
   ).toBeVisible({ timeout: 60_000 });
+  // A guest presentation (and so a shadow-rooted mount) must be on screen to inject into.
+  await showCounterPanel(page);
   expect(failures).toEqual([]);
 
   const violated = await page.evaluate(async (foreign) => {
@@ -39,7 +47,7 @@ test("the app boots under the CSP and a DOM-injected remote image, css url() and
     document.addEventListener("securitypolicyviolation", (event) =>
       violations.push(event.effectiveDirective),
     );
-    const host = document.querySelector("[data-clay-presentation]") ?? document.body;
+    const host = (window as any).deepQueryAll("[data-clay-presentation]")[0];
     const img = document.createElement("img");
     img.src = `${foreign}/img.png`;
     const styled = document.createElement("div");
@@ -56,7 +64,13 @@ test("the app boots under the CSP and a DOM-injected remote image, css url() and
     return violations;
   }, FOREIGN);
 
-  expect(foreignRequests).toEqual([]);
+  const reachedNetwork = foreignRequests
+    .filter((request) => request.failure()?.errorText !== "csp")
+    .map(
+      (request) =>
+        `${request.url()} ${request.failure()?.errorText ?? "not failed"}`,
+    );
+  expect(reachedNetwork).toEqual([]);
   expect(violated).toContain("img-src");
   expect(violated.some((directive) => directive.startsWith("script-src"))).toBe(
     true,
@@ -68,20 +82,18 @@ test("a guest node with position:fixed and inset:0 cannot cover the shell outsid
   page,
 }) => {
   watchFailures(page);
+  await installDeepQuery(page);
   await page.goto("/");
   await expect(
     page.getByRole("button", { name: "Open Settings", exact: true }),
   ).toBeVisible({ timeout: 60_000 });
-  // Open Settings so a nested (child) presentation is on screen beside the shell's own chrome.
-  await page
-    .getByRole("button", { name: "Open Settings", exact: true })
-    .click();
-  await expect(
-    page.getByRole("button", { name: "Open Micro lifecycle settings" }),
-  ).toBeVisible({ timeout: 60_000 });
+  // A layout presentation with the counter's presentation nested in it, beside the shell chrome.
+  await showCounterPanel(page);
 
   const result = await page.evaluate(() => {
-    const boxes = [...document.querySelectorAll("[data-clay-presentation]")];
+    const boxes: Element[] = (window as any).deepQueryAll(
+      "[data-clay-presentation]",
+    );
     const viewport = { w: window.innerWidth, h: window.innerHeight };
     const area = (el: Element) => {
       const r = el.getBoundingClientRect();
@@ -105,7 +117,14 @@ test("a guest node with position:fixed and inset:0 cannot cover the shell outsid
         : boxRect.top > 8
           ? { x: 2, y: 2 }
           : { x: Math.min(viewport.w - 2, boxRect.right + 2), y: 2 };
-    const hit = document.elementFromPoint(outside.x, outside.y);
+    // `document.elementFromPoint` stops at a shadow host; descend so a hit on the intruder inside
+    // a mount's shadow root is seen as the intruder, not as its host.
+    let hit: Element | null = document.elementFromPoint(outside.x, outside.y);
+    while (hit?.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint(outside.x, outside.y);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
     return {
       boxes: boxes.length,
       boxRect: JSON.parse(JSON.stringify(boxRect)),
