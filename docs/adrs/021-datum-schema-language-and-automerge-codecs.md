@@ -813,9 +813,13 @@ feature gates (`@since`, `@unstable`, `@deprecated`, kept as `wit_parser::Stabil
 - **A stable item is never removed or changed incompatibly.** It is deprecated instead, and stays in
   the schema. A new item carries `since` equal to the file's new revision. A breaking change to a
   stable item mints a new NSID.
-- **An `unstable` item is outside the rules** until it is stabilized: it may change or be dropped
-  freely, which is how pre-release shapes evolve without minting NSIDs. Stabilizing is the deliberate
-  act of replacing `unstable` with `since`.
+- **Unstable is the default** (operator, 2026-11-17): we are pre-release, so an item with no
+  stability annotation is `unstable`. An unstable item is outside the rules: it may change or be
+  dropped freely, which is how pre-release shapes evolve without minting NSIDs. Every change still
+  shows as a snapshot diff that needs `--bless`, so it is reviewed either way.
+- **Stabilizing needs the operator's sign-off.** Giving an item `since` is the deliberate act that
+  puts it under the rules, and the operator signs off on every one. The snapshot index records each
+  item's stability, so a stabilization is its own visible line in review.
 - **A cartridge never drops a stable datum** from a later version: data under its tag already lives
   in people's drawers, and other cartridges' `#datum` permbinds may name it. It deprecates the datum
   and keeps shipping its schema. Only an `unstable` datum may be dropped, so there is no retirement
