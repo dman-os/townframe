@@ -165,6 +165,49 @@ async fn a_held_records_sidecar_gives_it_storage_forms() {
     node.shutdown().await;
 }
 
+/// A sidecar is a JSON Schema document, and a bytes position's schema names a `$bytes` property.
+/// Stored as a datum it must not be read as the atproto bytes value it describes, or no cartridge
+/// with a bytes field could be published.
+#[tokio::test]
+async fn a_sidecar_describing_a_bytes_field_is_published_and_gives_it_storage() {
+    let node = node_with_alpha(Vec::new()).await;
+    let lexicon = json!({
+        "lexicon": 1,
+        "id": NOTE,
+        "revision": 1,
+        "defs": { "main": {
+            "type": "record",
+            "key": "tid",
+            "record": { "type": "object", "properties": { "raw": { "type": "bytes" } } },
+        } },
+    });
+    let document = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$ref": "#/$defs/Note",
+        "$defs": { "Note": {
+            "type": "object",
+            "properties": { "raw": {
+                "type": "object",
+                "properties": { "$bytes": { "type": "string", "contentEncoding": "base64" } },
+                "required": ["$bytes"],
+                "additionalProperties": false,
+                "x-automerge": "bytes",
+            } },
+        } },
+    });
+    let cartridge = with_sidecar(
+        with_lexicon(init_cartridge("beta", "1.0.0", &[], &[], &[]), lexicon),
+        NOTE,
+        document,
+    );
+    node.admit(node.operator(), cartridge).await.unwrap();
+    node.set_enabled(BETA, true).await;
+    let declared = node.schemas.require_for_write(NOTE).unwrap();
+    let raw = declared.compiled().member(&["raw"]).unwrap();
+    assert_eq!(Codec::of(raw.document()).unwrap(), Some(Codec::Bytes));
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_sidecar_for_a_record_the_nodule_does_not_hold_is_refused() {
     let node = node_hosting(&Probe::new()).await;
