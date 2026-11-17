@@ -201,11 +201,9 @@ pub async fn call(
                 "descriptor bodies are native-only",
             ),
         },
-        Err(ClientError::Method(error)) => dispatch_error_response(caller.missing_authority.refine(
-            authority,
-            &called,
-            error,
-        )),
+        Err(ClientError::Method(error)) => {
+            dispatch_error_response(caller.missing_authority.refine(authority, &called, error))
+        }
         Err(ClientError::Transport { message, .. }) => {
             panic!("in-process dispatch transport failed: {message}")
         }

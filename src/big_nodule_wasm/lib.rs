@@ -28,7 +28,6 @@
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
-use big_cabinet_core::authority::CapId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Component as ManifestComponent;
 use big_cartridges_core::Digest;
@@ -401,16 +400,13 @@ impl NoduleExecutor for WasmExecutor {
         let mut components = BTreeMap::new();
         for (key, (artifact, component_bytes)) in bytes {
             let workload_id = format!("nodule/{}/{}/{}", spec.cartridge_id, spec.revision, key);
-            self.signers
-                .lock()
-                .expect("signers lock")
-                .insert(
-                    workload_id.clone(),
-                    WorkloadCaller {
-                        signer: spec.actor.capability,
-                        missing_authority: spec.missing_authority.clone(),
-                    },
-                );
+            self.signers.lock().expect("signers lock").insert(
+                workload_id.clone(),
+                WorkloadCaller {
+                    signer: spec.actor.capability,
+                    missing_authority: spec.missing_authority.clone(),
+                },
+            );
             let started = self
                 .host
                 .workload_start(WorkloadStartRequest {

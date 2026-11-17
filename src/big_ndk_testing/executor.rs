@@ -12,7 +12,6 @@
 //! answer through a oneshot.
 
 use async_trait::async_trait;
-use big_cabinet_core::authority::CapId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Digest;
 use big_cartridges_core::Revision;

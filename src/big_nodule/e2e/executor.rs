@@ -13,6 +13,7 @@ use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
 use crate::executor::Reensure;
 use crate::executor::RoutineCapabilities;
+use crate::requests::MissingAuthorityLookup;
 use async_trait::async_trait;
 use big_blobs_core::Blob;
 use big_cabinet_core::DatumKey;
@@ -120,6 +121,8 @@ struct FakeState {
     /// The routine capabilities of the last `ensure`, and which routine serves each operation.
     routine_capabilities: BTreeMap<String, RoutineCapabilities>,
     routine_of: BTreeMap<String, String>,
+    /// The refusal attribution of the last `ensure`d cartridge.
+    missing_authority: Option<MissingAuthorityLookup>,
     /// What each served call was delivered with, as the wasm provider selects it: the
     /// capabilities of the routine that implements the called operation, at the call.
     delivered: Vec<(String, RoutineCapabilities)>,
@@ -164,6 +167,17 @@ impl FakeExecutor {
     /// The routine capabilities the last `ensure` was handed, by routine key.
     pub(super) fn routine_capabilities(&self) -> BTreeMap<String, RoutineCapabilities> {
         self.state.lock().unwrap().routine_capabilities.clone()
+    }
+
+    /// The refusal attribution the last `ensure` was handed, which the host's egress refines a
+    /// routine's refused calls with.
+    pub(super) fn missing_authority(&self) -> MissingAuthorityLookup {
+        self.state
+            .lock()
+            .unwrap()
+            .missing_authority
+            .clone()
+            .expect("a cartridge was ensured")
     }
 
     /// What each served call was delivered with, in order: the operation and the capabilities
@@ -218,6 +232,7 @@ impl NoduleExecutor for FakeExecutor {
         let mut state = self.state.lock().unwrap();
         state.ensures += 1;
         state.routine_capabilities = spec.routine_capabilities.clone();
+        state.missing_authority = Some(spec.missing_authority.clone());
         state.routine_of = spec
             .routines
             .iter()

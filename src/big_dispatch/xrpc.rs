@@ -31,13 +31,13 @@ use method_core::ContextError;
 use method_core::HttpMethod;
 use serde_json::Value;
 use service_client_native_rs::Client;
-use service_utils_rs::xrpc::domain_error_envelope;
 use service_utils_rs::ClientError;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc::XrpcErrorEnvelope;
 use service_utils_rs::xrpc::XrpcFallbackHandler;
 use service_utils_rs::xrpc::XrpcFallbackResponse;
 use service_utils_rs::xrpc::XrpcHandlerError;
+use service_utils_rs::xrpc::domain_error_envelope;
 
 /// What a request that presents no bearer token is admitted as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,5 +216,34 @@ fn refusal(error: ClientError<DispatchError>) -> XrpcHandlerError {
                 Err(_) => XrpcHandlerError::domain(status, "ProviderError", body.to_string()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use service_utils_rs::xrpc::DOMAIN_ERROR_FIELD;
+
+    /// A refusal for want of a grant reaches an HTTP caller with its fields intact under
+    /// `operationError`, where a typed client decodes it, and not as a denial or a string.
+    #[test]
+    fn missing_authority_reaches_an_http_caller_whole() {
+        let missing = DispatchError::Context(ContextError::MissingAuthority {
+            cartridge: "alpha/app".to_owned(),
+            permbind: "sync".to_owned(),
+            request: Some("018f0000-0000-7000-8000-000000000001".to_owned()),
+        });
+        let XrpcHandlerError::Domain { status, body } =
+            refusal(ClientError::Method(missing.clone()))
+        else {
+            panic!("a missing authority is a domain error");
+        };
+        assert_eq!(status, http::StatusCode::FORBIDDEN);
+        let body = serde_json::to_value(body).unwrap();
+        assert_eq!(body["error"], "MissingAuthority");
+        assert_eq!(
+            serde_json::from_value::<DispatchError>(body[DOMAIN_ERROR_FIELD].clone()).unwrap(),
+            missing
+        );
     }
 }

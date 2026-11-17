@@ -1076,7 +1076,10 @@ async fn apply_nodule_capabilities(
         routines
             .iter()
             .filter_map(|(routine_key, applied)| {
-                Some((applied.handles.dispatch?, ungranted.get(routine_key)?.clone()))
+                Some((
+                    applied.handles.dispatch?,
+                    ungranted.get(routine_key)?.clone(),
+                ))
             })
             .collect(),
     );
