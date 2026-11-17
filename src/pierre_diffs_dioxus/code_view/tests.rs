@@ -911,20 +911,31 @@ struct PageRig {
     rig: Rig,
     handle: ScrollRoot,
     scroller: Rc<Scripted>,
+    offset: f64,
+    viewport: f64,
 }
 
 impl PageRig {
     fn new() -> Self {
+        Self::at(CONTENT_OFFSET, PAGE_VIEWPORT)
+    }
+
+    /// A viewer whose top is `offset` below the top of the scroller's content, in a scroller
+    /// whose client box is `viewport` tall: what a document scroll proxy reports (the viewport's
+    /// size and the document's scroll), with the heading and tabs of a page above the viewer.
+    fn at(offset: f64, viewport: f64) -> Self {
         let handle = ScrollRoot::default();
         let rig = Rig::mounted_in(Environment::default(), ScrollMode::Embedder(handle.clone()));
         let scroller = Rc::new(Scripted::default());
         let viewer = Rc::new(Scripted::default());
         // The viewer's top is `CONTENT_OFFSET` below the scroller's, which is not scrolled.
-        viewer.client_top.set(CONTENT_OFFSET);
+        viewer.client_top.set(offset);
         let mut page = Self {
             rig,
             handle,
             scroller,
+            offset,
+            viewport,
         };
         let (handle, scroller) = (page.handle.clone(), Rc::clone(&page.scroller));
         // What a webview reports once the page is up: the viewer's root and the scroller mounted,
@@ -932,7 +943,7 @@ impl PageRig {
         page.rig.deliver(|_| {
             handle.viewer_mounted(Rc::new(MountedData::new(ScriptedElement(viewer))));
             handle.mounted(Rc::new(MountedData::new(ScriptedElement(scroller))));
-            handle.resized(PAGE_VIEWPORT, 400.0);
+            handle.resized(viewport, 400.0);
         });
         page
     }
@@ -945,8 +956,8 @@ impl PageRig {
             handle.scrolled(ScrollSample {
                 top,
                 left: 0.0,
-                scroll_height: CONTENT_OFFSET + 1_000_000.0,
-                client_height: PAGE_VIEWPORT,
+                scroll_height: self.offset + 1_000_000.0,
+                client_height: self.viewport,
             });
         });
     }
@@ -984,6 +995,32 @@ fn a_viewer_in_the_embedders_scroller_reads_its_geometry_from_the_handle() {
     let handle = page.handle.clone();
     page.rig.deliver(|_| handle.resized(500.0, 400.0));
     assert_eq!(page.rig.state.view.get_height(), 500.0);
+}
+
+/// The document scroll proxy's shape: the viewer starts well down a page (heading, tabs and
+/// controls above it, more than half of a laptop viewport), and until the first scroll event
+/// the scroller has reported only its mount and its size.
+#[test]
+fn a_viewer_low_in_the_document_renders_its_visible_part_then_follows_the_document() {
+    let mut page = PageRig::at(500.0, 720.0);
+    assert_eq!(page.handle.offset(), 500.0);
+    assert_eq!(page.rig.state.view.get_height(), 720.0);
+    assert_eq!(page.rig.state.view.get_scroll_top(), 0.0);
+    page.rig.frames_until_idle();
+    let first = page.rig.page();
+    assert!(first.contains("f0_1 = 1"), "the top of the viewer renders");
+    // The document scrolls the viewer into view: its window grows to the viewport.
+    page.scroll_to(300.0);
+    page.rig.frames_until_idle();
+    assert_eq!(page.rig.state.view.get_scroll_top(), 0.0);
+    page.scroll_to(500.0 + 5_000.0);
+    page.rig.frames_until_idle();
+    assert_eq!(page.rig.state.view.get_scroll_top(), 5_000.0);
+    let rendered = page.rig.page();
+    assert!(!rendered.contains("f0_1 = 1"), "the window left the top");
+    assert!(!page.rig.shells().is_empty(), "something renders at the new position");
+    let slab = *page.rig.state.slab.peek();
+    assert!(slab.spacer_height.is_some_and(|height| height > 4_000.0), "{slab:?}");
 }
 
 #[test]
