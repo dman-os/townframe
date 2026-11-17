@@ -92,6 +92,49 @@ pub fn is_json_content_type(mime: &str) -> bool {
 /// operation-level flags only repeat that admission. Stating them here, once per operation, lets
 /// a runtime mint them for a routine whose `#method` permbind names the operation, so a cartridge
 /// declares the operation and never the service's capability domain.
+/// An item's declared stability, after WIT's `@since`/`@deprecated`/`@unstable` and Rust std's
+/// `#[stable]`/`#[deprecated]`/`#[unstable]` (ADR 021). A stable item is never removed or changed
+/// incompatibly; an unstable one is outside those rules until it is stabilized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Stability {
+    /// The Lexicon revision that introduced the item; `None` for an item of the baseline.
+    pub since: Option<u32>,
+    /// The revision that deprecated the item, and why. A deprecated item stays in its schema.
+    pub deprecated: Option<Deprecation>,
+    /// The feature gate of an item that is not yet stable.
+    pub unstable: Option<&'static str>,
+}
+
+impl Stability {
+    /// A baseline item: stable, with no revision of its own.
+    pub const STABLE: Self = Self {
+        since: None,
+        deprecated: None,
+        unstable: None,
+    };
+
+    /// The highest revision this stability names: the file's `revision` is the highest of these
+    /// over every item it contains.
+    pub const fn revision(&self) -> Option<u32> {
+        match (self.since, self.deprecated) {
+            (Some(since), Some(deprecated)) => Some(if since > deprecated.since {
+                since
+            } else {
+                deprecated.since
+            }),
+            (Some(since), None) => Some(since),
+            (None, Some(deprecated)) => Some(deprecated.since),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Deprecation {
+    pub since: u32,
+    pub note: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct HandleNeed {
     /// The service's mint operation, which names its capability domain.
@@ -124,6 +167,9 @@ pub struct XrpcMethod {
     /// The service handle the operation needs beyond dispatch's admission, if any.
     #[serde(skip_deserializing)]
     pub handle: Option<HandleNeed>,
+    /// Whether the method is stable, and since which Lexicon revision (ADR 021, stability).
+    #[serde(skip_deserializing)]
+    pub stability: Stability,
 }
 
 impl XrpcMethod {
@@ -140,6 +186,7 @@ impl XrpcMethod {
             output_encoding: Encoding::Json,
             local_only: false,
             handle: None,
+            stability: Stability::STABLE,
         }
     }
 
@@ -156,6 +203,7 @@ impl XrpcMethod {
             output_encoding: Encoding::Json,
             local_only: false,
             handle: None,
+            stability: Stability::STABLE,
         }
     }
 
@@ -172,6 +220,7 @@ impl XrpcMethod {
             output_encoding: Encoding::Json,
             local_only: false,
             handle: None,
+            stability: Stability::STABLE,
         }
     }
 
@@ -195,8 +244,44 @@ impl XrpcMethod {
     }
 
     /// Declares the service handle the method needs: see [`HandleNeed`].
-    pub const fn needs_handle(mut self, mint: &'static str, flags: &'static [&'static str]) -> Self {
+    pub const fn needs_handle(
+        mut self,
+        mint: &'static str,
+        flags: &'static [&'static str],
+    ) -> Self {
         self.handle = Some(HandleNeed { mint, flags });
+        self
+    }
+
+    /// Declares the Lexicon revision that introduced the method (`since = N`).
+    pub const fn since(mut self, revision: u32) -> Self {
+        assert!(revision > 0, "revisions start at 1");
+        assert!(
+            self.stability.unstable.is_none(),
+            "an unstable method has no `since`: stabilizing replaces `unstable` with `since`"
+        );
+        self.stability.since = Some(revision);
+        self
+    }
+
+    /// Declares the method deprecated as of `revision`: it stays in its schema.
+    pub const fn deprecated(mut self, revision: u32, note: &'static str) -> Self {
+        assert!(revision > 0, "revisions start at 1");
+        self.stability.deprecated = Some(Deprecation {
+            since: revision,
+            note,
+        });
+        self
+    }
+
+    /// Declares the method unstable behind `feature`: outside the evolution rules until it is
+    /// stabilized by replacing this with `since`.
+    pub const fn unstable(mut self, feature: &'static str) -> Self {
+        assert!(
+            self.stability.since.is_none(),
+            "a stable method cannot become unstable"
+        );
+        self.stability.unstable = Some(feature);
         self
     }
 

@@ -6,9 +6,18 @@
 //! NSID instead of editing this one (operator rule, 2026-11-06). The classifier fails closed: a
 //! keyword it has no compatible rule for counts as breaking when it differs. Only `description`,
 //! prose a reader never validates against, is ignored.
+//!
+//! Stability is declared per item (ADR 021): a field, definition, method or union member is under
+//! the rules only when it states `since` (or `deprecated`). A stable item is never removed or
+//! changed incompatibly, and a new one carries `since` equal to the file's new `revision`. Every
+//! other item is unstable, the pre-release default, and is outside the rules until it is
+//! stabilized.
 
+use crate::items;
+use big_cabinet_core::datum::lexicon::stability::Declared;
 use serde_json::Map;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +41,73 @@ pub fn classify(old: &Value, new: &Value) -> Vec<Difference> {
     found
 }
 
-/// What stops `new` from replacing `old` under the same NSID: a breaking difference, or
-/// compatible differences without a bumped `revision`. An absent `revision` counts as 0.
-pub fn violations(nsid: &str, old: &Value, new: &Value) -> Vec<String> {
-    let differences = classify(old, new);
-    let breaking: Vec<_> = differences
+/// A published Lexicon and the sidecar it ships with, if it has one.
+#[derive(Debug, Clone, Copy)]
+pub struct Surface<'a> {
+    pub lexicon: &'a Value,
+    pub sidecar: Option<&'a Value>,
+}
+
+impl<'a> Surface<'a> {
+    pub fn of(lexicon: &'a Value) -> Self {
+        Self {
+            lexicon,
+            sidecar: None,
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        self.lexicon["revision"].as_u64().unwrap_or(0)
+    }
+}
+
+/// Whether the evolution rules reach a difference at `path` of the Lexicon: the nearest item
+/// around it decides, and only a stable one (in the old copy, or for a new item in the new one)
+/// is under them. A `required` or `nullable` entry belongs to the property it names.
+fn governed(
+    path: &str,
+    old: &BTreeMap<String, Declared>,
+    new: &BTreeMap<String, Declared>,
+) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    let owner = segments
+        .iter()
+        .position(|segment| matches!(*segment, "required" | "nullable"))
+        .filter(|at| at + 1 < segments.len())
+        .map(|at| {
+            format!(
+                "{}/properties/{}",
+                segments[..at].join("/"),
+                segments[at + 1]
+            )
+        });
+    let path = owner.as_deref().unwrap_or(path);
+    old.keys()
+        .chain(new.keys())
+        .map(|item| (items::lexicon_path(item), item))
+        .filter(|(at, _)| {
+            path.strip_prefix(at.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .max_by_key(|(at, _)| at.len())
+        .is_some_and(|(_, item)| {
+            old.get(item)
+                .or_else(|| new.get(item))
+                .is_some_and(Declared::is_stable)
+        })
+}
+
+/// What stops `new` from replacing `old` under the same NSID: a breaking difference, a stable item
+/// that was removed or changed, a new item that does not carry the file's new revision as its
+/// `since`, or compatible differences without a bumped `revision`. An absent `revision` counts as
+/// 0. Differences that sit in an unstable item are outside the rules.
+pub fn violations(nsid: &str, old: Surface, new: Surface) -> Vec<String> {
+    let (old_items, new_items) = (items::items(&old), items::items(&new));
+    let differences: Vec<Difference> = classify(old.lexicon, new.lexicon)
+        .into_iter()
+        .filter(|difference| governed(&difference.path, &old_items, &new_items))
+        .collect();
+    let mut found: Vec<String> = differences
         .iter()
         .filter(|difference| difference.severity == Severity::Breaking)
         .map(|difference| {
@@ -46,11 +117,16 @@ pub fn violations(nsid: &str, old: &Value, new: &Value) -> Vec<String> {
             )
         })
         .collect();
-    if !breaking.is_empty() {
-        return breaking;
+    found.extend(item_violations(
+        nsid,
+        &old_items,
+        &new_items,
+        (old.revision(), new.revision()),
+    ));
+    if !found.is_empty() {
+        return found;
     }
-    let revision = |lexicon: &Value| lexicon["revision"].as_u64().unwrap_or(0);
-    if differences.is_empty() || revision(new) > revision(old) {
+    if differences.is_empty() || new.revision() > old.revision() {
         return Vec::new();
     }
     let listed: Vec<_> = differences
@@ -60,8 +136,92 @@ pub fn violations(nsid: &str, old: &Value, new: &Value) -> Vec<String> {
     vec![format!(
         "{nsid}: compatible changes ({}) need a bumped `revision`, still {}",
         listed.join("; "),
-        revision(old)
+        old.revision()
     )]
+}
+
+/// The rules about items themselves, which the shape of the Lexicon cannot show: nothing stable is
+/// removed or made unstable, a stable item keeps its `since`, and a new stable item carries the
+/// new revision.
+fn item_violations(
+    nsid: &str,
+    old: &BTreeMap<String, Declared>,
+    new: &BTreeMap<String, Declared>,
+    (old_revision, revision): (u64, u64),
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let named = |path: &str| {
+        if path.is_empty() {
+            "the file".to_owned()
+        } else {
+            format!("`{path}`")
+        }
+    };
+    // An item inside an item that is itself removed (or new) is covered by the outer one.
+    let inside = |path: &str, outer: &dyn Fn(&str) -> bool| {
+        (0..path.len())
+            .filter(|at| path.as_bytes()[*at] == b'/')
+            .any(|at| at > 0 && outer(&path[..at]))
+    };
+    for (path, before) in old {
+        if !before.is_stable() {
+            continue;
+        }
+        match new.get(path) {
+            None if inside(path, &|outer| {
+                old.contains_key(outer) && !new.contains_key(outer)
+            }) => {}
+            None => found.push(format!(
+                "{nsid}: stable item {} was removed; deprecate it instead",
+                named(path)
+            )),
+            Some(after) if !after.is_stable() => found.push(format!(
+                "{nsid}: stable item {} became unstable",
+                named(path)
+            )),
+            Some(after) => {
+                if before.since != after.since {
+                    found.push(format!(
+                        "{nsid}: stable item {} changed its `since` from {:?} to {:?}",
+                        named(path),
+                        before.since,
+                        after.since
+                    ));
+                }
+                if let Some((since, _)) = &after.deprecated
+                    && before.deprecated.is_none()
+                    && *since != revision
+                {
+                    found.push(format!(
+                        "{nsid}: {} is newly deprecated since {since}, and the file's revision \
+                         is {revision}",
+                        named(path)
+                    ));
+                }
+            }
+        }
+    }
+    let is_new = |path: &str| old.get(path).is_none_or(|before| !before.is_stable());
+    for (path, after) in new {
+        if path.is_empty()
+            || !after.is_stable()
+            || !is_new(path)
+            || inside(path, &|outer| {
+                new.contains_key(outer) && is_new(outer) && new[outer].is_stable()
+            })
+        {
+            continue;
+        }
+        if after.since != Some(revision) {
+            found.push(format!(
+                "{nsid}: new stable item {} must carry `since = {revision}`, the file's new \
+                 revision (it was {old_revision}), and carries {:?}",
+                named(path),
+                after.since
+            ));
+        }
+    }
+    found
 }
 
 fn push(found: &mut Vec<Difference>, path: &str, severity: Severity, what: String) {
@@ -96,10 +256,20 @@ fn set_diff(
 ) {
     let (before, after) = sets;
     for name in after.difference(&before) {
-        push(found, path, severity.0, format!("{} `{name}`", what.0));
+        push(
+            found,
+            &child(path, name),
+            severity.0,
+            format!("{} `{name}`", what.0),
+        );
     }
     for name in before.difference(&after) {
-        push(found, path, severity.1, format!("{} `{name}`", what.1));
+        push(
+            found,
+            &child(path, name),
+            severity.1,
+            format!("{} `{name}`", what.1),
+        );
     }
 }
 
@@ -203,7 +373,7 @@ fn walk(path: &str, old: &Value, new: &Value, found: &mut Vec<Difference>) {
             // either way: values of it may be stored.
             "refs" => set_diff(
                 found,
-                &at,
+                &child(path, "$union"),
                 names(),
                 ("union gained member", "union lost member"),
                 (
@@ -440,7 +610,7 @@ mod tests {
         judges,
         (old, new, verdict),
         {
-            let found = violations("x.y.z", &old, &new);
+            let found = violations("x.y.z", Surface::of(&old), Surface::of(&new));
             match verdict {
                 "ok" => assert!(found.is_empty(), "{found:?}"),
                 needle => assert!(
@@ -472,10 +642,10 @@ mod tests {
             at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 1),
             "need a bumped `revision`"
         ),
-        compatible_change_with_no_revision_at_all_fails: (
-            record(object(json!({}), json!([]))),
+        a_file_with_no_revision_is_unstable_and_changes_freely: (
             record(object(json!({"a": {"type": "string"}}), json!([]))),
-            "need a bumped `revision`"
+            record(object(json!({"a": {"type": "integer"}}), json!([]))),
+            "ok"
         ),
         breaking_change_fails_even_with_a_bump: (
             at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 1),
@@ -483,9 +653,216 @@ mod tests {
             "mints a new NSID"
         ),
         breaking_change_beside_a_compatible_one_fails: (
-            record(object(json!({"a": {"type": "string"}}), json!([]))),
+            at_revision(record(object(json!({"a": {"type": "string"}}), json!([]))), 1),
             at_revision(record(object(json!({"b": {"type": "string"}}), json!([]))), 3),
             "removed or renamed"
         ),
+    }
+
+    /// A datum's Lexicon and sidecar from `(name, extras)` properties: the extras are the
+    /// stability keywords, which only the sidecar carries, and the Lexicon's `revision` is the
+    /// highest revision they name. A property named `u` is an open union of `members`, whose own
+    /// `extras` are keyed by member id.
+    fn datum(properties: Value) -> (Value, Value) {
+        let mut lexicon_properties = Map::new();
+        let mut sidecar_properties = Map::new();
+        let mut revision = 0;
+        let mut named = |extras: &Value| {
+            let declared = Declared::read(extras.as_object().unwrap()).unwrap();
+            revision = revision.max(declared.revision().unwrap_or(0));
+        };
+        for (name, extras) in properties.as_object().unwrap() {
+            let (lexicon, sidecar) = if name == "u" {
+                let members: Vec<&str> = extras["members"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|member| member.as_str().unwrap())
+                    .collect();
+                let mut branches: Vec<Value> = members
+                    .iter()
+                    .map(|id| {
+                        let mut branch = json!({
+                            "type": "object",
+                            "properties": { "$type": { "const": id } },
+                        });
+                        if let Some(more) = extras["extras"].get(*id) {
+                            named(more);
+                            branch
+                                .as_object_mut()
+                                .unwrap()
+                                .extend(more.as_object().unwrap().clone());
+                        }
+                        branch
+                    })
+                    .collect();
+                branches.push(json!({
+                    "type": "object",
+                    "properties": { "$type": { "type": "string", "not": { "enum": members } } },
+                }));
+                (
+                    json!({ "type": "union", "refs": members }),
+                    json!({ "oneOf": branches }),
+                )
+            } else {
+                named(extras);
+                let mut sidecar = json!({ "type": "string" });
+                sidecar
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(extras.as_object().unwrap().clone());
+                (json!({ "type": "string" }), sidecar)
+            };
+            lexicon_properties.insert(name.clone(), lexicon);
+            sidecar_properties.insert(name.clone(), sidecar);
+        }
+        let mut lexicon = record(object(Value::Object(lexicon_properties), json!([])));
+        if revision > 0 {
+            lexicon["revision"] = json!(revision);
+        }
+        let sidecar = json!({ "type": "object", "properties": sidecar_properties });
+        (lexicon, sidecar)
+    }
+
+    utils_rs::table_tests! {
+        stability,
+        (old, new, verdict),
+        {
+            let (old, new) = (datum(old), datum(new));
+            let found = violations(
+                "x.y.z",
+                Surface { lexicon: &old.0, sidecar: Some(&old.1) },
+                Surface { lexicon: &new.0, sidecar: Some(&new.1) },
+            );
+            match verdict {
+                "ok" => assert!(found.is_empty(), "{found:?}"),
+                needle => assert!(
+                    found.iter().any(|line| line.contains(needle)),
+                    "no `{needle}` in {found:?}",
+                ),
+            }
+        }
+    }
+
+    stability! {
+        an_unannotated_field_is_unstable_and_changes_freely: (
+            json!({"a": {}, "b": {}}),
+            json!({"a": {"type": "integer"}}),
+            "ok"
+        ),
+        a_new_field_carrying_the_new_revision_is_fine: (
+            json!({"a": {"x-since": 1}}),
+            json!({"a": {"x-since": 1}, "b": {"x-since": 2}}),
+            "ok"
+        ),
+        a_new_stable_field_below_the_revision_is_refused: (
+            json!({"a": {"x-since": 1}}),
+            json!({"a": {"x-since": 1}, "b": {"x-since": 2}, "c": {"x-since": 3}}),
+            "new stable item `/properties/b` must carry `since = 3`"
+        ),
+        a_stable_field_is_never_removed: (
+            json!({"a": {"x-since": 1}, "b": {"x-since": 1}}),
+            json!({"a": {"x-since": 1}}),
+            "stable item `/properties/b` was removed; deprecate it instead"
+        ),
+        a_deprecated_field_may_not_be_removed_either: (
+            json!({"a": {}, "b": {"x-since": 1, "x-deprecated": {"since": 3, "note": "use a"}}}),
+            json!({"a": {}}),
+            "stable item `/properties/b` was removed"
+        ),
+        a_new_unannotated_field_beside_stable_ones_is_unstable: (
+            json!({"a": {"x-since": 1}}),
+            json!({"a": {"x-since": 1}, "b": {}}),
+            "ok"
+        ),
+        an_unannotated_field_may_be_dropped_beside_stable_ones: (
+            json!({"a": {"x-since": 1}, "b": {}}),
+            json!({"a": {"x-since": 1}}),
+            "ok"
+        ),
+        deprecating_at_the_new_revision_is_fine: (
+            json!({"a": {}, "b": {"x-since": 1}}),
+            json!({"a": {}, "b": {"x-since": 1, "x-deprecated": {"since": 2, "note": "use a"}}}),
+            "ok"
+        ),
+        deprecating_at_another_revision_is_refused: (
+            json!({"a": {}, "b": {"x-since": 1}, "c": {"x-since": 2}}),
+            json!({"a": {}, "b": {"x-since": 1, "x-deprecated": {"since": 2, "note": "use a"}}, "c": {"x-since": 3}}),
+            "newly deprecated since 2, and the file's revision is 3"
+        ),
+        a_stable_field_cannot_become_unstable: (
+            json!({"a": {"x-since": 1}}),
+            json!({"a": {"x-unstable": "drafts"}}),
+            "stable item `/properties/a` became unstable"
+        ),
+        a_stable_field_cannot_silently_lose_its_since: (
+            json!({"a": {"x-since": 1}}),
+            json!({"a": {}}),
+            "stable item `/properties/a` became unstable"
+        ),
+        a_stable_fields_since_is_fixed: (
+            json!({"a": {"x-since": 2}}),
+            json!({"a": {"x-since": 3}}),
+            "changed its `since`"
+        ),
+        stabilizing_a_field_needs_the_new_revision: (
+            json!({"a": {}, "b": {"x-unstable": "drafts"}}),
+            json!({"a": {}, "b": {"x-since": 2}}),
+            "ok"
+        ),
+        stabilizing_a_field_below_the_revision_is_refused: (
+            json!({"a": {"x-since": 1}, "b": {}}),
+            json!({"a": {"x-since": 1}, "b": {"x-since": 2}, "c": {"x-since": 3}}),
+            "new stable item `/properties/b` must carry `since = 3`"
+        ),
+        a_new_union_member_carries_the_new_revision: (
+            json!({"u": {"members": ["a.one"], "extras": {"a.one": {"x-since": 1}}}}),
+            json!({"u": {"members": ["a.one", "a.two"], "extras": {"a.one": {"x-since": 1}, "a.two": {"x-since": 2}}}}),
+            "ok"
+        ),
+        a_new_stable_union_member_below_the_revision_is_refused: (
+            json!({"u": {"members": ["a.one"], "extras": {"a.one": {"x-since": 1}}}}),
+            json!({"u": {"members": ["a.one", "a.two"], "extras": {"a.one": {"x-since": 1}, "a.two": {"x-since": 2}}}, "z": {"x-since": 3}}),
+            "new stable item `/properties/u/$union/a.two` must carry `since = 3`"
+        ),
+        a_stable_union_member_is_never_dropped: (
+            json!({"u": {"members": ["a.one", "a.two"], "extras": {"a.one": {"x-since": 1}, "a.two": {"x-since": 1}}}}),
+            json!({"u": {"members": ["a.one"], "extras": {"a.one": {"x-since": 1}}}}),
+            "stable item `/properties/u/$union/a.two` was removed"
+        ),
+        an_unstable_union_member_may_be_dropped: (
+            json!({"u": {"members": ["a.one", "a.two"], "extras": {"a.one": {"x-since": 1}}}}),
+            json!({"u": {"members": ["a.one"], "extras": {"a.one": {"x-since": 1}}}}),
+            "ok"
+        ),
+    }
+
+    /// A method has no sidecar, so its stability sits beside its `revision`: a file that names one
+    /// is stable, and any other is unstable.
+    #[test]
+    fn a_file_is_stable_when_it_names_a_revision() {
+        let unstable = json!({"defs": {"main": {"type": "query", "errors": [{"name": "A"}]}}});
+        let changed = json!({"defs": {"main": {"type": "procedure"}}});
+        assert!(violations("x.y.z", Surface::of(&unstable), Surface::of(&changed)).is_empty());
+
+        let stable = at_revision(unstable.clone(), 1);
+        let stable_changed = at_revision(changed.clone(), 1);
+        assert!(
+            !violations("x.y.z", Surface::of(&stable), Surface::of(&stable_changed)).is_empty()
+        );
+        // Stabilizing is a change nobody is held to; destabilizing is refused.
+        let stabilized = violations(
+            "x.y.z",
+            Surface::of(&unstable),
+            Surface::of(&stable_changed),
+        );
+        assert!(stabilized.is_empty(), "{stabilized:?}");
+        let destabilized = violations("x.y.z", Surface::of(&stable), Surface::of(&changed));
+        assert!(
+            destabilized
+                .iter()
+                .any(|line| line.contains("the file became unstable")),
+            "{destabilized:?}"
+        );
     }
 }
