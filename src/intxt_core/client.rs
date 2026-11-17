@@ -145,6 +145,7 @@ impl<H: HttpTransport> Caller<H> {
         let metadata = HttpMetadata {
             authorization: self.capability.as_deref().map(bearer_header_value),
             idempotency_key: None,
+            range: None,
         };
         self.client
             .call_with(self.context.next_hop(), metadata, input)
