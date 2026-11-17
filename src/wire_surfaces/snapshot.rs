@@ -5,7 +5,10 @@
 //! sidecar JSON Schema document, which carries the storage forms its Lexicon cannot state.
 
 use crate::evolution;
+use crate::evolution::Surface;
+use crate::items;
 use big_cabinet::SchemaRepo;
+use big_cabinet_core::datum::lexicon::stability::Declared;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -19,6 +22,15 @@ struct Entry {
     owner: &'static str,
     lexicon: Value,
     sidecar: Option<Value>,
+}
+
+impl Entry {
+    fn surface(&self) -> Surface<'_> {
+        Surface {
+            lexicon: &self.lexicon,
+            sidecar: self.sidecar.as_ref(),
+        }
+    }
 }
 
 pub struct Snapshot {
@@ -156,12 +168,23 @@ impl Snapshot {
                     render(sidecar),
                 );
             }
+            // Unstable is the default, so the index lists the file's own stability and then only
+            // the items that are under the evolution rules: those are what a reviewer signs off.
+            let mut declared = items::items(&entry.surface());
+            let file = declared.remove("").expect("the file is an item");
+            let stable: BTreeMap<_, _> = declared
+                .iter()
+                .filter(|(_, item)| item.is_stable())
+                .map(|(path, item)| (path.clone(), items::describe(item)))
+                .collect();
             index.push(json!({
                 "nsid": entry.nsid,
                 "crate": entry.owner,
                 "kind": entry.lexicon["defs"]["main"]["type"].as_str().unwrap_or("defs"),
                 "revision": entry.lexicon.get("revision"),
                 "sidecar": entry.sidecar.is_some(),
+                "stability": items::describe(&file),
+                "stableItems": stable,
             }));
         }
         files.insert("index.json".to_owned(), render(&Value::Array(index)));
@@ -213,9 +236,21 @@ impl Snapshot {
                 continue;
             };
             let old: Value = serde_json::from_str(old)?;
-            problems
-                .evolution
-                .extend(evolution::violations(&entry.nsid, &old, &entry.lexicon));
+            let old_sidecar: Option<Value> = on_disk
+                .get(&format!("sidecars/{}.schema.json", entry.nsid))
+                .map(|text| serde_json::from_str(text))
+                .transpose()?;
+            problems.evolution.extend(evolution::violations(
+                &entry.nsid,
+                Surface {
+                    lexicon: &old,
+                    sidecar: old_sidecar.as_ref(),
+                },
+                Surface {
+                    lexicon: &entry.lexicon,
+                    sidecar: entry.sidecar.as_ref(),
+                },
+            ));
         }
         let published: BTreeSet<_> = self
             .entries
@@ -228,12 +263,62 @@ impl Snapshot {
                 .and_then(|name| name.strip_suffix(".json"))
                 && !published.contains(nsid)
             {
-                problems.evolution.push(format!(
-                    "{nsid}: breaking change: the Lexicon is no longer published"
-                ));
+                let old: Value = serde_json::from_str(&on_disk[path])?;
+                let old_sidecar: Option<Value> = on_disk
+                    .get(&format!("sidecars/{nsid}.schema.json"))
+                    .map(|text| serde_json::from_str(text))
+                    .transpose()?;
+                let file = items::items(&Surface {
+                    lexicon: &old,
+                    sidecar: old_sidecar.as_ref(),
+                })
+                .remove("")
+                .expect("the file is an item");
+                // Only an unstable Lexicon may be dropped: a stable one has data in drawers and
+                // may be named by other cartridges, so it is deprecated and keeps shipping.
+                if file.unstable.is_none() {
+                    problems.evolution.push(format!(
+                        "{nsid}: breaking change: the stable Lexicon is no longer published; there \
+                         is no retirement path, deprecate it and keep shipping it"
+                    ));
+                }
             }
         }
         Ok(problems)
+    }
+
+    /// One line per item that is stable in the snapshot and was not in `dir`: stabilizing is the
+    /// operator's decision, so a bless reports each one on its own line. A file `dir` does not
+    /// hold counts as not stable, so a new Lexicon's stable items are reported too.
+    pub fn stabilized(&self, dir: &Path) -> Res<Vec<String>> {
+        let on_disk = read_dir(dir)?;
+        let mut lines = Vec::new();
+        for entry in &self.entries {
+            let old = match on_disk.get(&format!("lexicons/{}.json", entry.nsid)) {
+                Some(text) => {
+                    let lexicon: Value = serde_json::from_str(text)?;
+                    let sidecar: Option<Value> = on_disk
+                        .get(&format!("sidecars/{}.schema.json", entry.nsid))
+                        .map(|text| serde_json::from_str(text))
+                        .transpose()?;
+                    items::items(&Surface {
+                        lexicon: &lexicon,
+                        sidecar: sidecar.as_ref(),
+                    })
+                }
+                None => BTreeMap::new(),
+            };
+            for (pointer, item) in items::items(&entry.surface()) {
+                if item.is_stable() && !old.get(&pointer).is_some_and(Declared::is_stable) {
+                    lines.push(format!(
+                        "STABILIZED {}{pointer} {}",
+                        entry.nsid,
+                        items::describe(&item)
+                    ));
+                }
+            }
+        }
+        Ok(lines)
     }
 
     /// Replaces the contents of `dir` with the snapshot.
