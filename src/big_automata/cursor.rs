@@ -3,7 +3,8 @@
 
 use crate::interlude::*;
 
-use crate::store::{CursorIndex, ObjPayload};
+use crate::store::CursorIndex;
+use crate::store::ObjPayload;
 use crate::watermark::WatermarkMachine;
 
 strike! {

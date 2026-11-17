@@ -658,7 +658,10 @@ mod tests {
             unreachable!("filter_buckets does not read payloads")
         }
 
-        fn obj_parts<'a>(&'a self, _obj_key: ObjKey) -> <Local as FutureForm>::Future<'a, Vec<PartKey>> {
+        fn obj_parts<'a>(
+            &'a self,
+            _obj_key: ObjKey,
+        ) -> <Local as FutureForm>::Future<'a, Vec<PartKey>> {
             unreachable!("filter_buckets does not read object parts")
         }
     }

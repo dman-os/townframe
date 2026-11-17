@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use serde::{Deserializer, Serializer};
+use serde::Deserializer;
+use serde::Serializer;
 
 pub fn value_as_cbor<S>(val: &serde_json::Value, serializer: S) -> Result<S::Ok, S::Error>
 where

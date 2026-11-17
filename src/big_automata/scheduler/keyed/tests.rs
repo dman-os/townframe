@@ -23,7 +23,9 @@ fn concat(mut old: Seed, new: Seed) -> Seed {
 }
 
 fn drained(s: &mut Keyed) -> Vec<(TaskId, Seed)> {
-    s.drain_spawn_queue().map(|task| (task.id, task.seed)).collect()
+    s.drain_spawn_queue()
+        .map(|task| (task.id, task.seed))
+        .collect()
 }
 
 #[test]
@@ -104,7 +106,11 @@ fn replacing_a_pending_retry_leaves_nothing_due() {
     assert_eq!(s.next_due(), None);
     assert_eq!(drained(&mut s), vec![(new, vec![2])]);
     s.tick(t(100));
-    assert_eq!(drained(&mut s), vec![], "the replaced retry does not resurface");
+    assert_eq!(
+        drained(&mut s),
+        vec![],
+        "the replaced retry does not resurface"
+    );
 }
 
 /// The backoff belongs to the attempt: repeated failures widen it, and a key whose task
@@ -136,7 +142,11 @@ fn cancel_drops_current_and_parked_work() {
     drained(&mut s);
     assert_eq!(s.cancel(&"a"), Some(task));
     assert_eq!(s.drain_stop_queue().collect::<Vec<_>>(), vec![task]);
-    assert_eq!(s.complete(task), None, "a cancelled task's completion is stale");
+    assert_eq!(
+        s.complete(task),
+        None,
+        "a cancelled task's completion is stale"
+    );
 
     s.park("b", vec![2]);
     assert_eq!(s.cancel(&"b"), None, "a parked key has no task to stop");
