@@ -43,6 +43,7 @@ use intxt_capture::pack::PackRequest;
 use intxt_capture::revisions;
 use intxt_core::client::Caller;
 use intxt_core::client::key;
+use intxt_core::client::to_value;
 use intxt_core::generic;
 use intxt_core::methods::CreateIntxt;
 use intxt_core::methods::IntxtCreated;
@@ -79,6 +80,8 @@ struct Resolved {
     tips: Vec<String>,
     bases: Vec<String>,
     commits: Vec<String>,
+    /// The jj change the commits are the evolution of, which their datums name.
+    change_id: Option<String>,
     label: String,
     /// The entry's value, given the pack's reference, the tips and the bases.
     value: fn(DatumReference, &[String], &[String]) -> Value,
@@ -101,6 +104,7 @@ impl Resolved {
                 tips: jj.commits.clone(),
                 bases: jj.bases,
                 commits: jj.commits,
+                change_id: Some(jj.change_id),
                 value: |pack, _, _| {
                     serde_json::to_value(work::JjChangeEntry {
                         pack,
@@ -138,6 +142,7 @@ impl Resolved {
             tips: vec![revisions.tip],
             bases: revisions.base.into_iter().collect(),
             commits,
+            change_id: None,
             value: |pack, tips, bases| {
                 serde_json::to_value(work::GitCommitEntry {
                     tip: commit_key(&tips[0]),
@@ -327,6 +332,67 @@ impl<'a> Packaging<'a> {
             }
         }
         Ok(live)
+    }
+
+    /// The intxt's commits document, made if the intxt has none yet: a meta document
+    /// (`metaDoc/commits/main`) of its drawer, like the notes document, so it is in the drawer
+    /// without an entry and `which` finds it by its datums, not by name. The command id is fixed
+    /// per drawer, so creating it again answers the first creation, and two writers converge on
+    /// one document.
+    async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
+        Ok(self
+            .caller
+            .call(CreateMetaDoc {
+                capability: self.drawer_capability(drawer).await?,
+                command: CommandId::try_from(format!("intxt-commits-{drawer}"))?,
+                drawer_id: drawer.clone(),
+                kind: "commits".into(),
+                name: "main".into(),
+                root: MetaRoot::Sensitive,
+            })
+            .await?
+            .doc_id)
+    }
+
+    /// Writes a `gitCommit/<sha>` for every commit `resolved` names into the intxt's commits
+    /// document, so the document holding the key is what says the intxt holds the commit (the
+    /// membership query of `which`). A commit is the same value wherever it is read, so one the
+    /// document holds already is left alone, which makes adding again, or adding a range that
+    /// overlaps, write only what is new. Answers how many were written.
+    async fn write_commits(&self, drawer: &DrawerId, resolved: &Resolved) -> Res<usize> {
+        if resolved.commits.is_empty() {
+            return Ok(0);
+        }
+        let doc = self.ensure_commits_doc(drawer).await?;
+        let held = self.caller.datum_keys(&doc).await?;
+        let mut missing = Vec::new();
+        for sha in &resolved.commits {
+            let commit = key(work::GitCommit::ID, sha)?;
+            if !held.contains(&commit) {
+                missing.push((sha.clone(), commit));
+            }
+        }
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        let (git_dir, change_id) = (resolved.git_dir.clone(), resolved.change_id.clone());
+        let read = tokio::task::spawn_blocking(move || -> Res<BTreeMap<DatumKey, Value>> {
+            let git = Git::new(&git_dir);
+            missing
+                .into_iter()
+                .map(|(sha, key)| {
+                    let mut commit = intxt_capture::git::commit(&git, &sha)?;
+                    commit.change_id = change_id.clone();
+                    Ok::<_, eyre::Report>((key, to_value(&commit)))
+                })
+                .collect()
+        })
+        .await??;
+        let written = read.len();
+        self.caller
+            .write_datums(&doc, read, BTreeSet::new())
+            .await?;
+        Ok(written)
     }
 
     /// Remembers `drawer` so the node lists it, which is what makes an intxt live.
@@ -860,6 +926,14 @@ impl<'a> Packaging<'a> {
             Default::default()
         };
 
+        // Written even when the entry is already in, so an intxt that holds a range from before
+        // its commits document existed gets its commits by adding the range again.
+        let wrote_commits = self.write_commits(&drawer, &resolved).await?;
+        if wrote_commits > 0 {
+            plan.lines.push(format!(
+                "  commit data {wrote_commits} commit(s) in the intxt's commits document"
+            ));
+        }
         let mut written = plan.written.clone();
         if !written.is_empty() {
             self.caller
@@ -892,7 +966,7 @@ impl<'a> Packaging<'a> {
         writeln!(
             out,
             "{} {heading}",
-            if written.is_empty() {
+            if written.is_empty() && wrote_commits == 0 {
                 "nothing to add to"
             } else {
                 "added to"
@@ -919,6 +993,37 @@ impl<'a> Packaging<'a> {
                     .map(|entry| shown(&ids, &entry.to_string()))
                     .collect::<Vec<_>>()
                     .join(" ")
+            )?;
+        }
+        Ok(())
+    }
+
+    /// `day x intxt which`: the intxts on this node that hold the commit `name` names in this
+    /// worktree's git (a full sha, a unique prefix or any name git resolves), one line each: its
+    /// short id, its title and its `link:`. None holding it prints nothing.
+    ///
+    /// The answer is the membership query anchored on each live intxt's drawer in turn
+    /// ([`Caller::commit_holders`]). That per-drawer loop goes away with the per-user root
+    /// drawer that holds every intxt drawer: one transitive query on it answers for all.
+    pub(crate) async fn which(&self, out: &mut impl Write, name: &str) -> Res<()> {
+        let sha = revisions::commit_of(&Git::new(&self.identity()?.root), name)?;
+        let live = self.live_intxts().await?;
+        let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
+        for drawer in &live {
+            if self.caller.commit_holders(drawer, &sha).await?.is_empty() {
+                continue;
+            }
+            let (_, title) = self
+                .caller
+                .read(drawer, &key(generic::Title::ID, "main")?)
+                .await?;
+            let title: generic::Title = serde_json::from_value(title)?;
+            writeln!(
+                out,
+                "{}  \"{}\"  link: {}",
+                shown(&ids, &drawer.to_string()),
+                title.title,
+                generic::Intxt::reference(drawer)
             )?;
         }
         Ok(())
