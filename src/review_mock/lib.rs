@@ -565,10 +565,10 @@ mod tests {
     #[test]
     fn the_change_list_renders_each_change_with_its_open_threads() {
         // `Callback`s need a runtime, so the review is mounted under a root component.
-        fn Root() -> Element {
+        fn root() -> Element {
             rsx! { MockReview { close: |()| () } }
         }
-        let mut dom = VirtualDom::new(Root);
+        let mut dom = VirtualDom::new(root);
         dom.rebuild_in_place();
         let page = dioxus_ssr::render(&dom);
         assert!(page.contains("Cap the retry backoff"));
