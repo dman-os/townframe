@@ -47,6 +47,7 @@ pub fn declarations() -> Universe {
         Declaration::of::<work::GitCommit>().expect("GitCommit declares a valid datum"),
         Declaration::of::<work::Rewrite>().expect("Rewrite declares a valid datum"),
         Declaration::of::<work::RewrittenFrom>().expect("RewrittenFrom declares a valid datum"),
+        Declaration::of::<work::GithubPull>().expect("GithubPull declares a valid datum"),
         Declaration::of::<work::GitRef>().expect("GitRef declares a valid datum"),
         Declaration::of::<work::JjOperation>().expect("JjOperation declares a valid datum"),
         Declaration::of::<work::JjChange>().expect("JjChange declares a valid datum"),
