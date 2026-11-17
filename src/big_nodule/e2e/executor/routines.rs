@@ -545,6 +545,93 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
     node.shutdown().await;
 }
 
+/// A grant is the cartridge's, not a permbind's (ADR 049 §4.1): granting a drawer once reaches
+/// every routine whose `uses` take a `#drawers` permbind that needs it, a routine whose `uses`
+/// do not take one does not reach the drawer however it is granted, and revoking the grant
+/// retracts the handles of every routine that held it.
+#[tokio::test]
+async fn one_drawer_grant_reaches_every_routine_that_uses_it_and_revoking_retracts_them_all() {
+    const PEEK: &str = "org.example.alpha.peek";
+    let mut cartridge = alpha(&[PING, SETUP, PEEK], &[], &[]);
+    for (binding, read, write) in [
+        ("readable", Some(Necessity::Optional), None),
+        ("writable", None, Some(Necessity::Optional)),
+    ] {
+        cartridge.permbinds.insert(
+            binding.into(),
+            Permbind::Drawers(PermbindDrawers {
+                description: binding.into(),
+                resolution: Default::default(),
+                read,
+                write,
+                create: None,
+                delete: None,
+                extra: Default::default(),
+            }),
+        );
+    }
+    // Two routines hold different permbinds over drawers, and PEEK holds none: its `uses` do
+    // not take the drawers, so the grant does not reach it.
+    uses(
+        &mut cartridge,
+        PING,
+        "readable",
+        RoutineUse {
+            read: true,
+            ..Default::default()
+        },
+    );
+    uses(&mut cartridge, SETUP, "writable", writes());
+    let (node, executor, _) = hosted(cartridge, &[]).await;
+    let present = node.drawers.local().present_id.clone();
+    crate::e2e::grant_drawer(
+        &node.drawers,
+        &node.drawers_actor,
+        &present,
+        node.nodules_actor.actor.actor_id,
+        DrawerAccess::Admin,
+    )
+    .await;
+    assert!(
+        executor
+            .routine_capabilities()
+            .values()
+            .all(|held| held.drawers.is_none()),
+        "no grant, no drawers"
+    );
+
+    // One grant of the drawer at Write satisfies both permbinds, each at what it declares.
+    node.set_drawers(
+        ALPHA,
+        BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
+    )
+    .await;
+    let held = executor.routine_capabilities();
+    let ping = held[PING].drawers.expect("ping reads the granted drawer");
+    let setup = held[SETUP]
+        .drawers
+        .expect("setup writes the granted drawer");
+    assert_ne!(ping, setup, "each routine holds a handle of its own");
+    assert!(
+        held[PEEK].drawers.is_none(),
+        "a routine whose `uses` do not take the drawers does not reach a granted one"
+    );
+    assert!(node.is_live(ping).await && node.is_live(setup).await);
+
+    // Revoking the one grant retracts both routines' handles.
+    node.set_drawers(ALPHA, BTreeMap::new()).await;
+    assert!(!node.is_live(ping).await, "ping's handle is retracted");
+    assert!(!node.is_live(setup).await, "setup's handle is retracted");
+    assert!(
+        executor
+            .routine_capabilities()
+            .values()
+            .all(|held| held.drawers.is_none()),
+        "no routine holds drawers once the grant is revoked"
+    );
+    node.shutdown().await;
+}
+
 /// A routine whose `uses` take a `#drawers` permbind and `#datum` kinds reaches the documents of
 /// each granted drawer for those kinds and no others (ADR 049 §2): a reader of one kind cannot
 /// read another or write the one it reads, a writer of that kind cannot write another, and a
