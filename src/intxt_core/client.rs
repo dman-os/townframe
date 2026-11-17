@@ -499,11 +499,20 @@ impl<H: HttpTransport> Caller<H> {
         Ok(())
     }
 
-    /// Enters `doc` in the intxt's drawer at Read, so everyone the intxt is shared with can read
-    /// it. The drawer it is lent from is the first, ordered by drawer id, that the caller reaches
-    /// it through at Read or above, other than the intxt's own: the drawers protocol does not
-    /// say which of them are the node's local ones, so none is preferred.
-    pub async fn share(&self, intxt: &DrawerId, doc: &DocId) -> Result<(), IntxtError> {
+    /// Enters `doc` in the intxt's drawer at `access`: Read for a document the intxt only shows
+    /// (everyone the intxt is shared with can read it), Write for one its writers add to as well
+    /// (a commits document shared between related intxts). The drawer it is lent from is the
+    /// first, ordered by drawer id, that the caller reaches it through at `access` or above,
+    /// other than the intxt's own: the drawers protocol does not say which of them are the
+    /// node's local ones, so none is preferred. `AddDoc` admits the entry when the caller holds
+    /// Write on the intxt's drawer and the reach handle, minted on that lending drawer at
+    /// `access`, reaches the doc at the level it confers.
+    pub async fn share(
+        &self,
+        intxt: &DrawerId,
+        doc: &DocId,
+        access: DrawerAccess,
+    ) -> Result<(), IntxtError> {
         let from = self
             .call(ListDocDrawers {
                 doc_id: doc.clone(),
@@ -511,17 +520,13 @@ impl<H: HttpTransport> Caller<H> {
             .await?
             .drawers
             .into_iter()
-            .find(|drawer| drawer.access >= DrawerAccess::Read && &drawer.drawer_id != intxt)
+            .find(|drawer| drawer.access >= access && &drawer.drawer_id != intxt)
             .ok_or_else(|| IntxtError::NotReachable(doc.clone()))?
             .drawer_id;
         let drawers = self
             .call(MintDrawerCapability {
                 scope: DrawerScope {
-                    drawers: [
-                        (intxt.clone(), DrawerAccess::Write),
-                        (from, DrawerAccess::Read),
-                    ]
-                    .into(),
+                    drawers: [(intxt.clone(), DrawerAccess::Write), (from, access)].into(),
                     create: false,
                 },
                 rights: Rights::USE,
@@ -532,10 +537,10 @@ impl<H: HttpTransport> Caller<H> {
         self.call(AddDoc {
             capability: drawers,
             reach: drawers,
-            command: self.command("add-doc", &(intxt, doc))?,
+            command: self.command("add-doc", &(intxt, doc, access))?,
             drawer_id: intxt.clone(),
             doc_id: doc.clone(),
-            access: DrawerAccess::Read,
+            access,
         })
         .await?;
         Ok(())
@@ -617,7 +622,7 @@ impl<H: HttpTransport> Caller<H> {
             .await?
             .try_into()
             .expect("one entry was included");
-        self.share(intxt, part_doc).await?;
+        self.share(intxt, part_doc, DrawerAccess::Read).await?;
         Ok(included)
     }
 }
