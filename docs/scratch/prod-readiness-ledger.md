@@ -642,6 +642,57 @@ Name and scope are to be decided with the operator. Mind symbol proliferation.
     big_node stress seeds like S1) on an x86 CI runner with KVM. It complements, not replaces,
     in-process DST of our machines. Worth a trial on S1.
 
+**Tool choice, Quint vs the alternatives (survey, 2026-11-17).** The operator asked why Quint
+has mindshare and whether Aristotle and the others are better.
+
+| Tool | What it verifies | Tied to our Rust how | Fit for us |
+|---|---|---|---|
+| **Quint** (+ TLC / Apalache) | Protocol specs with TLA+ semantics in typed, programmable syntax. TLC checks safety exhaustively, and liveness under stated fairness; Apalache does bounded symbolic checks. | quint-connect trace replay, or **full-graph conformance**: export TLC's reachable state graph, and a Rust test checks every (state, event) pair against `step` | **Interacting state machines**: big_automata, the doc runtime. The mindshare comes from TLA+ power with a programmer-friendly syntax plus a real Rust link (Informal Systems / Malachite). |
+| **Kani** (AWS) | Bounded model checking of the *actual Rust code*: no panics or overflows, user assertions, contracts | None needed, it checks the code itself | **Small self-contained pieces**: `WatermarkMachine` and `Scheduler` over bounded event sequences, fingerprint and id encodings. No spec drift is possible. Bounded; async and big collections get expensive. Used in production CI on Rust std. |
+| **Verus** | Full functional-correctness proofs in a Rust dialect | Proofs live beside the code (own toolchain) | Highest annotation cost. Only if a component needs proofs, not bounded checks. |
+| **Aristotle** (Harmonic) | An *AI prover* for Lean 4. Also checks C and Verilog per Harmonic. | A Rust→Lean extraction pipeline (Charon/Aeneas or hax) whose proofs the Lean kernel re-checks | Functional correctness of pure algorithms, e.g. crypto (arXiv 2605.30106). Doesn't fit concurrent or interacting machines. The spec is still ours to write. Commercial API. **Not for this lane now.** |
+| Stateright | Explicit-state model checking of Rust actor code | Runs the Rust directly | No commits since 2025-07; documented false negatives in "eventually" over cycles. **Avoid.** |
+| P (AWS) | Communicating state machines, plus PObserve on production logs | — | Needs .NET and Java, no Rust integration. |
+
+**Strongest evidence: flotilla's research issue** (flotilla-org/flotilla#3109, 2026-10-12). It
+asks our exact question for Rust lifecycle machines. Their decision:
+- **Quint specs, with TLC as the exhaustive CI gate**, Apalache for deeper bounded checks, and a
+  Rust simulator for fast sampling.
+- **Full-graph conformance** as the main link: "A Rust test checks every (state, event) pair, so
+  `step` accepts exactly the transitions the spec allows". quint-connect trace replay is used
+  only for code too rich for the full graph.
+- Spike numbers:
+  - TLC: 9,377 states in 7.2 s, mostly JVM start-up.
+  - Full-graph conformance: milliseconds, and it **caught both planted bugs**.
+  - Trace replay: caught only one of the two.
+- Gotcha: `quint run --seed` defaults to a single sample and can report "ok" falsely, so always
+  pass `--max-samples`.
+
+**Implication for #117's pattern:** #117 uses Apalache to depth 3 (about 7.5 min) plus trace
+replay. For small machines, **TLC with full-graph conformance is cheaper and stronger**. Proposal:
+- Quint + TLC full-graph conformance for each big_automata machine;
+- Apalache only where a model needs symbolic depth;
+- Kani harnesses on the pure pieces;
+- proptest for APIs;
+- the bespoke DST simulator for liveness.
+
+Still to check: our quint 0.33 / formal-tools build ships Apalache and the Rust evaluator, not
+TLC. Verify how quint drives TLC and whether formal-tools needs it.
+
+**DST at n0 (survey, 2026-11-17).** n0's `patchbay` (MIT/Apache-2.0) builds **Linux
+network-namespace emulations** (veth, nftables, tc netem) and runs real code in them. iroh's
+0.98 release used it as a NAT-traversal test matrix. It is **not deterministic**: "It does not
+virtualize per-node clocks or provide deterministic virtual time." It needs unprivileged user
+namespaces, `tc` and `nft`. **Fit:** transport and holepunching e2e for `big_node/peers*` and
+relays in CI. Not a DST substitute.
+
+**Shared test crate placement (operator offered `utils_rs` or a new `test_utils_rs`).**
+Recommendation: **`test_utils_rs`**, used only as a dev-dependency.
+- `utils_rs` is a production dependency of wasm guests and declares target contracts.
+- Test tooling (proptest, quint-connect, the DST simulator, convergence checks) must stay out of
+  the production and guest closure.
+- `utils_rs::table_tests!` can stay where it is, or move later.
+
 **Open:**
 - Name and scope of the shared test crate.
 - Which machine to model first. The suggestion is `WatermarkMachine`.
