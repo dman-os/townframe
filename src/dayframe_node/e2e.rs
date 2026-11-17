@@ -551,7 +551,11 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
         "the granted drawer's note is read: {text}"
     );
     let (status, denied) = read_datums(&egress, capability, &other_doc).await;
-    assert_eq!(status, 403, "{denied}");
+    assert_eq!(
+        (status, denied["error"].as_str()),
+        (400, Some("Denied")),
+        "a drawer outside the install is denied by the docs service: {denied}"
+    );
     assert!(
         !denied.to_string().contains("hidden"),
         "a refused read leaks nothing of the document: {denied}"
