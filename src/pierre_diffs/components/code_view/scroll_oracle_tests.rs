@@ -169,7 +169,7 @@ fn align_name(align: Option<PendingAlign>) -> Option<&'static str> {
 }
 
 /// The pending target as the script records it (`{ ...target, align }`).
-fn pending_json(target: &PendingScrollTarget) -> Value {
+pub(super) fn pending_json(target: &PendingScrollTarget) -> Value {
     let (plain, align) = match target {
         PendingScrollTarget::Position(target) => {
             (CodeViewScrollTarget::Position(target.clone()), None)
@@ -202,7 +202,7 @@ fn side_name(side: Option<SelectionSide>) -> Value {
     })
 }
 
-fn anchor_json(anchor: &ScrollAnchor) -> Value {
+pub(super) fn anchor_json(anchor: &ScrollAnchor) -> Value {
     match anchor {
         ScrollAnchor::Item(anchor) => json!({
             "type": "item",
@@ -245,7 +245,7 @@ fn anchor_from_json(value: &Value) -> ScrollAnchor {
     }
 }
 
-fn animation_from_json(value: &Value) -> ScrollToAnimation {
+pub(super) fn animation_from_json(value: &Value) -> ScrollToAnimation {
     ScrollToAnimation {
         position: value["position"].as_f64().expect("a position"),
         velocity: value["velocity"].as_f64().expect("a velocity"),

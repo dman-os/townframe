@@ -45,6 +45,8 @@ mod scroll_oracle_tests;
 #[cfg(test)]
 mod scroll_upstream_tests;
 #[cfg(test)]
+mod shell_oracle_tests;
+#[cfg(test)]
 mod shell_upstream_tests;
 
 #[cfg(test)]
