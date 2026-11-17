@@ -62,6 +62,13 @@ kinds, with disk quotas and with egress and mounts granted through the permbind/
   SELinux, seccomp) is the boundary. Candidates: proot (ptrace syscall translation, no root, as Termux's proot-distro
   does), or the Android Virtualization Framework where a device exposes it. Open constraint: apps targeting API 29+
   cannot exec binaries from their writable data directory. Survey: `.claude/scratch/android-sandbox-survey.md`.
+- **Android findings** (`.claude/scratch/android-sandbox-survey.md`): proot runs unmodified arm64 userlands without
+  root, near-native, but is **not a security boundary** (same app UID; containers are directories). AVF is closed
+  to ordinary apps. Apps targeting API 29+ cannot exec from writable data, Play requires target API 36, and a
+  runtime-downloaded native rootfs is a Play-policy risk. So the contract must report its **isolation level** as a
+  capability (VM vs process), and the Android backend depends on distribution: proot for sideload, F-Droid or
+  enterprise builds; something under Play's interpreter exception for Play builds (open question for the
+  operator: is Play required?).
 - **Rejected for Android:** wasm-hosted Linux. WebVM/CheerpX, v86 and container2wasm all emulate a CPU on top of
   wasm, and WASIX is tied to Wasmer (`.claude/scratch/linux-in-wasm-survey.md`).
 
