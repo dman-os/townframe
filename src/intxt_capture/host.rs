@@ -389,8 +389,7 @@ fn observe_worktree(
     found: Identity,
     tool_cause: Option<&Cause>,
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
-    import: &[String],
-    rewrites: &[RewritePair],
+    reported: &Reported,
     host: &mut WorktreeHost,
 ) -> Result<(Option<WorktreeBatch>, u64), Error> {
     if let (Event::PreToolUse, Some(tool_use_id)) = (event, tool_use_id) {
@@ -411,7 +410,7 @@ fn observe_worktree(
     let closing = tool_use_id.filter(|_| !ends_session);
 
     let (snapshots, sole) = host.segments(closing, tool_cause, tool_turns);
-    let (observation, next) = observe::observe(&host.observed, found, &snapshots, import)?;
+    let (observation, next) = observe::observe(&host.observed, found, &snapshots, reported.import)?;
     host.observed = next;
     host.clock += 1;
     host.observed_at = host.clock;
@@ -490,7 +489,11 @@ fn observe_worktree(
         .filter_map(|change| change.blob.as_deref())
         .collect();
     Git::new(&observation.identity.root).keep(&observation.identity.worktree_id, &blobs)?;
-    if ops.is_empty() && git.commits.is_empty() && git.refs.is_empty() && rewrites.is_empty() {
+    if ops.is_empty()
+        && git.commits.is_empty()
+        && git.refs.is_empty()
+        && reported.rewrites.is_empty()
+    {
         return Ok((None, uncaused));
     }
     Ok((
@@ -502,11 +505,20 @@ fn observe_worktree(
             commits: git.commits,
             refs: git.refs,
             reflog_gap: git.reflog_gap,
-            rewrites: rewrites.to_vec(),
+            rewrites: reported.rewrites.to_vec(),
             extra: Default::default(),
         }),
         uncaused,
     ))
+}
+
+/// What a caller reports to an observation that git state alone does not show.
+#[derive(Default)]
+struct Reported<'a> {
+    /// Commits to record although no reflog move made them ([`git::observe`]).
+    import: &'a [String],
+    /// Pairs git's `post-rewrite` hook reported.
+    rewrites: &'a [RewritePair],
 }
 
 /// Resolve the worktrees of `candidates` and observe each for one window, holding their locks.
@@ -519,8 +531,7 @@ fn observe_worktrees(
     tool_turns: &BTreeMap<String, (Option<String>, String)>,
     candidates: &BTreeSet<PathBuf>,
     stored: &BTreeSet<PathBuf>,
-    import: &[String],
-    rewrites: &[RewritePair],
+    reported: &Reported,
 ) -> Result<(Vec<PendingWorktree>, Vec<WorktreeBatch>, u64), Error> {
     let mut identities: BTreeMap<PathBuf, Identity> = BTreeMap::new();
     for candidate in candidates {
@@ -550,8 +561,7 @@ fn observe_worktrees(
             found,
             cause,
             tool_turns,
-            import,
-            rewrites,
+            reported,
             &mut host,
         )?;
         uncaused_tool_calls += uncaused;
@@ -707,8 +717,7 @@ pub fn prepare(hook: &Hook, session_path: &Path) -> Result<Prepared, Error> {
         &session.tool_turns,
         &candidates,
         &session.worktrees,
-        &[],
-        &[],
+        &Reported::default(),
     )?;
     session.worktrees = worktrees
         .iter()
@@ -812,8 +821,7 @@ pub fn prepare_acp(
         &BTreeMap::new(),
         &candidates,
         known,
-        &[],
-        &[],
+        &Reported::default(),
     )?;
     Ok(Prepared {
         batch: Batch {
@@ -845,8 +853,7 @@ fn prepare_worktree(
         &BTreeMap::new(),
         &candidates,
         &BTreeSet::new(),
-        import,
-        rewrites,
+        &Reported { import, rewrites },
     )?;
     Ok(Prepared {
         batch: Batch {
