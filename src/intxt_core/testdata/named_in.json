@@ -1,14 +1,14 @@
 [
   {
     "name": "one line, the documented form",
-    "body": "intxt: dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "body": "intxt: dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "one per line, in order",
-    "body": "intxt: dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\nintxt: dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\n",
+    "body": "intxt: dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\nintxt: dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\n",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
@@ -16,7 +16,7 @@
   },
   {
     "name": "duplicates are dropped, first mention orders",
-    "body": "dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\ndtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\ndtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\ndtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "body": "dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\ndtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\ndtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\ndtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
     "drawers": [
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
@@ -24,35 +24,35 @@
   },
   {
     "name": "any prefix, or none, before the reference",
-    "body": "Part of the work in dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main, see also dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main!",
+    "body": "Part of the work in dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi, see also dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx!",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "markdown link",
-    "body": "[the intxt](dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main) and more",
+    "body": "[the intxt](dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi) and more",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "inline code",
-    "body": "`dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main`",
+    "body": "`dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi`",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "angle brackets",
-    "body": "<dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main>",
+    "body": "<dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi>",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "double and single quotes",
-    "body": "\"dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\" 'dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main'",
+    "body": "\"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\" 'dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx'",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
@@ -60,7 +60,7 @@
   },
   {
     "name": "trailing period, comma, semicolon, colon",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main. dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main, dtxt:datum:zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP/org.example.intxt/main; dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main:",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi. dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx, dtxt:doc:zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP; dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi:",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
@@ -69,14 +69,14 @@
   },
   {
     "name": "trailing punctuation then a closing parenthesis",
-    "body": "(see dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main.)",
+    "body": "(see dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi.)",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "CRLF line ends",
-    "body": "intxt: dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\r\nintxt: dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main\r\n",
+    "body": "intxt: dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\r\nintxt: dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\r\n",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
@@ -84,7 +84,7 @@
   },
   {
     "name": "tabs and a non-breaking space end a reference",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\tdtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main dtxt:datum:zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP/org.example.intxt/main",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\tdtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx dtxt:doc:zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
@@ -92,42 +92,35 @@
     ]
   },
   {
-    "name": "a fragment still names the intxt",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main#L12",
+    "name": "a fragment makes it malformed",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi#L12",
+    "drawers": []
+  },
+  {
+    "name": "a pin still names the document",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?heads=z4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
-    "name": "a percent-encoded slot is decoded",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/ma%69n",
-    "drawers": [
-      "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
-    ]
-  },
-  {
-    "name": "wrong tag",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt.title/main",
+    "name": "a datum reference names no document",
+    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
     "drawers": []
   },
   {
-    "name": "wrong slot",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/other",
-    "drawers": []
-  },
-  {
-    "name": "slot with a sub-path",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main/extra",
+    "name": "a path after the id is malformed",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/extra",
     "drawers": []
   },
   {
     "name": "malformed document id",
-    "body": "dtxt:datum:nope/org.example.intxt/main",
+    "body": "dtxt:doc:nope",
     "drawers": []
   },
   {
     "name": "the self document",
-    "body": "dtxt:datum:self/org.example.intxt/main",
+    "body": "dtxt:doc:self",
     "drawers": []
   },
   {
@@ -137,36 +130,36 @@
   },
   {
     "name": "the prefix is lowercase only",
-    "body": "DTXT:DATUM:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "body": "DTXT:DOC:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
     "drawers": []
   },
   {
     "name": "a reference glued to a longer token is still found",
-    "body": "https://example.org/?u=dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main",
+    "body": "https://example.org/?u=dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
     "drawers": [
       "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
     ]
   },
   {
     "name": "two references glued together: only the last parses",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/maindtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKidtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
     "drawers": [
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
     ]
   },
   {
     "name": "a query that is not a pin makes it malformed",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main?x=1",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?x=1",
     "drawers": []
   },
   {
     "name": "a trailing question mark or exclamation mark is not trimmed",
-    "body": "dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main? dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main!",
+    "body": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi? dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx!",
     "drawers": []
   },
   {
     "name": "a malformed reference does not hide the next",
-    "body": "dtxt:datum:nope/org.example.intxt/main dtxt:datum:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx/org.example.intxt/main",
+    "body": "dtxt:doc:nope dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
     "drawers": [
       "zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
     ]
