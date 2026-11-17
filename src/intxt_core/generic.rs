@@ -66,7 +66,9 @@ impl Intxt {
         for (start, _) in text.match_indices("dtxt:datum:") {
             let rest = &text[start..];
             let end = rest
-                .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '>' | '`' | '"' | '\''))
+                .find(|c: char| {
+                    c.is_whitespace() || matches!(c, ')' | ']' | '>' | '`' | '"' | '\'')
+                })
                 .unwrap_or(rest.len());
             let candidate = rest[..end].trim_end_matches(['.', ',', ';', ':']);
             let Ok(location) = Location::parse(candidate) else {

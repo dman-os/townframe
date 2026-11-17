@@ -227,7 +227,9 @@ pub enum IntxtCommands {
     /// `add`, `show` and `inbox` act on that intxt when none is named, and `new` puts the
     /// worktree it runs in on the intxt it creates. Kept in the worktree's local state
     /// (`<git dir>/intxt/state.json`), never synced: each checkout is on its own intxt.
-    #[command(after_long_help = "Examples:\n  day x intxt use qx\n  day x intxt use\n  day x intxt use --none")]
+    #[command(
+        after_long_help = "Examples:\n  day x intxt use qx\n  day x intxt use\n  day x intxt use --none"
+    )]
     Use {
         /// The intxt: its short id, or its full drawer id
         intxt: Option<String>,
