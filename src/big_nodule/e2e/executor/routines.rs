@@ -415,6 +415,27 @@ async fn an_empty_use_of_a_method_permbind_grants_that_method() {
     node.shutdown().await;
 }
 
+/// A routine whose `#method` permbind names an operation that needs a service handle is minted
+/// that handle with the operation's flags (ADR 049 §6.2); its sibling, which does not bind the
+/// operation, holds none.
+#[tokio::test]
+async fn only_the_routine_binding_blobs_put_is_minted_a_blobs_handle() {
+    const BLOBS_PUT: &str = "org.example.daybook.blobs.put";
+    let mut cartridge = alpha(&[PING, SETUP], &[BLOBS_PUT], &[]);
+    uses(&mut cartridge, PING, BLOBS_PUT, RoutineUse::default());
+    let (node, executor, _) = hosted(cartridge, &[BLOBS_PUT]).await;
+    let capabilities = executor.routine_capabilities();
+    let blobs = capabilities[PING]
+        .blobs
+        .expect("the routine binding blobs.put holds a blobs handle");
+    assert!(node.is_live(blobs).await);
+    assert_eq!(
+        capabilities[SETUP].blobs, None,
+        "its sibling binds no blobs operation"
+    );
+    node.shutdown().await;
+}
+
 /// A routine whose `#drawers` use is `create` alone can make drawers but holds no access to
 /// the ones that exist: only a routine that uses `write` can write the granted drawer. Create
 /// sets the scope's create flag and nothing else (ADR 028: grants never widen silently).

@@ -1753,6 +1753,7 @@ dependencies = [
  "irpc",
  "keyring-core",
  "method_core",
+ "method_lexicon",
  "secrets_rs",
  "serde",
  "serde_json",
