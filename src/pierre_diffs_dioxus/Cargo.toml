@@ -1,0 +1,26 @@
+[package]
+name = "pierre_diffs_dioxus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+pierre_diffs = { workspace = true }
+# Spelled out (not `dioxus.workspace = true`) so default features stay off, as in
+# `clay_dioxus_kit`: the diff view needs the macro, signals, hooks and element vocabulary only,
+# never a renderer or launcher, so it links into native, browser and wasm guest builds alike.
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+
+[dev-dependencies]
+# The tests deliver events as the serialized payloads a renderer would convert from.
+dioxus-html = { workspace = true, features = ["serialize"] }
+dioxus-ssr.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+insta.workspace = true
+
+[lints]
+workspace = true

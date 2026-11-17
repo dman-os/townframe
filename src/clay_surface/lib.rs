@@ -14,17 +14,28 @@
 //! listener vocabulary a batch may name.
 mod render;
 mod replay;
+mod stylesheet;
 mod tree;
 mod wire;
 
 pub use replay::replay;
+pub use stylesheet::wrap_in_media_query;
 pub use tree::SurfaceTree;
 pub use wire::AttributeValue;
+pub use wire::ELEMENT_REPLY;
+pub use wire::ElementAction;
+pub use wire::ElementCommand;
+pub use wire::ElementHandles;
+pub use wire::ElementRead;
 pub use wire::Event;
 pub use wire::EventResponse;
 pub use wire::Mutation;
 pub use wire::NodeId;
 pub use wire::PresentationError;
+pub use wire::ScrollAlign;
+pub use wire::ScrollBehavior;
+pub use wire::ScrollIntoView;
+pub use wire::ScrollOffsets;
 pub use wire::SurfaceEventHandler;
 pub use wire::SurfaceSession;
 pub use wire::SurfaceSink;

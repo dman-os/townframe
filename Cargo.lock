@@ -379,7 +379,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -390,7 +390,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -408,7 +408,7 @@ dependencies = [
  "kurbo",
  "peniko",
  "raw-window-handle 0.6.2",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -420,7 +420,7 @@ dependencies = [
  "kurbo",
  "peniko",
  "raw-window-handle 0.6.2",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -607,7 +607,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -722,6 +722,12 @@ dependencies = [
  "serde_derive",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "askama_escape"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3df27b8d5ddb458c5fb1bbc1ce172d4a38c614a97d550b0ac89003897fb01de4"
 
 [[package]]
 name = "askama_parser"
@@ -1313,6 +1319,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backtrace-ext"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "537beee3be4a18fb023b570f80e3ae28003db9167a751266b259926e25539d50"
+dependencies = [
+ "backtrace",
+]
+
+[[package]]
 name = "bao-tree"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1327,7 +1342,7 @@ dependencies = [
  "range-collections",
  "self_cell",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
  "tokio",
 ]
 
@@ -1434,10 +1449,8 @@ dependencies = [
  "iroh",
  "iroh-blobs",
  "irpc",
- "method_core",
  "proptest",
  "rand 0.9.5",
- "rustix 1.1.6",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -1536,6 +1549,11 @@ dependencies = [
  "jsonschema",
  "macros",
  "method_core",
+ "panproto-lens",
+ "panproto-mig",
+ "panproto-protocols",
+ "panproto-schema",
+ "panproto-vcs",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -1599,11 +1617,9 @@ name = "big_dispatch"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum",
  "big_cabinet",
  "big_cabinet_core",
  "big_dispatch_core",
- "bytes",
  "futures",
  "http",
  "irpc",
@@ -1618,7 +1634,6 @@ dependencies = [
  "sqlite_rs",
  "thiserror 2.0.21",
  "tokio",
- "tower",
  "tracing",
 ]
 
@@ -1641,7 +1656,6 @@ dependencies = [
 name = "big_ndk"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "futures",
  "getrandom 0.3.4",
  "http",
@@ -1705,7 +1719,6 @@ dependencies = [
  "big_repo",
  "big_sync",
  "big_sync_core",
- "bytes",
  "data-encoding",
  "futures",
  "iroh",
@@ -1715,7 +1728,6 @@ dependencies = [
  "method_core",
  "method_lexicon",
  "rand 0.9.5",
- "rustix 1.1.6",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -1735,18 +1747,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automerge",
- "big_blobs",
  "big_blobs_core",
  "big_cabinet",
  "big_cabinet_core",
- "big_cartridges",
  "big_cartridges_core",
  "big_dispatch",
  "big_dispatch_core",
  "big_nodule_core",
  "big_repo",
  "blake3",
- "bytes",
  "futures",
  "http",
  "indexmap 2.14.2",
@@ -1803,11 +1812,8 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "bytes",
- "futures",
- "http-body",
  "http-body-util",
  "hyper",
- "method_core",
  "serde",
  "serde_json",
  "service_client_native_rs",
@@ -2122,7 +2128,7 @@ dependencies = [
  "selectors 0.41.0",
  "skrifa",
  "slotmap",
- "smallvec",
+ "smallvec 1.16.4",
  "stylo",
  "stylo_dom",
  "stylo_static_prefs",
@@ -2178,7 +2184,7 @@ dependencies = [
  "parley",
  "peniko",
  "skrifa",
- "smallvec",
+ "smallvec 1.16.4",
  "stylo",
  "taffy",
  "usvg",
@@ -2503,7 +2509,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.1.6",
  "rustix-linux-procfs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
  "winx",
 ]
 
@@ -2592,7 +2598,7 @@ version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d067ad48b8650848b989a59a86c6c36a995d02d2bf778d45c3c5d57bc2718f02"
 dependencies = [
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.12.16",
 ]
 
@@ -2820,7 +2826,6 @@ name = "clay_collection"
 version = "0.1.0"
 dependencies = [
  "clay_store",
- "datum_core",
  "proptest",
  "serde",
  "serde_json",
@@ -2838,6 +2843,7 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "serde_json",
  "tokio",
 ]
 
@@ -3011,8 +3017,10 @@ dependencies = [
 name = "clay_surface"
 version = "0.1.0"
 dependencies = [
+ "cssparser 0.38.0",
  "dioxus",
  "dioxus-core",
+ "dioxus-core-template",
  "dioxus-html",
  "insta",
  "pastey 0.1.1",
@@ -3129,7 +3137,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.1.14",
+ "unicode-width 0.2.3",
 ]
 
 [[package]]
@@ -3310,7 +3318,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 [[package]]
 name = "const-serialize"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const-serialize-macro",
  "dioxus-const-vec",
@@ -3320,7 +3328,7 @@ dependencies = [
 [[package]]
 name = "const-serialize-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3707,7 +3715,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "sha2 0.10.9",
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.13.5",
  "wasmtime-internal-core 48.0.7",
 ]
@@ -3768,7 +3776,7 @@ dependencies = [
  "cranelift-codegen",
  "hashbrown 0.17.1",
  "log",
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.13.5",
 ]
 
@@ -3901,7 +3909,7 @@ dependencies = [
  "dtoa-short",
  "itoa",
  "phf 0.13.1",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -3915,7 +3923,7 @@ dependencies = [
  "itoa",
  "phf 0.14.0",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -4154,7 +4162,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -4195,21 +4203,19 @@ dependencies = [
  "clap_complete",
  "data-encoding",
  "directories",
- "futures",
  "http",
  "libc",
  "method_core",
  "rand 0.9.5",
- "reqwest 0.12.28",
  "secrets_rs",
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "service_client_native_rs",
  "service_utils_rs",
  "sqlite_rs",
  "tempfile",
  "tokio",
- "tokio-util",
  "tower",
  "tracing",
  "trycmd",
@@ -4442,13 +4448,13 @@ dependencies = [
  "clay_surface",
  "daybook_types",
  "dayframe_composition",
- "dayframe_native",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
  "dioxus-native",
  "dioxus-native-dom",
  "micro_counter_manifest",
+ "micro_lab_manifest",
  "micro_layout_manifest",
  "micro_sample",
  "micro_settings",
@@ -4476,38 +4482,11 @@ dependencies = [
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
- "dayframe_composition",
- "dayframe_native",
  "dioxus",
  "dioxus-native",
- "jni 0.21.1",
- "tokio",
- "winit",
-]
-
-[[package]]
-name = "dayframe_native"
-version = "0.1.0"
-dependencies = [
- "clay_docs",
- "clay_host",
- "clay_mdk",
- "clay_store",
- "dayframe_composition",
- "dioxus",
- "dioxus-native",
- "micro_counter_manifest",
- "micro_sample",
- "micro_settings",
- "micro_settings_manifest",
- "micro_shell",
- "micro_shell_manifest",
- "micro_toolbar",
- "micro_toolbar_manifest",
- "serde_json",
- "sqlite_rs",
  "tokio",
  "ui",
+ "winit",
 ]
 
 [[package]]
@@ -4515,11 +4494,22 @@ name = "dayframe_showcase"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus_kit",
+ "console_error_panic_hook",
  "dioxus",
  "dioxus-native",
+ "dioxus-ssr",
+ "gloo-timers 0.3.0",
+ "js-sys",
+ "pierre_diffs_dioxus",
+ "review_mock",
  "serde",
  "serde_json",
+ "tokio",
  "ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]
@@ -4794,7 +4784,7 @@ dependencies = [
 [[package]]
 name = "dioxus"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-asset-resolver",
  "dioxus-cli-config",
@@ -4822,7 +4812,7 @@ dependencies = [
 [[package]]
 name = "dioxus-asset-resolver"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "http",
@@ -4842,7 +4832,7 @@ dependencies = [
 [[package]]
 name = "dioxus-cli-config"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "wasm-bindgen",
 ]
@@ -4850,22 +4840,22 @@ dependencies = [
 [[package]]
 name = "dioxus-config-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-config-macros"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-const-vec"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "const_format",
@@ -4890,7 +4880,7 @@ dependencies = [
 [[package]]
 name = "dioxus-core-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "convert_case 0.8.0",
  "dioxus-rsx",
@@ -4902,7 +4892,7 @@ dependencies = [
 [[package]]
 name = "dioxus-core-template"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-const-vec",
  "serde",
@@ -4912,12 +4902,12 @@ dependencies = [
 [[package]]
 name = "dioxus-core-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "dioxus-desktop"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4974,7 +4964,7 @@ dependencies = [
 [[package]]
 name = "dioxus-devtools"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
@@ -4991,7 +4981,7 @@ dependencies = [
 [[package]]
 name = "dioxus-devtools-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "serde",
@@ -5001,7 +4991,7 @@ dependencies = [
 [[package]]
 name = "dioxus-document"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-core-macro",
@@ -5019,7 +5009,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5077,7 +5067,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "anyhow",
  "axum-core",
@@ -5104,7 +5094,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const_format",
  "convert_case 0.8.0",
@@ -5117,7 +5107,7 @@ dependencies = [
 [[package]]
 name = "dioxus-history"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "tracing",
@@ -5126,7 +5116,7 @@ dependencies = [
 [[package]]
 name = "dioxus-hooks"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-signals",
@@ -5141,7 +5131,7 @@ dependencies = [
 [[package]]
 name = "dioxus-html"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5167,7 +5157,7 @@ dependencies = [
 [[package]]
 name = "dioxus-html-internal-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "convert_case 0.8.0",
  "proc-macro2",
@@ -5178,7 +5168,7 @@ dependencies = [
 [[package]]
 name = "dioxus-interpreter-js"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-core-types",
@@ -5197,7 +5187,7 @@ dependencies = [
 [[package]]
 name = "dioxus-logger"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "tracing",
@@ -5208,7 +5198,7 @@ dependencies = [
 [[package]]
 name = "dioxus-native"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "android-activity",
  "anyrender 0.14.0",
@@ -5243,7 +5233,7 @@ dependencies = [
 [[package]]
 name = "dioxus-native-dom"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -5257,7 +5247,7 @@ dependencies = [
 [[package]]
 name = "dioxus-rsx"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core-template",
  "proc-macro2",
@@ -5270,7 +5260,7 @@ dependencies = [
 [[package]]
 name = "dioxus-signals"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "futures-channel",
@@ -5283,9 +5273,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dioxus-ssr"
+version = "0.8.0-alpha.3"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+dependencies = [
+ "askama_escape",
+ "dioxus-core",
+ "dioxus-core-types",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
 name = "dioxus-stores"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-core",
  "dioxus-signals",
@@ -5296,7 +5297,7 @@ dependencies = [
 [[package]]
 name = "dioxus-stores-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "convert_case 0.8.0",
  "proc-macro2",
@@ -5307,7 +5308,7 @@ dependencies = [
 [[package]]
 name = "dioxus-web"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
@@ -5393,7 +5394,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5795,7 +5796,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5875,7 +5876,7 @@ dependencies = [
  "num-complex",
  "pulp",
  "rayon-core",
- "smallvec",
+ "smallvec 1.16.4",
  "zune-inflate",
 ]
 
@@ -6135,7 +6136,7 @@ dependencies = [
  "parlance",
  "read-fonts",
  "roxmltree 0.21.2",
- "smallvec",
+ "smallvec 1.16.4",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "yeslogic-fontconfig-sys",
@@ -6443,7 +6444,7 @@ dependencies = [
  "garde_derive",
  "once_cell",
  "regex",
- "smallvec",
+ "smallvec 1.16.4",
  "url",
 ]
 
@@ -6604,7 +6605,7 @@ dependencies = [
 [[package]]
 name = "generational-box"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "parking_lot",
  "tracing",
@@ -6750,7 +6751,7 @@ dependencies = [
  "libc",
  "once_cell",
  "pin-project-lite",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 1.0.69",
 ]
 
@@ -6920,7 +6921,7 @@ dependencies = [
  "libc",
  "memchr",
  "once_cell",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 1.0.69",
 ]
 
@@ -6960,7 +6961,7 @@ dependencies = [
  "log",
  "peniko",
  "skrifa",
- "smallvec",
+ "smallvec 1.16.4",
  "vello_common 0.1.0",
 ]
 
@@ -6976,7 +6977,7 @@ dependencies = [
  "log",
  "peniko",
  "skrifa",
- "smallvec",
+ "smallvec 1.16.4",
  "vello_common 0.3.0",
 ]
 
@@ -7160,7 +7161,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.62.2",
+ "windows 0.57.0",
 ]
 
 [[package]]
@@ -7285,7 +7286,7 @@ dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
  "read-fonts",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -7642,7 +7643,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "smallvec",
+ "smallvec 1.16.4",
  "tokio",
  "want",
 ]
@@ -7731,7 +7732,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -7824,7 +7825,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec",
+ "smallvec 1.16.4",
  "zerovec",
 ]
 
@@ -7884,7 +7885,7 @@ dependencies = [
  "icu_provider",
  "icu_segmenter_data",
  "potential_utf",
- "smallvec",
+ "smallvec 1.16.4",
  "utf8_iter",
  "zerotrie",
  "zerovec",
@@ -7921,7 +7922,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec",
+ "smallvec 1.16.4",
  "utf8_iter",
 ]
 
@@ -8130,7 +8131,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf64c2edc8226891a71f127587a2861b132d2b942310843814d5001d99a1d307"
 dependencies = [
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -8248,7 +8249,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
  "strum 0.28.0",
  "time",
  "tokio",
@@ -8313,7 +8314,7 @@ dependencies = [
  "reflink-copy",
  "self_cell",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
  "tokio",
  "tracing",
 ]
@@ -8350,7 +8351,7 @@ dependencies = [
  "bytes",
  "futures-lite",
  "pin-project",
- "smallvec",
+ "smallvec 1.16.4",
  "tokio",
 ]
 
@@ -8470,7 +8471,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
  "tokio",
  "tokio-util",
  "tracing",
@@ -8504,6 +8505,12 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "is_ci"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7655c9839580ee829dfacba1d1278c2b7883e50a277ff7541299489d6bdfdc45"
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -8918,7 +8925,7 @@ dependencies = [
  "arrayvec",
  "euclid",
  "polycool",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -8955,7 +8962,7 @@ dependencies = [
 [[package]]
 name = "lazy-js-bundle"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 
 [[package]]
 name = "lazy_static"
@@ -9414,7 +9421,7 @@ dependencies = [
 [[package]]
 name = "manganis"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const-serialize",
  "jni 0.21.1",
@@ -9428,7 +9435,7 @@ dependencies = [
 [[package]]
 name = "manganis-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "const-serialize",
  "dioxus-cli-config",
@@ -9440,7 +9447,7 @@ dependencies = [
 [[package]]
 name = "manganis-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "dunce",
  "macro-string",
@@ -9576,7 +9583,6 @@ dependencies = [
 name = "method_core"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "futures",
  "schemars 1.2.3",
  "serde",
@@ -9595,8 +9601,6 @@ dependencies = [
  "big_nodule_core",
  "insta",
  "method_core",
- "schemars 1.2.3",
- "serde",
  "serde_json",
  "service_core_rs",
  "thiserror 2.0.21",
@@ -9637,6 +9641,29 @@ dependencies = [
  "micro_layout_manifest",
  "micro_settings_manifest",
  "micro_toolbar_manifest",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_lab"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "dioxus-core",
+ "micro_lab_manifest",
+ "pierre_diffs_dioxus",
+ "review_mock",
+]
+
+[[package]]
+name = "micro_lab_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "insta",
+ "micro_layout_manifest",
  "serde_json",
 ]
 
@@ -9758,6 +9785,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "miette"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
+dependencies = [
+ "backtrace",
+ "backtrace-ext",
+ "cfg-if 1.0.5",
+ "miette-derive",
+ "owo-colors",
+ "supports-color",
+ "supports-hyperlinks",
+ "supports-unicode",
+ "terminal_size",
+ "textwrap",
+ "unicode-width 0.1.14",
+]
+
+[[package]]
+name = "miette-derive"
+version = "7.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db5b29714e950dbb20d5e6f74f9dcec4edbcc1067bb7f8ed198c097b8c1a818b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9842,7 +9899,7 @@ dependencies = [
  "equivalent",
  "parking_lot",
  "portable-atomic",
- "smallvec",
+ "smallvec 1.16.4",
  "tagptr",
  "uuid",
 ]
@@ -9921,7 +9978,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "png",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10703,7 +10760,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11601,7 +11658,7 @@ dependencies = [
  "libloading 0.9.0",
  "ndarray",
  "ort-sys",
- "smallvec",
+ "smallvec 1.16.4",
  "tracing",
  "ureq",
 ]
@@ -11624,7 +11681,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11674,6 +11731,154 @@ dependencies = [
 ]
 
 [[package]]
+name = "panproto-check"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84b32ffd10a1cd3e187268b308fde9cb5e9f1254760981fdb3a3fe20cc1897ed"
+dependencies = [
+ "memchr",
+ "panproto-gat",
+ "panproto-lens",
+ "panproto-mig",
+ "panproto-schema",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-expr"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8c81cebe836b12fbcd0250597ec4ccdcd596afefb7493bfa792d33c1667ae2f"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-gat"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e8198994adf004da2168b00838ab5952b846e6f599ad64bff033ccc5a8d6200"
+dependencies = [
+ "miette",
+ "panproto-expr",
+ "rustc-hash 2.1.3",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-inst"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78c45fbfc22d052d75d79c25b72074cd0679f06c8ce12c39d667a792ec738ddc"
+dependencies = [
+ "bumpalo",
+ "panproto-expr",
+ "panproto-gat",
+ "panproto-schema",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-lens"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b792be3ef346ece0f904a0fc8fc74357c2547cdf2379c3c07821ada71c98105e"
+dependencies = [
+ "panproto-expr",
+ "panproto-gat",
+ "panproto-inst",
+ "panproto-mig",
+ "panproto-schema",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-mig"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45790accd1edd5f16829d214122027c150889b53cd882d99d7046fcff2b5f66b"
+dependencies = [
+ "blake3",
+ "panproto-expr",
+ "panproto-gat",
+ "panproto-inst",
+ "panproto-schema",
+ "rustc-hash 2.1.3",
+ "serde",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-protocols"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bee866f69faffb5fd477adab1b63c3bfdbd964e10487e91372ab314412b6e187"
+dependencies = [
+ "blake3",
+ "panproto-expr",
+ "panproto-gat",
+ "panproto-inst",
+ "panproto-schema",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-schema"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5cd8bb3e369ef8d8dc98ce9229b193dc2af2a0c7db7e63818ffc299cda98d55"
+dependencies = [
+ "blake3",
+ "panproto-expr",
+ "panproto-gat",
+ "rustc-hash 2.1.3",
+ "serde",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "panproto-vcs"
+version = "0.74.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45e78603f9b95098b8dc413be3005bceec239797d05c0359de89787c75ae8153"
+dependencies = [
+ "blake3",
+ "panproto-check",
+ "panproto-expr",
+ "panproto-gat",
+ "panproto-inst",
+ "panproto-lens",
+ "panproto-mig",
+ "panproto-schema",
+ "rmp-serde",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "smallvec 2.0.0-beta.3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "papaya"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11708,7 +11913,7 @@ dependencies = [
  "cfg-if 1.0.5",
  "libc",
  "redox_syscall 0.5.18",
- "smallvec",
+ "smallvec 1.16.4",
  "windows-link",
 ]
 
@@ -11732,7 +11937,7 @@ dependencies = [
  "linebender_resource_handle",
  "parlance",
  "parley_engine",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -11882,7 +12087,7 @@ dependencies = [
  "color",
  "kurbo",
  "linebender_resource_handle",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -12105,6 +12310,29 @@ name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
+
+[[package]]
+name = "pierre_diffs"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
+ "similar 3.2.1",
+]
+
+[[package]]
+name = "pierre_diffs_dioxus"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-html",
+ "dioxus-ssr",
+ "futures",
+ "insta",
+ "pierre_diffs",
+ "serde_json",
+]
 
 [[package]]
 name = "pin-project"
@@ -12361,7 +12589,7 @@ dependencies = [
  "num_enum",
  "rand 0.10.3",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
  "socket2",
  "time",
  "tokio",
@@ -12644,8 +12872,8 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.4.1",
- "itertools 0.14.0",
+ "heck 0.5.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -12664,7 +12892,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -12876,7 +13104,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -13035,7 +13263,7 @@ dependencies = [
  "inplace-vec-builder",
  "ref-cast",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -13340,7 +13568,7 @@ dependencies = [
  "log",
  "rustc-hash 2.1.3",
  "serde",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -13491,6 +13719,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "review_mock"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "dioxus",
+ "dioxus-ssr",
+ "pierre_diffs_dioxus",
+]
+
+[[package]]
 name = "rfd"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13538,6 +13776,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+dependencies = [
+ "rmp",
+ "serde",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13574,7 +13831,7 @@ dependencies = [
  "fallible-streaming-iterator",
  "hashlink",
  "libsqlite3-sys",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -13676,7 +13933,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -13745,7 +14002,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -14035,7 +14292,7 @@ dependencies = [
  "precomputed-hash",
  "rustc-hash 2.1.3",
  "servo_arc 0.4.3",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -14052,7 +14309,7 @@ dependencies = [
  "precomputed-hash",
  "rustc-hash 2.1.3",
  "servo_arc 0.5.0",
- "smallvec",
+ "smallvec 1.16.4",
  "to_shmem",
  "to_shmem_derive",
 ]
@@ -14296,7 +14553,6 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "http",
- "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -14310,7 +14566,6 @@ dependencies = [
  "service_client_core_rs",
  "service_core_rs",
  "sha1",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
  "uuid",
@@ -14328,8 +14583,6 @@ dependencies = [
  "method_core",
  "opentelemetry",
  "opentelemetry_sdk",
- "rustix 1.1.6",
- "schemars 1.2.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -14708,6 +14961,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "smallvec"
+version = "2.0.0-beta.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "260f642f866b34ad70fb59f47aed43ab21c36d5d82891f82b0cf4cd551a187d2"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "smawk"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14786,7 +15048,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -14929,7 +15191,7 @@ dependencies = [
  "cfg-if 1.0.5",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -15145,7 +15407,7 @@ dependencies = [
  "serde",
  "servo_arc 0.5.0",
  "smallbitvec",
- "smallvec",
+ "smallvec 1.16.4",
  "static_assertions",
  "string_cache 0.11.0",
  "strum 0.28.0",
@@ -15212,7 +15474,7 @@ dependencies = [
  "selectors 0.41.0",
  "servo_arc 0.5.0",
  "smallbitvec",
- "smallvec",
+ "smallvec 1.16.4",
  "string_cache 0.11.0",
  "thin-vec",
  "void",
@@ -15389,7 +15651,7 @@ dependencies = [
 [[package]]
 name = "subsecond"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "js-sys",
  "libc",
@@ -15407,7 +15669,7 @@ dependencies = [
 [[package]]
 name = "subsecond-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=a3e1e68334b7dfa68cead38e9e8795ec7a6b534a#a3e1e68334b7dfa68cead38e9e8795ec7a6b534a"
+source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
 dependencies = [
  "serde",
 ]
@@ -15417,6 +15679,27 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "supports-color"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c64fc7232dd8d2e4ac5ce4ef302b1d81e0b80d055b9d77c7c4f51f6aa4c867d6"
+dependencies = [
+ "is_ci",
+]
+
+[[package]]
+name = "supports-hyperlinks"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e396b6523b11ccb83120b115a0b7366de372751aa6edf19844dfb13a6af97e91"
+
+[[package]]
+name = "supports-unicode"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7401a30af6cb5818bb64852270bb722533397edcfc7344954a38f420819ece2"
 
 [[package]]
 name = "surelock"
@@ -15584,7 +15867,7 @@ checksum = "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d"
 dependencies = [
  "serde",
  "slotmap",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -15684,7 +15967,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -15702,7 +15985,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -15715,12 +15998,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix 1.1.6",
+ "windows-sys 0.60.2",
+]
+
+[[package]]
 name = "test_nodule_handlers"
 version = "0.1.0"
 dependencies = [
  "big_ndk",
- "bytes",
- "futures",
  "http",
  "method_core",
  "serde",
@@ -15735,6 +16026,7 @@ version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ecfad6c3abc80a577f2b91c1e412ee57e7a060d430b553c1b0c940974ebcd49"
 dependencies = [
+ "icu_segmenter",
  "smawk",
  "unicode-width 0.2.3",
 ]
@@ -15890,7 +16182,7 @@ dependencies = [
  "cssparser 0.38.0",
  "servo_arc 0.5.0",
  "smallbitvec",
- "smallvec",
+ "smallvec 1.16.4",
  "string_cache 0.11.0",
  "thin-vec",
 ]
@@ -16411,7 +16703,7 @@ checksum = "1ac28f2d093c6c477eaa76b23525478f38de514fa9aeb1285738d4b97a9552fc"
 dependencies = [
  "js-sys",
  "opentelemetry",
- "smallvec",
+ "smallvec 1.16.4",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -16443,7 +16735,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sharded-slab",
- "smallvec",
+ "smallvec 1.16.4",
  "thread_local",
  "time",
  "tracing",
@@ -16489,7 +16781,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -16586,7 +16878,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -16664,7 +16956,7 @@ version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
 dependencies = [
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -16751,7 +17043,7 @@ dependencies = [
  "serde",
  "tempfile",
  "textwrap",
- "toml 0.8.2",
+ "toml 0.9.12+spec-1.1.0",
  "uniffi_internal_macros",
  "uniffi_meta",
  "uniffi_pipeline",
@@ -16807,7 +17099,7 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.119",
- "toml 0.8.2",
+ "toml 0.9.12+spec-1.1.0",
  "uniffi_meta",
 ]
 
@@ -17134,7 +17426,7 @@ dependencies = [
  "log",
  "peniko",
  "png",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 2.0.21",
 ]
 
@@ -17150,7 +17442,7 @@ dependencies = [
  "log",
  "peniko",
  "png",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 2.0.21",
 ]
 
@@ -17188,7 +17480,7 @@ dependencies = [
  "guillotiere",
  "peniko",
  "skrifa",
- "smallvec",
+ "smallvec 1.16.4",
 ]
 
 [[package]]
@@ -17531,7 +17823,7 @@ dependencies = [
  "indexmap 2.14.2",
  "log",
  "petgraph 0.6.5",
- "smallvec",
+ "smallvec 1.16.4",
  "wasm-encoder 0.254.2",
  "wasmparser 0.254.2",
  "wat",
@@ -17787,7 +18079,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.13.5",
  "tempfile",
  "wasm-compose",
@@ -17830,7 +18122,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "sha2 0.10.9",
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.13.5",
  "wasm-encoder 0.254.2",
  "wasmparser 0.254.2",
@@ -17860,7 +18152,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_derive",
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.13.5",
  "wasm-encoder 0.261.0",
  "wasmparser 0.261.0",
@@ -17950,7 +18242,7 @@ dependencies = [
  "log",
  "object 0.39.1",
  "pulley-interpreter",
- "smallvec",
+ "smallvec 1.16.4",
  "target-lexicon 0.13.5",
  "thiserror 2.0.21",
  "wasmparser 0.254.2",
@@ -18122,7 +18414,7 @@ dependencies = [
  "downcast-rs",
  "rustix 1.1.6",
  "scoped-tls",
- "smallvec",
+ "smallvec 1.16.4",
  "wayland-sys",
 ]
 
@@ -18618,7 +18910,7 @@ dependencies = [
  "portable-atomic",
  "profiling",
  "raw-window-handle 0.6.2",
- "smallvec",
+ "smallvec 1.16.4",
  "static_assertions",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -18648,7 +18940,7 @@ dependencies = [
  "portable-atomic",
  "profiling",
  "raw-window-handle 0.6.2",
- "smallvec",
+ "smallvec 1.16.4",
  "static_assertions",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -18681,7 +18973,7 @@ dependencies = [
  "profiling",
  "raw-window-handle 0.6.2",
  "rustc-hash 1.1.0",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 2.0.21",
  "wgpu-core-deps-apple 29.0.4",
  "wgpu-core-deps-emscripten 29.0.4",
@@ -18716,7 +19008,7 @@ dependencies = [
  "profiling",
  "raw-window-handle 0.6.2",
  "rustc-hash 1.1.0",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 2.0.21",
  "wgpu-core-deps-apple 30.0.1",
  "wgpu-core-deps-emscripten 30.0.1",
@@ -18831,7 +19123,7 @@ dependencies = [
  "raw-window-handle 0.6.2",
  "raw-window-metal 1.1.0",
  "renderdoc-sys",
- "smallvec",
+ "smallvec 1.16.4",
  "thiserror 2.0.21",
  "wasm-bindgen",
  "wayland-sys",
@@ -18886,7 +19178,7 @@ dependencies = [
  "raw-window-handle 0.6.2",
  "raw-window-metal 1.1.0",
  "renderdoc-sys",
- "smallvec",
+ "smallvec 1.16.4",
  "static_assertions",
  "thiserror 2.0.21",
  "wasm-bindgen",
@@ -19057,7 +19349,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
