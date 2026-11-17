@@ -374,7 +374,7 @@ impl<'a> Packaging<'a> {
     /// without an entry and `which` finds it by its datums, not by name. The command id is fixed
     /// per drawer, so creating it again answers the first creation, and two writers converge on
     /// one document.
-    pub(super) async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
+    async fn ensure_commits_doc(&self, drawer: &DrawerId) -> Res<DocId> {
         Ok(self
             .caller
             .call(CreateMetaDoc {
