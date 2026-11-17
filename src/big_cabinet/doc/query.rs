@@ -149,16 +149,10 @@ impl DocsService {
             .into_iter()
             .filter(|edge| readable.contains(&edge.origin.doc_id))
             .filter(|edge| {
-                let origin = Self::read_kinds(&caller.authority, &edge.origin.doc_id);
-                if !origin.allows(&edge.origin.datum_key) {
-                    return false;
-                }
-                match &edge.target {
-                    DatumRefTarget::Route { route, .. } => {
-                        Self::read_kinds(&caller.authority, &route.doc_id).allows(&route.datum_key)
-                    }
-                    DatumRefTarget::Key(_) => true,
-                }
+                Self::read_kinds(&caller.authority, &edge.origin.doc_id)
+                    .allows(&edge.origin.datum_key)
+                    && Self::read_kinds(&caller.authority, &edge.target.doc_id)
+                        .allows(&edge.target.datum_key)
             })
             .map(QueriedDatumRef::from)
             .collect())
