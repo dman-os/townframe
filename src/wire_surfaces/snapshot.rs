@@ -384,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_property_in_the_checked_in_copy_is_reported_as_evolution() {
+    fn a_dropped_property_of_an_unstable_lexicon_is_stale_and_not_evolution() {
         let dir = tempfile::tempdir().unwrap();
         let snapshot = Snapshot::generate().unwrap();
         snapshot.bless(dir.path()).unwrap();
@@ -415,12 +415,14 @@ mod tests {
             render(&old),
         )
         .unwrap();
+        // Every Lexicon of the corpus is unstable until an item states `since`, so the change
+        // makes the snapshot stale and is outside the evolution rules.
         let problems = snapshot.problems(dir.path()).unwrap();
+        assert!(problems.evolution.is_empty(), "{problems:?}");
         assert!(
             problems
-                .evolution
-                .iter()
-                .any(|line| line.contains("removed or renamed") && line.contains(&entry.nsid)),
+                .stale
+                .contains(&format!("lexicons/{}.json", entry.nsid)),
             "{problems:?}"
         );
     }
