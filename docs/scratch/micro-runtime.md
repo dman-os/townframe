@@ -38,8 +38,19 @@ language separately.
      the engine, not the wire. Dioxus does the same diffing in compiled Rust, so it is unaffected. Solid needs no
      diff at all (0.045 ms per typing step), which is why it is the interpreter tier's default. A memoized React
      app, or the AOT tier (item 5), narrows the gap; neither was measured.
-   - Solid needs its JSX compile step (babel-preset-solid, `generate: "universal"`) inside the language
-     cartridge's build routine.
+   - Every JSX framework needs a compile step, not just Solid: React and Preact JSX compiles to
+     `createElement`/`jsx()` calls, and Solid's compiles to fine-grained template code (babel-preset-solid,
+     `generate: "universal"`). TypeScript also needs its types stripped. The "build routine" is the language
+     cartridge's step that turns micro source into runnable JS.
+   - **A micro ships both its built JS and its source** (operator, 2026-11-17).
+     - The cartridge carries the transpiled, minified bundle, which is what runs. The default path does no build
+       on the device: install and run, like any shipped app.
+     - It also carries the full source (TS/JSX), which is what the person edits. Editing runs the build routine
+       on the host, and its output replaces the bundle for that device.
+     - A cartridge without source can run but not be edited in the app. End-user programmability requires the
+       source to ship.
+     - Because the build routine is deterministic, the registry can rebuild the bundle from the source and check
+       that they match. Then the code a person reads is the code that runs.
 4. **Heavy or stable micros stay in Rust** (the diff view, virtualization, highlighting) and are composed into TS
    micros by embedding (`mount-component`), with data exchanged through collections. That is the Emacs C-primitive
    split.
@@ -89,7 +100,8 @@ language separately.
   `createRenderer` are all thin adapters over that API. A framework that writes straight to `document` (Svelte, lit)
   needs a DOM-subset shim over the same API. Solid is the default only because it skips the virtual-DOM diff, which
   is costly on an interpreter (see item 3 above).
-- **The JSX compile step stays.** Any build step happens inside the language cartridge's build routine.
+- **The JSX compile step stays.** It happens in the language cartridge's build routine: at publish time for the shipped
+  bundle, and on the host when a person edits (see item 3).
 - **Open question 1: an edit is a full restart, not a hot swap or hot reload.** The "snapshot" is the engine's
   memory after Wizer has run its setup at build time (QuickJS booted, Solid and the MDK loaded), saved inside the
   component. Each instance starts from that memory instead of redoing the setup, which is why instantiating takes
