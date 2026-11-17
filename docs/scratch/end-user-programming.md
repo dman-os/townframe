@@ -69,8 +69,9 @@ If people fork rather than hook, forks have to be first-class:
   That shows what was overlaid on what.
 - **Upstream updates** rebase each overlay with a three-way merge. A conflict halts that micro's update, not the
   app's.
-- **Mixing forks** means composing overlays, with conflicts detected per file or datum, and the result is itself a
-  recorded lineage.
+- **Mixing forks (composing overlays): deferred** (operator, 2026-11-17). It's powerful but serious work, and it's
+  only easy in a pure-LLM workflow. Until then a fork has one base. Managing and understanding forks goes through
+  intxt: an overlay's patches are a change the user can read, annotate and review like any other.
 - **Questions for this week, with nodules:** how a substituted identity carries its grants; whether lineage lives
   in the cartridge envelope or beside it; how a user un-forks back to base.
 
