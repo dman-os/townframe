@@ -358,6 +358,7 @@ impl DioxusHost {
         if self.code_view.is_some() && !self.mounted.borrow().contains_key(&self.scroller_root()) {
             return;
         }
+        crate::instr_page(&format!("flush_frames pending={}", self.frames.borrow().pending.len())); // INSTR
         let pending = {
             let mut frames = self.frames.borrow_mut();
             #[cfg(test)]

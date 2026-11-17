@@ -127,17 +127,20 @@ impl ScrollRoot {
     }
 
     pub(crate) fn mounted(&self, scroller: Rc<MountedData>) {
+        crate::instr_page("page mounted"); // INSTR
         *self.0.scroller.borrow_mut() = Some(scroller);
         self.notify(RootNotice::Mounted);
         self.measure();
     }
 
     pub(crate) fn scrolled(&self, sample: ScrollSample) {
+        crate::instr_page(&format!("page scrolled {sample:?} offset={}", self.offset())); // INSTR
         self.0.sample.set(Some(sample));
         self.notify(RootNotice::Scrolled);
     }
 
     pub(crate) fn resized(&self, height: f64, width: f64) {
+        crate::instr_page(&format!("page resized height={height} width={width}")); // INSTR
         self.0.size.set(Some((height, width)));
         self.notify(RootNotice::Resized);
     }
@@ -200,6 +203,7 @@ impl ScrollRoot {
                 let scroller_rect = scroller.get_client_rect().await?;
                 let viewer_rect = viewer.get_client_rect().await?;
                 let scrolled = scroller.get_scroll_offset().await?;
+                crate::instr_page(&format!("page rects scroller={scroller_rect:?} viewer={viewer_rect:?} scrolled={scrolled:?}")); // INSTR
                 Ok::<_, MountedError>(viewer_rect.origin.y - scroller_rect.origin.y + scrolled.y)
             };
             let offset = match rects.await {
@@ -209,6 +213,7 @@ impl ScrollRoot {
                 Err(MountedError::NotSupported) => return,
                 Err(error) => panic!("the platform measures a mounted element: {error}"),
             };
+            crate::instr_page(&format!("page measured offset={offset} was={}", root.offset())); // INSTR
             if (offset - root.offset()).abs() >= 0.5 {
                 root.0.offset.set(offset);
                 root.notify(RootNotice::Moved);

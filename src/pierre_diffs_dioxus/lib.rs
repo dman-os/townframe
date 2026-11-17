@@ -58,3 +58,29 @@ pub use view::FileDiffView;
 pub use view::FileDiffViewProps;
 pub use view::Interaction;
 pub use view::Virtualization;
+
+/// INSTR (document-scroll investigation, 2026-11-17): appends one timestamped line per event to
+/// `$PIERRE_INSTR_LOG` (default `/tmp/pierre-docscroll.log`), so a run shows what the document's
+/// scroll proxy delivers to the viewer (mount, size, scroll samples, the measured offset) and what
+/// the viewer writes back (slab geometry, frames). No-op in the browser, which has no files.
+#[doc(hidden)]
+pub fn instr_page(what: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::io::Write as _;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis();
+        let path = std::env::var("PIERRE_INSTR_LOG")
+            .unwrap_or_else(|_| "/tmp/pierre-docscroll.log".to_owned());
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open the instr log");
+        writeln!(file, "{now} {what}").expect("write the instr log");
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = what;
+}

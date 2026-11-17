@@ -200,6 +200,7 @@ impl CodeViewHostState {
         let mut next = current;
         edit(&mut next);
         if next != current {
+            crate::instr_page(&format!("slab {next:?}")); // INSTR
             slab.set(next);
         }
     }
