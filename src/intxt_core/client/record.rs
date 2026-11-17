@@ -171,7 +171,7 @@ impl<H: HttpTransport> Recorder<'_, H> {
         let capability = self
             .caller
             .doc_capability(DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             })
             .await?;
