@@ -15,6 +15,46 @@ necessity, resolution), ADR 037 (holder-bound capabilities), ADR 044 (configurat
 ADR 047 (routines, permbinds, per-routine capabilities), "Clay on the node" (#129, signed by the
 nodules lane 2026-11-17).
 
+## Operator review, 2026-11-17 (direction; the sections below are revised to it next)
+
+1. **Grants happen at runtime too, not only at install.** Like Android asking for the camera after
+   the app has started: a cartridge may request access while it runs. The one-line story gains a
+   runtime request path for micros and nodules alike.
+2. **Runtime requests have one model on every surface.**
+   - Micros request through a host service and await the answer (a future).
+   - Nodule requests surface in the same UI. Workflows wait like micros. A plain routine files the
+     request and fails its call at once with a typed **missing-authority** error.
+   - The CLI has a pending-requests queue the person can accept or decline.
+   - Missing authority is a conventional error that propagates: when cartridge X's micro calls
+     cartridge Y's routine and Y lacks a grant, X can tell the person "Y needs permission for this".
+3. **"Only this time" lasts until the current boot ends.**
+4. **`atRuntime` as a permbind property goes away.** Any permbind can be requested at runtime under
+   items 1–2; claytxt's §5 one-shot-versus-remember question is answered by items 2–3.
+5. **Permbinds must also cover network access**: talking to an origin (fetch). Rich external
+   services (GitHub, Google) should not be a micro's raw fetch: platform cartridges provide them, so
+   a web-modelled micro is analysed in isolation and the general-purpose service cartridges are
+   the trusted part.
+6. **The user faces the cartridge, never its parts.** No routines, micros, nodules or permbind names
+   on the default path. The questions are in familiar nouns: "may it read/write drawer X",
+   "may it use data from cartridge Y", "may it talk to services at origin Z". Drawer access uses
+   the same read/write/admin vocabulary as the node's other grants. The single consent and audit
+   view per cartridge is the value; the subsystems may stay parallel underneath.
+7. **One answer per question.** Granting a drawer to a cartridge once satisfies every permbind
+   with the same or lesser rules; the person is never asked again for another permbind. Named
+   drawer-set permbinds can stay for internal analysis, but they are not a user-facing
+   distinction.
+8. **Collections are "data from cartridge Y"**, granted at install like other access. They are not
+   a separate Clay-only kind: the permbind system is the primary grant experience, and
+   claytxt's asymmetry 4 is withdrawn.
+9. **Fine-grained ACLs exist for risk analysis.** Per-routine `uses` plus shared local state let
+   the registry (the blessed store) analyse statically what can flow where, e.g. a routine with
+   fetch access and another with drawer access that share local state can exfiltrate that
+   drawer. Consent shows the permissions *and* the risks the analysis derives; the registry may
+   flag or refuse publishing very risky combinations.
+10. **Built-in host services and cartridges keep isomorphic shapes** (6.2), so host services can
+    later move into cartridges.
+11. **This document stays the ADR-shaped proposal; the user-facing experience gets its own FDR.**
+
 ## 1. The story in one line, and what is already settled
 
 **A cartridge declares the holes in its authority; installing proposes what fills them; a person
