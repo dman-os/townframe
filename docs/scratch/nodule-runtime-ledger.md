@@ -740,6 +740,12 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - **Sidecars are stored as JSON text** (ADR 021 §3 amendment): the full schemars output, so sidecars can grow JSON Schema features; the sidecar tag's own supplement states `contentSchema` = the 2020-12 meta-schema, which the node enforces.
   - **CI test output** stays out of job logs (volume broke the pipelines); the JUnit artifact stores failure output (#151).
   - **Clone bootstrap** (claytxt's gap 3) waits on the user-node composition ADR: sisters and mothers (ADR 038), whose vocabulary is to be settled by first enumerating the P2P forcing functions.
+- **D51. Reviewable wire surfaces** (operator, 2026-11-12, re-raised and approved 2026-11-17): every datum, method and manifest schema the corpus publishes must be visible and diffable in one place, like `public-api.txt`, because types are authored in Rust and nothing in review shows them as data. Built in this order:
+  1. **Lexicon snapshot:** every published Lexicon (datum records, methods, the cartridge envelope) and each datum's sidecar as checked-in atproto JSON, one file per NSID, plus a repo-wide index (NSID → crate → kind → revision); `cargo x guardrails` fails when stale.
+  2. **Evolution check:** a change against the checked-in copy is compatible (new optional field, new known value, new open-union member; the revision must bump) or breaking (removed or renamed field, type change, new required field, closed enum shrinking), and a breaking change fails unless it comes with a new NSID (operator rule 2026-11-06).
+  3. **Manifest snapshot:** every cartridge manifest the repo ships rendered to JSON (permbinds, `uses`, routines), the input ADR 049's risk analysis reads.
+  4. **Datum slot registry:** slot prefixes declared through one constructor, collected, overlaps fail.
+  Items 1–2 run as a Sonnet lane on top of the stack (2026-11-17).
 - [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
 - [todo] `big_ndk`'s `export_nodule!` routes with an if-chain of awaits in one async block, the frame shape #143 removed from the route macros; it matters most on a wasm guest's small stack. `big_node`'s boot block is also a 226 KB debug frame.
 - [todo] Typed initializer input record (trigger: install/upgrade/start; previous and current revision) for ADR 047 initializers (D47). Initializers receive `{}` until then.
