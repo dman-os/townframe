@@ -576,3 +576,99 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
     );
     composition.stop().await.unwrap();
 }
+
+const REVIEW: &str = "did:example:clay-local/dayframe.review";
+
+/// The review micro's install from the operator's `review.json`: its drawers are read from the
+/// file, its config datum is the file's members plus the minted `docCap`, the capability reads the
+/// listed drawers and no other, and the datum is where the micro's manifest asks for it. With no
+/// file the micro installs unconfigured: no drawers, no datum, no capability.
+#[tokio::test]
+async fn a_review_install_file_configures_the_micro_and_no_file_leaves_it_unconfigured() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut composition = NodeComposition::boot(NodeConfig {
+        root: dir.path().to_owned(),
+        bootstrap: vec![],
+        schemas: note_schemas(),
+        installs: vec![],
+    })
+    .await
+    .unwrap();
+    let github = create_drawer(composition.node(), "github").await;
+    let intxt = create_drawer(composition.node(), "intxt").await;
+    let other = create_drawer(composition.node(), "other").await;
+    let github_doc = create_note(composition.node(), &github, "a pull").await;
+    let other_doc = create_note(composition.node(), &other, "hidden").await;
+
+    let file = json!({
+        "githubDrawer": github.to_string(),
+        "intxtDrawers": [intxt.to_string()],
+        // A file that carries `docCap` must not decide it: only the composition mints one.
+        "docCap": "forged",
+    });
+    let file = serde_json::to_vec(&file).unwrap();
+    let installs = MicroInstall::interim([REVIEW.to_owned()], |name| {
+        assert_eq!(name, "review.json");
+        Ok(Some(file.clone()))
+    })
+    .unwrap();
+    assert_eq!(installs.len(), 1);
+    assert!(
+        installs[0]
+            .methods
+            .contains("org.example.intxt.summarizeIntxts"),
+        "the review micro's grants come with its install: {:?}",
+        installs[0].methods
+    );
+    for install in installs {
+        composition.install_micro(install).await.unwrap();
+    }
+    let capability = composition
+        .doc_capability(REVIEW)
+        .expect("a configured review micro is minted a document capability");
+    let (tag, key, config) = composition.config_datum(REVIEW).unwrap();
+    // The datum goes where the micro's manifest reads its configuration.
+    let manifest = micro_review_manifest::manifest();
+    assert!(
+        manifest.configuration_requests.iter().any(|request| {
+            request.facets.iter().any(|facet| {
+                facet.tag.as_str() == tag && facet.key_id.as_deref().is_none_or(|id| id == key)
+            })
+        }),
+        "the review manifest requests {tag}/{key}"
+    );
+    assert_eq!(
+        *config,
+        json!({
+            "githubDrawer": github.to_string(),
+            "intxtDrawers": [intxt.to_string()],
+            "docCap": serde_json::to_value(capability).unwrap(),
+        })
+    );
+    let egress = composition.egress(REVIEW).unwrap();
+    let (status, read) = read_datums(&egress, capability, &github_doc).await;
+    assert_eq!(status, 200, "{read}");
+    let (status, denied) = read_datums(&egress, capability, &other_doc).await;
+    assert_eq!((status, denied["error"].as_str()), (400, Some("Denied")));
+
+    // No file: the micro is installed with its grants and nothing configured.
+    let installs = MicroInstall::interim([REVIEW.to_owned()], |_| Ok(None)).unwrap();
+    for install in installs {
+        composition.install_micro(install).await.unwrap();
+    }
+    assert!(composition.doc_capability(REVIEW).is_none());
+    assert!(composition.config_datum(REVIEW).is_none());
+
+    // A file naming something that is not a drawer is refused, not half read.
+    let refused = MicroInstall::interim([REVIEW.to_owned()], |_| {
+        Ok(Some(
+            br#"{"githubDrawer": "nope", "intxtDrawers": []}"#.to_vec(),
+        ))
+    })
+    .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("githubDrawer"),
+        "the refusal names the member: {refused:#}"
+    );
+    composition.stop().await.unwrap();
+}

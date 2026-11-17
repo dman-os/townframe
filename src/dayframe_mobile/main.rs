@@ -56,7 +56,7 @@ mod android {
     /// way to put bytes in the APK: it bundles what `asset!` names. Android offers no
     /// directory listing through the resolver, so the names are listed here.
     static PACKAGES: Asset = asset!("/packages");
-    const PACKAGE_NAMES: [&str; 2] = ["counter", "layout"];
+    const PACKAGE_NAMES: [&str; 3] = ["counter", "layout", "review"];
 
     #[no_mangle]
     fn android_main(app: dioxus_native::AndroidApp) {
@@ -123,6 +123,34 @@ mod android {
         })
     }
 
+    /// The directories the operator's files are read from, external first: `adb push` reaches the
+    /// external one without a debuggable build, the internal one is the fallback.
+    fn pairing_directories(data_directory: &std::path::Path) -> Vec<&std::path::Path> {
+        EXTERNAL_DIRECTORY
+            .get()
+            .and_then(Option::as_deref)
+            .into_iter()
+            .chain([data_directory])
+            .collect()
+    }
+
+    /// The text of the install file `name` (see `dayframe_node::MicroInstall::interim`): the
+    /// first of the pairing directories that has it. Missing everywhere is no file, which installs
+    /// the micro unconfigured; any other read failure is the operator's to see.
+    fn read_install_file(
+        data_directory: &std::path::Path,
+        name: &str,
+    ) -> std::io::Result<Option<Vec<u8>>> {
+        for directory in pairing_directories(data_directory) {
+            match std::fs::read(directory.join(name)) {
+                Ok(bytes) => return Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+
     /// Boots the phone's node under `<data>/node` with one actor per package micro, dialing the
     /// tickets in the pairing files and publishing its own ticket beside them. A node that
     /// cannot boot is a failure the launcher shows: the micros' node access is part of what the
@@ -131,12 +159,7 @@ mod android {
         data_directory: &std::path::Path,
         installs: Vec<dayframe_node::MicroInstall>,
     ) -> Result<dayframe_node::NodeComposition, String> {
-        let pairing_directories: Vec<&std::path::Path> = EXTERNAL_DIRECTORY
-            .get()
-            .and_then(Option::as_deref)
-            .into_iter()
-            .chain([data_directory])
-            .collect();
+        let pairing_directories = pairing_directories(data_directory);
         let mut bootstrap = Vec::new();
         for directory in &pairing_directories {
             bootstrap.extend(
@@ -147,7 +170,11 @@ mod android {
         let node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
             root: data_directory.join("node"),
             bootstrap,
-            // No micro on the phone reads a datum yet; the intxt review micro's Lexicons go here.
+            // The node learns the datum vocabulary of intxt (the PR and intxt datums the review
+            // micro reads) from intxt's cartridge, whose Lexicons it admits when the cartridge is
+            // installed. SEAM: `intxt_core::install::install` (stack/intxt-21-install-lib) goes
+            // after this boot, over the node's own client, with the intxt guest wasm bundled in
+            // the APK. The review config datum is Clay's, not the node's, and needs no schema.
             schemas: Arc::new(
                 big_cabinet::SchemaRepo::open(std::iter::empty())
                     .expect("no registrations is a valid schema repo"),
@@ -178,8 +205,11 @@ mod android {
                 Err(error) => errors.push(error),
             }
         }
-        let installs =
-            dayframe_node::MicroInstall::interim(dayframe_native::package_micro_ids(&packages));
+        let installs = dayframe_node::MicroInstall::interim(
+            dayframe_native::package_micro_ids(&packages),
+            |name| read_install_file(data_directory, name),
+        )
+        .map_err(|error| format!("cannot read the install files: {error:#}"))?;
         let node = NODE
             .get_or_try_init(|| boot_node(data_directory, installs))
             .await?;
@@ -189,6 +219,7 @@ mod android {
             errors,
             dayframe_native::wasmtime_engine,
             &|micro| node.egress(micro),
+            &|micro| node.config_datum(micro).cloned(),
         )
         .await
         .map_err(|error| format!("cannot load the store: {error}"))

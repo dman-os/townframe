@@ -37,4 +37,5 @@ tokio = { workspace = true, features = ["sync"] }
 blitz = ["dep:dioxus-native"]
 
 [dev-dependencies]
+micro_review_manifest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

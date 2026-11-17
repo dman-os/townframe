@@ -95,7 +95,7 @@ switch (command) {
       guestProfile,
     });
     // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
-    // `asset!`, so stage the prepared counter and layout beside the crate (gitignored).
+    // `asset!`, so stage the prepared counter, layout and review beside the crate (gitignored).
     const staged = root.join("src/dayframe_mobile/packages");
     await Deno.mkdir(staged.toString(), { recursive: true });
     for (const name of ["counter", "layout"]) {

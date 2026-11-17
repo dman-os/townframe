@@ -18,6 +18,7 @@ big_node.workspace = true
 clay_guest_session.workspace = true
 clay_node_egress.workspace = true
 day_node.workspace = true
+micro_review_manifest.workspace = true
 service_utils_rs.workspace = true
 utils_rs.workspace = true
 
