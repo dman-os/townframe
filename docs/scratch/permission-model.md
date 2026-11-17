@@ -15,7 +15,7 @@ necessity, resolution), ADR 037 (holder-bound capabilities), ADR 044 (configurat
 ADR 047 (routines, permbinds, per-routine capabilities), "Clay on the node" (#129, signed by the
 nodules lane 2026-11-17).
 
-## Operator review, 2026-11-17 (direction; the sections below are revised to it next)
+## Operator review, 2026-11-17 (direction; §1, 2, 4, 6 and 10 are revised to it, §3, 5 and 8 next)
 
 1. **Grants happen at runtime too, not only at install.** Like Android asking for the camera after
    the app has started: a cartridge may request access while it runs. The one-line story gains a
@@ -57,9 +57,11 @@ nodules lane 2026-11-17).
 
 ## 1. The story in one line, and what is already settled
 
-**A cartridge declares the holes in its authority; installing proposes what fills them; a person
-grants; the runtime mints one capability per routine or micro from what it declared and was
-granted; the services refuse anything outside it; a changed grant re-mints before the next call.**
+**A cartridge declares the holes in its authority; installing proposes what fills them, and the
+running cartridge may ask for more; a person grants, in the cartridge's terms; the runtime mints
+one capability per routine or micro from what it declared and was granted; the services refuse
+anything outside it, with an error that says what is missing; a changed grant re-mints before the
+next call.**
 
 Settled by ADR 047 (accepted 2026-11-13) and not reopened here:
 - **Permbinds** are the cartridge's named holes, by kind: `#datum { nsid, read, write, create,
@@ -67,15 +69,20 @@ Settled by ADR 047 (accepted 2026-11-13) and not reopened here:
   resolution }`. Each access is `required` or `optional`.
 - **`uses`** is a routine's ACL over the permbinds. A key names a permbind and takes no more than
   it declares; admission refuses anything else.
-- **Grants** are keyed by permbind and kept per runtime in the cartridge config document:
-  `nodule.grant/<permbind>[/<drawerId>]` and `micro.grant/<permbind>[/<drawerId>]` (ADR 044).
+- **Grants** live in the cartridge config document (ADR 044). ADR 047 keys them by permbind and
+  runtime; §4 proposes amending that, so a person answers each question once per cartridge.
 - **One capability per routine**, from `uses` ∩ grants, minted at start and re-minted on a grant
   change. Dispatch and the docs service refuse what it does not cover.
 - **Confused deputy:** a call to another cartridge passes none of the caller's access.
 
-What this proposal adds: the micro side on the same terms (with "Clay on the node" §2), the
-consent and at-runtime picker flows, how a capability-bearing service's domain handle is reached
-(§6), and the gaps that show the current minting path is incomplete (§7).
+What this proposal adds:
+- the micro side on the same terms ("Clay on the node" §2);
+- grants per cartridge in user-facing nouns, and runtime requests with a missing-authority error (§4);
+- access narrowed by datum kind inside granted drawers, and a permbind kind for network origins (§2);
+- how a service's own handle is reached (§6.2), and the gaps that show the minting path is incomplete
+  (§7);
+- the per-routine ACLs as the input to a static risk analysis (§9a).
+The person-facing screens are an FDR of their own (operator review item 11).
 
 ## 2. Declaration: the nodule side [nodules]
 
@@ -90,15 +97,24 @@ table, never from the request).
   docs handle over the cartridge config document (its `#datum` kinds) and a drawers handle (its
   `#drawers` access and the create flag). `big_nodule/state.rs` builds those scopes from `uses`
   and the granted drawers.
-- **The authoring surface lowers into the manifest, never around it.** A routine written with
-  `big_ndk` states its permbinds and `uses` as declarations the build turns into the ADR 047
-  manifest (the shape `export_nodule!` already has for routing). The manifest stays the artifact
-  that is admitted, granted and audited. The concrete traits are open (§10).
+- **The authoring surface lowers into the manifest, never around it.** Permbinds and `uses` are
+  written with the manifest-authoring code that exists, behind a builder that is pleasant to write;
+  the manifest stays the artifact that is admitted, granted and audited.
 
-Open in this section:
-- `#datum` today scopes only the cartridge config document (its settings). Datum kinds in the
-  documents of a granted drawer are reached through the drawers handle, not narrowed by kind.
-  Whether `#datum` should also narrow drawer documents by kind is §10's first question.
+**The default shape of access is a datum kind in a drawer** (operator, 2026-11-17): "read datum
+type X from drawer Y", where Y is a named drawer, a drawer type, or the drawers of a cartridge.
+Today `#datum` narrows only the cartridge config document, and a granted drawer is reached whole
+through the drawers handle. The revision: a routine's `#datum` kinds narrow its access inside every
+drawer it was granted too, so its docs handle maps each reached document to those kinds
+(`DocScope`'s `DatumKinds`, ADR 047 §6). Broad access ("any datum in this drawer") is an explicit
+permbind added when something needs it, never the default. Narrow defaults are also what makes the
+risk analysis (§9a) say something specific.
+
+**Network access is a permbind kind** (operator review item 5): `#origin { origin, methods? }`, an
+origin a routine or micro may talk to. A rich external service (GitHub, Google) is not a raw origin
+grant: a platform cartridge provides it as operations, and a cartridge that wants it declares a
+`#method` on those operations. The general-purpose service cartridges are the trusted part; the
+cartridges that use them are analysed without network access.
 
 ## 3. Declaration: the micro side [claytxt]
 
@@ -142,10 +158,55 @@ Asymmetries with the nodule side, stated explicitly:
 
 ## 4. Grants [both]
 
-To write together. Starting points:
-- Grant datums keyed by permbind, per runtime, in the cartridge config document (ADR 044 §8).
-- Who may write them: the cartridges service (privileged `setGrant { subsystem, permbind }`);
-  never the cartridge itself (a nodule writes its settings, not its grants: ADR 044 §6).
+### 4.1 A grant is per cartridge, in the person's nouns (amends ADR 047 §5)
+
+The person answers questions about the cartridge, never about its parts (operator review items 6
+and 7), so a grant records the answer to that question, once:
+- `grant/drawer/<drawerId>` → `{ access: read | write | admin }`, the node's grant vocabulary;
+- `grant/cartridge/<cartridgeId>` → `{ access }`, "may use data from cartridge Y" (its collections
+  and datums included, item 8);
+- `grant/origin/<origin>` → `{}`, "may talk to services at origin Z";
+- `grant/method/<nsid or authority>` → `{}`, "may use Y's operation" where the person is asked at
+  all (most are proposed and accepted at install, ADR 047 §10).
+
+Permbinds no longer carry grants of their own. Each routine's or micro's handle is derived: its
+`uses`, narrowed by its permbinds' rules, intersected with the cartridge's grants. Granting drawer X
+read access satisfies every permbind that needs read on X or a drawer like it, whichever runtime
+or routine holds that permbind, and the person is not asked again. Named drawer sets stay in the
+manifest because the analysis (§9a) and the runtime need them, but they are not a question.
+The grant datums are written only by the cartridges service (`setGrant`), never by the cartridge
+(ADR 044 §6).
+
+What this drops from ADR 047 §5: the per-runtime split (`nodule.grant/…`, `micro.grant/…`). One
+cartridge-level grant feeds both runtimes. What the split bought, a nodule and a micro reaching
+different things, is kept by each one's `uses`, which the grant never widens.
+
+### 4.2 Runtime requests
+
+Access can be requested while the cartridge runs, not only at install (operator review items
+1–4). Any permbind may be requested at runtime; there is no `atRuntime` property.
+- **The request** names a permbind (and, for a drawer set, may let the person choose the drawer).
+  It is filed by the runtime on the cartridge's behalf, never written by the cartridge.
+- **One queue, every surface.** Pending requests are node state the shell shows, the micro's host
+  shows, and the CLI lists (`day grants pending`, `accept`, `decline`). A person answers it once,
+  wherever they are.
+- **"Only this time"** is a grant that ends with the current boot. "Allow" writes the grant datum.
+- **Who waits.** A micro awaits the answer (a future from its host service). A workflow waits as
+  workflows do. A plain routine files the request and fails its call at once with the
+  missing-authority error below; the caller retries once the person has answered.
+
+### 4.3 The missing-authority error
+
+Every service refuses an ungranted call with one conventional error, carried through dispatch and
+across cartridges unchanged: `MissingAuthority { cartridge, permbind, request? }`. It names the
+cartridge that lacks the access (not necessarily the caller), the permbind, and the pending request
+if one was filed. So when cartridge X's micro calls cartridge Y's routine and Y lacks a grant, X
+receives Y's `MissingAuthority` and can tell the person "Y needs permission for this", with the
+request to answer. It is distinct from `Denied`, which means the access will not be granted (the
+rules forbid it), not that nobody has said yes yet.
+
+### 4.4 Unchanged
+
 - Candidates are proposed automatically and a person accepts (ADR 047 §10).
 - An upgrade that widens required access leaves the cartridge not startable until granted
   (ADR 028 §3).
@@ -207,11 +268,19 @@ capability, blobs a blobs capability. `RoutineCapabilities` mints only three of 
 config docs, drawers), so a routine that binds `blobs.put` passes dispatch and is refused by
 blobs (§7's second gap).
 
-Proposed: **a `#method` permbind on an operation whose service takes a domain handle lowers into
-that domain's handle too**, with the narrowest scope that operation needs, minted by the service
-actor as in 6.1. The service's Lexicon or method metadata states which domain and scope an
-operation needs, so the lowering is a table the runtime reads, not code per service. The routine
-then holds one handle per domain it reaches, all minted from the same `uses` ∩ grants.
+A domain handle mixes two things. Its operation-level part (`BlobsScope.put`) only repeats what
+dispatch already checked: may this routine call `blobs.put`. Its resource-level part
+(`BlobsScope.read`, a doc capability's documents) says *which* resources, and dispatch cannot.
+
+Proposed:
+- **The operation-level part follows from the `#method` permbind.** A routine that may call an
+  operation gets the service handle part that operation needs, minted by the service actor as in
+  6.1. Which part each operation needs is stated once, beside the method's definition in
+  `method_core`, so the lowering is a table the runtime reads, not code per service.
+- **The resource-level part follows from the grants** (drawers, datum kinds, cartridges, §4.1).
+- **Later, operation-level flags leave the service handles** and dispatch alone checks
+  operations. Built-in services and cartridge-provided services then have the same shape: a
+  handle names resources, dispatch names operations (operator review item 10).
 
 Alternative considered: a permbind kind per domain (`#blobs { put, read }`). Rejected for now:
 it puts service structure into every manifest, and a cartridge cares that it may call `put`, not
@@ -297,12 +366,44 @@ Nothing on the nodule side needs a parent either:
 - **polkit** (§4): operator-level approval is an explicit act (`auth_admin_keep`), never ambient
   authority, matching ADR 043's client identity.
 
+## 9a. Risk analysis from the ACLs [nodules]
+
+The per-routine and per-micro `uses` exist so the system can say not only "X wants Y" but "X wants
+Y, and this is what can follow from it" (operator review item 9). Because every reach is declared,
+the analysis is static: it reads a cartridge version's manifest, needs no execution, and gives the
+same answer on every node and in the registry.
+
+- **The graph.** Nodes are the cartridge's routines and micro, and the resources their `uses`
+  name: datum kinds in drawers (read or write), other cartridges' data, operations, origins, and
+  the cartridge's own local state and revisioned stores. Edges are the declared accesses.
+- **Flows.** Data read by a routine can reach anything that routine can write or send. Across
+  routines, data flows through anything one writes and another reads: shared local state, the
+  cartridge's settings, a datum kind both reach. The analysis takes the transitive closure.
+- **Risks** are flows from a sensitive source to an outward sink. The first rule is exfiltration:
+  a path from a drawer's data to an origin, whether one routine holds both or one writes local
+  state another sends out. It is reported with its path ("`sync` can send what `reindex` reads
+  from your Photos drawer, through their shared local state `cache`").
+- **Where it is shown.** The consent screen (the FDR) lists the permissions in the person's nouns
+  and the risks beside them. The registry runs the same analysis at publish and may flag or refuse
+  a version whose risks cross its policy; a node installing from elsewhere still shows them.
+- **What it cannot see.** Two routines served by one component instance could exchange data in
+  memory (ADR 047 §6 states this limit), so the analysis treats a component's routines as one
+  unit for flows, and the per-routine split only sharpens reports within that bound. Platform
+  cartridges (§2's GitHub or Google services) are trusted to do what their operations say; a
+  cartridge using them is analysed as calling those operations, not as holding their network
+  access.
+
 ## 10. Open questions [both]
 
-1. Does `#datum` narrow drawer documents by kind as well as the config document (§2)?
-2. Where an operation states the domain handle it needs (§6.2): Lexicon extension, method
-   metadata in `method_core`, or the service's registration with dispatch.
-3. The concrete `big_ndk` declaration traits that lower into the manifest (§2).
+Answered by the operator's review: `#datum` narrows inside granted drawers (§2); an operation
+states the handle part it needs beside its definition in `method_core` (§6.2); the authoring surface
+is the existing manifest code behind a builder (§2).
+
+Still open:
+1. The vocabulary that names a drawer in a permbind beyond a drawer id: drawer "types" and "the
+   drawers of cartridge Y" (§2) need a definition of what a drawer type is.
+2. How long a declined runtime request suppresses the same request (§4.2), so a routine retrying
+   does not ask the person in a loop.
 
 Micro side [claytxt]:
 
