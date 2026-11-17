@@ -63,7 +63,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 /// How many rewrites deep [`Caller::commit_holders`] follows a commit back.
-const MAX_REWRITE_HOPS: usize = 16;
+pub const MAX_REWRITE_HOPS: usize = 16;
 
 /// What a caller needs to call cabinet methods on behalf of whoever it presents the authority of:
 /// the transport to the node, the capability it presents (none when the node already admits the
