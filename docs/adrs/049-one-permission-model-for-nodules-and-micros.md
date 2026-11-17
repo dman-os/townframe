@@ -1,21 +1,15 @@
-# One permission model for nodules and micros (proposal)
+# ADR 049: One permission model for nodules and micros
 
-Status: Proposal (draft, not accepted); all sections written, claytxt's merged 2026-11-17
-Owner: Townframe maintainers (nodules and claytxt lanes)
-Updated: 2026-11-17
-Scope: The permission model from a cartridge's manifest to the capabilities its nodule routines and micros hold, and the gaps in today's minting path. Everything here is proposed unless it cites an accepted ADR.
-
-Written by the nodules lane with the claytxt lane: sections 3, 5 and
-the micro half of 8 are claytxt's (from `docs/scratch/permission-model-micro.md`, revision 2 at
-`bbf871d5` on `docs/claytxt-design`), merged here. Not accepted. This is the week's focus (ledger D47): the permission model as
-one story, the same for both runtimes a cartridge contributes.
+**Status:** Accepted (operator, 2026-11-17), written by the nodules lane with the claytxt lane (sections 3, 5 and
+the micro half of 8 are claytxt's). It amends ADR 047 §5: grants are per cartridge, in the person's nouns (§4.1). The
+person-facing side is [FDR 009](../fdrs/009-what-a-person-grants-a-cartridge.md).
 
 Related: ADR 022 (actors and grants), ADR 027 (cartridges and nodules), ADR 028 (requests,
 necessity, resolution), ADR 037 (holder-bound capabilities), ADR 044 (configuration documents),
 ADR 047 (routines, permbinds, per-routine capabilities), "Clay on the node" (#129, signed by the
 nodules lane 2026-11-17).
 
-## Operator review, 2026-11-17 (direction; every section is revised to it)
+## Operator review, 2026-11-17 (the direction every section follows)
 
 1. **Grants happen at runtime too, not only at install.** Like Android asking for the camera after
    the app has started: a cartridge may request access while it runs. The one-line story gains a
@@ -83,7 +77,7 @@ What this proposal adds:
 - how a service's own handle is reached (§6.2), and the gaps that show the minting path is incomplete
   (§7);
 - the per-routine ACLs as the input to a static risk analysis (§9a).
-The person-facing screens are an FDR of their own (operator review item 11).
+The person-facing side is FDR 009 (operator review item 11).
 
 ## 2. Declaration: the nodule side [nodules]
 
