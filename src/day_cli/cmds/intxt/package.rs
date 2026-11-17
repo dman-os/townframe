@@ -20,6 +20,7 @@ use big_blobs_core::MintBlobsCapability;
 use big_blobs_core::PutBlob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
+use big_cabinet_core::KeyReference;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
@@ -83,8 +84,8 @@ struct Resolved {
     bases: Vec<String>,
     commits: Vec<String>,
     label: String,
-    /// The entry's value, given the pack's reference, the tips and the bases.
-    value: fn(DatumReference, &[String], &[String]) -> Value,
+    /// The entry's value, given the pack's reference, the tips, the bases and the commits.
+    value: fn(DatumReference, &[String], &[String], &[String]) -> Value,
     /// A branch to track on this clone: its full ref name and its base.
     tracked: Option<(String, Option<String>)>,
 }
@@ -104,8 +105,9 @@ impl Resolved {
                 tips: jj.commits.clone(),
                 bases: jj.bases,
                 commits: jj.commits,
-                value: |pack, _, _| {
+                value: |pack, _, _, commits| {
                     serde_json::to_value(work::JjChangeEntry {
+                        commits: commits.iter().map(|sha| commit_key(sha)).collect(),
                         pack,
                         extra: Default::default(),
                     })
@@ -141,10 +143,11 @@ impl Resolved {
             tips: vec![revisions.tip],
             bases: revisions.base.into_iter().collect(),
             commits,
-            value: |pack, tips, bases| {
+            value: |pack, tips, bases, commits| {
                 serde_json::to_value(work::GitCommitEntry {
                     tip: commit_key(&tips[0]),
                     base: bases.first().map(|base| commit_key(base)),
+                    commits: commits.iter().map(|sha| commit_key(sha)).collect(),
                     pack,
                     extra: Default::default(),
                 })
@@ -185,14 +188,16 @@ impl View {
     }
 }
 
-/// The key an entry names a commit by, until the cabinet resolves `#keyRef` (ADR 035 §2.9).
-pub(super) fn commit_key(sha: &str) -> String {
-    format!("{}/{sha}", work::GitCommit::ID)
+/// The `#keyRef` (ADR 035 §2.9) an entry names a commit by.
+pub(super) fn commit_key(sha: &str) -> KeyReference {
+    KeyReference::new(
+        DatumKey::from_text(work::GitCommit::ID, sha).expect("a commit sha is a valid slot"),
+    )
 }
 
 /// The sha a commit key names.
-pub(super) fn sha_of(commit_key: &str) -> &str {
-    commit_key.rsplit('/').next().unwrap_or(commit_key)
+pub(super) fn sha_of(commit: &KeyReference) -> &str {
+    std::str::from_utf8(commit.key.slot_bytes()).expect("a commit key's slot is a hex sha")
 }
 
 pub(super) fn short_sha(sha: &str) -> &str {
@@ -749,7 +754,7 @@ impl<'a> Packaging<'a> {
         plan.set.insert(blob_key, blob);
         plan.set.insert(
             resolved.entry.clone(),
-            (resolved.value)(pack_ref, &resolved.tips, &resolved.bases),
+            (resolved.value)(pack_ref, &resolved.tips, &resolved.bases, &resolved.commits),
         );
         plan.written.push(resolved.entry.clone());
         plan.lines.push(format!(
@@ -806,7 +811,7 @@ impl<'a> Packaging<'a> {
                     ReferenceDocId::Concrete(clone_doc.clone()),
                     ref_key,
                 ),
-                base: base.as_deref().map(commit_key),
+                base: base.as_deref().map(|base| commit_key(base).key.to_string()),
                 extra: Default::default(),
             })?,
         );
@@ -991,7 +996,7 @@ impl<'a> Packaging<'a> {
                     "  {id}  {}{}",
                     commit
                         .base
-                        .as_deref()
+                        .as_ref()
                         .map(|base| format!("{}..", short_sha(sha_of(base))))
                         .unwrap_or_default(),
                     short_sha(sha_of(&commit.tip))
@@ -1007,7 +1012,11 @@ impl<'a> Packaging<'a> {
                     tracked
                         .base
                         .as_deref()
-                        .map(|base| format!("  base {}", short_sha(sha_of(base))))
+                        .map(|base| {
+                            // `GitRefEntry::base` is still a plain commit key string.
+                            let (_, sha) = base.rsplit_once('/').expect("a commit key has a slot");
+                            format!("  base {}", short_sha(sha))
+                        })
                         .unwrap_or_default()
                 ));
             } else if tag == work::SessionEntry::ID {

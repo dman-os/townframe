@@ -273,7 +273,7 @@ impl Packaging<'_> {
             let entry: work::GitCommitEntry = serde_json::from_value(value.clone())?;
             let revisions = Revisions {
                 tip: sha_of(&entry.tip).to_owned(),
-                base: entry.base.as_deref().map(|base| sha_of(base).to_owned()),
+                base: entry.base.as_ref().map(|base| sha_of(base).to_owned()),
             };
             let commits = revisions::commits_of(git, &revisions).wrap_err_with(|| {
                 format!(

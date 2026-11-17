@@ -4,6 +4,7 @@
 
 use big_cabinet_core::ActorUrl;
 use big_cabinet_core::DatumReference;
+use big_cabinet_core::KeyReference;
 use big_cabinet_core::Location;
 use big_cabinet_core::datum::Bytes;
 use big_cabinet_core::datum::Extra;
@@ -573,14 +574,18 @@ pub struct SessionEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GitCommitEntry {
-    /// The commit key `org.example.intxt.work.gitCommit/<sha>` of the newest commit named.
-    /// A plain string until the cabinet resolves `#keyRef` (ADR 035 §2.9), when it becomes one:
-    /// resolved by key and verified against the sha.
-    pub tip: String,
+    /// The commit key `org.example.intxt.work.gitCommit/<sha>` of the newest commit named,
+    /// a `#keyRef` (ADR 035 §2.9) so a key query finds the intxt holding it.
+    pub tip: KeyReference,
     /// The commit key of the commit the recipient is assumed to hold: the merge base of the
     /// range. None when the range reaches the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
+    pub base: Option<KeyReference>,
+    /// Every commit in the range (reachable from `tip`, not from `base`), in the order the
+    /// range lists them. Each is a `#keyRef`, so a key query for any commit of the range finds
+    /// this entry, not only one for its tip. Like the range, resolved when the entry is
+    /// written and never re-evaluated.
+    pub commits: Vec<KeyReference>,
     /// The pack's `org.example.daybook.blob` datum in the intxt's own descriptor document.
     pub pack: DatumReference,
     #[serde(flatten)]
@@ -594,6 +599,10 @@ pub struct GitCommitEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct JjChangeEntry {
+    /// Every commit of the change's evolution, the ones the pack holds, each a `#keyRef` so a
+    /// key query for any of them finds this entry. Resolved when the entry is written and
+    /// never re-evaluated: a later rewrite is a later `add`.
+    pub commits: Vec<KeyReference>,
     /// The pack's `org.example.daybook.blob` datum in the intxt's own descriptor document.
     pub pack: DatumReference,
     #[serde(flatten)]

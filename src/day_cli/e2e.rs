@@ -1212,10 +1212,20 @@ mod library {
             )
             .await
             .unwrap();
-            assert_eq!(entry["tip"], format!("org.example.intxt.work.gitCommit/{tip}"));
+            assert_eq!(entry["tip"]["key"], format!("org.example.intxt.work.gitCommit/{tip}"));
             assert_eq!(
-                entry["base"],
+                entry["base"]["key"],
                 format!("org.example.intxt.work.gitCommit/{merge_base}")
+            );
+            // Every commit of the range is named by key, newest first as `rev-list` lists them,
+            // so a key query for either finds this entry.
+            let parent = rev(&repo, "feat/x~1");
+            assert_eq!(
+                entry["commits"],
+                serde_json::json!([
+                    {"key": format!("org.example.intxt.work.gitCommit/{tip}")},
+                    {"key": format!("org.example.intxt.work.gitCommit/{parent}")},
+                ])
             );
             let pack = entry["pack"].as_str().unwrap();
             let blob_key = pack
