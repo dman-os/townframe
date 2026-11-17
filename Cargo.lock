@@ -9875,6 +9875,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_review"
+version = "0.1.0"
+dependencies = [
+ "big_cabinet_core",
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "futures",
+ "intxt_core",
+ "method_core",
+ "micro_review_manifest",
+ "pierre_diffs_dioxus",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "micro_review_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "insta",
+ "micro_layout_manifest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "micro_sample"
 version = "0.1.0"
 dependencies = [
