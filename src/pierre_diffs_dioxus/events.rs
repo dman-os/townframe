@@ -365,11 +365,6 @@ impl Dispatch {
             // Upstream's passive root listeners: `wheel`, `touchstart`, `pointerdown` (the
             // scrollbar belongs to the root, and some webviews do not raise it) and `keydown`.
             let dispatch = Rc::clone(self);
-            attributes.push(listener("onwheel", move |_: WheelData| {
-                crate::instr_kinetic("wheel"); // INSTR
-                dispatch.took_over()
-            }));
-            let dispatch = Rc::clone(self);
             attributes.push(listener("ontouchstart", move |_: TouchData| {
                 dispatch.took_over();
             }));
