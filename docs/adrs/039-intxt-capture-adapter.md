@@ -4,6 +4,8 @@
 
 **Changed 2026-11-12:** filesystem worktrees have no file documents (ledger D59, D60; ADR 040 §3–§4). Capture writes changed content into the clone's git object store with `git hash-object -w`, keeps it reachable under `refs/intxt/keep/<worktree uuid>`, and records blob ids on ops; it no longer uploads blob bytes or writes file documents.
 
+**Changed 2026-11-17 (operator):** capture installs git's `post-rewrite` hook in the clones it records (§3, §4), so amends and rebases are recorded as exact old → new pairs.
+
 **Depends on:** ADR 040 (the datums it writes), ADR 036 (intxt entries and `body`), ADR 019 (drawers), ADR 037 (acting as a descendant actor, its open question 2). Functional requirements: FDR 007, "Harness adapter". Evidence: `docs/scratch/intxt-ledger.md` F5 (session import), F7 (capture loop prototype), F10 and F12 (document limits, write cost); decisions D29–D35.
 
 ## 1. Context
@@ -39,6 +41,7 @@ A prototype (`/run/media/asdf/p3N/tmp/intxt-proto/session-import`, ledger F7) re
 | What caused a change | The tool call whose window the change fell in, when the harness reports one | `worktreeOp.cause` |
 | HEAD and ref moves, commits | `HEAD`, the clone's refs and the reflog, read at every hook | `worktreeOp` (`commit`, `refMove`, `checkout`, `reset`), `gitCommit`, `gitRef` |
 | jj operations and changes | `jj op log` / `jj evolog` ids and structure, when the clone is a jj repo | `jjOperation`, `jjChange`, the `jj` field of ops |
+| Rewrites (amend, rebase) | git's `post-rewrite` hook, which capture installs in the clone (§4) | `rewrite/<old>`, `rewrittenFrom/<new>` (`how: hook`) in the repository document |
 | Session, prompt turns, tool calls, plan | The harness transcript, imported incrementally; subagents as their own sessions (D30) | `agentSession`, `promptTurn`, `plan` |
 
 **Resolving a change to a worktree.** A path belongs to the deepest worktree root containing it. A shell call's window covers every worktree its session has touched or its working directory is in, so one session can produce ops in several worktrees of several repositories (ADR 040 §1). Paths outside any checkout are not recorded (opt-in later, D32).
@@ -59,6 +62,8 @@ Capture has two halves (ledger D41). **Observing** happens on the agent's machin
 | `UserPromptSubmit`, `Stop`, `SubagentStop`, `PreCompact`, `SessionEnd` | Import the transcript up to now; snapshot; check `HEAD`, refs and jj |
 
 Every invocation first imports the transcript from its stored offset, so any hook brings the session up to date. Hooks of parallel tool calls run concurrently, so each invocation first takes its session's lock (the transcript offset is session state), then a lock per worktree in the window, and holds them from the snapshot until the observations are recorded and the local state is written. A failed record writes no state, so the next hook observes again from the same point. Taking the session lock before any worktree lock keeps the order deadlock-free; the cost is that one session's hooks run one at a time. Snapshotting around every tool call, not only shell calls, is what makes the shell-only baseline and edit tools look the same: an edit tool's write is a change in its window like any other, and its patch, when the transcript has one, is only a cross-check. A harness without hooks is recorded by snapshots at session boundaries and by importing its transcript afterwards; changes then have no cause finer than the session.
+
+**git's `post-rewrite` hook.** The first time capture observes a worktree it installs the hook in the clone: the directory `git rev-parse --git-path hooks` names (it follows `core.hooksPath` and is shared by linked worktrees), a two-line `sh` script carrying a marker comment that runs `day x intxt capture git-rewrite "$1"`. That command reads git's stdin (`<old> <new>` per line), observes the worktree under its lock like a hook and records the pairs in the same batch, into the capture drawer; they never ship. Installing again is a no-op. A `post-rewrite` that is not capture's is never overwritten or chained: the worktree's local state records "hook not installed: foreign post-rewrite", `day x intxt status` says so, and `day x intxt capture install-git-hooks` retries on request. The errors rule below holds: a failure exits non-zero with a message, and git ignores it, since `post-rewrite` cannot block.
 
 **`recordObservations`.** One call per hook invocation per worktree, made while the host still holds that worktree's lock, so calls for one worktree arrive one at a time and the op log stays single-writer without any ordering in the node. The host knows what the node cannot find cheaply, and passes it:
 
