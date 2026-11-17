@@ -13,8 +13,11 @@
 //!
 //! [`CodeViewView`] is Pierre's `CodeView`: many files in one virtualized scroller, each from a
 //! patch or from two versions of the file, with the same annotation slots, and a
-//! [`ScrollRequest`] that reveals a line of a file. Its host and the slab's per-frame signal path
-//! are in `host/code_view.rs` and `render.rs`; it is view-only for now (see `code_view.rs`).
+//! [`ScrollRequest`] that reveals a line or a file, and `on_top_file`, which reports the file at the
+//! top of the viewport. It scrolls in a scroller of its own or, with [`ScrollMode::Embedder`], in
+//! one the embedder owns and forwards to a [`ScrollRoot`] (`scroll_root.rs`). Its host and the
+//! slab's per-frame signal path are in `host/code_view.rs` and `render.rs`; it is view-only for
+//! now (see `code_view.rs`).
 
 mod code_view;
 mod events;

@@ -7,8 +7,9 @@
 //! on first selection and cached. A patch cannot expand its collapsed lines (the view needs the
 //! full file contents for that), so the options bar's expansion does not reach this view.
 //!
-//! `PrCodeView` is the same diff as one `CodeViewView`: every file in one virtualized scroller,
-//! parsed together once for the process, with buttons that reveal a file's first line.
+//! `PrCodeView` is the same diff as one `CodeViewView`, the default view of the PR: every file in
+//! one virtualized viewer that lays out in the page's own scroller, parsed together once for the
+//! process, with an `ArcIndex` of the files and buttons that reveal a file's first line.
 
 use dioxus::prelude::*;
 use pierre_diffs_dioxus::CodeViewFile;
@@ -18,7 +19,9 @@ use pierre_diffs_dioxus::DiffStyle;
 use pierre_diffs_dioxus::FileDiffView;
 use pierre_diffs_dioxus::PtrEq;
 use pierre_diffs_dioxus::Runtime;
+use pierre_diffs_dioxus::ScrollMode;
 use pierre_diffs_dioxus::ScrollRequest;
+use pierre_diffs_dioxus::ScrollRoot;
 use pierre_diffs_dioxus::SelectionSide;
 use pierre_diffs_dioxus::Virtualization;
 use std::cell::RefCell;
@@ -29,7 +32,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use super::Segmented;
+use crate::LabViewport;
 use review_mock::DiffOptions;
+use ui::ArcIndex;
 use web_time::Instant;
 
 /// Where the diff comes from unless `DAYFRAME_LAB_DIFF` says otherwise.
@@ -240,6 +245,28 @@ pub fn PrCodeView(options: DiffOptions, virtualized: Virtualization) -> Element 
     }
 }
 
+/// The ids of the PR's files as `&'static str`, for the index, which takes static labels. The
+/// diff is the process's (`PR_DIFF`), and the ids are derived from it, so they are leaked once
+/// per process instead of once per mount.
+fn file_labels(files: &[CodeViewFile<()>]) -> &'static [&'static str] {
+    static LABELS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    let labels = LABELS.get_or_init(|| {
+        files
+            .iter()
+            .map(|file| &*Box::leak(file.id.clone().into_boxed_str()))
+            .collect()
+    });
+    assert_eq!(
+        labels.len(),
+        files.len(),
+        "the PR's files are the same on every mount"
+    );
+    labels
+}
+
+/// The PR as one `CodeViewView` in the page's own scroller (`main` forwards its scroll events
+/// into the `ScrollRoot` of the context), with an index of its files: picking one reveals it,
+/// and scrolling moves the index to the file at the top of the viewport.
 #[component]
 fn PrCodeFiles(
     diff: &'static PrDiff,
@@ -259,8 +286,26 @@ fn PrCodeFiles(
             now: PtrEq::new(Rc::new(move || start.elapsed().as_secs_f64() * 1000.0)),
         }
     });
+    let scroll_root = use_context::<ScrollRoot>();
+    let viewport = use_context::<LabViewport>().0;
     let mut serial = use_signal(|| 0_u64);
     let mut reveal = use_signal(|| None::<ScrollRequest>);
+    // The index's current file: the viewer's, as it scrolls.
+    let mut current = use_signal(|| 0_usize);
+    let top_file = use_callback({
+        let parsed = Rc::clone(&parsed);
+        move |id: String| {
+            let (Ok(files), _) = &*parsed else {
+                return;
+            };
+            current.set(
+                files
+                    .iter()
+                    .position(|file| file.id == id)
+                    .expect("the viewer reports a file of its list"),
+            );
+        }
+    });
     let (files, parse) = &*parsed;
     let files = match files {
         Ok(files) => files,
@@ -268,6 +313,7 @@ fn PrCodeFiles(
             return rsx! { p { role: "alert", class: "text-sm text-foreground", "{message}" } };
         }
     };
+    let labels = file_labels(files);
     let ids: Vec<String> = [0, files.len() / 2, files.len() - 1]
         .into_iter()
         .map(|index| files[index].id.clone())
@@ -275,7 +321,7 @@ fn PrCodeFiles(
     rsx! {
         div { class: "flex flex-col gap-3",
             p { class: "text-sm text-text-muted",
-                "{files.len()} files in one scroller, parsed in {parse.as_secs_f64() * 1000.0:.0} ms."
+                "{files.len()} files in the page's scroller, parsed in {parse.as_secs_f64() * 1000.0:.0} ms."
             }
             div { class: "flex flex-wrap items-center gap-3",
                 for (label , id) in ["First file", "Middle file", "Last file"].into_iter().zip(ids) {
@@ -290,14 +336,26 @@ fn PrCodeFiles(
                     }
                 }
             }
-            div { class: "min-w-0 overflow-hidden rounded-md border border-border",
+            // No `overflow` here: an ancestor that clips would be the scroller the viewer's
+            // sticky slab sticks to, instead of the page's.
+            div { class: "min-w-0 rounded-md border border-border",
                 CodeViewView::<()> {
                     files: files.clone(),
-                    height: virtualized.height.clone(),
+                    scroll: ScrollMode::Embedder(scroll_root),
                     runtime: runtime.clone(),
                     diff_style: options.diff_style.unwrap_or(DiffStyle::Unified),
                     scroll_to: reveal(),
+                    on_top_file: top_file,
                 }
+            }
+            ArcIndex {
+                viewport: (viewport(), 860.0),
+                items: labels.to_vec(),
+                current: Some(current()),
+                on_select: move |index: usize| {
+                    *serial.write() += 1;
+                    reveal.set(Some(ScrollRequest::to_file(serial(), labels[index])));
+                },
             }
         }
     }

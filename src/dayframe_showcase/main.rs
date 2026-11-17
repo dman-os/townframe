@@ -18,6 +18,7 @@ use dioxus::prelude::*;
 use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
 #[cfg(feature = "desktop")]
 use dioxus_native::winit::window::Window;
+use pierre_diffs_dioxus::use_scroll_root;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -192,6 +193,13 @@ fn App() -> Element {
         _ => LabTab::Components,
     });
     let available_width = use_available_width();
+    // The page's own scroller is `main`, so a viewer that lays out in the page (the PR diff's)
+    // is driven by it: the handle takes `main`'s events and the sections reach it by context.
+    let scroll_root = use_scroll_root();
+    use_context_provider(|| scroll_root.clone());
+    use_context_provider(|| LabViewport(available_width));
+    let diffs_view = use_signal(diffs::DiffsView::initial);
+    use_context_provider(|| diffs_view);
     let photo_preloads = use_memo(|| {
         (0..36)
             .map(|index| {
@@ -214,7 +222,24 @@ fn App() -> Element {
             family: "material".to_string(),
             mode: mode(),
             main {
-                class: "min-h-screen box-border bg-background p-6 font-sans text-foreground lg:p-12",
+                class: "box-border bg-background p-6 font-sans text-foreground lg:p-12",
+                // The page scroller, a fixed-height element rather than the document: standard
+                // Dioxus reports an element's `onscroll`, not the window's. `overflow-anchor` off
+                // so the engine does not move the position the diff's scroll fix corrects. Inline
+                // because the lab's utility CSS is generated and these two are not in it.
+                style: "height:100vh;overflow-y:auto;overflow-anchor:none;",
+                onmounted: {
+                    let scroll_root = scroll_root.clone();
+                    move |event| scroll_root.onmounted(event)
+                },
+                onscroll: {
+                    let scroll_root = scroll_root.clone();
+                    move |event| scroll_root.onscroll(event)
+                },
+                onresize: {
+                    let scroll_root = scroll_root.clone();
+                    move |event| scroll_root.onresize(event)
+                },
                 h1 {
                     class: "mb-2 text-4xl font-bold leading-tight tracking-tight",
                     "Dayframe theme lab"
@@ -238,7 +263,10 @@ fn App() -> Element {
                     kit::KitSpecimens { only: Some(group) }
                 } else {
                 LabTabs { active: tab(), on_select: move |next| tab.set(next) }
-                ThemeLabNav { viewport: (available_width(), 860.0), tab: tab() }
+                // The PR diff lists its own files in the index.
+                if !(tab() == LabTab::Diffs && diffs_view() == diffs::DiffsView::Pr84) {
+                    ThemeLabNav { viewport: (available_width(), 860.0), tab: tab() }
+                }
                 div {
                     id: "lab-panel",
                     role: "tabpanel",
@@ -284,6 +312,10 @@ fn App() -> Element {
         }
     }
 }
+
+/// The window size the lab's overlays (the index) lay out against, from the root.
+#[derive(Clone, Copy)]
+struct LabViewport(Signal<f64>);
 
 /// The lab's major sections, one tab each. Each tab lists the sections the `ArcIndex` jumps
 /// between, by the `FoundationSection` id they mount under.

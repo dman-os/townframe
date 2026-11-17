@@ -7,6 +7,8 @@
 //! * The viewer decides what is mounted from the scroll position, so there are no visibility
 //!   events. Geometry comes from `onresize` and `onscroll`, scroll writes go through
 //!   `MountedData`, frames are paced by the embedder's `sleep` on its `now` clock (`Runtime`).
+//!   The scroller is the viewer's own root or, in `ScrollMode::Embedder`, an ancestor the
+//!   embedder forwards to a `ScrollRoot` (`scroll_root.rs`).
 //! * The viewer's slab moves on every scrolled frame, which must not rebuild the shells it
 //!   holds. Its three per-frame writes set a `Signal` that three wrapper components render their
 //!   `style` from (`render.rs`, `host/code_view.rs`); the `Document`'s structure edits (a shell
