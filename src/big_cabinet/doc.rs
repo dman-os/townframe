@@ -427,6 +427,7 @@ impl DocsService {
                     || crate::drawer::parse_placement(placement).is_some_and(|drawer| {
                         scope.drawers.get(&drawer).is_some_and(|reach| {
                             reach.access >= big_cabinet_core::drawer::DrawerAccess::Write
+                                && !reach.write.admits_nothing()
                         })
                     })),
                 AccessRequest::Read(doc) => Ok(Self::reach(
@@ -454,7 +455,7 @@ impl DocsService {
         }
         crate::drawer::parse_placement(placement)
             .and_then(|drawer| scope.drawers.get(&drawer))
-            .map_or(DatumKinds::All, |reach| reach.kinds.clone())
+            .map_or(DatumKinds::All, |reach| reach.write.clone())
     }
 
     /// The documents of `documents` that `authority` reaches for `needed`, each with the datum
@@ -512,15 +513,24 @@ impl DocsService {
             &DatumKinds,
             BTreeMap<DocId, big_cabinet_core::drawer::DrawerAccess>,
         )> = Vec::new();
-        for (drawer, reach) in drawers.iter().filter(|(_, reach)| reach.access >= needed) {
-            match groups.iter_mut().find(|(kinds, _)| **kinds == reach.kinds) {
+        // The kinds a drawer reaches documents at depend on the need: a write reaches only its
+        // write kinds, a read the kinds it reads. A drawer that admits no kind for the need
+        // reaches nothing.
+        let is_read = needed == big_cabinet_core::drawer::DrawerAccess::Read;
+        for (drawer, reach) in drawers {
+            let kinds = if is_read {
+                reach.readable()
+            } else {
+                &reach.write
+            };
+            if reach.access < needed || kinds.admits_nothing() {
+                continue;
+            }
+            match groups.iter_mut().find(|(group, _)| **group == *kinds) {
                 Some((_, group)) => {
                     group.insert(drawer.clone(), reach.access);
                 }
-                None => groups.push((
-                    &reach.kinds,
-                    BTreeMap::from([(drawer.clone(), reach.access)]),
-                )),
+                None => groups.push((kinds, BTreeMap::from([(drawer.clone(), reach.access)]))),
             }
         }
         let mut reached: BTreeMap<DocId, DatumKinds> = BTreeMap::new();
