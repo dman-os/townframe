@@ -255,4 +255,57 @@ impl crate::components::code_view::CodeViewHost for FakeDom {
     fn platform_info(&self) -> crate::utils::dom::platform::PlatformInfo {
         self.platform_info.borrow().clone()
     }
+
+    fn random(&self) -> f64 {
+        self.random_values
+            .borrow_mut()
+            .pop_front()
+            .expect("the scenario scripts a value for every Math.random() call")
+    }
+
+    // The vocabulary of the jsdom world of `oracle/s12b_render.mjs`, which the
+    // shell oracle records with.
+    fn create_shell_observer(&self) {
+        self.emit(json!(["observer.create"]));
+    }
+
+    fn shell_observe(&self, element: &NodeKey) {
+        self.emit(json!(["observe", self.name(*element)]));
+    }
+
+    fn shell_unobserve(&self, element: &NodeKey) {
+        self.emit(json!(["unobserve", self.name(*element)]));
+    }
+
+    fn shell_disconnect(&self) {
+        self.emit(json!(["observer.disconnect"]));
+    }
+
+    fn add_shell_listeners(&self, root: &NodeKey) {
+        for kind in ["scroll", "wheel", "touchstart", "pointerdown", "keydown"] {
+            self.emit(json!(["listener.add", self.name(*root), kind]));
+        }
+    }
+
+    fn remove_shell_listeners(&self, root: &NodeKey) {
+        for kind in ["scroll", "wheel", "touchstart", "pointerdown", "keydown"] {
+            self.emit(json!(["listener.remove", self.name(*root), kind]));
+        }
+    }
+
+    // A discarded node is not focused any more (a browser moves focus to the
+    // body when the focused element leaves the document).
+    fn active_element(&self) -> Option<NodeKey> {
+        self.active_element
+            .get()
+            .filter(|element| self.doc.exists(*element))
+    }
+
+    fn shadow_active_element(&self, element: &NodeKey) -> Option<NodeKey> {
+        self.shadow_active_elements.borrow().get(element).copied()
+    }
+
+    fn focus_root(&self, root: &NodeKey) {
+        self.emit(json!(["focus", self.name(*root)]));
+    }
 }

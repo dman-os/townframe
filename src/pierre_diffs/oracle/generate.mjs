@@ -26,6 +26,7 @@ import { buildS12bLayout } from "./s12b_layout.mjs";
 import { buildS12bWindow } from "./s12b_window.mjs";
 import { buildS12cCodeView } from "./s12c_code_view.mjs";
 import { buildS12dCodeViewScroll } from "./s12d_code_view_scroll.mjs";
+import { buildS12eCodeViewShell } from "./s12e_code_view_shell.mjs";
 import { stubHighlighter } from "./stub_highlighter.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -2106,6 +2107,7 @@ const outputs = {
   "s12b_window.json": await buildS12bWindow(oracle, makeRandom(0x5eed11), corpusMocks),
   "s12c_code_view.json": await buildS12cCodeView(oracle, makeRandom(0x5eed13), corpusMocks),
   "s12d_code_view_scroll.json": await buildS12dCodeViewScroll(oracle, makeRandom(0x5eed14), corpusMocks),
+  "s12e_code_view_shell.json": await buildS12eCodeViewShell(oracle, makeRandom(0x5eed15), corpusMocks),
   "../../highlights/data/highlights_data.json": highlightsData(),
 };
 
