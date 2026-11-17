@@ -135,3 +135,8 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
   narrowed to what the fork's manifest asks for; anything wider needs fresh consent. Lineage is a signed `lineage`
   datum beside the envelope, pinned by it. Un-forking means substituting the base again.
 - **Sandbox egress:** uses the same grant vocabulary as micro and nodule egress.
+- **Working copy, agreed with nodules:** `sources` is either a pinned set (published) or a reference to a working
+  drawer (live). Grants stay bound to the manifest's permbinds and never to the sources. A working-copy reference is
+  admitted only on nodes where the editing user has write access to that drawer, i.e. their own devices. A cartridge
+  installed elsewhere, or published, carries pinned sources, so nobody runs code that changes under them.
+  Publishing pins the drawer's heads into a new version, and the AOT build runs then.
