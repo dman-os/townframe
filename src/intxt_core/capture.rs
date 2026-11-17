@@ -9,7 +9,6 @@
 //! wrote the object to the clone's store and keeps it reachable under its own ref.
 
 use crate::work::AgentSession;
-use crate::work::GitCommit;
 use crate::work::GitObservation;
 use crate::work::GitRef;
 use crate::work::OpKind;
@@ -111,8 +110,6 @@ pub struct WorktreeBatch {
     /// The sequence number of `ops[0]`.
     pub next_seq: u64,
     pub ops: Vec<Op>,
-    /// sha → commit.
-    pub commits: BTreeMap<String, GitCommit>,
     /// Ref name → ref.
     pub refs: BTreeMap<String, GitRef>,
     /// The reflog lost entries since the last observation; the last op is a synthetic move.

@@ -287,14 +287,14 @@ async fn a_capture_session_is_recorded_as_adr_040_lays_it_out() {
     let commit_op = value(&node, &log, work::WorktreeOp::ID, "2").await;
     assert_eq!(commit_op["kind"], "commit");
     assert_eq!(commit_op["git"]["head"], sha);
-    let commit = value(
-        &node,
-        docs.repo.as_ref().unwrap(),
-        work::GitCommit::ID,
-        &sha,
-    )
-    .await;
-    assert_eq!(commit["message"], "second");
+    // Capture writes no `gitCommit`: the repository document keeps identity only.
+    let repo_doc: DocId = docs.repo.as_ref().unwrap().parse().unwrap();
+    let commit_key = DatumKey::new(work::GitCommit::ID, sha.as_bytes()).unwrap();
+    assert!(
+        read(&node, &repo_doc, std::slice::from_ref(&commit_key))
+            .await
+            .is_empty()
+    );
     let clone_id_slot = String::from_utf8(worktree.clone.key().slot_bytes().to_vec()).unwrap();
     // The repository is keyed by its root commit, which any clone of it derives alike.
     let repo = value(
