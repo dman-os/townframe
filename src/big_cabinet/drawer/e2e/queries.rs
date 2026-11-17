@@ -267,7 +267,11 @@ impl Containment {
         self.capability(
             actor,
             DocScope {
-                drawers: [(self.parent.clone(), access)].into(),
+                drawers: [(
+                    self.parent.clone(),
+                    big_cabinet_core::doc::DrawerReach::all_kinds(access),
+                )]
+                .into(),
                 ..Default::default()
             },
         )
@@ -280,8 +284,14 @@ impl Containment {
             &self.bob,
             DocScope {
                 drawers: [
-                    (self.parent.clone(), Access::Read),
-                    (self.other.clone(), Access::Read),
+                    (
+                        self.parent.clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                    ),
+                    (
+                        self.other.clone(),
+                        big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                    ),
                 ]
                 .into(),
                 ..Default::default()
@@ -717,7 +727,11 @@ async fn non_transitive_poll_includes_self_doc_children_but_not_child_drawer_doc
                 .mint_doc(
                     &bob,
                     DocScope {
-                        drawers: [(parent.clone(), Access::Read)].into(),
+                        drawers: [(
+                            parent.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                        )]
+                        .into(),
                         ..Default::default()
                     },
                 )
@@ -854,7 +868,11 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
 
     node.grant(&alice, &drawer, &bob, Access::Read).await;
     let doc_scope = DocScope {
-        drawers: [(drawer.clone(), Access::Read)].into(),
+        drawers: [(
+            drawer.clone(),
+            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+        )]
+        .into(),
         ..Default::default()
     };
     let note_tag = big_cabinet_core::DatumTag::new(NOTE).unwrap();
@@ -1180,7 +1198,11 @@ async fn move_in_delivers_older_rows_move_out_leaves_and_resume_does_not_redeliv
                 .mint_doc(
                     &alice,
                     DocScope {
-                        drawers: [(drawer.clone(), Access::Read)].into(),
+                        drawers: [(
+                            drawer.clone(),
+                            big_cabinet_core::doc::DrawerReach::all_kinds(Access::Read),
+                        )]
+                        .into(),
                         ..Default::default()
                     },
                 )
@@ -1395,4 +1417,178 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
     assert_eq!(known_after.drawers[0].drawer_id, parent);
 
     node.stop().await;
+}
+
+/// What a reach through `parent` at `access` holds of the note kind alone, or of every kind.
+fn parent_reach(
+    fx: &Containment,
+    access: Access,
+    kinds: big_cabinet_core::doc::DatumKinds,
+) -> DocScope {
+    DocScope {
+        drawers: BTreeMap::from([(
+            fx.parent.clone(),
+            big_cabinet_core::doc::DrawerReach { access, kinds },
+        )]),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_drawer_reach_admits_only_its_datum_kinds_for_reads_and_writes() {
+    use big_cabinet_core::doc::DatumKinds;
+    let fx = Containment::boot().await;
+    let (secret_key, secret_value) = secret("hidden");
+    let note_only = DatumKinds::Only(BTreeSet::from([fx.note_tag.clone()]));
+    let write_as_alice = async |doc: &DocId, capability: CapId, key: DatumKey, value: Value| {
+        fx.node
+            .docs()
+            .call(
+                RequestContext::root(),
+                WriteDatums {
+                    capability,
+                    command: None,
+                    doc_id: doc.clone(),
+                    mode: WriteMode::AtCurrent,
+                    set: BTreeMap::from([(key, value)]),
+                    remove: BTreeSet::new(),
+                },
+            )
+            .await
+    };
+    // Alice puts a second kind into a document of `parent`, through a handle that holds every
+    // kind of it.
+    let everything = fx
+        .capability(&fx.alice, parent_reach(&fx, Access::Write, DatumKinds::All))
+        .await;
+    write_as_alice(&fx.doc_direct, everything, secret_key.clone(), secret_value)
+        .await
+        .unwrap();
+
+    let read = async |capability: CapId, doc: &DocId, datums: Option<BTreeSet<DatumKey>>| {
+        fx.node
+            .docs()
+            .call(
+                RequestContext::root(),
+                ReadDatums {
+                    capability,
+                    doc_id: doc.clone(),
+                    at: At::Current,
+                    datums,
+                    optimistic: false,
+                },
+            )
+            .await
+    };
+
+    // A read through the drawer returns the kinds the reach names and refuses the others,
+    // whether they are named or left to the default selection.
+    let reader = fx
+        .capability(
+            &fx.alice,
+            parent_reach(&fx, Access::Read, note_only.clone()),
+        )
+        .await;
+    let seen = read(reader, &fx.doc_direct, None).await.unwrap();
+    assert!(seen.datums.contains_key(&fx.note_key));
+    assert!(!seen.datums.contains_key(&secret_key));
+    assert_eq!(
+        read(
+            reader,
+            &fx.doc_direct,
+            Some(BTreeSet::from([secret_key.clone()]))
+        )
+        .await
+        .unwrap_err(),
+        ClientError::Method(DocsError::Denied),
+    );
+    // A reach through a broader handle of the same drawer still sees every kind.
+    let everything_read = read(everything, &fx.doc_direct, None).await.unwrap();
+    assert!(everything_read.datums.contains_key(&secret_key));
+    // The kinds do not extend the reach: a document outside `parent` is refused outright.
+    assert_eq!(
+        read(reader, &fx.doc_outside, None).await.unwrap_err(),
+        ClientError::Method(DocsError::Denied),
+    );
+
+    // A write of another kind through the drawer is refused, a write of a named kind is not.
+    let writer = fx
+        .capability(
+            &fx.alice,
+            parent_reach(&fx, Access::Write, note_only.clone()),
+        )
+        .await;
+    assert_eq!(
+        write_as_alice(
+            &fx.doc_direct,
+            writer,
+            secret_key.clone(),
+            secret("changed").1
+        )
+        .await
+        .unwrap_err(),
+        ClientError::Method(DocsError::Denied),
+    );
+    let (note_key, note_value) = note("rewritten");
+    write_as_alice(&fx.doc_direct, writer, note_key, note_value)
+        .await
+        .unwrap();
+
+    // Minting is monotone in kinds: a handle that holds the note kind of `parent` can mint the
+    // note kind, and cannot mint every kind, the secret kind, or more drawer access.
+    let delegate = fx
+        .node
+        .docs()
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(fx.alice.capability).metadata(),
+            MintDocCapability {
+                scope: parent_reach(&fx, Access::Write, note_only.clone()),
+                rights: Rights::USE | Rights::NARROW,
+                subject: None,
+            },
+        )
+        .await
+        .unwrap();
+    let mint_from_delegate = async |access: Access, kinds: DatumKinds| {
+        fx.node
+            .docs()
+            .call_with(
+                RequestContext::root(),
+                Authorization {
+                    authority: delegate.capability_id,
+                    signer: fx.alice.capability,
+                }
+                .metadata(),
+                MintDocCapability {
+                    scope: parent_reach(&fx, access, kinds),
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+    };
+    mint_from_delegate(Access::Read, note_only.clone())
+        .await
+        .unwrap();
+    let denied = ClientError::Method(DocsError::Denied);
+    for (access, kinds) in [
+        (Access::Write, DatumKinds::All),
+        (
+            Access::Write,
+            DatumKinds::Only(BTreeSet::from([secret_key.tag().clone()])),
+        ),
+        (
+            Access::Write,
+            DatumKinds::Only(BTreeSet::from([
+                fx.note_tag.clone(),
+                secret_key.tag().clone(),
+            ])),
+        ),
+        (Access::Admin, note_only.clone()),
+    ] {
+        assert_eq!(mint_from_delegate(access, kinds).await.unwrap_err(), denied);
+    }
+
+    fx.node.stop().await;
 }
