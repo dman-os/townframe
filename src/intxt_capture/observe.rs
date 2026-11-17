@@ -45,10 +45,14 @@ pub struct Observation {
 /// last observation can be later than a still-open window's snapshot) and replay changes the
 /// log already holds, so the caller leaves out the snapshots at or before the last observation.
 /// Without boundaries all changes are in `changes`.
+///
+/// `import` are commits the git observation reports although no reflog move made them
+/// ([`git::observe`]).
 pub fn observe(
     state: &WorktreeState,
     identity: Identity,
     boundaries: &[&Snapshot],
+    import: &[String],
 ) -> Result<(Observation, WorktreeState), Error> {
     let snapshot = Snapshot::take(&identity.root)?;
     let mut earlier = Vec::with_capacity(boundaries.len());
@@ -73,6 +77,7 @@ pub fn observe(
         &identity.git_dir,
         &identity.common_dir,
         &state.git,
+        import,
     )?;
     Ok((
         Observation {
