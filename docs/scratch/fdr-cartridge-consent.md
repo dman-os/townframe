@@ -33,14 +33,17 @@ handles. An advanced view may show the declarations for people who ask.
    installs it as "needs setup".
 2. **A running cartridge asks for more.** A photo editor opens fine, then asks for the Photos drawer
    when the person first imports. The prompt names the cartridge, the drawer and the access, and
-   offers Only this time / Allow / Don't allow. It appears wherever the person is: in the app, in
-   the shell's notifications, or in the CLI.
+   offers Only this time (until the device restarts) / Allow / Don't allow. The shell draws it
+   **over** the app, never the app itself, so the cartridge can neither fake the prompt nor read
+   it. The same request can be answered from the shell's notifications or the CLI instead.
 3. **Nothing in front of the person.** A background job (no screen) needs access. Its request waits
    in the same pending list until the person opens it, in the shell or with `day grants pending`.
    The job reports that it is waiting rather than failing silently.
 4. **One cartridge needs another's permission.** The person uses cartridge X, which calls cartridge
    Y, and Y has not been allowed to read the drawer involved. X shows "Y needs access to Photos for
-   this" with the request to answer, not a generic error.
+   this" with the request to answer, not a generic error. The prompt X offers is still the
+   shell's and is about Y: X can show Y's request but cannot answer it, and answering it changes
+   only Y's access. X gains nothing from it.
 5. **See what a cartridge can do.** A per-cartridge page lists every answer in the same words, with
    the risks below, and each answer can be changed or taken back. Taking access back takes effect
    on the cartridge's next action.
