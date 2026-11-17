@@ -519,6 +519,63 @@ async fn assert_commit_membership(
     assert!(datum.get("raw").is_none(), "{datum}");
 }
 
+/// `new --with` shares the commits document: the new intxt's descriptor names the same
+/// document, so the membership query anchored on either drawer finds the commits once; a name
+/// that is no intxt creates nothing.
+async fn assert_new_with_shares_commits_document(
+    client: &NodeClient,
+    packaging: &crate::cmds::intxt::package::Packaging<'_>,
+    drawer: &big_cabinet_core::drawer::protocol::DrawerId,
+    short: &str,
+    tip: &str,
+) {
+    let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
+        let (_, datum) = read_at(
+            client,
+            drawer,
+            &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        datum["doc"].as_str().unwrap().to_owned()
+    };
+    let mut out = Vec::new();
+    let follow_up = packaging
+        .create(&mut out, "Follow-up", None, Some(short))
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("shares the commits document of"), "{out}");
+    assert_eq!(
+        commits_doc_of(&follow_up).await,
+        commits_doc_of(drawer).await
+    );
+    let lookup = intxt_core::client::Caller::new(
+        client,
+        service_utils_rs::RequestContext::root(),
+        None,
+        "test-with".to_owned(),
+    );
+    assert_eq!(
+        lookup.commit_holders(&follow_up, tip).await.unwrap(),
+        lookup.commit_holders(drawer, tip).await.unwrap(),
+    );
+    // A name that is no intxt creates nothing.
+    let list = async || {
+        let mut out = Vec::new();
+        packaging.list(&mut out).await.unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    let before = list().await;
+    assert!(
+        packaging
+            .create(&mut Vec::new(), "Orphan", None, Some("nope"))
+            .await
+            .is_err()
+    );
+    assert_eq!(list().await, before);
+}
+
 /// Packaging a branch of two commits whose content a recorded session's tool calls produced:
 /// `add --branch` writes one commit entry carrying the pack, tracks the ref on this clone
 /// and brings the session; `show` lists all three; adding again changes nothing; `status`
@@ -756,48 +813,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             "{after}"
         );
 
-        // `new --with` shares the commits document: the new intxt's descriptor names the same
-        // document, so the membership query anchored on either drawer finds the commits once.
-        let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
-            let (_, datum) = read_at(
-                client,
-                drawer,
-                &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
-            )
-            .await
-            .unwrap();
-            datum["doc"].as_str().unwrap().to_owned()
-        };
-        let mut out = Vec::new();
-        let follow_up = packaging
-            .create(&mut out, "Follow-up", None, Some(&short))
-            .await
-            .unwrap();
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("shares the commits document of"), "{out}");
-        assert_eq!(
-            commits_doc_of(&follow_up).await,
-            commits_doc_of(&drawer).await
-        );
-        let lookup = intxt_core::client::Caller::new(
-            client,
-            service_utils_rs::RequestContext::root(),
-            None,
-            "test-with".to_owned(),
-        );
-        assert_eq!(
-            lookup.commit_holders(&follow_up, &tip).await.unwrap(),
-            lookup.commit_holders(&drawer, &tip).await.unwrap(),
-        );
-        // A name that is no intxt creates nothing.
-        let before = list().await;
-        assert!(
-            packaging
-                .create(&mut Vec::new(), "Orphan", None, Some("nope"))
-                .await
-                .is_err()
-        );
-        assert_eq!(list().await, before);
+        assert_new_with_shares_commits_document(client, &packaging, &drawer, &short, &tip).await;
     })
     .await;
 }
