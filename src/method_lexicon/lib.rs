@@ -203,17 +203,26 @@ type Assemble = fn() -> Result<Value, MethodLexiconError>;
 pub fn builtin_methods() -> impl Iterator<Item = (&'static str, Assemble)> {
     builtin_list()
         .iter()
-        .map(|(nsid, assemble, _)| (*nsid, *assemble))
+        .map(|(method, assemble, _)| (method.nsid, *assemble))
 }
 
-type Builtin = (&'static str, Assemble, fn() -> MethodSchemas);
+/// The built-in method `nsid` names, as its service declares it: what a runtime reads the
+/// operation's [`method_core::HandleNeed`] from (ADR 049 §6.2).
+pub fn builtin_method(nsid: &str) -> Option<method_core::XrpcMethod> {
+    builtin_list()
+        .iter()
+        .find(|(method, _, _)| method.nsid == nsid)
+        .map(|(method, _, _)| *method)
+}
+
+type Builtin = (method_core::XrpcMethod, Assemble, fn() -> MethodSchemas);
 
 /// [`builtin_methods`] with each method's schemas too, which the tests read the error enums from.
 fn builtin_list() -> &'static [Builtin] {
     static LIST: std::sync::LazyLock<Vec<Builtin>> = std::sync::LazyLock::new(|| {
         macro_rules! group {
                 ($($method:path),* $(,)?) => { vec![$((
-                    <$method as Method>::XRPC.nsid,
+                    <$method as Method>::XRPC,
                     lexicon::<$method> as Assemble,
                     <$method as MethodSchema>::schemas as fn() -> MethodSchemas,
                 )),*] };

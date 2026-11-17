@@ -842,6 +842,26 @@ where
         )
         .await?
         .capability_id;
+    // The nodule service mints each routine's blobs handle for the blobs operations its permbinds
+    // name (ADR 049 §6.2), so it holds, as their delegator, a handle for every operation-level
+    // blobs flag. Only the operator's identity mints a blobs handle unscoped by another, so the
+    // operator introduces this one to the service's actor.
+    let blobs_delegator = blobs
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(authority.root).metadata(),
+            big_blobs_core::MintBlobsCapability {
+                scope: big_blobs_core::protocol::BlobsScope {
+                    put: true,
+                    ..Default::default()
+                },
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+                subject: Some(nodules_actor.actor.actor_id),
+            },
+        )
+        .await?
+        .capability_id;
     let (nodules, nodules_stop) = big_nodule::boot(NodulesConfig {
         authority: authority.client.clone(),
         docs: docs.client.clone(),
@@ -861,6 +881,8 @@ where
             authority: cartridges_handle,
             signer: nodules_actor.capability,
         },
+        blobs: blobs.client.clone(),
+        blobs_capability: blobs_delegator,
         executor: Some(Arc::clone(&executor)),
         schemas,
         allow_slot_takeover,
