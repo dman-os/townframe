@@ -368,6 +368,42 @@ Nothing on the nodule side needs a parent either:
 - **polkit** (§4): operator-level approval is an explicit act (`auth_admin_keep`), never ambient
   authority, matching ADR 043's client identity.
 
+### The WASI component ecosystem (operator request, 2026-11-17)
+
+Our guest/host boundary is WASI interfaces, so these are the closest precedents. Read 2026-11-17
+from the projects' public docs; versions move, so recheck before citing details.
+- **WASI itself** is capability-based and deny-by-default: each capability is a separate import, a
+  host instantiates a component with only the imports it grants, and the imports are in the
+  binary, so the surface is statically inspectable. WASI does not fix how fine-grained a check is;
+  each interface sets its own. *For us:* admission can check that a component's imports are no
+  wider than its routines' `uses` justify (no `wasi:sockets`, no `wasi:filesystem` without local
+  state), and §9a can read the imports as well as the manifest. The fine-grained part is ours to
+  add, as here.
+- **Spin** declares access per component in its manifest: `allowed_outbound_hosts` (deny when
+  omitted, and an advisory warns against the `"self"` shorthand in favour of explicit hosts) and
+  `key_value_stores` (no store unless listed). Its open question is whether a composed dependency
+  inherits its parent's access; the proposal there is not to, with a deny adapter. *For us:*
+  `#origin` is `allowed_outbound_hosts` with explicit origins only; components composed into one
+  routine share that routine's handle, which ADR 047 §6's stated limit already covers.
+- **wasmCloud** grants a capability when a component imports a WIT interface and the host has a
+  provider linked to it. Links can be removed at any time, which denies the capability at once. An
+  optional policy service, off by default, decides whether a component may start or invoke a
+  provider, and can revoke earlier decisions; host invariants hold regardless. *For us:* link
+  removal is our retract-and-re-mint (6.4); the policy service is the registry's role in §9a, as
+  an external decision point that never loosens what the host enforces.
+- **wasi-virt** composes an adapter onto a component that denies, passes through or virtualizes
+  each WASI interface. *For us:* a way to host an untrusted component (a user-edited TS micro)
+  whose imports are cut down by composition before it runs, rather than trusting host
+  configuration alone.
+- **Wassette** (Microsoft's agent tool runtime on Wasm components) keeps a per-component policy
+  (network hosts, storage paths, environment variables) and grants at runtime through its CLI and
+  tools (`wassette permission grant network <component> <host>`), persisted to the policy and
+  effective at once. *For us:* the closest precedent for §4.2's runtime grants and the
+  `day grants` CLI.
+
+None of them has a person-facing consent model or a flow analysis across a package's parts; those
+are this proposal's additions (§4, §9a).
+
 ## 9a. Risk analysis from the ACLs [nodules]
 
 The per-routine and per-micro `uses` exist so the system can say not only "X wants Y" but "X wants
