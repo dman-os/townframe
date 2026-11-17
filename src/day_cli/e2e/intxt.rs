@@ -1358,7 +1358,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         assert!(resolved.contains("resolved"), "{resolved}");
         assert!(
             resolved.contains(&format!("undo: day x intxt reply {root} --reopen")),
-            "{resolved}"
+            "root {root:?}: {resolved}"
         );
         assert!(inbox(&operator).await.contains("nothing waiting"));
         assert!(inbox(&agent).await.contains("nothing waiting"));
