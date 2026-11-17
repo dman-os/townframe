@@ -958,6 +958,8 @@ impl<'a> Packaging<'a> {
         if let Some(description) = &view.title.description {
             writeln!(out, "{description}")?;
         }
+        // The text that names this intxt on any node, for a PR description or a commit message.
+        writeln!(out, "link: {}", generic::Intxt::reference(&drawer))?;
         let mut commits = Vec::new();
         let mut changes = Vec::new();
         let mut refs = Vec::new();

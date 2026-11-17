@@ -304,6 +304,27 @@ fn a_git_commit_is_keyed_by_its_object_id() {
     );
 }
 
+/// A PR description names the intxts it belongs to, one reference each, among any other text.
+#[test]
+fn a_pr_description_names_its_intxts() {
+    let first: big_cabinet_core::DocId = "z11111111111111111111111111111111".parse().unwrap();
+    let second: big_cabinet_core::DocId = "z11111111111111111111111111111112".parse().unwrap();
+    let reference = generic::Intxt::reference(&first).to_string();
+    assert_eq!(
+        reference,
+        "dtxt:datum:z11111111111111111111111111111111/org.example.intxt/main"
+    );
+    let body = format!(
+        "Splits the reference parser.\n\n\
+         Intxt: {reference}.\n\
+         Also [the follow-up](dtxt:datum:{second}/org.example.intxt/main) and `{reference}` again.\n\
+         Not an intxt: dtxt:datum:{second}/org.example.intxt.title/main\n\
+         Not a reference: dtxt:datum:nope/org.example.intxt/main\n"
+    );
+    assert_eq!(generic::Intxt::named_in(&body), [first, second]);
+    assert!(generic::Intxt::named_in("dtxt:datum:self/org.example.intxt/main").is_empty());
+}
+
 #[test]
 fn future_fields_and_vocabulary_values_are_carried() {
     codec_round_trip::<annotation::Comment>(json!({

@@ -1178,6 +1178,10 @@ mod library {
             let shown = show(&short).await;
             assert!(shown.contains("\"Two files\""), "{shown}");
             assert!(shown.contains("b and c"), "{shown}");
+            assert!(
+                shown.contains(&format!("link: dtxt:datum:{drawer}/org.example.intxt/main\n")),
+                "{shown}"
+            );
             assert!(shown.contains("commits (1):"), "{shown}");
             assert!(shown.contains(&range), "{shown}");
             assert!(shown.contains("tracked refs (1):"), "{shown}");
