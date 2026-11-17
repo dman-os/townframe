@@ -43,6 +43,7 @@ use big_dispatch_core::InvocationContext;
 use big_dispatch_core::Readiness;
 use big_nodule::XrpcBody;
 use big_nodule::egress;
+use big_nodule::egress::WorkloadCaller;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
@@ -403,7 +404,13 @@ impl NoduleExecutor for WasmExecutor {
             self.signers
                 .lock()
                 .expect("signers lock")
-                .insert(workload_id.clone(), spec.actor.capability);
+                .insert(
+                    workload_id.clone(),
+                    WorkloadCaller {
+                        signer: spec.actor.capability,
+                        missing_authority: spec.missing_authority.clone(),
+                    },
+                );
             let started = self
                 .host
                 .workload_start(WorkloadStartRequest {
@@ -680,7 +687,7 @@ impl Router for Sealed {
 /// The signer (the nodule actor's own capability) of each running workload's outgoing calls,
 /// by workload id. The id is chosen by the host and is not guest-controllable, which is what
 /// makes it the caller identity of a nested call.
-type Signers = Arc<Mutex<BTreeMap<String, CapId>>>;
+type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 
 /// The `dispatch.local` egress of the wash host: adapts a workload's outgoing `wasi:http`
 /// request to [`big_nodule::egress::call`], which authorizes it for every executor alike. What
@@ -732,15 +739,15 @@ impl Egress {
                 .and_then(|value| value.parse().ok());
             XrpcBody::Bytes(byte_body(body, mime, length))
         };
-        let signer = self
+        let caller = self
             .signers
             .lock()
             .expect("signers lock")
             .get(workload_id)
-            .copied();
+            .cloned();
         egress::call(
             &self.dispatch,
-            signer,
+            caller.as_ref(),
             &parts.method,
             parts
                 .uri

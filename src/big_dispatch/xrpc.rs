@@ -31,6 +31,7 @@ use method_core::ContextError;
 use method_core::HttpMethod;
 use serde_json::Value;
 use service_client_native_rs::Client;
+use service_utils_rs::xrpc::domain_error_envelope;
 use service_utils_rs::ClientError;
 use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc::XrpcErrorEnvelope;
@@ -171,6 +172,12 @@ fn refusal(error: ClientError<DispatchError>) -> XrpcHandlerError {
             "InvalidToken",
             "the Authorization header is not a dispatch bearer token",
         ),
+        // The typed error travels whole under `operationError`, as any method's own error does,
+        // so a caller decodes it with the method's error type (every one wraps `ContextError`).
+        DispatchError::Context(ContextError::MissingAuthority { .. }) => XrpcHandlerError::Domain {
+            status: StatusCode::FORBIDDEN,
+            body: domain_error_envelope(&error),
+        },
         DispatchError::Context(_) | DispatchError::InvalidInput(_) => {
             XrpcHandlerError::InvalidInput(error.to_string())
         }

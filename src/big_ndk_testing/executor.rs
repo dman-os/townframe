@@ -25,6 +25,7 @@ use big_dispatch_core::InvocationContext;
 use big_ndk::HttpHandle;
 use big_ndk::Nodule;
 use big_nodule::egress;
+use big_nodule::egress::WorkloadCaller;
 use big_nodule::executor::HandlerSpec;
 use big_nodule::executor::Hosted;
 use big_nodule::executor::NoduleExecutor;
@@ -134,7 +135,7 @@ pub(crate) struct Started {
 #[derive(Clone)]
 pub(crate) struct Egress {
     dispatch: Client<DispatchProtocol>,
-    signer: CapId,
+    caller: WorkloadCaller,
 }
 
 impl HttpTransport for Egress {
@@ -147,7 +148,7 @@ impl HttpTransport for Egress {
         } = request;
         let (status, body) = egress::call(
             &self.dispatch,
-            Some(self.signer),
+            Some(&self.caller),
             &method,
             &format!("/{path}"),
             &headers,
@@ -332,7 +333,10 @@ impl NoduleExecutor for NativeExecutor {
             format!("nodule/{}", spec.cartridge_id),
             Egress {
                 dispatch: self.dispatch.clone(),
-                signer: spec.actor.capability,
+                caller: WorkloadCaller {
+                    signer: spec.actor.capability,
+                    missing_authority: spec.missing_authority.clone(),
+                },
             },
         );
         let provider = Arc::new(NativeProvider {

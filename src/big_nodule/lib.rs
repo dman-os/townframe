@@ -23,6 +23,7 @@ pub mod egress;
 pub use service_client_core_rs::xrpc::XrpcBody;
 pub mod executor;
 mod requests;
+pub use requests::MissingAuthorityLookup;
 mod state;
 mod store;
 pub mod wire;
