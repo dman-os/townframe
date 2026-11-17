@@ -801,6 +801,32 @@ copy contracts are to be designed with DocumentsRepo (ADR 020 §2).
 A future datum-wide LWW JSON backend is separate work. Sharing a value model does not establish
 that a snapshot-only engine can reproduce Automerge's concurrent Counter/List semantics.
 
+### Stability is declared per item, and enforced (amended 2026-11-17, operator)
+
+"Publication and evolution policy are later repository features" above is now decided, after WIT's
+feature gates (`@since`, `@unstable`, `@deprecated`, kept as `wit_parser::Stability`) and Rust std's
+`#[stable(since)]`, `#[unstable(feature)]` and `#[deprecated(since, note)]`:
+- **Each item states its stability in the Rust declaration**: a field, a def, a method or a union
+  member carries `since = N`, `deprecated(since = N, note)` or `unstable(feature)`. They lower into
+  the sidecar as `x-since`, `x-deprecated` and `x-unstable`, and a Lexicon file's `revision` is the
+  highest `since` it contains. Nothing else sets a revision.
+- **A stable item is never removed or changed incompatibly.** It is deprecated instead, and stays in
+  the schema. A new item carries `since` equal to the file's new revision. A breaking change to a
+  stable item mints a new NSID.
+- **An `unstable` item is outside the rules** until it is stabilized: it may change or be dropped
+  freely, which is how pre-release shapes evolve without minting NSIDs. Stabilizing is the deliberate
+  act of replacing `unstable` with `since`.
+- **A cartridge never drops a stable datum** from a later version: data under its tag already lives
+  in people's drawers, and other cartridges' `#datum` permbinds may name it. It deprecates the datum
+  and keeps shipping its schema. Only an `unstable` datum may be dropped, so there is no retirement
+  path for a stable NSID.
+- **Sidecars have compatibility rules too**, because they carry what Lexicon cannot. A change to a
+  field's storage form (`x-automerge`) is breaking, since documents already stored in the old form
+  no longer read; narrowing a typed map or tightening a constraint is breaking; loosening a
+  constraint, or adding a field with its `since`, is compatible.
+- **The guardrail enforces this.** `cargo x guardrails wire` (ledger D51) snapshots every published
+  Lexicon and sidecar and refuses a change these rules call breaking.
+
 ## 12. Out of scope, and what remains open
 
 Not adopted here: record keys and TIDs, the ATProto repository/collection model, DNS
