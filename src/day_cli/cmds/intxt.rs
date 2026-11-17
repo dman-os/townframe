@@ -339,18 +339,29 @@ pub enum GithubCommands {
         /// `<owner>/<repo>#<number>`, or the pull request's URL
         target: String,
     },
+    /// List the pull requests imported onto this node
+    Ls,
+    /// Show an imported pull request and the intxts named by its description
+    Show {
+        /// `<owner>/<repo>#<number>`, or the pull request's URL
+        target: String,
+    },
 }
 
 pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
     match command {
         IntxtCommands::Record { thinking, agent } => record::run(agent, thinking).await,
-        IntxtCommands::Github {
-            command: GithubCommands::Pull { target },
-        } => {
-            with_packaging(async |packaging| {
-                packaging
-                    .github_pull(&mut std::io::stdout(), &target, github::fetch_with_gh)
-                    .await
+        IntxtCommands::Github { command } => {
+            with_packaging(async |packaging| match command {
+                GithubCommands::Pull { target } => {
+                    packaging
+                        .github_pull(&mut std::io::stdout(), &target, github::fetch_with_gh)
+                        .await
+                }
+                GithubCommands::Ls => packaging.github_ls(&mut std::io::stdout()).await,
+                GithubCommands::Show { target } => {
+                    packaging.github_show(&mut std::io::stdout(), &target).await
+                }
             })
             .await
         }
