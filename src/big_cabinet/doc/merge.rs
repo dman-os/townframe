@@ -177,6 +177,11 @@ fn check_delta(
                 // A merge brings history synced from elsewhere, so a key that does not parse
                 // is not skipped: it is held to every kind, like a change naming no datum.
                 match key.parse::<DatumKey>() {
+                    // A system datum is the repository's own record, written only by it and
+                    // signed by its system actor; the signature gate above already holds it.
+                    // Merging a branch brings that branch's `branch/<id>` datum by design
+                    // (ADR 034), so it is not the merging actor's write.
+                    Ok(key) if super::is_system(&key) => {}
                     Ok(key) => {
                         keys.insert(key);
                     }
