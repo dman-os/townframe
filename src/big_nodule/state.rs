@@ -127,6 +127,9 @@ pub(crate) struct Stores {
     /// service presents to it.
     pub(crate) cartridges: Client<CartridgesProtocol>,
     pub(crate) cartridges_authorization: Authorization,
+    /// The blobs service and the delegator handle routine blobs handles are minted from.
+    pub(crate) blobs: Client<big_blobs_core::BlobsProtocol>,
+    pub(crate) blobs_capability: CapId,
     pub(crate) shared_config_drawer: DrawerId,
     pub(crate) parent: OpenedActor,
     pub(crate) parent_path: String,
@@ -457,6 +460,10 @@ async fn load_applied_operations(
         .collect())
 }
 
+/// The blobs service's mint operation: the one capability domain beyond dispatch, docs and
+/// drawers whose handle a routine's operations can need (ADR 049 §6.2).
+const BLOBS_MINT: &str = "org.example.daybook.blobs.mintCapability";
+
 /// The scope of each service handle a routine should hold; a service the routine has no access
 /// to is `None`, and no handle is minted for it.
 #[derive(Clone, Default, PartialEq)]
@@ -464,6 +471,7 @@ struct RoutineScopes {
     dispatch: Option<DispatchScope>,
     config: Option<DocScope>,
     drawers: Option<DrawerScope>,
+    blobs: Option<big_blobs_core::protocol::BlobsScope>,
 }
 
 /// What a routine holds: the handles, and the scopes they were minted for, which is what a
@@ -480,6 +488,7 @@ impl AppliedRoutine {
             self.handles.dispatch,
             self.handles.config,
             self.handles.drawers,
+            self.handles.blobs,
         ]
         .into_iter()
         .flatten()
@@ -505,6 +514,9 @@ fn desired_routine_scopes(
             let mut write = BTreeSet::new();
             let mut drawers = BTreeMap::new();
             let mut create_drawer = false;
+            // The operation-level flags of the blobs handle the routine's operations need, stated
+            // beside each operation's definition (ADR 049 §6.2).
+            let mut blobs_flags = serde_json::Map::new();
             for (binding, usage) in &routine.uses {
                 let permbind = installed
                     .resolved
@@ -521,6 +533,19 @@ fn desired_routine_scopes(
                             .contains(method.nsid.as_str())
                         {
                             operations.insert(method.nsid.to_string());
+                            if let Some(need) = method_lexicon::builtin_method(method.nsid.as_str())
+                                .and_then(|built_in| built_in.handle)
+                            {
+                                assert_eq!(
+                                    need.mint, BLOBS_MINT,
+                                    "a built-in operation's handle need names a domain the nodule runtime mints"
+                                );
+                                blobs_flags.extend(
+                                    need.flags
+                                        .iter()
+                                        .map(|flag| ((*flag).to_owned(), serde_json::Value::Bool(true))),
+                                );
+                            }
                         }
                     }
                     Permbind::Datum(datum) => {
@@ -594,6 +619,10 @@ fn desired_routine_scopes(
                     ..Default::default()
                 }
             });
+            let blobs = (!blobs_flags.is_empty()).then(|| {
+                serde_json::from_value(serde_json::Value::Object(blobs_flags))
+                    .expect("a handle need's flags are fields of the blobs scope")
+            });
             let drawers = (!drawers.is_empty() || create_drawer).then_some(DrawerScope {
                 drawers,
                 create: create_drawer,
@@ -609,6 +638,7 @@ fn desired_routine_scopes(
                     dispatch,
                     config,
                     drawers,
+                    blobs,
                 },
             )
         })
@@ -699,6 +729,37 @@ async fn mint_missing_handles(
             };
             applied.scopes.drawers = scopes.drawers.clone();
         }
+        if applied.handles.blobs.is_none()
+            && let Some(scope) = &scopes.blobs
+        {
+            // Minted from the service's delegator handle, narrowed to this routine's flags and
+            // bound to its nodule actor (ADR 049 §6.1).
+            applied.handles.blobs = match state
+                .stores
+                .blobs
+                .call_with(
+                    context.child(),
+                    Authorization {
+                        authority: state.stores.blobs_capability,
+                        signer: state.stores.parent.capability,
+                    }
+                    .metadata(),
+                    big_blobs_core::MintBlobsCapability {
+                        scope: scope.clone(),
+                        rights: Rights::USE,
+                        subject: Some(actor.actor.actor_id),
+                    },
+                )
+                .await
+            {
+                Ok(capability) => Some(capability.capability_id),
+                Err(mint_error) => {
+                    error = Some(mint_error.to_string());
+                    None
+                }
+            };
+            applied.scopes.blobs = scopes.blobs.clone();
+        }
     }
     error
 }
@@ -761,8 +822,12 @@ async fn apply_nodule_capabilities(
                 applied.handles.drawers,
                 wanted.is_some_and(|wanted| wanted.drawers == applied.scopes.drawers),
             ),
+            (
+                applied.handles.blobs,
+                wanted.is_some_and(|wanted| wanted.blobs == applied.scopes.blobs),
+            ),
         ];
-        let mut live = [false; 3];
+        let mut live = [false; 4];
         for (index, (handle, matches)) in held.into_iter().enumerate() {
             let Some(capability) = handle else { continue };
             if matches && state.stores.is_cap_live(context, capability).await? {
@@ -782,6 +847,10 @@ async fn apply_nodule_capabilities(
         if live[2] {
             kept.handles.drawers = applied.handles.drawers;
             kept.scopes.drawers = applied.scopes.drawers;
+        }
+        if live[3] {
+            kept.handles.blobs = applied.handles.blobs;
+            kept.scopes.blobs = applied.scopes.blobs;
         }
         routines.insert(routine_key, kept);
     }

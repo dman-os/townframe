@@ -156,6 +156,12 @@ pub struct NodulesConfig {
     /// nodule service's own actor, whose capability is the `signer`.
     pub cartridges: Client<CartridgesProtocol>,
     pub cartridges_authorization: Authorization,
+    /// The blobs service, and the delegator handle the operator minted the nodule service's actor
+    /// for every operation-level blobs flag (`put`), with `DELEGATE`: each routine whose `#method`
+    /// permbind names an operation that needs a blobs handle is minted its narrowed handle from it
+    /// (ADR 049 §6.1–6.2).
+    pub blobs: Client<big_blobs_core::BlobsProtocol>,
+    pub blobs_capability: CapId,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
     pub schemas: Arc<SchemaRepo>,
     /// Whether the dev takeover hook is on (`dev.allow_slot_takeover` in `node.json`, ADR 045 §5).
@@ -685,6 +691,8 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         docs_capability: doc_cap.capability_id,
         cartridges: config.cartridges,
         cartridges_authorization: config.cartridges_authorization,
+        blobs: config.blobs,
+        blobs_capability: config.blobs_capability,
         shared_config_drawer: config.shared_config_drawer,
         parent: config.actor,
         parent_path: config.actor_path,
