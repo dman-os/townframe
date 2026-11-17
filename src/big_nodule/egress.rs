@@ -76,7 +76,7 @@ pub async fn call_http<B>(
 ) -> (StatusCode, XrpcBody)
 where
     B: http_body::Body<Data = Bytes> + Send + 'static,
-    B::Error: std::fmt::Debug,
+    B::Error: std::error::Error + Send + Sync + 'static,
 {
     let (parts, body) = request.into_parts();
     let content_type = parts
