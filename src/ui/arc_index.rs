@@ -508,6 +508,9 @@ struct ArcState {
     announced: Option<usize>,
     /// The breakpoint under a hovering pointer, when not pressed.
     hovered: Option<usize>,
+    /// Where the owner said the list currently is while a gesture held the strip (a scroll
+    /// the gesture itself set off reports back mid-drag): the strip goes there once it rests.
+    follow: Option<usize>,
 }
 
 impl Default for ArcState {
@@ -520,6 +523,7 @@ impl Default for ArcState {
             generation: 0,
             announced: None,
             hovered: None,
+            follow: None,
         }
     }
 }
@@ -553,6 +557,10 @@ enum ArcEvent {
     },
     /// A keyboard step of `by` breakpoints.
     Nudge(f64),
+    /// The owner's list is at this breakpoint (it scrolled there): a strip at rest moves its
+    /// focus without announcing it, since the owner is not waiting for a selection; a strip
+    /// under a thumb keeps it for when the thumb is gone.
+    Follow(usize),
     /// One frame of the settle animation begun by the release of `generation`.
     Tick {
         generation: u64,
@@ -626,12 +634,23 @@ impl ArcState {
             ArcEvent::Nudge(by) => {
                 state.commit((state.focus + by).round(), count, &mut effects);
             }
+            ArcEvent::Follow(index) => {
+                let index = index.min(count - 1);
+                if state.thumb_x.is_some() {
+                    state.follow = Some(index);
+                } else {
+                    state.focus = index as f64;
+                }
+            }
             ArcEvent::Tick { generation, step } => {
                 if state.generation == generation {
                     if step >= SETTLE_STEPS {
                         state.settle = 0.0;
                         state.pull = 0.0;
                         state.thumb_x = None;
+                        if let Some(index) = state.follow.take() {
+                            state.focus = index.min(count - 1) as f64;
+                        }
                     } else {
                         // Ease out: leaves the finger quickly, arrives slowly.
                         let remaining = 1.0 - step as f64 / SETTLE_STEPS as f64;
@@ -667,6 +686,11 @@ pub fn ArcIndex(
     viewport: (f64, f64),
     items: Vec<&'static str>,
     on_select: EventHandler<usize>,
+    /// The item the owner's content is at, when it can say (a list that scrolls reports the item
+    /// at its top). The strip's focus follows it while at rest and does not call `on_select`;
+    /// while a thumb holds the strip, the last value waits for the release.
+    #[props(default)]
+    current: Option<usize>,
 ) -> Element {
     assert!(!items.is_empty(), "ArcIndex requires at least one item");
     let count = items.len();
@@ -706,6 +730,12 @@ pub fn ArcIndex(
             }
         }
     });
+
+    use_effect(use_reactive!(|(current,)| {
+        if let Some(index) = current {
+            send.call(ArcEvent::Follow(index));
+        }
+    }));
 
     let view = state();
     let pressed = view.thumb_x.is_some();

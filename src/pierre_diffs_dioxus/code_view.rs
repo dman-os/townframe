@@ -44,6 +44,7 @@ use pierre_diffs::types::patch::ParseDiffOptions;
 use pierre_diffs::types::patch::ParsePatchOptions;
 use pierre_diffs::types::view::CodeViewDiffItem;
 use pierre_diffs::types::view::CodeViewItem;
+use pierre_diffs::types::view::CodeViewItemScrollTarget;
 use pierre_diffs::types::view::CodeViewLineScrollTarget;
 use pierre_diffs::types::view::CodeViewScrollTarget;
 use pierre_diffs::types::view::DiffLineAnnotation;
@@ -63,6 +64,7 @@ use crate::host::Environment;
 use crate::host::SlabStyle;
 use crate::host::SleepFuture;
 use crate::render::Renderer;
+use crate::scroll_root::ScrollRoot;
 use crate::slot::SlotContent;
 use crate::slot::SlotTable;
 
@@ -177,6 +179,19 @@ pub struct ScrollRequest {
 }
 
 impl ScrollRequest {
+    /// Brings the file named `id` into view (the viewer's default alignment, as for a line).
+    pub fn to_file(serial: u64, id: impl Into<String>) -> Self {
+        Self {
+            target: CodeViewScrollTarget::Item(CodeViewItemScrollTarget {
+                id: id.into(),
+                align: None,
+                offset: None,
+                behavior: None,
+            }),
+            serial,
+        }
+    }
+
     /// Brings `line_number` of `side` of the file named `id` into view (the viewer's default
     /// alignment: the nearest edge, and the smooth scroll for a short way).
     pub fn to_line(
@@ -199,6 +214,19 @@ impl ScrollRequest {
     }
 }
 
+/// Which element scrolls the viewer.
+#[derive(Clone, PartialEq)]
+pub enum ScrollMode {
+    /// The viewer renders a scroller of its own, of this CSS `height` (`"40rem"`, `"100%"` of a
+    /// bounded parent): the one thing a virtualizer cannot derive, as a scroller that grows with
+    /// its content has nothing to virtualize.
+    Own { height: String },
+    /// The embedder's scroller, an ancestor of the viewer (see `ScrollRoot`): the viewer lays
+    /// out in the page's own scroll container, and its sticky slab sticks to that one. Read when
+    /// the view mounts, like `highlighter`: switching mode, or handle, needs a new view.
+    Embedder(ScrollRoot),
+}
+
 /// What the viewer cannot get from standard Dioxus: a timer and a clock. Read when the view
 /// mounts.
 #[derive(Clone, PartialEq)]
@@ -215,10 +243,8 @@ pub struct Runtime {
 pub struct CodeViewViewProps<A: Clone + PartialEq + 'static> {
     /// Every file, in order.
     pub files: Vec<CodeViewFile<A>>,
-    /// The scroller's CSS `height` (`"40rem"`, `"100%"` of a bounded parent): the one thing a
-    /// virtualizer cannot derive, as a scroller that grows with its content has nothing to
-    /// virtualize.
-    pub height: String,
+    /// The scroller: the viewer's own, or the embedder's.
+    pub scroll: ScrollMode,
     pub runtime: Runtime,
     /// Device pixel ratio, reduced motion and the platform strings; the defaults are a plain
     /// desktop.
@@ -247,6 +273,14 @@ pub struct CodeViewViewProps<A: Clone + PartialEq + 'static> {
     /// Scrolls to a line, range, file or position when the request changes.
     #[props(default)]
     pub scroll_to: Option<ScrollRequest>,
+    /// Told the `CodeViewFile::id` of the file at the top of the viewport each time it differs
+    /// from the one last reported (nothing is reported before the first scroll). The top file is
+    /// the last one that starts at or above the viewport's top plus the gap between files, so a
+    /// file whose reveal lands a few pixels short of its first row is still the one reported.
+    /// It follows the viewer's scroll notifications: a file that moves under a still viewport
+    /// (a measured height, a changed list) is reported at the next scroll.
+    #[props(default)]
+    pub on_top_file: Option<Callback<String>>,
 }
 
 /// The props that become `CodeViewOptions`; a change needs `set_options`.
@@ -310,7 +344,8 @@ struct AppliedFile<A> {
 struct Applied<A> {
     files: Vec<AppliedFile<A>>,
     options: ViewOptions,
-    height: String,
+    /// The CSS height of the viewer's own scroller; `None` in the embedder's.
+    height: Option<String>,
     environment: Environment,
     scroll_to: Option<ScrollRequest>,
 }
@@ -323,11 +358,15 @@ struct State<A: Clone + PartialEq + 'static> {
     /// The caller's current callback, read when an annotation's content is made.
     render_annotation: AnnotationCallback<A>,
     slab: Signal<SlabStyle>,
+    /// The caller's current `on_top_file`, read when the top file changes.
+    on_top_file: Rc<RefCell<Option<Callback<String>>>>,
+    /// Ends the viewer's subscription to its own scroll notifications.
+    unsubscribe: RefCell<Option<Box<dyn FnOnce()>>>,
     /// True while `sync` runs: the render that follows reads the document, so edits made now
     /// need no signal (and writing one during the render that reads it only schedules a second,
     /// identical render).
     syncing: Rc<Cell<bool>>,
-    applied: RefCell<Applied<A>>,
+    applied: Rc<RefCell<Applied<A>>>,
 }
 
 impl<A: Clone + PartialEq + 'static> State<A> {
@@ -340,7 +379,7 @@ impl<A: Clone + PartialEq + 'static> State<A> {
         };
         let view_options = ViewOptions::of(props);
         let host = DioxusHost::new_code_view(
-            &props.height,
+            &props.scroll,
             Rc::clone(&props.runtime.sleep.0),
             Rc::clone(&props.runtime.now.0),
             props.environment.clone(),
@@ -402,6 +441,35 @@ impl<A: Clone + PartialEq + 'static> State<A> {
         });
         view.setup(host.root());
         syncing.set(false);
+        let applied = Rc::new(RefCell::new(Applied {
+            files: Vec::new(),
+            options: view_options,
+            height: match &props.scroll {
+                ScrollMode::Own { height } => Some(height.clone()),
+                ScrollMode::Embedder(_) => None,
+            },
+            environment: props.environment.clone(),
+            scroll_to: None,
+        }));
+        let on_top_file: Rc<RefCell<Option<Callback<String>>>> = Rc::default();
+        let unsubscribe = view.subscribe_to_scroll(top_file_listener(
+            Rc::clone(&applied),
+            Rc::clone(&on_top_file),
+        ));
+        if let ScrollMode::Embedder(page) = &props.scroll {
+            // A `Weak`: the handle is the embedder's and outlives this viewer's dispatch.
+            let weak = Rc::downgrade(&dispatch);
+            let linked = page.clone();
+            page.link(Some(Rc::new(move |notice| {
+                let dispatch = weak
+                    .upgrade()
+                    .expect("the viewer unlinks the handle before its dispatch goes");
+                dispatch.page_notice(&linked, notice);
+            })));
+            // What the handle already knows goes into the caches; the reaction to it (a pass)
+            // waits for the events that follow the mount, as an own root's would.
+            dispatch.seed_page(page);
+        }
         Self {
             host,
             view,
@@ -409,14 +477,10 @@ impl<A: Clone + PartialEq + 'static> State<A> {
             slots,
             render_annotation,
             slab,
+            on_top_file,
+            unsubscribe: RefCell::new(Some(unsubscribe)),
             syncing,
-            applied: RefCell::new(Applied {
-                files: Vec::new(),
-                options: view_options,
-                height: props.height.clone(),
-                environment: props.environment.clone(),
-                scroll_to: None,
-            }),
+            applied,
         }
     }
 
@@ -430,17 +494,31 @@ impl<A: Clone + PartialEq + 'static> State<A> {
     /// when the same render reads it.
     fn sync(&self, props: &CodeViewViewProps<A>) {
         *self.render_annotation.borrow_mut() = props.render_annotation;
+        *self.on_top_file.borrow_mut() = props.on_top_file;
         self.syncing.set(true);
         let mut applied = self.applied.borrow_mut();
         if applied.environment != props.environment {
             self.shell().set_environment(props.environment.clone());
             applied.environment = props.environment.clone();
         }
-        if applied.height != props.height {
-            self.host
-                .document()
-                .set_style_property(self.host.root(), "height", &props.height);
-            applied.height = props.height.clone();
+        match (&props.scroll, &mut applied.height) {
+            (ScrollMode::Own { height }, Some(own)) => {
+                if own != height {
+                    self.host
+                        .document()
+                        .set_style_property(self.host.root(), "height", height);
+                    own.clone_from(height);
+                }
+            }
+            (ScrollMode::Embedder(page), None) => {
+                assert!(
+                    self.shell().is_page(page),
+                    "a CodeViewView reads its ScrollRoot when it mounts: key the view to change it"
+                );
+            }
+            _ => panic!(
+                "a CodeViewView reads its ScrollMode when it mounts: key the view to change it"
+            ),
         }
         let options = ViewOptions::of(props);
         if applied.options != options {
@@ -550,9 +628,51 @@ impl<A: Clone + PartialEq + 'static> State<A> {
     }
 
     fn clean_up(&self) {
+        if let Some(unsubscribe) = self.unsubscribe.borrow_mut().take() {
+            unsubscribe();
+        }
+        if let Some(page) = self.shell().page() {
+            page.link(None);
+        }
         self.host.document().set_observer(None);
         self.view.clean_up();
     }
+}
+
+/// The viewer's scroll listener that reports the file at the top of the viewport to the caller
+/// when it changes. `scroll_top` is the viewer's own (clamped, so a viewer whose top is below the
+/// fold reports its first file).
+fn top_file_listener<A: Clone + PartialEq + 'static>(
+    applied: Rc<RefCell<Applied<A>>>,
+    on_top_file: Rc<RefCell<Option<Callback<String>>>>,
+) -> pierre_diffs::components::code_view::ScrollListener<DioxusHost, SlotContent, A> {
+    let reported: RefCell<Option<String>> = RefCell::new(None);
+    Rc::new(move |scroll_top, view| {
+        // `Callback` is `Copy`, so the borrow ends before the caller runs.
+        let Some(callback) = *on_top_file.borrow() else {
+            return;
+        };
+        let probe = scroll_top + view.get_layout().gap + 1.0;
+        let top = {
+            let applied = applied.borrow();
+            // Item tops ascend with the list: the top file is the last one that starts at or
+            // above the probe, the first when the viewport is above them all.
+            let after = applied.files.partition_point(|file| {
+                view.get_top_for_item(&file.id)
+                    .expect("a file of the list is an item of the viewer")
+                    <= probe
+            });
+            match applied.files.get(after.saturating_sub(1)) {
+                Some(file) => file.id.clone(),
+                None => return,
+            }
+        };
+        if reported.borrow().as_deref() == Some(top.as_str()) {
+            return;
+        }
+        *reported.borrow_mut() = Some(top.clone());
+        callback.call(top);
+    })
 }
 
 /// A signal is `Copy`; the write needs a binding of its own per call.
