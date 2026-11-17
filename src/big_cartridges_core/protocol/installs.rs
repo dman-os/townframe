@@ -53,21 +53,22 @@ pub struct UninstallCartridge {
     pub cartridge_id: CartridgeId,
 }
 
-/// Sets, or with `value` absent revokes, one grant of one component: the datum `grant` names in the
-/// cartridge's config document. A drawer grant's value states its access and a method or authority
-/// grant's states whether it is privileged (see [`GrantKey::accepts`]).
+/// Sets, or with `value` absent revokes, one grant of the cartridge: the datum `grant` names in
+/// its config document. Grants are per cartridge, in the person's nouns, and feed the nodule and
+/// the micro alike (ADR 049 §4.1). A drawer or cartridge grant's value states its access; an
+/// origin, method or authority grant states none (see [`GrantKey::accepts`]). Only this method
+/// writes grant datums, never the cartridge.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetCartridgeGrant {
     pub cartridge_id: CartridgeId,
-    pub component: Component,
     pub grant: GrantKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<GrantBody>,
 }
 
-/// Deletes the cartridge's settings datums and every grant datum, nodule and micro, from its
+/// Deletes the cartridge's settings datums and every grant datum from its
 /// config document. The install, if any, stays: the cartridge keeps running with no settings and
 /// no grants.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
