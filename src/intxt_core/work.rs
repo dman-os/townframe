@@ -621,6 +621,18 @@ pub struct WorktreeEntry {
     pub extra: Extra,
 }
 
+/// An intxt includes a GitHub pull request (`githubPullEntry/<owner>/<repo>/<number>`): the
+/// reference is the `githubPull` datum in the pull request's own document, which the intxt's
+/// drawer shares so everyone the intxt is shared with reads it.
+#[macros::datum(authority = "org.example.intxt.work")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubPullEntry {
+    pub pull: DatumReference,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
 /// An intxt includes an agent session (`sessionEntry/<session id>`).
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
