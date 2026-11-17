@@ -811,7 +811,7 @@ impl<'a> Packaging<'a> {
                     ReferenceDocId::Concrete(clone_doc.clone()),
                     ref_key,
                 ),
-                base: base.as_deref().map(|base| commit_key(base).key.to_string()),
+                base: base.as_deref().map(commit_key),
                 extra: Default::default(),
             })?,
         );
@@ -1011,12 +1011,8 @@ impl<'a> Packaging<'a> {
                     &clone[..clone.len().min(8)],
                     tracked
                         .base
-                        .as_deref()
-                        .map(|base| {
-                            // `GitRefEntry::base` is still a plain commit key string.
-                            let (_, sha) = base.rsplit_once('/').expect("a commit key has a slot");
-                            format!("  base {}", short_sha(sha))
-                        })
+                        .as_ref()
+                        .map(|base| format!("  base {}", short_sha(sha_of(base))))
                         .unwrap_or_default()
                 ));
             } else if tag == work::SessionEntry::ID {

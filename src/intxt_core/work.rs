@@ -619,10 +619,9 @@ pub struct GitRefEntry {
     /// The clone's `gitRef` datum.
     #[serde(rename = "ref")]
     pub reference: DatumReference,
-    /// The commit key of what a review of the ref compares against; as `GitCommitEntry::base`,
-    /// a plain string until `#keyRef`.
+    /// The commit a review of the ref compares against, a `#keyRef` like `GitCommitEntry::base`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
+    pub base: Option<KeyReference>,
     #[serde(flatten)]
     pub extra: Extra,
 }

@@ -279,7 +279,7 @@ fn the_adr_examples_are_valid_datums() {
     }));
     codec_round_trip::<work::GitRefEntry>(json!({
         "ref": "dtxt:datum:z11111111111111111111111111111111/org.example.intxt.work.gitRef/0193c/refs/heads/feat/refs",
-        "base": "org.example.intxt.work.gitCommit/9a0e11"
+        "base": {"key": "org.example.intxt.work.gitCommit/9a0e11"}
     }));
     codec_round_trip::<annotation::AnnotationsEntry>(json!({"empty": true}));
 }
