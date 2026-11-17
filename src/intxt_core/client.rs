@@ -30,6 +30,7 @@ use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::DatumEvent;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::ListDatums;
@@ -170,6 +171,25 @@ impl<H: HttpTransport> Caller<H> {
             })
             .await?
             .capability_id)
+    }
+
+    /// A capability to write into `doc` the datums at `keys`, limited to those keys' kinds
+    /// (ADR 047 §6): a write of any other kind into `doc` is refused at the docs service, so the
+    /// handle cannot be spent on more than the write it was minted for.
+    pub async fn write_capability<'k>(
+        &self,
+        doc: &DocId,
+        keys: impl IntoIterator<Item = &'k DatumKey>,
+    ) -> Result<CapId, IntxtError> {
+        self.doc_capability(DocScope {
+            write: [(
+                doc.clone(),
+                DatumKinds::Only(keys.into_iter().map(|key| key.tag().clone()).collect()),
+            )]
+            .into(),
+            ..DocScope::default()
+        })
+        .await
     }
 
     /// The heads of `doc` and what each of `keys` reads as at them; every datum when `keys` is
@@ -340,10 +360,7 @@ impl<H: HttpTransport> Caller<H> {
         remove: BTreeSet<DatumKey>,
     ) -> Result<(), IntxtError> {
         let capability = self
-            .doc_capability(DocScope {
-                write: [doc.clone()].into(),
-                ..DocScope::default()
-            })
+            .write_capability(doc, set.keys().chain(&remove))
             .await?;
         self.call(WriteDatums {
             capability,
@@ -385,12 +402,7 @@ impl<H: HttpTransport> Caller<H> {
             });
         }
         set.insert(body_key, to_value(&body));
-        let descriptor = self
-            .doc_capability(DocScope {
-                write: [intxt.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
+        let descriptor = self.write_capability(intxt, set.keys()).await?;
         self.call(WriteDatums {
             capability: descriptor,
             command: Some(self.command("write-entry", &(&set, &body_heads))?),
@@ -421,10 +433,7 @@ impl<H: HttpTransport> Caller<H> {
         let set: BTreeMap<DatumKey, Value> = [(body_key, to_value(&body))].into();
         let remove: BTreeSet<DatumKey> = entries.union(also).cloned().collect();
         let descriptor = self
-            .doc_capability(DocScope {
-                write: [intxt.clone()].into(),
-                ..DocScope::default()
-            })
+            .write_capability(intxt, set.keys().chain(&remove))
             .await?;
         self.call(WriteDatums {
             capability: descriptor,

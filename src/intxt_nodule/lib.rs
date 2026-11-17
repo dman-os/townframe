@@ -19,7 +19,6 @@
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
-use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
@@ -109,12 +108,6 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
             })
             .await?
             .drawer_id;
-        let descriptor = caller
-            .doc_capability(DocScope {
-                write: [drawer_id.clone()].into(),
-                ..DocScope::default()
-            })
-            .await?;
         let set: BTreeMap<DatumKey, Value> = [
             datum(
                 to_value(&generic::Intxt::default()),
@@ -140,6 +133,7 @@ impl big_ndk::Handler<CreateIntxt> for Intxt {
             ),
         ]
         .into();
+        let descriptor = caller.write_capability(&drawer_id, set.keys()).await?;
         caller
             .call(WriteDatums {
                 capability: descriptor,
