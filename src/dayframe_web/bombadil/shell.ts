@@ -9,6 +9,7 @@
 import { always, eventually, next } from "@antithesishq/bombadil";
 import { actions, extract } from "@antithesishq/bombadil/browser";
 import { lastAction } from "@antithesishq/bombadil/browser/defaults/actions";
+import { readFrame } from "./frame.ts";
 
 // The exploration's moves: clicks on buttons, typing into the textbox, browser back (the
 // platform back gesture, ADR 032), reload.
@@ -24,103 +25,7 @@ export {
   noUnhandledPromiseRejections,
 } from "@antithesishq/bombadil/browser/defaults/properties";
 
-type Rect = { left: number; top: number; right: number; bottom: number };
-
-type Frame = {
-  /// Some panel region has rendered. Before that (first load, a reload) the shell is still
-  /// "Loading the shell…" and no structural property applies.
-  booted: boolean;
-  /// `main` landmarks on screen.
-  mains: number;
-  /// Names of the outermost panel regions that are not details (the list/main position).
-  lists: string[];
-  /// Names of the outermost panel regions that are details ("<list> details").
-  details: string[];
-  /// Bounds of every on-screen button that reads "Back".
-  backs: Rect[];
-  /// On-screen buttons that move between positions: "Back", "Open sidebar", "Hide sidebar".
-  navigation: { name: string; enabled: boolean }[];
-  /// On-screen dialogs (the compact sidebar drawer and sheets).
-  dialogs: {
-    name: string;
-    hasDismiss: boolean;
-    hasSidebarNavigation: boolean;
-    isEmpty: boolean;
-  }[];
-  /// The viewport is wide enough that the sidebar sits beside the content (the kit's
-  /// `WidthClass::fits_side_by_side`: 600 px and up).
-  sideBySide: boolean;
-  /// On-screen "Loading section…" placeholders.
-  loadingSections: number;
-};
-
-const frame = extract((state): Frame => {
-  const { document, window } = state;
-  const nameOf = (element: Element) =>
-    element.getAttribute("aria-label") ?? (element.textContent ?? "").trim();
-  // On screen: rendered, and not hidden from assistive technology (the kit marks a list that its
-  // details cover as `aria-hidden`). Opacity is deliberately not part of it: the kit's enter
-  // motion fades a scrim in from opacity 0 (KIT-105 `kit-fade-in`), and a control that is still
-  // fading in is present, not missing; a sampled frame in that interval used to report the
-  // drawer's "Dismiss" scrim as absent.
-  const onScreen = (element: Element) =>
-    element.checkVisibility({ visibilityProperty: true }) &&
-    element.closest('[aria-hidden="true"]') === null;
-  const all = (selector: string) =>
-    [...document.querySelectorAll(selector)].filter(onScreen);
-  const buttonsNamed = (...names: string[]) =>
-    all("button").filter((button) => names.includes(nameOf(button)));
-
-  // A panel region is a region that is not the shell's own chrome ("Sidebar", "Content"), not
-  // inside a dialog, and not inside another panel region (a guest's sections are regions too).
-  const panelRegions = all('[role="region"]').filter((region) => {
-    const name = nameOf(region);
-    if (name === "Sidebar" || name === "Content") return false;
-    if (region.closest('[role="dialog"]') !== null) return false;
-    for (
-      let ancestor = region.parentElement?.closest('[role="region"]') ?? null;
-      ancestor !== null;
-      ancestor = ancestor.parentElement?.closest('[role="region"]') ?? null
-    ) {
-      if (nameOf(ancestor) !== "Content") return false;
-    }
-    return true;
-  });
-  const names = panelRegions.map(nameOf);
-
-  return {
-    booted: names.length > 0,
-    mains: all("main").length,
-    lists: names.filter((name) => !name.endsWith(" details")),
-    details: names.filter((name) => name.endsWith(" details")),
-    backs: buttonsNamed("Back").map((button) => {
-      const { left, top, right, bottom } = button.getBoundingClientRect();
-      return { left, top, right, bottom };
-    }),
-    navigation: buttonsNamed("Back", "Open sidebar", "Hide sidebar").map(
-      (button) => ({
-        name: nameOf(button),
-        enabled: !(button as HTMLButtonElement).disabled,
-      }),
-    ),
-    dialogs: all('[role="dialog"]').map((dialog) => {
-      const name = nameOf(dialog);
-      return {
-        name,
-        hasDismiss: buttonsNamed(`Dismiss ${name}`).length > 0,
-        hasSidebarNavigation:
-          dialog.querySelector(
-            'nav[aria-label="Sidebar"], [role="navigation"][aria-label="Sidebar"]',
-          ) !== null,
-        isEmpty: dialog.children.length === 0,
-      };
-    }),
-    sideBySide: window.innerWidth >= 600,
-    loadingSections: all('[role="status"]').filter(
-      (status) => nameOf(status) === "Loading section…",
-    ).length,
-  };
-});
+const frame = extract(({ document, window }) => readFrame(document, window));
 
 // Why it must hold: a shell with no content region is a blank screen, and one with two lists is
 // a stack that did not unwind (FDR 006, "List and details"; ADR 032, "Stack semantics": a push
