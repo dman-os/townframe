@@ -37,29 +37,29 @@ is just "instantiate this component with these datums". Zena, Lua or Hoot would 
 settled micro can be promoted to an AOT tier (StarlingMonkey with weval, Porffor, scriptc) by another build
 routine, against the same micro interface (survey, "Tiered JS").
 
-## 2. Getting files to toolchains (revised 2026-11-17)
+## 2. Files for toolchains: dpaths, volumes and containers (revised again 2026-11-17)
 
-The first draft proposed a full `wasi:filesystem` backed by datums. The operator's framing of sandboxes as local
-resources (section 3) makes that unnecessary for toolchains and agents, which work on the sandbox's own disk, with
-source imported in and artifacts exported out. What's left is the live working copy: an editor and an agent should
-see the same files while a micro is being edited. That can be one mounted directory backed by the working drawer,
-not a general datum filesystem. Small build routines that run as plain wasm guests (TS type stripping in the
-engine) need no filesystem at all.
+Withdrawn: the earlier datum-backed `wasi:filesystem` and the working-copy mount. Materializing datums as files
+is **dpaths**, which the nodules lane already owns and has designed. Toolchains and agents get files through
+Docker-shaped local resources (operator):
+- a **filesystem volume** (VFS) as a local-state resource;
+- a **sandbox/container** as a named local-state resource, which mounts volumes and dpaths.
+Small build routines that run as plain wasm guests (TS type stripping in the engine) need no filesystem at all.
 
 ## 3. The sandbox (agents, toolchains, builds)
 
-A sandbox is a **resource, like local state**: a container with its own disk, local to one device, not synced,
-created and destroyed as a unit (operator, 2026-11-17). Agents and toolchains get an ordinary POSIX filesystem
-inside it, at native speed. Their scratch files, `node_modules` and build caches never become datums.
-- **Crossing the datum boundary** is explicit: source is imported into the sandbox, and artifacts and patches are
-  exported back as datums. smolvm's "staged" mounts work this way: copy in on first boot, sync back on stop.
-- **Platforms:**
-  - Desktop: a microVM through smolvm (libkrun; boots OCI images in under 200 ms; virtiofs mounts; networking off
-    by default, with egress allow-lists; branch and checkpoint; an embeddable Rust SDK; Apache-2.0). It needs
-    hardware virtualization on every host (KVM, HVF or WHP).
-  - Android: ordinary apps get no hardware virtualization, so the phone needs Linux or a POSIX userland inside
-    wasm. Survey in progress: `.claude/scratch/linux-in-wasm-survey.md`.
-- **Egress** follows the same grant model as micros and nodules.
+A container is a named local-state resource: local to one device, not synced, created and destroyed as a unit,
+with its own disk and the volumes it mounts. With nodules: ADR 047's `localState` gains `sandbox` (and `volume`)
+kinds, with disk quotas and with egress and mounts granted through the permbind/`uses` vocabulary.
+- **Desktop and servers:** microVMs, for the security gain. smolvm (libkrun) boots OCI images in under 200 ms,
+  uses virtiofs mounts, has networking off by default with egress allow-lists, an embeddable Rust SDK, and is
+  Apache-2.0. It needs KVM, HVF or WHP.
+- **Android:** whatever native containerization runs arm64 Linux inside a normal app. The app sandbox (per-app UID,
+  SELinux, seccomp) is the boundary. Candidates: proot (ptrace syscall translation, no root, as Termux's proot-distro
+  does), or the Android Virtualization Framework where a device exposes it. Open constraint: apps targeting API 29+
+  cannot exec binaries from their writable data directory. Survey: `.claude/scratch/android-sandbox-survey.md`.
+- **Rejected for Android:** wasm-hosted Linux. WebVM/CheerpX, v86 and container2wasm all emulate a CPU on top of
+  wasm, and WASIX is tied to Wasmer (`.claude/scratch/linux-in-wasm-survey.md`).
 
 ## 4. Forks, overlays and lineage
 
@@ -130,8 +130,7 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
   dependency with its own permbind. The build routine is an ordinary nodule routine. claytxt asked for a
   working-copy state, so live edits don't need a new envelope each time: `sources` refers to a mutable drawer
   until publish pins it.
-- **Datum-backed wasi:filesystem:** owned by nodules, on the cabinet/docs layer. It's the same seam as R19
-  (granted host directories for nodules), with one implementation serving both guest kinds.
+- **Datum filesystem:** withdrawn; dpaths covers materializing datums as files.
 - **Forks:** identity per ADR 028; grants never widen silently. A substitution starts with the original's grants
   narrowed to what the fork's manifest asks for; anything wider needs fresh consent. Lineage is a signed `lineage`
   datum beside the envelope, pinned by it. Un-forking means substituting the base again.
@@ -144,5 +143,4 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
 - **Sandboxes as local state (agreed with nodules):** a sandbox is ADR 047's `localState` with a new kind,
   `sandbox`: node-local, not synced, its lifecycle tied to the install, with a disk quota. Egress and mounts are
   granted through the permbind/`uses` vocabulary. Import and export across the datum boundary are explicit
-  operations under the routine's grants. The datum filesystem shrinks to one live working-copy mount, next to
-  R19's granted host directories.
+  operations under the routine's grants.
