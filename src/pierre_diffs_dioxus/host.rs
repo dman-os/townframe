@@ -687,6 +687,7 @@ impl VirtualizerHost for DioxusHost {
     }
 
     fn element_scroll_to(&self, element: &NodeKey, top: f64, behavior: PierreScrollBehavior) {
+        crate::instr_kinetic(&format!("scroll_to top={top:.1} behavior={behavior:?}")); // INSTR
         let left = self.geometry.borrow().scroll(*element).left;
         self.geometry.borrow_mut().set_scroll_top(*element, top);
         self.spawn_scroll(
@@ -701,6 +702,7 @@ impl VirtualizerHost for DioxusHost {
     /// and move the cached position by the delta at once so reads before the task finishes
     /// already see where the scroller is going.
     fn element_scroll_by(&self, element: &NodeKey, scroll_offset: f64) {
+        crate::instr_kinetic(&format!("scroll_by offset={scroll_offset:.1}")); // INSTR
         let top = self.geometry.borrow().scroll(*element).top;
         self.geometry
             .borrow_mut()

@@ -51,3 +51,20 @@ pub use view::FileDiffView;
 pub use view::FileDiffViewProps;
 pub use view::Interaction;
 pub use view::Virtualization;
+
+/// INSTR (kinetic scrolling investigation, 2026-11-17): appends one timestamped line per event
+/// to a scratch log so a touchpad fling shows whether a programmatic scroll write lands mid-fling.
+#[doc(hidden)]
+pub fn instr_kinetic(what: &str) {
+    use std::io::Write as _;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/nix-shell.RQ0wJG/claude-1000/-run-media-asdf-p3N-repos-townframe-p3N-4/23dac044-636d-451d-a780-0b8ccce3c44f/scratchpad/kinetic.log")
+        .expect("open the kinetic log");
+    writeln!(file, "{now} {what}").expect("write the kinetic log");
+}

@@ -348,6 +348,7 @@ impl Dispatch {
         if self.host.wants_scroll(node) {
             let dispatch = Rc::clone(self);
             attributes.push(listener("onscroll", move |data: ScrollData| {
+                crate::instr_kinetic(&format!("onscroll top={:.1}", data.scroll_top())); // INSTR
                 dispatch.scrolled(
                     node,
                     ScrollSample {
@@ -365,6 +366,7 @@ impl Dispatch {
             // scrollbar belongs to the root, and some webviews do not raise it) and `keydown`.
             let dispatch = Rc::clone(self);
             attributes.push(listener("onwheel", move |_: WheelData| {
+                crate::instr_kinetic("wheel"); // INSTR
                 dispatch.took_over()
             }));
             let dispatch = Rc::clone(self);
