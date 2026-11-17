@@ -89,6 +89,16 @@ decision is made or a finding turns up. Findings go here, not only in chat.
   upstream. This week has no bandwidth to reach Keyline.
 - 2026-11-17: The lane owns its stack. Pushing needs no permission. No attribution trailers.
 
+- 2026-11-17: **Verification split approved:**
+  - Quint + TLC full-graph conformance for each interacting machine (Apalache only where
+    symbolic depth is needed);
+  - Kani for small self-contained pieces;
+  - proptest for APIs;
+  - a bespoke DST simulator for liveness;
+  - shared test tooling in a new dev-only crate `test_utils_rs`.
+
+  The first machine is `WatermarkMachine`, done with both Quint+TLC and Kani to compare them.
+
 ## Phase 0 — what has to change
 
 ### Keyline: what it changes for us
@@ -676,8 +686,34 @@ replay. For small machines, **TLC with full-graph conformance is cheaper and str
 - proptest for APIs;
 - the bespoke DST simulator for liveness.
 
-Still to check: our quint 0.33 / formal-tools build ships Apalache and the Rust evaluator, not
-TLC. Verify how quint drives TLC and whether formal-tools needs it.
+**TLC is not a quint backend:** `quint verify` drives Apalache only. TLC runs on the TLA+ from
+`quint compile --target=tlaplus` (<https://quint-lang.org/docs/model-checkers>), which is the
+route flotilla's spike took, plus a converter from TLC's dumped state graph. So `formal-tools`
+must also provision `tla2tools.jar` (TLC). The JSON-limit fix to Apalache 0.62.4 also unblocked
+`compile --target=tlaplus` (per #117's comments).
+
+**`WatermarkMachine` read for modelling (2026-11-17; `src/big_automata/watermark.rs`).**
+Found before writing any spec:
+- **W-1 (bug):** `add_job` opens every slot with `ready: true`. `drain()` takes the leading run
+  of ready slots as the watermark, so unsettled jobs count as done, and the watermark passes
+  unacked work. That violates the cursor rule (advance only on ack or obsolescence), and
+  `settle_*` setting `ready = true` becomes a no-op. Expected `ready: false`.
+- **W-2 (bug):** `add_job` skips when `cursor <= last_emitted.unwrap_or_default()`. If
+  `Cursor::default()` is a real cursor (0), a fresh stream's first job at cursor 0 is dropped.
+  Compare against `Option` instead.
+- **W-3 (semantics):** `add_job` lets different streams carry *different* lanes at the same
+  cursor and key, but `settle_on_cursor(key, cursor, lane)` removes the whole waiter and panics
+  if any stream's lane differs. Either mixed lanes per cursor are illegal (assert in `add_job`)
+  or `settle_on_cursor` should settle only that lane's streams, like `settle_all_on_lane`.
+- **W-4 (gap):** obsolescence, where a newer cursor for the same key supersedes an older
+  pending one, is not expressed here. Is it the caller's job (`CursorSyncMachine`), or should
+  `add_job` on a newer cursor settle the older waiter for that key?
+- **W-5:** `retire_stream` is `todo!()`. What happens to its waiters (drop that stream from
+  every waiter, remove empty waiters and jobs)?
+- **W-6 (tests):** `tests` holds two empty fns without `#[test]`.
+
+These go to the operator's file-by-file pass (FIXMEs in `watermark.rs`), not edited by this
+lane. The spec waits on W-3, W-4 and W-5.
 
 **DST at n0 (survey, 2026-11-17).** n0's `patchbay` (MIT/Apache-2.0) builds **Linux
 network-namespace emulations** (veth, nftables, tc netem) and runs real code in them. iroh's
