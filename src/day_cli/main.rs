@@ -371,6 +371,7 @@ mod tests {
             input: Some(input),
             command: None,
             get: false,
+            ..
         } = parse(&["x", "org.example.a.b", "{}"])
         else {
             panic!("`day x org.example.a.b '{{}}'` is an operation call");

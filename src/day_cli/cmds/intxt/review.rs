@@ -324,7 +324,7 @@ impl Packaging<'_> {
         side: Side,
         motivation: Motivation,
     ) -> Res<()> {
-        let (drawer, intxts) = self.resolve(intxt).await?;
+        let (drawer, intxts) = self.resolve(Some(intxt)).await?;
         let view = self.load(&drawer).await?;
         let identity = self.identity()?;
         let git = Git::new(&identity.root);
@@ -711,7 +711,7 @@ impl Packaging<'_> {
     /// `day x intxt inbox`: the unresolved threads of the intxt that the caller has not seen, or
     /// whose last comment someone else wrote, each placed on the intxt's current revision. Marks
     /// them seen afterwards.
-    pub(crate) async fn inbox(&self, out: &mut impl Write, intxt: &str) -> Res<()> {
+    pub(crate) async fn inbox(&self, out: &mut impl Write, intxt: Option<&str>) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
         let heading = shown(&intxts, &drawer.to_string());
         let me = self.caller.actor().await?;

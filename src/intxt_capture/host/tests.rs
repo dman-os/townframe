@@ -936,3 +936,25 @@ fn recorded_blobs_stay_reachable_from_the_keep_ref_and_survive_gc() {
         env.repo.git(&["cat-file", "-e", blob]);
     }
 }
+
+/// The intxt a worktree is on lives in its local state beside capture's, and an observation that
+/// rewrites that state keeps it.
+#[test]
+fn the_intxt_a_worktree_is_on_survives_observations_until_changed() {
+    let env = Env::new();
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+    assert_eq!(recorded_worktree(&identity).unwrap().intxt, None);
+    put_on_intxt(&identity, Some(DOC.to_owned())).unwrap();
+
+    env.append(&env.transcript, &[user("u1", None, "hi")]);
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().intxt.as_deref(),
+        Some(DOC)
+    );
+
+    put_on_intxt(&identity, None).unwrap();
+    assert_eq!(recorded_worktree(&identity).unwrap().intxt, None);
+}

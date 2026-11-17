@@ -84,14 +84,16 @@ pub enum IntxtCommands {
     /// the commits need are carried as a git pack (thin against the base unless `--full`), in
     /// the node's blob store, and the sessions whose recorded edits produced content in those
     /// commits come with them. Adding something already in the intxt changes nothing and says
-    /// so. Names the intxt by the short id `show` prints, or by its full drawer id.
+    /// so. Names the intxt by the short id `show` prints, or by its full drawer id, and with
+    /// neither, adds to the intxt this worktree is on.
     #[command(
         group = clap::ArgGroup::new("what").required(true),
         after_long_help = "Examples:\n  day x intxt add qx --branch feat/refs\n  day x intxt add qx --commits main..feat/refs\n  day x intxt add qx --change kxqoltvm"
     )]
     Add {
-        /// The intxt: its short id, or its full drawer id
-        intxt: String,
+        /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on
+        /// (`day x intxt use`)
+        intxt: Option<String>,
         /// Commits: a range `main..feat/x` (its tip and its merge base with `main`), or one
         /// commit (against its first parent). Brings those commits and the files they touch
         #[arg(long, group = "what", value_name = "RANGE")]
@@ -155,8 +157,9 @@ pub enum IntxtCommands {
     /// Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
     #[command(after_long_help = "Examples:\n  day x intxt show qx")]
     Show {
-        /// The intxt: its short id, or its full drawer id
-        intxt: String,
+        /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on
+        /// (`day x intxt use`)
+        intxt: Option<String>,
     },
     /// Comment on lines of a commit or an op the intxt holds
     ///
@@ -215,8 +218,22 @@ pub enum IntxtCommands {
     /// commits. Listing marks the threads seen.
     #[command(after_long_help = "Examples:\n  day x intxt inbox qx")]
     Inbox {
+        /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on
+        /// (`day x intxt use`)
+        intxt: Option<String>,
+    },
+    /// Say which intxt this worktree is on, or put it on another
+    ///
+    /// `add`, `show` and `inbox` act on that intxt when none is named, and `new` puts the
+    /// worktree it runs in on the intxt it creates. Kept in the worktree's local state
+    /// (`<git dir>/intxt/state.json`), never synced: each checkout is on its own intxt.
+    #[command(after_long_help = "Examples:\n  day x intxt use qx\n  day x intxt use\n  day x intxt use --none")]
+    Use {
         /// The intxt: its short id, or its full drawer id
-        intxt: String,
+        intxt: Option<String>,
+        /// Put the worktree on no intxt
+        #[arg(long, conflicts_with = "intxt")]
+        none: bool,
     },
     /// Say what is recorded in this worktree and which intxts include it
     ///
@@ -272,7 +289,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             };
             with_packaging(async |packaging| {
                 packaging
-                    .add(&mut std::io::stdout(), &intxt, named, full)
+                    .add(&mut std::io::stdout(), intxt.as_deref(), named, full)
                     .await
             })
             .await
@@ -338,12 +355,28 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             .await
         }
         IntxtCommands::Inbox { intxt } => {
-            with_packaging(async |packaging| packaging.inbox(&mut std::io::stdout(), &intxt).await)
-                .await
+            with_packaging(async |packaging| {
+                packaging
+                    .inbox(&mut std::io::stdout(), intxt.as_deref())
+                    .await
+            })
+            .await
         }
         IntxtCommands::Show { intxt } => {
-            with_packaging(async |packaging| packaging.show(&mut std::io::stdout(), &intxt).await)
-                .await
+            with_packaging(async |packaging| {
+                packaging
+                    .show(&mut std::io::stdout(), intxt.as_deref())
+                    .await
+            })
+            .await
+        }
+        IntxtCommands::Use { intxt, none } => {
+            with_packaging(async |packaging| {
+                packaging
+                    .use_intxt(&mut std::io::stdout(), intxt.as_deref(), none)
+                    .await
+            })
+            .await
         }
         IntxtCommands::List => {
             with_packaging(async |packaging| packaging.list(&mut std::io::stdout()).await).await

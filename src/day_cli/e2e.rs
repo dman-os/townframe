@@ -1139,17 +1139,18 @@ mod library {
                 .unique;
             assert!(created.starts_with(&format!("intxt {short} \"Two files\"")), "{created}");
             assert!(created.contains(&format!("undo: day x intxt drop {short}")), "{created}");
+            assert!(created.contains("this worktree is on it now"), "{created}");
             let add = async |name: &str| {
                 let mut out = Vec::new();
                 packaging
-                    .add(&mut out, name, Named::Branch("feat/x".to_owned()), false)
+                    .add(&mut out, Some(name), Named::Branch("feat/x".to_owned()), false)
                     .await
                     .unwrap();
                 String::from_utf8(out).unwrap()
             };
             let show = async |name: &str| {
                 let mut out = Vec::new();
-                packaging.show(&mut out, name).await.unwrap();
+                packaging.show(&mut out, Some(name)).await.unwrap();
                 String::from_utf8(out).unwrap()
             };
 
@@ -1182,6 +1183,18 @@ mod library {
                 shown.contains(&format!("link: dtxt:datum:{drawer}/org.example.intxt/main\n")),
                 "{shown}"
             );
+            // `new` put the worktree on the intxt, so naming none is naming it, until `use`
+            // takes the worktree off it.
+            let mut on = Vec::new();
+            packaging.show(&mut on, None).await.unwrap();
+            assert_eq!(String::from_utf8(on).unwrap(), shown);
+            packaging.use_intxt(&mut Vec::new(), None, true).await.unwrap();
+            let refused = packaging.show(&mut Vec::new(), None).await.unwrap_err();
+            assert!(refused.to_string().contains("day x intxt use"), "{refused}");
+            let mut used = Vec::new();
+            packaging.use_intxt(&mut used, Some(&short), false).await.unwrap();
+            let used = String::from_utf8(used).unwrap();
+            assert!(used.starts_with(&format!("this worktree is on {short}")), "{used}");
             assert!(shown.contains("commits (1):"), "{shown}");
             assert!(shown.contains(&range), "{shown}");
             assert!(shown.contains("tracked refs (1):"), "{shown}");
@@ -1308,7 +1321,7 @@ mod library {
                 .unique;
             let mut out = Vec::new();
             packaging
-                .add(&mut out, &short, Named::Branch("feat/x".to_owned()), false)
+                .add(&mut out, Some(&short), Named::Branch("feat/x".to_owned()), false)
                 .await
                 .unwrap();
             let added = String::from_utf8(out).unwrap();
@@ -1317,7 +1330,7 @@ mod library {
             assert!(added.contains("ref        refs/heads/feat/x (tracked on this clone)"), "{added}");
             assert!(added.contains("sessions   none recorded"), "{added}");
             let mut out = Vec::new();
-            packaging.show(&mut out, &short).await.unwrap();
+            packaging.show(&mut out, Some(&short)).await.unwrap();
             let shown = String::from_utf8(out).unwrap();
             assert!(shown.contains("commits (1):"), "{shown}");
             assert!(shown.contains("tracked refs (1):"), "{shown}");
@@ -1380,7 +1393,7 @@ mod library {
             // Adding the branch again, now that it moved, imports nothing: capture has the move.
             let mut out = Vec::new();
             packaging
-                .add(&mut out, &short, Named::Branch("feat/x".to_owned()), false)
+                .add(&mut out, Some(&short), Named::Branch("feat/x".to_owned()), false)
                 .await
                 .unwrap();
             assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
@@ -1475,7 +1488,7 @@ mod library {
                 operator
                     .add(
                         &mut Vec::new(),
-                        &intxt,
+                        Some(&intxt),
                         Named::Branch("feat/x".to_owned()),
                         false,
                     )
@@ -1493,7 +1506,7 @@ mod library {
             };
             let inbox = async |who: &Packaging<'_>| {
                 let mut out = Vec::new();
-                who.inbox(&mut out, &intxt).await.unwrap();
+                who.inbox(&mut out, Some(&intxt)).await.unwrap();
                 String::from_utf8(out).unwrap()
             };
             let reply = async |who: &Packaging<'_>,

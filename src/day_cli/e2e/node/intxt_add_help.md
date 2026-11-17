@@ -4,13 +4,13 @@
 $ day x intxt add --help
 Add commits, a branch or a jj change to an intxt, with the sessions that produced them
 
-Run it in the worktree that holds the work. What is named is resolved now, to commits: a range is stored as its tip and merge base, never as the text you typed. The objects the commits need are carried as a git pack (thin against the base unless `--full`), in the node's blob store, and the sessions whose recorded edits produced content in those commits come with them. Adding something already in the intxt changes nothing and says so. Names the intxt by the short id `show` prints, or by its full drawer id.
+Run it in the worktree that holds the work. What is named is resolved now, to commits: a range is stored as its tip and merge base, never as the text you typed. The objects the commits need are carried as a git pack (thin against the base unless `--full`), in the node's blob store, and the sessions whose recorded edits produced content in those commits come with them. Adding something already in the intxt changes nothing and says so. Names the intxt by the short id `show` prints, or by its full drawer id, and with neither, adds to the intxt this worktree is on.
 
-Usage: day exec intxt add [OPTIONS] <--commits <RANGE>|--branch <NAME>|--change <CHANGE>> <INTXT>
+Usage: day exec intxt add [OPTIONS] <--commits <RANGE>|--branch <NAME>|--change <CHANGE>> [INTXT]
 
 Arguments:
-  <INTXT>
-          The intxt: its short id, or its full drawer id
+  [INTXT]
+          The intxt: its short id, or its full drawer id. Default: the one this worktree is on (`day x intxt use`)
 
 Options:
       --commits <RANGE>
@@ -102,11 +102,11 @@ Show what an intxt holds: its commits, jj changes, tracked refs and sessions
 
 Each entry has a short id, the shortest prefix that is unique among the intxt's entries.
 
-Usage: day exec intxt show [OPTIONS] <INTXT>
+Usage: day exec intxt show [OPTIONS] [INTXT]
 
 Arguments:
-  <INTXT>
-          The intxt: its short id, or its full drawer id
+  [INTXT]
+          The intxt: its short id, or its full drawer id. Default: the one this worktree is on (`day x intxt use`)
 
 Options:
       --node <DIR>

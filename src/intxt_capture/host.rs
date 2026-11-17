@@ -81,6 +81,11 @@ struct WorktreeHost {
     /// `clock` at the last observation. A window opened at or before it is no boundary for the
     /// next diff: the changes up to the last observation are already recorded.
     observed_at: u64,
+    /// The intxt this worktree is on, by its drawer id: the one the intxt commands act on when
+    /// none is named. Which intxt a checkout is on is this machine's business, so it is kept here
+    /// and not in a datum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    intxt: Option<String>,
 }
 
 /// A tool call's window: the snapshot taken before it ran, when (`WorktreeHost::clock`) and which
@@ -551,6 +556,8 @@ pub struct RecordedWorktree {
     pub docs: WorktreeDocs,
     /// The sequence number of the next op, which is the number of ops recorded.
     pub ops: u64,
+    /// The drawer id of the intxt the worktree is on, see [`put_on_intxt`].
+    pub intxt: Option<String>,
 }
 
 /// What capture recorded for the worktree `identity` names, from its stored state; empty for a
@@ -560,7 +567,18 @@ pub fn recorded_worktree(identity: &Identity) -> Result<RecordedWorktree, Error>
     Ok(RecordedWorktree {
         docs: host.docs,
         ops: host.next_seq,
+        intxt: host.intxt,
     })
+}
+
+/// Put the worktree `identity` names on the intxt `drawer` (a drawer id), or on none. Takes the
+/// worktree's lock, so a hook observing it at the same time keeps the change.
+pub fn put_on_intxt(identity: &Identity, drawer: Option<String>) -> Result<(), Error> {
+    let _lock = lock(&identity.git_dir.join("intxt/lock"))?;
+    let path = identity.git_dir.join("intxt/state.json");
+    let mut host: WorktreeHost = load(&path)?;
+    host.intxt = drawer;
+    save(&path, &host)
 }
 
 /// A session capture holds state for, as `sessions_in` lists it.

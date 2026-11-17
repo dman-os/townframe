@@ -345,11 +345,23 @@ impl<'a> Packaging<'a> {
     }
 
     /// The intxt `name` names, and the short ids of the live intxts. `name` is a short id over
-    /// the live intxts or a full drawer id. An intxt is live once the node remembers its drawer:
+    /// the live intxts or a full drawer id; none is the intxt the worktree is on (`use`). An intxt is live once the node remembers its drawer:
     /// `new` remembers the drawers it creates, and a full drawer id that is an intxt is
     /// remembered when it is named, so an intxt made by `createIntxt` directly becomes
     /// addressable by short id the first time it is named in full.
-    pub(super) async fn resolve(&self, name: &str) -> Res<(DrawerId, ShortIds<String>)> {
+    pub(super) async fn resolve(&self, name: Option<&str>) -> Res<(DrawerId, ShortIds<String>)> {
+        let on;
+        let name = match name {
+            Some(name) => name,
+            None => {
+                on = host::recorded_worktree(&self.identity()?)?.intxt.ok_or_else(|| {
+                    eyre::eyre!(
+                        "name an intxt, or put this worktree on one with `day x intxt use <intxt>`"
+                    )
+                })?;
+                on.as_str()
+            }
+        };
         let live = self.live_intxts().await?;
         let mut ids: Vec<String> = live.iter().map(ToString::to_string).collect();
         if let Some(drawer) = full_drawer_id(name) {
@@ -420,7 +432,7 @@ impl<'a> Packaging<'a> {
 
     /// `day x intxt drop`: forgets an intxt on this node without changing its drawer or shared data.
     pub(crate) async fn drop(&self, out: &mut impl Write, intxt: &str) -> Res<()> {
-        let (drawer, intxts) = self.resolve(intxt).await?;
+        let (drawer, intxts) = self.resolve(Some(intxt)).await?;
         let view = self.load(&drawer).await?;
         let short = shown(&intxts, &drawer.to_string());
         self.caller
@@ -455,6 +467,10 @@ impl<'a> Packaging<'a> {
         let ids = ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
         let short = shown(&ids, &drawer_id.to_string());
         writeln!(out, "intxt {short} \"{title}\"")?;
+        if let Some(identity) = identity::resolve(self.cwd)? {
+            host::put_on_intxt(&identity, Some(drawer_id.to_string()))?;
+            writeln!(out, "  this worktree is on it now (day x intxt use)")?;
+        }
         writeln!(out, "  undo: day x intxt drop {short}")?;
         Ok(drawer_id)
     }
@@ -482,7 +498,7 @@ impl<'a> Packaging<'a> {
     /// entry still needs one is not derivable from the entries alone. Removing a thread's first
     /// comment removes its replies and its state with it.
     pub(crate) async fn rm(&self, out: &mut impl Write, intxt: &str, items: &[String]) -> Res<()> {
-        let (drawer, intxts) = self.resolve(intxt).await?;
+        let (drawer, intxts) = self.resolve(Some(intxt)).await?;
         let view = self.load(&drawer).await?;
         let comments = self.comment_keys(&drawer).await?;
         let ids = ShortIds::new(
@@ -851,7 +867,7 @@ impl<'a> Packaging<'a> {
     pub(crate) async fn add(
         &self,
         out: &mut impl Write,
-        intxt: &str,
+        intxt: Option<&str>,
         named: Named,
         full: bool,
     ) -> Res<()> {
@@ -940,7 +956,7 @@ impl<'a> Packaging<'a> {
 
     /// `day x intxt show`: the title, the description, and the entries by kind, each with its
     /// short id among the intxt's entries.
-    pub(crate) async fn show(&self, out: &mut impl Write, intxt: &str) -> Res<()> {
+    pub(crate) async fn show(&self, out: &mut impl Write, intxt: Option<&str>) -> Res<()> {
         let (drawer, intxts) = self.resolve(intxt).await?;
         let view = self.load(&drawer).await?;
         let ids = ShortIds::new(
@@ -1048,6 +1064,39 @@ impl<'a> Packaging<'a> {
 
     /// `day x intxt status`: what is recorded in the worktree, and which intxts include its
     /// commits, its clone's refs and its sessions.
+    /// `day x intxt use`: puts the worktree on the intxt `name` names, or on none, or says which
+    /// one it is on.
+    pub(crate) async fn use_intxt(
+        &self,
+        out: &mut impl Write,
+        name: Option<&str>,
+        none: bool,
+    ) -> Res<()> {
+        let identity = self.identity()?;
+        if none {
+            host::put_on_intxt(&identity, None)?;
+            writeln!(out, "this worktree is on no intxt")?;
+            return Ok(());
+        }
+        if name.is_none() && host::recorded_worktree(&identity)?.intxt.is_none() {
+            writeln!(out, "this worktree is on no intxt")?;
+            return Ok(());
+        }
+        let (drawer, intxts) = self.resolve(name).await?;
+        if name.is_some() {
+            host::put_on_intxt(&identity, Some(drawer.to_string()))?;
+        }
+        let view = self.load(&drawer).await?;
+        writeln!(
+            out,
+            "this worktree is on {}  \"{}\"",
+            shown(&intxts, &drawer.to_string()),
+            view.title.title
+        )?;
+        writeln!(out, "link: {}", generic::Intxt::reference(&drawer))?;
+        Ok(())
+    }
+
     pub(crate) async fn status(&self, out: &mut impl Write) -> Res<()> {
         let identity = self.identity()?;
         let git = Git::new(&identity.root);
@@ -1063,6 +1112,10 @@ impl<'a> Packaging<'a> {
                 .map(|branch| branch.trim_start_matches("refs/heads/"))
                 .unwrap_or("detached HEAD")
         )?;
+        match &recorded.intxt {
+            Some(drawer) => writeln!(out, "on intxt {drawer}")?,
+            None => writeln!(out, "on no intxt (day x intxt use <intxt>)")?,
+        }
         writeln!(out, "recorded here: {} op(s)", recorded.ops)?;
         if sessions.is_empty() {
             writeln!(out, "sessions recorded here: none")?;
