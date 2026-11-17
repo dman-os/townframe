@@ -135,14 +135,20 @@ impl Packaging<'_> {
         let view = self.load(&drawer).await?;
         let (mut document, _) =
             self.current_document(&drawer, &view, self.summaries(&view).await?)?;
+        document.schema = Some(self.schema_location()?);
+        Ok((document, drawer))
+    }
+
+    /// Where the document's JSON Schema is, as a `file://` URL: written beside the node's other
+    /// files when it is missing or out of date, so an editor that follows `$schema` finds it.
+    fn schema_location(&self) -> Res<String> {
         let schema = self.node_dir.join("intxt-edit.schema.json");
         let text = EditDocument::json_schema();
         if std::fs::read_to_string(&schema).ok().as_deref() != Some(text.as_str()) {
             std::fs::write(&schema, text)
                 .wrap_err_with(|| format!("writing {}", schema.display()))?;
         }
-        document.schema = Some(format!("file://{}", schema.display()));
-        Ok((document, drawer))
+        Ok(format!("file://{}", schema.display()))
     }
 
     /// `day x intxt edit --print`.
@@ -260,18 +266,19 @@ impl Packaging<'_> {
         let (current, keys) =
             self.current_document(&drawer, &view, self.summaries(&view).await?)?;
 
-        let stale = |current: EditDocument| {
-            Outcome::Refused(Failed {
+        let stale = |mut current: EditDocument| -> Res<Outcome> {
+            current.schema = Some(self.schema_location()?);
+            Ok(Outcome::Refused(Failed {
                 errors: vec![PlanError::new(
                     "/base",
                     "the intxt changed since the document was printed; `current` is its document now",
                 )],
                 current: Some(current),
-            })
+            }))
         };
         let heads = |base: &[String]| base.iter().cloned().collect::<BTreeSet<_>>();
         if heads(&document.base) != heads(&current.base) {
-            return Ok(stale(current));
+            return stale(current);
         }
 
         // Ids are read at the apply: any prefix that is unambiguous among the entries now.
@@ -307,7 +314,7 @@ impl Packaging<'_> {
 
         let plan = match document.plan(&current) {
             Ok(plan) => plan,
-            Err(Refusal::Stale) => return Ok(stale(current)),
+            Err(Refusal::Stale) => return stale(current),
             Err(Refusal::Invalid(errors)) => {
                 return Ok(Outcome::Refused(Failed {
                     errors,
