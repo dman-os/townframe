@@ -46,7 +46,7 @@ pub(crate) struct Summary {
     pub uncaused_tool_calls: u64,
 }
 
-fn write_atomically(path: &Path, bytes: &[u8]) -> Res<()> {
+pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Res<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
