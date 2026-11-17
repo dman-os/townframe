@@ -15,9 +15,6 @@ use super::call;
 use crate::client::NodeClient;
 use crate::interlude::*;
 
-use big_blobs_core::BlobsScope;
-use big_blobs_core::MintBlobsCapability;
-use big_blobs_core::PutBlob;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::KeyReference;
@@ -678,34 +675,7 @@ impl<'a> Packaging<'a> {
 
     /// Puts `pack` in the blob store and answers the blob datum that names it: its key and value.
     async fn put_pack(&self, pack: Vec<u8>) -> Res<(DatumKey, Value)> {
-        eyre::ensure!(
-            pack.len() <= big_blobs_core::MAX_PUT_BYTES,
-            "the pack is {} bytes, over the {} one blob put carries; name fewer commits, or leave \
-             out --full so the pack is thin against the base",
-            pack.len(),
-            big_blobs_core::MAX_PUT_BYTES
-        );
-        let capability = call(
-            self.client,
-            MintBlobsCapability {
-                scope: BlobsScope {
-                    put: true,
-                    ..BlobsScope::default()
-                },
-                rights: Rights::USE,
-                subject: None,
-            },
-        )
-        .await?
-        .capability_id;
-        let info = call(
-            self.client,
-            PutBlob {
-                capability,
-                bytes: pack.into(),
-            },
-        )
-        .await?;
+        let info = super::put_blob(self.client, &pack).await?;
         let digest = info.blob_id.digest_str();
         Ok((
             key(big_blobs_core::Blob::ID, &digest)?,
