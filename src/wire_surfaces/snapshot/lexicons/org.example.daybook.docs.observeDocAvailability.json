@@ -1,0 +1,127 @@
+{
+  "defs": {
+    "DocAvailability": {
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "localUsability": {
+          "enum": [
+            "notObserved",
+            "noLocalContent",
+            "pendingMaterialization",
+            "usable"
+          ],
+          "type": "string"
+        },
+        "syncDemand": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "docId",
+        "localUsability",
+        "syncDemand"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "DocNotFound"
+        },
+        {
+          "name": "InvalidCommand"
+        },
+        {
+          "name": "UnrelatedHistory"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Access"
+        },
+        {
+          "name": "Repository"
+        },
+        {
+          "name": "UnknownHeads"
+        },
+        {
+          "description": "A document id arrived in a request that is not the 32 bytes every document id is. Ids are\nvariable-width keys on the wire (ADR 012), but a document's id is its ed25519 key, so\nonly a 32-byte one can name a document; refusing here keeps the width from ever reaching\nthe repository, where it is an invariant.",
+          "name": "InvalidDocId"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "UnknownSchema"
+        },
+        {
+          "name": "SystemDatum"
+        },
+        {
+          "name": "SetAndRemoved"
+        },
+        {
+          "name": "InvalidValue"
+        },
+        {
+          "name": "ValueTooLarge"
+        },
+        {
+          "name": "Conflict"
+        },
+        {
+          "name": "BaseNotAccepted"
+        },
+        {
+          "name": "Pending"
+        },
+        {
+          "name": "ResourceRefused"
+        },
+        {
+          "name": "Unsupported"
+        },
+        {
+          "name": "MalformedEvidence"
+        }
+      ],
+      "message": {
+        "schema": {
+          "ref": "#DocAvailability",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "capability": {
+            "type": "string"
+          },
+          "docId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability",
+          "docId"
+        ],
+        "type": "params"
+      },
+      "type": "subscription"
+    }
+  },
+  "id": "org.example.daybook.docs.observeDocAvailability",
+  "lexicon": 1
+}

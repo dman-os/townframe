@@ -1,0 +1,157 @@
+{
+  "defs": {
+    "CartridgeInstall": {
+      "nullable": [
+        "micro",
+        "nodule"
+      ],
+      "properties": {
+        "cartridge": {
+          "ref": "org.example.daybook.defs#datumPin",
+          "type": "ref"
+        },
+        "configDoc": {
+          "type": "string"
+        },
+        "micro": {
+          "ref": "#ComponentInstall",
+          "type": "ref"
+        },
+        "nodule": {
+          "ref": "#ComponentInstall",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "cartridge",
+        "configDoc"
+      ],
+      "type": "object"
+    },
+    "CartridgeInstallRecord": {
+      "properties": {
+        "cartridgeId": {
+          "type": "string"
+        },
+        "install": {
+          "ref": "#CartridgeInstall",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "cartridgeId",
+        "install"
+      ],
+      "type": "object"
+    },
+    "CartridgeInstalls": {
+      "properties": {
+        "installs": {
+          "items": {
+            "ref": "#CartridgeInstallRecord",
+            "type": "ref"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "installs"
+      ],
+      "type": "object"
+    },
+    "ComponentInstall": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Rejected"
+        },
+        {
+          "description": "Staging refuses a version once its envelope has been published.",
+          "name": "AlreadyPublished"
+        },
+        {
+          "description": "A pinned datum is unavailable at its recorded frontier; this is recoverable when sync catches up.",
+          "name": "PinnedDatumUnreadable"
+        },
+        {
+          "description": "A pin must resolve inside the registry document that carries its envelope.",
+          "name": "PinnedDocumentMismatch"
+        },
+        {
+          "description": "A pinned datum was readable but did not decode as its declared manifest type.",
+          "name": "PinnedDatumInvalid"
+        },
+        {
+          "description": "A published version never changes content: the label is taken by another envelope.",
+          "name": "VersionExists"
+        },
+        {
+          "description": "The envelope's signature is missing or does not verify against its namespace DID, or the\nDID's method cannot be verified without resolution (fail closed).",
+          "name": "Signature"
+        },
+        {
+          "description": "An unsigned envelope can be signed by the node only for the node's own DID.",
+          "name": "UnsignedForeignNamespace"
+        },
+        {
+          "description": "A new label must order after every label the cartridge has or had, so a validly signed older\nversion cannot be published as new (a downgrade attack). Taking an older version is an\nexplicit runtime action, not a registry one.",
+          "name": "Downgrade"
+        },
+        {
+          "description": "The handle's namespace scope does not include the cartridge's namespace.",
+          "name": "NamespaceNotPermitted"
+        },
+        {
+          "description": "The version exists in the drawer but its signature did not verify, so it is not served.",
+          "name": "Unverified"
+        },
+        {
+          "description": "An artifact's bytes are not in the local blob store, so the registry would pin bytes it\ncannot serve.",
+          "name": "ArtifactUnavailable"
+        },
+        {
+          "name": "UnknownCartridge"
+        },
+        {
+          "name": "UnknownVersion"
+        }
+      ],
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#CartridgeInstalls",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {},
+        "type": "params"
+      },
+      "type": "query"
+    }
+  },
+  "id": "org.example.daybook.cartridges.listCartridgeInstalls",
+  "lexicon": 1
+}
