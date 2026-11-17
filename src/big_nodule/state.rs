@@ -655,36 +655,38 @@ fn routine_docs_scope(
     operations: &mut BTreeSet<String>,
 ) -> Option<DocScope> {
     // Reading or writing datum kinds in a granted drawer is the default shape of drawer
-    // access (ADR 049 §2): each drawer the routine's `#drawers` use reaches is reached
-    // for those kinds only. A routine with no `#datum` kinds reaches no document in any
-    // drawer; broad access is a separate, explicit permbind. The reach carries one kind
-    // set, so a routine that reads one kind and writes another holds both at the
-    // drawer's access, and the access is the drawers handle's, capped at what the datum
-    // uses need.
-    let datum_access = if !datum_write.is_empty() {
-        Some(DrawerAccess::Write)
-    } else if !datum_read.is_empty() {
-        Some(DrawerAccess::Read)
-    } else {
-        None
-    };
-    let drawer_reach: BTreeMap<_, _> = datum_access
-        .map(|wanted| {
-            let kinds = DatumKinds::Only(datum_read.union(&datum_write).cloned().collect());
-            drawers
-                .iter()
-                .map(|(drawer, access)| {
-                    (
-                        drawer.clone(),
-                        DrawerReach {
-                            access: (*access).min(wanted),
-                            kinds: kinds.clone(),
-                        },
-                    )
-                })
-                .collect()
+    // access (ADR 049 §2): each drawer the routine's `#drawers` use reaches is reached for
+    // the routine's `#datum` kinds only, the kinds it reads for reading and the kinds it
+    // writes (`write`, `create`, `delete`) for writing, so a routine that reads one kind and
+    // writes another cannot write the first. A write kind needs the drawers use to reach
+    // the drawer for `Write`; without it the kind contributes nothing. A routine with no
+    // `#datum` kinds reaches no document in any drawer; broad access is a separate,
+    // explicit permbind.
+    let drawer_reach: BTreeMap<_, _> = drawers
+        .iter()
+        .filter_map(|(drawer, access)| {
+            let write = if *access >= DrawerAccess::Write {
+                datum_write.clone()
+            } else {
+                BTreeSet::new()
+            };
+            if datum_read.is_empty() && write.is_empty() {
+                return None;
+            }
+            Some((
+                drawer.clone(),
+                DrawerReach {
+                    access: if write.is_empty() {
+                        DrawerAccess::Read
+                    } else {
+                        DrawerAccess::Write
+                    },
+                    read: DatumKinds::Only(datum_read.clone()),
+                    write: DatumKinds::Only(write),
+                },
+            ))
         })
-        .unwrap_or_default();
+        .collect();
     (!read.is_empty() || !write.is_empty() || !drawer_reach.is_empty()).then(|| {
         let by_doc = |kinds: BTreeSet<DatumTag>| {
             if kinds.is_empty() {
