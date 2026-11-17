@@ -1,52 +1,51 @@
 # intxt: the review micro (D62: a GitHub PR on the phone, and its intxts)
 
-Status: Proposal, for the operator's review
-Owner: intxt lane (the micro is intxt's end to end; claytxt provides CodeView and the micro runtime, nodules the node)
+Status: Proposal, for the operator's review (revision 2: operator's answers of 2026-11-17 folded in)
+Owner: intxt lane (the micro is intxt's end to end; claytxt provides CodeView, the micro runtime and the phone shell, nodules the node)
 Updated: 2026-11-17
-Scope: What the review micro shows, what it calls, and which pieces of infrastructure it waits on. Builds on `intxt-commit-membership.md` (the PR names its intxts) and `intxt-review-surface.md` (R5, GitHub).
+Scope: What the review micro shows, what it calls, and which pieces of infrastructure it waits on. Builds on `intxt-commit-membership.md` (the PR names its intxts) and `intxt-review-surface.md` (R5, GitHub). Written in Rust.
 
 ## The flow
 
-1. Open a PR in the review micro (from a list of PRs the node knows, or by URL).
-2. The micro reads the PR's description and finds its `intxt:` lines (`Intxt::named_in`; the grammar and golden vectors are in `intxt-commit-membership.md`).
-3. One `summarizeIntxts { drawers }` call returns a row per intxt: found (title, description, link, entries), not found, or unreadable (#146).
-4. Tapping a row opens the intxt: its guide, threads and the diff of each entry, the diff rendered by CodeView with intxt's threads in its annotation slots.
+1. Open a PR in the review micro (from the PRs the node holds, or by URL).
+2. The micro reads the PR's description and finds the intxts it links to: any ADR 035 URL to an intxt's marker, `dtxt:datum:<drawer>/org.example.intxt/main`. The drawer id is the intxt's descriptor document id, global, so the URL is all a PR needs. There is no line grammar to learn: an `intxt:` prefix is decoration, and `Intxt::named_in` finds the URLs anywhere in the text (golden vectors in #146).
+3. The micro shows a row per linked intxt (title, description, link) and opens one on tap: its guide, its threads, and the diff of each entry, rendered by CodeView with intxt's threads in its annotation slots.
 
-PRs without `intxt:` lines show none. Finding intxts by commit is deferred to a cartridge index built by processors (ledger, 2026-11-17).
+The other direction is a datum: `day x intxt github pull` writes a `githubPullEntry/<owner>/<repo>/<n>` into every intxt the PR links to (#150), so an intxt lists its PRs.
+
+PRs that link to no intxt show none. Finding intxts by commit is deferred to a cartridge index built by processors (ledger, 2026-11-17).
 
 ## What exists and what doesn't (2026-11-17 survey of the stack)
 
 | Need | State | Owner |
 |---|---|---|
-| Author a UI micro | Rust + `clay_mdk` (`micro_counter` pattern: code crate + manifest crate, `export_micro!`, wasm32-wasip3). The TS/QuickJS runtime (`micro-runtime.md`, #129) is a draft. | claytxt |
-| Micro → cartridge method (`summarizeIntxts`) | **Missing.** A micro reaches only Clay collections, config, and other micros' publications (`clay_mdk::Context`). A Clay host import carrying the micro's capability is a proposal (`cartridge-authoring.md`, principle 3, lane T1). | open: nodules or claytxt |
-| The PR on the node | **Missing.** No egress: micros have none, nodules reach only `dispatch.local`. GitHub is only reachable from the `day` CLI. | intxt (see below) |
-| Diff view | CodeView port through C5 (#145). C6, the Dioxus host, exposes the props. Embedded content is the embedder's Dioxus `Element` at a slot marker (`pierre-dioxus-host.md`), so CodeView is a library inside the review micro, not a cross-micro component. | claytxt |
-| Phone shell that loads micros | **Missing.** `dayframe_mobile` renders a heading only; no micro loading, no deep links or share intents. | open: claytxt (Android, #81)? |
+| Author a UI micro | Rust + `clay_mdk` (`micro_counter` pattern: code crate + manifest crate, `export_micro!`, wasm32-wasip3). | claytxt (runtime), intxt (the micro) |
+| Micro → cartridge method | **Missing.** A micro reaches only Clay collections, config, and other micros' publications (`clay_mdk::Context`). | claytxt (the Clay host import) with nodules (routing, the micro's capability), alongside claytxt running on the node this week (operator) |
+| The PR on the node | Built: `day x intxt github pull` (#150), option A below. | intxt |
+| Diff view | CodeView port through C5 (#145); C6, the Dioxus host, exposes the needs below. It may land as a library the micro links (boundary A, 2026-11-10) or as a micro of its own (operator, 2026-11-17); the needs are the same either way, only the embedding differs. | claytxt |
+| Phone shell that loads micros | **Missing.** `dayframe_mobile` renders a heading only. | claytxt (operator) |
 
-## Getting the PR onto the node (intxt's)
+`summarizeIntxts` (#146) is a batch read of each linked intxt's descriptor, for a micro that can't read datums itself. If micros get direct datum reads with the micro → node calls, it goes.
 
-**A. The CLI imports it (proposed for this week).** `day x intxt github pull <owner>/<repo>#<n>` (R5 of `intxt-review-surface.md`) fetches the PR with the user's `gh` credentials and writes a `githubPull/<owner>/<repo>/<n>` datum `{ title, body, state, head, base, headSha, updatedAt, url }` into a per-repository GitHub document. The micro lists and reads those datums like any other. No new node capability, and no token on the node. Cost: only PRs someone imported are visible, and they're as fresh as the last pull (a `--watch` or a hook can refresh).
+## Getting the PR onto the node
 
-**B. A node routine fetches it.** The intxt cartridge gets a GitHub egress capability and a stored token, and fetches on demand. Any PR is readable from the phone. Cost: a new egress permbind and secret storage in the node (nodules' work), and a decision about where the token lives.
+**A. The CLI imports it (built, #150).** `day x intxt github pull <owner>/<repo>#<n>` (or the PR URL) fetches the PR with the user's `gh` login and writes `githubPull/<owner>/<repo>/<n>` `{ title, body, state, head, base, headSha, baseSha, updatedAt, url }` into the PR's own document, in a node-level GitHub drawer. One document per PR, created idempotently, so an intxt that links to the PR shares just that PR. No node capability, no token on the node. Cost: only imported PRs are visible, as fresh as the last pull.
 
-A now, B when the node grows egress. The datum shape is the same in both, so the micro doesn't change.
+**B. A node routine fetches it.** Needs a GitHub egress permbind and secret storage in the node (nodules). Any PR is readable from the phone. The datum is the same, so the micro doesn't change.
 
-## What I need from CodeView (for claytxt, before C6)
+## What I need from CodeView (sent to claytxt for C6)
 
-- Input: a unified patch for one file, or old and new blob text plus the path; the micro has both from the entry's pack.
-- Per-line annotation slots: the micro renders a thread marker or an expanded thread at (side, line).
-- Scroll or reveal a (path, side, line) anchor, for opening a thread from the list.
-- View-only first. Line selection → "comment here" is the first event wanted, after props (operator: props first, events later).
+- Input: a unified patch for one file, or old and new text plus the path (`parse_patch_files`, `parse_diff_from_file`).
+- Per-line annotation slots at (side, line) for intxt's threads (`lineAnnotations` + `renderAnnotation`).
+- Reveal a (path, side, line) anchor (`CodeView::scroll_to`, items keyed by path).
+- View-only first; line selection → "comment here" next (ported in `InteractionManager`).
 
-## Proposed scope for this week
+## Scope for this week
 
-1. `github pull` (A) and the `githubPull` datum, on my stack.
-2. The review micro in Rust on the desktop shell: PR list → named intxts → intxt view with CodeView, against a fixture until micro → cartridge calls exist.
-3. The phone once the mobile shell loads micros, and `summarizeIntxts` once a micro can call a cartridge method.
+1. Done: `github pull`, `githubPull`, `githubPullEntry` (#150).
+2. The review micro in Rust on the desktop shell: PR list → linked intxts → intxt view with CodeView, on fixtures until micro → node calls exist.
+3. The phone when claytxt's shell loads micros.
 
 ## Open (for the operator)
 
-1. Who builds micro → cartridge calls (the Clay host import carrying the micro's capability)?
-2. Who builds micro loading in the mobile shell, and is it this week?
-3. A (CLI import) for this week, B later?
+1. **A clickable form of the URL.** GitHub doesn't render `dtxt:` as a link, so in a PR description the reference is text. An `https://` form of ADR 035 URLs (through a resolver or the web node) would make one URL work everywhere: GitHub, chat, the browser. That is an ADR 035 extension, worth designing once for every kind, not for intxt alone.
