@@ -97,7 +97,7 @@ pub fn is_json_content_type(mime: &str) -> bool {
 /// incompatibly; an unstable one is outside those rules until it is stabilized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct Stability {
-    /// The Lexicon revision that introduced the item; `None` for an item of the baseline.
+    /// The Lexicon revision that stabilized the item; `None` while it is unannotated (unstable).
     pub since: Option<u32>,
     /// The revision that deprecated the item, and why. A deprecated item stays in its schema.
     pub deprecated: Option<Deprecation>,
@@ -106,8 +106,9 @@ pub struct Stability {
 }
 
 impl Stability {
-    /// A baseline item: stable, with no revision of its own.
-    pub const STABLE: Self = Self {
+    /// No annotation. Pre-release this is UNSTABLE (ADR 021, operator 2026-11-17): the item is
+    /// outside the evolution rules until it states `since`, which needs the operator's sign-off.
+    pub const UNANNOTATED: Self = Self {
         since: None,
         deprecated: None,
         unstable: None,
@@ -186,7 +187,7 @@ impl XrpcMethod {
             output_encoding: Encoding::Json,
             local_only: false,
             handle: None,
-            stability: Stability::STABLE,
+            stability: Stability::UNANNOTATED,
         }
     }
 
@@ -203,7 +204,7 @@ impl XrpcMethod {
             output_encoding: Encoding::Json,
             local_only: false,
             handle: None,
-            stability: Stability::STABLE,
+            stability: Stability::UNANNOTATED,
         }
     }
 
@@ -220,7 +221,7 @@ impl XrpcMethod {
             output_encoding: Encoding::Json,
             local_only: false,
             handle: None,
-            stability: Stability::STABLE,
+            stability: Stability::UNANNOTATED,
         }
     }
 
