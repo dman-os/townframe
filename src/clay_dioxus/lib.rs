@@ -352,9 +352,33 @@ fn MountedComponent(
     // only after the close returns, so a render in that window finds the mount live and the
     // renderer gone: it shows what a withdrawn component shows.
     match render {
-        Some(render) => render(&mount),
+        Some(render) => rsx! { RenderedMount { render, mount } },
         None => rsx! { p { "Component withdrawn." } },
     }
+}
+
+/// What one mount's render scope is made of. Equal while it is the same renderer and the same
+/// mount, so a `MountedComponent` re-render (its liveness flipping, say) does not re-run the
+/// micro's render.
+#[derive(Props, Clone)]
+struct RenderedMountProps {
+    render: Renderer,
+    mount: Arc<Mount>,
+}
+
+impl PartialEq for RenderedMountProps {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.render, &other.render) && Arc::ptr_eq(&self.mount, &other.mount)
+    }
+}
+
+/// The scope a micro's render closure runs in, one per mount, like one instance of a custom
+/// element: the hooks the closure calls are this mount's own, and nothing shares them with
+/// another mount of the same publication. Being its own component, those hooks also run in a
+/// fixed order, unlike in `MountedComponent`, which returns early while the mount is withdrawn.
+#[expect(non_snake_case, reason = "Dioxus component naming")]
+fn RenderedMount(props: RenderedMountProps) -> Element {
+    (props.render)(&props.mount)
 }
 
 #[component]
