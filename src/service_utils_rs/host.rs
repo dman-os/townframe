@@ -320,12 +320,11 @@ macro_rules! service_protocol {
         impl<H> $crate::Route<H> for $protocol
         where H: Send + Sync + 'static $(+ $crate::Handler<$params>)* $(+ $crate::Handler<$stream_params>)* {
             fn route(host: std::sync::Arc<$crate::Host<H>>, dispatch: $crate::Dispatch, message: $message) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-                Box::pin(async move {
-                    match message {
-                        $( $message::$variant(message) => host.unary(dispatch, message).await, )*
-                        $( $message::$stream_variant(message) => host.stream(dispatch, message).await, )*
-                    }
-                })
+                // One box per arm, not one `async` block over every arm: see `bind_service_protocol!`.
+                match message {
+                    $( $message::$variant(message) => Box::pin(host.unary(dispatch, message)), )*
+                    $( $message::$stream_variant(message) => Box::pin(host.stream(dispatch, message)), )*
+                }
             }
             fn mount(router: &mut $crate::XrpcRouter, host: std::sync::Arc<$crate::Host<H>>) -> Result<(), $crate::xrpc::XrpcRegistrationError> {
                 $( router.mount::<$params, H>(std::sync::Arc::clone(&host))?; )*
@@ -390,13 +389,15 @@ macro_rules! bind_service_protocol {
         where H: Send + Sync + 'static $(+ $crate::Handler<$params>)* $(+ $crate::Handler<$stream_params>)* {
             fn route(self: std::sync::Arc<Self>, dispatch: $crate::Dispatch, message: $message) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 use $message as Message;
-                Box::pin(async move {
-                    let host = std::sync::Arc::clone(&self.0);
-                    match message {
-                        $( Message::$variant(message) => host.unary(dispatch, message).await, )*
-                        $( Message::$stream_variant(message) => host.stream(dispatch, message).await, )*
-                    }
-                })
+                // Each arm boxes its own operation's future rather than one `async` block
+                // awaiting whichever arm matched: a debug build gives every arm of such a block
+                // its own stack slot, so its poll frame was the sum of all the protocol's
+                // operation futures (228 KB for the drawer service) on every hop.
+                let host = std::sync::Arc::clone(&self.0);
+                match message {
+                    $( Message::$variant(message) => Box::pin(host.unary(dispatch, message)), )*
+                    $( Message::$stream_variant(message) => Box::pin(host.stream(dispatch, message)), )*
+                }
             }
 
             fn mount(router: &mut $crate::XrpcRouter, binding: std::sync::Arc<Self>) -> Result<(), $crate::xrpc::XrpcRegistrationError> {
