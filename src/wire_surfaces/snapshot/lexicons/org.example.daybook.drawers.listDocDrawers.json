@@ -1,0 +1,140 @@
+{
+  "defs": {
+    "DocDrawer": {
+      "properties": {
+        "access": {
+          "enum": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        },
+        "drawerId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "drawerId",
+        "access"
+      ],
+      "type": "object"
+    },
+    "DocDrawers": {
+      "properties": {
+        "drawers": {
+          "items": {
+            "ref": "#DocDrawer",
+            "type": "ref"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "drawers"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "The drawers through which the presented authority reaches `doc_id`, each with the access it\ngets there. Authorized from the request's `Authorization` metadata rather than a body\n`capability`, because the caller asking has no scoped handle on the doc yet: it holds an\nidentity or some scoped drawers handle, and a doc it reaches through no drawer answers an\nempty list, so \"not in a drawer\" and \"not visible\" look the same.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "SelfChild"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "name": "Docs"
+        },
+        {
+          "name": "DocsUnavailable"
+        },
+        {
+          "description": "Keyhive storage or the engine failed; nothing the caller named is at fault.",
+          "name": "Keyhive"
+        },
+        {
+          "description": "A named group or doc id that is not a 32-byte Ed25519 point.",
+          "name": "InvalidKey"
+        },
+        {
+          "description": "A Keyhive group this node does not hold, perhaps not yet synced.",
+          "name": "UnknownGroup"
+        },
+        {
+          "description": "A principal group the caller named that this node does not hold.",
+          "name": "UnknownPrincipal"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "UnknownDrawer"
+        },
+        {
+          "description": "A peer this node has not met: its keyhive identity arrives with a live connection.",
+          "name": "UnknownPeer"
+        },
+        {
+          "name": "SelfDoc"
+        },
+        {
+          "name": "AlreadyDrawer"
+        },
+        {
+          "name": "NotAnEntry"
+        },
+        {
+          "name": "ForeignLayout"
+        },
+        {
+          "name": "CommandInFlight"
+        },
+        {
+          "name": "CommandReused"
+        },
+        {
+          "name": "RosterUnreadable"
+        },
+        {
+          "name": "InvalidMetaDocSlot"
+        },
+        {
+          "name": "SuccessorCycle"
+        },
+        {
+          "name": "SuccessorSelf"
+        }
+      ],
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#DocDrawers",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "docId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "docId"
+        ],
+        "type": "params"
+      },
+      "type": "query"
+    }
+  },
+  "id": "org.example.daybook.drawers.listDocDrawers",
+  "lexicon": 1
+}

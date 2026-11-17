@@ -1,0 +1,70 @@
+{
+  "defs": {
+    "CapabilityChange": {
+      "properties": {
+        "status": {
+          "enum": [
+            "live",
+            "retracted"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "InvalidCapability"
+        },
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "Escalation"
+        },
+        {
+          "name": "UnrecognizedActor"
+        },
+        {
+          "name": "InvalidActorPath"
+        },
+        {
+          "name": "ActorNotFound"
+        },
+        {
+          "name": "StateCorrupt"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Claim"
+        }
+      ],
+      "message": {
+        "schema": {
+          "ref": "#CapabilityChange",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "capability": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability"
+        ],
+        "type": "params"
+      },
+      "type": "subscription"
+    }
+  },
+  "id": "org.example.daybook.authority.observeCapability",
+  "lexicon": 1
+}

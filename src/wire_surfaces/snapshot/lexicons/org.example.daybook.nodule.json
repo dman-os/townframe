@@ -1,0 +1,57 @@
+{
+  "defs": {
+    "Initializer": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "mode": {
+          "knownValues": [
+            "once",
+            "everyStart"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "ref": "#Nsid",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "key",
+        "target",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "Nsid": {
+      "type": "string"
+    },
+    "main": {
+      "properties": {
+        "bindings": {
+          "type": "unknown"
+        },
+        "initialization": {
+          "items": {
+            "ref": "#Initializer",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "localState": {
+          "type": "unknown"
+        },
+        "revisionedStores": {
+          "type": "unknown"
+        },
+        "routines": {
+          "type": "unknown"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.nodule",
+  "lexicon": 1
+}

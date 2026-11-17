@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "Nsid": {
+      "type": "string"
+    },
+    "PermbindDatum": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "create": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delete": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "nsid": {
+          "$ref": "#/$defs/Nsid"
+        },
+        "read": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "write": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nsid",
+        "description"
+      ],
+      "title": "PermbindDatum",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.cartridge.datum"
+    }
+  },
+  "$ref": "#/$defs/PermbindDatum",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

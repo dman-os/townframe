@@ -1,0 +1,129 @@
+{
+  "defs": {
+    "HttpForm": {
+      "properties": {
+        "method": {
+          "enum": [
+            "post",
+            "get"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "InvocationContext": {
+      "nullable": [
+        "http",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "http": {
+          "ref": "#HttpForm",
+          "type": "ref"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Invoke": {
+      "properties": {
+        "body": {
+          "type": "unknown"
+        },
+        "context": {
+          "ref": "#InvocationContext",
+          "type": "ref"
+        },
+        "operation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "body"
+      ],
+      "type": "object"
+    },
+    "InvokeOutput": {
+      "properties": {
+        "body": {
+          "type": "unknown"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "description": "Any JSON value, spelled in place as `serde_json::Value` is: the other cases have no schema, as\nthey have no serialized form.",
+      "errors": [
+        {
+          "name": "Denied"
+        },
+        {
+          "name": "UnknownOperation"
+        },
+        {
+          "name": "Authority"
+        },
+        {
+          "name": "AuthorityUnavailable"
+        },
+        {
+          "description": "Retryable: the provider exists but is not serving yet.",
+          "name": "NotReady"
+        },
+        {
+          "name": "InvalidInput"
+        },
+        {
+          "description": "The call's body is the other case than the method declares: bytes for a JSON method (or a\nJSON body that is not application/json), JSON for a byte method.",
+          "name": "BodyMismatch"
+        },
+        {
+          "description": "The method is local-only (ADR 042 §3) and the call did not come from the node's own\nmachine through an edge transport.",
+          "name": "LocalOnly"
+        },
+        {
+          "description": "A JSON body, which dispatch gathers whole, is over its limit.",
+          "name": "TooLarge"
+        },
+        {
+          "description": "The provider answered with a body its method's Lexicon does not describe: a provider bug,\nas atproto's `InternalServerError`.",
+          "name": "InvalidOutput"
+        },
+        {
+          "description": "The provider's own XRPC error, passed through untouched.",
+          "name": "Provider"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#Invoke",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#InvokeOutput",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.dispatch.invoke",
+  "lexicon": 1
+}

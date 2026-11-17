@@ -1,0 +1,765 @@
+[
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "com.atproto.lexicon.schema",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.authority.attenuateCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.authority.inspectCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.authority.mintCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "subscription",
+    "nsid": "org.example.daybook.authority.observeCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.authority.openActor",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.authority.resolveActor",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.authority.resolveAuthority",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.authority.retractCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.authority.signDatumClaim",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs",
+    "kind": "object",
+    "nsid": "org.example.daybook.blob",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_blobs",
+    "kind": "object",
+    "nsid": "org.example.daybook.blobPin",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_blobs_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.blobs.importFile",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.blobs.mintCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.blobs.put",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.blobs.read",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.blobs.stat",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.branch",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.component",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.datum",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.drawers",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.identity",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.method",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.micro",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridge.wasm",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.clearCartridgeConfig",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.config",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.getCartridge",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.getCartridgeVersion",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.getPublisher",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.importCartridgeDocument",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.cartridges.install",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.installCartridge",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.listCartridgeInstalls",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.listCartridges",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.mintCartridgesCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "subscription",
+    "nsid": "org.example.daybook.cartridges.observeCartridgeInstalls",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.publishCartridgeVersion",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.removeCartridge",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.removeCartridgeVersion",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.resolveCartridgeVersion",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.setCartridgeEnabled",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.setCartridgeGrant",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.stageCartridgeVersion",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.uninstallCartridge",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.watchCartridges",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs",
+    "kind": "object",
+    "nsid": "org.example.daybook.cipherBlob",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.componentExport",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "defs",
+    "nsid": "org.example.daybook.defs",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_dispatch_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.dispatch.invoke",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_dispatch_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.dispatch.mintCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.dispatch.route",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.dmeta",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.branchDoc",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.createDoc",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.docs.getDocAvailability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.inspectDatumClaims",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.listDatums",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.mergeDoc",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.mintDocCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "subscription",
+    "nsid": "org.example.daybook.docs.observeDocAvailability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.pollDatums",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.queryDatumRefs",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.readDatums",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.unsafeInspectDatum",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.docs.writeDatums",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.childEntry",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.docEntry",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.knownEntry",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.metaDoc",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.roster",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.selfDoc",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.singleGroup",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet",
+    "kind": "object",
+    "nsid": "org.example.daybook.drawer.successor",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.addChild",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.addDoc",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.createDrawer",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.createMetaDoc",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.forgetDrawer",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.drawers.getDrawer",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.grantDrawer",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.invitePrincipal",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.drawers.listDocDrawers",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.listDocs",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.drawers.listDrawers",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.drawers.listKnownDrawers",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.mintDrawerCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.rememberDrawer",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.removeChild",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.removeDoc",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.drawers.resolveDrawerSuccessor",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.revokeDrawer",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.revokePrincipal",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.setDrawerPolicy",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_cabinet_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.drawers.setDrawerSuccessor",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_blobs",
+    "kind": "object",
+    "nsid": "org.example.daybook.jwk",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.lexicon.sidecar",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.micro.grant",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_cartridges",
+    "kind": "object",
+    "nsid": "org.example.daybook.nodule",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.nodule.devTakeover",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_nodule",
+    "kind": "object",
+    "nsid": "org.example.daybook.nodule.grant",
+    "revision": null,
+    "sidecar": true
+  },
+  {
+    "crate": "big_nodule_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.nodules.confirmNoduleResolution",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.nodules.getNodule",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.nodules.listNodules",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.nodules.mintNoduleCapability",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.nodules.setMethodRoute",
+    "revision": null,
+    "sidecar": false
+  },
+  {
+    "crate": "big_nodule_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.nodules.setNoduleDevTakeover",
+    "revision": null,
+    "sidecar": false
+  }
+]

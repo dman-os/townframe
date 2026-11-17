@@ -1,0 +1,21 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "from": {
+          "ref": "org.example.daybook.defs#datumPin",
+          "type": "ref"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.branch",
+  "lexicon": 1
+}
