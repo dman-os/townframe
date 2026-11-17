@@ -45,7 +45,7 @@ pub(crate) enum RootNotice {
     Moved,
 }
 
-type Link = Rc<dyn Fn(RootNotice)>;
+pub(crate) type Link = Rc<dyn Fn(RootNotice)>;
 
 #[derive(Default)]
 struct Shared {
@@ -145,6 +145,19 @@ impl ScrollRoot {
     /// The viewer's own root mounted: its place in the scroller's content can be measured.
     pub(crate) fn viewer_mounted(&self, viewer: Rc<MountedData>) {
         *self.0.viewer.borrow_mut() = Some(viewer);
+        // A scroller that reported before this viewer linked reports nothing more until it
+        // changes (the embedder replaced the viewer, not the scroller), and the viewer's first
+        // pass waits for those reports: tell it what the handle knows. A scroller that has not
+        // reported yet is reported to the viewer as it does.
+        if self.0.scroller.borrow().is_some() {
+            self.notify(RootNotice::Mounted);
+        }
+        if self.size().is_some() {
+            self.notify(RootNotice::Resized);
+        }
+        if self.sample().is_some() {
+            self.notify(RootNotice::Scrolled);
+        }
         self.measure();
     }
 
@@ -175,8 +188,26 @@ impl ScrollRoot {
         }
     }
 
-    pub(crate) fn link(&self, link: Option<Link>) {
-        *self.0.link.borrow_mut() = link;
+    /// A viewer starts reading this handle. The handle may have outlived another viewer (the
+    /// embedder replaced it while the scroller went on), so what it knew of that viewer's root is
+    /// dropped: the new viewer's root measures itself when it mounts.
+    pub(crate) fn link(&self, link: Link) {
+        *self.0.viewer.borrow_mut() = None;
+        self.0.offset.set(0.0);
+        *self.0.link.borrow_mut() = Some(link);
+    }
+
+    /// A viewer stops reading this handle. A replaced component is dropped after its replacement
+    /// mounted, so the handle may already belong to the new viewer: only the viewer's own link
+    /// is removed.
+    pub(crate) fn unlink(&self, link: &Link) {
+        let mut current = self.0.link.borrow_mut();
+        if current
+            .as_ref()
+            .is_some_and(|current| std::ptr::addr_eq(Rc::as_ptr(current), Rc::as_ptr(link)))
+        {
+            *current = None;
+        }
     }
 
     /// The `Rc` is cloned out first: the viewer's reaction may link or unlink.

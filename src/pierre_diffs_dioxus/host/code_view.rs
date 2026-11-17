@@ -234,11 +234,25 @@ impl DioxusHost {
     ) -> Rc<Self> {
         let document = Document::new();
         let root = document.create_element("div");
-        if let ScrollMode::Own { height } = scroll {
-            document.set_attribute(root, "style", &format!("overflow-y:auto;height:{height};"));
-            // A scroll container the keyboard can reach (the viewer would make it a script-only
-            // tab stop): without one its arrow and page keys do nothing.
-            document.set_attribute(root, "tabindex", "0");
+        match scroll {
+            ScrollMode::Own { height } => {
+                document.set_attribute(
+                    root,
+                    "style",
+                    &format!("overflow-y:auto;height:{height};"),
+                );
+                // A scroll container the keyboard can reach (the viewer would make it a
+                // script-only tab stop): without one its arrow and page keys do nothing.
+                document.set_attribute(root, "tabindex", "0");
+            }
+            // A root that scrolls (`overflow-y:auto`) also clips its inline axis; this one does
+            // not scroll, so wide rows would widen the embedder's scroller, the document
+            // included. `clip` crops at the root's edge without making a scroll container, which
+            // the sticky slab would otherwise stick to instead of the embedder's scroller. The
+            // rows scroll inside their own columns (`[data-code]` is `overflow: scroll clip`).
+            ScrollMode::Embedder(_) => {
+                document.set_attribute(root, "style", "overflow-x:clip;");
+            }
         }
         Self::build(
             document,

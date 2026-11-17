@@ -997,6 +997,41 @@ fn a_viewer_in_the_embedders_scroller_reads_its_geometry_from_the_handle() {
     assert_eq!(page.rig.state.view.get_height(), 500.0);
 }
 
+/// A viewer that mounts on a handle whose scroller is already live (the embedder switched views:
+/// the scroller and its events go on, the viewer is replaced) must read the handle's mount, size
+/// and scroll at once, and the viewer it replaces, dropped after the new one linked, must not
+/// take the new one's link with it.
+#[test]
+fn a_viewer_mounted_on_a_live_scroller_follows_it_after_the_old_viewer_drops() {
+    let mut old = PageRig::at(500.0, 720.0);
+    old.scroll_to(900.0);
+    let handle = old.handle.clone();
+    let scroller = Rc::clone(&old.scroller);
+    // The new viewer mounts before the old one is dropped, as a replaced component does.
+    let mut rig = Rig::mounted_in(Environment::default(), ScrollMode::Embedder(handle.clone()));
+    drop(old.rig);
+    let viewer = Rc::new(Scripted::default());
+    viewer.client_top.set(500.0 - 900.0);
+    rig.deliver(|_| handle.viewer_mounted(Rc::new(MountedData::new(ScriptedElement(viewer)))));
+    rig.frames_until_idle();
+    // Nothing happened on the scroller since the mount; the viewer already knows where it is.
+    assert_eq!(rig.state.view.get_height(), 720.0);
+    assert_eq!(rig.state.view.get_scroll_top(), 400.0);
+    // The document scrolls on: the new viewer follows.
+    scroller.offset.set((0.0, 5_500.0));
+    rig.deliver(|_| {
+        handle.scrolled(ScrollSample {
+            top: 5_500.0,
+            left: 0.0,
+            scroll_height: 500.0 + 1_000_000.0,
+            client_height: 720.0,
+        });
+    });
+    rig.frames_until_idle();
+    assert_eq!(rig.state.view.get_scroll_top(), 5_000.0);
+    assert!(!rig.page().contains("f0_1 = 1"), "the window left the top");
+}
+
 /// The document scroll proxy's shape: the viewer starts well down a page (heading, tabs and
 /// controls above it, more than half of a laptop viewport), and until the first scroll event
 /// the scroller has reported only its mount and its size.
@@ -1028,6 +1063,7 @@ fn the_root_in_the_embedders_scroller_is_no_scroller() {
     let page = PageRig::new();
     let rendered = page.rig.page();
     assert!(!rendered.contains("overflow-y:auto"), "{rendered}");
+    assert!(rendered.contains("overflow-x:clip"), "{rendered}");
     assert!(!rendered.contains("tabindex=\"0\""));
     let listeners = &page.rig.listeners;
     // Nothing on the viewer's own root scrolls: the handle forwards the scroller's `scroll`.
