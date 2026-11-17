@@ -10,6 +10,7 @@ use big_cabinet_core::dmeta::ResourceLimit;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
@@ -96,9 +97,9 @@ static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 /// A node that admitted intxt's cartridge, serving its handler natively, with the methods the
 /// handler calls granted to it, and the nodule enabled.
 async fn boot() -> TestNode {
-    let cartridge = intxt_core::cartridge::cartridge(intxt_core::cartridge::handler_artifact(
+    let cartridge = intxt_core::cartridge::cartridge(
         b"placeholder: the native test harness never reads the handler bytes",
-    ));
+    );
     let id = cartridge.id.clone();
     let methods = DispatchScope {
         operations: intxt_core::methods::REQUIRED_OPERATIONS
@@ -187,7 +188,7 @@ async fn write(node: &TestNode, document: &DocId, mode: WriteMode, set: BTreeMap
     let capability = capability(
         node,
         DocScope {
-            write: BTreeSet::from([document.clone()]),
+            write: BTreeMap::from([(document.clone(), DatumKinds::All)]),
             ..DocScope::default()
         },
     )
@@ -551,7 +552,7 @@ async fn long_af_test_a_note_past_the_value_budget_is_refused_by_name() {
     let capability = capability(
         &node,
         DocScope {
-            write: BTreeSet::from([receipt.doc_id.clone()]),
+            write: BTreeMap::from([(receipt.doc_id.clone(), DatumKinds::All)]),
             ..DocScope::default()
         },
     )
