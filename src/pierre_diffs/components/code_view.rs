@@ -1,6 +1,6 @@
 // Ported from @pierre/diffs 1.6.4 (tag diffs-v1.6.4, commit
 // 75e00805b44e193c0fb235c1bd9d7fadfa06acf6): packages/diffs/src/components/CodeView.ts
-// (C2: the item model; see `parity/closure_notes.md`, "CodeView").
+// (C2: the item model; C3: the scroll model, in `code_view/scroll.rs`; see `parity/closure_notes.md`, "CodeView").
 // Copyright 2025 Pierre Computer Company, Apache-2.0; see THIRD_PARTY_NOTICES.md.
 // Changes:
 // * `CodeView<LAnnotation, Caret>` is `CodeView<Host, Rendered, LAnnotation>`
@@ -29,6 +29,7 @@ mod item_options;
 mod items;
 mod layout;
 pub mod options;
+mod scroll;
 pub mod state;
 
 #[cfg(test)]
@@ -43,6 +44,9 @@ use std::rc::Weak;
 
 use self::options::CodeViewOptions;
 use self::options::compute_item_metrics;
+use self::scroll::DEFAULT_SCROLL_REBASE;
+use self::scroll::FIREFOX_SCROLL_REBASE;
+use self::scroll::ScrollRebaseConfig;
 use self::state::CodeViewLineSelection;
 use self::state::EMPTY_WINDOW_SPECS;
 use self::state::HeaderFooterHost;
@@ -67,6 +71,8 @@ use crate::types::layout::PendingCodeViewLayoutReset;
 use crate::types::layout::VirtualFileMetrics;
 use crate::types::layout::VirtualWindowSpecs;
 use crate::types::view::CodeViewItem;
+use crate::utils::dom::platform::PlatformInfo;
+use crate::utils::dom::platform::is_firefox;
 
 /// What `CodeView` reads from the platform beyond a virtualized diff's own
 /// needs. C2 has the two reads of `roundToDevicePixel` and
@@ -78,6 +84,10 @@ pub trait CodeViewHost: VirtualizedFileDiffHost {
     /// `matchMedia('(prefers-reduced-motion: reduce)').matches`; false when the
     /// platform cannot answer.
     fn prefers_reduced_motion(&self) -> bool;
+    /// `navigator.platform`, `navigator.userAgent` and the rest of what
+    /// `utils/platform.ts` reads, as `new` needs it to choose the scroll
+    /// rebase config (`isFirefox()`).
+    fn platform_info(&self) -> PlatformInfo;
 }
 
 /// The mutable fields of the class (see the header).
@@ -96,7 +106,19 @@ where
     pub(crate) pending_layout_reset: Option<PendingCodeViewLayoutReset>,
     pub(crate) render_options_revision: i64,
     pub(crate) scroll_height: f64,
+    /// The cached logical scroll position, valid while `scroll_dirty` is false.
+    pub(crate) scroll_top: f64,
+    /// How far the paged scroll window sits into the logical scroll range.
+    pub(crate) scroll_page_offset: f64,
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by scroll.rs, which C4 and C5 call")
+    )]
+    pub(crate) scroll_rebase_config: ScrollRebaseConfig,
     pub(crate) scroll_dirty: bool,
+    /// The cached viewport height, valid while `height_dirty` is false.
+    pub(crate) height: f64,
+    pub(crate) height_dirty: bool,
     pub(crate) window_specs: VirtualWindowSpecs,
     pub(crate) render_state: RenderState,
     pub(crate) item_metrics_cache: VirtualFileMetrics,
@@ -104,10 +126,6 @@ where
     pub(crate) pending_layout_anchor: Option<ScrollAnchor>,
     pub(crate) scroll_animation: Option<ScrollToAnimation>,
     pub(crate) header: HeaderFooterHost,
-    #[expect(
-        dead_code,
-        reason = "C3's getMaxScrollTopForHeight reads the footer's height"
-    )]
     pub(crate) footer: HeaderFooterHost,
     pub(crate) options: CodeViewOptions<Rendered, LAnnotation>,
     pub(crate) root: Option<NodeKey>,
@@ -159,6 +177,11 @@ where
     ) -> Rc<Self> {
         options.validate();
         let item_metrics_cache = compute_item_metrics(options.item_metrics);
+        let scroll_rebase_config = if is_firefox(&host.platform_info()) {
+            FIREFOX_SCROLL_REBASE
+        } else {
+            DEFAULT_SCROLL_REBASE
+        };
         let document = VirtualizerHost::document(&*host);
         let (container, sticky_container, sticky_offset) = (
             document.create_element("div"),
@@ -196,7 +219,12 @@ where
                     pending_layout_reset: None,
                     render_options_revision: 0,
                     scroll_height: 0.0,
+                    scroll_top: 0.0,
+                    scroll_page_offset: 0.0,
+                    scroll_rebase_config,
                     scroll_dirty: true,
+                    height: 0.0,
+                    height_dirty: true,
                     window_specs: EMPTY_WINDOW_SPECS,
                     render_state: RenderState::RESET,
                     item_metrics_cache,

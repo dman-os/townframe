@@ -15,9 +15,8 @@
 //   `Rc` instead (parity/divergences.psv).
 // * `item.item.annotations ?? []` is a fresh empty `Rc<Vec>` when absent, as a
 //   fresh `[]` is upstream.
-// * `capturePendingLayoutAnchor` returns before `getScrollAnchor` (C3) while
-//   there is no root, which is every call before C4's `setup`; past it, it
-//   `todo!`s.
+// * `capturePendingLayoutAnchor` returns while there is no root, which is every
+//   call before C4's `setup`; past it, it is `scroll.rs`'s `getScrollAnchor`.
 // * `findFirstVisibleIndex`/`findLastVisibleIndex` panic on an invalid index as
 //   upstream throws.
 
@@ -311,7 +310,7 @@ where
     /// `capturePendingLayoutAnchor(nextItems = this.idToItem)`
     pub fn capture_pending_layout_anchor(
         &self,
-        _next_items: Option<&HashMap<String, ItemRef<Host, Rendered, LAnnotation>>>,
+        next_items: Option<&HashMap<String, ItemRef<Host, Rendered, LAnnotation>>>,
     ) {
         {
             let state = self.state.borrow();
@@ -322,7 +321,8 @@ where
                 return;
             }
         }
-        todo!("C3: getScrollAnchor")
+        let anchor = self.get_scroll_anchor(self.get_scroll_top(), next_items);
+        self.state.borrow_mut().pending_layout_anchor = anchor;
     }
 
     /// `canSkipRenderForAppend(appendedTop)`

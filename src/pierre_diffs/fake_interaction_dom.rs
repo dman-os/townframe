@@ -120,6 +120,8 @@ pub struct FakeDom {
     pub device_pixel_ratio: Cell<f64>,
     /// `matchMedia('(prefers-reduced-motion: reduce)').matches` (`CodeViewHost`).
     pub prefers_reduced_motion: Cell<bool>,
+    /// `navigator` (`CodeViewHost`).
+    pub platform_info: RefCell<crate::utils::dom::platform::PlatformInfo>,
 }
 
 impl Default for FakeDom {
@@ -177,6 +179,7 @@ impl Default for FakeDom {
             world: RefCell::default(),
             device_pixel_ratio: Cell::new(1.0),
             prefers_reduced_motion: Cell::new(false),
+            platform_info: RefCell::default(),
         }
     }
 }
