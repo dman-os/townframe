@@ -13,10 +13,16 @@ import { $ } from "./utils.ts";
 // e2e that pins a sync-export trap faulting only that micro. It is not part of `testFixtures`:
 // those are components tests load by environment variable, while this one is a package the
 // shell lists and so changes what every shell shows.
+//
+// `guestProfile` is the cargo profile the guests build with. `wasm-release` (the default) is the
+// workspace's optimized guest profile, the one `dayframe_web` also builds with. `dev` is opt-in, for
+// faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
+// seconds to compile on a phone, and they burn about 10x the fuel (see below).
 export async function prepareDayframePackages(
-  { testFixtures, trapper = false }: {
+  { testFixtures, trapper = false, guestProfile = "wasm-release" }: {
     testFixtures: boolean;
     trapper?: boolean;
+    guestProfile?: "dev" | "wasm-release";
   },
 ): Promise<
   Record<string, string>
@@ -37,13 +43,15 @@ export async function prepareDayframePackages(
     : ["micro_counter", "micro_layout", "micro_lab"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
-  } --target wasm32-wasip3 --profile wasm-release`;
+  } --target wasm32-wasip3 --profile ${guestProfile}`;
   if (testFixtures) {
-    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile wasm-release`;
+    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
   }
   if (trapper) {
-    await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3 --profile wasm-release`;
+    await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3 --profile ${guestProfile}`;
   }
+  // cargo names the `dev` profile's output directory `debug`; other profiles use their own name.
+  const profileDirectory = guestProfile === "dev" ? "debug" : guestProfile;
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
     .json<{ target_directory: string; packages: { name: string }[] }>();
   const target = $.path(metadata.target_directory);
@@ -52,30 +60,36 @@ export async function prepareDayframePackages(
 
   // Prepared guest components, keyed by the guest name `component_package`/env vars use.
   const components: Record<string, [string, string]> = {
-    counter: ["wasm32-wasip3/wasm-release/micro_counter.wasm", "counter"],
-    layout: ["wasm32-wasip3/wasm-release/micro_layout.wasm", "layout"],
-    lab: ["wasm32-wasip3/wasm-release/micro_lab.wasm", "lab"],
+    counter: [
+      `wasm32-wasip3/${profileDirectory}/micro_counter.wasm`,
+      "counter",
+    ],
+    layout: [`wasm32-wasip3/${profileDirectory}/micro_layout.wasm`, "layout"],
+    lab: [`wasm32-wasip3/${profileDirectory}/micro_lab.wasm`, "lab"],
     ...(testFixtures
       ? {
         collectionProbe: [
-          "wasm32-wasip3/wasm-release/micro_collection_probe.wasm",
+          `wasm32-wasip3/${profileDirectory}/micro_collection_probe.wasm`,
           "collection-probe",
         ],
         sleeper: [
-          "wasm32-wasip3/wasm-release/examples/sleeper.wasm",
+          `wasm32-wasip3/${profileDirectory}/examples/sleeper.wasm`,
           "sleeper",
         ],
-        egress: ["wasm32-wasip3/wasm-release/examples/egress.wasm", "egress"],
+        egress: [
+          `wasm32-wasip3/${profileDirectory}/examples/egress.wasm`,
+          "egress",
+        ],
         overbudget: [
-          "wasm32-wasip3/wasm-release/examples/overbudget.wasm",
+          `wasm32-wasip3/${profileDirectory}/examples/overbudget.wasm`,
           "overbudget",
         ],
         lifecycle: [
-          "wasm32-wasip3/wasm-release/examples/lifecycle.wasm",
+          `wasm32-wasip3/${profileDirectory}/examples/lifecycle.wasm`,
           "lifecycle",
         ],
         context: [
-          "wasm32-wasip3/wasm-release/examples/context.wasm",
+          `wasm32-wasip3/${profileDirectory}/examples/context.wasm`,
           "context",
         ],
       }
@@ -83,7 +97,7 @@ export async function prepareDayframePackages(
     ...(trapper
       ? {
         trapper: [
-          "wasm32-wasip3/wasm-release/examples/trapper.wasm",
+          `wasm32-wasip3/${profileDirectory}/examples/trapper.wasm`,
           "trapper",
         ],
       }

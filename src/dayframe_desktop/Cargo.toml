@@ -11,6 +11,7 @@ path = "main.rs"
 dioxus = { workspace = true }
 ui = { workspace = true }
 dayframe_composition = { workspace = true }
+dayframe_native = { workspace = true }
 clay_docs = { workspace = true }
 clay_dioxus = { workspace = true }
 clay_host = { workspace = true }
@@ -48,6 +49,7 @@ desktop = ["dioxus/desktop"]
 blitz = [
     "dioxus/native",
     "dep:dioxus-native",
+    "dayframe_native/blitz",
     "dep:anyrender",
     "dep:anyrender_vello",
     "dep:anyrender_vello_cpu",
