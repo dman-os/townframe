@@ -55,13 +55,13 @@ crate-type = ["cdylib"]
 required-features = ["guest"]
 
 [dependencies]
-clay_collection = { workspace = true }
+#
+# internal
 method_core.workspace = true
 service_core_rs.workspace = true
-# The guest's `Context::call` is the nodule transport itself: `big_ndk`'s `wasi:http` client to
-# `dispatch.local`, not a second implementation.
-big_ndk = { workspace = true, optional = true }
 service_client_core_rs = { workspace = true, optional = true }
+
+clay_collection = { workspace = true }
 wit-bindgen = { workspace = true, features = ["async", "macros", "realloc", "async-spawn", "inter-task-wakeup"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -82,6 +82,14 @@ blake3 = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clay_rt_wasmtime = { workspace = true, optional = true }
+
+# The guest's `Context::call` is the nodule transport itself: `big_ndk`'s `wasi:http` client to
+# `dispatch.local`, not a second implementation. The guest backend builds natively (tests) and
+# as wasip3, never as wasm32-unknown-unknown, where `big_ndk` has no build contract.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dependencies]
+#
+# internal
+big_ndk = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # The lifecycle fixture decodes its CBOR `initial-context.arguments`.
