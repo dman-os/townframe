@@ -1672,7 +1672,7 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         assert!(shown.contains("url: https://github.com/o/r/pull/12"), "{shown}");
         assert!(shown.contains("Part of the port."), "{shown}");
         assert!(
-            shown.contains(&format!("dtxt:doc:{drawer}  \"Port the sync\"  0 entries")),
+            shown.contains(&format!("dtxt:doc:{drawer}  \"Port the sync\"  1 entries")),
             "{shown}"
         );
 
