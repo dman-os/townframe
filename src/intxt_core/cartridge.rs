@@ -202,6 +202,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             [AddToIntxt::XRPC.nsid, CreateIntxt::XRPC.nsid],
         );
+        // Every operation the cartridge requests is one some routine uses, so nothing is
+        // requested (and granted) that no handler calls.
+        let nodule = fixture.nodule.as_ref().unwrap();
+        for permbind in fixture.permbinds.keys() {
+            assert!(
+                nodule
+                    .routines
+                    .values()
+                    .any(|routine| routine.uses.contains_key(permbind)),
+                "no routine uses {permbind}"
+            );
+        }
         // The manifest's Lexicons are a map, so they come back in NSID order, not declaration order.
         let mut held: Vec<&str> = fixture
             .resolved
