@@ -135,6 +135,10 @@ pub struct FakeDom {
     pub active_element: Cell<Option<NodeKey>>,
     /// `element.shadowRoot.activeElement`, by host element.
     pub shadow_active_elements: RefCell<HashMap<NodeKey, NodeKey>>,
+    /// Every `scrollTo` on the clamping root: the requested `top` and the height
+    /// of the sticky spacer (the container's first child) at the moment of the
+    /// write.
+    pub scroll_writes: RefCell<Vec<(f64, f64)>>,
 }
 
 impl Default for FakeDom {
@@ -198,6 +202,7 @@ impl Default for FakeDom {
             random_values: RefCell::default(),
             active_element: Cell::new(None),
             shadow_active_elements: RefCell::default(),
+            scroll_writes: RefCell::default(),
         }
     }
 }
