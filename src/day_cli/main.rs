@@ -175,6 +175,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Carts { command } => cmds::carts::run(command).await,
         StaticCommands::Peers { command } => cmds::peers::run(command).await,
         StaticCommands::Drawers { command } => cmds::drawers::run(command).await,
+        StaticCommands::Grants { command } => cmds::grants::run(command).await,
         StaticCommands::Exec {
             nsid,
             input,
@@ -240,6 +241,12 @@ enum StaticCommands {
     Drawers {
         #[clap(subcommand)]
         command: cmds::drawers::DrawersCommands,
+    },
+    /// What cartridges may reach, and the requests they make for more
+    #[clap(visible_alias = "grant")]
+    Grants {
+        #[clap(subcommand)]
+        command: cmds::grants::GrantsCommands,
     },
     /// Execute an operation through the node's dispatch router and print the JSON answer
     #[clap(visible_alias = "x")]
