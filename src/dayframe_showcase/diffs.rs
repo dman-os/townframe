@@ -36,26 +36,29 @@ pub struct Note {
 enum DiffsView {
     Specimens,
     Pr84,
+    Pr84CodeView,
 }
 
 impl DiffsView {
-    const ALL: [Self; 2] = [Self::Specimens, Self::Pr84];
+    const ALL: [Self; 3] = [Self::Specimens, Self::Pr84, Self::Pr84CodeView];
 
     fn label(self) -> &'static str {
         match self {
             Self::Specimens => "Specimens",
             Self::Pr84 => "PR #84",
+            Self::Pr84CodeView => "PR #84 (CodeView)",
         }
     }
 }
 
 /// The tab: a view choice and the options bar over the chosen view. `DAYFRAME_LAB_DIFFS_VIEW`
-/// (`pr84`) opens that view, so a screenshot run needs no click.
+/// (`pr84`, `pr84-code-view`) opens that view, so a screenshot run needs no click.
 #[component]
 pub fn DiffsFoundation() -> Element {
     let mut view = use_signal(|| {
         match crate::lab_setting("DAYFRAME_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
             Some("pr84") => DiffsView::Pr84,
+            Some("pr84-code-view") => DiffsView::Pr84CodeView,
             _ => DiffsView::Specimens,
         }
     });
@@ -142,6 +145,7 @@ pub fn DiffsFoundation() -> Element {
             match view() {
                 DiffsView::Specimens => rsx! { Specimens { options: current, expand_unchanged: expand_unchanged(), virtualized } },
                 DiffsView::Pr84 => rsx! { pr_diff::PrView { options: current, virtualized } },
+                DiffsView::Pr84CodeView => rsx! { pr_diff::PrCodeView { options: current, virtualized } },
             }
         }
     }
