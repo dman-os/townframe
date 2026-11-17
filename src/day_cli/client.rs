@@ -31,6 +31,7 @@ use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
 use service_client_core_rs::xrpc::XrpcRequest;
 use service_client_core_rs::xrpc::XrpcResponse;
+use std::pin::Pin;
 use tower::ServiceExt;
 
 /// The bound on one request or response body, the same as the listener's.
@@ -71,13 +72,22 @@ impl Mode {
 /// bytes, which moves neither as JSON.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Raw<'a> {
-    /// A file streamed as the raw request body, so a procedure's input is never held whole.
-    pub upload: Option<&'a std::path::Path>,
+    /// The raw request body.
+    pub upload: Option<Upload<'a>>,
     /// The value of a `Range` request header, for a method that serves part of its answer.
     pub range: Option<&'a str>,
     /// Where an answer that is bytes is streamed to. An answer that is JSON, such as a method's
     /// own error, is returned as the [`Reply`] whatever this says.
     pub download: Option<&'a std::path::Path>,
+}
+
+/// Where the raw request body of a byte-bodied call comes from.
+#[derive(Debug, Clone, Copy)]
+pub enum Upload<'a> {
+    /// A file, streamed so a procedure's input is never held whole.
+    File(&'a std::path::Path),
+    /// Bytes the caller already holds.
+    Bytes(&'a [u8]),
 }
 
 /// What the node answered: the HTTP status and the JSON body, whatever the transport. A
@@ -310,12 +320,20 @@ impl NodeClient {
         use tokio::io::AsyncWriteExt;
         ensure_nsid(nsid)?;
         let query = query_pairs(params)?;
+        // Either source is sent as a stream of chunks, so the two transports below share one path.
         let upload = match raw.upload {
-            Some(path) => Some(
-                tokio::fs::File::open(path)
+            Some(Upload::File(path)) => {
+                let file = tokio::fs::File::open(path)
                     .await
-                    .wrap_err_with(|| format!("opening {}", path.display()))?,
-            ),
+                    .wrap_err_with(|| format!("opening {}", path.display()))?;
+                Some(tokio_util::io::ReaderStream::new(
+                    Box::pin(file) as Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>
+                ))
+            }
+            Some(Upload::Bytes(bytes)) => Some(tokio_util::io::ReaderStream::new(Box::pin(
+                std::io::Cursor::new(bytes.to_vec()),
+            )
+                as Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>)),
             None => None,
         };
         let header = |headers: &http::HeaderMap, name: http::HeaderName| {
@@ -332,12 +350,10 @@ impl NodeClient {
                     HttpMethod::Get => http.get(url),
                 }
                 .query(&query);
-                if let Some(file) = upload {
+                if let Some(chunks) = upload {
                     request = request
                         .header(http::header::CONTENT_TYPE, "application/octet-stream")
-                        .body(reqwest::Body::wrap_stream(
-                            tokio_util::io::ReaderStream::new(file),
-                        ));
+                        .body(reqwest::Body::wrap_stream(chunks));
                 }
                 if let Some(range) = raw.range {
                     request = request.header(http::header::RANGE, range);
@@ -367,10 +383,10 @@ impl NodeClient {
                     request = request.header(http::header::RANGE, range);
                 }
                 let body = match upload {
-                    Some(file) => {
+                    Some(chunks) => {
                         request =
                             request.header(http::header::CONTENT_TYPE, "application/octet-stream");
-                        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file))
+                        axum::body::Body::from_stream(chunks)
                     }
                     None => axum::body::Body::empty(),
                 };

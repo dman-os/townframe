@@ -235,17 +235,6 @@ impl TestNode {
             })
     }
 
-    /// Admits `cartridge` after boot. For a cartridge whose nodule only holds records, which no
-    /// executor hosts, so [`TestNodeBuilder::with_nodule`] has nothing to register for it; a
-    /// cartridge with a handler is registered there instead.
-    pub async fn admit(&self, cartridge: Cartridge) -> NoduleRecord {
-        self.nodules(AdmitNodule {
-            cartridge,
-            drawers: None,
-        })
-        .await
-    }
-
     /// Enables the nodule of `cartridge_id`, which starts hosting it.
     pub async fn enable(&self, cartridge_id: &CartridgeId) -> NoduleRecord {
         self.set_enabled(cartridge_id, true).await
