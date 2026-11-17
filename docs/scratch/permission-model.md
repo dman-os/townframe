@@ -6,8 +6,8 @@ Updated: 2026-11-17
 Scope: The permission model from a cartridge's manifest to the capabilities its nodule routines and micros hold, and the gaps in today's minting path. Everything here is proposed unless it cites an accepted ADR.
 
 Written by the nodules lane with the claytxt lane: sections 3, 5 and
-the micro half of 8 are claytxt's (from `docs/scratch/permission-model-micro.md`, `381a0869` on
-`docs/claytxt-design`), merged here. Not accepted. This is the week's focus (ledger D47): the permission model as
+the micro half of 8 are claytxt's (from `docs/scratch/permission-model-micro.md`, revision 2 at
+`bbf871d5` on `docs/claytxt-design`), merged here. Not accepted. This is the week's focus (ledger D47): the permission model as
 one story, the same for both runtimes a cartridge contributes.
 
 Related: ADR 022 (actors and grants), ADR 027 (cartridges and nodules), ADR 028 (requests,
@@ -15,7 +15,7 @@ necessity, resolution), ADR 037 (holder-bound capabilities), ADR 044 (configurat
 ADR 047 (routines, permbinds, per-routine capabilities), "Clay on the node" (#129, signed by the
 nodules lane 2026-11-17).
 
-## Operator review, 2026-11-17 (direction; §1, 2, 4, 6 and 10 are revised to it, §3, 5 and 8 next)
+## Operator review, 2026-11-17 (direction; every section is revised to it)
 
 1. **Grants happen at runtime too, not only at install.** Like Android asking for the camera after
    the app has started: a cartridge may request access while it runs. The one-line story gains a
@@ -118,43 +118,44 @@ cartridges that use them are analysed without network access.
 
 ## 3. Declaration: the micro side [claytxt]
 
-**A micro declares `uses` exactly as a routine does, once per micro.** The keys name the cartridge's permbinds,
-and each asks no more than its permbind declares. Admission applies the routine rule unchanged. A micro has no
-routines, so its `uses` sits on the micro contribution (`Contribution::Micro`, "Clay on the node" §5), and the
-host mints one micro capability from `uses` ∩ `micro.grant/*`.
+**A micro declares `uses` exactly as a routine does, once per micro.** Each key names one of the cartridge's
+permbinds and asks no more than it declares; admission applies the routine rule unchanged. A micro has no routines,
+so its `uses` sits on the micro contribution (`Contribution::Micro`, "Clay on the node" §5). Its handle is derived
+like a routine's (§4.1): `uses`, narrowed by the permbinds' rules, intersected with the **cartridge's** grants.
+There are no micro-specific grant datums: `grant/drawer/…`, `grant/cartridge/…`, `grant/origin/…` and
+`grant/method/…` feed the micro and the nodule alike, and each one's `uses` keeps them apart. The default shape is
+§2's: a datum kind in a drawer, with broad access an explicit permbind.
 
-6.1 fits as written: the `micros` service actor holds, as a delegator, the union of what its micros may be
-granted, and mints each micro's handles with the micro's actor as subject. 6.2 fits too: a micro whose `uses`
-binds `blobs.put` gets a blobs handle the same way a routine does.
+6.1 fits as written: the `micros` service actor holds the union as a delegator and mints each micro's handles with the
+micro's actor as subject. So does 6.2: a micro binding `blobs.put` gets a blobs handle like a routine.
 
 Asymmetries with the nodule side, stated explicitly:
-1. **When the capability is minted.** A routine's capability is minted when its cartridge starts. A micro's is
-   minted when its host binds an incarnation. Micros start eagerly or on demand, and a disabled micro holds
-   nothing. Every mount of the same incarnation shares that one micro capability; there is no capability per
-   mount or per surface. Dropping the incarnation retracts it (Clay's shutdown is RAII: the capability is owned by
-   the incarnation).
-2. **The guest never holds the capability bytes.** The host attaches the micro's capability to each
-   `dispatch.local` call and each docs call. The guest only names the operation. This matters more for micros than
-   for nodules, because micro code is user-editable (TS, the end-user tier), so the handle must stay out of the
-   guest's memory. On the web the page itself is the host, and the micro still runs in wcmp's sandbox, so the
-   same holds.
-3. **UI sinks are reads too.** A micro reads a blob or a datum not only through `fetch` but also by rendering it:
-   an `<img>` whose source is a blob, a CSS `url()`. These never become network requests (micros have no
-   egress). The host resolves them on the surface and checks them against the micro's blobs or docs handle. A
-   blob that only a sink reads still needs a `uses` entry, so that "this micro can show your photos" is visible
-   in the manifest. Nodules have no sinks.
-4. **Clay-local access that isn't a node permbind.** A micro also declares access that never reaches the node:
-   - collections it shares with other micros (ADR 031's manifest-declared collections);
-   - presentations it publishes or embeds (`mount-component`).
-
-   The host enforces these through the capability bank, and they are not granted through `micro.grant/*`. Proposal:
-   they stay in the Clay manifest under ADR 028/031's request rules and aren't modelled as permbinds, because no
-   service actor mints them. They do show on the consent screen (§5) beside the permbinds, so a person sees one
-   list. This is the one place the two surfaces differ in kind and not only in detail; see §10.
-5. **Calling its own cartridge's nodule.** A micro calling an operation its own cartridge's nodule serves needs a
-   `#method` permbind and a `uses` entry, like any other call. ADR 047's confused-deputy rule applies within a
-   cartridge too: the micro passes none of its access, and the nodule acts with its own. That keeps one rule. The
-   alternative, implicit access to one's own nodule, is what a cartridge-level parent actor would enable (§8).
+1. **When the handle is minted.** A routine's handle is minted when the cartridge starts. A micro's is minted when its
+   host binds an incarnation (micros start eagerly or on demand; a disabled micro holds nothing). It is shared by every
+   mount of that incarnation, and retracted when the incarnation drops (Clay shutdown is RAII). A grant change
+   re-mints it under 6.4's order.
+2. **The guest never holds the handle's bytes.** The host attaches the handle to each `dispatch.local` and docs call;
+   the guest names only the operation. This matters more for micros, whose code is user-editable (the TS tier). On the
+   web, the page is the host and the micro still runs in wcmp's sandbox, so the same holds.
+3. **UI sinks are reads and sends.** A micro reads not only through `fetch` but by rendering: an `<img>` whose source
+   is a blob, a CSS `url()`. The host resolves a sink on the surface and checks it against the micro's handle, as for
+   a call. A sink source outside the node (an `https:` image) is network access and needs an `#origin` permbind like
+   `fetch` does; without one the host refuses it rather than loading it (micros have no ambient egress). §9a counts
+   sink reads as reads and external sinks as outward sends, so "this micro can show your photos" and "this micro
+   loads images from Z" are visible to the analysis. Nodules have no sinks.
+4. **Withdrawn (operator review item 8).** Collections are "data from cartridge Y", granted at install through
+   `grant/cartridge/<Y>` like other access; they are not a Clay-only kind. What follows for Clay:
+   - A collection shared between micros of the **same** cartridge needs no grant; it is the cartridge's own data
+     (like a nodule's local state), declared in `uses` so §9a sees the flow.
+   - A collection another cartridge publishes is reached through a permbind on that cartridge's data, granted as
+     `grant/cartridge/<Y>`. The capability bank keeps enforcing it on the Clay side; the bank's handle is minted from
+     that permbind, so it is one more domain handle under 6.2, not a separate grant path.
+   - **Embedding another cartridge's presentation** (`mount-component`) is a reach to Y's exported surface, so it is a
+     `#method`-shaped permbind on Y's presentation, proposed and accepted at install (§4.4). The embedded micro renders
+     with Y's own handle, never the embedder's (the confused-deputy rule). Props the embedder passes are a flow from
+     X to Y, which §9a counts.
+5. **Calling its own cartridge's nodule.** Still a declared `#method` in `uses`, like any call; one grant per
+   cartridge (§4.1) means the person is not asked twice for it, but the micro's `uses` must still name it.
 
 ## 4. Grants [both]
 
@@ -211,38 +212,43 @@ rules forbid it), not that nobody has said yes yet.
 - An upgrade that widens required access leaves the cartridge not startable until granted
   (ADR 028 §3).
 
-## 5. Consent and at-runtime resolution [claytxt]
+## 5. Consent and runtime requests: the micro host's side [claytxt]
 
-**At install** (ADR 047 §10): the install flow proposes a candidate for each permbind, and the person accepts or
-changes it.
-- The screen is per cartridge, with one list. Each entry shows the permbind's `description`, its access
-  (read/write/create/delete, or "can call X"), whether it is required, and which runtime asks for it ("the app"
-  for the micro, "in the background" for the nodule). Each runtime is granted separately, as `micro.grant/*` and
-  `nodule.grant/*`.
-- Clay-local requests (§3, asymmetry 4) appear in the same list.
-- Nothing is granted without being shown. Declining an optional permbind leaves the cartridge startable; declining
-  a required one leaves it "needs configuration" (ADR 028 §3).
+§4.2 defines one pending-request queue on every surface. This section is what the micro host and the shell add to it.
 
-**At runtime** (`resolution: atRuntime`): **the picker is an introduction, in the Sandstorm powerbox sense.**
-- The micro asks through the MDK for a permbind it declared with `atRuntime`, for example
-  `ctx.pick(permbind)`, an async call answering with a handle or "declined". It never names a candidate.
-- The **shell** draws the picker, not the micro. It is a trusted surface that the asking micro can neither style
-  nor read, so the micro can't spoof it and never sees the candidates it wasn't given. It shows the cartridge, the
-  permbind's description and the access.
-- What the person picks comes back as a handle over exactly that drawer, with exactly that access. Nothing else
-  becomes visible.
+**Asking.** A micro asks through an MDK host service: `ctx.request(permbind)` (or `ctx.request_drawer(permbind)` for
+a drawer-set permbind, where the person picks the drawer). The host files the request into the node's queue on the
+cartridge's behalf, under the micro's actor; the micro never writes it. The call returns a future that resolves to:
+- `Granted`: answered "allow" or "only this time". The host re-mints the micro's handle (6.4) **before** resolving,
+  so the micro's next call succeeds;
+- `Declined`: answered no. §10 decides how long the same request stays suppressed;
+- the future stays pending while nobody has answered. The micro may drop it; the request stays in the queue.
 
-**Does a pick become a grant?** Proposal: **one-shot by default, with an explicit "remember"**, like Android's
-"only this time" versus "allow":
-- A one-shot pick is an introduction owned by the incarnation. It is minted under the micro's actor and retracted
-  when the incarnation ends. No grant datum is written.
-- "Remember" writes `micro.grant/<permbind>/<drawerId>` through the cartridges service's `setGrant`, never through
-  the micro. The micro capability is re-minted from it and shows in the cartridge's settings, where it can be
-  revoked.
+A micro does not ask for what its `uses` doesn't declare: admission already refuses it, and `request` takes only a
+declared permbind.
 
-**Nodules and `atRuntime`.** A routine has no surface to show a picker on. Proposal: a nodule's `atRuntime`
-permbind is resolved through the cartridge's settings screen, which the shell draws, and always becomes a grant.
-There is no one-shot introduction for routines, because no incarnation exists to own it. See §10.
+**Missing authority from a call.** A call that fails with `MissingAuthority` for the micro's own cartridge (§4.3)
+carries the request the runtime filed, if any. The MDK lets the micro await that request (`ctx.await_request(r)`)
+instead of filing a second one. Proposal: the MDK never files implicitly on a failed call; a micro asks explicitly,
+so a prompt is always tied to something the person just did.
+
+**The prompt is the shell's.** The person sees one prompt, drawn by the shell on a trusted surface the micro can
+neither style nor read:
+- It names the cartridge and asks in the person's nouns (item 6): "may *Photos* read your *Camera roll* drawer?",
+  "may *Photos* talk to services at `example.com`?". Never a micro, routine or permbind name. The §9a risks of
+  saying yes are shown beside it.
+- Answers: **Allow** (writes the grant datum through `setGrant`), **Only this time** (a grant that ends with the
+  boot, item 3; an incarnation that restarts within the boot keeps it), **Don't allow**.
+- For a drawer-set permbind, the prompt is the powerbox: the person picks among drawers the micro never sees, and
+  only the pick is granted.
+- **When it appears.** If the asking micro's cartridge has a visible surface, the shell shows the prompt over it. If
+  not (a background incarnation, or a request filed by a routine), it goes to the shell's pending list and the CLI
+  queue only, with no interruption. One request is answered once, on whichever surface the person uses.
+
+**Another cartridge's missing authority** (item 2). When X's micro calls Y's operation and gets Y's
+`MissingAuthority { cartridge: Y, request }`, X may show "Y needs permission for this" and offer the request. The
+prompt is still the shell's and is about Y: X can surface Y's request but never answer it, and answering it changes
+only Y's grants. X never gains anything from it.
 
 ## 6. Minting and enforcement [nodules]
 
@@ -323,22 +329,10 @@ cartridge-level parent, until something needs one that the config document canno
 
 ### Micro half [claytxt]
 
-Today the two subsystems are parallel: operator → `micros` → one micro actor, and operator → `nodules` → one
-nodule actor. Neither side's call path depends on a parent ("Clay on the node" §2; 6.1 mints under the service
-actor whatever the tree above the subject looks like).
-
-From the micro side, a parent `cartridge` actor over both would buy three things:
-- **One consent and audit view.** Mostly there already: both runtimes' grants live in one config document, so
-  the consent screen (§5) groups by cartridge without an actor.
-- **Revoking everything a cartridge can do in one step.** Also reachable without a parent: disabling the
-  cartridge retracts both runtimes' capabilities.
-- **Implicit access between a cartridge's own runtimes** (§3, asymmetry 5). This is the only thing a parent would
-  change, and it weakens the one rule that every call is declared.
-
-Recommendation from the micro side: **keep the subsystems parallel**, with no parent, until something needs one
-that the config document can't give. Every micro-to-own-nodule call stays a declared `#method`. Revisit the parent
-with the cartridge consent ADR if cross-runtime delegation inside a cartridge (a micro handing its nodule a
-picked drawer) turns out to need more than passing a handle in the call, which ADR 047 already allows.
+The operator's item 6 settles the person-facing side: the person sees only the cartridge, in one consent and audit
+view, and §4.1 puts grants on the cartridge, not on an actor. So a parent actor is not needed for consent or audit.
+That leaves only implicit access between a cartridge's own runtimes, which §3 asymmetry 5 rejects. Keep the
+`micros` and `nodules` subsystems parallel underneath, as the nodule half agrees.
 
 ### Nodule half [nodules]
 
@@ -407,13 +401,12 @@ Still open:
 
 Micro side [claytxt]:
 
-- **Clay-local access** (§3, asymmetry 4): should collections and presentations become permbind kinds, so that
-  one ACL covers everything a cartridge holds? Or do they stay Clay manifest requests shown beside the permbinds?
-  This proposal is the latter.
-- **One-shot versus remember** (§5): is one-shot the right default for picks, or should a pick become a grant
-  unless the person declines?
-- **UI sinks** (§3, asymmetry 3): where does a sink read check its handle? On the host surface, as proposed, or
-  through a docs/blobs call the host makes for the micro? The answer decides how `<img>` of a blob works on Wry
-  and Blitz.
-- **Nodule `atRuntime`** (§5): resolved only through settings, or may a cartridge's micro pick on its nodule's
-  behalf and hand the result over?
+The earlier one-shot-versus-remember question is answered by §4.2 (the boot-scoped "only this time"), the Clay-local
+access question by item 8, and the nodule `atRuntime` question by §4.2 (one queue, no `atRuntime`). Still open:
+1. **Where a sink checks its handle** (§3 asymmetry 3): on the host surface, as proposed, or through a docs or blobs
+   call the host makes for the micro? This decides how `<img>` of a blob works on Wry and Blitz.
+2. **Embedding as a `#method` reach** (§3 asymmetry 4): is a presentation an operation of Y's, for the permbind and
+   the analysis, or does it need its own kind?
+3. **Explicit requests only** (§5): should the MDK ever file a request on a failed call, or always leave it to the
+   micro?
+4. **Prompts for invisible requesters** (§5): pending list only, or a system notification on Android and desktop?
