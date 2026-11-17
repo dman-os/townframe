@@ -3,7 +3,8 @@
 Status: draft, 2026-11-12. The operator answered both rounds on 2026-11-12 (recorded per section). The operator
 reviewed the whole on 2026-11-17 and likes it; §6 is now settled. Two conditions remain before it is accepted: it
 must work for TypeScript micros as well as Rust ones (see "TypeScript micros" in §3), and the nodules lane must
-sign it off, because the micro and nodule surfaces are meant to be as isomorphic as possible.
+sign it off, because the micro and nodule surfaces are meant to be as isomorphic as possible. Nodules lane, 2026-11-17:
+signed.
 Number: to be assigned when it moves to `docs/adrs/` (ADRs 029–031 are Clay's; the node lane is at
 045 on `feat/big-node-next`). The app this serves is **daytxt** (the user-facing name, spelled with TXT; "Dayframe"
 is free for other use).
@@ -231,8 +232,7 @@ None from the first two rounds. The cartridge-level parent actor (§2) waits for
 consent ADR.
 
 Before acceptance (2026-11-17):
-- **Nodules sign-off.** §1 and §3–§6 are signed off (2026-11-17). §2 was revised to ADR 047 the same day, at their
-  request, and their sign-off on the revised §2 is pending.
+- **Nodules sign-off.** Nodules lane, 2026-11-17: signed. This includes §2 as revised to ADR 047 at their request.
 - **Placement list.** Which micros stay native under §6.
 
 Order (operator, 2026-11-17): this ADR is delivered before the TypeScript spike in `micro-runtime.md`, so the API
