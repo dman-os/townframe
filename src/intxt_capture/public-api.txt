@@ -57,6 +57,7 @@ pub intxt_capture::host::fn sessions_in (sessions_dir : & Path , root : & Path) 
 pub intxt_capture::identity::fn resolve (path : & Path) -> Result < Option < Identity > , Error >
 pub intxt_capture::observe::fn observe (state : & WorktreeState , identity : Identity , boundaries : & [& Snapshot] , import : & [String] ,) -> Result < (Observation , WorktreeState) , Error >
 pub intxt_capture::pack::fn build (git : & Git , request : & PackRequest) -> Result < Pack , Error >
+pub intxt_capture::pack::fn unified_diff (git : & Git , base : Option < & str > , tip : & str , max_bytes : u64 ,) -> Result < Option < Vec < u8 > > , Error >
 pub intxt_capture::revisions::fn commit_of (git : & Git , name : & str) -> Result < String , Error >
 pub intxt_capture::revisions::fn commits_of (git : & Git , revisions : & Revisions) -> Result < Vec < String > , Error >
 pub intxt_capture::revisions::fn head_branch (git : & Git) -> Result < Option < String > , Error >
