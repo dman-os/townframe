@@ -280,3 +280,7 @@ What the stress test asks of Clay, beyond the needs table:
 - **The node stack** (big-node-next, split as #93-#119, node-01 to node-22) lands after the operator reviews all
   of it. Our node-lane branches (holder, cart-micros, micro-dispatch, datum-client, claytxt-node) rebase once it
   lands. `stack/node-14-nsid` is the main-equivalent base if we need one sooner.
+- **Flaky test to pin:** `dayframe_desktop e2e::layout::hiding_a_native_panel_leaves_the_layout_mounted`
+  (wasmi runtime, 6 hide/show rounds). It takes 59 s alone on the mothership, 75 s (passing on retry) and 111 s in
+  #80's pre-merge CI, and it timed out at 120 s under load. Not caused by the main merge. Instrument where the time
+  goes before tuning anything.
