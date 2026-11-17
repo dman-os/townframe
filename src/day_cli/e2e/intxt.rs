@@ -936,6 +936,7 @@ async fn intxt_add_copies_the_rewrites_the_hook_reported() {
     use crate::cmds::intxt::capture;
     use crate::cmds::intxt::package::Named;
     use crate::cmds::intxt::package::Packaging;
+    use big_cabinet_core::datum::DatumMember;
     use intxt_core::client::Caller;
     use intxt_core::work;
     use service_utils_rs::RequestContext;
