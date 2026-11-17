@@ -28,10 +28,17 @@ use clay_host::ComponentRef;
 use clay_host::Host;
 use clay_host::Instance;
 use clay_surface::AttributeValue;
+use clay_surface::ElementAction;
+use clay_surface::ElementCommand;
+use clay_surface::ElementRead;
 use clay_surface::Event;
 use clay_surface::EventResponse;
 use clay_surface::Mutation;
 use clay_surface::PresentationError;
+use clay_surface::ScrollAlign;
+use clay_surface::ScrollBehavior;
+use clay_surface::ScrollIntoView;
+use clay_surface::ScrollOffsets;
 use clay_surface::SurfaceSession;
 use clay_surface::SurfaceSink;
 use tokio::sync::oneshot;
@@ -403,11 +410,47 @@ fn convert_mutation(mutation: wit_presentation::Mutation) -> Mutation<Resource<W
             Mutation::SetAttribute((name, ns, convert_attribute_value(value)))
         }
         wit_presentation::Mutation::SetText(value) => Mutation::SetText(value),
+        wit_presentation::Mutation::SetStyleSheet(sheet) => Mutation::SetStyleSheet(sheet),
         wit_presentation::Mutation::AddEventListener(name) => Mutation::AddEventListener(name),
         wit_presentation::Mutation::RemoveEventListener(name) => {
             Mutation::RemoveEventListener(name)
         }
         wit_presentation::Mutation::Remove => Mutation::Remove,
+    }
+}
+
+fn convert_element_command(command: wit_presentation::ElementCommand) -> ElementCommand {
+    use wit_presentation::ElementAction as Wire;
+    let behavior = |behavior| match behavior {
+        wit_presentation::ScrollBehavior::Instant => ScrollBehavior::Instant,
+        wit_presentation::ScrollBehavior::Smooth => ScrollBehavior::Smooth,
+    };
+    let align = |align| match align {
+        wit_presentation::ScrollAlign::Start => ScrollAlign::Start,
+        wit_presentation::ScrollAlign::Center => ScrollAlign::Center,
+        wit_presentation::ScrollAlign::End => ScrollAlign::End,
+        wit_presentation::ScrollAlign::Nearest => ScrollAlign::Nearest,
+    };
+    ElementCommand {
+        request: command.request,
+        action: match command.action {
+            Wire::Scroll(to) => ElementAction::Scroll(ScrollOffsets {
+                left: to.left,
+                top: to.top,
+                behavior: behavior(to.behavior),
+            }),
+            Wire::ScrollIntoView(view) => ElementAction::ScrollIntoView(ScrollIntoView {
+                behavior: behavior(view.behavior),
+                vertical: align(view.vertical),
+                horizontal: align(view.horizontal),
+            }),
+            Wire::SetFocus(focus) => ElementAction::SetFocus(focus),
+            Wire::Read(what) => ElementAction::Read(match what {
+                wit_presentation::ElementRead::ClientRect => ElementRead::ClientRect,
+                wit_presentation::ElementRead::ScrollOffset => ElementRead::ScrollOffset,
+                wit_presentation::ElementRead::ScrollSize => ElementRead::ScrollSize,
+            }),
+        },
     }
 }
 
@@ -468,6 +511,19 @@ impl wit_presentation::HostSurface for WasmStoreState {
         Ok(self
             .presentation
             .apply(&surface, &converted)
+            .map_err(convert_error))
+    }
+
+    fn element_command(
+        &mut self,
+        surface: Resource<Surface>,
+        element: u32,
+        command: wit_presentation::ElementCommand,
+    ) -> wasmtime::Result<Result<(), wit_presentation::PresentationError>> {
+        let surface = self.table.get(&surface)?;
+        Ok(self
+            .presentation
+            .element_command(surface, element, convert_element_command(command))
             .map_err(convert_error))
     }
 

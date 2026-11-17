@@ -48,7 +48,7 @@ async fn activate(context: Context) -> Result<(), Error> {
 
 clay_mdk::export_micro!(activate, micro_layout_manifest::manifest);
 
-/// The layout's model and view in one root-scope render. First the app bar, then the toggles, one
+/// The layout's model and view in one render. First the app bar, then the toggles, one
 /// per installed panel (the viewer's way to edit the arrangement), then the arrangement itself.
 fn view(
     panels: Collection<String, Panel>,

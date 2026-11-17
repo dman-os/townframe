@@ -19,6 +19,14 @@ pub fn replay<C>(
             "component slots require a composition renderer".into(),
         ));
     }
+    if batch
+        .iter()
+        .any(|mutation| matches!(mutation, Mutation::SetStyleSheet(_)))
+    {
+        return Err(PresentationError::Unsupported(
+            "stylesheets require a surface tree renderer".into(),
+        ));
+    }
     let element = |id: NodeId| ElementId::from_raw(id as usize);
     for mutation in batch {
         match mutation {
@@ -29,6 +37,7 @@ pub fn replay<C>(
             Mutation::CreateElement((tag, ns)) => to.create_element(tag, ns.as_deref()),
             Mutation::CreateText(value) => to.create_text(value),
             Mutation::MountComponent(_) => unreachable!("component slots rejected before replay"),
+            Mutation::SetStyleSheet(_) => unreachable!("stylesheets rejected before replay"),
             Mutation::CloneNode => to.clone(),
             Mutation::AppendChildren(m) => to.append_children(*m as usize),
             Mutation::ReplaceWith(m) => to.replace_with(*m as usize),

@@ -1223,6 +1223,76 @@ async fn guest_blocking_in_dispatch_fails_as_trap_not_panic_or_pending() {
     host.close();
 }
 
+/// The guest `WasiCtx` grants nothing (`WasmStoreState::new`), although the linker offers all of
+/// WASI p3 including sockets and filesystem. The `egress` fixture tries TCP, UDP, name lookup,
+/// directory listing, absolute and relative file opens when it mounts and renders what each
+/// returned; every channel must fail and the environment must be empty. Adding
+/// `inherit_network()`, `allow_*`, a preopen, or an env var to the context breaks this test.
+#[tokio::test]
+async fn guest_wasi_context_grants_no_network_filesystem_or_environment() {
+    struct CapturingSink(Mutex<Vec<String>>);
+
+    impl SurfaceSink<ComponentRef> for CapturingSink {
+        fn is_live(&self) -> bool {
+            true
+        }
+
+        fn apply(&self, edits: &[Mutation<ComponentRef>]) -> Result<u64, PresentationError> {
+            let mut texts = self.0.lock().unwrap();
+            for edit in edits {
+                if let Mutation::CreateText(text) = edit {
+                    texts.push(text.clone());
+                }
+            }
+            Ok(0)
+        }
+
+        fn withdraw(&self) {}
+    }
+
+    let host = Host::new();
+    let owner = host.start("egress");
+    let package = WasmPackage::from_env("egress")
+        .await
+        .expect("prepared egress component is valid");
+    let (runtime, driver) =
+        WasmRuntime::initialize(&host, owner.clone(), &package, InitialContext::default())
+            .await
+            .unwrap();
+    let sink = Arc::new(CapturingSink(Mutex::new(Vec::new())));
+    let session = runtime
+        .mount("view", Arc::clone(&sink) as _)
+        .unwrap_or_else(|error| {
+            panic!(
+                "the probe mounts: {error:?}, fault {:?}",
+                host.fault(&owner)
+            )
+        });
+    let reports = sink.0.lock().unwrap().clone();
+    let [report] = reports.as_slice() else {
+        panic!("the probe renders one report, got {reports:?}");
+    };
+    let attempts: std::collections::BTreeMap<&str, &str> = report
+        .split(';')
+        .map(|attempt| attempt.split_once('=').expect("name=outcome"))
+        .collect();
+    for channel in ["tcp", "udp", "dns", "read_dir", "open", "open_relative"] {
+        let outcome = attempts
+            .get(channel)
+            .unwrap_or_else(|| panic!("{channel} missing from {report}"));
+        assert!(
+            outcome.starts_with("err("),
+            "{channel} must fail inside the guest, got {outcome}: {report}"
+        );
+    }
+    assert_eq!(attempts["env"], "0", "{report}");
+    // The program name is the only argument a command-line guest sees; none are granted.
+    assert!(attempts["args"].parse::<usize>().unwrap() <= 1, "{report}");
+    drop(session);
+    drop(driver);
+    host.close();
+}
+
 /// A guest whose `dispatch` commits a batch over the surface mutation budget faults only its own
 /// micro: the surface is withdrawn, the instance closes, and the budget is the recorded cause,
 /// reached through the guest's graceful `Revoked` unwind, not a trap. Pinned by

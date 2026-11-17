@@ -19,7 +19,8 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                                  x86_64 is what an emulator on this host runs
                 --release        release profile (unsigned unless Dioxus.toml configures signing)
                 --guest-profile <dev|wasm-release>  cargo profile of the bundled Wasm guests,
-                                 default dev (15 to 17 MB components, slow to compile on a phone)
+                                 default wasm-release; dev builds faster but its 15 to 17 MB components
+                                 compile slowly on a phone and burn about 10x the fuel
                 --install        adb install the APK on the attached device
   web         build and serve dayframe_web (--build: build only)
   showcase    run the design showcase (dayframe_showcase) in a webview (Wry)
@@ -76,7 +77,7 @@ switch (command) {
     const guestProfileFlag = rest.indexOf("--guest-profile");
     const guestProfile = guestProfileFlag >= 0
       ? rest[guestProfileFlag + 1]
-      : "dev";
+      : "wasm-release";
     if (guestProfile !== "dev" && guestProfile !== "wasm-release") {
       throw new Error(
         `--guest-profile must be dev or wasm-release, got ${guestProfile}`,

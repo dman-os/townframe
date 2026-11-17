@@ -32,18 +32,23 @@ pub fn AppBar(
     #[props(default)] skin: AppBarSkin,
 ) -> Element {
     let state = if leading.is_some() { "leading" } else { "bare" };
-    let style = format!(
-        "display:flex;align-items:center;min-width:0;position:relative;z-index:{}",
-        Layer::AppBar.css()
-    );
+    let layer = Layer::AppBar.css();
     rsx! {
-        header { class: skin.root, "data-state": state, style,
+        header {
+            class: skin.root,
+            "data-state": state,
+            display: "flex",
+            align_items: "center",
+            min_width: "0",
+            position: "relative",
+            z_index: "{layer}",
+
             if let Some(leading) = leading {
-                div { class: skin.leading, style: "flex:none", {leading} }
+                div { class: skin.leading, flex: "none", {leading} }
             }
-            h2 { class: skin.title, style: "flex:1 1 0;min-width:0", "{title}" }
+            h2 { class: skin.title, flex: "1 1 0", min_width: "0", "{title}" }
             if let Some(trailing) = trailing {
-                div { class: skin.trailing, style: "flex:none", {trailing} }
+                div { class: skin.trailing, flex: "none", {trailing} }
             }
         }
     }

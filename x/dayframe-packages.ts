@@ -14,11 +14,12 @@ import { $ } from "./utils.ts";
 // those are components tests load by environment variable, while this one is a package the
 // shell lists and so changes what every shell shows.
 //
-// `guestProfile` is the cargo profile the guests build with. `dev` (the default) emits 15 to 17
-// MB unoptimized components that Wasmtime needs seconds to compile on a phone; `wasm-release`
-// is the workspace's optimized guest profile (the one `dayframe_web` also builds with).
+// `guestProfile` is the cargo profile the guests build with. `wasm-release` (the default) is the
+// workspace's optimized guest profile, the one `dayframe_web` also builds with. `dev` is opt-in, for
+// faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
+// seconds to compile on a phone, and they burn about 10x the fuel.
 export async function prepareDayframePackages(
-  { testFixtures, trapper = false, guestProfile = "dev" }: {
+  { testFixtures, trapper = false, guestProfile = "wasm-release" }: {
     testFixtures: boolean;
     trapper?: boolean;
     guestProfile?: "dev" | "wasm-release";
@@ -38,7 +39,7 @@ export async function prepareDayframePackages(
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3 --profile ${guestProfile}`;
   if (testFixtures) {
-    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
+    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
   }
   if (trapper) {
     await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3 --profile ${guestProfile}`;
@@ -67,6 +68,10 @@ export async function prepareDayframePackages(
         sleeper: [
           `wasm32-wasip3/${profileDirectory}/examples/sleeper.wasm`,
           "sleeper",
+        ],
+        egress: [
+          `wasm32-wasip3/${profileDirectory}/examples/egress.wasm`,
+          "egress",
         ],
         overbudget: [
           `wasm32-wasip3/${profileDirectory}/examples/overbudget.wasm`,

@@ -190,7 +190,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     pub(super) fn validate_mutation(
-        &self,
+        &mut self,
         mutation: &Mutation<C>,
         bytes: &mut usize,
         work: &mut usize,
@@ -245,6 +245,20 @@ impl<C: Clone> SurfaceTree<C> {
                 self.validate_attribute(top, name, ns.as_deref(), value, bytes, work)
             }
             Mutation::SetText(text) => self.validate_text(top, text, bytes, work),
+            Mutation::SetStyleSheet(sheet) => {
+                Self::charge_work(work, 1 + sheet.len() / 64)?;
+                Self::charge_string(bytes, sheet)?;
+                // The stored sheet is charged to the surface's retained budget like node bytes
+                // are, and a replacement releases the sheet it replaces. The raw length bounds
+                // the sanitized one, so this check is conservative.
+                let mut retained = self.retained_bytes - self.stylesheet.len();
+                Self::charge(
+                    &mut retained,
+                    sheet.len(),
+                    Self::MAX_RETAINED_BYTES,
+                    "retained byte limit",
+                )
+            }
             Mutation::AddEventListener(name) | Mutation::RemoveEventListener(name) => {
                 self.validate_listener(top, mutation, name, bytes)
             }
@@ -279,7 +293,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     fn validate_create_element(
-        &self,
+        &mut self,
         tag: &str,
         ns: Option<&str>,
         bytes: &mut usize,
@@ -289,9 +303,28 @@ impl<C: Clone> SurfaceTree<C> {
             Self::charge_string(bytes, ns)?;
         }
         if !supported_tag(tag, ns) {
-            return Err(PresentationError::Unsupported(
-                "element tag or namespace".into(),
-            ));
+            if ns.is_some() || !is_custom_element_name(tag) {
+                return Err(PresentationError::Unsupported(
+                    "element tag or namespace".into(),
+                ));
+            }
+            // Same two-level bound as `data-*` names: the process-wide interner leaks each
+            // distinct name, and the per-surface cap keeps one micro from spending its budget.
+            // Checked before interning so an over-budget surface interns nothing new.
+            if !self.custom_element_names.contains(tag) {
+                if self.custom_element_names.len() >= Self::MAX_CUSTOM_ELEMENT_NAMES {
+                    return Err(PresentationError::InvalidBatch(
+                        "too many distinct custom element names on this surface".into(),
+                    ));
+                }
+                let interned =
+                    intern_custom_element(&CUSTOM_ELEMENTS, tag).map_err(|NamesExhausted| {
+                        PresentationError::InvalidBatch(
+                            "too many distinct custom element names".into(),
+                        )
+                    })?;
+                self.custom_element_names.insert(interned);
+            }
         }
         self.check_capacity(1, 0, tag.len() + ns.map_or(0, str::len))
     }
@@ -314,7 +347,7 @@ impl<C: Clone> SurfaceTree<C> {
     }
 
     fn validate_attribute(
-        &self,
+        &mut self,
         top: SurfaceNodeId,
         name: &str,
         ns: Option<&str>,
@@ -329,19 +362,54 @@ impl<C: Clone> SurfaceTree<C> {
         if let AttributeValue::Text(text) = value {
             Self::charge_string(bytes, text)?;
         }
-        if static_attribute(name, ns).is_none() {
-            return Err(PresentationError::Unsupported(
-                "attribute name or namespace".into(),
+        // The process-wide interner leaks every distinct data-* name (Dioxus attribute names are
+        // `&'static str`), so its 4096-name budget is shared by every micro. The per-surface cap
+        // keeps one micro from spending it all. It is checked before interning so a surface that
+        // is over budget interns nothing new, and it counts every distinct name the surface
+        // uses, including names other surfaces already interned.
+        let new_data_name = ns.is_none()
+            && is_data_attribute_name(name)
+            && !self.data_attribute_names.contains(name);
+        if new_data_name && self.data_attribute_names.len() >= Self::MAX_DATA_ATTRIBUTE_NAMES {
+            return Err(PresentationError::InvalidBatch(
+                "too many distinct data-* attribute names on this surface".into(),
             ));
+        }
+        match static_attribute(&DATA_ATTRIBUTES, name, ns) {
+            Ok(Some((interned, _))) => {
+                if new_data_name {
+                    self.data_attribute_names.insert(interned);
+                }
+            }
+            Ok(None) => {
+                return Err(PresentationError::Unsupported(
+                    "attribute name or namespace".into(),
+                ));
+            }
+            Err(NamesExhausted) => {
+                return Err(PresentationError::InvalidBatch(
+                    "too many distinct data-* attribute names".into(),
+                ));
+            }
         }
         if matches!(value, AttributeValue::Float(float) if !float.is_finite()) {
             return Err(PresentationError::Unsupported(
                 "non-finite attribute".into(),
             ));
         }
-        let SurfaceNodeKind::Element { attributes, .. } = &self.node(top).kind else {
+        let SurfaceNodeKind::Element {
+            tag,
+            namespace,
+            attributes,
+            ..
+        } = &self.node(top).kind
+        else {
             return Err(invalid_target());
         };
+        validate_element_attribute(tag, namespace.as_deref(), name, ns)?;
+        if let Err(reason) = attribute_value_policy(tag, namespace.as_deref(), name, ns, value) {
+            return Err(PresentationError::Unsupported(reason.into()));
+        }
         Self::charge_work(work, attributes.len())?;
         let existing = attributes
             .iter()
@@ -443,6 +511,30 @@ impl<C: Clone> SurfaceTree<C> {
             Self::charge_work(work, self.node(parent).children.len())?;
         }
         Ok(())
+    }
+}
+
+/// Attribute rules that depend on the element carrying the attribute. (Value rules that depend
+/// on the element too, such as an SVG `<use>` href, live in `attribute_value_policy`.)
+///
+/// A `<style>` element takes `media`, as `document::Style { media }` does in a guest, and `media`
+/// is refused everywhere else. The guest side drops `title` and `nonce` silently because it can;
+/// the retained tree mirrors the wire one-to-one, so here `nonce` is outside the vocabulary and
+/// `title` (which on a `<style>` would select a named style sheet set, not label it) is refused
+/// like any other unsupported attribute. The remaining vocabulary (`id`, `class`, ...) is inert on
+/// a `<style>`.
+fn validate_element_attribute(
+    tag: &str,
+    element_ns: Option<&str>,
+    name: &str,
+    ns: Option<&str>,
+) -> Result<(), PresentationError> {
+    match (tag, element_ns, name, ns) {
+        ("style", None, "media", None) => Ok(()),
+        ("style", None, "title", None) | (_, _, "media", _) => Err(PresentationError::Unsupported(
+            "attribute name or namespace".into(),
+        )),
+        _ => Ok(()),
     }
 }
 

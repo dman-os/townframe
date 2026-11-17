@@ -32,6 +32,7 @@
 use crate::Layer;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
+use dioxus_core::AttributeValue;
 use std::rc::Rc;
 
 /// One pane's size limits, in logical px along the split axis.
@@ -361,36 +362,6 @@ impl Layout {
     }
 }
 
-/// The inline styles of the parts a skin does not own: geometry and stacking.
-struct Styles {
-    handle: String,
-    /// The strip on the leading edge that reopens a folded first pane: the half of a handle's hit
-    /// area that lies inside the window.
-    edge: String,
-    gesture: String,
-}
-
-impl Styles {
-    fn new() -> Self {
-        Self {
-            handle: format!(
-                "position:relative;z-index:{};flex:none;touch-action:none;cursor:col-resize;width:{HANDLE_HIT_PX}px;margin:0 -{}px",
-                Layer::Raised.css(),
-                HANDLE_HIT_PX / 2.0
-            ),
-            edge: format!(
-                "position:absolute;top:0;bottom:0;left:0;z-index:{};touch-action:none;cursor:col-resize;width:{}px",
-                Layer::Raised.css(),
-                HANDLE_HIT_PX / 2.0
-            ),
-            gesture: format!(
-                "position:fixed;top:0;right:0;bottom:0;left:0;z-index:{};cursor:col-resize;touch-action:none",
-                Layer::Gesture.css()
-            ),
-        }
-    }
-}
-
 /// `folded` folds the first pane away: it is not rendered, its handle goes, and an edge strip on
 /// the leading edge takes their place. Dragging the strip previews the pane opening at the
 /// pointer's x (within its rule); the release past the rule's collapse distance reports the new
@@ -426,7 +397,9 @@ pub fn Sections(
         first_shown,
     } = Layout::of(&split, drag(), folded);
     let handles = HandleView::between(&panes, &split, &sizes);
-    let styles = Styles::new();
+    let raised = Layer::Raised.css();
+    let gesture = Layer::Gesture.css();
+    let handle_overlap = HANDLE_HIT_PX / 2.0;
 
     let release = use_callback({
         let split = Rc::clone(&split);
@@ -434,15 +407,8 @@ pub fn Sections(
             let Some(drag) = drag.write().take() else {
                 return;
             };
-            match drag.release(&split) {
-                Release::Resize(weights) => on_resize.call(weights),
-                Release::Collapse(pane) => on_collapse.call(pane),
-                Release::Expand(weights) => {
-                    on_resize.call(weights);
-                    on_expand.call(());
-                }
-                Release::Nothing => {}
-            }
+            drag.release(&split)
+                .report(on_resize, on_collapse, on_expand);
         }
     });
     let abort = use_callback(move |()| {
@@ -472,7 +438,7 @@ pub fn Sections(
             class: skin.root,
             role: "group",
             "aria-label": "{label}",
-            style: "display:flex;flex-direction:row;position:relative;width:100%;height:100%;min-width:0;min-height:0",
+            ..root_style(),
             for (index, pane) in panes.iter().enumerate() {
                 if index > 0 || first_shown {
                     div {
@@ -480,7 +446,7 @@ pub fn Sections(
                         class: skin.pane,
                         role: "region",
                         "aria-label": "{pane.name}",
-                        style: pane_style(weights[index], &split.rules[index], shut == Some(index)),
+                        ..pane_style(weights[index], &split.rules[index], shut == Some(index)),
                         {pane.content.clone()}
                     }
                 }
@@ -496,7 +462,6 @@ pub fn Sections(
                         "aria-valuemax": "{view.max}",
                         tabindex,
                         "data-state": if dragging_handle == Some(index) { "dragging" } else { "idle" },
-                        style: "{styles.handle}",
                         onpointerdown: move |event| {
                             event.prevent_default();
                             drag.set(Some(Drag::press(index, event.page_coordinates().x, false)));
@@ -514,6 +479,7 @@ pub fn Sections(
                                 on_resize.call(split.dragged(index, step));
                             }
                         },
+                        ..handle_style(raised, handle_overlap),
                         div { class: skin.grip }
                     }
                 }
@@ -529,7 +495,6 @@ pub fn Sections(
                     "aria-valuemax": "{handles[0].max}",
                     tabindex,
                     "data-state": if edge_dragging { "dragging" } else { "idle" },
-                    style: "{styles.edge}",
                     onpointerdown: move |event| {
                         event.prevent_default();
                         drag.set(Some(Drag::press(0, event.page_coordinates().x, true)));
@@ -546,13 +511,13 @@ pub fn Sections(
                             on_expand.call(());
                         }
                     },
+                    ..edge_style(raised, handle_overlap),
                     div { class: skin.grip }
                 }
             }
             if drag().is_some() {
                 div {
                     role: "presentation",
-                    style: "{styles.gesture}",
                     onpointermove: move |event| track.call(event),
                     onpointerup: move |_| release.call(()),
                     onpointerleave: move |_| {
@@ -561,28 +526,124 @@ pub fn Sections(
                         }
                     },
                     onpointercancel: move |_| abort.call(()),
+                    ..gesture_style(gesture),
                 }
             }
         }
     }
 }
 
+impl Release {
+    /// Tells the parent what the gesture amounted to.
+    fn report(
+        self,
+        on_resize: EventHandler<Vec<f64>>,
+        on_collapse: EventHandler<usize>,
+        on_expand: EventHandler<()>,
+    ) {
+        match self {
+            Release::Resize(weights) => on_resize.call(weights),
+            Release::Collapse(pane) => on_collapse.call(pane),
+            Release::Expand(weights) => {
+                on_resize.call(weights);
+                on_expand.call(());
+            }
+            Release::Nothing => {}
+        }
+    }
+}
+
+fn root_style() -> Vec<Attribute> {
+    style_attributes(&[
+        ("display", "flex".into()),
+        ("flex-direction", "row".into()),
+        ("position", "relative".into()),
+        ("width", "100%".into()),
+        ("height", "100%".into()),
+        ("min-width", "0".into()),
+        ("min-height", "0".into()),
+    ])
+}
+
+/// The seam handle: 24 px wide, centred on the seam, above the panes.
+fn handle_style(layer: &str, overlap: f64) -> Vec<Attribute> {
+    style_attributes(&[
+        ("position", "relative".into()),
+        ("z-index", layer.into()),
+        ("flex", "none".into()),
+        ("touch-action", "none".into()),
+        ("cursor", "col-resize".into()),
+        ("width", format!("{HANDLE_HIT_PX}px")),
+        ("margin", format!("0 -{overlap}px")),
+    ])
+}
+
+/// The strip on the leading edge that reopens a folded first pane: the half of a handle's hit
+/// area that lies inside the window.
+fn edge_style(layer: &str, overlap: f64) -> Vec<Attribute> {
+    style_attributes(&[
+        ("position", "absolute".into()),
+        ("top", "0".into()),
+        ("bottom", "0".into()),
+        ("left", "0".into()),
+        ("z-index", layer.into()),
+        ("touch-action", "none".into()),
+        ("cursor", "col-resize".into()),
+        ("width", format!("{overlap}px")),
+    ])
+}
+
+/// The overlay that takes a gesture's pointer events. Absolute inside the presentation: a guest
+/// box cannot be fixed to the viewport (the wire refuses `fixed`, and the host contains the
+/// presentation).
+fn gesture_style(layer: &str) -> Vec<Attribute> {
+    style_attributes(&[
+        ("position", "absolute".into()),
+        ("top", "0".into()),
+        ("right", "0".into()),
+        ("bottom", "0".into()),
+        ("left", "0".into()),
+        ("z-index", layer.into()),
+        ("cursor", "col-resize".into()),
+        ("touch-action", "none".into()),
+    ])
+}
+
+/// Per-property `style:` attributes, the only inline style a guest presentation can send (the
+/// wire has no raw `style` attribute).
+fn style_attributes(declarations: &[(&'static str, String)]) -> Vec<Attribute> {
+    declarations
+        .iter()
+        .map(|(property, value)| {
+            Attribute::new(
+                property,
+                AttributeValue::Text(value.clone()),
+                Some("style"),
+                false,
+            )
+        })
+        .collect()
+}
+
 /// A collapsed pane lays out at 0 whatever its minimum says, and clips what it holds.
-fn pane_style(weight: f64, rule: &SizeRule, collapsed: bool) -> String {
-    let max = if rule.max.is_finite() {
-        format!(";max-width:{}px", rule.max)
-    } else {
-        String::new()
-    };
-    let (min, clip) = if collapsed {
-        (0.0, ";overflow:hidden")
-    } else {
-        (rule.min, "")
-    };
-    format!(
-        "flex:{weight} 1 0px;min-width:{min}px;min-height:0;position:relative;z-index:{}{clip}{max}",
-        Layer::Content.css()
-    )
+fn pane_style(weight: f64, rule: &SizeRule, collapsed: bool) -> Vec<Attribute> {
+    let mut style = vec![
+        ("flex", format!("{weight} 1 0px")),
+        (
+            "min-width",
+            format!("{}px", if collapsed { 0.0 } else { rule.min }),
+        ),
+        ("min-height", "0".into()),
+        ("position", "relative".into()),
+        ("z-index", Layer::Content.css().into()),
+    ];
+    if collapsed {
+        style.push(("overflow", "hidden".into()));
+    }
+    if rule.max.is_finite() {
+        style.push(("max-width", format!("{}px", rule.max)));
+    }
+    style_attributes(&style)
 }
 
 #[cfg(test)]

@@ -106,13 +106,13 @@ pub fn ListDetails(
         };
         let mut panes = vec![SectionPane {
             name: list_name.clone(),
-            content: rsx! { div { class: skin.list, style: "width:100%;height:100%", {list} } },
+            content: rsx! { div { class: skin.list, width: "100%", height: "100%", {list} } },
         }];
         let (label, split) = match details {
             Some(details) => {
                 panes.push(SectionPane {
                     name: details_name.clone(),
-                    content: rsx! { div { class: skin.details, style: "width:100%;height:100%", {details} } },
+                    content: rsx! { div { class: skin.details, width: "100%", height: "100%", {details} } },
                 });
                 (format!("{list_name} and {details_name}"), split)
             }
@@ -129,7 +129,11 @@ pub fn ListDetails(
     rsx! {
         div {
             class: skin.root,
-            style: "position:relative;width:100%;height:100%;min-width:0;min-height:0",
+            position: "relative",
+            width: "100%",
+            height: "100%",
+            min_width: "0",
+            min_height: "0",
             div {
                 class: skin.list,
                 role: "region",
@@ -143,7 +147,11 @@ pub fn ListDetails(
                 // `pointer-events:none` while covered takes the list out of hit-testing outright
                 // (`inert` is not in the guest wire vocabulary), so nothing in it can take a
                 // click meant for the details even if it paints above them.
-                style: "position:relative;width:100%;height:100%;z-index:{content};pointer-events:{list_events}",
+                position: "relative",
+                width: "100%",
+                height: "100%",
+                z_index: "{content}",
+                pointer_events: "{list_events}",
                 {list}
             }
             if let Some(details) = details {
@@ -151,7 +159,12 @@ pub fn ListDetails(
                     class: skin.details,
                     role: "region",
                     "aria-label": "{details_name}",
-                    style: "position:absolute;top:0;right:0;bottom:0;left:0;z-index:{raised}",
+                    position: "absolute",
+                    top: "0",
+                    right: "0",
+                    bottom: "0",
+                    left: "0",
+                    z_index: "{raised}",
                     {details}
                 }
             }

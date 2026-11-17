@@ -215,7 +215,10 @@ pub fn doctor(root: &Path, json: bool) -> Res<bool> {
                     .into(),
             );
         }
-        if cfg_text.lines().any(|line| line.trim_start().starts_with("split-debuginfo")) {
+        if cfg_text
+            .lines()
+            .any(|line| line.trim_start().starts_with("split-debuginfo"))
+        {
             issues.push(
                 ".cargo/config.toml sets `split-debuginfo`; mbx then caches no native link across checkouts"
                     .into(),

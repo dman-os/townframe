@@ -184,7 +184,7 @@ fn GuestMount(mount: Mount) -> Element {
     let id = use_hook(|| slots.hold(component));
     use_drop(move || slots.retire(id));
     let id = i64::try_from(id).expect("slot ids stay within i64");
-    rsx! { div { style: "display: contents", "data-clay-slot": id } }
+    rsx! { div { display: "contents", "data-clay-slot": id } }
 }
 
 /// What tells a hook its source changed. In-process, the source's own stream is awaited by a

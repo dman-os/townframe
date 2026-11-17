@@ -15,6 +15,8 @@
 //! resyncs do.
 pub use dom::GuestDom;
 pub(crate) use dom::Slots;
+#[cfg(test)]
+pub(crate) use dom::settle;
 
 use crate::Access;
 use crate::Capability;
@@ -82,22 +84,6 @@ pub(crate) struct ChangeTick(pub(crate) Signal<u64>);
 struct Presentation {
     dom: GuestDom,
     tick: Rc<Cell<Option<Signal<u64>>>>,
-}
-
-#[derive(Clone)]
-struct RootProps {
-    tick: Rc<Cell<Option<Signal<u64>>>>,
-    render: Rc<dyn Fn() -> Element>,
-}
-
-fn root(props: RootProps) -> Element {
-    let tick = use_hook(|| {
-        let signal = Signal::new(0_u64);
-        props.tick.set(Some(signal));
-        signal
-    });
-    use_context_provider(|| ChangeTick(tick));
-    (props.render)()
 }
 
 /// Local tasks an incarnation owns. A task is dropped at its next poll once the incarnation is
@@ -584,13 +570,20 @@ impl Runtime {
         name: &str,
         render: Rc<dyn Fn() -> Element>,
     ) -> Result<(), Error> {
-        let tick = Rc::default();
-        let dom = GuestDom::new_with_props(
-            root,
-            RootProps {
-                tick: Rc::clone(&tick),
-                render,
+        let tick: Rc<Cell<Option<Signal<u64>>>> = Rc::default();
+        let root_tick = Rc::clone(&tick);
+        // The change tick is the presentation's one shared reactive source, so it lives in the
+        // root; `render` runs below it, once per mount, and reads it through context.
+        let dom = GuestDom::with_setup(
+            move || {
+                let tick = use_hook(|| {
+                    let signal = Signal::new(0_u64);
+                    root_tick.set(Some(signal));
+                    signal
+                });
+                use_context_provider(|| ChangeTick(tick));
             },
+            render,
         );
         let published = capability_bank::publish_presentation(name)?;
         assert!(
