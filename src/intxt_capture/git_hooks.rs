@@ -24,22 +24,32 @@ fn script() -> String {
 }
 
 /// What capture knows of the `post-rewrite` hook of a clone, kept in each worktree's local state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HookState {
     /// The hook is capture's and is in place.
     Installed,
     /// A `post-rewrite` that is not capture's is there, so none was installed and rewrites are
     /// not seen exactly (`add` falls back to patch ids).
     ForeignPostRewrite,
+    /// Installing failed (a read-only hooks directory, say). Capture goes on recording and tries
+    /// again at its next observation, or when `capture install-git-hooks` is run.
+    Failed { reason: String },
 }
 
 impl HookState {
     /// The sentence for `day x intxt status`.
-    pub fn describe(self) -> &'static str {
+    pub fn describe(&self) -> String {
         match self {
-            Self::Installed => "post-rewrite installed",
-            Self::ForeignPostRewrite => "hook not installed: foreign post-rewrite",
+            Self::Installed => "post-rewrite installed".to_owned(),
+            Self::ForeignPostRewrite => "hook not installed: foreign post-rewrite".to_owned(),
+            Self::Failed { reason } => format!("hook install failed: {reason}"),
         }
+    }
+
+    /// Whether capture should look at the hook again: it has not settled (never looked, or the
+    /// last install failed).
+    pub fn needs_install(state: &Option<Self>) -> bool {
+        matches!(state, None | Some(Self::Failed { .. }))
     }
 }
 

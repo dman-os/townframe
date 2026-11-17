@@ -552,8 +552,15 @@ fn observe_worktrees(
         // First sight of the worktree: put the `post-rewrite` hook in its clone. Persisted with
         // the rest of the state when the batch is committed, so a failed record installs again,
         // which is idempotent.
-        if host.git_hooks.is_none() {
-            host.git_hooks = Some(git_hooks::install_post_rewrite(&found.root)?.state());
+        // A failed install is recorded, not raised: capture's job is recording, and `status`
+        // shows the failure. The next observation tries again.
+        if HookState::needs_install(&host.git_hooks) {
+            host.git_hooks = Some(match git_hooks::install_post_rewrite(&found.root) {
+                Ok(installed) => installed.state(),
+                Err(error) => HookState::Failed {
+                    reason: error.to_string(),
+                },
+            });
         }
         let (batch, uncaused) = observe_worktree(
             event,
@@ -610,10 +617,16 @@ pub fn install_git_hooks(identity: &Identity) -> Result<git_hooks::Install, Erro
     let _lock = lock(&identity.git_dir.join("intxt/lock"))?;
     let path = identity.git_dir.join("intxt/state.json");
     let mut host: WorktreeHost = load(&path)?;
-    let installed = git_hooks::install_post_rewrite(&identity.root)?;
-    host.git_hooks = Some(installed.state());
+    // The explicit command raises the failure to its caller, and records it for `status` too.
+    let installed = git_hooks::install_post_rewrite(&identity.root);
+    host.git_hooks = Some(match &installed {
+        Ok(installed) => installed.state(),
+        Err(error) => HookState::Failed {
+            reason: error.to_string(),
+        },
+    });
     save(&path, &host)?;
-    Ok(installed)
+    installed
 }
 
 /// Put the worktree `identity` names on the intxt `drawer` (a drawer id), or on none. Takes the

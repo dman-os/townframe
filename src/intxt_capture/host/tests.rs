@@ -1051,3 +1051,36 @@ fn a_rewrite_is_observed_with_the_commit_it_made() {
     let recorded = recorded_for(&prepared, worktree.next_seq + worktree.ops.len() as u64);
     prepared.commit(recorded).unwrap();
 }
+
+#[test]
+fn a_failed_install_is_recorded_and_tried_again_at_the_next_observation() {
+    let env = Env::new();
+    let hooks = env.repo.root.join(".git/hooks");
+    // A file where the hooks directory should be: reading the hook under it is an error.
+    std::fs::remove_dir_all(&hooks).unwrap();
+    std::fs::write(&hooks, "not a directory").unwrap();
+    let identity = identity::resolve(&env.repo.root).unwrap().unwrap();
+
+    let start = prepare(&env.hook("SessionStart", json!({})), &env.session_state).unwrap();
+    let recorded = recorded_for(&start, 0);
+    start.commit(recorded).unwrap();
+    let state = recorded_worktree(&identity).unwrap().git_hooks;
+    assert!(
+        matches!(&state, Some(HookState::Failed { reason }) if !reason.is_empty()),
+        "{state:?}"
+    );
+    assert!(
+        state
+            .unwrap()
+            .describe()
+            .starts_with("hook install failed: ")
+    );
+
+    std::fs::remove_file(&hooks).unwrap();
+    let stop = prepare(&env.hook("Stop", json!({})), &env.session_state).unwrap();
+    stop.commit(RecordedIds::default()).unwrap();
+    assert_eq!(
+        recorded_worktree(&identity).unwrap().git_hooks,
+        Some(HookState::Installed)
+    );
+}
