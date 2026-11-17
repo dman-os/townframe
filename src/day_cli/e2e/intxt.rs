@@ -752,10 +752,10 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
     .await;
 }
 
-/// FDR 008 W6: a branch made with no capture at all. `add --branch` records its ref and the
-/// identity documents first (no sessions: none were recorded, and `show` says so) and the
-/// intxt holds the commits, read from git; the repository document never holds a `gitCommit`.
-/// A hook afterwards records only the live move, with no second baseline.
+/// FDR 008 W6: a branch made with no capture at all. `add --branch` imports its commits, its
+/// ref and the identity documents first (no sessions: none were recorded, and `show` says
+/// so); a hook afterwards records only the live move, with no second baseline and no
+/// commit twice.
 #[tokio::test(flavor = "multi_thread")]
 async fn intxt_add_branch_imports_history_that_was_never_recorded() {
     use crate::cmds::intxt::capture;
@@ -810,23 +810,22 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
         assert!(!shown.contains("sessions ("), "{shown}");
         assert!(shown.contains("sessions: none recorded"), "{shown}");
 
-        // The observation `add` made recorded the identity documents and the branch's ref, and
-        // no commit: the repository document keeps identity only, the intxt holds the commits.
-        // The worktree was clean, so it recorded no op.
+        // The import recorded the identity documents and exactly the range's commits. The
+        // worktree was clean, so it recorded no op.
         let recorded = host::recorded_worktree(&worktree).unwrap();
         assert_eq!(recorded.ops, 0);
         let caller = Caller::new(client, RequestContext::root(), None, "test".to_owned());
         let repo_doc: DocId = recorded.docs.repo.as_deref().unwrap().parse().unwrap();
-        let repo_commits = async || {
+        let commits = async || {
             let (_, datums) = caller.read_datums(&repo_doc, None).await.unwrap();
             datums
                 .into_keys()
                 .filter(|key| key.tag().as_str() == work::GitCommit::ID)
                 .count()
         };
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 2);
 
-        // A live move is recorded by capture as usual: one commit op, no commit datum, and no
+        // A live move is recorded by capture as usual: one commit op, one more commit, and no
         // second baseline of the ref.
         let transcript = base.join("claude/s1.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
@@ -851,18 +850,18 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
             .await
             .unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 0);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 2);
 
         std::fs::write(repo.join("d.txt"), "d\n").unwrap();
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-q", "-m", "add d.txt"]);
         capture::run(client, &node_root, &hook("Stop")).await.unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 3);
 
         capture::run(client, &node_root, &hook("Stop")).await.unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 3);
 
         // Adding the branch again, now that it moved, imports nothing: capture has the move.
         let mut out = Vec::new();
@@ -871,7 +870,7 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
             .await
             .unwrap();
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
-        assert_eq!(repo_commits().await, 0);
+        assert_eq!(commits().await, 3);
 
     })
     .await;
