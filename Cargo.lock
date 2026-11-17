@@ -3312,7 +3312,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 [[package]]
 name = "const-serialize"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "const-serialize-macro",
  "dioxus-const-vec",
@@ -3322,7 +3322,7 @@ dependencies = [
 [[package]]
 name = "const-serialize-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4766,7 +4766,7 @@ dependencies = [
 [[package]]
 name = "dioxus"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-asset-resolver",
  "dioxus-cli-config",
@@ -4794,7 +4794,7 @@ dependencies = [
 [[package]]
 name = "dioxus-asset-resolver"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-cli-config",
  "http",
@@ -4814,7 +4814,7 @@ dependencies = [
 [[package]]
 name = "dioxus-cli-config"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "wasm-bindgen",
 ]
@@ -4822,22 +4822,22 @@ dependencies = [
 [[package]]
 name = "dioxus-config-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 
 [[package]]
 name = "dioxus-config-macros"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 
 [[package]]
 name = "dioxus-const-vec"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 
 [[package]]
 name = "dioxus-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "anyhow",
  "const_format",
@@ -4862,7 +4862,7 @@ dependencies = [
 [[package]]
 name = "dioxus-core-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "convert_case 0.8.0",
  "dioxus-rsx",
@@ -4874,7 +4874,7 @@ dependencies = [
 [[package]]
 name = "dioxus-core-template"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-const-vec",
  "serde",
@@ -4884,12 +4884,12 @@ dependencies = [
 [[package]]
 name = "dioxus-core-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 
 [[package]]
 name = "dioxus-desktop"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4946,7 +4946,7 @@ dependencies = [
 [[package]]
 name = "dioxus-devtools"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
@@ -4963,7 +4963,7 @@ dependencies = [
 [[package]]
 name = "dioxus-devtools-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "serde",
@@ -4973,7 +4973,7 @@ dependencies = [
 [[package]]
 name = "dioxus-document"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "dioxus-core-macro",
@@ -4991,7 +4991,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5049,7 +5049,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "anyhow",
  "axum-core",
@@ -5076,7 +5076,7 @@ dependencies = [
 [[package]]
 name = "dioxus-fullstack-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "const_format",
  "convert_case 0.8.0",
@@ -5089,7 +5089,7 @@ dependencies = [
 [[package]]
 name = "dioxus-history"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "tracing",
@@ -5098,7 +5098,7 @@ dependencies = [
 [[package]]
 name = "dioxus-hooks"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "dioxus-signals",
@@ -5113,7 +5113,7 @@ dependencies = [
 [[package]]
 name = "dioxus-html"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "async-trait",
  "bytes",
@@ -5139,7 +5139,7 @@ dependencies = [
 [[package]]
 name = "dioxus-html-internal-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "convert_case 0.8.0",
  "proc-macro2",
@@ -5150,7 +5150,7 @@ dependencies = [
 [[package]]
 name = "dioxus-interpreter-js"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "dioxus-core-types",
@@ -5169,7 +5169,7 @@ dependencies = [
 [[package]]
 name = "dioxus-logger"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-cli-config",
  "tracing",
@@ -5180,7 +5180,7 @@ dependencies = [
 [[package]]
 name = "dioxus-native"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "android-activity",
  "anyrender 0.14.0",
@@ -5215,7 +5215,7 @@ dependencies = [
 [[package]]
 name = "dioxus-native-dom"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -5229,7 +5229,7 @@ dependencies = [
 [[package]]
 name = "dioxus-rsx"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core-template",
  "proc-macro2",
@@ -5242,7 +5242,7 @@ dependencies = [
 [[package]]
 name = "dioxus-signals"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "futures-channel",
@@ -5257,7 +5257,7 @@ dependencies = [
 [[package]]
 name = "dioxus-stores"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-core",
  "dioxus-signals",
@@ -5268,7 +5268,7 @@ dependencies = [
 [[package]]
 name = "dioxus-stores-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "convert_case 0.8.0",
  "proc-macro2",
@@ -5279,7 +5279,7 @@ dependencies = [
 [[package]]
 name = "dioxus-web"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dioxus-cli-config",
  "dioxus-core",
@@ -6576,7 +6576,7 @@ dependencies = [
 [[package]]
 name = "generational-box"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "parking_lot",
  "tracing",
@@ -8933,7 +8933,7 @@ dependencies = [
 [[package]]
 name = "lazy-js-bundle"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 
 [[package]]
 name = "lazy_static"
@@ -9392,7 +9392,7 @@ dependencies = [
 [[package]]
 name = "manganis"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "const-serialize",
  "jni 0.21.1",
@@ -9406,7 +9406,7 @@ dependencies = [
 [[package]]
 name = "manganis-core"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "const-serialize",
  "dioxus-cli-config",
@@ -9418,7 +9418,7 @@ dependencies = [
 [[package]]
 name = "manganis-macro"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "dunce",
  "macro-string",
@@ -15566,7 +15566,7 @@ dependencies = [
 [[package]]
 name = "subsecond"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "js-sys",
  "libc",
@@ -15584,7 +15584,7 @@ dependencies = [
 [[package]]
 name = "subsecond-types"
 version = "0.8.0-alpha.3"
-source = "git+https://github.com/dman-os/dioxus?rev=4ef345c24e3d92b4b006467618b3a6d20d0a74e2#4ef345c24e3d92b4b006467618b3a6d20d0a74e2"
+source = "git+https://github.com/dman-os/dioxus?rev=7f6251d8070f39e46cff33712395077a9606a43c#7f6251d8070f39e46cff33712395077a9606a43c"
 dependencies = [
  "serde",
 ]
