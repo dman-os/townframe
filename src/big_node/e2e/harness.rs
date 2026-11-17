@@ -125,6 +125,20 @@ impl Note {
             other => panic!("datum {field} is not settled: {other:?}"),
         }
     }
+
+    /// The accepted values of the datums tagged `tag`, by key.
+    pub(super) fn accepted(&self, tag: &str) -> BTreeMap<DatumKey, serde_json::Value> {
+        self.0
+            .datums
+            .iter()
+            .filter(|(key, _)| key.tag().as_str() == tag)
+            .filter_map(|(key, read)| match read {
+                DatumRead::Accepted { value, .. } => Some((key.clone(), value.clone())),
+                DatumRead::Absent { .. } => None,
+                other => panic!("datum {key} is not settled: {other:?}"),
+            })
+            .collect()
+    }
 }
 
 fn field_key(field: &str) -> DatumKey {
@@ -640,7 +654,7 @@ impl Cluster {
         index: usize,
         drawer: &SharedDrawer,
         bytes: &[u8],
-    ) -> BlobId {
+    ) -> (DocId, BlobId) {
         let node = self.node(index);
         let put = put_cap(node).await;
         let info = node
@@ -653,7 +667,8 @@ impl Cluster {
             .await
             .unwrap();
         let placement = format!("drawer {}", drawer.id);
-        node.docs
+        let receipt = node
+            .docs
             .client
             .call(
                 RequestContext::root(),
@@ -681,7 +696,7 @@ impl Cluster {
             .await
             .unwrap();
         self.wait_blob_published(index, drawer, info.blob_id).await;
-        info.blob_id
+        (receipt.doc_id, info.blob_id)
     }
 
     /// Waits until node `index` holds `blob`'s inventory part, which is when the bytes are
