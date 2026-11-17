@@ -77,7 +77,7 @@ impl PartialEq for MountProps {
 /// over (the micro's collections, its store) is shared by all of them.
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 fn MountRoot(props: MountProps) -> dioxus_core::Element {
-    dioxus::prelude::use_context_provider(|| props.slots.clone());
+    dioxus::prelude::use_context_provider(|| std::rc::Rc::clone(&props.slots));
     (props.render)()
 }
 
@@ -113,7 +113,7 @@ impl GuestDom {
                         Portal {
                             key: "{mount.identity}",
                             target: mount.target,
-                            MountRoot { render: render.clone(), slots: mount.slots.clone() }
+                            MountRoot { render: std::rc::Rc::clone(&render), slots: std::rc::Rc::clone(&mount.slots) }
                         }
                     }
                 }
