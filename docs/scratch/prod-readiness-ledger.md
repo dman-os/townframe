@@ -502,6 +502,85 @@ through a large rewrite.
 - Method: operator and lane go file by file, identify flows and issues, and mostly regroup code.
   Semantics mostly hold.
 
+**Process (operator, 2026-11-17):** big_automata *is* the big_sync rewrite. It is mostly good
+after dozens of redesigns, but unfinished. Nothing gets "fixed" in #165 as such. The operator
+drives the file-by-file pass and brings the items he struggled with during the rewrite. This
+lane builds the verification tooling in parallel.
+
+### W7 — Verification tooling for big_automata (proposal, 2026-11-17)
+
+**big_automata's machines are already sans-IO**, which is the shape that DST and quint-connect
+need:
+
+| Machine | Shape | State |
+|---|---|---|
+| `BigSyncMachine` (`lib.rs`) | `handle_evt(&mut self, evt)`; drains spawn and stop queues; injected `Clock` | 6 of 8 event handlers are `todo!()` |
+| `CursorSyncMachine` (`cursor.rs`) | `on_subscription_evt` / `on_obj_sync_job_evt` push into `out: &mut Vec<CursorMachineCommand>` | delete story is a FIXME |
+| `WatermarkMachine<Key, StreamId, Cursor, Lane>` (`watermark.rs`) | generic and pure: `add_job`, `settle_on_cursor`, `settle_all_on_lane`, `watermark`, `retire_stream` | one `todo!()` |
+| `StatMachine` (`stat.rs`) | full-sync waiters, `drain_evts` | |
+| `Scheduler<Seed>` (`scheduler.rs`) | queue, stop with `Retry`, drain | |
+| `SerialOutbox` (`outbox.rs`) | push, front, complete | |
+| `DecidePeerStrategyTask` (`tasks/decide_peer_strat.rs`) | cursor-vs-bucket choice | |
+| `fingerprint.rs` | seeded SipHash-2-4 `u64` fingerprints | |
+
+**Tooling that already exists:**
+- **On main:**
+  - proptest 1.12 **model tests**: randomized operation scripts checked against a reference
+    oracle. Examples: `big_cabinet/{drawer,doc}/e2e/model.rs`,
+    `big_blobs/admission/tests/model.rs`, `clay_collection/tests/model.rs`,
+    `clay_surface/tree/tests/property.rs`. Regressions persist under `src/proptest-regressions/`.
+  - `insta`, `loom 0.7.2` (in the workspace), the `utils_rs::table_tests!` macro.
+  - The cross-engine **conformance scenario suite** pattern in `clay_guest_session/lifecycle_conformance`.
+  - **No quint anywhere on main.**
+- **On #117 (`feat/native-wflow`, unmerged):**
+  - `src/nix/formal-tools.nix`: quint 0.33.0, Rust evaluator 0.7.0, and Apalache 0.62.4
+    pre-provisioned. 0.62.4 matters: 0.62.1's 20 MB JSON limit rejected the model before
+    checking anything.
+  - Workspace dep `quint-connect = "=0.1.2"`.
+  - The conformance pattern in `wflow_core/partition/authority/conformance.rs`: a `Driver::step`
+    with `switch!` over model actions; a mirrored `model.rs`; a **coverage map that refuses a
+    trace set that never reaches some action**; constants mirrored between the model and the
+    Rust code.
+  - CI in the Lint job: `quint typecheck`; `quint run --invariant` simulation (100 samples,
+    16 steps, fixed seed); `quint verify --max-steps=3`, about 7.5 min.
+  - Lessons: depth 4 didn't fit (Apalache costs about 100 s per extra step); quint 0.33 rejected
+    the model's inductive invariant; keep each model small.
+
+**Proposed layering**, with each tool on the property it is good at:
+1. **quint spec + quint-connect conformance, per machine.** These cover safety across
+   interleavings. Suggested order:
+   - `WatermarkMachine`. It's pure and generic, and it carries the core cursor rule: a cursor
+     advances only on ack or obsolescence and never skips an unacked event.
+   - `CursorSyncMachine`.
+   - `Scheduler` and retry.
+   - `BigSyncMachine` as the composition.
+   - The bucket strategy last.
+
+   Each gets bounded `quint verify` in CI plus simulation, and a coverage assertion.
+2. **proptest model tests** for local data invariants against an oracle:
+   - an incrementally maintained bucket fingerprint equals a recompute;
+   - `ids` encodings round-trip;
+   - part-membership bookkeeping matches a naive model.
+3. **A DST harness**, for convergence and liveness under faults, which quint's bounded checks
+   won't reach. It runs single-threaded with a seeded RNG, a virtual clock, and a simulated RPC
+   that drops, reorders and partitions. It drives the sans-IO machines for two or more peers
+   and asserts convergence (equal part-store views) and cursor monotonicity. Reference:
+   `samod-test-harness`.
+
+   Keep it inside big_automata's test modules unless big_repo's new runtime needs it too. Then
+   it gets one shared home, not a new crate per machine.
+4. **insta snapshots** for the RPC wire shapes (`rpc/{bucket,replay,summary}.rs`).
+5. **CI placement:** quint goes in the Lint job, as #117 does. proptest and DST seeds run under
+   nextest on CI or mothership, never on the laptop.
+
+**Dependency:** this needs #117's `formal-tools.nix` and the `quint-connect` pin. Either wait for
+#117 or carry those two pieces in this stack, coordinated with #117's owner.
+
+**Open:**
+- When does #117 land, and who owns it now?
+- Do we want liveness (temporal) properties in quint, or leave liveness to DST?
+- Which machine does the operator want modelled first? The suggestion is `WatermarkMachine`.
+
 ### W5 — Performance
 
 - There are no benchmarks anywhere in the workspace: no `[[bench]]`, criterion or divan.
