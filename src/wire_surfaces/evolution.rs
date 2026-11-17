@@ -14,6 +14,7 @@
 //! stabilized.
 
 use crate::items;
+use crate::sidecar;
 use big_cabinet_core::datum::lexicon::stability::Declared;
 use serde_json::Map;
 use serde_json::Value;
@@ -66,6 +67,7 @@ impl<'a> Surface<'a> {
 /// is under them. A `required` or `nullable` entry belongs to the property it names.
 fn governed(
     path: &str,
+    to_path: fn(&str) -> String,
     old: &BTreeMap<String, Declared>,
     new: &BTreeMap<String, Declared>,
 ) -> bool {
@@ -84,7 +86,7 @@ fn governed(
     let path = owner.as_deref().unwrap_or(path);
     old.keys()
         .chain(new.keys())
-        .map(|item| (items::lexicon_path(item), item))
+        .map(|item| (to_path(item), item))
         .filter(|(at, _)| {
             path.strip_prefix(at.as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -105,7 +107,14 @@ pub fn violations(nsid: &str, old: Surface, new: Surface) -> Vec<String> {
     let (old_items, new_items) = (items::items(&old), items::items(&new));
     let differences: Vec<Difference> = classify(old.lexicon, new.lexicon)
         .into_iter()
-        .filter(|difference| governed(&difference.path, &old_items, &new_items))
+        .filter(|difference| {
+            governed(
+                &difference.path,
+                items::lexicon_path,
+                &old_items,
+                &new_items,
+            )
+        })
         .collect();
     let mut found: Vec<String> = differences
         .iter()
@@ -117,6 +126,38 @@ pub fn violations(nsid: &str, old: Surface, new: Surface) -> Vec<String> {
             )
         })
         .collect();
+    // The sidecar's rules govern stable items only, like the Lexicon's. Its compatible changes
+    // (a loosened constraint, a new field) need no bump: a revision comes from `since` alone.
+    let sidecar_breaking = match (old.sidecar, new.sidecar) {
+        (Some(old), Some(new)) => sidecar::classify(old, new),
+        (None, None) => Vec::new(),
+        (before, _) => vec![Difference {
+            path: String::new(),
+            severity: Severity::Breaking,
+            what: format!(
+                "the sidecar {}",
+                if before.is_some() {
+                    "disappeared"
+                } else {
+                    "appeared"
+                }
+            ),
+        }],
+    };
+    found.extend(
+        sidecar_breaking
+            .into_iter()
+            .filter(|difference| difference.severity == Severity::Breaking)
+            .filter(|difference| {
+                governed(&difference.path, str::to_owned, &old_items, &new_items)
+            })
+            .map(|difference| {
+                format!(
+                    "{nsid}: breaking sidecar change at `{}`: {}; a breaking change mints a new NSID",
+                    difference.path, difference.what
+                )
+            }),
+    );
     found.extend(item_violations(
         nsid,
         &old_items,
@@ -814,6 +855,26 @@ mod tests {
             json!({"a": {"x-since": 1}, "b": {}}),
             json!({"a": {"x-since": 1}, "b": {"x-since": 2}, "c": {"x-since": 3}}),
             "new stable item `/properties/b` must carry `since = 3`"
+        ),
+        tightening_a_stable_fields_constraint_is_refused: (
+            json!({"a": {"x-since": 1, "maxLength": 8}}),
+            json!({"a": {"x-since": 1, "maxLength": 4}}),
+            "breaking sidecar change at `/properties/a/maxLength`"
+        ),
+        loosening_a_stable_fields_constraint_is_fine: (
+            json!({"a": {"x-since": 1, "maxLength": 4}}),
+            json!({"a": {"x-since": 1, "maxLength": 8}}),
+            "ok"
+        ),
+        changing_a_stable_fields_storage_form_is_refused: (
+            json!({"a": {"x-since": 1, "x-automerge": "text"}}),
+            json!({"a": {"x-since": 1, "x-automerge": "timestamp"}}),
+            "the storage form changed"
+        ),
+        tightening_an_unstable_fields_constraint_is_fine: (
+            json!({"a": {"maxLength": 8}}),
+            json!({"a": {"maxLength": 4}}),
+            "ok"
         ),
         a_new_union_member_carries_the_new_revision: (
             json!({"u": {"members": ["a.one"], "extras": {"a.one": {"x-since": 1}}}}),
