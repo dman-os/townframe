@@ -14,7 +14,7 @@
 //! The cartridge's own config document ([`CartridgeConfig`], one per cartridge in the shared
 //! config drawer, so it follows the user to sister nodes) holds its settings datums, which are
 //! ordinary datums under the NSIDs its manifest declares and are never interpreted here, and one
-//! grant datum per grant (see [`GrantKey`]).
+//! grant datum per grant, per cartridge (see [`GrantKey`]).
 //!
 //! [`NoduleConfig`] hydrates from the node document and is handed every cartridge document an
 //! install names ([`NoduleConfig::attach_cartridge_docs`]). Both projections preserve unknown
@@ -40,6 +40,7 @@ use big_cabinet_core::doc::DatumStore;
 use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::drawer::EntryAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::CartridgeError;
 use big_cartridges_core::CartridgeId;
@@ -52,8 +53,6 @@ use big_cartridges_core::config::Component;
 use big_cartridges_core::config::ComponentInstall;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
-use big_cartridges_core::config::MicroGrant;
-use big_cartridges_core::config::NoduleGrant;
 use big_cartridges_core::config::config_identity_key;
 use big_cartridges_core::config::install_key;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
@@ -563,14 +562,14 @@ impl DatumStore for NoduleConfig {
 }
 
 /// Typed [`DatumStore`] projection over a cartridge's config document: its grants, keyed by
-/// component and [`GrantKey`], and the cartridge identity. Everything else the document holds is
+/// [`GrantKey`], and the cartridge identity. Everything else the document holds is
 /// the cartridge's settings (ordinary datums under the NSIDs its manifest declares, written by
 /// the nodule, its micro or a generic editor), carried verbatim and never decoded here, so this
 /// projection owns the whole document without interpreting what it does not know.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CartridgeConfig {
     identity: DatumSlot<CartridgeConfigIdentity>,
-    grants: BTreeMap<(Component, GrantKey), DatumSlot<GrantBody>>,
+    grants: BTreeMap<GrantKey, DatumSlot<GrantBody>>,
     /// The settings datums, and grant-tagged datums whose slot is not a grant key.
     carried: BTreeMap<DatumKey, DatumRead>,
 }
@@ -590,16 +589,11 @@ impl DatumStore for CartridgeConfig {
                 config.identity = DatumSlot::from_read(datum_read);
                 continue;
             }
-            let component = match key.tag().as_str() {
-                NoduleGrant::ID => Some(Component::Nodule),
-                MicroGrant::ID => Some(Component::Micro),
-                _ => None,
-            };
-            match component.zip(GrantKey::from_slot(key.slot_bytes())) {
-                Some((component, grant)) => {
+            match GrantKey::from_datum_key(key) {
+                Some(grant) => {
                     config
                         .grants
-                        .insert((component, grant), DatumSlot::from_read(datum_read));
+                        .insert(grant, DatumSlot::from_read(datum_read));
                 }
                 None => {
                     config.carried.insert(key.clone(), datum_read.clone());
@@ -618,11 +612,10 @@ impl DatumStore for CartridgeConfig {
             &mut patch,
         )?;
         let absent = DatumSlot::Absent;
-        let grants: BTreeSet<&(Component, GrantKey)> =
-            before.grants.keys().chain(after.grants.keys()).collect();
+        let grants: BTreeSet<&GrantKey> = before.grants.keys().chain(after.grants.keys()).collect();
         for grant in grants {
             diff_slot(
-                grant.1.datum_key(grant.0),
+                grant.datum_key(),
                 before.grants.get(grant).unwrap_or(&absent),
                 after.grants.get(grant).unwrap_or(&absent),
                 &mut patch,
@@ -642,41 +635,33 @@ impl CartridgeConfig {
         &self.identity
     }
 
-    /// The grants of `component`, by key, with whether each decoded.
-    pub fn grants(
-        &self,
-        component: Component,
-    ) -> impl Iterator<Item = (&GrantKey, &DatumSlot<GrantBody>)> {
-        self.grants
-            .iter()
-            .filter(move |((owner, _), _)| *owner == component)
-            .map(|((_, grant), slot)| (grant, slot))
+    /// The grants, by key, with whether each decoded.
+    pub fn grants(&self) -> impl Iterator<Item = (&GrantKey, &DatumSlot<GrantBody>)> {
+        self.grants.iter()
     }
 
-    /// Sets, or with `value` absent revokes, one grant of `component`. A rewrite keeps the members
-    /// of the stored datum this build does not know.
+    /// Sets, or with `value` absent revokes, one grant. A rewrite keeps the members of the stored
+    /// datum this build does not know.
     pub fn set_grant(
         &mut self,
-        component: Component,
         grant: GrantKey,
         value: Option<GrantBody>,
     ) -> Result<(), InventoryError> {
-        let slot = (component, grant);
         let Some(body) = value else {
-            self.grants.remove(&slot);
+            self.grants.remove(&grant);
             return Ok(());
         };
-        if !slot.1.accepts(&body) {
+        if !grant.accepts(&body) {
             return Err(InventoryError::InvalidGrant {
-                grant: slot.1.to_string(),
-                reason: "a drawer grant states its access and nothing else, and a method or \
-                         authority grant states no access"
+                grant: grant.to_string(),
+                reason: "a drawer or cartridge grant states its access, and an origin, method \
+                         or authority grant states none"
                     .to_owned(),
             });
         }
         // The stored datum's other members survive the rewrite; the two this build writes are
         // replaced, and one the new value leaves out is dropped.
-        let mut raw = match self.grants.get(&slot) {
+        let mut raw = match self.grants.get(&grant) {
             Some(DatumSlot::Accepted {
                 raw: Some(Value::Object(raw)),
                 ..
@@ -684,14 +669,18 @@ impl CartridgeConfig {
             _ => serde_json::Map::new(),
         };
         raw.remove("access");
-        raw.remove("privileged");
+        raw.remove("empty");
         let Value::Object(written) = serde_json::to_value(&body).expect("a grant body serializes")
         else {
             unreachable!("a grant body serializes as an object");
         };
         raw.extend(written);
+        if body.access.is_none() {
+            // A grant that states nothing carries `empty` (the empty-member convention).
+            raw.insert("empty".to_owned(), Value::Bool(true));
+        }
         self.grants.insert(
-            slot,
+            grant,
             DatumSlot::Accepted {
                 value: body,
                 raw: Some(Value::Object(raw)),
@@ -700,23 +689,20 @@ impl CartridgeConfig {
         Ok(())
     }
 
-    /// Drops the settings and every grant, nodule and micro. The identity stays: it is what lets
+    /// Drops the settings and every grant. The identity stays: it is what lets
     /// the document be found again.
     pub fn clear(&mut self) {
         self.grants.clear();
         self.carried.clear();
     }
 
-    /// What `component`'s grants ask for: drawer access by drawer, and the scope of the dispatch
-    /// capability minted for it. A grant that does not decode, or states an access level this
-    /// build does not know, refuses the component with the reason, as an invalid datum always has.
-    pub fn resolve_grants(
-        &self,
-        component: Component,
-    ) -> Result<(BTreeMap<DrawerId, DrawerAccess>, DispatchScope), String> {
-        let mut drawers = BTreeMap::new();
-        let mut scope = DispatchScope::default();
-        for (grant, slot) in self.grants(component) {
+    /// What the cartridge's grants give: drawer access by drawer, and the scope of the dispatch
+    /// capability minted for the nodule. A grant that does not decode, or states an access level
+    /// this build does not know, refuses the cartridge with the reason, as an invalid datum always
+    /// has.
+    pub fn resolve_grants(&self) -> Result<ResolvedGrants, String> {
+        let mut resolved = ResolvedGrants::default();
+        for (grant, slot) in self.grants() {
             let body = match slot {
                 DatumSlot::Absent => continue,
                 DatumSlot::Invalid { reason, .. } => {
@@ -729,28 +715,49 @@ impl CartridgeConfig {
                     "grant datum `{grant}` states a value that kind of grant does not take"
                 ));
             }
+            let known_access = |access: &EntryAccess| {
+                access.known().ok_or_else(|| {
+                    format!(
+                        "unknown access level `{}` in grant `{grant}`",
+                        access.as_str()
+                    )
+                })
+            };
             match grant {
                 GrantKey::Drawer(drawer_id) => {
-                    let access = body.access.as_ref().expect("checked by `accepts`");
-                    let Some(known) = access.known() else {
-                        return Err(format!(
-                            "unknown drawer access level `{}` for drawer `{drawer_id}`",
-                            access.as_str()
-                        ));
-                    };
-                    drawers.insert(drawer_id.clone(), known);
+                    let access = known_access(body.access.as_ref().expect("checked by `accepts`"))?;
+                    resolved.drawers.insert(drawer_id.clone(), access);
+                }
+                GrantKey::Cartridge(cartridge_id) => {
+                    let access = known_access(body.access.as_ref().expect("checked by `accepts`"))?;
+                    resolved.cartridges.insert(cartridge_id.clone(), access);
+                }
+                GrantKey::Origin(origin) => {
+                    resolved.origins.insert(origin.clone());
                 }
                 GrantKey::Method(nsid) => {
-                    scope.operations.insert(nsid.clone());
+                    resolved.operations.operations.insert(nsid.clone());
                 }
                 GrantKey::Authority(prefix) => {
-                    scope.authorities.insert(prefix.clone());
+                    resolved.operations.authorities.insert(prefix.clone());
                 }
             }
-            scope.privileged |= body.privileged;
         }
-        Ok((drawers, scope))
+        Ok(resolved)
     }
+}
+
+/// What a cartridge's grants give (ADR 049 §4.1), before each routine's `uses` narrows it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResolvedGrants {
+    pub drawers: BTreeMap<DrawerId, DrawerAccess>,
+    /// Data of other cartridges the cartridge may use, at an access. Nothing enforces these yet.
+    pub cartridges: BTreeMap<CartridgeId, DrawerAccess>,
+    /// Origins the cartridge may talk to. Nothing enforces these yet: there is no `#origin`
+    /// permbind.
+    pub origins: BTreeSet<String>,
+    /// The operations and authorities the cartridge may invoke through dispatch.
+    pub operations: DispatchScope,
 }
 
 /// Whether the nodule member of `install` is enabled.
@@ -1629,9 +1636,13 @@ fn resolve_entry(
         ),
     };
 
-    let (desired_grants, mut desired_operations) = match docs {
+    let ResolvedGrants {
+        drawers: desired_grants,
+        operations: mut desired_operations,
+        ..
+    } = match docs {
         None => Default::default(),
-        Some(docs) => match docs.resolve_grants(Component::Nodule) {
+        Some(docs) => match docs.resolve_grants() {
             Ok(grants) => grants,
             Err(reason) => return Some(refuse(Some(version), Some(revision), reason)),
         },
