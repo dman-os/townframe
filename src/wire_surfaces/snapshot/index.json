@@ -236,6 +236,24 @@
   {
     "crate": "big_cartridges_core",
     "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.answerCartridgeGrantRequest",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.awaitCartridgeGrantRequest",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
     "nsid": "org.example.daybook.cartridges.clearCartridgeConfig",
     "revision": null,
     "sidecar": false,
@@ -353,6 +371,24 @@
   {
     "crate": "big_cartridges_core",
     "kind": "query",
+    "nsid": "org.example.daybook.cartridges.listCartridgeGrantRequests",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
+    "nsid": "org.example.daybook.cartridges.listCartridgeGrants",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "query",
     "nsid": "org.example.daybook.cartridges.listCartridgeInstalls",
     "revision": null,
     "sidecar": false,
@@ -408,6 +444,15 @@
     "crate": "big_cartridges_core",
     "kind": "procedure",
     "nsid": "org.example.daybook.cartridges.removeCartridgeVersion",
+    "revision": null,
+    "sidecar": false,
+    "stability": "unstable",
+    "stableItems": {}
+  },
+  {
+    "crate": "big_cartridges_core",
+    "kind": "procedure",
+    "nsid": "org.example.daybook.cartridges.requestCartridgeGrant",
     "revision": null,
     "sidecar": false,
     "stability": "unstable",
