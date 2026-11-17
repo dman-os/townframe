@@ -23,7 +23,7 @@ pub struct big_nodule::NodulesConfig  { authority: Client < AuthorityProtocol >,
 pub struct big_nodule::SharedConfigDrawerConfig< 'a >  { drawers: & 'a Drawers, actor: & 'a OpenedActor, access: & 'a DrawerAccess, sql: Database }
 pub struct big_nodule::executor::HandlerSpec  { cartridge_id: CartridgeId, revision: Revision, components: BTreeMap < String , ManifestComponent >, routines: BTreeMap < String , RoutineSpec >, config_doc: big_cabinet_core :: dmeta :: DocId, actor: OpenedActor, routine_capabilities: BTreeMap < String , RoutineCapabilities >, reensure: Reensure }
 pub struct big_nodule::executor::Reensure  {  }
-pub struct big_nodule::executor::RoutineCapabilities  { dispatch: Option < CapId >, config: Option < CapId >, drawers: Option < CapId >, blobs: Option < CapId > }
+pub struct big_nodule::executor::RoutineCapabilities  { dispatch: Option < CapId >, docs: Option < CapId >, drawers: Option < CapId >, blobs: Option < CapId > }
 pub struct big_nodule::executor::RoutineSpec  { routine_key: String, component: String, export: String }
 pub trait big_nodule::executor::NoduleExecutor { fn kind (& self) -> & 'static str; async fn ensure (& self , spec : & HandlerSpec) -> Hosted; fn hosts (& self , cartridge_id : & CartridgeId) -> bool; async fn retire (& self , cartridge_id : & CartridgeId) }
 pub type big_nodule::NodulesHandler = Arc < NoduleService >

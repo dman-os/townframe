@@ -39,6 +39,7 @@ use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsProtocol;
+use big_cabinet_core::doc::DrawerReach;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::doc::StoreSnapshot;
@@ -469,7 +470,9 @@ const BLOBS_MINT: &str = "org.example.daybook.blobs.mintCapability";
 #[derive(Clone, Default, PartialEq)]
 struct RoutineScopes {
     dispatch: Option<DispatchScope>,
-    config: Option<DocScope>,
+    /// The docs handle: the cartridge config document and, narrowed to the routine's `#datum`
+    /// kinds, each drawer it was granted (ADR 049 §2).
+    docs: Option<DocScope>,
     drawers: Option<DrawerScope>,
     blobs: Option<big_blobs_core::protocol::BlobsScope>,
 }
@@ -486,7 +489,7 @@ impl AppliedRoutine {
     fn handles(&self) -> impl Iterator<Item = CapId> {
         [
             self.handles.dispatch,
-            self.handles.config,
+            self.handles.docs,
             self.handles.drawers,
             self.handles.blobs,
         ]
@@ -512,6 +515,10 @@ fn desired_routine_scopes(
             let mut operations = BTreeSet::new();
             let mut read = BTreeSet::new();
             let mut write = BTreeSet::new();
+            // Every `#datum` kind the routine's `uses` take, settings or not: the kinds its docs
+            // handle reaches inside the drawers it was granted.
+            let mut datum_read = BTreeSet::new();
+            let mut datum_write = BTreeSet::new();
             let mut drawers = BTreeMap::new();
             let mut create_drawer = false;
             // The operation-level flags of the blobs handle the routine's operations need, stated
@@ -551,6 +558,12 @@ fn desired_routine_scopes(
                     Permbind::Datum(datum) => {
                         let tag = DatumTag::new(datum.nsid.to_string())
                             .expect("an admitted datum binding has a valid tag");
+                        if usage.read {
+                            datum_read.insert(tag.clone());
+                        }
+                        if usage.write || usage.create || usage.delete {
+                            datum_write.insert(tag.clone());
+                        }
                         // What the cartridge-wide capabilities this replaces reached, and so
                         // all a datum permbind reaches: the cartridge config document, whole
                         // for reads and the declared settings kinds for writes. No code ever
@@ -597,28 +610,13 @@ fn desired_routine_scopes(
                     Permbind::Unknown(_) => {}
                 }
             }
-            let config = (!read.is_empty() || !write.is_empty()).then(|| {
-                let by_doc = |kinds: BTreeSet<DatumTag>| {
-                    if kinds.is_empty() {
-                        BTreeMap::new()
-                    } else {
-                        BTreeMap::from([(installed.config_doc.clone(), DatumKinds::Only(kinds))])
-                    }
-                };
-                // The nodule reaches the docs service through dispatch, so the handle that
-                // names the document kinds is useless without the operations that carry it.
-                if !read.is_empty() {
-                    operations.insert("org.example.daybook.docs.readDatums".to_owned());
-                }
-                if !write.is_empty() {
-                    operations.insert("org.example.daybook.docs.writeDatums".to_owned());
-                }
-                DocScope {
-                    read: by_doc(read),
-                    write: by_doc(write),
-                    ..Default::default()
-                }
-            });
+            let docs = routine_docs_scope(
+                installed,
+                &drawers,
+                [read, write],
+                [datum_read, datum_write],
+                &mut operations,
+            );
             let blobs = (!blobs_flags.is_empty()).then(|| {
                 serde_json::from_value(serde_json::Value::Object(blobs_flags))
                     .expect("a handle need's flags are fields of the blobs scope")
@@ -636,13 +634,84 @@ fn desired_routine_scopes(
                 routine_key.clone(),
                 RoutineScopes {
                     dispatch,
-                    config,
+                    docs,
                     drawers,
                     blobs,
                 },
             )
         })
         .collect()
+}
+
+/// The docs handle's scope for one routine: the cartridge config document's settings kinds
+/// (`config`, as `[read, write]`) and each drawer the routine's `#drawers` use reaches
+/// (`drawers`), at the routine's `#datum` kinds (`datum`, as `[read, write]`). Adds the docs
+/// operations the handle is useless without to `operations`.
+fn routine_docs_scope(
+    installed: &InstalledNodule,
+    drawers: &BTreeMap<DrawerId, DrawerAccess>,
+    [read, write]: [BTreeSet<DatumTag>; 2],
+    [datum_read, datum_write]: [BTreeSet<DatumTag>; 2],
+    operations: &mut BTreeSet<String>,
+) -> Option<DocScope> {
+    // Reading or writing datum kinds in a granted drawer is the default shape of drawer
+    // access (ADR 049 §2): each drawer the routine's `#drawers` use reaches is reached
+    // for those kinds only. A routine with no `#datum` kinds reaches no document in any
+    // drawer; broad access is a separate, explicit permbind. The reach carries one kind
+    // set, so a routine that reads one kind and writes another holds both at the
+    // drawer's access, and the access is the drawers handle's, capped at what the datum
+    // uses need.
+    let datum_access = if !datum_write.is_empty() {
+        Some(DrawerAccess::Write)
+    } else if !datum_read.is_empty() {
+        Some(DrawerAccess::Read)
+    } else {
+        None
+    };
+    let drawer_reach: BTreeMap<_, _> = datum_access
+        .map(|wanted| {
+            let kinds = DatumKinds::Only(datum_read.union(&datum_write).cloned().collect());
+            drawers
+                .iter()
+                .map(|(drawer, access)| {
+                    (
+                        drawer.clone(),
+                        DrawerReach {
+                            access: (*access).min(wanted),
+                            kinds: kinds.clone(),
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (!read.is_empty() || !write.is_empty() || !drawer_reach.is_empty()).then(|| {
+        let by_doc = |kinds: BTreeSet<DatumTag>| {
+            if kinds.is_empty() {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(installed.config_doc.clone(), DatumKinds::Only(kinds))])
+            }
+        };
+        // The nodule reaches the docs service through dispatch, so the handle that
+        // names the document kinds is useless without the operations that carry it.
+        if !read.is_empty() || !drawer_reach.is_empty() {
+            operations.insert("org.example.daybook.docs.readDatums".to_owned());
+        }
+        if !write.is_empty()
+            || drawer_reach
+                .values()
+                .any(|reach| reach.access >= DrawerAccess::Write)
+        {
+            operations.insert("org.example.daybook.docs.writeDatums".to_owned());
+        }
+        DocScope {
+            read: by_doc(read),
+            write: by_doc(write),
+            drawers: drawer_reach,
+            ..Default::default()
+        }
+    })
 }
 
 /// Mints the handles each routine wants and does not hold, recording the scope each was minted
@@ -675,19 +744,26 @@ async fn mint_missing_handles(
                 };
             applied.scopes.dispatch = scopes.dispatch.clone();
         }
-        if applied.handles.config.is_none()
-            && let Some(scope) = &scopes.config
+        if applied.handles.docs.is_none()
+            && let Some(scope) = &scopes.docs
         {
-            applied.handles.config = match state
+            // The service's own docs handle reaches only the config documents, so a scope that
+            // reaches granted drawers is proved by the drawers' policy as the service actor,
+            // which holds each drawer it granted (`apply_grant`), as a drawers handle is.
+            let authorization = if scope.drawers.is_empty() {
+                Authorization {
+                    authority: state.stores.docs_capability,
+                    signer: state.stores.parent.capability,
+                }
+            } else {
+                Authorization::identity(state.stores.parent.capability)
+            };
+            applied.handles.docs = match state
                 .stores
                 .docs
                 .call_with(
                     context.child(),
-                    Authorization {
-                        authority: state.stores.docs_capability,
-                        signer: state.stores.parent.capability,
-                    }
-                    .metadata(),
+                    authorization.metadata(),
                     MintDocCapability {
                         scope: scope.clone(),
                         rights: Rights::USE,
@@ -702,7 +778,7 @@ async fn mint_missing_handles(
                     None
                 }
             };
-            applied.scopes.config = scopes.config.clone();
+            applied.scopes.docs = scopes.docs.clone();
         }
         if applied.handles.drawers.is_none()
             && let Some(scope) = &scopes.drawers
@@ -815,8 +891,8 @@ async fn apply_nodule_capabilities(
                 wanted.is_some_and(|wanted| wanted.dispatch == applied.scopes.dispatch),
             ),
             (
-                applied.handles.config,
-                wanted.is_some_and(|wanted| wanted.config == applied.scopes.config),
+                applied.handles.docs,
+                wanted.is_some_and(|wanted| wanted.docs == applied.scopes.docs),
             ),
             (
                 applied.handles.drawers,
@@ -841,8 +917,8 @@ async fn apply_nodule_capabilities(
             kept.scopes.dispatch = applied.scopes.dispatch;
         }
         if live[1] {
-            kept.handles.config = applied.handles.config;
-            kept.scopes.config = applied.scopes.config;
+            kept.handles.docs = applied.handles.docs;
+            kept.scopes.docs = applied.scopes.docs;
         }
         if live[2] {
             kept.handles.drawers = applied.handles.drawers;
