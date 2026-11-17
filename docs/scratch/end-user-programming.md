@@ -51,6 +51,10 @@ Small build routines that run as plain wasm guests (TS type stripping in the eng
 A container is a named local-state resource: local to one device, not synced, created and destroyed as a unit,
 with its own disk and the volumes it mounts. With nodules: ADR 047's `localState` gains `sandbox` (and `volume`)
 kinds, with disk quotas and with egress and mounts granted through the permbind/`uses` vocabulary.
+- **One contract, platform-blind (operator):** the sandbox resource hides platform differences. We pick a baseline every
+  platform can run (likely a native arm64/x86_64 Linux userland from an OCI image, with volumes and an exec/IO API)
+  and define the contract against it. Every stronger backend is an optimization under the same contract:
+  more isolation, faster boot, checkpointing.
 - **Desktop and servers:** microVMs, for the security gain. smolvm (libkrun) boots OCI images in under 200 ms,
   uses virtiofs mounts, has networking off by default with egress allow-lists, an embeddable Rust SDK, and is
   Apache-2.0. It needs KVM, HVF or WHP.
