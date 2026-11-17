@@ -573,13 +573,80 @@ need:
 5. **CI placement:** quint goes in the Lint job, as #117 does. proptest and DST seeds run under
    nextest on CI or mothership, never on the laptop.
 
-**Dependency:** this needs #117's `formal-tools.nix` and the `quint-connect` pin. Either wait for
-#117 or carry those two pieces in this stack, coordinated with #117's owner.
+**Dependency, resolved 2026-11-17:** #117 has no owner and is blocked on the operator's
+review. The operator said to split out what we need. **#167** carries `formal-tools.nix` (as of
+`b3b614d3`), its devshell and package wiring, and the `quint-connect` pin, on top of #165.
+`nix eval .#packages.x86_64-linux.quint` gives `quint-0.33.0`, and the version assert passes.
+#117 will conflict trivially on those hunks when it rebases. The stack is tracked on GitHub
+(`gh stack link 164 165 167`); local `gh stack` tracking only knows layers 01 and 02.
+
+**Testing strategy (operator, 2026-11-17).** Streamline testing across the repo, with **one
+shared crate** that supports four approaches:
+
+| Approach | For | Existing art |
+|---|---|---|
+| End-to-end | whole features | crate-local `e2e` modules; `big_repo/test2/harness` (converge, topo, heads, dump, fixtures); `big_sync/test/stress.rs`; `big_ndk_testing` |
+| Formal verification | state machines and small self-contained pieces | quint + quint-connect (#117 pattern, now #167) |
+| Property ("prop") testing | APIs | proptest model tests against an oracle (`big_cabinet`, `big_blobs`, `clay_*`); `src/proptest-regressions/` |
+| Deterministic simulation (DST) | liveness, convergence under faults | none yet |
+
+Today the support code is scattered across per-crate harnesses plus `utils_rs::table_tests!`.
+`src/test_fixtures/` holds a single image and is not a crate. A shared crate should hold:
+- the quint-connect driver scaffolding, including the coverage assertion;
+- proptest oracle and strategy helpers, and the regression-path convention;
+- the DST simulator: seeded RNG, virtual clock, simulated transport with faults;
+- convergence assertions.
+
+Name and scope are to be decided with the operator. Mind symbol proliferation.
+
+**Liveness: can we model it?** Partly.
+- quint has temporal operators (`always`, `eventually`, fairness), and Apalache can check
+  temporal properties over bounded executions. But #117 needed about 7.5 min for *safety* at
+  depth 3, and depth 4 didn't fit.
+- So liveness in quint is realistic only for tiny, self-contained machines, such as
+  `WatermarkMachine` with two streams and three jobs.
+- Proposal:
+  - **quint for safety** invariants per machine;
+  - **liveness in DST** as "eventually converges / every waiter resolves within N simulated
+    steps under fair scheduling and healed partitions";
+  - quint temporal checks only where a model stays tiny.
+
+**DST options (survey, 2026-11-17):**
+- **Our sans-IO machines (big_automata, a sans-IO `big_repo::runtime`) need no framework.** A
+  hand-written simulator in the FoundationDB / TigerBeetle VOPR style drives the machines
+  directly, owns time, RNG and message delivery, and injects faults. samod's
+  `samod-test-harness` is the reference. This is the cleanest fit, and it works single-threaded
+  (browser, wasmCloud).
+- **For tokio-shaped code we keep** (runtime2 until it's replaced, node-level e2e):
+  - **madsim**, a drop-in tokio replacement that also intercepts libc time and randomness
+    (used by RisingWave);
+  - **turmoil**, which runs on tokio and simulates many hosts in one thread with a simulated
+    network and filesystem (no disk fault injection; links are pairwise);
+  - **shuttle / loom** are interleaving explorers for in-process concurrency, not whole-system
+    DST; `loom` is already in the workspace.
+
+  The common guidance is madsim or turmoil for real tokio code, and a bespoke simulator for
+  sans-IO designs. Sources: <https://s2.dev/blog/dst>,
+  <https://notes.eatonphil.com/2024-08-20-deterministic-simulation-testing.html>,
+  <https://refpath.github.io/nuif/research/items/deterministic-simulation-testing.html>.
+- **Rewind VM** (fzakaria, rewindvm.dev, MIT; posts from 10-03, 10-24 and 11-05) is **not
+  Nix-only**. It runs "a Nix build, a test suite or any Linux command" in a KVM guest with a
+  patched kernel. The monitor owns time, interrupts and RNG, so every run is a function of its
+  inputs (seed included).
+  - It can replay failures, scrub through them, fork them under different interleavings
+    (`rewind check` perturbs the schedule), and export replayable `.rwd` runs.
+  - Limits: **one vCPU** (true-parallel races are out of reach); no preemption between
+    syscalls; **loopback-only network**; **x86_64 Linux with KVM only**, so not mothership
+    (aarch64); replay only on the same CPU vendor.
+  - Fit: a black-box tool for catching and replaying flaky *existing* tests (big_repo `test2`,
+    big_node stress seeds like S1) on an x86 CI runner with KVM. It complements, not replaces,
+    in-process DST of our machines. Worth a trial on S1.
 
 **Open:**
-- When does #117 land, and who owns it now?
-- Do we want liveness (temporal) properties in quint, or leave liveness to DST?
-- Which machine does the operator want modelled first? The suggestion is `WatermarkMachine`.
+- Name and scope of the shared test crate.
+- Which machine to model first. The suggestion is `WatermarkMachine`.
+- Whether to trial Rewind on S1, which needs an x86 KVM host: the laptop, or a CI runner with
+  `/dev/kvm`.
 
 ### W5 — Performance
 
