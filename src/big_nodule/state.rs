@@ -181,7 +181,6 @@ pub(crate) enum Command {
     SetGrant {
         context: RequestContext,
         cartridge_id: CartridgeId,
-        component: Component,
         grant: GrantKey,
         value: Option<GrantBody>,
         reply: Reply<()>,
@@ -498,9 +497,11 @@ impl AppliedRoutine {
     }
 }
 
-/// Each routine's desired scopes: what its `uses` list, intersected with what was granted
-/// (`effective_operations` for methods, `desired_grants` for drawers) and with what the
-/// permbind declares.
+/// Each routine's desired scopes: what its `uses` list, intersected with what the cartridge was
+/// granted (`effective_operations` for methods, `desired_grants` for drawers; ADR 049 §4.1) and
+/// with what the permbind declares. A grant is the cartridge's, so one grant of a drawer
+/// satisfies every routine whose `uses` take a `#drawers` permbind that needs it, and a routine
+/// whose `uses` do not take one reaches no drawer however many are granted.
 fn desired_routine_scopes(
     installed: &InstalledNodule,
     desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
@@ -945,16 +946,9 @@ async fn apply_nodule_capabilities(
         }
     }
 
-    let mut error = mint_missing_handles(state, context, actor, &desired, &mut routines).await;
+    let error = mint_missing_handles(state, context, actor, &desired, &mut routines).await;
     // A routine the manifest no longer has holds nothing.
     routines.retain(|routine_key, _| desired.contains_key(routine_key));
-    if effective_operations.privileged
-        && !routines
-            .values()
-            .any(|applied| applied.handles.dispatch.is_some())
-    {
-        error = Some("requested privileged operation exceeds the dispatch authority".to_owned());
-    }
     if error.is_some() {
         // A routine that got only some of its handles would run with less than it declared:
         // none keep any, and the next reconcile mints them again.
@@ -1231,17 +1225,10 @@ impl State {
             Command::SetGrant {
                 context,
                 cartridge_id,
-                component,
                 grant,
                 value,
                 reply,
-            } => {
-                answer(
-                    reply,
-                    self.set_grant(&context, &cartridge_id, component, grant, value),
-                )
-                .await
-            }
+            } => answer(reply, self.set_grant(&context, &cartridge_id, grant, value)).await,
             Command::ClearConfig {
                 context,
                 cartridge_id,
@@ -1395,32 +1382,18 @@ impl State {
         self.install_record(cartridge_id)
     }
 
-    /// Sets or revokes one grant datum in the cartridge's config document.
+    /// Sets or revokes one grant datum in the cartridge's config document. A grant is the
+    /// cartridge's, not a component's (ADR 049 §4.1), so any install may be granted.
     async fn set_grant(
         &mut self,
         context: &RequestContext,
         cartridge_id: &CartridgeId,
-        component: Component,
         grant: GrantKey,
         value: Option<GrantBody>,
     ) -> Res<()> {
-        // A grant is of a component the cartridge contributes: one it does not would be a datum
-        // nothing reads.
-        if self
-            .install_record(cartridge_id)?
-            .install
-            .component(component)
-            .is_none()
-        {
-            return Err(InventoryError::NoComponent {
-                id: cartridge_id.clone(),
-                component,
-                action: "grant",
-            }
-            .into());
-        }
+        self.install_record(cartridge_id)?;
         self.edit_cartridge_config(context, cartridge_id, move |config| {
-            config.set_grant(component, grant, value)
+            config.set_grant(grant, value)
         })
         .await
     }
