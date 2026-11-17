@@ -169,7 +169,9 @@ async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
     .await;
 }
 
-/// Runs `git` in `dir` with nothing taken from the machine.
+/// Runs `git` in `dir` with nothing taken from the machine. Hooks do not run: capture installs a
+/// `post-rewrite` hook that execs `day`, which must never find a real one on the `PATH` when a
+/// test amends or rebases.
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -177,6 +179,9 @@ fn git(dir: &std::path::Path, args: &[&str]) {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null")
         .env("GIT_AUTHOR_NAME", "Ada")
         .env("GIT_AUTHOR_EMAIL", "ada@example.com")
         .env("GIT_COMMITTER_NAME", "Grace")
@@ -917,6 +922,120 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
         assert_eq!(host::recorded_worktree(&worktree).unwrap().ops, 1);
         assert_eq!(commits().await, 3);
 
+    })
+    .await;
+}
+
+/// A rewrite git's `post-rewrite` hook reported (recorded by `capture git-rewrite` in the capture
+/// drawer) is copied by `add` into the intxt's commits document as an exact link, even where the
+/// amended commit's patch id changed and matching could not have found it, and an amend repeated
+/// before the next `add` (held -> amended -> amended again) still links the held commit to the
+/// last.
+#[tokio::test(flavor = "multi_thread")]
+async fn intxt_add_copies_the_rewrites_the_hook_reported() {
+    use crate::cmds::intxt::capture;
+    use crate::cmds::intxt::package::Named;
+    use crate::cmds::intxt::package::Packaging;
+    use intxt_core::client::Caller;
+    use intxt_core::work;
+    use service_utils_rs::RequestContext;
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let base = tmp.path().canonicalize().unwrap();
+        let repo = init_repo(&base, &[("a.txt", "one\n")]);
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "add b.txt"]);
+        let held = rev(&repo, "feat/x");
+
+        let packaging = Packaging::new(client, &repo, &node_root);
+        let drawer = packaging
+            .create(&mut Vec::new(), "Rewritten", None, None)
+            .await
+            .unwrap();
+        let short = short_ids::ShortIds::new([drawer.to_string()])
+            .render(&drawer.to_string())
+            .unique;
+        let add = async || {
+            let mut out = Vec::new();
+            packaging
+                .add(
+                    &mut out,
+                    Some(&short),
+                    Named::Branch("feat/x".to_owned()),
+                    false,
+                )
+                .await
+                .unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(add().await.contains("1 commit(s)"));
+
+        // Amends that change the patch (so no patch id would match), each reported by the hook
+        // as git reports it: `<old> <new>`.
+        let amend = async |content: &str| {
+            let old = rev(&repo, "feat/x");
+            std::fs::write(repo.join("b.txt"), content).unwrap();
+            git(&repo, &["commit", "-q", "-a", "--amend", "-m", "add b.txt"]);
+            let new = rev(&repo, "feat/x");
+            let recorded =
+                capture::git_rewrite(client, &node_root, &repo, &format!("{old} {new}\n"))
+                    .await
+                    .unwrap();
+            assert_eq!(recorded, 1);
+            new
+        };
+        let first = amend("bee\n").await;
+        let added = add().await;
+        assert!(
+            added.contains(&format!(
+                "rewrite    {} replaces {} (post-rewrite hook)",
+                &first[..7],
+                &held[..7]
+            )),
+            "{added}"
+        );
+
+        let caller = Caller::new(client, RequestContext::root(), None, "test-hook".to_owned());
+        let [commits_doc] = caller
+            .commit_holders(&drawer, &first)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let slot = |tag: &str, sha: &str| format!("{tag}/{sha}").parse().unwrap();
+        let (_, rewrite) = caller
+            .read(&commits_doc, &slot(work::Rewrite::ID, &held))
+            .await
+            .unwrap();
+        assert_eq!(rewrite, json!({"successor": first, "how": "hook"}));
+        let (_, from) = caller
+            .read(&commits_doc, &slot(work::RewrittenFrom::ID, &first))
+            .await
+            .unwrap();
+        assert_eq!(from, json!({"predecessor": held, "how": "hook"}));
+
+        // Two amends before the next `add`: the intxt holds the first commit of the chain, and
+        // its link goes to the last.
+        amend("bee bee\n").await;
+        let last = amend("bee bee bee\n").await;
+        let added = add().await;
+        assert!(
+            added.contains(&format!(
+                "rewrite    {} replaces {} (post-rewrite hook)",
+                &last[..7],
+                &first[..7]
+            )),
+            "{added}"
+        );
+        let (_, from) = caller
+            .read(&commits_doc, &slot(work::RewrittenFrom::ID, &last))
+            .await
+            .unwrap();
+        assert_eq!(from, json!({"predecessor": first, "how": "hook"}));
     })
     .await;
 }
