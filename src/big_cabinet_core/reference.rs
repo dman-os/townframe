@@ -1077,7 +1077,9 @@ pub enum ReferenceError {
     FragmentNotAllowed,
     #[error("this reference kind cannot have a query or fragment")]
     QueryOrFragmentNotAllowed,
-    #[error("unsupported query {0:?}: only `heads=` is defined (and `via=` on a document reference)")]
+    #[error(
+        "unsupported query {0:?}: only `heads=` is defined (and `via=` on a document reference)"
+    )]
     UnsupportedQuery(String),
     #[error("`via=` is empty; a reference with no hint has no such key")]
     EmptyVia,
