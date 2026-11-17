@@ -7,7 +7,7 @@ impl Default for intxt_core::generic::Intxt
 impl From < Included > for intxt_core::client::AddedToIntxt
 pub const intxt_core::cartridge::AUTHORITY: & str
 pub const intxt_core::cartridge::HANDLER_COMPONENT: & str
-pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 8]
+pub const intxt_core::methods::REQUIRED_OPERATIONS: [& str ; 7]
 pub enum intxt_core::annotation::Motivation { # [serde (rename = "assessing")] Assessing, # [serde (rename = "bookmarking")] Bookmarking, # [serde (rename = "classifying")] Classifying, # [serde (rename = "commenting")] Commenting, # [serde (rename = "describing")] Describing, # [serde (rename = "editing")] Editing, # [serde (rename = "highlighting")] Highlighting, # [serde (rename = "identifying")] Identifying, # [serde (rename = "linking")] Linking, # [serde (rename = "moderating")] Moderating, # [serde (rename = "questioning")] Questioning, # [serde (rename = "replying")] Replying, # [serde (rename = "tagging")] Tagging, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::Progress { # [serde (rename = "pending")] Pending, # [serde (rename = "in_progress")] InProgress, # [serde (rename = "completed")] Completed, # [datum (other)] Unknown (String) }
 pub enum intxt_core::annotation::StructureKind { # [serde (rename = "task")] Task, # [serde (rename = "decision")] Decision, # [serde (rename = "section")] Section, # [datum (other)] Unknown (String) }
