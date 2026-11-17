@@ -20,7 +20,8 @@ declarations exist underneath so the system can tell them what a combination of 
   already uses for every other grant.
 - **Data from another cartridge:** "may use your data from Notes".
 - **Internet:** "may talk to `api.example.com`".
-- **Only this time / Allow / Don't allow.** "Only this time" lasts until the device restarts.
+- **Only this time / Allow / Don't allow.** "Only this time" lasts until the app is next started,
+  and so does "Don't allow": the same question is not asked again before then.
 
 Not shown on the default path: routines, micros, nodules, permbind names, datum kinds, capability
 handles. An advanced view may show the declarations for people who ask.
@@ -33,11 +34,12 @@ handles. An advanced view may show the declarations for people who ask.
    installs it as "needs setup".
 2. **A running cartridge asks for more.** A photo editor opens fine, then asks for the Photos drawer
    when the person first imports. The prompt names the cartridge, the drawer and the access, and
-   offers Only this time (until the device restarts) / Allow / Don't allow. The shell draws it
+   offers Only this time (until the app is next started) / Allow / Don't allow. The shell draws it
    **over** the app, never the app itself, so the cartridge can neither fake the prompt nor read
    it. The same request can be answered from the shell's notifications or the CLI instead.
 3. **Nothing in front of the person.** A background job (no screen) needs access. Its request waits
-   in the same pending list until the person opens it, in the shell or with `day grants pending`.
+   in a pending panel, beside the other things waiting on the person (human-in-the-loop work), and
+   raises a notification; the person answers it there or with `day grants pending`.
    The job reports that it is waiting rather than failing silently.
 4. **One cartridge needs another's permission.** The person uses cartridge X, which calls cartridge
    Y, and Y has not been allowed to read the drawer involved. X shows "Y needs access to Photos for
@@ -80,6 +82,5 @@ Wording matches the shell's, so a person who answered on one surface recognises 
 ## Not decided here
 
 - The visual design of the screens: the design-language work's.
-- How long a declined request stays declined before a cartridge may ask again (proposal §10).
-- Drawer "types" as something a cartridge can name ("your photo drawers") rather than a specific
-  drawer (proposal §10).
+- Drawer labels (sensitive and the like), which come later and will let a cartridge ask about a
+  kind of drawer rather than a specific one.
