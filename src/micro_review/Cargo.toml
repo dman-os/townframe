@@ -8,6 +8,10 @@ rust-version.workspace = true
 path = "lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The in-memory fixture node, for tests and standalone labs; the shipped guest leaves it out.
+fixture = []
+
 [dependencies]
 #
 # internal

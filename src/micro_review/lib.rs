@@ -12,6 +12,7 @@
 //!
 //! The manifest declares a `layout.panels` row, so the layout lists the micro as a panel. It
 //! reads its PRs from the GitHub drawer its install configuration names ([`node::Configuration`]).
+#[cfg(any(test, feature = "fixture"))]
 pub mod fixture;
 pub mod model;
 pub mod node;
@@ -22,7 +23,6 @@ use clay_mdk::Error;
 use clay_mdk::Facet;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
-use fixture::Fixture;
 use micro_review_manifest::ReviewConfig;
 use micro_review_manifest::ReviewConfigDecl;
 use micro_review_manifest::ReviewView;
@@ -46,18 +46,26 @@ use pierre_diffs_dioxus::FileDiffView;
 const ROW: &str = "block min-h-12 w-full rounded-md px-4 py-3 text-left text-text hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus";
 
 /// Publish the presentation over the node the micro is configured to read: the real node
-/// through the micro's `Context` when the composition granted the configuration entry, the
-/// fixture node when it granted none (the standalone lab, tests).
+/// through the micro's `Context` when the composition granted the configuration entry. With none
+/// granted it publishes the "Unconfigured" alert: sample pull requests on a phone would read as
+/// real, so the fixture node ([`fixture`], behind the `fixture` feature and tests) is never a
+/// fallback here.
 async fn activate(context: Context) -> Result<(), Error> {
     match context.config::<ReviewConfigDecl>()? {
         Some(facet) => context.publish::<ReviewView>({
             let context = context.clone();
             move || configured_view(context.clone(), facet.clone())
         })?,
-        None => {
-            let node = Fixture::sample();
-            context.publish::<ReviewView>(move || view(node.clone()))?;
-        }
+        None => context.publish::<ReviewView>(|| {
+            rsx! {
+                Failed {
+                    error: CallError::Unconfigured(
+                        "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
+                            .to_owned(),
+                    ),
+                }
+            }
+        })?,
     }
     Ok(())
 }
