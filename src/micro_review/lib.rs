@@ -10,8 +10,8 @@
 //! [`clay_mdk::export_micro!`] exports the micro as the `micro-client` guest on wasm32-wasip3 and
 //! as the native `ACTIVATE` entry everywhere else.
 //!
-//! The micro has no contribution yet, so no shell lists it: how it is reached (a shell panel, a
-//! deep link from a PR page) is open.
+//! The manifest declares a `layout.panels` row, so the layout lists the micro as a panel. It
+//! reads its PRs from the GitHub drawer its install configuration names ([`node::Configuration`]).
 pub mod fixture;
 pub mod model;
 pub mod node;
@@ -19,8 +19,12 @@ pub mod node;
 use clay_dioxus_kit::AppBar;
 use clay_mdk::Context;
 use clay_mdk::Error;
+use clay_mdk::Facet;
+use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
 use fixture::Fixture;
+use micro_review_manifest::ReviewConfig;
+use micro_review_manifest::ReviewConfigDecl;
 use micro_review_manifest::ReviewView;
 use model::Content;
 use model::Entry;
@@ -33,6 +37,7 @@ use model::Read;
 use model::Review;
 use model::Screen;
 use node::CallError;
+use node::ContextNode;
 use node::NodeCalls;
 use pierre_diffs_dioxus::DiffInput;
 use pierre_diffs_dioxus::DiffStyle;
@@ -40,16 +45,31 @@ use pierre_diffs_dioxus::FileDiffView;
 
 const ROW: &str = "block min-h-12 w-full rounded-md px-4 py-3 text-left text-text hover:bg-surface-sunken focus-visible:outline-2 focus-visible:outline-focus";
 
-/// Publish the presentation over the node the micro reads.
+/// Publish the presentation over the node the micro is configured to read: the real node
+/// through the micro's `Context` when the composition granted the configuration entry, the
+/// fixture node when it granted none (the standalone lab, tests).
 async fn activate(context: Context) -> Result<(), Error> {
-    // INTERIM: the fixture node. The real node (`clay_mdk::Context` behind `NodeCalls`, see
-    // `node.rs`) replaces this one line when the micro -> node transport lands.
-    let node = Fixture::sample();
-    context.publish::<ReviewView>(move || view(node.clone()))?;
+    match context.config::<ReviewConfigDecl>()? {
+        Some(facet) => context.publish::<ReviewView>({
+            let context = context.clone();
+            move || configured_view(context.clone(), facet.clone())
+        })?,
+        None => {
+            let node = Fixture::sample();
+            context.publish::<ReviewView>(move || view(node.clone()))?;
+        }
+    }
     Ok(())
 }
 
 clay_mdk::export_micro!(activate, micro_review_manifest::manifest);
+
+/// [`view`] over the real node. Binding the facet to reactivity makes a configuration entry
+/// written, or changed, after mount re-render the view over a node that reads the new one.
+fn configured_view(context: Context, facet: Facet<ReviewConfig>) -> Element {
+    let snapshot = use_facet(&facet);
+    view(ContextNode::new(context, snapshot.state))
+}
 
 /// The whole micro in one root-scope render: a stack of screens, the top one read from the node.
 fn view<C: NodeCalls>(node: C) -> Element {
@@ -59,9 +79,10 @@ fn view<C: NodeCalls>(node: C) -> Element {
         .last()
         .cloned()
         .expect("the stack always holds the pull request list");
-    // Reads the screen on top; reading `stack` here is what restarts it when the screen changes.
-    let loaded = use_resource(move || {
-        let review = Review::new(node.clone());
+    // Reads the screen on top. Reading `stack` restarts it when the screen changes, and the
+    // node as a dependency restarts it when the node reads something else (new configuration).
+    let loaded = use_resource(use_reactive((&node,), move |(node,)| {
+        let review = Review::new(node);
         let screen = stack
             .read()
             .last()
@@ -71,7 +92,7 @@ fn view<C: NodeCalls>(node: C) -> Element {
             let content = review.open(&screen).await;
             (screen, content)
         }
-    });
+    }));
     // A resource keeps its last answer while it reads again, so an answer to another screen is
     // no answer to this one.
     let content = (*loaded.read())

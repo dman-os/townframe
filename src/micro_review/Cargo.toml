@@ -15,7 +15,6 @@ big_cabinet_core = { workspace = true }
 clay_dioxus_kit = { workspace = true }
 intxt_core = { workspace = true }
 method_core = { workspace = true }
-service_core_rs = { workspace = true }
 micro_review_manifest = { workspace = true }
 pierre_diffs_dioxus = { workspace = true }
 #

@@ -7,18 +7,24 @@
 //! exercises the same types it will exchange with the real node.
 use crate::model::key;
 use crate::node::CallError;
+use crate::node::Configuration;
 use crate::node::NodeCalls;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::doc::DatumEvent;
+use big_cabinet_core::doc::DatumPage;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DatumVersion;
 use big_cabinet_core::doc::DatumsRead;
+use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
+use clay_mdk::ClientError;
 use intxt_core::generic;
 use intxt_core::methods::IntxtSummary;
 use intxt_core::methods::IntxtsSummarized;
@@ -29,7 +35,7 @@ use method_core::ContextError;
 use method_core::Unary;
 use serde_json::Value;
 use serde_json::json;
-use service_core_rs::ClientError;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -53,8 +59,8 @@ const SAMPLE_PATCH: &str = "diff --git a/src/review.rs b/src/review.rs
 #[derive(Clone, Default)]
 struct Held {
     docs: BTreeMap<DocId, Datums>,
-    /// The documents `held_pulls` names, in order.
-    pulls: Vec<DocId>,
+    /// The `githubPull` datums of the GitHub drawer, which a poll reports.
+    pulls: Vec<(DocId, DatumKey)>,
 }
 
 /// A node held in memory. Clones share what they are asked, so a test sees the calls a view made.
@@ -86,10 +92,10 @@ impl Fixture {
         self
     }
 
-    /// Name `doc` among the pull requests the node holds, whatever it holds.
+    /// Have the poll report `key` of `doc` as a held pull request, whatever the document holds.
     #[must_use]
-    pub fn held_pull(mut self, doc: DocId) -> Self {
-        Rc::make_mut(&mut self.held).pulls.push(doc);
+    pub fn held_pull(mut self, doc: DocId, key: DatumKey) -> Self {
+        Rc::make_mut(&mut self.held).pulls.push((doc, key));
         self
     }
 
@@ -107,8 +113,9 @@ impl Fixture {
             "updatedAt": "2026-11-17T10:00:00Z",
             "url": format!("https://github.com/{repo}/pull/{number}"),
         });
-        self.doc(doc.clone(), [(key(work::GithubPull::ID, slot), datum)])
-            .held_pull(doc)
+        let pull = key(work::GithubPull::ID, slot);
+        self.doc(doc.clone(), [(pull.clone(), datum)])
+            .held_pull(doc, pull)
     }
 
     /// Hold an intxt: the drawer's descriptor document with the intxt marker, a title, and a
@@ -273,6 +280,9 @@ impl Fixture {
             micro_review_manifest::READ_DATUMS => serde_json::to_value(
                 self.read(serde_json::from_value(input).expect("a ReadDatums"))?,
             ),
+            micro_review_manifest::POLL_DATUMS => serde_json::to_value(
+                self.poll(serde_json::from_value(input).expect("a PollDatums")),
+            ),
             other => unimplemented!("the fixture node does not serve {other}"),
         };
         Some(answer.expect("a method output is plain JSON"))
@@ -321,33 +331,65 @@ impl Fixture {
         IntxtsSummarized { results }
     }
 
+    /// Every held pull request in one caught-up page, whatever the predicate says: the fixture
+    /// holds one GitHub drawer.
+    fn poll(&self, _input: PollDatums) -> DatumPage {
+        DatumPage {
+            events: self
+                .held
+                .pulls
+                .iter()
+                .map(|(doc_id, datum_key)| DatumEvent::Datum {
+                    revision: 1,
+                    doc_id: doc_id.clone(),
+                    datum_key: datum_key.clone(),
+                    datum: ObservedDatum::Present {
+                        doc_heads: vec![],
+                        version: DatumVersion {
+                            heads: vec![],
+                            clock: 1,
+                        },
+                    },
+                })
+                .collect(),
+            through: 1,
+            caught_up: true,
+        }
+    }
+
     fn read(&self, input: ReadDatums) -> Option<DatumsRead> {
         let datums = self.held.docs.get(&input.doc_id)?;
         let version = DatumVersion {
             heads: vec![],
             clock: 1,
         };
-        Some(DatumsRead {
-            heads: vec![],
-            datums: datums
+        let accepted = |value: &Value| DatumRead::Accepted {
+            value: value.clone(),
+            version: version.clone(),
+            authors: vec![],
+        };
+        let read = match &input.datums {
+            None => datums
                 .iter()
-                .filter(|(datum, _)| {
-                    input
-                        .datums
-                        .as_ref()
-                        .is_none_or(|only| only.contains(*datum))
-                })
-                .map(|(datum, value)| {
-                    (
-                        datum.clone(),
-                        DatumRead::Accepted {
-                            value: value.clone(),
+                .map(|(datum, value)| (datum.clone(), accepted(value)))
+                .collect(),
+            // A key the document does not hold reads as absent, as at the node.
+            Some(only) => only
+                .iter()
+                .map(|datum| {
+                    let read = datums.get(datum).map_or_else(
+                        || DatumRead::Absent {
                             version: version.clone(),
-                            authors: vec![],
                         },
-                    )
+                        accepted,
+                    );
+                    (datum.clone(), read)
                 })
                 .collect(),
+        };
+        Some(DatumsRead {
+            heads: vec![],
+            datums: read,
         })
     }
 }
@@ -371,11 +413,18 @@ impl NodeCalls for Fixture {
         )
     }
 
-    fn read_capability(&self, _doc: &DocId) -> impl Future<Output = Result<CapId, CallError>> {
-        ready(Ok(CapId::from_bytes([0; 16])))
+    fn configuration(&self) -> Result<Configuration, CallError> {
+        Ok(Configuration {
+            github_drawer: Fixture::doc_id("91"),
+            intxt_drawers: vec![Fixture::doc_id("92")],
+            doc_cap: CapId::from_bytes([0; 16]),
+        })
     }
+}
 
-    fn held_pulls(&self) -> impl Future<Output = Result<Vec<DocId>, CallError>> {
-        ready(Ok(self.held.pulls.clone()))
+/// Two fixtures are the same node when they are clones of one.
+impl PartialEq for Fixture {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.held, &other.held) && Rc::ptr_eq(&self.calls, &other.calls)
     }
 }

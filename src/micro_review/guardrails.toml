@@ -9,7 +9,6 @@ allowed_dependencies = [
     "method_core",
     "micro_review_manifest",
     "pierre_diffs_dioxus",
-    "service_core_rs",
 ]
 allow_external_api_types = false
 

@@ -9,11 +9,18 @@
 use crate::node::CallError;
 use crate::node::NodeCalls;
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
 use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::drawer::DrawerAccess;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 use intxt_core::generic;
 use intxt_core::methods::MAX_SUMMARIZED;
 use intxt_core::methods::SummarizeIntxts;
@@ -188,19 +195,20 @@ impl<C: NodeCalls> Review<C> {
         }
     }
 
-    /// Every datum of `doc`, or why the node would not give them.
-    async fn read_all(
+    /// The datums of `doc` at `keys` (every datum when none), or why the node would not give
+    /// them.
+    async fn read(
         &self,
         doc: &DocId,
+        keys: Option<BTreeSet<DatumKey>>,
     ) -> Result<Read<BTreeMap<DatumKey, DatumRead>>, CallError> {
-        let capability = self.node.read_capability(doc).await?;
         let read = self
             .node
             .call(ReadDatums {
-                capability,
+                capability: self.node.configuration()?.doc_cap,
                 doc_id: doc.clone(),
                 at: At::Current,
-                datums: None,
+                datums: keys,
                 optimistic: false,
             })
             .await
@@ -208,28 +216,92 @@ impl<C: NodeCalls> Review<C> {
         match read {
             Ok(read) => Ok(Read::Ready(read.datums)),
             Err(CallError::Refused(reason)) => Ok(Read::Unreadable(format!("{doc}: {reason}"))),
-            Err(transport) => Err(transport),
+            Err(other) => Err(other),
         }
     }
 
+    /// The `githubPull` datums of the GitHub drawer's own documents, then each one read: a poll
+    /// from the start with no hold, paged until caught up and asking only for the tag, so a page
+    /// carries no values (the shape of `Caller::key_holders`).
     pub(crate) async fn pulls(&self) -> Result<Vec<Read<Pull>>, CallError> {
-        let docs = self.node.held_pulls().await?;
-        futures::future::try_join_all(docs.into_iter().map(|doc| self.pull(doc))).await
+        let configuration = self.node.configuration()?;
+        let tag = DatumTag::new(work::GithubPull::ID).expect("a datum id is a tag");
+        let predicate = Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: configuration.github_drawer.clone(),
+                    transitive: false,
+                    at_least: DrawerAccess::Read,
+                },
+                Predicate::HasTag { tag: tag.clone() },
+            ],
+        };
+        let datums = DatumSelection::Of {
+            tags: [tag].into(),
+            keys: BTreeSet::new(),
+        };
+        let mut held = BTreeSet::new();
+        let mut after = 0;
+        loop {
+            let page = self
+                .node
+                .call(PollDatums {
+                    capability: configuration.doc_cap,
+                    predicate: predicate.clone(),
+                    datums: datums.clone(),
+                    after,
+                    limit: 0,
+                    hold_ms: 0,
+                })
+                .await?;
+            // Events are in revision order, so the last word stands: a removed row is a pull
+            // request taken out, and a `leave` is the document moving out of the result.
+            for event in page.events {
+                match event {
+                    DatumEvent::Datum {
+                        doc_id,
+                        datum_key,
+                        datum: ObservedDatum::Present { .. },
+                        ..
+                    } => {
+                        held.insert((doc_id, datum_key));
+                    }
+                    DatumEvent::Datum {
+                        doc_id,
+                        datum_key,
+                        datum: ObservedDatum::Removed { .. },
+                        ..
+                    } => {
+                        held.remove(&(doc_id, datum_key));
+                    }
+                    DatumEvent::Leave { doc_id, .. } => held.retain(|(held, _)| *held != doc_id),
+                }
+            }
+            if page.caught_up {
+                break;
+            }
+            // A node that is not caught up and does not move the cursor would be asked forever.
+            if page.through <= after {
+                return Err(CallError::Refused(format!(
+                    "the poll for pull requests is not caught up and made no progress past {after}"
+                )));
+            }
+            after = page.through;
+        }
+        futures::future::try_join_all(held.into_iter().map(|(doc, key)| self.pull(doc, key))).await
     }
 
-    async fn pull(&self, doc: DocId) -> Result<Read<Pull>, CallError> {
-        let datums = match self.read_all(&doc).await? {
+    async fn pull(&self, doc: DocId, key: DatumKey) -> Result<Read<Pull>, CallError> {
+        let datums = match self.read(&doc, Some([key.clone()].into())).await? {
             Read::Ready(datums) => datums,
             Read::Unreadable(reason) => return Ok(Read::Unreadable(reason)),
         };
-        let Some((key, read)) = datums
-            .into_iter()
-            .find(|(key, _)| key.tag().as_str() == work::GithubPull::ID)
-        else {
-            return Ok(Read::Unreadable(format!("{doc} holds no pull request")));
-        };
-        let DatumRead::Accepted { value, .. } = read else {
-            return Ok(Read::Unreadable(format!("{doc}: {}", why(&read))));
+        let value = match datums.get(&key) {
+            Some(DatumRead::Accepted { value, .. }) => value.clone(),
+            other => {
+                let why = other.map_or_else(|| "absent".to_owned(), why);
+                return Ok(Read::Unreadable(format!("{doc}: {key} is {why}")));
+            }
         };
         let pull: work::GithubPull =
             serde_json::from_value(value).expect("the node admitted this value as a githubPull");
@@ -294,7 +366,7 @@ impl<C: NodeCalls> Review<C> {
     }
 
     pub(crate) async fn intxt(&self, drawer: &DocId) -> Result<Read<Intxt>, CallError> {
-        Ok(match self.read_all(drawer).await? {
+        Ok(match self.read(drawer, None).await? {
             Read::Ready(datums) => assemble(&datums).map_or_else(Read::Unreadable, Read::Ready),
             Read::Unreadable(reason) => Read::Unreadable(reason),
         })
@@ -465,12 +537,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_held_document_without_a_pull_is_an_unreadable_row_not_a_missing_one() {
+    async fn a_pull_the_poll_names_but_the_document_lacks_is_an_unreadable_row() {
         let bare = Fixture::doc_id("5");
-        let fixture = Fixture::empty().doc(bare.clone(), []).held_pull(bare);
+        let fixture = Fixture::empty()
+            .doc(bare.clone(), [])
+            .held_pull(bare, key(work::GithubPull::ID, "o/r/1"));
         let pulls = review(&fixture).pulls().await.unwrap();
-        assert!(
-            matches!(&pulls[..], [Read::Unreadable(reason)] if reason.contains("no pull request"))
+        assert!(matches!(&pulls[..], [Read::Unreadable(reason)] if reason.contains("absent")));
+    }
+
+    #[tokio::test]
+    async fn the_list_is_one_poll_then_one_read_per_pull() {
+        let fixture = Fixture::sample();
+        review(&fixture).pulls().await.unwrap();
+        assert_eq!(
+            fixture.calls(),
+            [
+                "org.example.daybook.docs.pollDatums",
+                "org.example.daybook.docs.readDatums",
+                "org.example.daybook.docs.readDatums"
+            ]
         );
     }
 
