@@ -533,7 +533,7 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
         let packaging = Packaging::new(client, &repo, &node_root);
         let mut created = Vec::new();
         let drawer = packaging
-            .create(&mut created, "Two files", Some("b and c"))
+            .create(&mut created, "Two files", Some("b and c"), None)
             .await
             .unwrap();
         let created = String::from_utf8(created).unwrap();
@@ -748,6 +748,49 @@ async fn intxt_add_branch_packages_commits_ref_and_session_and_readding_is_a_no_
             after.contains("commits (1):") && after.contains("sessions (1):"),
             "{after}"
         );
+
+        // `new --with` shares the commits document: the new intxt's descriptor names the same
+        // document, so the membership query anchored on either drawer finds the commits once.
+        let commits_doc_of = async |drawer: &big_cabinet_core::drawer::protocol::DrawerId| {
+            let (_, datum) = read_at(
+                client,
+                drawer,
+                &"org.example.intxt.work.commitsDoc/main".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            datum["doc"].as_str().unwrap().to_owned()
+        };
+        let mut out = Vec::new();
+        let follow_up = packaging
+            .create(&mut out, "Follow-up", None, Some(&short))
+            .await
+            .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("shares the commits document of"), "{out}");
+        assert_eq!(
+            commits_doc_of(&follow_up).await,
+            commits_doc_of(&drawer).await
+        );
+        let lookup = intxt_core::client::Caller::new(
+            client,
+            service_utils_rs::RequestContext::root(),
+            None,
+            "test-with".to_owned(),
+        );
+        assert_eq!(
+            lookup.commit_holders(&follow_up, &tip).await.unwrap(),
+            lookup.commit_holders(&drawer, &tip).await.unwrap(),
+        );
+        // A name that is no intxt creates nothing.
+        let before = list().await;
+        assert!(
+            packaging
+                .create(&mut Vec::new(), "Orphan", None, Some("nope"))
+                .await
+                .is_err()
+        );
+        assert_eq!(list().await, before);
     })
     .await;
 }
@@ -786,7 +829,7 @@ async fn intxt_add_branch_imports_history_that_was_never_recorded() {
         let packaging = Packaging::new(client, &repo, &node_root);
         let mut created = Vec::new();
         let drawer = packaging
-            .create(&mut created, "Unrecorded", None)
+            .create(&mut created, "Unrecorded", None, None)
             .await
             .unwrap();
         let short = short_ids::ShortIds::new([drawer.to_string()])
@@ -925,7 +968,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
 
         let mut created = Vec::new();
         let drawer = operator
-            .create(&mut created, "Review me", None)
+            .create(&mut created, "Review me", None, None)
             .await
             .unwrap();
         let intxt = short_ids::ShortIds::new([drawer.to_string()])
@@ -1320,7 +1363,7 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         let packaging = Packaging::new(client, tmp.path(), &node_root);
         let mut out = Vec::new();
         let drawer = packaging
-            .create(&mut out, "Port the sync", None)
+            .create(&mut out, "Port the sync", None, None)
             .await
             .unwrap();
         let link = generic::Intxt::reference(&drawer).to_string();

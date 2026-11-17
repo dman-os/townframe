@@ -55,8 +55,6 @@ use std::io::Write;
 
 /// The meta document that holds an intxt's annotations: `notes/annotations`.
 const NOTES_SLOT: &str = "notes/annotations";
-/// Where the drawer lists the commits document `add` makes (`metaDoc/commits/main`).
-const COMMITS_SLOT: &str = "commits/main";
 
 /// Which end of a commit's diff a line number counts on, as GitHub's `side` does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -371,7 +369,7 @@ impl Packaging<'_> {
                     }
                 );
                 // The commit's datum is in the intxt's commits document, written by `add`.
-                let commits_doc = self.meta_doc(&drawer, COMMITS_SLOT).await?.ok_or_else(|| {
+                let commits_doc = self.commits_doc(&drawer).await?.ok_or_else(|| {
                     eyre::eyre!(
                         "the intxt {} holds no commits: run `day x intxt add` first",
                         shown(&intxts, &drawer.to_string())
