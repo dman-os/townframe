@@ -79,6 +79,7 @@ members = [
   "./src/clay_dioxus_kit",
   "./src/dioxus_storm",
   "./src/dayframe_composition",
+  "./src/dayframe_native",
   "./src/dayframe_web",
   "./src/dayframe_desktop",
   "./src/dayframe_mobile",
@@ -173,6 +174,7 @@ micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 dayframe_composition = { path = "./src/dayframe_composition" }
+dayframe_native = { path = "./src/dayframe_native" }
 
 #
 # meta
@@ -370,13 +372,13 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-core-template = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-ssr = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
 blitz-dom = "=0.3.0-beta.4"
 ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
@@ -386,8 +388,8 @@ ui = { path = "./src/ui" }
 wasmtime = { git = "https://github.com/dman-os/wasmtime", rev = "a24366c874177c2beecd96c7dfae6754c847d361" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
-dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "4ef345c24e3d92b4b006467618b3a6d20d0a74e2" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c" }
 # blitz 0.3.0-beta.4 plus a fix: a form control added and dropped in one mutation batch stayed
 # queued and the mutator's flush indexed its freed node id. Every blitz crate comes from the same
 # rev, since blitz-dom reaches its siblings by path inside that workspace.

@@ -19,6 +19,8 @@ pub use crate::wasm::WasmPackage;
 #[cfg(feature = "wasmtime")]
 pub use crate::wasm::component_package;
 #[cfg(feature = "wasmtime")]
+pub use crate::wasm::set_component_cache_directory;
+#[cfg(feature = "wasmtime")]
 pub use crate::wasm::factory as wasm_factory;
 #[cfg(feature = "wcmp")]
 pub use crate::wcmp::WcmpPackage;

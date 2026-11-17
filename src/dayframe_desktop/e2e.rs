@@ -1,6 +1,6 @@
 use crate::composition::desktop_runtime;
-use crate::composition::Application;
 use crate::composition::CompositionRuntime;
+use dayframe_composition::Application;
 use blitz_dom::ns;
 use blitz_dom::BaseDocument;
 use blitz_dom::DocumentConfig;
