@@ -7,6 +7,7 @@ allowed_dependencies = [
     "clay_guest_session",
     "clay_host",
     "clay_mdk",
+    "clay_rt_wcmp",
     "clay_store",
     "clay_surface",
     "daybook_types",
@@ -16,6 +17,8 @@ allowed_dependencies = [
     "micro_sample",
     "micro_settings",
     "micro_settings_manifest",
+    "micro_shell",
+    "micro_shell_manifest",
     "micro_toolbar",
     "micro_toolbar_manifest",
     "sqlite_rs",
@@ -24,7 +27,8 @@ allowed_dependencies = [
 allow_external_api_types = false
 
 # Desktop is the native launch shell only (ADR 018 §7). The shell is meaningless without
-# the `desktop` renderer feature, so the matrix never builds it bare.
+# the `desktop` (Wry) renderer feature, so the matrix never builds it bare; `blitz` adds the
+# Blitz launcher next to it.
 [builds.native]
-features = ["desktop"]
+features = ["blitz"]
 required_features = ["desktop"]

@@ -23,13 +23,9 @@ use crate::Source;
 use crate::Transaction;
 use crate::Version;
 
-#[path = "tests_cursors.rs"]
 mod cursors;
-#[path = "tests_lifecycle.rs"]
 mod lifecycle;
-#[path = "tests_model.rs"]
 mod model;
-#[path = "tests_requests.rs"]
 mod requests;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
