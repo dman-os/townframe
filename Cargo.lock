@@ -112,6 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "accesskit_xplat"
+version = "0.2.1"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
+dependencies = [
+ "accesskit",
+ "accesskit_macos",
+ "accesskit_windows",
+ "android-activity",
+ "raw-window-handle 0.6.2",
+]
+
+[[package]]
 name = "addr"
 version = "0.15.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -420,7 +432,7 @@ dependencies = [
  "anyrender 0.13.0",
  "ash",
  "ash-window",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "gl",
  "glutin",
  "hashbrown 0.17.1",
@@ -457,7 +469,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1301d68b8d7a9333c242225bb026dc08f70a5b0ab096087866c06ceab227de5"
 dependencies = [
  "anyrender 0.13.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "kurbo",
  "peniko",
@@ -478,7 +490,7 @@ dependencies = [
  "anyrender 0.13.0",
  "bytemuck",
  "color",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "glifo 0.2.0",
  "kurbo",
  "peniko",
@@ -495,7 +507,7 @@ dependencies = [
  "anyrender 0.14.0",
  "bytemuck",
  "color",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "glifo 0.4.0",
  "kurbo",
  "peniko",
@@ -511,7 +523,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acface501bfa9d5b2abf9413ee5728ded41bd7f9c63b24162b9ea54f431d7e4f"
 dependencies = [
  "anyrender 0.13.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "glifo 0.2.0",
  "kurbo",
@@ -532,7 +544,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5139465733e457ebd2dd04efbee5aa6fbc1d8747d0e3fe0f81b8de4f240cb01"
 dependencies = [
  "anyrender 0.14.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-channel",
  "glifo 0.4.0",
  "kurbo",
@@ -2080,8 +2092,7 @@ dependencies = [
 [[package]]
 name = "blitz-dom"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a814bfd3ad19e6d8d26f99c75188062baca499564f9abe44250230962427d183"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "accesskit",
  "anyrender 0.14.0",
@@ -2092,7 +2103,7 @@ dependencies = [
  "color",
  "cssparser 0.38.0",
  "cursor-icon",
- "debug_timer",
+ "debug_timer 0.1.3 (git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca)",
  "euclid",
  "html-escape",
  "icu_casemap",
@@ -2131,8 +2142,7 @@ dependencies = [
 [[package]]
 name = "blitz-html"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eddd638e05f3f3efb9f2d37f0406e7834ea023727e1678524488aa70eb639615"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "blitz-dom",
  "blitz-traits",
@@ -2143,8 +2153,7 @@ dependencies = [
 [[package]]
 name = "blitz-net"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "966a91d78155df3fd34af4cfcc711e0a998b3bdc0d2967cda40b0087e129deff"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "blitz-traits",
  "data-url",
@@ -2156,8 +2165,7 @@ dependencies = [
 [[package]]
 name = "blitz-paint"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28803328124d7b7ea5f8f41501513ccb005559e9f6baf33fa0c1fb7612654a93"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "anyrender 0.14.0",
  "anyrender_svg",
@@ -2179,11 +2187,10 @@ dependencies = [
 [[package]]
 name = "blitz-shell"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d80b952b007a4bd82012583da8540d95cfd276b3c790ded39299fce728864fdb"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "accesskit",
- "accesskit_xplat",
+ "accesskit_xplat 0.2.1 (git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca)",
  "android-activity",
  "anyrender 0.14.0",
  "arboard",
@@ -2203,8 +2210,7 @@ dependencies = [
 [[package]]
 name = "blitz-traits"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d339c3ff7fe8bed623e27695a4c15dd1ec8faa9bf9158b7475bf180280e4018c"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "atomic_refcell",
  "bitflags 2.13.2",
@@ -2832,6 +2838,17 @@ dependencies = [
  "dioxus-core",
  "dioxus-html",
  "tokio",
+]
+
+[[package]]
+name = "clay_dioxus_kit"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "dioxus_storm",
+ "serde_json",
 ]
 
 [[package]]
@@ -4385,6 +4402,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde",
@@ -4398,18 +4417,24 @@ dependencies = [
 name = "dayframe_desktop"
 version = "0.1.0"
 dependencies = [
- "accesskit_xplat",
+ "accesskit_xplat 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "anyrender 0.13.0",
+ "anyrender 0.14.0",
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
+ "anyrender_vello_cpu 0.18.0",
  "anyrender_vello_hybrid 0.10.0",
  "blitz-dom",
+ "blitz-html",
+ "blitz-paint",
+ "blitz-traits",
  "ciborium",
  "clay_dioxus",
  "clay_docs",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
+ "clay_rt_wcmp",
  "clay_store",
  "clay_surface",
  "daybook_types",
@@ -4424,6 +4449,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde",
@@ -4431,6 +4458,8 @@ dependencies = [
  "sqlite_rs",
  "tokio",
  "ui",
+ "wcmp",
+ "wcmp-wasm-core-wasmi",
 ]
 
 [[package]]
@@ -4454,10 +4483,7 @@ dependencies = [
 name = "dayframe_showcase"
 version = "0.1.0"
 dependencies = [
- "anyrender 0.13.0",
- "anyrender_vello",
- "anyrender_vello_cpu 0.17.0",
- "anyrender_vello_hybrid 0.10.0",
+ "clay_dioxus_kit",
  "dioxus",
  "dioxus-native",
  "serde",
@@ -4483,6 +4509,8 @@ dependencies = [
  "micro_sample",
  "micro_settings",
  "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde",
@@ -4509,6 +4537,11 @@ name = "debug_timer"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da220af51a1a335e9a930beaaef53d261e41ea9eecfb3d973a3ddae1a7284b9c"
+
+[[package]]
+name = "debug_timer"
+version = "0.1.3"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 
 [[package]]
 name = "debugid"
@@ -5270,6 +5303,17 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.5.0",
  "web-sys",
+]
+
+[[package]]
+name = "dioxus_storm"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -9572,8 +9616,10 @@ dependencies = [
 name = "micro_layout"
 version = "0.1.0"
 dependencies = [
+ "clay_dioxus_kit",
  "clay_mdk",
  "dioxus",
+ "dioxus-core",
  "micro_layout_manifest",
 ]
 
@@ -9584,6 +9630,7 @@ dependencies = [
  "ciborium",
  "clay_mdk",
  "insta",
+ "micro_shell_manifest",
  "serde",
  "serde_json",
 ]
@@ -9611,17 +9658,42 @@ name = "micro_settings"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",
+ "clay_dioxus_kit",
  "clay_guest_session",
  "clay_host",
  "clay_mdk",
  "dioxus",
  "micro_settings_manifest",
+ "micro_shell_manifest",
  "serde",
  "tokio",
 ]
 
 [[package]]
 name = "micro_settings_manifest"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_mdk",
+ "insta",
+ "micro_shell_manifest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_shell"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "micro_shell_manifest",
+ "tokio",
+]
+
+[[package]]
+name = "micro_shell_manifest"
 version = "0.1.0"
 dependencies = [
  "ciborium",
@@ -9652,6 +9724,7 @@ dependencies = [
  "ciborium",
  "clay_mdk",
  "insta",
+ "micro_shell_manifest",
  "serde",
  "serde_json",
 ]
@@ -12241,7 +12314,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31c2ba47171f8376a1cd74f8d575f1d729c033fc007f59a9da3688c31187264b"
 dependencies = [
  "anyrender 0.14.0",
- "debug_timer",
+ "debug_timer 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "pixels",
 ]
 
@@ -15331,8 +15404,7 @@ dependencies = [
 [[package]]
 name = "stylo_taffy"
 version = "0.3.0-beta.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d932deb3145f9e1c4159d09237f7999a29632fba9125896abb364dab080e0c0"
+source = "git+https://github.com/dman-os/blitz?rev=ffaf2bd0518a2cf7571c43f08327bd580b1871ca#ffaf2bd0518a2cf7571c43f08327bd580b1871ca"
 dependencies = [
  "bitflags 2.13.2",
  "stylo",
@@ -16726,6 +16798,10 @@ name = "ui"
 version = "0.1.0"
 dependencies = [
  "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "dioxus_storm",
+ "serde_json",
  "tokio",
 ]
 
@@ -18378,7 +18454,7 @@ dependencies = [
 [[package]]
 name = "wcmp"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "js-sys",
@@ -18397,7 +18473,7 @@ dependencies = [
 [[package]]
 name = "wcmp-bindgen"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "heck 0.5.0",
@@ -18410,7 +18486,7 @@ dependencies = [
 [[package]]
 name = "wcmp-macros"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -18421,7 +18497,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "thiserror 2.0.21",
@@ -18432,7 +18508,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-wasmi"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "wasmi",
@@ -18443,7 +18519,7 @@ dependencies = [
 [[package]]
 name = "wcmp-wasm-core-web"
 version = "0.1.1"
-source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55#7604dc85aa4df0b567e46ae18bee2b7d0e0c3c55"
+source = "git+https://github.com/dman-os/wasm-component-model-polyfill?rev=da35a9b4e4cc71dacb57323b906093f9e18e78b6#da35a9b4e4cc71dacb57323b906093f9e18e78b6"
 dependencies = [
  "anyhow",
  "js-sys",

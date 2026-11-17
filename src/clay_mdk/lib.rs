@@ -30,10 +30,14 @@ pub use clay_collection::{self as collection};
 #[unsafe(no_mangle)]
 pub extern "C" fn __pthread_tsd_run_dtors() {}
 
+#[cfg(any(test, all(target_os = "wasi", target_env = "p3")))]
+mod task_stacks;
+
 /// Component-model task lifecycle hook codes synthesized by `wit-component`
 /// when componentizing a core module. See `wit-component`'s `TaskHook` enum.
 #[cfg(all(target_os = "wasi", target_env = "p3"))]
 mod task_hook {
+    use crate::task_stacks::TaskStacks;
     use core::sync::atomic::AtomicBool;
     use core::sync::atomic::AtomicPtr;
     use core::sync::atomic::Ordering;
@@ -53,29 +57,12 @@ mod task_hook {
     pub const REALLOC_START: i32 = 12;
     pub const REALLOC_FINISH: i32 = 13;
 
-    /// Whether the statically allocated main-program stack (`__init_stack_pointer`)
-    /// is currently handed out to a running task. A task releases it on FINISH or when it
-    /// blocks, before any other task starts or resumes.
-    static INIT_STACK_IN_USE: AtomicBool = AtomicBool::new(false);
-
     /// Set exactly once on the first START hook: the main-thread TLS block is
     /// installed for the program lifetime and never swapped or freed (post-#884
     /// shared-TLS semantics; v34's per-task TLS swap is what made
     /// `#[thread_local]` `RUNTIMES`/`RUNTIME` vanish between `activate` and
     /// `mount`).
     static TLS_INSTALLED: AtomicBool = AtomicBool::new(false);
-
-    /// The running async export task's wit-bindgen task state (`start_task` stores its boxed
-    /// `TaskState` here and every callback reads it back). wit-bindgen without its `std`
-    /// feature reaches it through [`wit_bindgen_0_62_0_get_task_context`] and
-    /// [`wit_bindgen_0_62_0_set_task_context`], which we define over this pointer instead of
-    /// the C runtime's `_Thread_local`.
-    ///
-    /// This is task state, not thread state: TLS is shared by every task (see [`run`]), so the
-    /// hook must park this pointer in the task's component-model context slot 0 whenever the
-    /// task blocks and put it back when the task resumes. Between a `BLOCK` and the matching
-    /// `RESUME` this is null, so another task (async or sync) can run in between.
-    pub(super) static CURRENT: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
     /// Whether wit-bindgen has ever stored task state through our `set_task_context`. Every
     /// async export calls `start_task`, which does, so a task that blocks or finishes without
@@ -84,6 +71,24 @@ mod task_hook {
     /// longer matches the resolved wit-bindgen). [`run`] turns that into an immediate panic
     /// instead of a silent return to one-suspended-export-per-instance.
     pub(super) static TASK_CONTEXT_WIRED: AtomicBool = AtomicBool::new(false);
+
+    /// Every stack a task runs on, and the wit-bindgen state kept beside each (see
+    /// [`TaskStacks`]). That state is task state, not thread state: TLS is shared by every task
+    /// (see [`run`]), so the hook parks the state pointer in the task's component-model context
+    /// slot 0 whenever the task blocks (returns from its callback) and puts it back beside
+    /// whatever stack the task resumes on. A task suspended in the middle of a callback fires
+    /// no hook, but keeps its stack and so its state.
+    static STACKS: TaskStacks = TaskStacks::new();
+
+    /// The running task's wit-bindgen state cell, found from the address of a local, which is
+    /// on the stack the task runs on.
+    pub(super) fn current_state() -> &'static AtomicPtr<u8> {
+        let marker = 0_u8;
+        STACKS.state(
+            init_stack_pointer() as usize,
+            core::hint::black_box(&marker) as *const u8 as usize,
+        )
+    }
 
     #[inline]
     fn init_stack_pointer() -> i32 {
@@ -138,36 +143,16 @@ mod task_hook {
         }
     }
 
-    /// Acquire the main-program stack for a starting task. Nested/concurrent
-    /// Starts are an invariant violation for this sequential cooperative guest
-    /// and must not silently share the stack.
+    /// A stack for a task that starts or resumes (see [`TaskStacks`]).
     fn task_stack_alloc() -> i32 {
-        if INIT_STACK_IN_USE
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            init_stack_pointer()
-        } else {
-            // A task releases the stack before any other can run (FINISH or BLOCK),
-            // so a held stack means two tasks are running at once, which the
-            // component model never does on one instance. Crash rather than
-            // corrupt the shared stack.
-            unreachable!("nested or concurrent __wasilibc_task_hook Start")
-        }
+        STACKS.alloc(init_stack_pointer() as usize) as i32
     }
 
-    /// Inverse of [`task_stack_alloc`]: release the main-program stack so the
-    /// next sequential export can re-acquire it. Matches post-#884
-    /// `task_stack_free` for the init-stack case (no secondary malloc stack is
-    /// ever handed out).
-    fn task_stack_free(prev_context_0: i32) {
-        if prev_context_0 == init_stack_pointer() {
-            INIT_STACK_IN_USE.store(false, Ordering::Release);
-        } else if prev_context_0 != 0 {
-            // Only the init stack is ever returned by `task_stack_alloc` above,
-            // so anything else reaching here is an unexpected stack identity.
-            unreachable!("unexpected task stack handed to __wasilibc_task_hook Finish");
-        }
+    /// Inverse of [`task_stack_alloc`]. `prev_context_0` is the task's stack pointer at the
+    /// moment it finished or blocked, which its frames have unwound to the value
+    /// `task_stack_alloc` handed it. Answers the task's wit-bindgen state.
+    fn task_stack_free(prev_context_0: i32) -> *mut u8 {
+        STACKS.free(init_stack_pointer() as usize, prev_context_0 as usize)
     }
 
     /// `__wasm_task_hook` (see wasi-libc `__wasm_task_hook.S`) saves the caller's
@@ -178,11 +163,11 @@ mod task_hook {
     ///
     /// * START → a fresh task stack (or `hook_stack` for realloc, which must not
     ///   allocate);
-    /// * FINISH → `NULL` (task done; the component model drives the next Start,
-    ///   and wasmtime restores SP around its own lifting trampolines);
-    /// * `ASYNC_BLOCK` → the task's parked wit-bindgen state (see [`CURRENT`]), which the
+    /// * FINISH → `NULL` (task done; the component model drives the next Start, and wasmtime
+    ///   restores SP around its own lifting trampolines);
+    /// * `ASYNC_BLOCK` → the task's parked wit-bindgen state (see [`current_state`]), which the
     ///   component model keeps in slot 0 for this task alone until it resumes;
-    /// * `ASYNC_RESUME` → a fresh stack, with [`CURRENT`] restored from `prev_context_0`.
+    /// * `ASYNC_RESUME` → a fresh stack, with the state restored from `prev_context_0`.
     ///
     /// Two different things are deliberately scoped differently:
     ///
@@ -197,27 +182,18 @@ mod task_hook {
     ///   on resume, while any number of other async exports may start, run and park in
     ///   between. That is what lets calls into one instance overlap. Stock wasi-libc gets this
     ///   by swapping the TLS base per task; since we share TLS, we swap just this one pointer
-    ///   the same way, through slot 0 (the slot the stack pointer uses while a task runs).
-    ///
-    /// Sync exports (`mount`, `dispatch`, ...) never touch [`CURRENT`]: they run to completion
-    /// on the shared TLS while any async tasks are parked with a null `CURRENT`.
+    ///   the same way: it lives beside the stack the task runs on ([`current_state`]) and rides
+    ///   in slot 0 while the task is parked between callbacks. A task suspended in the middle
+    ///   of a callback fires no hook, but keeps its stack and so its state.
     pub extern "C" fn run(hook: i32, prev_context_0: i32, hook_stack: i32) -> i32 {
         match hook {
-            ASYNC_START => {
-                assert!(
-                    CURRENT.load(Ordering::Relaxed).is_null(),
-                    "async export started while another task's state is current"
-                );
-                install_tls_once();
-                task_stack_alloc()
-            }
-            SYNC_START | INITIALIZE_START | RESOURCE_DTOR_START | POST_RETURN_START => {
+            ASYNC_START | SYNC_START | INITIALIZE_START | RESOURCE_DTOR_START
+            | POST_RETURN_START => {
                 install_tls_once();
                 task_stack_alloc()
             }
             ASYNC_FINISH => {
                 assert_task_context_wired();
-                CURRENT.store(core::ptr::null_mut(), Ordering::Relaxed);
                 task_stack_free(prev_context_0);
                 0
             }
@@ -226,17 +202,19 @@ mod task_hook {
                 0
             }
             ASYNC_BLOCK => {
-                // The stack pointer in slot 0 is no longer needed once the task blocks, and
-                // the next task must find `CURRENT` empty. What the task keeps in slot 0
-                // while parked is its wit-bindgen state, handed back on RESUME.
+                // The stack pointer in slot 0 is no longer needed once the task blocks. What
+                // the task keeps in slot 0 while parked is its wit-bindgen state, handed back
+                // on RESUME.
                 assert_task_context_wired();
-                task_stack_free(prev_context_0);
-                CURRENT.swap(core::ptr::null_mut(), Ordering::Relaxed) as usize as i32
+                task_stack_free(prev_context_0) as usize as i32
             }
             ASYNC_RESUME => {
                 install_tls_once();
-                CURRENT.store(prev_context_0 as usize as *mut u8, Ordering::Relaxed);
-                task_stack_alloc()
+                let stack = task_stack_alloc();
+                STACKS
+                    .state(init_stack_pointer() as usize, stack as usize)
+                    .store(prev_context_0 as usize as *mut u8, Ordering::Relaxed);
+                stack
             }
             REALLOC_START => {
                 // Realloc is bounded and non-reentrant: run it on the hook stack
@@ -270,10 +248,12 @@ mod task_hook {
 /// workspace pins wit-bindgen with `=0.62.0` so that a bump is a conscious edit next to these
 /// names. They override the C runtime's `_Thread_local` versions in `libwit_bindgen_cabi_wasip3.a`
 /// (our object precedes the archive on the link line).
+///
+/// The state lives beside the stack the running task is on (`task_hook::current_state`).
 #[cfg(all(target_os = "wasi", target_env = "p3"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn wit_bindgen_0_62_0_get_task_context() -> *mut u8 {
-    task_hook::CURRENT.load(core::sync::atomic::Ordering::Relaxed)
+    task_hook::current_state().load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// See [`wit_bindgen_0_62_0_get_task_context`].
@@ -281,7 +261,7 @@ pub extern "C" fn wit_bindgen_0_62_0_get_task_context() -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn wit_bindgen_0_62_0_set_task_context(ptr: *mut u8) {
     task_hook::TASK_CONTEXT_WIRED.store(true, core::sync::atomic::Ordering::Relaxed);
-    task_hook::CURRENT.store(ptr, core::sync::atomic::Ordering::Relaxed);
+    task_hook::current_state().store(ptr, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Strong override of wasi-libc v34's `__wasilibc_task_hook`.
@@ -304,11 +284,12 @@ pub extern "C" fn wit_bindgen_0_62_0_set_task_context(ptr: *mut u8) {
 ///
 /// * TLS: installed once on the first Start via `__wasm_init_tls`, never
 ///   swapped or freed;
-/// * stack: the single statically allocated `__init_stack_pointer` is acquired
-///   on Start/Resume and released on Finish/Block. Only one task ever *runs* at a
-///   time and a parked task holds no stack, so async exports can overlap;
-/// * wit-bindgen task state: one pointer, swapped through context slot 0 on
-///   Block/Resume (see `task_hook::run`);
+/// * stack: the statically allocated `__init_stack_pointer` is acquired on Start/Resume and
+///   released on Finish/Block; a task that starts while another is suspended in the middle of
+///   its execution gets a heap-allocated stack of its own (see `task_hook::task_stack_alloc`),
+///   and a task parked between callbacks holds none, so async exports can overlap;
+/// * wit-bindgen task state: one pointer per task, beside the task's stack and parked in
+///   context slot 0 on Block/Resume (see `task_hook::run`);
 /// * realloc: runs on the existing hook stack; returns NULL on Finish;
 /// * TSD dtors: never run (paired with the `__pthread_tsd_run_dtors` no-op).
 ///
@@ -445,6 +426,8 @@ macro_rules! __export_guest_world {
 mod manifest;
 pub use manifest::Access;
 pub use manifest::AttachmentDeclaration;
+#[cfg(feature = "contract")]
+pub use manifest::Attachments;
 pub use manifest::BindingResolution;
 pub use manifest::CollectionCapability;
 pub use manifest::CollectionContract;
@@ -455,6 +438,8 @@ pub use manifest::FacetAccess;
 pub use manifest::InterfaceRef;
 pub use manifest::LOCAL_NAMESPACE;
 pub use manifest::MANIFEST_NSID;
+#[cfg(feature = "contract")]
+pub use manifest::ManifestBuilder;
 pub use manifest::MicroId;
 pub use manifest::MicroManifest;
 pub use manifest::Necessity;
@@ -526,18 +511,33 @@ pub mod package;
 #[cfg(all(test, feature = "view"))]
 extern crate self as clay_mdk;
 #[cfg(all(test, feature = "view"))]
-#[path = "context_micro.rs"]
 mod context_micro;
 
 #[cfg(feature = "in_process")]
 mod native;
 
+#[cfg(feature = "contract")]
+mod attachment;
+#[cfg(feature = "contract")]
+mod decl;
+#[cfg(feature = "contract")]
+pub use decl::CollectionDecl;
+#[cfg(feature = "contract")]
+pub use decl::ComponentDecl;
+#[cfg(feature = "contract")]
+pub use decl::ConfigDecl;
+#[cfg(feature = "contract")]
+pub use decl::DeclaredCollection;
+#[cfg(feature = "contract")]
+pub use decl::PackageDecl;
+#[cfg(feature = "contract")]
+pub use decl::RootRow;
+#[cfg(feature = "contract")]
+pub use decl::ShellRoots;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod context;
 #[cfg(any(feature = "in_process", feature = "guest"))]
 mod rows;
-#[cfg(feature = "contract")]
-mod attachment;
 #[cfg(feature = "contract")]
 pub use attachment::Attachment;
 #[cfg(feature = "contract")]

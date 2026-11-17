@@ -148,6 +148,9 @@ pub(crate) struct State {
     pub(crate) next: u64,
     pub(crate) instances: BTreeMap<u64, InstanceRecord>,
     pub(crate) ending: BTreeMap<u64, Ending>,
+    /// Why an incarnation was closed by its own runtime (a guest trap, a failed drive), by
+    /// instance id; the supervisor reports it as the micro's fault.
+    pub(crate) faults: BTreeMap<u64, String>,
     /// consumer -> provider -> number of live [`Binding`]s for that edge.
     pub(crate) dependencies: BTreeMap<u64, BTreeMap<u64, usize>>,
     /// Incarnations whose owned effects are being torn down. Distinct from
@@ -192,6 +195,7 @@ impl Host {
                 next: 0,
                 instances: BTreeMap::new(),
                 ending: BTreeMap::new(),
+                faults: BTreeMap::new(),
                 dependencies: BTreeMap::new(),
                 tearing_down: BTreeSet::new(),
                 components: BTreeMap::new(),
@@ -583,6 +587,31 @@ impl Host {
             state.changes.send_replace(HostStatus::Closing);
         }
         self.run_closes();
+    }
+
+    /// Record why the runtime of `instance` is about to close it (a guest trap, a failed drive),
+    /// so the supervisor can report that cause as the micro's fault instead of a bare "ended
+    /// outside supervision". The first cause of an incarnation stands.
+    pub fn record_fault(&self, instance: &Instance, message: String) {
+        assert_eq!(
+            self.identity, instance.host,
+            "instance belongs to another host"
+        );
+        self.inner
+            .lock()
+            .unwrap()
+            .faults
+            .entry(instance.id)
+            .or_insert(message);
+    }
+
+    /// The cause [`Self::record_fault`] kept for `instance`, if its runtime closed it.
+    pub fn fault(&self, instance: &Instance) -> Option<String> {
+        assert_eq!(
+            self.identity, instance.host,
+            "instance belongs to another host"
+        );
+        self.inner.lock().unwrap().faults.get(&instance.id).cloned()
     }
 
     pub fn close_instance(&self, instance: &Instance) -> Result<(), AccessError> {

@@ -47,24 +47,23 @@ pub(super) fn deliver(
         Delivery::Changed { id, snapshot } => first_poll(
             events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot)),
             &active.waker,
+            "document-events.changed",
         ),
-        Delivery::Lagged(id) => {
-            first_poll(events.call_lagged(&mut active.store, id), &active.waker)
-        }
+        Delivery::Lagged(id) => first_poll(
+            events.call_lagged(&mut active.store, id),
+            &active.waker,
+            "document-events.lagged",
+        ),
         Delivery::Completed(receipt) => first_poll(
             events.call_completed(&mut active.store, &receipt_to_wire(receipt)),
             &active.waker,
+            "document-events.completed",
         ),
     };
-    // A suspension (Suspended) or a guest trap both withdraw the incarnation: document
-    // callbacks are the same class of contract violation as a presentation call that fails.
-    let trapped = match outcome {
-        Ok(outcome) => outcome.is_err(),
-        Err(super::Suspended) => true,
-    };
-    if trapped {
+    // A guest trap withdraws the incarnation, and the cause is kept for the supervisor to report.
+    if let Err(trap) = outcome {
         guard.take();
-        return DeliveryOutcome::Trapped;
+        return DeliveryOutcome::Trapped(format!("guest trapped in a document delivery: {trap}"));
     }
     DeliveryOutcome::Delivered
 }

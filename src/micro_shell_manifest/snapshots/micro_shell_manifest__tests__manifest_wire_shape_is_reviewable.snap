@@ -1,0 +1,92 @@
+---
+source: src/micro_shell_manifest/lib.rs
+expression: sidecar()
+---
+id: dayframe.shell
+package_version: 1
+authority: org.example.dayframe.shell
+entrypoints:
+  initialize: "townframe:dayframe/micro-lifecycle@0.4.0"
+  presentation: "townframe:dayframe/presentation-events@0.4.0"
+  installer: ~
+publications:
+  - name: frame
+    kind: presentation
+    contract: ~
+  - name: home
+    kind: presentation
+    contract: ~
+  - name: nav-button
+    kind: presentation
+    contract: ~
+  - name: navigate
+    kind: call
+    contract: org.example.dayframe.shell.navigate
+  - name: back
+    kind: call
+    contract: org.example.dayframe.shell.back
+  - name: forward
+    kind: call
+    contract: org.example.dayframe.shell.forward
+  - name: open-sheet
+    kind: call
+    contract: org.example.dayframe.shell.openSheet
+  - name: close-sheet
+    kind: call
+    contract: org.example.dayframe.shell.closeSheet
+  - name: opened
+    kind: call
+    contract: org.example.dayframe.shell.opened
+requires: []
+configuration_requests:
+  - binding: shell
+    facets:
+      - tag: org.example.dayframe.shell.config
+        key_id: main
+        read: true
+        write: true
+        create: false
+        delete: false
+collection_contracts:
+  - id: org.example.dayframe.shell.panels
+    selector_schema: org.example.dayframe.shell.panelSelector
+    key_schema: org.example.dayframe.shell.panelKey
+    value_schema: org.example.dayframe.shell.panel
+    write_context_schema: ~
+    offered:
+      - read
+      - register
+collection_requests:
+  - binding: panels
+    contract: org.example.dayframe.shell.panels
+    access: read
+  - binding: home-panel
+    contract: org.example.dayframe.shell.panels
+    access: write
+  - binding: roots
+    contract: org.example.clay.shell.roots
+    access: write
+contributions:
+  - id: home-panel
+    binding: home-panel
+    key: dayframe.shell
+    payload:
+      content:
+        $attachment: 0
+      home: true
+      sockets:
+        - list
+      title: Home
+    attachments:
+      - index: 0
+        publication: home
+  - id: root
+    binding: roots
+    key: dayframe.shell
+    payload:
+      content:
+        $attachment: 0
+      title: Shell
+    attachments:
+      - index: 0
+        publication: frame
