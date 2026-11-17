@@ -64,7 +64,6 @@ use http_body_util::StreamBody;
 use method_core::ByteBody;
 
 use serde_json::Value;
-use serde_json::json;
 use service_client_native_rs::Client;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
@@ -698,58 +697,13 @@ impl Egress {
         workload_id: &str,
         request: hyper::Request<WasiBody>,
     ) -> (hyper::StatusCode, XrpcBody) {
-        let (parts, body) = request.into_parts();
-        let is_json = parts.method == hyper::Method::GET
-            || parts
-                .headers
-                .get(hyper::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(method_core::is_json_content_type);
-        let body = if is_json {
-            let Ok(body) = Limited::new(body, MAX_MESSAGE_OCTETS).collect().await else {
-                return (
-                    hyper::StatusCode::PAYLOAD_TOO_LARGE,
-                    XrpcBody::json(
-                        serde_json::to_vec(&json!({
-                            "error": "InvalidRequest",
-                            "message": "the request body failed or is too large"
-                        }))
-                        .expect("a JSON error serializes"),
-                    ),
-                );
-            };
-            XrpcBody::Json(body.to_bytes().to_vec())
-        } else {
-            let mime = parts
-                .headers
-                .get(hyper::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned);
-            let length = parts
-                .headers
-                .get(hyper::header::CONTENT_LENGTH)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse().ok());
-            XrpcBody::Bytes(byte_body(body, mime, length))
-        };
         let signer = self
             .signers
             .lock()
             .expect("signers lock")
             .get(workload_id)
             .copied();
-        egress::call(
-            &self.dispatch,
-            signer,
-            &parts.method,
-            parts
-                .uri
-                .path_and_query()
-                .map_or(parts.uri.path(), |target| target.as_str()),
-            &parts.headers,
-            body,
-        )
-        .await
+        egress::call_http(&self.dispatch, signer, request).await
     }
 }
 

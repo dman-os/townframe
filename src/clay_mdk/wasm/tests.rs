@@ -111,6 +111,7 @@ impl Rig {
                 MicroId::local("test.wasm"),
                 declared,
                 CollectionBindings::default(),
+                None,
                 move || {
                     let package = package.clone();
                     async move { Ok(package) }
@@ -372,6 +373,7 @@ async fn a_guest_slot_mounts_another_guests_presentation_and_follows_it_through_
                     MicroId::local(name),
                     manifest,
                     bindings,
+                    None,
                     move || {
                         let package = package.clone();
                         async move { Ok(package) }
