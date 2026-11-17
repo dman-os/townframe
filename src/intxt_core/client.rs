@@ -220,13 +220,14 @@ impl<H: HttpTransport> Caller<H> {
         Ok((read.heads, read.datums))
     }
 
-    /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha`: an
-    /// intxt's commits document holds `gitCommit/<sha>` for every commit the intxt holds, so a
-    /// hit is membership. When no document holds it, the commit may be a rewrite of one that is:
-    /// `add` writes `rewrittenFrom/<new sha>` beside a matched predecessor, so the lookup follows
-    /// those back (each hop the same query on the new slot) and answers the holders of the
-    /// nearest predecessors that have any. A rewrite chain is followed at most
-    /// `MAX_REWRITE_HOPS` deep, and a commit met twice is not asked again, so a cycle ends.
+    /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha` or
+    /// any commit it rewrote: an intxt's commits document holds `gitCommit/<sha>` for every
+    /// commit the intxt holds, so a hit is membership. `add` also writes
+    /// `rewrittenFrom/<new sha>` beside a matched predecessor, and the lookup follows those back
+    /// whether or not `sha` itself is held (each hop is the same query on the new slot), so the
+    /// answer holds both the intxt of the new commit and the intxt whose work sits on a
+    /// predecessor. A chain is followed at most `MAX_REWRITE_HOPS` deep, and a commit met twice
+    /// is not asked again, so a cycle ends.
     ///
     /// The query is anchored on the drawer (`And[InDrawer, HasKey]`), which is what lets a
     /// capability of less than node-wide authority ask it, and the caller needs Read on the
@@ -238,37 +239,38 @@ impl<H: HttpTransport> Caller<H> {
     ) -> Result<BTreeSet<DocId>, IntxtError> {
         let mut seen = BTreeSet::from([sha.to_owned()]);
         let mut wanted = vec![sha.to_owned()];
+        let mut holders = BTreeSet::new();
         for _ in 0..=MAX_REWRITE_HOPS {
-            let mut holders = BTreeSet::new();
             let mut predecessors = Vec::new();
             for sha in &wanted {
-                let held = self
-                    .key_holders(drawer, key(work::GitCommit::ID, sha)?)
-                    .await?;
-                if !held.is_empty() {
-                    holders.extend(held);
-                    continue;
-                }
-                let from = key(work::RewrittenFrom::ID, sha)?;
-                for doc in self.key_holders(drawer, from.clone()).await? {
-                    let Some(value) = self.try_read(&doc, &from).await?.1 else {
-                        continue;
-                    };
+                holders.extend(
+                    self.key_holders(drawer, key(work::GitCommit::ID, sha)?)
+                        .await?,
+                );
+                let from_key = key(work::RewrittenFrom::ID, sha)?;
+                for doc in self.key_holders(drawer, from_key.clone()).await? {
+                    // The poll just said the document holds it.
+                    let (_, value) = self.try_read(&doc, &from_key).await?;
+                    let value = value.ok_or_else(|| {
+                        IntxtError::Invalid(format!(
+                            "{doc} was found holding {from_key} and does not"
+                        ))
+                    })?;
                     let from: work::RewrittenFrom =
                         serde_json::from_value(value).map_err(|error| {
-                            IntxtError::Invalid(format!("rewrittenFrom/{sha}: {error}"))
+                            IntxtError::Invalid(format!("{from_key} in {doc}: {error}"))
                         })?;
                     if seen.insert(from.predecessor.clone()) {
                         predecessors.push(from.predecessor);
                     }
                 }
             }
-            if !holders.is_empty() || predecessors.is_empty() {
-                return Ok(holders);
+            if predecessors.is_empty() {
+                break;
             }
             wanted = predecessors;
         }
-        Ok(BTreeSet::new())
+        Ok(holders)
     }
 
     /// The documents in `drawer`, and in the drawers it reaches, that hold the datum `commit`:
