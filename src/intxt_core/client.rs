@@ -29,10 +29,13 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::ChangeHash;
 use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::PollDatums;
 use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
@@ -42,6 +45,8 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::ListDocDrawers;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::query::DatumSelection;
+use big_cabinet_core::query::Predicate;
 use big_cabinet_core::reference::DatumReference;
 use big_cabinet_core::reference::ReferenceDocId;
 use method_core::Unary;
@@ -190,6 +195,87 @@ impl<H: HttpTransport> Caller<H> {
             })
             .await?;
         Ok((read.heads, read.datums))
+    }
+
+    /// The documents in `drawer`, and in the drawers it reaches, that hold the commit `sha`: an
+    /// intxt's commits document holds `gitCommit/<sha>` for every commit the intxt holds, so a
+    /// hit is membership. The query is anchored on the drawer (`And[InDrawer, HasKey]`), which
+    /// is what lets a capability of less than node-wide authority ask it, and the caller needs
+    /// Read on the drawer. It is a poll from the start with no hold, paged until caught up, and
+    /// asks only for the one key, so a page carries no values.
+    pub async fn commit_holders(
+        &self,
+        drawer: &DrawerId,
+        sha: &str,
+    ) -> Result<BTreeSet<DocId>, IntxtError> {
+        let commit = key(work::GitCommit::ID, sha)?;
+        let predicate = Predicate::And {
+            clauses: vec![
+                Predicate::InDrawer {
+                    drawer_id: drawer.clone(),
+                    transitive: true,
+                    at_least: DrawerAccess::Read,
+                },
+                Predicate::HasKey {
+                    key: commit.clone(),
+                },
+            ],
+        };
+        let datums = DatumSelection::Of {
+            tags: BTreeSet::new(),
+            keys: [commit].into(),
+        };
+        let capability = self
+            .doc_capability(DocScope {
+                drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        let mut holders = BTreeSet::new();
+        let mut after = 0;
+        loop {
+            let page = self
+                .call(PollDatums {
+                    capability,
+                    predicate: predicate.clone(),
+                    datums: datums.clone(),
+                    after,
+                    limit: 0,
+                    hold_ms: 0,
+                })
+                .await?;
+            // Events are in revision order, so the last word per document stands: a removed row
+            // is a commit taken out again, and a `leave` is the document moving out of the
+            // result.
+            for event in page.events {
+                match event {
+                    DatumEvent::Datum {
+                        doc_id,
+                        datum: ObservedDatum::Present { .. },
+                        ..
+                    } => {
+                        holders.insert(doc_id);
+                    }
+                    DatumEvent::Datum {
+                        doc_id,
+                        datum: ObservedDatum::Removed { .. },
+                        ..
+                    }
+                    | DatumEvent::Leave { doc_id, .. } => {
+                        holders.remove(&doc_id);
+                    }
+                }
+            }
+            if page.caught_up {
+                return Ok(holders);
+            }
+            if page.through <= after {
+                return Err(IntxtError::Invalid(format!(
+                    "the poll for {sha} in {drawer} is not caught up and made no progress past {after}"
+                )));
+            }
+            after = page.through;
+        }
     }
 
     /// The keys of every datum `doc` holds at its current heads, without their values.
