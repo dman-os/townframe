@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Townframe maintainers
-Updated: 2026-11-16
+Updated: 2026-11-17
 Scope: Working ledger for the `feat/nodules` PR: decisions made with the operator, work in flight, to-dos, and questions awaiting review. Read this first after any context compaction, together with AGENTS.md and ADR 027.
 
 ## How to use this ledger
@@ -733,6 +733,18 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
 
   They are not `long_test`-named. Our branch adds a 4th local drawer (config) at boot, so **compare timings against an origin/main baseline** before calling it main's.
 
+### Follow-ups from the 2026-11-17 session
+- [todo] Typed initializer input record (trigger: install/upgrade/start; previous and current revision) for ADR 047 initializers (D47). Initializers receive `{}` until then.
+- [below-the-cabinet] `wal_checkpoint(TRUNCATE)` every 5 min in big_repo maintenance (`5a0f4aad`, #41): fights Litestream, small win; plus the catch-and-log at `native.rs:2484`. Goes with the keyhive lane's refactor.
+- [keyhive lane, from the old design chat] `INSERT OR IGNORE` is too broad in `insert_commit`/`insert_fragment`; the conflict-identity invariant test is missing; the keyhive archive loads everything at startup (`keyhive_storage.rs:11` FIXME).
+- [flake, needs an owner] `big_node` `long_test_seeded_partitions_restarts_and_grants_converge`, seed `0xb160de5eed00001`: `docs.recover()` fails with "capability does not permit" at `big_node/lib.rs:652` on a restarted node; 1 fail, then 3/3 pass.
+- [guardrails] `api` ordering drift since `a844e47c` (`service_core_rs`, `service_utils_rs`): the guard reports set diffs (+0/-0). Re-bless at the stack PR; fix the guard to report ordering.
+- [relay ops] Node state inventory: `node.json` seed, wrapping key in the keyring only, keyhive DEKs as files, `node.sqlite` and `big_repo.sqlite` WAL, blobs redb. No health endpoint, random QUIC port, no stop timeout. "Serve from S3" to explore.
+- [relay] The alpha relay's status showed no connected peers while syncing. Not investigated.
+- [day] `day` boots with an empty `SchemaRepo`, so there are no user datums without a cartridge.
+- [permissions] `blobs.mintCapability`: a nodule actor with a method permbind on `blobs.put` can't mint a blobs handle (only the operator or a blobs handle can). The guest-bodies test mints from the harness meanwhile.
+- [ADR 047 amendments] `#hosted` components, the lineage datum, fork grants narrowing by default, sandbox/volume `localState`: proposed at the end of ADR 047, not accepted.
+
 ### Slice 2c follow-ups
 - [authority] The service's dispatch authority is minted per boot and retracted on clean shutdown, so nodule caps rotate on every restart (the subagent's claim that they stay stable across restarts is wrong). There is no orphan after a crash: the capability ledger is in-memory only (`cap::State`, rebuilt empty at every `authority::boot`; no capability table exists, asserted in `reboot_loses_handles_but_preserves_actors_and_keys`), so a dead process takes every cap with it. The clean-stop retraction only kills the handles within the running process once the nodule service is gone. No persistence or sweep is needed (checked 2026-11-10).
 - [convention] Nested calls inherit a deadline only if the guest forwards the header. gRPC propagates deadlines through the context automatically, so the guest SDK should do the same.
@@ -874,6 +886,21 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
     - big_repo outside the cabinet: services other than the cabinet should use the docs service, not big_repo. The gap the operator saw is big_blobs reading documents through big_repo's Automerge frontier worker (`big_blobs/workers.rs:332,435`). Groups A–D above are the work list. The docs-service materialization watch (B) closes the gap named.
     - The `-next` PR stack (8 layers: docs; cabinet leftovers; blobs over the wire; a1 + watch + typed errors; nodule methods + privileged; ADR 045 routes; `day` reshape; holder serves) is approved.
     - **Crate renames approved (2026-11-12):** `method_core`→`method_core_rs`, `service_utils_rs`→`service_host_rs`. `service_core_rs`, `service_client_core_rs`, `service_client_native_rs` and `method_lexicon` keep their names. Queued after the stack is submitted (mechanical; a Luna lane when the Codex quota resets).
+- **D47. Week focus, ADR 047 and the stack** (operator, 2026-11-17):
+  - **Focus:** the permission model as one story (manifest, then grant, then capability), and making micro and nodule guest interfaces isomorphic. Relays and the PDS are the user-facing driver. intxt is not the driver: it is datum work and doesn't stress the design.
+  - **Initializers target only operations their own cartridge implements** (ADR 047 amendment (a)). Foreign targets are dropped; the routinecaps lane carries the removal commit. An initializer still receives `{}`. A typed input record (trigger: install/upgrade/start; previous and current revision) is a To-do, not this week.
+  - **Stack:** stays drafts; no merge before the operator's full-stack review. The rebase onto main (#120 CI fix `5df5ce21`) folds into the next re-cut.
+  - **Verification goes to GitHub CI** (free; runs on every `pull_request` including drafts and stacked bases). Mothership and the laptop are for narrow loops, one heavy build per session. The 3-hour builds came from mothership sitting below mbx `gc.min_free_size` (30GiB), so mbx evicted continuously; stale `~/scratch/wt-*` were cleared to 40G free.
+  - **dpaths** (FDR 001, `origin/feat/dpaths`, stale since 2026-10-12, pre-dtxt terms) is now in this lane's scope.
+- **D48. Relay and PDS** (operator, 2026-11-17):
+  - The alpha relay runs on mothership (tmux `relay-alpha`, node `cb2fc75f…`). Proper ops (backup/Litestream, Helm) wait for the keyhive lane's below-the-cabinet refactor; wasmCloud relays come before a Helm chart (2-3 weeks out).
+  - A secret store (file/env-backed, for headless relays) needs the operator's sign-off on the design first.
+  - **The PDS starts as a separate service.** Drawers are its primitive; the PDS host holds the signing key and accepts app writes. Prefer off-the-shelf (rsky-pds, atproto-crates; tranquil only if AGPL is acceptable). "Every node is a PDS" is rejected; local nodes relate to the PDS as OAuth clients. Spaces are the interesting part. The goal is to find the border between daytxt (the hive) and the atmosphere, not just "local-first atproto" (draft ADR 048).
+- **D49. Sandbox and volume** (operator, 2026-11-17):
+  - Docker-shaped `localState` kinds: `volume` (a VFS) and `sandbox` (a named container). The datum-backed filesystem is dropped; dpaths covers materialization.
+  - The sandbox contract hides platform differences: an OCI Linux userland baseline, volumes, exec/stdio/env, egress and mounts via permbinds. Backends are optimizations: a microVM on desktop/server, a wasm-hosted emulator for web nodes and Play builds (Play bans downloaded native code; wasm sits under its VM/interpreter exception, an emulated Linux is grey), proot only for sideload builds. Extras (checkpoint/branch) are capabilities that may be reported absent.
+  - **`#hosted` component kind** for language-runtime cartridges: sources are pinned datums (published) or a working drawer (live, own devices only). Grants bind to the manifest, never the sources. Lineage pins published states only.
+  - Proposed as ADR 047 amendments (b)-(d) (not accepted); packaging in `sandbox-packaging.md`.
 
 ## Deferred
 
@@ -903,3 +930,8 @@ Big_cabinet read/write options discussed with the operator 2026-11-06, deferred 
 
 - Resolved: ADR 027 was revised in place with D1–D6 (`01ea305b`).
 - Resolved (D31): integer widths lean on spec compatibility.
+
+- **2026-11-17 (pending operator answers).** Not decided; do not treat as settled.
+  1. **`#keyRef`:** keep it, or the narrower shape (content-addressed key type plus a field-level marker; keep the query and read-by-key), or drop both from stack PR node-10. intxt no longer uses either (its commits live per intxt and membership is `Predicate::HasKey`), so nothing does. Manager's lean: drop, and bring back the narrower shape when a real content-addressed user appears.
+  2. **The atmosphere border:** run the spaces experiment (alpha spaces PDS plus bulletin, managed-policy `checkAccess` backed by keyhive), and review draft ADR 048 (three tiers, inward direction).
+  3. **Mothership:** enable lingering (root) plus the secret store, so the relay survives a reboot.
