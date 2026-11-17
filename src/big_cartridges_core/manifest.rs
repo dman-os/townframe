@@ -1,5 +1,6 @@
 use big_cabinet_core::datum::Extra;
 use big_cabinet_core::datum::Nsid;
+use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::reference::DatumPin;
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -75,6 +76,23 @@ pub struct PermbindDrawers {
     pub delete: Option<Necessity>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+impl PermbindDrawers {
+    /// The most access to an existing drawer this permbind declares: reading is `Read`, and
+    /// writing or deleting (which has no access level of its own) is `Write`. `None` when it
+    /// declares neither, as for a permbind that only creates drawers, which no drawer grant
+    /// satisfies (a create-only routine reaches no existing drawer).
+    pub fn declared_access(&self) -> Option<DrawerAccess> {
+        [
+            (self.read.is_some(), DrawerAccess::Read),
+            (self.write.is_some(), DrawerAccess::Write),
+            (self.delete.is_some(), DrawerAccess::Write),
+        ]
+        .into_iter()
+        .filter_map(|(declared, access)| declared.then_some(access))
+        .max()
+    }
 }
 
 #[expect(
