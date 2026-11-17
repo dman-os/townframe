@@ -66,6 +66,7 @@ use crate::host::Environment;
 use crate::host::SlabStyle;
 use crate::host::SleepFuture;
 use crate::render::Renderer;
+use crate::scroll_root::Link;
 use crate::scroll_root::ScrollRoot;
 use crate::slot::SlotContent;
 use crate::slot::SlotTable;
@@ -362,6 +363,8 @@ struct State<A: Clone + PartialEq + 'static> {
     slab: Signal<SlabStyle>,
     /// The caller's current `on_top_file`, read when the top file changes.
     on_top_file: Rc<RefCell<Option<Callback<String>>>>,
+    /// The viewer's link on the embedder's scroller, in `ScrollMode::Embedder`.
+    page_link: Option<Link>,
     /// Ends the viewer's subscription to its own scroll notifications.
     unsubscribe: RefCell<Option<Box<dyn FnOnce()>>>,
     /// True while `sync` runs: the render that follows reads the document, so edits made now
@@ -458,21 +461,26 @@ impl<A: Clone + PartialEq + 'static> State<A> {
             Rc::clone(&applied),
             Rc::clone(&on_top_file),
         ));
-        if let ScrollMode::Embedder(page) = &props.scroll {
+        let page_link = if let ScrollMode::Embedder(page) = &props.scroll {
             // A `Weak`: the handle is the embedder's and outlives this viewer's dispatch.
             let weak = Rc::downgrade(&dispatch);
             let linked = page.clone();
-            page.link(Some(Rc::new(move |notice| {
+            let link: Link = Rc::new(move |notice| {
                 let dispatch = weak
                     .upgrade()
                     .expect("the viewer unlinks the handle before its dispatch goes");
                 dispatch.page_notice(&linked, notice);
-            })));
+            });
+            page.link(Rc::clone(&link));
             // What the handle already knows goes into the caches; the reaction to it (a pass)
             // waits for the events that follow the mount, as an own root's would.
             dispatch.seed_page(page);
-        }
+            Some(link)
+        } else {
+            None
+        };
         Self {
+            page_link,
             host,
             view,
             dispatch,
@@ -633,8 +641,8 @@ impl<A: Clone + PartialEq + 'static> State<A> {
         if let Some(unsubscribe) = self.unsubscribe.borrow_mut().take() {
             unsubscribe();
         }
-        if let Some(page) = self.shell().page() {
-            page.link(None);
+        if let (Some(page), Some(link)) = (self.shell().page(), &self.page_link) {
+            page.unlink(link);
         }
         self.host.document().set_observer(None);
         self.view.clean_up();

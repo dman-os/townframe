@@ -1063,6 +1063,7 @@ fn the_root_in_the_embedders_scroller_is_no_scroller() {
     let page = PageRig::new();
     let rendered = page.rig.page();
     assert!(!rendered.contains("overflow-y:auto"), "{rendered}");
+    assert!(rendered.contains("overflow-x:clip"), "{rendered}");
     assert!(!rendered.contains("tabindex=\"0\""));
     let listeners = &page.rig.listeners;
     // Nothing on the viewer's own root scrolls: the handle forwards the scroller's `scroll`.
