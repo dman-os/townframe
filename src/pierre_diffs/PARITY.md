@@ -568,7 +568,7 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/test/CodeView.rangeScroll.test.ts` | all seven cases | they run `setup(root)`, `scrollTo`, `render(true)` and read `root.scrollTop` (C4, C5): C3 asserts the position the model resolves (`resolve_scroll_target_top`; `normalize_scroll_target` for `nearest`) for an `ROOT_HEIGHT` root; the file items (`makeFileItem`) become `expandUnchanged` diff items whose expected positions come from `get_line_position` rather than `getFileLineTop`; the two diff cases keep their fixtures |
 | `pierre/src/utils/roundToDevicePixel.ts` | `window.devicePixelRatio ?? 1` read inside the function | the ratio is an argument (`CodeViewHost::device_pixel_ratio`, read fresh by the caller on every call) |
 
-## Dropped branches (68)
+## Dropped branches (67)
 
 | upstream file | dropped | reason |
 |---|---|---|
@@ -617,7 +617,6 @@ The Rust `parity` test checks that every `PORTED` row names existing files that 
 | `pierre/src/components/FileDiff.ts` | `mergeOptions` | folded into `set_theme_type`, its only caller |
 | `pierre/src/components/FileDiff.ts` | the `try`/`catch` around the collapsed and the full render, `applyErrorToDOM`, `errorWrapper`, `cleanupErrorWrapper`, `disableErrorHandling` in `render` | errors are programming errors and panic; nothing else sets the error wrapper |
 | `pierre/src/components/FileDiff.ts` | in `cleanUp`: `dequeueRender(handleEditSessionRender)`, the editor teardown (`editor?.cleanUp`), `workerManager?.unsubscribeToThemeChanges` and the reset, `refreshViewTimeout`, `editSession`, `deferredEditorActiveLine`, `errorWrapper` | edit mode, the worker pool and the error wrapper are OUT; `recycle` is ported |
-| `pierre/src/components/FileDiff.ts` | `cleanUp` leaving the sprite and the theme and unsafe CSS `style` elements in the shadow root | the instance owns the nodes it creates and frees them (a later instance on the container creates its own); the oracle removes them after the published `cleanUp` |
 | `pierre/src/components/FileDiff.ts` | `revealLine`/`isLineRenderable`/`getNearestRenderableLine` edit-session reads | none: they read the rendered diff and the expansion state only; `this.expandHunk` is `FileDiff::expand_hunk` (the `VirtualizedFileDiff` override is S12b) |
 | `pierre/src/components/FileDiff.ts` | `finalizeRender` | an empty hook `VirtualizedFileDiff` overrides; S12b decides how the subclass hooks are expressed |
 | `pierre/src/components/FileDiff.ts` | `hunksRenderer.getDiffForNextRender`, `hunksRenderer.hydrate`, `clearRenderCache` calls, the `renderDiff == undefined` worker initialisation branch | the Rust renderer is synchronous and has no render cache (see the DiffHunksRenderer rows); `getDiffForNextRender` is the working diff |

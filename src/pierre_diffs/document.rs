@@ -305,6 +305,47 @@ impl Document {
         });
     }
 
+    /// `parent.prepend(child)`
+    pub fn prepend(&self, parent: impl Borrow<NodeKey>, child: impl Borrow<NodeKey>) {
+        let parent = *parent.borrow();
+        let first = self.first_child(parent);
+        self.insert_before(parent, child, first);
+    }
+
+    /// `node.before(child)`: `node` must have a parent.
+    pub fn before(&self, node: impl Borrow<NodeKey>, child: impl Borrow<NodeKey>) {
+        let node = *node.borrow();
+        let parent = self.parent(node).expect("before: the node has no parent");
+        self.insert_before(parent, child, Some(node));
+    }
+
+    /// `node.after(child)`: `node` must have a parent.
+    pub fn after(&self, node: impl Borrow<NodeKey>, child: impl Borrow<NodeKey>) {
+        let node = *node.borrow();
+        let parent = self.parent(node).expect("after: the node has no parent");
+        let next = self.next_sibling(node);
+        self.insert_before(parent, child, next);
+    }
+
+    /// `node.firstChild`
+    pub fn first_child(&self, node: impl Borrow<NodeKey>) -> Option<NodeKey> {
+        self.arena
+            .borrow()
+            .node(*node.borrow())
+            .children
+            .first()
+            .copied()
+    }
+
+    /// `node.nextSibling`
+    pub fn next_sibling(&self, node: impl Borrow<NodeKey>) -> Option<NodeKey> {
+        let node = *node.borrow();
+        let arena = self.arena.borrow();
+        let siblings = &arena.node(arena.node(node).parent?).children;
+        let position = siblings.iter().position(|key| *key == node)?;
+        siblings.get(position + 1).copied()
+    }
+
     /// `node.remove()`: detaches the node from its parent; the node and its
     /// subtree stay usable (see the module docs).
     pub fn remove(&self, node: impl Borrow<NodeKey>) {
