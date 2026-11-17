@@ -416,7 +416,7 @@ impl<H: HttpTransport> Caller<H> {
             .await?;
         self.call(WriteDatums {
             capability,
-            command: Some(self.command("write-datums", &(&set, &remove))?),
+            command: Some(self.command("write-datums", &(doc, &set, &remove))?),
             doc_id: doc.clone(),
             mode: WriteMode::AtCurrent,
             set,
