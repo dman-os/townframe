@@ -1,0 +1,23 @@
+{
+  "$defs": {
+    "KnownDrawerEntry": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.drawer.knownEntry/<drawerId>`: this node explicitly remembers the\ndrawer, and what it intends to do about it — not a roster entry. Remembering grants no\naccess, mirroring is intent rather than fetched bytes, and observing a tag never writes\none of these; only the drawer service's remember operation does.",
+      "properties": {
+        "mirror": {
+          "description": "The node wants this drawer's content fetched and retained. Absent means it does not;\nexplicit `false` means it did and stopped.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "title": "KnownDrawerEntry",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer.knownEntry"
+    }
+  },
+  "$ref": "#/$defs/KnownDrawerEntry",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

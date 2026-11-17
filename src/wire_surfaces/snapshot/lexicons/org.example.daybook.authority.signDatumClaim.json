@@ -1,0 +1,141 @@
+{
+  "defs": {
+    "Cid": {
+      "items": {
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "DatumClaim": {
+      "nullable": [
+        "valueCid"
+      ],
+      "properties": {
+        "actorUuid": {
+          "type": "string"
+        },
+        "chosenUuid": {
+          "type": "string"
+        },
+        "datumKey": {
+          "type": "string"
+        },
+        "operation": {
+          "enum": [
+            "Set",
+            "Remove"
+          ],
+          "type": "string"
+        },
+        "originDocument": {
+          "type": "string"
+        },
+        "predecessors": {
+          "items": {
+            "ref": "#Cid",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "valueCid": {
+          "ref": "#Cid",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "originDocument",
+        "datumKey",
+        "chosenUuid",
+        "actorUuid",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "SignDatumClaim": {
+      "properties": {
+        "claim": {
+          "ref": "#DatumClaim",
+          "type": "ref"
+        },
+        "via": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "via",
+        "claim"
+      ],
+      "type": "object"
+    },
+    "SignedDatumClaim": {
+      "properties": {
+        "actorPublicKey": {
+          "type": "string"
+        },
+        "claim": {
+          "ref": "#DatumClaim",
+          "type": "ref"
+        },
+        "signature": {
+          "type": "bytes"
+        }
+      },
+      "required": [
+        "actorPublicKey",
+        "signature",
+        "claim"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "InvalidCapability"
+        },
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "Escalation"
+        },
+        {
+          "name": "UnrecognizedActor"
+        },
+        {
+          "name": "InvalidActorPath"
+        },
+        {
+          "name": "ActorNotFound"
+        },
+        {
+          "name": "StateCorrupt"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Claim"
+        }
+      ],
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#SignDatumClaim",
+          "type": "ref"
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#SignedDatumClaim",
+          "type": "ref"
+        }
+      },
+      "type": "procedure"
+    }
+  },
+  "id": "org.example.daybook.authority.signDatumClaim",
+  "lexicon": 1
+}

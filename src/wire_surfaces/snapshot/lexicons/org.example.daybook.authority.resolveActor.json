@@ -1,0 +1,85 @@
+{
+  "defs": {
+    "Actor": {
+      "nullable": [
+        "parentActorId"
+      ],
+      "properties": {
+        "actorId": {
+          "type": "string"
+        },
+        "certificate": {
+          "type": "bytes"
+        },
+        "parentActorId": {
+          "type": "string"
+        },
+        "publicKey": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "actorId",
+        "url",
+        "publicKey",
+        "certificate"
+      ],
+      "type": "object"
+    },
+    "main": {
+      "errors": [
+        {
+          "name": "InvalidCapability"
+        },
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "Escalation"
+        },
+        {
+          "name": "UnrecognizedActor"
+        },
+        {
+          "name": "InvalidActorPath"
+        },
+        {
+          "name": "ActorNotFound"
+        },
+        {
+          "name": "StateCorrupt"
+        },
+        {
+          "name": "Storage"
+        },
+        {
+          "name": "Claim"
+        }
+      ],
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "ref": "#Actor",
+          "type": "ref"
+        }
+      },
+      "parameters": {
+        "properties": {
+          "actorId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "actorId"
+        ],
+        "type": "params"
+      },
+      "type": "query"
+    }
+  },
+  "id": "org.example.daybook.authority.resolveActor",
+  "lexicon": 1
+}

@@ -1,0 +1,31 @@
+{
+  "$defs": {
+    "MicroGrant": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.micro.grant/<grantKey>`: one grant of the cartridge's micro.",
+      "properties": {
+        "access": {
+          "knownValues": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "privileged": {
+          "type": "boolean"
+        }
+      },
+      "title": "MicroGrant",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.micro.grant"
+    }
+  },
+  "$ref": "#/$defs/MicroGrant",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

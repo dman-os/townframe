@@ -1,0 +1,19 @@
+{
+  "$defs": {
+    "SelfDocLayout": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "`org.example.daybook.drawer.selfDoc/main` (as a union member, the id is the `$type`):\n`empty: true` is the convention for a member with nothing to say — an object is required, the\nproperty keeps it honest, and later fields land beside it without a new tag. The value is\nconst: a member with `empty: false` is no longer empty, so it is not this member.",
+      "properties": {
+        "empty": {
+          "type": "boolean"
+        }
+      },
+      "title": "SelfDocLayout",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer.selfDoc"
+    }
+  },
+  "$ref": "#/$defs/SelfDocLayout",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

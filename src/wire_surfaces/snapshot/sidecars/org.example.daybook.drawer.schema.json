@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "Drawer": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "description": "The descriptor: `org.example.daybook.drawer/main` on the doc whose id is the `DrawerId`.",
+      "properties": {
+        "layout": {
+          "oneOf": [
+            {
+              "additionalProperties": true,
+              "description": "`org.example.daybook.drawer.selfDoc/main` (as a union member, the id is the `$type`):\n`empty: true` is the convention for a member with nothing to say — an object is required, the\nproperty keeps it honest, and later fields land beside it without a new tag. The value is\nconst: a member with `empty: false` is no longer empty, so it is not this member.",
+              "properties": {
+                "$type": {
+                  "const": "org.example.daybook.drawer.selfDoc"
+                },
+                "empty": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "$type"
+              ],
+              "type": "object",
+              "x-lexicon-id": "org.example.daybook.drawer.selfDoc"
+            },
+            {
+              "additionalProperties": true,
+              "properties": {
+                "$type": {
+                  "const": "org.example.daybook.drawer.singleGroup"
+                },
+                "docsGroup": {
+                  "description": "The collection group included docs delegate access to.",
+                  "type": "string"
+                },
+                "metaGroup": {
+                  "description": "Authority over the descriptor, which is the public metadata root, and its roster.",
+                  "type": "string"
+                },
+                "sensitiveGroup": {
+                  "description": "Authority over the sensitive metadata root: its membership is withheld from a Relay\nprincipal, so plaintext inventories named there reach only Read+.",
+                  "type": "string"
+                },
+                "sensitiveRoot": {
+                  "description": "The sensitive metadata root doc. Its existence and id are public discovery facts; its\ncontents are not. It carries no descriptor, roster, doc entries or child entries.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$type",
+                "metaGroup",
+                "docsGroup",
+                "sensitiveGroup",
+                "sensitiveRoot"
+              ],
+              "type": "object",
+              "x-lexicon-id": "org.example.daybook.drawer.singleGroup"
+            },
+            {
+              "additionalProperties": true,
+              "properties": {
+                "$type": {
+                  "not": {
+                    "enum": [
+                      "org.example.daybook.drawer.selfDoc",
+                      "org.example.daybook.drawer.singleGroup"
+                    ]
+                  },
+                  "type": "string"
+                }
+              },
+              "required": [
+                "$type"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layout"
+      ],
+      "title": "Drawer",
+      "type": "object",
+      "x-lexicon-id": "org.example.daybook.drawer"
+    }
+  },
+  "$ref": "#/$defs/Drawer",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
