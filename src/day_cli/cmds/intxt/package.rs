@@ -172,11 +172,11 @@ impl Resolved {
                 short_sha(&revisions.tip),
                 commits.len()
             ),
+            patch_tip: Some(revisions.tip.clone()),
             tips: vec![revisions.tip],
             bases: revisions.base.into_iter().collect(),
             commits,
             change_id: None,
-            patch_tip: Some(revisions.tip.clone()),
             value: |pack, patch, tips, bases| {
                 serde_json::to_value(work::GitCommitEntry {
                     tip: commit_key(&tips[0]),
