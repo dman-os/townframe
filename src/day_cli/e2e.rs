@@ -220,7 +220,6 @@ mod library {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_daemon() {
         use crate::client::Raw;
-        use crate::client::Upload;
         use method_core::HttpMethod::Get;
         use method_core::HttpMethod::Post;
         const MINT: &str = "org.example.daybook.blobs.mintCapability";
@@ -248,7 +247,7 @@ mod library {
                     Post,
                     &json!({ "capability": put }),
                     Raw {
-                        upload: Some(Upload::File(&upload)),
+                        upload: Some(&upload),
                         ..Default::default()
                     },
                 )

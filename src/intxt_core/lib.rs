@@ -19,6 +19,8 @@ pub mod cartridge;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod generic;
+#[cfg(feature = "install")]
+pub mod install;
 pub mod methods;
 pub mod work;
 
