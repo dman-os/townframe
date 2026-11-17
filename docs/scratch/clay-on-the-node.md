@@ -172,6 +172,9 @@ nodules and micros, but not the partial-sync collection machinery.**
   micros.
 - Only micros that must reach platform-specific resources run as native (built-in) micros. On the Wry desktop
   those cross IPC.
+- **Placement is invisible to guests** (operator, 2026-11-17). A micro doesn't know whether it runs in-process,
+  in the page or across IPC: the WIT world, the presentation wire and the `dispatch.local` transport are the same
+  everywhere. The distinction is a host choice made today for the Wry desktop; on Blitz it doesn't exist.
 - The operator calls this a forcing function: almost every micro has to be written portable, because it is
   written for wasm, and a native micro has to justify its native resource (see "built-in micros" in the
   micro-runtime ADR draft).
