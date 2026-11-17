@@ -173,6 +173,34 @@ pub(crate) async fn run(client: &NodeClient, node_dir: &Path, input: &[u8]) -> R
     Ok(summary)
 }
 
+/// Records the pairs `input` (git's `post-rewrite` stdin) holds for the worktree `cwd` is in, the
+/// way a hook's batch is recorded: observed under the worktree's lock, written into the capture
+/// drawer. Returns how many pairs git reported.
+pub(crate) async fn git_rewrite(
+    client: &NodeClient,
+    node_dir: &Path,
+    cwd: &Path,
+    input: &str,
+) -> Res<usize> {
+    let rewrites = intxt_capture::git_hooks::parse_post_rewrite(input)?;
+    if rewrites.is_empty() {
+        return Ok(0);
+    }
+    let identity = intxt_capture::identity::resolve(cwd)?.ok_or_else(|| {
+        eyre::eyre!(
+            "{} is not in a git worktree; git runs the hook in one",
+            cwd.display()
+        )
+    })?;
+    let recorded = rewrites.len();
+    let prepared = tokio::task::spawn_blocking(move || {
+        intxt_capture::host::prepare_rewrite(&identity, &rewrites)
+    })
+    .await??;
+    record_prepared(client, node_dir, prepared).await?;
+    Ok(recorded)
+}
+
 /// Records `prepared`'s batch through intxt's `recordObservations` and commits the recorder's
 /// answer as the host's state: the one place a batch reaches the node, for hooks and for ACP
 /// recordings alike. Returns the answer, or none when the batch was empty and nothing was sent.
