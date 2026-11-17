@@ -686,7 +686,7 @@ impl<'a> Packaging<'a> {
         .await?;
         self.remember(&drawer_id).await?;
         if let Some(doc) = &shared {
-            self.caller.share(&drawer_id, doc).await?;
+            self.caller.share(&drawer_id, doc, DrawerAccess::Write).await?;
             self.record_commits_doc(&drawer_id, doc).await?;
         }
         let live = self.live_intxts().await?;
@@ -1102,7 +1102,7 @@ impl<'a> Packaging<'a> {
                 .include(&drawer, plan.set, &plan.written)
                 .await?;
             for doc in &plan.shared {
-                self.caller.share(&drawer, doc).await?;
+                self.caller.share(&drawer, doc, DrawerAccess::Read).await?;
             }
         }
         for (part, described) in &sessions {
