@@ -20,7 +20,7 @@ pub const BUCKET_DEAD_FP_SEED: FingerprintSeed = FingerprintSeed::new(0x64656164
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-struct BucketFingerprint(u64);
+pub struct BucketFingerprint(u64);
 
 impl BucketFingerprint {
     fn add<T: core::hash::Hash>(&mut self, seed: &FingerprintSeed, value: &T) {

@@ -10,24 +10,35 @@ mod interlude {
     pub use std::collections::{HashMap as Map, HashSet as Set};
 }
 
+mod bucket;
 mod cursor;
 mod fingerprint;
 mod ids;
 mod mpsc;
-mod okv;
+pub mod okv;
 mod outbox;
+// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
+#[cfg(any())]
 mod peer;
+pub mod rev;
 mod rpc;
 mod scheduler;
+// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
+#[cfg(any())]
 mod stat;
 mod store;
+// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
+#[cfg(any())]
 mod tasks;
 mod utils;
 mod watermark;
 
 use crate::interlude::*;
 
+// FIXME(port): disabled with `cfg(any())` until its port lands; re-enable as it compiles
+#[cfg(any())]
 use scheduler::{TaskId, TaskSeed};
+#[cfg(any())]
 use tasks::{MachineTask, SyncTask};
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -37,6 +48,8 @@ pub enum AllowedStrat {
     CursorAndBucket,
 }
 
+// FIXME(port): disabled until peer/stat/tasks land
+#[cfg(any())]
 strike! {
     #[structstruck::each[derive(Debug)]]
     pub enum BigSyncEvent {
@@ -88,6 +101,8 @@ strike! {
 
 pub type Clock = Box<dyn Fn() -> std::time::Instant>;
 
+// FIXME(port): disabled until peer/stat/tasks land
+#[cfg(any())]
 strike! {
     pub struct BigSyncMachine {
         all_seen_peer: Set<PeerKey>,
@@ -101,6 +116,8 @@ strike! {
     }
 }
 
+// FIXME(port): disabled until peer/stat/tasks land
+#[cfg(any())]
 impl BigSyncMachine {
     pub fn new(clock: Clock) -> Self {
         Self {
@@ -131,6 +148,8 @@ impl BigSyncMachine {
 }
 
 // tasks
+// FIXME(port): disabled until peer/stat/tasks land
+#[cfg(any())]
 impl BigSyncMachine {
     pub fn drain_sync_spawn_queue(&mut self) -> std::vec::Drain<'_, TaskSeed<SyncTask>> {
         self.sync_tasks.drain_spawn_queue()
@@ -153,6 +172,8 @@ impl BigSyncMachine {
 }
 
 // stat
+// FIXME(port): disabled until peer/stat/tasks land
+#[cfg(any())]
 impl BigSyncMachine {
     #[tracing::instrument(skip(self))]
     fn handle_wait_for_full_sync_evt(
@@ -176,7 +197,8 @@ impl BigSyncMachine {
     }
 }
 
-#[cfg(test)]
+// FIXME(port): the machine tests wait on the machine itself
+#[cfg(all(test, any()))]
 mod test {
     use super::*;
 

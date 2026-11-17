@@ -51,10 +51,12 @@ structstruck::strike! {
         part_id: PartKey,
         //remote_depth: BuckLevel,
 
-        done_listing: bool,
         working_level: BuckLevel,
         next_page_offset: BuckId,
+
+        done_listing: bool,
         list_dispatched: bool,
+
         pending_buckets: BTreeMap<BuckId, BucketSummary>,
         working_buckets: Map<BuckId, struct WorkingBucketState {
             #![derive(Debug, Clone)]

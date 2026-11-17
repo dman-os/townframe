@@ -13,7 +13,7 @@ impl ByteKey {
             Self::Heap(bytes.into())
         } else {
             let mut buf = [0u8; 32];
-            buf.copy_from_slice(bytes);
+            buf[..len].copy_from_slice(bytes);
             Self::Inline { len: len as _, buf }
         }
     }
@@ -74,7 +74,7 @@ impl std::str::FromStr for ByteKey {
             Ok(Self::Heap(bytes.into()))
         } else {
             let mut buf = [0u8; 32];
-            buf.copy_from_slice(&bytes);
+            buf[..len].copy_from_slice(&bytes);
             Ok(Self::Inline { len: len as _, buf })
         }
     }
