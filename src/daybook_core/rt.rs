@@ -2763,8 +2763,10 @@ async fn load_bundle_components(
                     format!("failed to read component file: {}", path.display())
                 })?
             }
-            scheme if scheme == crate::blobs::BLOB_SCHEME => {
-                let hash = url.path().trim_start_matches('/');
+            "dtxt" => {
+                let hash = crate::blobs::blob_url_digest(url).ok_or_else(|| {
+                    eyre::eyre!("unsupported dtxt component URL, expected a blob: {url}")
+                })?;
                 let blob_id = hash
                     .parse::<crate::blobs::BlobId>()
                     .wrap_err_with(|| format!("invalid blob hash in component URL: {hash}"))?;
@@ -2920,8 +2922,10 @@ async fn start_bundle_workload(
                     format!("failed to read component file: {}", path.display())
                 })?
             }
-            scheme if scheme == crate::blobs::BLOB_SCHEME => {
-                let hash = url.path().trim_start_matches('/');
+            "dtxt" => {
+                let hash = crate::blobs::blob_url_digest(url).ok_or_else(|| {
+                    eyre::eyre!("unsupported dtxt component URL, expected a blob: {url}")
+                })?;
                 let blob_id = hash
                     .parse::<crate::blobs::BlobId>()
                     .wrap_err_with(|| format!("invalid blob hash in component URL: {hash}"))?;

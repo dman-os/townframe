@@ -1,128 +1,11 @@
-use crate::context::ContextError;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
-use futures::Stream;
+use method_core::ContextError;
+use method_core::Method;
+use method_core::Subscription;
 use serde::Deserialize;
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use std::fmt;
-use std::pin::Pin;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum XrpcKind {
-    Query,
-    Procedure,
-    Subscription,
-}
-
-impl XrpcKind {
-    pub const fn transport_outcome_unknown(self) -> bool {
-        matches!(self, Self::Procedure | Self::Subscription)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpMethod {
-    Get,
-    Post,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpInput {
-    Query,
-    JsonBody,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct XrpcOperation {
-    pub nsid: &'static str,
-    pub kind: XrpcKind,
-    pub method: HttpMethod,
-    pub input: HttpInput,
-    pub output_schema: &'static str,
-    pub error_schema: &'static str,
-    pub long_poll: bool,
-}
-
-impl XrpcOperation {
-    pub const fn query(nsid: &'static str) -> Self {
-        Self {
-            nsid,
-            kind: XrpcKind::Query,
-            method: HttpMethod::Get,
-            input: HttpInput::Query,
-            output_schema: "",
-            error_schema: "",
-            long_poll: false,
-        }
-    }
-
-    pub const fn procedure(nsid: &'static str) -> Self {
-        Self {
-            nsid,
-            kind: XrpcKind::Procedure,
-            method: HttpMethod::Post,
-            input: HttpInput::JsonBody,
-            output_schema: "",
-            error_schema: "",
-            long_poll: false,
-        }
-    }
-
-    pub const fn subscription(nsid: &'static str) -> Self {
-        Self {
-            nsid,
-            kind: XrpcKind::Subscription,
-            method: HttpMethod::Get,
-            input: HttpInput::Query,
-            output_schema: "",
-            error_schema: "",
-            long_poll: false,
-        }
-    }
-
-    pub const fn with_schemas(
-        mut self,
-        output_schema: &'static str,
-        error_schema: &'static str,
-    ) -> Self {
-        self.output_schema = output_schema;
-        self.error_schema = error_schema;
-        self
-    }
-
-    /// Marks the operation as a long poll. A held poll keeps its request permit
-    /// for up to the hold, so the XRPC router admits it through the long-poll
-    /// pool instead of consuming an ordinary unary slot.
-    pub const fn long_poll(mut self) -> Self {
-        self.long_poll = true;
-        self
-    }
-}
-
-pub trait Wire: fmt::Debug + Serialize + DeserializeOwned + Send + Sync + Unpin + 'static {}
-impl<T> Wire for T where T: fmt::Debug + Serialize + DeserializeOwned + Send + Sync + Unpin + 'static
-{}
-
-pub trait ServiceError: From<ContextError> + Wire {}
-impl<E> ServiceError for E where E: From<ContextError> + Wire {}
-
-pub trait Operation: Serialize + DeserializeOwned + Send + Sync + 'static {
-    type Output: Send + 'static;
-    type Error: ServiceError;
-    const XRPC: XrpcOperation;
-}
-
-pub trait Unary: Operation<Output: Wire> {}
-impl<P> Unary for P where P: Operation<Output: Wire> {}
-
-pub trait Subscription:
-    Operation<Output = EventStream<<Self as Subscription>::Event, <Self as Operation>::Error>>
-{
-    type Event: Wire;
-}
-
-pub type EventStream<E, Err> = Pin<Box<dyn Stream<Item = Result<E, Err>> + Send + 'static>>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum TransportContext {
@@ -203,7 +86,7 @@ impl<P> Envelope<P> {
 }
 
 pub type Reply<P> = irpc::channel::oneshot::Sender<
-    Result<ResponseEnvelope<<P as Operation>::Output>, <P as Operation>::Error>,
+    Result<ResponseEnvelope<<P as Method>::Output>, <P as Method>::Error>,
 >;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +97,7 @@ pub enum EventFrame<E> {
 }
 
 pub type EventReply<P> = irpc::channel::mpsc::Sender<
-    Result<EventFrame<<P as Subscription>::Event>, <P as Operation>::Error>,
+    Result<EventFrame<<P as Subscription>::Event>, <P as Method>::Error>,
 >;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -224,8 +107,8 @@ pub enum ClientError<E> {
         message: String,
         outcome_unknown: bool,
     },
-    #[error("operation failed: {0}")]
-    Operation(E),
+    #[error("method failed: {0}")]
+    Method(E),
 }
 
 impl<E> ClientError<E> {
@@ -239,6 +122,6 @@ impl<E> ClientError<E> {
 
 impl<E: From<ContextError>> From<ContextError> for ClientError<E> {
     fn from(error: ContextError) -> Self {
-        Self::Operation(E::from(error))
+        Self::Method(E::from(error))
     }
 }

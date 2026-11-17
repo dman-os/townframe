@@ -51,7 +51,9 @@ impl ElementReplies {
         let id = self.next.get() + 1;
         self.next.set(id);
         let slot = std::rc::Rc::new(std::cell::RefCell::new(Reply::default()));
-        self.pending.borrow_mut().insert(id, slot.clone());
+        self.pending
+            .borrow_mut()
+            .insert(id, std::rc::Rc::clone(&slot));
         (id, ReplyFuture(slot))
     }
 }
@@ -404,16 +406,16 @@ impl GuestDom {
             u64,
             dioxus_core::RenderTargetId,
         )>::new()));
-        let root_targets = targets.clone();
+        let root_targets = std::rc::Rc::clone(&targets);
         let slots = std::rc::Rc::new(Slots::default());
-        let root_slots = slots.clone();
+        let root_slots = std::rc::Rc::clone(&slots);
         let head = std::rc::Rc::new(HeadState::default());
-        let root_head = head.clone();
+        let root_head = std::rc::Rc::clone(&head);
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {
-                use_context_provider(|| root_slots.clone());
+                use_context_provider(|| std::rc::Rc::clone(&root_slots));
                 use_context_provider(|| {
-                    root_head.clone() as std::rc::Rc<dyn dioxus::document::Document>
+                    std::rc::Rc::clone(&root_head) as std::rc::Rc<dyn dioxus::document::Document>
                 });
                 let children = app();
                 let targets = root_targets.borrow();
@@ -627,7 +629,7 @@ impl GuestDom {
                 GuestElement {
                     surface: std::rc::Rc::downgrade(held),
                     element: event.element,
-                    replies: self.replies.clone(),
+                    replies: std::rc::Rc::clone(&self.replies),
                 },
             ))) as std::rc::Rc<dyn std::any::Any>
         } else {

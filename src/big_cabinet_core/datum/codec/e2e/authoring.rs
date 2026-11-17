@@ -230,7 +230,7 @@ fn a_reference_that_the_document_does_not_carry_is_refused() {
     assert!(error.to_string().contains("Absent"), "{error}");
 }
 
-/// The numbers a JSON document holds, with the widths their schema declares.
+/// The numbers a JSON document holds, with the kinds their schema declares.
 #[derive(Debug, autosurgeon::Hydrate)]
 struct Numbers {
     signed: i64,
@@ -249,9 +249,9 @@ fn a_number_is_stored_as_the_schema_declares_it() {
         "type": "object",
         "$defs": {},
         "properties": {
-            "signed": {"type": "integer", "format": "int64"},
-            "unsigned": {"type": "integer", "format": "uint64"},
-            "float": {"type": "number", "format": "float"},
+            "signed": {"type": "integer"},
+            "unsigned": {"type": "integer", "minimum": 0},
+            "float": {"type": "number"},
         },
     });
     let mut doc = AutoCommit::new();
@@ -295,7 +295,7 @@ fn a_number_type_written_as_a_list_or_without_a_width_is_still_read() {
         "type": "object",
         "$defs": {},
         "properties": {
-            "maybe": {"type": ["integer", "null"], "format": "int64"},
+            "maybe": {"type": ["integer", "null"]},
             "bare": {"type": "integer"},
             "undeclared": {},
         },
@@ -342,7 +342,7 @@ fn a_float_union_ref_normalizes_before_owned_write() {
     let schema = json!({
         "$ref": "#/$defs/Float",
         "$defs": {
-            "Float": {"type": "string", "x-automerge": "float", "format": "double"}
+            "Float": {"type": "string", "x-automerge": "float"}
         }
     });
     let compiled = CompiledSchema::compile(schema.clone()).unwrap();
@@ -395,7 +395,7 @@ fn authoring_normalization_is_stack_safe_for_wide_values_and_bounded_for_ambigui
         "type": "object",
         "additionalProperties": {
             "type": "array",
-            "items": {"type": "string", "x-automerge": "float", "format": "double"}
+            "items": {"type": "string", "x-automerge": "float"}
         }
     });
     let mut wide_members = serde_json::Map::new();
@@ -412,8 +412,8 @@ fn authoring_normalization_is_stack_safe_for_wide_values_and_bounded_for_ambigui
         "type": "object",
         "additionalProperties": {
             "anyOf": [
-                {"type": "string", "x-automerge": "float", "format": "double"},
-                {"type": "string", "x-automerge": "float", "format": "float"}
+                {"type": "string", "x-automerge": "float"},
+                {"type": "string", "x-automerge": "float"}
             ]
         }
     });
@@ -430,8 +430,8 @@ fn authoring_normalization_is_stack_safe_for_wide_values_and_bounded_for_ambigui
         "type": "object",
         "additionalProperties": {
             "anyOf": [
-                {"type": "string", "x-automerge": "float", "format": "double", "pattern": "^1\\.25$"},
-                {"type": "string", "x-automerge": "float", "format": "float", "pattern": "^2$"}
+                {"type": "string", "x-automerge": "float", "pattern": "^1\\.25$"},
+                {"type": "string", "x-automerge": "float", "pattern": "^2$"}
             ]
         }
     });
@@ -447,7 +447,7 @@ fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container
         "type": "object",
         "properties": {
             "kind": {"const": "a"},
-            "value": {"type": "string", "x-automerge": "float", "format": "double"}
+            "value": {"type": "string", "x-automerge": "float"}
         },
         "required": ["kind", "value"]
     });
@@ -455,7 +455,7 @@ fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container
         "type": "object",
         "properties": {
             "kind": {"const": "b"},
-            "value": {"type": "string", "x-automerge": "float", "format": "float"}
+            "value": {"type": "string", "x-automerge": "float"}
         },
         "required": ["kind", "value"]
     });
@@ -470,8 +470,8 @@ fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container
 
     let array_schema = json!({
         "anyOf": [
-            {"type": "array", "items": {"type": "string", "x-automerge": "float", "format": "double"}, "minItems": 2},
-            {"type": "array", "items": {"type": "string", "x-automerge": "float", "format": "double"}, "minItems": 1, "maxItems": 1}
+            {"type": "array", "items": {"type": "string", "x-automerge": "float"}, "minItems": 2},
+            {"type": "array", "items": {"type": "string", "x-automerge": "float"}, "minItems": 1, "maxItems": 1}
         ]
     });
     let array = Stored::check(&compiled(&array_schema), json!([1.25]))
@@ -489,7 +489,7 @@ fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container
                 "type": "object",
                 "properties": {
                     "tag": {"const": "a"},
-                    "value": {"type": "string", "x-automerge": "float", "format": "double"}
+                    "value": {"type": "string", "x-automerge": "float"}
                 },
                 "required": ["tag", "value"]
             },
@@ -497,7 +497,7 @@ fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container
                 "type": "object",
                 "properties": {
                     "tag": {"const": "b"},
-                    "value": {"type": "string", "x-automerge": "float", "format": "double"}
+                    "value": {"type": "string", "x-automerge": "float"}
                 },
                 "required": ["tag", "value"]
             }
@@ -521,8 +521,8 @@ fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container
 
     let nested_ambiguous_schema = json!({
         "anyOf": [
-            {"type": "object", "properties": {"value": {"type": "string", "x-automerge": "float", "format": "double"}}, "required": ["value"]},
-            {"type": "object", "properties": {"value": {"type": "string", "x-automerge": "float", "format": "double"}}, "required": ["value"]}
+            {"type": "object", "properties": {"value": {"type": "string", "x-automerge": "float"}}, "required": ["value"]},
+            {"type": "object", "properties": {"value": {"type": "string", "x-automerge": "float"}}, "required": ["value"]}
         ]
     });
     let error = Stored::check(&compiled(&nested_ambiguous_schema), json!({"value": 1.25}))
@@ -563,8 +563,8 @@ fn a_float_round_trips_at_the_precision_its_json_had() {
         "type": "object",
         "$defs": {},
         "properties": {
-            "single": {"type": "number", "format": "float"},
-            "double": {"type": "number", "format": "double"},
+            "single": {"type": "number"},
+            "double": {"type": "number"},
         },
     });
     let value = json!({"single": 0.1f32, "double": 0.1f64});
@@ -609,13 +609,13 @@ fn a_float_position_is_carried_as_the_string_the_convention_spells() {
     let datum = &document["$defs"]["Stored0"]["properties"];
 
     // The convention: the number's `type` is carried as the string a float is spelled in, under
-    // the keyword, and the width's `format` stays beside it.
+    // the keyword; there is one float width, so no `format` accompanies it.
     assert_eq!(datum["fraction"]["type"], "string");
-    assert_eq!(datum["fraction"]["format"], "double");
+    assert!(datum["fraction"].get("format").is_none());
     assert_eq!(datum["fraction"]["x-automerge"], "float");
     // The `null` of an option is not a float and is not spelled one.
     assert_eq!(datum["maybe"]["type"], json!(["string", "null"]));
-    assert_eq!(datum["maybe"]["format"], "double");
+    assert!(datum["maybe"].get("format").is_none());
     // A bare `f64` is the opt-out, stated by the field's marker, and the statement survives into
     // the schema the type derives: a plain number, named as one.
     assert_eq!(datum["plain_number"]["type"], "number");
@@ -630,15 +630,14 @@ fn a_float_position_is_carried_as_the_string_the_convention_spells() {
 }
 
 /// A float position accepts the number a typed writer hands it and reads back the decimal string
-/// the convention spells; a string carried by a reader of the convention sits, and a position that
-/// states `f32` is spelled at the width it says.
+/// the convention spells; a string carried by a reader of the convention sits.
 #[test]
 fn a_float_travels_as_a_decimal_string_and_a_number_arrives_too() {
     let mut document = document();
     redeclare(
         &mut document,
         "maybe",
-        json!({"type": "string", "x-automerge": "float", "format": "float"}),
+        json!({"type": "string", "x-automerge": "float"}),
     );
 
     // What a typed writer hands over is a number, and what the convention carries is a string:
@@ -651,7 +650,11 @@ fn a_float_travels_as_a_decimal_string_and_a_number_arrives_too() {
     };
     let doc = write(json!({"maybe": 0.1}));
     let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
-    assert_eq!(projected["maybe"], json!("0.1"), "spelled at the f32 width");
+    assert_eq!(
+        projected["maybe"],
+        json!("0.1"),
+        "spelled as the shortest decimal"
+    );
 
     let doc = write(json!({"maybe": "0.1"}));
     let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
@@ -688,7 +691,7 @@ fn the_non_finite_values_travel_by_their_names() {
     redeclare(
         &mut document,
         "fraction",
-        json!({"type": "string", "x-automerge": "float", "format": "double"}),
+        json!({"type": "string", "x-automerge": "float"}),
     );
 
     // The name a reader gets parses to the exact value the document held, which is what makes the
@@ -826,8 +829,8 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
 fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     #[derive(Debug, PartialEq, serde::Deserialize)]
     struct Plain {
-        fraction: Float64,
-        maybe: Option<Float64>,
+        fraction: F64,
+        maybe: Option<F64>,
         plain_number: f64,
     }
 
@@ -850,7 +853,7 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
 
     let value: Plain =
         serde_json::from_value(emitted).expect("the emitted JSON is what serde expects");
-    assert_eq!(value.fraction, Float64(0.1));
+    assert_eq!(value.fraction, F64(0.1));
     assert!(value.maybe.is_none());
     assert_eq!(value.plain_number, 2.5);
 }

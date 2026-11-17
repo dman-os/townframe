@@ -31,6 +31,45 @@ impl PlugsRepo {
         Ok(())
     }
 
+    /// A component URL must be an existing `file:` path or a `dtxt:blob:` URL whose blob this
+    /// node's BlobsRepo holds.
+    async fn validate_component_url(&self, bundle_name: &str, url: &url::Url) -> Res<()> {
+        match url.scheme() {
+            "file" => {
+                let path = url
+                    .to_file_path()
+                    .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
+                if !path.exists() {
+                    eyre::bail!(
+                        "Component file not found for bundle '{}': {}",
+                        bundle_name,
+                        path.display()
+                    );
+                }
+            }
+            "dtxt" => {
+                let Some(hash) = crate::blobs::blob_url_digest(url) else {
+                    eyre::bail!(
+                        "Unsupported dtxt URL for bundle {bundle_name:?}, expected a blob: {url}"
+                    );
+                };
+                let Ok(blob_id) = hash.parse::<crate::blobs::BlobId>() else {
+                    eyre::bail!("Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}");
+                };
+                if self.blobs.get_path(blob_id).await.is_err() {
+                    eyre::bail!("Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}");
+                }
+            }
+            _ => {
+                eyre::bail!(
+                    "Unsupported URL scheme for bundle {bundle_name:?}: {}",
+                    url.scheme()
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Structural validity + tag clashes + deps + ACLs + components — no
     /// version baseline. Used by the record gate (remote manifest changes)
     /// and by activation gates; the compat diff is applied separately
@@ -208,42 +247,7 @@ impl PlugsRepo {
         // -- Component URL Validation --
         for (bundle_name, bundle) in &manifest.wflow_bundles {
             for url in &bundle.component_urls {
-                match url.scheme() {
-                    "file" => {
-                        let path = url
-                            .to_file_path()
-                            .map_err(|_| eyre::eyre!("invalid file path in url: {}", url))?;
-                        if !path.exists() {
-                            eyre::bail!(
-                                "Component file not found for bundle '{}': {}",
-                                bundle_name,
-                                path.display()
-                            );
-                        }
-                    }
-                    scheme if scheme == crate::blobs::BLOB_SCHEME => {
-                        let hash = url.path().trim_start_matches('/');
-                        let blob_id = match hash.parse::<crate::blobs::BlobId>() {
-                            Ok(value) => value,
-                            Err(_) => {
-                                eyre::bail!(
-                                    "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
-                                );
-                            }
-                        };
-                        if self.blobs.get_path(blob_id).await.is_err() {
-                            eyre::bail!(
-                                "Blob not found in BlobsRepo for bundle {bundle_name:?}: {hash:?}",
-                            );
-                        }
-                    }
-                    _ => {
-                        eyre::bail!(
-                            "Unsupported URL scheme for bundle {bundle_name:?}: {}",
-                            url.scheme()
-                        );
-                    }
-                }
+                self.validate_component_url(bundle_name, url).await?;
             }
         }
 

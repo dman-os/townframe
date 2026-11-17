@@ -186,7 +186,7 @@ mod focus {
         let positive = el!(div, "positive", tabindex = "5");
         let last = el!(button, "last");
         let inert_btn = el!(button, "inert-btn");
-        let trap = rec.clone();
+        let trap = Rc::clone(&rec);
         rsx! {
             {outside}
             div {
@@ -196,7 +196,7 @@ mod focus {
                         e.prevent_default();
                         let ids = ["first", "last"];
                         let to = if e.modifiers().shift() { ids[1] } else { ids[0] };
-                        let handle = trap.mounted.borrow()[to].clone();
+                        let handle = Rc::clone(&trap.mounted.borrow()[to]);
                         // The call runs `doc_mut()` now (inside the handler), the future is trivial.
                         drop(handle.set_focus(true));
                         trap.log.borrow_mut().push(format!("trap->{to}"));
@@ -229,7 +229,7 @@ mod focus {
     }
 
     fn set_focus(rec: &Rec, id: &str, focus: bool) {
-        let handle = rec.mounted.borrow()[id].clone();
+        let handle = Rc::clone(&rec.mounted.borrow()[id]);
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(matches!(
             std::pin::pin!(handle.set_focus(focus)).poll(&mut cx),

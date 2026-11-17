@@ -1,9 +1,9 @@
-# Review: big_plugs, nodule config and lifecycles
+# Review: big_cartridges, nodule config and lifecycles
 
 Status: For operator review
 Owner: Townframe maintainers
 Updated: 2026-11-04
-Scope: Operator-requested high-level design review of the big_plugs catalog, nodule config datums and nodule lifecycle (commit `57a7de13`), compared with the old `daybook_core` PlugsRepo and `rt/init.rs` and reframed by the decisions in `docs/scratch/nodule-runtime-ledger.md` (D1–D6). Findings are tagged **[bug]**, **[gap]**, **[design]** or **[perf]**. Recommendations marked *(proposal)* await the operator; the rest are fixes I intend to make.
+Scope: Operator-requested high-level design review of the big_cartridges catalog, nodule config datums and nodule lifecycle (commit `57a7de13`), compared with the old `daybook_core` PlugsRepo and `rt/init.rs` and reframed by the decisions in `docs/scratch/nodule-runtime-ledger.md` (D1–D6). Findings are tagged **[bug]**, **[gap]**, **[design]** or **[perf]**. Recommendations marked *(proposal)* await the operator; the rest are fixes I intend to make.
 
 ## Summary
 
@@ -18,15 +18,15 @@ Scope: Operator-requested high-level design review of the big_plugs catalog, nod
   - upgrade gating that can't wedge.
 - **Rule violations to fix now:** reconcile errors are swallowed and the actor exits silently, which AGENTS.md forbids. Every reconcile, and even reads, re-admits every envelope.
 
-## 1. Catalog (`big_plugs_core`)
+## 1. Catalog (`big_cartridges_core`)
 
-- **[gap]** `Catalog` (in-memory import/resolve) has no consumer, `Plug.dependencies` is never read, and `admitNodule` takes the full envelope inline. The ADR's "catalogued, then admitted" is therefore not what the code does.
+- **[gap]** `Catalog` (in-memory import/resolve) has no consumer, `Cartridge.dependencies` is never read, and `admitNodule` takes the full envelope inline. The ADR's "catalogued, then admitted" is therefore not what the code does.
 - **[design] (proposal)** Keep the **inline envelope in `NoduleInstall`.** It makes the config document self-contained and portable: a mirrored node gets everything it needs except the artifact bytes, which travel by digest through big_blobs. Shrink the catalog to a **distribution tool**: import (OCI or doc), version resolution, and fetching or pinning artifacts into big_blobs. It is not a runtime state holder. Drop the in-memory `Catalog` type unless a consumer appears.
 - **[design] (proposal)** Split **dependencies** by concern:
-  - **Package dependencies** (`Plug.dependencies`, id + semver) are a *distribution* concern: "also fetch these packages". The catalog resolves them at import time.
-  - **Runtime dependencies** are operation NSIDs (`Nodule.requires`), resolved by dispatch's routing table at bind time. They are not plug ids.
+  - **Package dependencies** (`Cartridge.dependencies`, id + semver) are a *distribution* concern: "also fetch these packages". The catalog resolves them at import time.
+  - **Runtime dependencies** are operation NSIDs (`Nodule.requires`), resolved by dispatch's routing table at bind time. They are not cartridge ids.
   - A missing provider makes the *dependent's* affected services `NotReady(ProviderMissing(nsid))`. It does not refuse installation.
-  - This replaces old `collect_plug_and_dependency_order` (plug-id DFS) with a graph over operations, which also gives init its ordering (§4).
+  - This replaces old `collect_cartridge_and_dependency_order` (cartridge-id DFS) with a graph over operations, which also gives init its ordering (§4).
 
 ## 2. Admission scope (D1)
 
@@ -58,10 +58,10 @@ Scope: Operator-requested high-level design review of the big_plugs catalog, nod
 The old design was strong on ids and done-ness, but its gating and retry model was weak.
 
 - **Old behaviour:**
-  - Ids were `plug@version/key`, so an upgrade re-ran inits.
+  - Ids were `cartridge@version/key`, so an upgrade re-ran inits.
   - There were three modes: `PerInstall` (done-ness synced through the app doc, so once across devices), `PerNode` (SQLite) and `PerBoot` (memory).
   - Inits were chained serially in dependency order.
-  - Every dispatch of the plug queued *behind* pending init dispatches.
+  - Every dispatch of the cartridge queued *behind* pending init dispatches.
   - On failure, waiters were failed and retry was implicit at the next boot or dispatch, with no failure record.
 - **New behaviour:** `Initializer{target, mode: Once|EveryStart}` has no key, no argument and no done-ness (O1, O10–O12).
 - **(proposal)** Redesign:
@@ -85,22 +85,22 @@ The old design was strong on ids and done-ness, but its gating and retry model w
 
 ## 6. Actors, grants and authority
 
-- **[design] (proposal)** **Uninstalled actors reserve their NSID prefix forever (O14).** Keeping the actor identity for reinstall is deliberate. But a *retired* plug's prefix should not block other plugs, so restrict the overlap check to installed plugs.
+- **[design] (proposal)** **Uninstalled actors reserve their NSID prefix forever (O14).** Keeping the actor identity for reinstall is deliberate. But a *retired* cartridge's prefix should not block other cartridges, so restrict the overlap check to installed cartridges.
 - **[design] (proposal)** **Bootstrapping grants (O21).** The reconciler can only grant drawers where the nodules actor already holds Admin, and big_node gives it Admin on the config drawer only. Ocap-correct alternative: `setNoduleDrawerGrants` carries the **operator's delegated capability** for the target drawer, and the nodule service stores the delegation. Authority travels with the request instead of pre-granting Admin everywhere. This also fits D4's operation grants.
-- **[bug]** `NoduleScope.admit` is global (O22): a scoped admitter can install any package. Scope it per plug id.
+- **[bug]** `NoduleScope.admit` is global (O22): a scoped admitter can install any package. Scope it per cartridge id.
 - **[gap]** The nodule's own Lexicons are never registered with `SchemaRepo` (O2), so nodules can't write their own datums yet, and `SchemaRepo` has no live-registration API. Dispatch keeps operation schemas per provider for edge validation, so that part doesn't need `SchemaRepo`. Live datum-schema registration is a separate item; added to the ledger.
 
 ## 7. Code-level fixes (intended, small)
 
 - **[bug]** `state.rs:216` does `drop(state.reconcile(...).await)`, and `:218` ends the actor silently on watch error, after which `Handle::ask` panics on send. Propagate it: a reconcile error that isn't per-nodule is fatal and must surface. The watch closing is a lifecycle error.
-- **[perf]** Every reconcile re-decodes and re-admits every envelope. The conflict pass is O(n²). `get`/`list` trigger a full reconcile whenever any grant exists (O18). Cache the admitted result per `(plug, revision)`, reconcile only the changed keys, and make reads serve the last records.
+- **[perf]** Every reconcile re-decodes and re-admits every envelope. The conflict pass is O(n²). `get`/`list` trigger a full reconcile whenever any grant exists (O18). Cache the admitted result per `(cartridge, revision)`, reconcile only the changed keys, and make reads serve the last records.
 - **[design]** `inventory::Inventory` duplicates `NoduleConfig`'s admission logic and has no non-test consumer (O7). Remove it.
 - **[bug]** `resolve_entry` takes the nodule id from the first contribution with a string `description.id`, whatever its kind (O19). Filter to the nodule contribution.
 - ADR vocabulary drift: `InvalidConfig` vs `Refused`, and `setNoduleGrants` vs `setNoduleDrawerGrants` (O3). Fix as part of the ADR 027 revision.
 
 ## Questions for the operator
 
-**Resolved 2026-11-04.** See [ADR 027](../adrs/027-plugs-nodules-and-operation-contracts.md) §10 and [ADR 028](../adrs/028-plug-identity-naming-and-dependencies.md).
+**Resolved 2026-11-04.** See [ADR 027](../adrs/027-cartridges-nodules-and-operation-contracts.md) §10 and [ADR 028](../adrs/028-cartridge-identity-naming-and-dependencies.md).
 
 1. Keep the inline envelope and reduce the catalog to a distribution tool (§1)?
 2. Package dependencies go to the catalog and runtime dependencies are operation NSIDs (§1)?

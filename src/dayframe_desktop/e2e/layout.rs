@@ -4,13 +4,13 @@
 //! mounts other micros' presentations through capabilities it redeems itself, so what that
 //! scenario proved (interactive children, one child's withdrawal not touching the others) is
 //! proven here on the capability path.
-use super::composed;
-use super::press_platform_back;
 use super::HeadlessDom;
 use super::Launch;
+use super::composed;
+use super::press_platform_back;
+use crate::composition::CompositionRuntime;
 use crate::composition::assemble;
 use crate::composition::desktop_runtime;
-use crate::composition::CompositionRuntime;
 use clay_docs::FacetRoute;
 use clay_host::MicroState;
 use clay_mdk::MicroId;
@@ -80,7 +80,7 @@ impl Layout {
             serde_json::json!({ "visible": visible }),
         );
         let launch = Launch::new(runtime.clone(), super::WIDE_PX);
-        let host = launch.host.clone();
+        let host = std::rc::Rc::clone(&launch.host);
         let mut ui = HeadlessDom::new(composed, launch);
         ui.wait_until("home offers the layout", |ui| {
             ui.find(OPEN_LAYOUT).is_some()
@@ -247,9 +247,10 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
         ui.text("section[aria-label=\"ghost panel\"] p[role=\"status\"]"),
         "Panel ghost is not installed."
     );
-    assert!(ui
-        .text("section[aria-label=\"Counter (Wasm) panel\"] p[role=\"alert\"]")
-        .contains("unavailable"));
+    assert!(
+        ui.text("section[aria-label=\"Counter (Wasm) panel\"] p[role=\"alert\"]")
+            .contains("unavailable")
+    );
     assert_eq!(stored_arrangement(&runtime), Some(stored.clone()));
 
     // Enabling the provider mounts its panel where the placeholder was; the unregistered id
@@ -259,9 +260,10 @@ async fn an_unregistered_or_unavailable_panel_is_a_placeholder_and_the_arrangeme
         ui.find(COUNTER_INCREMENT).is_some()
     })
     .await;
-    assert!(ui
-        .find("section[aria-label=\"ghost panel\"] p[role=\"status\"]")
-        .is_some());
+    assert!(
+        ui.find("section[aria-label=\"ghost panel\"] p[role=\"status\"]")
+            .is_some()
+    );
     assert_eq!(stored_arrangement(&runtime), Some(stored));
 }
 

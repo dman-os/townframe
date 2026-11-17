@@ -111,7 +111,7 @@ clay_mdk::export_micro!(activate, micro_counter_manifest::manifest);
 /// the host mounts this presentation into (see [`Context::publish_component`]).
 fn view(counter: Counter) -> Element {
     let mut rerender = use_signal(|| 0_u64);
-    let _ = rerender();
+    let _: u64 = rerender();
     let mut operation = use_signal(|| None::<Operation>);
     let mut error = use_signal(|| None::<String>);
     let snapshot = counter.facet.as_ref().map(use_facet);

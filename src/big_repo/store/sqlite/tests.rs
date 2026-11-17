@@ -2319,7 +2319,10 @@ async fn sqlite_big_repo_register_admission_consumers_writes_the_four_identities
     ]
     .into_iter()
     .map(|(namespace, consumer_id)| {
-        SqliteDeltaWalkerStateRepo::retention_reader_id_of(namespace, consumer_id)
+        SqliteDeltaWalkerStateRepo::retention_reader_id_of(
+            &store.admission_consumer_namespace(namespace),
+            consumer_id,
+        )
     })
     .collect();
 

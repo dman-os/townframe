@@ -32,6 +32,8 @@ pub(super) struct CapRow {
     pub(super) dependencies: Vec<CapId>,
     pub(super) issuer: Uuid7,
     pub(super) kind: Kind,
+    /// The actor this handle is bound to; see [`Capability::subject`]. Namespace roots have none.
+    pub(super) subject: Option<Uuid7>,
     depth: usize,
 }
 
@@ -39,6 +41,8 @@ pub(super) struct CapRow {
 /// operator's root has none), so retracting the capability drops both entries without a scan.
 pub(super) struct ActorBinding {
     pub(super) actor_id: Uuid7,
+    /// The actor this one was opened under; the operator's root has none.
+    pub(super) parent_actor: Option<Uuid7>,
     pub(super) reuse_key: Option<(Uuid7, CapId, i64)>,
 }
 
@@ -49,8 +53,24 @@ impl CapRow {
             object: self.object.clone(),
             rights: self.rights,
             issuer_id: self.issuer,
+            subject: self.subject,
         }
     }
+}
+
+/// An actor's liveness capability: an internal row, never returned on the wire, that exists
+/// while at least one of the actor's identity capabilities is live. `OpenActor` reuses one
+/// identity capability per parent and rights, so an actor can hold several, and a handle
+/// introduced to the actor cannot depend on "the" identity capability. It depends on this
+/// row instead, which the last identity capability's retraction takes down with it.
+struct Liveness {
+    cap: CapId,
+    identities: usize,
+    /// The actor's parent in the actor tree, recorded when its first identity capability is
+    /// bound (a path names its parent, so every later binding agrees). An introduction walks
+    /// these to decide whether one actor is a descendant of another. A live child implies
+    /// live ancestors, because its identity capability depends on its parent's.
+    parent: Option<Uuid7>,
 }
 
 /// Every live capability. Retraction deletes rows: a capability is invalid exactly when it
@@ -63,6 +83,7 @@ pub(super) struct State {
     pub(super) actors: HashMap<CapId, ActorBinding>,
     pub(super) actor_caps: HashMap<(Uuid7, CapId, i64), CapId>,
     namespaces: HashMap<Uuid7, CapId>,
+    liveness: HashMap<Uuid7, Liveness>,
     dependents: HashMap<CapId, HashSet<CapId>>,
 }
 
@@ -101,12 +122,21 @@ impl State {
             if let Some(dependents) = self.dependents.remove(&id) {
                 pending.extend(dependents);
             }
-            if let Some(ActorBinding {
-                reuse_key: Some(key),
-                ..
-            }) = self.actors.remove(&id)
-            {
-                assert_eq!(self.actor_caps.remove(&key), Some(id));
+            if let Some(binding) = self.actors.remove(&id) {
+                if let Some(key) = binding.reuse_key {
+                    assert_eq!(self.actor_caps.remove(&key), Some(id));
+                }
+                let liveness = self
+                    .liveness
+                    .get_mut(&binding.actor_id)
+                    .expect("a live identity capability keeps its actor's liveness row");
+                liveness.identities -= 1;
+                if liveness.identities == 0 {
+                    // The last identity capability is gone: retract the liveness row in this
+                    // same pass, which takes every handle introduced to the actor with it.
+                    pending.push(liveness.cap);
+                    self.liveness.remove(&binding.actor_id);
+                }
             }
             if row.kind == Kind::Namespace && self.namespaces.get(&row.issuer) == Some(&id) {
                 self.namespaces.remove(&row.issuer);
@@ -129,6 +159,7 @@ impl State {
             dependencies: Vec::new(),
             issuer: namespace_id,
             kind: Kind::Namespace,
+            subject: None,
             depth: 1,
         });
         assert!(self.namespaces.insert(namespace_id, capability).is_none());
@@ -138,12 +169,78 @@ impl State {
         }
     }
 
+    /// Publish `cap` as the identity capability of `binding.actor_id`, bound to that actor,
+    /// and keep the actor's liveness row: created with its first identity capability, and
+    /// retracted by [`Self::retract`] with the last.
+    pub(super) fn bind_identity(&mut self, mut cap: CapRow, binding: ActorBinding) {
+        let actor_id = binding.actor_id;
+        let parent = binding.parent_actor;
+        cap.subject = Some(actor_id);
+        let id = cap.id;
+        self.insert(cap);
+        assert!(self.actors.insert(id, binding).is_none());
+        if let Some(liveness) = self.liveness.get_mut(&actor_id) {
+            liveness.identities += 1;
+            return;
+        }
+        let liveness = CapRow {
+            id: CapId::new_random(),
+            object: format!("actor liveness {actor_id}"),
+            rights: Rights::empty(),
+            dependencies: Vec::new(),
+            issuer: actor_id,
+            kind: Kind::Object,
+            subject: Some(actor_id),
+            depth: 1,
+        };
+        let cap = liveness.id;
+        self.insert(liveness);
+        self.liveness.insert(
+            actor_id,
+            Liveness {
+                cap,
+                identities: 1,
+                parent,
+            },
+        );
+    }
+
+    /// Whether `actor` is a strict descendant of `ancestor` in the actor tree, walking parents
+    /// at most [`MAX_CHAIN_DEPTH`] steps. An actor is not its own descendant.
+    pub(super) fn is_descendant(&self, actor: Uuid7, ancestor: Uuid7) -> bool {
+        let mut current = actor;
+        for _ in 0..MAX_CHAIN_DEPTH {
+            let Some(parent) = self
+                .liveness
+                .get(&current)
+                .and_then(|liveness| liveness.parent)
+            else {
+                return false;
+            };
+            if parent == ancestor {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    /// The liveness capability of `actor`, or `ActorNotFound` when it has no live identity
+    /// capability (never opened, or every one retracted).
+    pub(super) fn liveness_of(&self, actor: Uuid7) -> Result<CapId, AuthorityError> {
+        self.liveness
+            .get(&actor)
+            .map(|liveness| liveness.cap)
+            .ok_or(AuthorityError::ActorNotFound)
+    }
+
     pub(super) fn child(
         &self,
         object: String,
         rights: Rights,
         issuer: Uuid7,
         kind: Kind,
+        subject: Option<Uuid7>,
         dependencies: impl IntoIterator<Item = CapId>,
     ) -> Result<CapRow, AuthorityError> {
         let mut unique = HashSet::new();
@@ -167,6 +264,7 @@ impl State {
             dependencies: direct,
             issuer,
             kind,
+            subject,
             depth: depth + 1,
         })
     }
@@ -266,7 +364,8 @@ pub(super) fn may_retract(target: &Chain<'_>, via: &CapId) -> Result<(), Authori
 }
 
 /// The answer to [`Command::Resolve`]: what a live capability says, and the actor it names
-/// if it is an actor capability.
+/// if it is an identity capability (a handle's `subject` is the actor it is bound to, which an
+/// identity capability shares with every handle derived from it).
 pub(super) struct Resolved {
     pub(super) capability: Capability,
     pub(super) actor: Option<Uuid7>,
@@ -281,13 +380,16 @@ impl Resolved {
         }
     }
 
-    /// The actor this capability presents, provided it carries `right`. Like
-    /// [`super::actor::recognize`], a capability that names no actor is refused as such
-    /// before its rights are looked at.
-    pub(super) fn actor(&self, right: Rights) -> Result<Uuid7, AuthorityError> {
-        let actor = self.actor.ok_or(AuthorityError::UnrecognizedActor)?;
+    /// The actor this handle is bound to, provided it carries `right`. Like
+    /// [`super::actor::recognize`], a handle bound to no actor is refused as such before its
+    /// rights are looked at.
+    pub(super) fn subject(&self, right: Rights) -> Result<Uuid7, AuthorityError> {
+        let subject = self
+            .capability
+            .subject
+            .ok_or(AuthorityError::UnrecognizedActor)?;
         self.require(right)?;
-        Ok(actor)
+        Ok(subject)
     }
 }
 
@@ -317,6 +419,7 @@ pub(super) enum Command {
     BindActor {
         issued: CapRow,
         actor_id: Uuid7,
+        parent_actor: Uuid7,
         parent: CapId,
         reply: Reply<CapId>,
     },
@@ -406,9 +509,12 @@ impl State {
             Command::BindActor {
                 issued,
                 actor_id,
+                parent_actor,
                 parent,
                 reply,
-            } => respond(reply, || self.bind_actor(issued, actor_id, parent)),
+            } => respond(reply, || {
+                self.bind_actor(issued, actor_id, parent_actor, parent)
+            }),
             #[cfg(test)]
             Command::Peek(peek) => peek(self),
             #[cfg(test)]

@@ -11,9 +11,13 @@ impl DocsService {
     async fn write(
         &self,
         context: &RequestContext,
+        metadata: &HttpMetadata,
         params: WriteDatums,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.capability).await?;
+        let instr_start = std::time::Instant::now(); // INSTR
+        let caller = self
+            .signing_invocation(context, metadata, params.capability)
+            .await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -34,6 +38,7 @@ impl DocsService {
         {
             return Ok(receipt);
         }
+        let instr_authorized = instr_start.elapsed(); // INSTR
         let set = self.schemas(params.set, &params.remove)?;
         if let Some(command) = &params.command {
             self.commands
@@ -61,12 +66,13 @@ impl DocsService {
         let result = self
             .commit_write(
                 context,
-                actor.capability,
+                caller.via,
                 &params.mode,
                 &mut plan,
                 params.command.as_ref(),
             )
             .await;
+        tracing::debug!(?instr_authorized, total = ?instr_start.elapsed(), "INSTR write timing"); // INSTR
         match (&params.command, result) {
             (Some(command), Ok(heads)) => {
                 self.commands.advance(command, State::Done, &heads).await?;
@@ -95,9 +101,12 @@ impl DocsService {
         plan: &mut Plan<'_>,
         command: Option<&CommandId>,
     ) -> Result<Vec<ChangeHash>, Failure> {
+        let instr_start = std::time::Instant::now(); // INSTR
         let document = self.handle(plan.document).await?;
+        let instr_handle = instr_start.elapsed(); // INSTR
         let staged = document
             .with_document(|doc| -> Result<_, DocsError> {
+                let instr_inner = std::time::Instant::now(); // INSTR
                 let base = Self::condition(doc, mode)?;
                 let gate = Gate::new(doc, &base);
                 for key in plan.keys() {
@@ -119,17 +128,21 @@ impl DocsService {
                     predecessors.insert(key.clone(), ids);
                 }
                 plan.predecessors = predecessors;
+                let instr_verified = instr_inner.elapsed(); // INSTR
                 let tx = doc
                     .transaction_at(PatchLog::null(), &base)
                     .expect("a null patch log matches any document");
                 let (tx, claims) = self.stage(tx, plan, None)?;
                 tx.rollback();
+                tracing::debug!(changes = doc.get_changes(&[]).len(), ?instr_verified, staged = ?instr_inner.elapsed(), "INSTR commit_write stage split"); // INSTR
                 Ok((base, claims))
             })
             .await
             .map_err(repository)??;
         let (base, claims) = staged;
+        let instr_staged = instr_start.elapsed(); // INSTR
         let signatures = self.sign(context, capability, &claims).await?;
+        let instr_signed = instr_start.elapsed(); // INSTR
         let committed = document
             .with_document(|doc| -> Result<_, DocsError> {
                 Self::condition(doc, mode)?;
@@ -147,7 +160,11 @@ impl DocsService {
                 Ok(sorted(doc.get_heads()))
             })
             .await
-            .map_err(|error| Failure::Ambiguous(repository(error)))?;
+            .map_err(|error| match commit_refusal(&error) {
+                Some(denied) => Failure::Refused(denied),
+                None => Failure::Ambiguous(repository(error)),
+            })?;
+        tracing::debug!(?instr_handle, ?instr_staged, ?instr_signed, committed = ?instr_start.elapsed(), "INSTR commit_write timing"); // INSTR
         Ok(committed?)
     }
 }
@@ -157,6 +174,9 @@ impl Handler<WriteDatums> for DocsService {
         &self,
         request: Envelope<WriteDatums>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
-        Ok(self.write(&request.context, request.params).await?.into())
+        Ok(self
+            .write(&request.context, &request.metadata, request.params)
+            .await?
+            .into())
     }
 }

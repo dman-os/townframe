@@ -21,6 +21,12 @@ mod input;
 pub mod lexicon;
 #[cfg(feature = "schemars")]
 pub use input::LexiconAdmissionError;
+#[cfg(feature = "schemars")]
+pub use input::PositionValidator;
+#[cfg(feature = "schemars")]
+pub use input::admit_lexicon;
+#[cfg(feature = "schemars")]
+pub use input::compile_position;
 
 #[cfg(feature = "schemars")]
 mod universe;
@@ -79,9 +85,7 @@ pub use codec::Counter;
 #[cfg(feature = "schemars")]
 pub use codec::DeclaredReference;
 #[cfg(feature = "schemars")]
-pub use codec::Float32;
-#[cfg(feature = "schemars")]
-pub use codec::Float64;
+pub use codec::F64;
 #[cfg(feature = "schemars")]
 pub use codec::KEYWORD;
 #[cfg(feature = "schemars")]
@@ -112,3 +116,5 @@ pub use universe::TypeDecl;
 pub use universe::Universe;
 #[cfg(feature = "schemars")]
 pub use universe::UniverseError;
+#[cfg(feature = "schemars")]
+pub use universe::rust_number_formats_to_bounds;

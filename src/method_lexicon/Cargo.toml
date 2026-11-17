@@ -1,0 +1,24 @@
+[package]
+name = "method_lexicon"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+method_core = { workspace = true, features = ["schemars"] }
+big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
+serde_json.workspace = true
+thiserror.workspace = true
+big_blobs_core = { path = "../big_blobs_core", features = ["schemars"] }
+big_cartridges_core = { path = "../big_cartridges_core", features = ["schemars"] }
+big_dispatch_core = { path = "../big_dispatch_core", features = ["schemars"] }
+big_nodule_core = { path = "../big_nodule_core", features = ["schemars"] }
+
+[dev-dependencies]
+service_core_rs.workspace = true
+insta = { workspace = true, features = ["json"] }

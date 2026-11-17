@@ -321,7 +321,7 @@ impl NativeComponents {
             Rc::new(move |mount| {
                 rsx! {
                     MountedSurface {
-                        mount: SharedMount(mount.clone()),
+                        mount: SharedMount(Arc::clone(mount)),
                         owner: owner.clone(),
                         factory: factory.clone(),
                     }
@@ -449,7 +449,7 @@ fn MountedComponent(
         let mut path = path.clone();
         path.references.push(reference);
         if let Some(mount) = &mount {
-            path.mounts.push(mount.clone());
+            path.mounts.push(Arc::clone(mount));
         }
         path
     });
@@ -489,17 +489,17 @@ fn MountedComponent(
 fn MountedSurface(mount: SharedMount, owner: Instance, factory: SurfaceFactory) -> Element {
     let path = use_hook(|| try_consume_context::<MountPath>().unwrap_or_default());
     let writer = use_hook(|| {
-        let mut writer = SurfaceWriter::new(mount.0.clone());
+        let mut writer = SurfaceWriter::new(Arc::clone(&mount.0));
         writer.ancestors = path.mounts.clone();
         writer.ancestor_surfaces = path.surfaces.clone();
         writer
     });
     use_context_provider(|| {
         let mut path = path.clone();
-        path.surfaces.push(writer.revoked.clone());
+        path.surfaces.push(Arc::clone(&writer.revoked));
         path
     });
-    let session = use_hook(|| match (factory.0)(mount.0.clone(), writer.clone()) {
+    let session = use_hook(|| match (factory.0)(Arc::clone(&mount.0), writer.clone()) {
         Ok(session) => Ok(Rc::new(session)),
         Err(error) => {
             writer.withdraw();

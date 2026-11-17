@@ -298,7 +298,7 @@ fn dropping_ui_operation_handles_does_not_discard_completion_tracking() {
 
 fn counting(mirror: &DocumentMirror) -> Rc<Cell<u32>> {
     let calls = Rc::new(Cell::new(0));
-    let counted = calls.clone();
+    let counted = std::rc::Rc::clone(&calls);
     mirror.set_notifier(move || counted.set(counted.get() + 1));
     calls
 }
@@ -402,5 +402,5 @@ fn decoding_a_present_facet_at_the_wrong_shape_is_an_invariant_failure() {
         2,
         documents::FacetValue::Present("not a number".into()),
     ));
-    let _ = watch.current().value::<u64>("counter", "count");
+    watch.current().value::<u64>("counter", "count").unwrap();
 }

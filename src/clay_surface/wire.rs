@@ -211,7 +211,7 @@ impl SurfaceSession {
     }
 
     pub fn handler(&self) -> SurfaceEventHandler {
-        self.dispatch.clone()
+        Rc::clone(&self.dispatch)
     }
 }
 
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn session_drop_fires_the_hook_exactly_once() {
         let drops = Rc::new(Cell::new(0_u32));
-        let counted = drops.clone();
+        let counted = Rc::clone(&drops);
         let session = SurfaceSession::with_drop(
             |_| EventResponse::default(),
             move || {
@@ -254,13 +254,14 @@ mod tests {
         drop(session);
         assert_eq!(drops.get(), 1);
         // The handler outlives its session; dispatch must stay usable after the hook fired.
-        let _ = handler(Event {
+        let response = handler(Event {
             revision: 8,
             element: 3,
             name: "click".into(),
             bubbles: true,
             data_json: "null".into(),
         });
+        assert_eq!(response, EventResponse::default());
         assert_eq!(drops.get(), 1);
     }
 

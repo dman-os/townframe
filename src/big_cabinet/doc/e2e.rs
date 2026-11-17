@@ -4,14 +4,17 @@
 //! Forgeries are planted with raw Automerge edits on documents the repository wrote correctly, so
 //! each test states exactly which invariant the sabotage breaks.
 
+mod authors;
 mod branches;
 mod capabilities;
 mod commands;
 mod gate;
+mod list_costs;
 mod model;
 mod observe;
 mod peer;
 mod wire;
+mod write_costs;
 mod writes;
 
 use super::*;
@@ -23,16 +26,19 @@ use crate::schema::SchemaRepo;
 use automerge::Automerge;
 use automerge::ChangeHash;
 use big_cabinet_core::DatumKey;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::Bundle;
+use big_cabinet_core::datum::DatumDecl;
+use big_cabinet_core::datum::Universe;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::doc::ObservedDatum;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
 use big_repo::SharedBigRepo;
-use big_repo::StorageConfig;
+use big_repo::Storage;
 use secrets_rs::SecretStore;
 use serde_json::Value;
 use serde_json::json;
@@ -45,6 +51,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 const NOTE: &str = "org.example.note";
+const TEXT_NOTE: &str = "org.example.textNote";
 const PLACEMENT: &str = "drawer test";
 
 fn note(text: &str) -> Value {
@@ -65,12 +72,42 @@ fn schemas() -> Arc<SchemaRepo> {
             "properties": {"value": {"type": "string"}}
         }}}
     });
+    let text_lexicon = json!({
+        "lexicon": 1,
+        "id": TEXT_NOTE,
+        "defs": {"main": {"type": "record", "key": "tid", "record": {
+            "type": "object",
+            "required": ["text"],
+            "properties": {"text": {"type": "string"}}
+        }}}
+    });
+    // The Automerge representation is a sidecar annotation: Lexicon has no place for it.
+    let text_storage = Universe {
+        datums: vec![DatumDecl {
+            id: TEXT_NOTE.to_owned(),
+            name: "Main".to_owned(),
+            schema: schemars::Schema::try_from(json!({
+                "type": "object",
+                "properties": {"text": {"type": "string", "x-automerge": "text"}}
+            }))
+            .unwrap(),
+            flags: Vec::new(),
+        }],
+        types: Vec::new(),
+    };
     Arc::new(
-        SchemaRepo::open([SchemaRegistrationGroup::new(
-            None,
-            [SchemaRegistration::new(NOTE, lexicon)],
-            Vec::new(),
-        )])
+        SchemaRepo::open([
+            SchemaRegistrationGroup::new(
+                None,
+                [SchemaRegistration::new(NOTE, lexicon)],
+                Vec::new(),
+            ),
+            SchemaRegistrationGroup::new(
+                Some(Bundle::new(&text_storage, Vec::new())),
+                [SchemaRegistration::new(TEXT_NOTE, text_lexicon)],
+                Vec::new(),
+            ),
+        ])
         .unwrap(),
     )
 }
@@ -78,7 +115,7 @@ fn schemas() -> Arc<SchemaRepo> {
 struct Node {
     authority: Authority,
     authority_stop: Option<StopToken>,
-    docs_actor: Actor,
+    docs_actor: OpenedActor,
     docs_namespace: Namespace,
     access: Arc<LedgerAccess>,
     repo: SharedBigRepo,
@@ -99,10 +136,13 @@ impl Node {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
-        let (authority, authority_stop) =
-            crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
-                .await
-                .unwrap();
+        let (authority, authority_stop) = crate::authority::boot(
+            &secrets,
+            "test-node",
+            sqlite_rs::test_support::db(&[]).unwrap().clone(),
+        )
+        .await
+        .unwrap();
         let docs_actor = authority
             .client
             .call(
@@ -126,18 +166,15 @@ impl Node {
                 .await
                 .unwrap(),
         );
-        let (repo, repo_stop) = BigRepo::boot(
-            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
-            Config {
-                node_identity_seed: [seed; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "documents-e2e".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(Config {
+            node_identity_seed: [seed; 32],
+            storage: Storage::memory(&sqlite_rs::SqliteRuntime::new(Default::default())).unwrap(),
+            scope_key: "documents-e2e".into(),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        })
         .await
         .unwrap();
         let datum_set = Arc::new(
@@ -243,12 +280,12 @@ impl Node {
         self.start().await
     }
 
-    fn client(&self) -> &service_utils_rs::Client<DocsProtocol> {
+    fn client(&self) -> &service_client_native_rs::Client<DocsProtocol> {
         &self.docs.as_ref().unwrap().client
     }
 
     /// A fresh actor allowed to create documents in [`PLACEMENT`].
-    async fn writer(&self, path: &str) -> Actor {
+    async fn writer(&self, path: &str) -> OpenedActor {
         let actor = self
             .authority
             .client
@@ -272,12 +309,12 @@ impl Node {
         actor
     }
 
-    async fn grant(&self, actor: &Actor, object: String) {
+    async fn grant(&self, actor: &OpenedActor, object: String) {
         self.access
             .grants
             .grant(
                 &RequestContext::root(),
-                actor.actor_id,
+                actor.actor.actor_id,
                 object,
                 Rights::USE,
                 None,
@@ -286,15 +323,16 @@ impl Node {
             .unwrap();
     }
 
-    async fn capability(&self, actor: &Actor, scope: DocScope) -> Result<CapId, DocsError> {
+    async fn capability(&self, actor: &OpenedActor, scope: DocScope) -> Result<CapId, DocsError> {
         op(self
             .client()
-            .call(
+            .call_with(
                 RequestContext::root(),
+                Authorization::identity(actor.capability).metadata(),
                 MintDocCapability {
-                    authorization: Authorization::identity(actor.capability),
                     scope,
                     rights: Rights::USE,
+                    subject: None,
                 },
             )
             .await)
@@ -303,7 +341,7 @@ impl Node {
 
     async fn create(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         command: &str,
         datums: impl IntoIterator<Item = (DatumKey, Value)>,
     ) -> Result<WriteReceipt, DocsError> {
@@ -331,7 +369,7 @@ impl Node {
 
     async fn write(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         document: &DocId,
         mode: WriteMode,
         set: impl IntoIterator<Item = (DatumKey, Value)>,
@@ -363,7 +401,7 @@ impl Node {
 
     async fn read(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         document: &DocId,
         at: At,
         optimistic: bool,
@@ -393,7 +431,7 @@ impl Node {
 
     async fn read_one(
         &self,
-        actor: &Actor,
+        actor: &OpenedActor,
         document: &DocId,
         at: At,
         datum: &DatumKey,
@@ -459,14 +497,14 @@ impl Node {
 
 fn op<T>(result: Result<T, ClientError<DocsError>>) -> Result<T, DocsError> {
     result.map_err(|error| match error {
-        ClientError::Operation(error) => error,
+        ClientError::Method(error) => error,
         ClientError::Transport { message, .. } => panic!("transport: {message}"),
     })
 }
 
 fn accepted(read: &DatumRead) -> (&Value, &[ChangeHash]) {
     match read {
-        DatumRead::Accepted { value, version } => (value, version.heads.as_slice()),
+        DatumRead::Accepted { value, version, .. } => (value, version.heads.as_slice()),
         other => panic!("expected an accepted datum, got {other:?}"),
     }
 }

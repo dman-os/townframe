@@ -50,11 +50,9 @@ impl Handler<ListDocs> for DrawerService {
     async fn call(
         &self,
         request: Envelope<ListDocs>,
-    ) -> Result<ResponseEnvelope<Vec<ListedDoc>>, DrawersError> {
-        Ok(self
-            .list_docs(&request.context, request.params)
-            .await?
-            .into())
+    ) -> Result<ResponseEnvelope<ListedDocs>, DrawersError> {
+        let docs = self.list_docs(&request.context, request.params).await?;
+        Ok(ListedDocs { docs }.into())
     }
 }
 

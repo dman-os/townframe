@@ -1,4 +1,5 @@
 use super::*;
+use big_cabinet_core::authority::CapabilityChange;
 use big_cabinet_core::authority::CapabilityStatus;
 use big_cabinet_core::authority::ObserveCapability;
 use big_repo::BigRepoDocIdFilter;
@@ -191,15 +192,15 @@ impl AvailabilityObserver {
     /// capability is retracted, and the first authorization failure otherwise.
     async fn watch_access(
         &self,
-        mut authority_changes: service_utils_rs::ClientStream<ObserveCapability>,
+        mut authority_changes: service_client_core_rs::ClientStream<ObserveCapability>,
         mut policy_changes: Option<tokio::sync::watch::Receiver<u64>>,
     ) -> Result<(), DocsError> {
         loop {
             tokio::select! {
                 biased;
                 change = authority_changes.next() => match change {
-                    Some(Ok(CapabilityStatus::Live)) => {}
-                    Some(Ok(CapabilityStatus::Retracted)) => return Ok(()),
+                    Some(Ok(CapabilityChange { status: CapabilityStatus::Live })) => {}
+                    Some(Ok(CapabilityChange { status: CapabilityStatus::Retracted })) => return Ok(()),
                     Some(Err(error)) => return Err(authority_error(error)),
                     None => return Err(DocsError::AuthorityUnavailable(
                         "authority change stream ended without retraction".into(),
