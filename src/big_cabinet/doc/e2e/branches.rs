@@ -812,13 +812,15 @@ utils_rs::table_tests! {
     },
 }
 
-// A branch carries its own path datum, so a merge of one always brings that kind too.
+// A merge is held to the datums it changes; the branch datum it brings is the repository's own.
 merges_are_held_to_what_they_change! {
-    a_target_writable_at_the_changed_kinds_takes_the_merge: (None, Some(&[NOTE, BranchPath::ID][..]), &[NOTE][..], Ok(())),
-    a_target_not_writable_at_a_changed_kind_refuses_the_merge: (None, Some(&[NOTE, BranchPath::ID][..]), &[NOTE, TEXT_NOTE][..], Err(DocsError::Denied)),
-    a_target_not_writable_at_the_branch_path_kind_refuses_the_merge: (None, Some(&[NOTE][..]), &[NOTE][..], Err(DocsError::Denied)),
-    a_source_readable_at_the_changed_kinds_gives_the_merge: (Some(&[NOTE, BranchPath::ID][..]), None, &[NOTE][..], Ok(())),
-    a_source_not_readable_at_a_changed_kind_refuses_the_merge: (Some(&[NOTE, BranchPath::ID][..]), None, &[NOTE, TEXT_NOTE][..], Err(DocsError::Denied)),
+    a_target_writable_at_the_changed_kinds_takes_the_merge: (None, Some(&[NOTE][..]), &[NOTE][..], Ok(())),
+    a_target_not_writable_at_a_changed_kind_refuses_the_merge: (None, Some(&[NOTE][..]), &[NOTE, TEXT_NOTE][..], Err(DocsError::Denied)),
+    // The branch's own `branch/<id>` datum comes along by design (ADR 034); it is the
+    // repository's record, so it needs no kind of the merging actor's.
+    the_branch_datum_a_merge_brings_needs_no_kind: (Some(&[NOTE][..]), Some(&[NOTE][..]), &[NOTE][..], Ok(())),
+    a_source_readable_at_the_changed_kinds_gives_the_merge: (Some(&[NOTE][..]), None, &[NOTE][..], Ok(())),
+    a_source_not_readable_at_a_changed_kind_refuses_the_merge: (Some(&[NOTE][..]), None, &[NOTE, TEXT_NOTE][..], Err(DocsError::Denied)),
 }
 
 #[tokio::test]

@@ -162,8 +162,11 @@ and 7), so a grant records the answer to that question, once:
 - `grant/cartridge/<cartridgeId>` → `{ access }`, "may use data from cartridge Y" (its collections
   and datums included, item 8);
 - `grant/origin/<origin>` → `{}`, "may talk to services at origin Z";
-- `grant/method/<nsid or authority>` → `{}`, "may use Y's operation" where the person is asked at
-  all (most are proposed and accepted at install, ADR 047 §10).
+- `grant/method/<nsid>` → `{}`, "may use Y's operation", and `grant/authority/<prefix or *>` →
+  `{}`, "may use operations under this namespace". They are two kinds because an NSID-shaped
+  name is both a valid operation and a valid authority prefix, and dev takeover needs the two
+  apart (ADR 028 §3; operator, 2026-11-18). Most are proposed and accepted at install (ADR 047
+  §10).
 
 Permbinds no longer carry grants of their own. Each routine's or micro's handle is derived: its
 `uses`, narrowed by its permbinds' rules, intersected with the cartridge's grants. Granting drawer X
