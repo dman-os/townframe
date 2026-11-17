@@ -9838,7 +9838,6 @@ dependencies = [
  "micro_review_manifest",
  "pierre_diffs_dioxus",
  "serde_json",
- "service_core_rs",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -9849,6 +9848,8 @@ version = "0.1.0"
 dependencies = [
  "clay_mdk",
  "insta",
+ "micro_layout_manifest",
+ "serde",
  "serde_json",
 ]
 
