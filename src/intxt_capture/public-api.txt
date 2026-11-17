@@ -40,6 +40,7 @@ pub intxt_capture::git::fn observe (root : & Path , git_dir : & Path , common_di
 pub intxt_capture::host::fn prepare (hook : & Hook , session_path : & Path) -> Result < Prepared , Error >
 pub intxt_capture::host::fn prepare_acp (session : SessionBatch , sessions_dir : & Path , cwd : & Path , known : & BTreeSet < PathBuf > , window : & Window ,) -> Result < Prepared , Error >
 pub intxt_capture::host::fn prepare_import (identity : & Identity , import : & [String]) -> Result < Prepared , Error >
+pub intxt_capture::host::fn put_on_intxt (identity : & Identity , drawer : Option < String >) -> Result < () , Error >
 pub intxt_capture::host::fn recorded_worktree (identity : & Identity) -> Result < RecordedWorktree , Error >
 pub intxt_capture::host::fn sessions_in (sessions_dir : & Path , root : & Path) -> Result < Vec < RecordedSession > , Error >
 pub intxt_capture::identity::fn resolve (path : & Path) -> Result < Option < Identity > , Error >
@@ -76,7 +77,7 @@ pub struct intxt_capture::git::Head  { reference: Option < String >, target: Opt
 pub struct intxt_capture::hook::Hook  { session_id: String, transcript_path: PathBuf, cwd: PathBuf, event: Event, tool_name: Option < String >, tool_use_id: Option < String >, tool_input: Option < Value >, extra: BTreeMap < String , Value > }
 pub struct intxt_capture::host::Prepared  { batch: Batch }
 pub struct intxt_capture::host::RecordedSession  { session_id: String, doc: Option < String >, modified: std :: time :: SystemTime }
-pub struct intxt_capture::host::RecordedWorktree  { docs: WorktreeDocs, ops: u64 }
+pub struct intxt_capture::host::RecordedWorktree  { docs: WorktreeDocs, ops: u64, intxt: Option < String > }
 pub struct intxt_capture::identity::Identity  { root: PathBuf, git_dir: PathBuf, common_dir: PathBuf, clone_id: String, worktree_id: String, remotes: Vec < String >, roots: Vec < String > }
 pub struct intxt_capture::observe::Observation  { identity: Identity, earlier: Vec < Vec < Change > >, changes: Vec < Change >, git: GitObserved }
 pub struct intxt_capture::observe::WorktreeState  {  }

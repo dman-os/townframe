@@ -43,6 +43,8 @@ pub impl intxt_core::client::Caller < H >::async fn write_datums (& self , doc :
 pub impl intxt_core::client::Caller < H >::fn acting_as (mut self , actor : Uuid7) -> Self
 pub impl intxt_core::client::Caller < H >::fn command (& self , step : & str , content : & impl Serialize) -> Result < CommandId , IntxtError >
 pub impl intxt_core::client::Caller < H >::fn new (transport : H , context : RequestContext , capability : Option < & str > , command_base : String ,) -> Self
+pub impl intxt_core::generic::Intxt::fn named_in (text : & str) -> Vec < DocId >
+pub impl intxt_core::generic::Intxt::fn reference (drawer : & DocId) -> DatumReference
 pub intxt_core::cartridge::fn cartridge (handler : Artifact) -> Cartridge
 pub intxt_core::cartridge::fn handler_artifact (wasm : & [u8]) -> Artifact
 pub intxt_core::client::fn key (tag : & str , slot : & str) -> Result < DatumKey , IntxtError >
