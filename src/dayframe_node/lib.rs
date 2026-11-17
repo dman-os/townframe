@@ -78,9 +78,17 @@ pub struct InstallConfig {
 /// The node methods each micro is granted, by its plug name (the `<name>` of `<did>/<name>`).
 ///
 /// INTERIM: see [`MicroInstall`]. This table is the one place the composition names a micro's node
-/// access, and it grants nothing today: a micro here gets an actor and an egress, and can call no
-/// method.
-const INTERIM_GRANTS: &[(&str, &[&str])] = &[];
+/// access. A micro not listed here still gets an actor and an egress, but can call no method.
+const INTERIM_GRANTS: &[(&str, &[&str])] = &[(
+    // intxt's review micro (D62): the linked intxts' summaries, and the PR and intxt datums it reads
+    // with the doc capability in its config.
+    "dayframe.review",
+    &[
+        "org.example.intxt.summarizeIntxts",
+        "org.example.daybook.docs.readDatums",
+        "org.example.daybook.docs.pollDatums",
+    ],
+)];
 
 impl MicroInstall {
     /// The installs of the micros with these ids, each granted its [`INTERIM_GRANTS`].
