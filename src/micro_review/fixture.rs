@@ -1,0 +1,370 @@
+//! The fixture node: [`NodeCalls`] over documents held in memory, answering `summarizeIntxts` and
+//! `readDatums` as the node does for the same data. It stands in until claytxt's micro -> node
+//! transport lands (see [`crate::node`]), and is what the view-model tests read.
+//!
+//! Methods are answered through their JSON wire shape: the input is serialized, dispatched by the
+//! method's NSID and the typed answer is deserialized as the method's own output, so the micro
+//! exercises the same types it will exchange with the real node.
+use crate::model::key;
+use crate::node::CallError;
+use crate::node::NodeCalls;
+use big_cabinet_core::DatumKey;
+use big_cabinet_core::DocId;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumVersion;
+use big_cabinet_core::doc::DatumsRead;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::ReferenceDocId;
+use intxt_core::generic;
+use intxt_core::methods::IntxtSummary;
+use intxt_core::methods::IntxtsSummarized;
+use intxt_core::methods::SummarizeIntxts;
+use intxt_core::methods::SummaryStatus;
+use intxt_core::work;
+use method_core::Unary;
+use serde_json::Value;
+use serde_json::json;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::future::ready;
+use std::rc::Rc;
+
+type Datums = BTreeMap<DatumKey, Value>;
+
+/// The unified patch the sample's first commit entry carries.
+const SAMPLE_PATCH: &str = "diff --git a/src/review.rs b/src/review.rs
+--- a/src/review.rs
++++ b/src/review.rs
+@@ -1,3 +1,4 @@
+ fn review() {
+-    println!(\"todo\");
++    println!(\"read the PR\");
++    println!(\"find its intxts\");
+ }
+";
+
+#[derive(Clone, Default)]
+struct Held {
+    docs: BTreeMap<DocId, Datums>,
+    /// The documents `held_pulls` names, in order.
+    pulls: Vec<DocId>,
+}
+
+/// A node held in memory. Clones share what they are asked, so a test sees the calls a view made.
+#[derive(Clone, Default)]
+pub struct Fixture {
+    held: Rc<Held>,
+    calls: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl Fixture {
+    /// A node holding nothing.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// A document id from `tail`, left-padded: ids are 32 base58 characters after the `z`.
+    pub fn doc_id(tail: &str) -> DocId {
+        format!("z{tail:1>32}")
+            .parse()
+            .expect("a fixture id is well formed")
+    }
+
+    /// Hold `doc` with these datums.
+    #[must_use]
+    pub fn doc(mut self, doc: DocId, datums: impl IntoIterator<Item = (DatumKey, Value)>) -> Self {
+        Rc::make_mut(&mut self.held)
+            .docs
+            .insert(doc, datums.into_iter().collect());
+        self
+    }
+
+    /// Name `doc` among the pull requests the node holds, whatever it holds.
+    #[must_use]
+    pub fn held_pull(mut self, doc: DocId) -> Self {
+        Rc::make_mut(&mut self.held).pulls.push(doc);
+        self
+    }
+
+    /// Hold a pull request: its own document with the `githubPull` datum at
+    /// `githubPull/<slot>` (`<owner>/<repo>/<number>`).
+    #[must_use]
+    pub fn pull(self, doc: DocId, slot: &str, title: &str, state: &str, body: &str) -> Self {
+        let (repo, number) = slot
+            .rsplit_once('/')
+            .expect("a pull request's slot is owner/repo/number");
+        let datum = json!({
+            "title": title, "body": body, "state": state,
+            "head": "feat/intxt-review-micro", "base": "main",
+            "headSha": "4c1f0a7e", "baseSha": "9a0e11c0",
+            "updatedAt": "2026-11-17T10:00:00Z",
+            "url": format!("https://github.com/{repo}/pull/{number}"),
+        });
+        self.doc(doc.clone(), [(key(work::GithubPull::ID, slot), datum)])
+            .held_pull(doc)
+    }
+
+    /// Hold an intxt: the drawer's descriptor document with the intxt marker, a title, and a
+    /// body listing `entries` in order.
+    #[must_use]
+    pub fn intxt(
+        self,
+        drawer: DocId,
+        title: &str,
+        description: Option<&str>,
+        entries: Vec<(DatumKey, Value)>,
+    ) -> Self {
+        let body = generic::Body {
+            order: entries
+                .iter()
+                .map(|(entry, _)| DatumReference::new(ReferenceDocId::SelfDoc, entry.clone()))
+                .collect(),
+            extra: Default::default(),
+        };
+        let title = generic::Title {
+            title: title.to_owned(),
+            description: description.map(str::to_owned),
+            extra: Default::default(),
+        };
+        let marker = [
+            (
+                key(generic::Intxt::ID, "main"),
+                serde_json::to_value(generic::Intxt::default()).expect("a marker is plain JSON"),
+            ),
+            (
+                key(generic::Title::ID, "main"),
+                serde_json::to_value(title).expect("a title is plain JSON"),
+            ),
+            (
+                key(generic::Body::ID, "main"),
+                serde_json::to_value(body).expect("a body is plain JSON"),
+            ),
+        ];
+        self.doc(drawer, marker.into_iter().chain(entries))
+    }
+
+    /// A body that lists an entry its document does not hold.
+    #[cfg(test)]
+    #[must_use]
+    pub fn listing_a_missing_entry(mut self, drawer: &DocId) -> Self {
+        let body_key = key(generic::Body::ID, "main");
+        let datums = Rc::make_mut(&mut self.held)
+            .docs
+            .get_mut(drawer)
+            .expect("the drawer is held");
+        let mut body: generic::Body =
+            serde_json::from_value(datums[&body_key].clone()).expect("a body");
+        body.order.push(DatumReference::new(
+            ReferenceDocId::SelfDoc,
+            key(work::SessionEntry::ID, "gone"),
+        ));
+        datums.insert(
+            body_key,
+            serde_json::to_value(body).expect("a body is plain JSON"),
+        );
+        self
+    }
+
+    /// The NSIDs of the calls made so far, in order, by this node and every clone of it.
+    pub fn calls(&self) -> Vec<&'static str> {
+        self.calls.borrow().clone()
+    }
+
+    #[cfg(test)]
+    pub fn forget_calls(&self) {
+        self.calls.borrow_mut().clear();
+    }
+
+    /// What the micro opens on: two pull requests, the first naming two intxts and a document that
+    /// is no intxt in its description block (`PrLinks::block`), the second naming none.
+    pub fn sample() -> Self {
+        let first = Self::doc_id("31");
+        let second = Self::doc_id("32");
+        let not_an_intxt = Self::doc_id("41");
+
+        let commit = |tip: &str, base: Option<&str>, patch: Option<&str>| {
+            let mut entry = json!({
+                "tip": format!("{}/{tip}", work::GitCommit::ID),
+                "pack": "dtxt:datum:self/org.example.daybook.blob/af1349b9f5f9a1a6a0404dea36dcc949",
+            });
+            if let Some(base) = base {
+                entry["base"] = json!(format!("{}/{base}", work::GitCommit::ID));
+            }
+            // A commits entry names its commits by pack, not by patch, so no vocabulary carries
+            // a patch to show. The fixture carries one beside the entry's own fields, as the
+            // datum's open members may, until the review micro is told where patches come from.
+            if let Some(patch) = patch {
+                entry["patch"] = json!(patch);
+            }
+            (key(work::GitCommitEntry::ID, &tip[..7]), entry)
+        };
+        let pull_entry = (
+            key(work::GithubPullEntry::ID, "dman-os/townframe/150"),
+            json!({ "pull": format!("dtxt:datum:{}/{}/dman-os/townframe/150", Self::doc_id("21"), work::GithubPull::ID) }),
+        );
+
+        let mut named = generic::PrLink::new(generic::Intxt::reference(
+            &first,
+            [MultibaseKey::try_from([7_u8; 32].as_slice()).expect("32 bytes are a node key")],
+        ));
+        named.title = Some("intxt: commits live with the intxt".to_owned());
+        named.refs = vec!["refs/heads/stack/intxt-16-capture-records-commits".to_owned()];
+        let description = format!(
+            "Reads a pull request and the intxts it names on the phone.\n\n{}",
+            generic::PrLinks {
+                intxts: vec![
+                    named,
+                    generic::PrLink::new(generic::Intxt::reference(&second, [])),
+                    generic::PrLink::new(generic::Intxt::reference(&not_an_intxt, [])),
+                ],
+                ..Default::default()
+            }
+            .block()
+        );
+
+        Self::empty()
+            .pull(
+                Self::doc_id("21"),
+                "dman-os/townframe/150",
+                "intxt: read a PR and its intxts on the phone",
+                "open",
+                &description,
+            )
+            .pull(
+                Self::doc_id("22"),
+                "dman-os/townframe/151",
+                "chore: pin the review micro's lockfile",
+                "merged",
+                "",
+            )
+            .intxt(
+                first,
+                "intxt: commits live with the intxt",
+                Some("Commits travel with the intxt that names them."),
+                vec![
+                    commit("4c1f0a7e22", Some("9a0e11c0d4"), Some(SAMPLE_PATCH)),
+                    commit("77b2d03e91", None, None),
+                    pull_entry.clone(),
+                ],
+            )
+            .intxt(
+                second,
+                "review micro: the PR on the phone",
+                Some("Reads a PR on the phone and finds the intxts it names."),
+                vec![pull_entry],
+            )
+            .doc(not_an_intxt, [])
+    }
+
+    fn answer(&self, nsid: &'static str, input: Value) -> Result<Value, CallError> {
+        self.calls.borrow_mut().push(nsid);
+        let answer = match nsid {
+            micro_review_manifest::SUMMARIZE_INTXTS => serde_json::to_value(
+                self.summarize(serde_json::from_value(input).expect("a SummarizeIntxts")),
+            ),
+            micro_review_manifest::READ_DATUMS => serde_json::to_value(
+                self.read(serde_json::from_value(input).expect("a ReadDatums"))?,
+            ),
+            other => unimplemented!("the fixture node does not serve {other}"),
+        };
+        Ok(answer.expect("a method output is plain JSON"))
+    }
+
+    fn summarize(&self, input: SummarizeIntxts) -> IntxtsSummarized {
+        let results = input
+            .drawers
+            .into_iter()
+            .map(|drawer| {
+                let summary = |status, reason: Option<String>| IntxtSummary {
+                    drawer: drawer.clone(),
+                    status,
+                    title: None,
+                    description: None,
+                    entries: None,
+                    updated: None,
+                    link: None,
+                    reason,
+                };
+                let Some(datums) = self.held.docs.get(&drawer) else {
+                    return summary(
+                        SummaryStatus::Unreadable,
+                        Some("the node does not hold this document".to_owned()),
+                    );
+                };
+                if !datums.contains_key(&key(generic::Intxt::ID, "main")) {
+                    return summary(SummaryStatus::NotFound, None);
+                }
+                let title: generic::Title =
+                    serde_json::from_value(datums[&key(generic::Title::ID, "main")].clone())
+                        .expect("a held intxt has a title");
+                let body: generic::Body =
+                    serde_json::from_value(datums[&key(generic::Body::ID, "main")].clone())
+                        .expect("a held intxt has a body");
+                IntxtSummary {
+                    title: Some(title.title),
+                    description: title.description,
+                    entries: Some(u32::try_from(body.order.len()).expect("few entries")),
+                    updated: Some(1),
+                    link: Some(generic::Intxt::reference(&drawer, []).to_string()),
+                    ..summary(SummaryStatus::Found, None)
+                }
+            })
+            .collect();
+        IntxtsSummarized { results }
+    }
+
+    fn read(&self, input: ReadDatums) -> Result<DatumsRead, CallError> {
+        let datums = self.held.docs.get(&input.doc_id).ok_or_else(|| {
+            CallError::Refused(format!("the node does not hold {}", input.doc_id))
+        })?;
+        let version = DatumVersion {
+            heads: vec![],
+            clock: 1,
+        };
+        Ok(DatumsRead {
+            heads: vec![],
+            datums: datums
+                .iter()
+                .filter(|(datum, _)| {
+                    input
+                        .datums
+                        .as_ref()
+                        .is_none_or(|only| only.contains(*datum))
+                })
+                .map(|(datum, value)| {
+                    (
+                        datum.clone(),
+                        DatumRead::Accepted {
+                            value: value.clone(),
+                            version: version.clone(),
+                            authors: vec![],
+                        },
+                    )
+                })
+                .collect(),
+        })
+    }
+}
+
+impl NodeCalls for Fixture {
+    fn call<M: Unary>(&self, input: M) -> impl Future<Output = Result<M::Output, CallError>> {
+        let input = serde_json::to_value(&input).expect("a method input is plain JSON");
+        ready(self.answer(M::XRPC.nsid, input).map(|answer| {
+            serde_json::from_value(answer)
+                .expect("the fixture answers in the method's output shape")
+        }))
+    }
+
+    fn read_capability(&self, _doc: &DocId) -> impl Future<Output = Result<CapId, CallError>> {
+        ready(Ok(CapId::from_bytes([0; 16])))
+    }
+
+    fn held_pulls(&self) -> impl Future<Output = Result<Vec<DocId>, CallError>> {
+        ready(Ok(self.held.pulls.clone()))
+    }
+}
