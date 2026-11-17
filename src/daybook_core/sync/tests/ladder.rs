@@ -392,11 +392,6 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
         node_b.sync_repo.connect_endpoint_addr(addr_a).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_id_a).await?;
 
-        let doc_on_a = node_a
-            .drawer
-            .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
-            .await?
-            .ok_or_eyre("node_a lost the pre-connect blob doc")?;
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         wait_for_drawer_doc_parity(
             &node_a,
@@ -411,8 +406,17 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
             .await?
             .ok_or_eyre("node_b did not receive the pre-connect blob doc")?;
+        // Read the seed only once the replica has caught up: its encryption worker appends the
+        // Blob facet's `?via=` url after connect, so a copy read before the parity wait is older
+        // than the one the replica converges to.
+        let doc_on_a = node_a
+            .drawer
+            .get_with_heads(&doc_id, &BranchPathBuf::from("main"), None)
+            .await?
+            .ok_or_eyre("node_a lost the pre-connect blob doc")?;
 
         assert_eq!(doc_on_a.0.id, doc_on_b.0.id);
+        assert_eq!(doc_on_a.1, doc_on_b.1);
         assert_eq!(doc_on_a.0.facets, doc_on_b.0.facets);
         // The seed's blob workers run, so its encryption worker publishes the
         // Blob facet's resolution url through the cipherBlob at the commit point
