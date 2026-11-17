@@ -7,4 +7,5 @@
 
 pub mod evolution;
 mod items;
+mod sidecar;
 pub mod snapshot;
