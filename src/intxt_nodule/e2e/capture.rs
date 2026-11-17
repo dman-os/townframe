@@ -386,7 +386,7 @@ async fn is_absent(node: &TestNode, doc: &str, tag: &str, slot: &str) -> bool {
     let capability = capability(
         node,
         DocScope {
-            read: BTreeSet::from([doc.clone()]),
+            read: DocScope::read_all([doc.clone()]),
             ..DocScope::default()
         },
     )
