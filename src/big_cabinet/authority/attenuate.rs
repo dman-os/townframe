@@ -15,6 +15,7 @@ impl cap::State {
             request.rights,
             held.cap.issuer,
             held.cap.kind,
+            held.cap.subject,
             [request.capability],
         )?;
         let capability = child.wire();

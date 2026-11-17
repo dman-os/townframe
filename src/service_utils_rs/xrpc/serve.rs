@@ -8,24 +8,29 @@ use hyper_util::service::TowerToHyperService;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncWrite;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 use tracing::instrument::WithSubscriber;
 
-pub(super) type AcceptFuture<'a> = Pin<
-    Box<
-        dyn Future<Output = std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>>
-            + Send
-            + 'a,
-    >,
->;
+pub type AcceptFuture<'a, S, P> =
+    Pin<Box<dyn Future<Output = std::io::Result<(S, P)>> + Send + 'a>>;
 
-/// A production accept driver. Tests can provide a deterministic driver to
-/// exercise listener failures without replacing the connection lifecycle.
-pub(super) trait ConnectionAcceptor: Send {
-    fn accept(&mut self) -> AcceptFuture<'_>;
+/// An accept driver: where connections come from, and what the transport reports about each
+/// one as its `Peer` (the TCP remote address, a Unix peer's credentials). The serving loop
+/// attaches the peer to every request of that connection as an `axum::Extension`, so a handler
+/// can read it; the acceptor reports and never decides. A policy that refuses peers wraps an
+/// acceptor and keeps accepting, and an `Err` from `accept` is a listener failure that ends the
+/// server. Tests can provide a deterministic driver to exercise listener failures without
+/// replacing the connection lifecycle.
+pub trait ConnectionAcceptor: Send {
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+    type Peer: Clone + Send + Sync + 'static;
+
+    fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer>;
 }
 
 struct TcpConnectionAcceptor {
@@ -33,7 +38,10 @@ struct TcpConnectionAcceptor {
 }
 
 impl ConnectionAcceptor for TcpConnectionAcceptor {
-    fn accept(&mut self) -> AcceptFuture<'_> {
+    type Stream = tokio::net::TcpStream;
+    type Peer = std::net::SocketAddr;
+
+    fn accept(&mut self) -> AcceptFuture<'_, Self::Stream, Self::Peer> {
         Box::pin(self.listener.accept())
     }
 }
@@ -76,7 +84,9 @@ pub async fn serve_with_connection_limit(
     serve_with_acceptor(TcpConnectionAcceptor { listener }, router, max_connections).await
 }
 
-pub(super) async fn serve_with_acceptor<A: ConnectionAcceptor + 'static>(
+/// Serves `router` over connections from `acceptor`, with the same connection bound, task
+/// ownership and shutdown as [`serve`].
+pub async fn serve_with_acceptor<A: ConnectionAcceptor + 'static>(
     mut acceptor: A,
     router: Router,
     max_connections: usize,
@@ -99,7 +109,7 @@ pub(super) async fn serve_with_acceptor<A: ConnectionAcceptor + 'static>(
                 tokio::select! {
                     accepted = &mut accept => {
                         match accepted {
-                            (permit, Ok((stream, _))) => spawn_connection(&mut connections, router.clone(), permit, stream),
+                            (permit, Ok((stream, peer))) => spawn_connection(&mut connections, router.clone(), permit, stream, peer),
                             (permit, Err(error)) => {
                                 drop(permit);
                                 return abort_and_reap(&mut connections, error).await;
@@ -114,7 +124,7 @@ pub(super) async fn serve_with_acceptor<A: ConnectionAcceptor + 'static>(
                 tokio::select! {
                     accepted = &mut accept => {
                         match accepted {
-                            (permit, Ok((stream, _))) => spawn_connection(&mut connections, router.clone(), permit, stream),
+                            (permit, Ok((stream, peer))) => spawn_connection(&mut connections, router.clone(), permit, stream, peer),
                             (permit, Err(error)) => {
                                 drop(permit);
                                 return abort_and_reap(&mut connections, error).await;
@@ -145,10 +155,7 @@ pub(super) async fn serve_with_acceptor<A: ConnectionAcceptor + 'static>(
 async fn accept_with_permit<A: ConnectionAcceptor>(
     acceptor: &mut A,
     connection_admission: Arc<Semaphore>,
-) -> (
-    OwnedSemaphorePermit,
-    std::io::Result<(tokio::net::TcpStream, std::net::SocketAddr)>,
-) {
+) -> (OwnedSemaphorePermit, std::io::Result<(A::Stream, A::Peer)>) {
     let permit = connection_admission
         .acquire_owned()
         .await
@@ -156,16 +163,20 @@ async fn accept_with_permit<A: ConnectionAcceptor>(
     (permit, acceptor.accept().await)
 }
 
-fn spawn_connection(
+fn spawn_connection<S, P>(
     connections: &mut JoinSet<Result<(), hyper::Error>>,
     router: Router,
     connection_permit: OwnedSemaphorePermit,
-    stream: tokio::net::TcpStream,
-) {
+    stream: S,
+    peer: P,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    P: Clone + Send + Sync + 'static,
+{
     connections.spawn(
         async move {
             let _connection_permit = connection_permit;
-            let service = TowerToHyperService::new(router);
+            let service = TowerToHyperService::new(router.layer(axum::Extension(peer)));
             http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service)
                 .with_upgrades()

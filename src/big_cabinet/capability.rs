@@ -16,30 +16,35 @@ use big_cabinet_core::dmeta::Uuid7;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::StopToken;
 
 type Error = ClientError<AuthorityServiceError>;
 
-/// The object a domain capability carries. `signer` is the actor capability the mint bound
-/// the handle to; it is also a dependency of the handle, so a handle whose signer has been
-/// retracted is itself invalid and never reaches [`DomainCapabilities::scoped`].
+/// The object a domain capability carries. Who the handle is bound to is not part of it: that
+/// is the capability's `subject`, which the authority records and enforces.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BoundScope<S> {
     scope: S,
-    signer: CapId,
     originating_actor: Option<Uuid7>,
 }
 
 pub struct Invocation<S> {
     pub authority: DomainAuthority<S>,
+    /// The handle that decided this call's scope and rights (`Authorization::authority`): what a
+    /// mint derives from.
+    pub handle: CapId,
+    /// The handle the call signs through (`Authorization::signer`, `SignDatumClaim { via }`), so
+    /// the call's authority to sign is exactly that handle's.
+    pub via: CapId,
+    /// The public identity of the signing handle's subject, the actor `via` signs as.
     pub signer: Actor,
-    /// The actor a scoped handle was minted for: its bound signer, whichever signer is presenting
-    /// it now. `None` for an identity, which is nobody's handle. A domain whose handles are
-    /// personal (dispatch) refuses a presenter that is not this actor.
+    /// The actor a scoped handle was minted for, whichever signer is presenting it now. `None`
+    /// for an identity, which is nobody's handle. A domain whose handles are personal (dispatch)
+    /// refuses a presenter that is not this actor.
     pub bound_signer: Option<Uuid7>,
     pub rights: Rights,
     pub originating_actor: Option<Uuid7>,
@@ -83,8 +88,8 @@ impl DomainCapabilities {
                     )
                     .await
                 {
-                    Ok(())
-                    | Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {}
+                    Ok(()) | Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => {
+                    }
                     Err(error) => panic!("failed to retire domain namespace: {error}"),
                 }
             })
@@ -92,50 +97,105 @@ impl DomainCapabilities {
         stop
     }
 
-    async fn scoped<S: DeserializeOwned>(
+    /// What a handle this domain minted says, without resolving anyone: its scope and the
+    /// actor it is bound to.
+    fn bound<S: DeserializeOwned>(
         &self,
-        context: &RequestContext,
-        cap: Capability,
-    ) -> Result<Invocation<S>, Error> {
+        cap: &Capability,
+    ) -> Result<(BoundScope<S>, Uuid7), Error> {
         if cap.issuer_id != self.namespace.namespace_id || !cap.rights.contains(Rights::USE) {
-            return Err(ClientError::Operation(AuthorityServiceError::Unauthorized));
+            return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
         }
         let object = cap
             .object
             .strip_prefix(self.prefix)
-            .ok_or(ClientError::Operation(AuthorityServiceError::Unauthorized))?;
+            .ok_or(ClientError::Method(AuthorityServiceError::Unauthorized))?;
         let bound: BoundScope<S> = serde_json::from_str(object)
-            .map_err(|_| ClientError::Operation(AuthorityServiceError::Unauthorized))?;
-        let signer = self
-            .authority
-            .call(
-                context.child(),
-                ResolveActor {
-                    capability: bound.signer,
-                },
-            )
-            .await?;
-        Ok(Invocation {
-            authority: DomainAuthority::Scoped(bound.scope),
-            bound_signer: Some(signer.actor_id),
-            signer,
-            rights: cap.rights,
-            originating_actor: bound.originating_actor,
-        })
+            .map_err(|_| ClientError::Method(AuthorityServiceError::Unauthorized))?;
+        let subject = cap.subject.ok_or(ClientError::Method(
+            AuthorityServiceError::UnrecognizedActor,
+        ))?;
+        Ok((bound, subject))
     }
 
+    /// The public identity `signing` signs as. The handle must be bound to an actor and carry
+    /// `USE`, as `SignDatumClaim` will require when the signature is made. `known` is an actor
+    /// the caller already resolved, reused when it is the subject.
+    async fn signing_actor(
+        &self,
+        context: &RequestContext,
+        signing: &Capability,
+        known: Option<&Actor>,
+    ) -> Result<Actor, Error> {
+        let subject = signing.subject.ok_or(ClientError::Method(
+            AuthorityServiceError::UnrecognizedActor,
+        ))?;
+        if !signing.rights.contains(Rights::USE) {
+            return Err(ClientError::Method(AuthorityServiceError::Unauthorized));
+        }
+        match known {
+            Some(actor) if actor.actor_id == subject => Ok(actor.clone()),
+            _ => {
+                self.authority
+                    .call(context.child(), ResolveActor { actor_id: subject })
+                    .await
+            }
+        }
+    }
+
+    async fn inspect(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+    ) -> Result<Capability, Error> {
+        self.authority
+            .call(context.child(), InspectCapability { capability })
+            .await
+    }
+
+    /// A bare handle, presented with no separate signer: it is its own `handle` and signs as the
+    /// actor it is bound to.
     pub async fn resolve<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
         capability: CapId,
     ) -> Result<Invocation<S>, Error> {
-        let cap = self
-            .authority
-            .call(context.child(), InspectCapability { capability })
-            .await?;
-        self.scoped(context, cap).await
+        self.resolve_signed(context, capability, capability).await
     }
 
+    /// A handle this domain minted, signing through `signer` instead of through itself. The
+    /// handle decides scope and rights, and `signer` (live, `USE`, bound to an actor) decides
+    /// whose signature the call carries, exactly as wide as the handle the caller presented.
+    /// Unlike [`Self::source`] the authority must be a scoped handle, never an identity.
+    pub async fn resolve_signed<S: DeserializeOwned>(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+        signer: CapId,
+    ) -> Result<Invocation<S>, Error> {
+        let cap = self.inspect(context, capability).await?;
+        let (bound, subject) = self.bound(&cap)?;
+        let signing = if signer == capability {
+            cap.clone()
+        } else {
+            self.inspect(context, signer).await?
+        };
+        let signer_actor = self.signing_actor(context, &signing, None).await?;
+        Ok(Invocation {
+            authority: DomainAuthority::Scoped(bound.scope),
+            handle: capability,
+            via: signer,
+            bound_signer: Some(subject),
+            signer: signer_actor,
+            rights: cap.rights,
+            originating_actor: bound.originating_actor,
+        })
+    }
+
+    /// Resolve an [`Authorization`]: `authority` decides the scope and rights, and `signer` is
+    /// the handle the call signs through. The signer must be live, carry `USE` and be bound to
+    /// an actor; naming a handle there is how a service acts for an authenticated caller without
+    /// any introduction, since signing is exactly as wide as the handle the caller presented.
     pub async fn source<S: DeserializeOwned>(
         &self,
         context: &RequestContext,
@@ -150,50 +210,73 @@ impl DomainCapabilities {
                 },
             )
             .await?;
+        let signing = if authorization.signer == authorization.authority {
+            resolved.capability.clone()
+        } else {
+            self.inspect(context, authorization.signer).await?
+        };
         let signer = self
-            .authority
-            .call(
-                context.child(),
-                ResolveActor {
-                    capability: authorization.signer,
-                },
-            )
+            .signing_actor(context, &signing, resolved.actor.as_ref())
             .await?;
         match resolved.actor {
             Some(actor) => Ok(Invocation {
                 authority: DomainAuthority::Identity(actor.actor_id),
+                handle: authorization.authority,
+                via: authorization.signer,
                 originating_actor: Some(actor.actor_id),
                 bound_signer: None,
                 signer,
                 rights: resolved.capability.rights,
             }),
             None => {
-                let mut source = self.scoped(context, resolved.capability).await?;
-                source.signer = signer;
-                Ok(source)
+                let (bound, bound_subject) = self.bound(&resolved.capability)?;
+                Ok(Invocation {
+                    authority: DomainAuthority::Scoped(bound.scope),
+                    handle: authorization.authority,
+                    via: authorization.signer,
+                    bound_signer: Some(bound_subject),
+                    signer,
+                    rights: resolved.capability.rights,
+                    originating_actor: bound.originating_actor,
+                })
             }
         }
     }
 
+    /// The actor whose identity capability `signer` is: the presenter an [`Authorization`] names,
+    /// for a domain whose handles are personal and so must know who is holding one. A
+    /// capability that is not an identity capability is `UnrecognizedActor`.
+    pub async fn presenter(&self, context: &RequestContext, signer: CapId) -> Result<Actor, Error> {
+        self.authority
+            .call(context.child(), ResolveAuthority { capability: signer })
+            .await?
+            .actor
+            .ok_or(ClientError::Method(
+                AuthorityServiceError::UnrecognizedActor,
+            ))
+    }
+
+    /// Mint a handle for `scope` from the handle `caller` presented as its authority. The new
+    /// handle is bound to `subject`, or to that handle's own subject when it is `None`. Naming
+    /// another actor is an introduction, which the authority permits only for a descendant of
+    /// the presented handle's subject and only when the handle carries `Rights::DELEGATE`.
     pub async fn mint<S: Serialize>(
         &self,
         context: &RequestContext,
-        source: CapId,
         caller: &Invocation<S>,
+        subject: Option<Uuid7>,
         scope: S,
         rights: Rights,
-        mut dependencies: Vec<CapId>,
+        dependencies: Vec<CapId>,
     ) -> Result<Capability, Error> {
         if !caller.rights.contains(Rights::NARROW) || !rights.is_subset_of(caller.rights) {
-            return Err(ClientError::Operation(AuthorityServiceError::Escalation));
+            return Err(ClientError::Method(AuthorityServiceError::Escalation));
         }
-        dependencies.push(caller.signer.capability);
         let object = format!(
             "{}{}",
             self.prefix,
             serde_json::to_string(&BoundScope {
                 scope,
-                signer: caller.signer.capability,
                 originating_actor: caller.originating_actor,
             })
             .expect("domain capability data serializes")
@@ -203,10 +286,11 @@ impl DomainCapabilities {
                 context.child(),
                 MintCapability {
                     issuer: self.namespace.capability,
-                    parent: Some(source),
+                    parent: Some(caller.handle),
                     dependencies,
                     object,
                     rights,
+                    subject,
                 },
             )
             .await

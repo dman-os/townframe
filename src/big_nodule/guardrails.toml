@@ -5,10 +5,16 @@ allowed_dependencies = [
     "big_blobs_core",
     "big_cabinet",
     "big_cabinet_core",
+    "big_dispatch",
+    "big_dispatch_core",
     "big_nodule_core",
-    "big_plugs_core",
+    "big_cartridges_core",
     "big_repo",
+    "method_core",
     "secrets_rs",
+    "service_client_core_rs",
+    "service_client_native_rs",
+    "service_core_rs",
     "service_utils_rs",
     "sqlite_rs",
     "utils_rs",
@@ -28,3 +34,4 @@ features = []
 "src/big_nodule/sqlite/migrations/003_init_done.sql" = "83f5b4769acfac69f4f82ca3048afd376f85baa7822aee33cbd94f48181cd042"
 "src/big_nodule/sqlite/migrations/004_actor_path_derived.sql" = "7b80c20c6eab5ffc6ce590fab0405f270922b62e5741c5aeff45ef09bc971b32"
 "src/big_nodule/sqlite/migrations/005_resolution_locks.sql" = "7c588d8cd7bf31c1a189b8b7c1ca67024b0ade301246ccb4469d02a8310c79e7"
+"src/big_nodule/sqlite/migrations/006_cartridge_rename.sql" = "f8022c215c96f10255367d40f07d80abb8ae8a9b680ca92491f4eb69e07ed905"

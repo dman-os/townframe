@@ -19,6 +19,7 @@ use big_cabinet_core::datum::Declaration;
 use big_cabinet_core::datum::LexiconAdmissionError;
 use big_cabinet_core::datum::Universe;
 use big_cabinet_core::datum::UniverseError;
+use big_cabinet_core::datum::admit_lexicon;
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::drawer::Drawer;
@@ -30,12 +31,17 @@ use big_cabinet_core::drawer::DrawerSuccessor;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::SelfDocLayout;
 use big_cabinet_core::drawer::SingleGroupLayout;
+use big_cabinet_core::reference::DEFS_NSID;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use thiserror::Error;
+
+/// The reference defs Lexicon ([`big_cabinet_core::reference::defs_lexicon`]), carried for every
+/// registration.
+static DEFS: LazyLock<Value> = LazyLock::new(big_cabinet_core::reference::defs_lexicon);
 
 static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
@@ -78,6 +84,7 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
             .enumerate()
             .filter(|(other, _)| *other != index)
             .map(|(_, other)| &other.file)
+            .chain(std::iter::once(&*DEFS))
             .collect();
         let compiled = bundle
             .validate_lexicon(&datum.id, &lexicon.file, &carried)
@@ -96,6 +103,10 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
 pub struct SchemaRegistration {
     pub datum_tag: String,
     pub lexicon: Value,
+    /// The datum's sidecar JSON Schema document, when it arrives as data rather than as a Rust
+    /// declaration: a cartridge's nodule ships one per record it holds. A group with a
+    /// [`SchemaRegistrationGroup::sidecar`] renders its own, so it states none here.
+    pub supplement: Option<Value>,
 }
 
 impl SchemaRegistration {
@@ -103,7 +114,15 @@ impl SchemaRegistration {
         Self {
             datum_tag: datum_tag.into(),
             lexicon,
+            supplement: None,
         }
+    }
+
+    /// The same registration with `supplement` as its sidecar document.
+    #[must_use]
+    pub fn with_supplement(mut self, supplement: Value) -> Self {
+        self.supplement = Some(supplement);
+        self
     }
 }
 
@@ -133,6 +152,8 @@ pub enum SchemaRepoError {
     EmptyDatumTag,
     #[error("known datum schema tag `{0}` is configured more than once")]
     DuplicateDatumTag(String),
+    #[error("the carried copy of `{0}` differs from this node's: its defs are the node's to state")]
+    ConflictingDefs(String),
     #[error("sidecar bundle is invalid: {source}")]
     SidecarInvalid {
         #[source]
@@ -150,7 +171,7 @@ pub enum SchemaRepoError {
 
 #[derive(Debug, Clone)]
 struct OwnedSidecar {
-    plug: Universe,
+    cartridge: Universe,
     dependencies: Vec<Universe>,
 }
 
@@ -160,7 +181,7 @@ impl OwnedSidecar {
             .validate()
             .map_err(|source| SchemaRepoError::SidecarInvalid { source })?;
         Ok(Self {
-            plug: bundle.plug.clone(),
+            cartridge: bundle.cartridge.clone(),
             dependencies: bundle
                 .dependencies
                 .iter()
@@ -170,7 +191,7 @@ impl OwnedSidecar {
     }
 
     fn borrowed(&self) -> Bundle<'_> {
-        Bundle::new(&self.plug, self.dependencies.iter().collect())
+        Bundle::new(&self.cartridge, self.dependencies.iter().collect())
     }
 }
 
@@ -206,8 +227,8 @@ impl SchemaHandle {
 }
 
 /// The datum schemas this node knows. The boot set (the core datums and the groups the embedder
-/// registers) is fixed for the life of the repo; beyond it, a plug's Lexicons are registered
-/// under an owner and retired with it, live, as the plug is enabled and disabled. Readers hold a
+/// registers) is fixed for the life of the repo; beyond it, a cartridge's Lexicons are registered
+/// under an owner and retired with it, live, as the cartridge is enabled and disabled. Readers hold a
 /// [`SchemaHandle`], so a retired schema stays usable to whoever already resolved it and only
 /// stops resolving for new readers.
 #[derive(Debug)]
@@ -228,8 +249,15 @@ impl KnownSchemas {
         groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
     ) -> Result<(), SchemaRepoError> {
         let known = &mut self.known;
-        let empty = Universe::default();
         for group in groups {
+            if let Some(copy) = group
+                .carried_lexicons
+                .iter()
+                .find(|file| file.get("id").and_then(Value::as_str) == Some(DEFS_NSID))
+                && copy != &*DEFS
+            {
+                return Err(SchemaRepoError::ConflictingDefs(DEFS_NSID.to_owned()));
+            }
             let mut tags = std::collections::BTreeSet::new();
             for registration in &group.registrations {
                 if !tags.insert(&registration.datum_tag)
@@ -246,10 +274,6 @@ impl KnownSchemas {
                 .map(OwnedSidecar::from_bundle)
                 .transpose()?
                 .map(Arc::new);
-            let borrowed = sidecar.as_ref().map_or_else(
-                || Bundle::new(&empty, Vec::new()),
-                |sidecar| sidecar.borrowed(),
-            );
             for registration in &group.registrations {
                 let tag = &registration.datum_tag;
                 if tag.is_empty() {
@@ -258,9 +282,13 @@ impl KnownSchemas {
                 if known.contains_key(tag) {
                     return Err(SchemaRepoError::DuplicateDatumTag(tag.clone()));
                 }
+                // The reference defs are carried for every registration, so any Lexicon can refer to
+                // them. A group's own copy is a vendored one and must be the node's.
                 let carried: Vec<_> = group
                     .carried_lexicons
                     .iter()
+                    .filter(|file| file.get("id").and_then(Value::as_str) != Some(DEFS_NSID))
+                    .chain(std::iter::once(&*DEFS))
                     .chain(
                         group
                             .registrations
@@ -269,12 +297,23 @@ impl KnownSchemas {
                             .map(|other| &other.lexicon),
                     )
                     .collect();
-                let compiled = borrowed
-                    .validate_lexicon(tag, &registration.lexicon, &carried)
-                    .map_err(|source| SchemaRepoError::Admission {
-                        tag: tag.clone(),
-                        source: Box::new(source),
-                    })?;
+                let compiled = match (&sidecar, &registration.supplement) {
+                    (Some(_), Some(_)) => {
+                        panic!("`{tag}` states a supplement in a group whose sidecar renders one")
+                    }
+                    (Some(sidecar), None) => {
+                        sidecar
+                            .borrowed()
+                            .validate_lexicon(tag, &registration.lexicon, &carried)
+                    }
+                    (None, supplement) => {
+                        admit_lexicon(tag, &registration.lexicon, &carried, supplement.as_ref())
+                    }
+                }
+                .map_err(|source| SchemaRepoError::Admission {
+                    tag: tag.clone(),
+                    source: Box::new(source),
+                })?;
                 known.insert(
                     tag.clone(),
                     SchemaHandle {
@@ -363,7 +402,7 @@ impl SchemaRepo {
     }
 
     /// Whether `datum_tag` belongs to the boot set: known to the node itself rather than
-    /// registered by a plug.
+    /// registered by a cartridge.
     pub fn is_boot_schema(&self, datum_tag: &str) -> bool {
         let state = self.read();
         state.known.contains_key(datum_tag) && !state.owners.contains_key(datum_tag)

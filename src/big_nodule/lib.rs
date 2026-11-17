@@ -15,10 +15,11 @@ use sqlite_rs as sqlite_rs_alias;
 mod sqlite {
     include!("sqlite/gen.rs");
 }
-pub mod dispatch;
+pub mod egress;
 pub mod executor;
 mod state;
 mod store;
+pub mod wire;
 
 #[cfg(test)]
 mod e2e;
@@ -31,13 +32,13 @@ use big_cabinet::authority::DomainAuthority;
 use big_cabinet::capability::DomainCapabilities;
 use big_cabinet::capability::Invocation;
 use big_cabinet_core::DocId;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::Bundle;
 use big_cabinet_core::datum::Universe;
@@ -49,15 +50,17 @@ use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::StoreError;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
+use big_cartridges_core::CartridgeId;
+use big_dispatch_core::DispatchProtocol;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::config_universe;
-use big_nodule_core::dispatch::DispatchProtocol;
 use big_nodule_core::protocol::AdmitNodule;
 use big_nodule_core::protocol::ConfigureNodule;
 use big_nodule_core::protocol::ConfirmNoduleResolution;
 use big_nodule_core::protocol::GetNodule;
 use big_nodule_core::protocol::ListNodules;
 use big_nodule_core::protocol::MintNoduleCapability;
+use big_nodule_core::protocol::NoduleList;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NoduleScope;
 use big_nodule_core::protocol::NodulesError;
@@ -68,8 +71,8 @@ use big_nodule_core::protocol::SetNoduleEnabled;
 use big_nodule_core::protocol::SetNoduleOperationGrants;
 use big_nodule_core::protocol::SetNoduleSubstitution;
 use big_nodule_core::protocol::UninstallNodule;
-use big_plugs_core::PlugId;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
+use service_client_native_rs::Transport;
 use service_utils_rs::ClientError;
 use service_utils_rs::Envelope;
 use service_utils_rs::Handler;
@@ -115,11 +118,11 @@ pub struct NodulesConfig {
     pub docs: Client<DocsProtocol>,
     pub drawers: Client<DrawersProtocol>,
     pub config_drawer: DrawerId,
-    pub actor: Actor,
+    pub actor: OpenedActor,
     pub actor_path: String,
     pub namespace: Namespace,
     pub operator: Uuid7,
-    pub dispatch: Arc<dispatch::Router>,
+    pub dispatch: Arc<big_dispatch::Router>,
     pub dispatch_client: Client<DispatchProtocol>,
     pub dispatch_authority: CapId,
     pub executor: Option<Arc<dyn executor::NoduleExecutor>>,
@@ -139,26 +142,26 @@ type Res<T> = std::result::Result<T, NodulesError>;
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> NodulesError {
     match error {
-        ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
-        ClientError::Operation(
+        ClientError::Method(AuthorityServiceError::Context(error)) => error.into(),
+        ClientError::Method(
             AuthorityServiceError::InvalidCapability
             | AuthorityServiceError::Unauthorized
             | AuthorityServiceError::UnrecognizedActor,
         ) => NodulesError::Denied,
-        ClientError::Operation(error) => NodulesError::Authority(error),
+        ClientError::Method(error) => NodulesError::Authority(error),
         ClientError::Transport { message, .. } => NodulesError::AuthorityUnavailable(message),
     }
 }
 
 pub(crate) fn docs_error(error: ClientError<DocsError>) -> NodulesError {
     match error {
-        ClientError::Operation(DocsError::Context(error)) => error.into(),
-        ClientError::Operation(DocsError::Authority(error)) => NodulesError::Authority(error),
-        ClientError::Operation(DocsError::AuthorityUnavailable(msg)) => {
+        ClientError::Method(DocsError::Context(error)) => error.into(),
+        ClientError::Method(DocsError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(DocsError::AuthorityUnavailable(msg)) => {
             NodulesError::AuthorityUnavailable(msg)
         }
-        ClientError::Operation(DocsError::Denied) => NodulesError::Denied,
-        ClientError::Operation(other) => NodulesError::Storage(other.to_string()),
+        ClientError::Method(DocsError::Denied) => NodulesError::Denied,
+        ClientError::Method(other) => NodulesError::Storage(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }
@@ -204,19 +207,27 @@ impl NoduleService {
         }
     }
 
-    /// A scoped handle admits only the plug ids in its `plugs`, and only with `admit` set.
-    fn require_admit(&self, caller: &Invocation<NoduleScope>, plug_id: &PlugId) -> Res<()> {
+    /// A scoped handle admits only the cartridge ids in its `cartridges`, and only with `admit` set.
+    fn require_admit(
+        &self,
+        caller: &Invocation<NoduleScope>,
+        cartridge_id: &CartridgeId,
+    ) -> Res<()> {
         match self.scope_of(caller)? {
-            Some(scope) if !(scope.admit && scope.plugs.contains(plug_id)) => {
+            Some(scope) if !(scope.admit && scope.cartridges.contains(cartridge_id)) => {
                 Err(NodulesError::Denied)
             }
             _ => Ok(()),
         }
     }
 
-    fn require_manage(&self, caller: &Invocation<NoduleScope>, plug_id: &PlugId) -> Res<()> {
+    fn require_manage(
+        &self,
+        caller: &Invocation<NoduleScope>,
+        cartridge_id: &CartridgeId,
+    ) -> Res<()> {
         match self.scope_of(caller)? {
-            Some(scope) if !scope.plugs.contains(plug_id) => Err(NodulesError::Denied),
+            Some(scope) if !scope.cartridges.contains(cartridge_id) => Err(NodulesError::Denied),
             _ => Ok(()),
         }
     }
@@ -224,9 +235,10 @@ impl NoduleService {
     async fn mint(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: MintNoduleCapability,
     ) -> Res<Capability> {
-        let caller = self.caller(context, params.authorization).await?;
+        let caller = self.caller(context, authorization).await?;
         if let Some(scope) = self.scope_of(&caller)?
             && !scope.covers(&params.scope)
         {
@@ -235,8 +247,8 @@ impl NoduleService {
         self.capabilities
             .mint(
                 context,
-                params.authorization.authority,
                 &caller,
+                None,
                 params.scope,
                 params.rights,
                 Vec::new(),
@@ -245,14 +257,19 @@ impl NoduleService {
             .map_err(authority_error)
     }
 
-    async fn admit(&self, context: &RequestContext, params: AdmitNodule) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_admit(&caller, &params.plug.id)?;
+    async fn admit(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: AdmitNodule,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, authorization).await?;
+        self.require_admit(&caller, &params.cartridge.id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Admit {
                 context,
-                plug: Box::new(params.plug),
+                cartridge: Box::new(params.cartridge),
                 drawers: params.drawers,
                 reply,
             })
@@ -262,15 +279,16 @@ impl NoduleService {
     async fn configure(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: ConfigureNodule,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Configure {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 settings: params.settings,
                 reply,
             })
@@ -280,15 +298,16 @@ impl NoduleService {
     async fn set_enabled(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleEnabled,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetEnabled {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 enabled: params.enabled,
                 reply,
             })
@@ -298,15 +317,16 @@ impl NoduleService {
     async fn confirm_resolution(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: ConfirmNoduleResolution,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::ConfirmResolution {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 binding: params.binding,
                 reply,
             })
@@ -316,10 +336,11 @@ impl NoduleService {
     async fn set_substitution(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleSubstitution,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         if let Some(by) = &params.by {
             self.require_manage(&caller, by)?;
         }
@@ -327,7 +348,7 @@ impl NoduleService {
         self.state
             .ask(|reply| Command::SetSubstitution {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 by: params.by,
                 reply,
             })
@@ -337,15 +358,16 @@ impl NoduleService {
     async fn set_drawer_grants(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleDrawerGrants,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetDrawerGrants {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 drawers: params.drawers,
                 reply,
             })
@@ -355,58 +377,76 @@ impl NoduleService {
     async fn set_operation_grants(
         &self,
         context: &RequestContext,
+        authorization: Authorization,
         params: SetNoduleOperationGrants,
     ) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::SetOperationGrants {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 operations: params.operations,
                 reply,
             })
             .await
     }
 
-    async fn uninstall(&self, context: &RequestContext, params: UninstallNodule) -> Res<()> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+    async fn uninstall(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: UninstallNodule,
+    ) -> Res<()> {
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Uninstall {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 reply,
             })
             .await
     }
 
-    async fn get(&self, context: &RequestContext, params: GetNodule) -> Res<NoduleRecord> {
-        let caller = self.caller(context, params.authorization).await?;
-        self.require_manage(&caller, &params.plug_id)?;
+    async fn get(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        params: GetNodule,
+    ) -> Res<NoduleRecord> {
+        let caller = self.caller(context, authorization).await?;
+        self.require_manage(&caller, &params.cartridge_id)?;
         let context = context.clone();
         self.state
             .ask(|reply| Command::Get {
                 context,
-                plug_id: params.plug_id,
+                cartridge_id: params.cartridge_id,
                 reply,
             })
             .await
     }
 
-    async fn list(&self, context: &RequestContext, params: ListNodules) -> Res<Vec<NoduleRecord>> {
-        let caller = self.caller(context, params.authorization).await?;
+    async fn list(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        _: ListNodules,
+    ) -> Res<NoduleList> {
+        let caller = self.caller(context, authorization).await?;
         let scope = self.scope_of(&caller)?.cloned();
         let context = context.clone();
-        self.state
+        let nodules = self
+            .state
             .ask(|reply| Command::List {
                 context,
                 scope,
                 reply,
             })
-            .await
+            .await?;
+        Ok(NoduleList { nodules })
     }
 }
 
@@ -417,7 +457,11 @@ macro_rules! handlers {
                 &self,
                 request: Envelope<$request>,
             ) -> Res<ResponseEnvelope<$output>> {
-                Ok(self.$method(&request.context, request.params).await?.into())
+                let authorization = Authorization::from_metadata(&request.metadata)?;
+                Ok(self
+                    .$method(&request.context, authorization, request.params)
+                    .await?
+                    .into())
             }
         }
     )*};
@@ -433,7 +477,7 @@ handlers! {
     SetNoduleSubstitution => set_substitution: NoduleRecord;
     UninstallNodule => uninstall: ();
     GetNodule => get: NoduleRecord;
-    ListNodules => list: Vec<NoduleRecord>;
+    ListNodules => list: NoduleList;
 }
 
 service_utils_rs::bind_service_protocol! {
@@ -470,16 +514,17 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
     let config_doc = DocId::from(config.config_drawer);
     let doc_cap = config
         .docs
-        .call(
+        .call_with(
             RequestContext::root(),
+            Authorization::identity(config.actor.capability).metadata(),
             MintDocCapability {
-                authorization: Authorization::identity(config.actor.capability),
                 scope: DocScope {
                     read: BTreeSet::from([config_doc.clone()]),
                     write: BTreeSet::from([config_doc.clone()]),
                     ..DocScope::default()
                 },
                 rights: Rights::USE,
+                subject: None,
             },
         )
         .await
@@ -522,7 +567,7 @@ pub async fn boot(config: NodulesConfig) -> Result<(Nodules, StopToken), Nodules
         state,
     });
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(NodulesBinding::new(Arc::clone(&host)));
+    let client = Client::new(Transport::direct(NodulesBinding::new(Arc::clone(&host))));
     Ok((
         Nodules { host, client },
         host_stop

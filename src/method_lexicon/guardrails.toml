@@ -1,0 +1,12 @@
+version = 1
+role = "domain"
+dependency_reason = "Assembles the atproto Lexicon a method carries from its schemas, over the datum Lexicon projection; host-only, so method_core stays wasm-buildable."
+allowed_dependencies = ["big_cabinet_core", "method_core", "big_blobs_core", "big_cartridges_core", "big_dispatch_core", "big_nodule_core", "service_core_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[builds.native]

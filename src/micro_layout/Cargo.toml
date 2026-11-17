@@ -23,3 +23,6 @@ clay_mdk = { workspace = true, features = ["in_process", "view"] }
 
 [dev-dependencies]
 dioxus-core = { workspace = true }
+
+[lints]
+workspace = true

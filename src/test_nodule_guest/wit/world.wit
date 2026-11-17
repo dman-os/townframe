@@ -1,6 +1,0 @@
-package townframe:test-nodule-guest@0.1.0;
-
-world test-nodule-guest {
-  import wasi:http/client@0.3.0;
-  export wasi:http/handler@0.3.0;
-}

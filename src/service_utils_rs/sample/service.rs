@@ -11,16 +11,16 @@ use super::protocol::SampleEvent;
 use super::protocol::StatePage;
 use super::protocol::SubscribeEvents;
 use super::protocol::ValueSnapshot;
-use crate::ContextError;
 use crate::Envelope;
-use crate::EventStream;
 use crate::Handler;
 use crate::Host;
 use crate::Layer;
-use crate::Operation;
 use crate::ServiceBuilder;
 use crate::Spawner;
 use crate::StopToken;
+use method_core::ContextError;
+use method_core::EventStream;
+use method_core::Method;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -348,7 +348,7 @@ pub struct Logged<H> {
     log: CallLog,
 }
 
-impl<P: Operation, H: Handler<P>> Handler<P> for Logged<H> {
+impl<P: Method, H: Handler<P>> Handler<P> for Logged<H> {
     async fn call(
         &self,
         request: Envelope<P>,
@@ -362,7 +362,7 @@ impl<P: Operation, H: Handler<P>> Handler<P> for Logged<H> {
 }
 
 /// The layered handler [`boot`] hosts. Naming it lets consumers write
-/// `Arc<Host<SampleHandler>>` and `Client::<SampleProtocol>::direct(host)`.
+/// `Arc<Host<SampleHandler>>` and `Client::new(Transport::<SampleProtocol>::direct(host))`.
 pub type SampleHandler = Logged<Arc<SampleService>>;
 
 /// A booted sample: the implementation, the host that fronts it, and the log

@@ -446,7 +446,7 @@ impl PlugsRepo {
         target: &str,
         heads: Option<&ChangeHashSet>,
     ) -> Res<url::Url> {
-        if target.starts_with("db+facet://") {
+        if target.starts_with("dtxt:datum:") {
             let ref_url = url::Url::parse(target)?;
             self.enable_plug(&ref_url).await?;
             return Ok(ref_url);
@@ -517,7 +517,7 @@ impl PlugsRepo {
             manifest.version
         );
 
-        // 1.5 Convert file:// URLs to db+blob:// URLs
+        // 1.5 Convert file:// URLs to dtxt:blob: URLs
         // This ensures that all components are stored in the BlobsRepo for portability.
         for bundle in manifest.wflow_bundles.values_mut() {
             let bundle = Arc::make_mut(bundle);
@@ -531,10 +531,9 @@ impl PlugsRepo {
                             format!("failed to read component file: {}", path.display())
                         })?;
                         let hash = self.blobs.put(&data).await?;
-                        *url =
-                            url::Url::parse(&format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash))?;
+                        *url = url::Url::parse(&crate::blobs::blob_url(&hash))?;
                     }
-                    crate::blobs::BLOB_SCHEME => {}
+                    "dtxt" if crate::blobs::blob_url_digest(url).is_some() => {}
                     _ => {
                         eyre::bail!("unsupported component_url scheme: {url}");
                     }
@@ -552,10 +551,9 @@ impl PlugsRepo {
         let mut blob_lengths = std::collections::HashMap::<String, u64>::new();
         for bundle in manifest.wflow_bundles.values() {
             for url in &bundle.component_urls {
-                if url.scheme() != crate::blobs::BLOB_SCHEME {
+                let Some(hash) = crate::blobs::blob_url_digest(url) else {
                     continue;
-                }
-                let hash = url.path().trim_start_matches('/');
+                };
                 if blob_lengths.contains_key(hash) {
                     continue;
                 }
@@ -585,7 +583,7 @@ impl PlugsRepo {
                     length_octets,
                     digest: hash.clone(),
                     inline: None,
-                    urls: Some(vec![format!("{}:///{}", crate::blobs::BLOB_SCHEME, hash)]),
+                    urls: Some(vec![crate::blobs::blob_url(&hash)]),
                 })
                 .into(),
             );

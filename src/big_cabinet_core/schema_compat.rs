@@ -163,13 +163,13 @@ pub fn compare_datum_bundles(
     // that fails the publish gate is a codec document: it has no Lexicon, so the dimension is not
     // established rather than guessed.
     let old_id = old
-        .plug
+        .cartridge
         .datums
         .iter()
         .find(|datum| datum.name == old_datum)
         .map(|datum| datum.id.as_str());
     let new_id = new
-        .plug
+        .cartridge
         .datums
         .iter()
         .find(|datum| datum.name == new_datum)

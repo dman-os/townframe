@@ -26,7 +26,10 @@ impl Core {
                     read: [drawer.clone()].into(),
                     ..Default::default()
                 },
-                |capability| {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| {
                     let key = key.clone();
                     async move {
                         self.docs()

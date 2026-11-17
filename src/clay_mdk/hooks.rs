@@ -130,7 +130,7 @@ fn InProcessSlot(reference: Capability, chrome: Option<Element>) -> Element {
 #[component]
 fn GuestSlot(reference: Capability, chrome: Option<Element>) -> Element {
     let tick = use_context::<crate::guest::ChangeTick>().0;
-    let _ = tick();
+    let _: u64 = tick();
     let (state, cancel) = use_hook(|| {
         let state = Rc::new(std::cell::RefCell::new(SlotState::Loading));
         let runtime = crate::guest::Runtime::current();
@@ -218,7 +218,7 @@ fn use_changes(source: impl FnOnce() -> Changes) {
                     }
                 }
             });
-            let _ = tick();
+            let _: u64 = tick();
         }
         #[cfg(feature = "in_process")]
         Changes::Rows(observer) => {
@@ -232,11 +232,11 @@ fn use_changes(source: impl FnOnce() -> Changes) {
                     }
                 }
             });
-            let _ = tick();
+            let _: u64 = tick();
         }
         #[cfg(feature = "guest")]
         Changes::Pushed => {
-            let _ = use_context::<crate::guest::ChangeTick>().0();
+            let _: u64 = use_context::<crate::guest::ChangeTick>().0();
         }
     }
 }

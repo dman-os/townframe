@@ -404,16 +404,16 @@ impl GuestDom {
             u64,
             dioxus_core::RenderTargetId,
         )>::new()));
-        let root_targets = targets.clone();
+        let root_targets = std::rc::Rc::clone(&targets);
         let slots = std::rc::Rc::new(Slots::default());
-        let root_slots = slots.clone();
+        let root_slots = std::rc::Rc::clone(&slots);
         let head = std::rc::Rc::new(HeadState::default());
-        let root_head = head.clone();
+        let root_head = std::rc::Rc::clone(&head);
         let mut dom = dioxus_core::VirtualDom::new_with_props(
             move |()| {
-                use_context_provider(|| root_slots.clone());
+                use_context_provider(|| std::rc::Rc::clone(&root_slots));
                 use_context_provider(|| {
-                    root_head.clone() as std::rc::Rc<dyn dioxus::document::Document>
+                    std::rc::Rc::clone(&root_head) as std::rc::Rc<dyn dioxus::document::Document>
                 });
                 let children = app();
                 let targets = root_targets.borrow();

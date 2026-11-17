@@ -11,12 +11,10 @@ struct WholeNumbers {
     signed16: i16,
     signed32: i32,
     signed64: i64,
-    signed_size: isize,
     unsigned8: u8,
     unsigned16: u16,
     unsigned32: u32,
     unsigned64: u64,
-    unsigned_size: usize,
     optional: Option<i32>,
     list: Vec<u16>,
     map: BTreeMap<String, u32>,
@@ -40,12 +38,10 @@ fn plain_integers_declare_publish_admit_and_round_trip_at_their_boundaries() {
             signed16: if minimum { i16::MIN } else { i16::MAX },
             signed32: if minimum { i32::MIN } else { i32::MAX },
             signed64: if minimum { i64::MIN } else { i64::MAX },
-            signed_size: if minimum { isize::MIN } else { isize::MAX },
             unsigned8: if minimum { 0 } else { u8::MAX },
             unsigned16: if minimum { 0 } else { u16::MAX },
             unsigned32: if minimum { 0 } else { u32::MAX },
             unsigned64: if minimum { 0 } else { i64::MAX as u64 },
-            unsigned_size: if minimum { 0 } else { isize::MAX as usize },
             optional: if minimum { None } else { Some(i32::MAX) },
             list: vec![0, u16::MAX],
             map: BTreeMap::from([("count".into(), u32::MAX), ("zero".into(), 0)]),
@@ -91,134 +87,91 @@ fn plain_integers_declare_publish_admit_and_round_trip_at_their_boundaries() {
     }
 }
 
-#[macros::datum(authority = "org.example.daybook")]
-#[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-struct WideNumbers {
-    signed128: i128,
-    unsigned128: u128,
-    optional: Option<i128>,
-    list: Vec<u128>,
-    #[serde(flatten)]
-    extra: Extra,
-}
-
-/// A 128-bit field is declarable and publishable, but a Lexicon integer is signed-64-bit, so the
-/// field carries exactly the signed range: the boundaries it round-trips are `i64`'s, stated here
-/// through the 128-bit types a declaration actually names.
+/// A Rust width reaches the Lexicon as bounds alone: `schemars`' `format: uint32` becomes
+/// `minimum: 0, maximum: 4294967295`, a signed width its two-sided range, and the 64-bit widths
+/// only what an `i64` bound can state. Nothing named `format` is left on the integer.
 #[test]
-fn wide_integers_declare_publish_admit_and_round_trip_at_the_signed_lexicon_boundaries() {
-    let universe = Universe::collect([Declaration::of::<WideNumbers>().unwrap()]);
-    let bundle = Bundle::new(&universe, Vec::new());
-    let lexicons = bundle.lexicons().unwrap();
-    let lexicon = &lexicons[0];
-    let properties = &lexicon.file["defs"]["main"]["properties"];
-    assert_eq!(properties["signed128"], json!({"type": "integer"}));
-    assert_eq!(
-        properties["unsigned128"],
-        json!({"type": "integer", "minimum": 0})
-    );
-    let compiled = bundle
-        .validate_lexicon(&lexicon.id, &lexicon.file, &[])
-        .unwrap();
-    let mut doc = Automerge::new();
-    for minimum in [true, false] {
-        let numbers = WideNumbers {
-            signed128: if minimum {
-                i128::from(i64::MIN)
-            } else {
-                i128::from(i64::MAX)
-            },
-            unsigned128: if minimum { 0 } else { i64::MAX as u128 },
-            optional: if minimum { None } else { Some(-1) },
-            list: vec![0, i64::MAX as u128],
-            extra: [("future".into(), json!({"value": 42}))].into(),
-        };
-        let mut value = serde_json::to_value(&numbers).unwrap();
-        value["$type"] = json!(WideNumbers::ID);
-        reconcile_json_atomic(
-            doc.transaction(),
-            &compiled,
-            &ROOT,
-            "datum".into(),
-            value.clone(),
-        )
-        .unwrap()
-        .commit();
-        let (_, object) = doc.get(ROOT, "datum").unwrap().unwrap();
-        for (field, scalar) in [
-            (
-                "signed128",
-                automerge::ScalarValue::Int(numbers.signed128 as i64),
-            ),
-            (
-                "unsigned128",
-                automerge::ScalarValue::Uint(numbers.unsigned128 as u64),
-            ),
-        ] {
-            assert_eq!(
-                doc.get(&object, field).unwrap().unwrap().0,
-                automerge::Value::Scalar(std::borrow::Cow::Owned(scalar))
-            );
-        }
-        let hydrated = hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap();
-        assert_eq!(hydrated, value);
-        let mut fields = hydrated.as_object().unwrap().clone();
-        fields.remove("$type");
-        assert_eq!(
-            serde_json::from_value::<WideNumbers>(fields.into()).unwrap(),
-            numbers
-        );
-        let heads = doc.get_heads();
-        reconcile_json_atomic(doc.transaction(), &compiled, &ROOT, "datum".into(), value)
-            .unwrap()
-            .commit();
-        assert_eq!(doc.get_heads(), heads);
+fn rust_integer_widths_publish_as_bounds_and_leave_no_format() {
+    let universe = Universe::collect([Declaration::of::<WholeNumbers>().unwrap()]);
+    let lexicons = Bundle::new(&universe, Vec::new()).lexicons().unwrap();
+    let properties = &lexicons[0].file["defs"]["main"]["properties"];
+    for (field, expected) in [
+        (
+            "signed8",
+            json!({"type": "integer", "minimum": -128, "maximum": 127}),
+        ),
+        (
+            "signed32",
+            json!({"type": "integer", "minimum": i32::MIN, "maximum": i32::MAX}),
+        ),
+        ("signed64", json!({"type": "integer"})),
+        (
+            "unsigned8",
+            json!({"type": "integer", "minimum": 0, "maximum": 255}),
+        ),
+        (
+            "unsigned32",
+            json!({"type": "integer", "minimum": 0, "maximum": u32::MAX}),
+        ),
+        ("unsigned64", json!({"type": "integer", "minimum": 0})),
+    ] {
+        assert_eq!(properties[field], expected, "{field}");
     }
 }
 
-/// Past the signed range a 128-bit value is refused at admission, not truncated into storage: the
-/// JSON spelling of `i64::MAX + 1` and of `u64::MAX` both name a 128-bit value the field's type
-/// can hold and the Lexicon cannot.
+/// The values a width excludes are refused at admission, not truncated into storage.
 #[test]
-fn wide_integers_outside_the_signed_lexicon_range_are_refused_at_admission() {
-    let universe = Universe::collect([Declaration::of::<WideNumbers>().unwrap()]);
+fn values_outside_a_rust_width_are_refused_at_admission() {
+    let universe = Universe::collect([Declaration::of::<WholeNumbers>().unwrap()]);
     let bundle = Bundle::new(&universe, Vec::new());
-    let lexicons = bundle.lexicons().unwrap();
-    let lexicon = &lexicons[0];
+    let lexicon = &bundle.lexicons().unwrap()[0];
     let compiled = bundle
         .validate_lexicon(&lexicon.id, &lexicon.file, &[])
         .unwrap();
     let within = json!({
-        "$type": WideNumbers::ID,
-        "signed128": i64::MAX,
-        "unsigned128": i64::MAX,
-        "list": [],
+        "$type": WholeNumbers::ID,
+        "signed8": 0, "signed16": 0, "signed32": 0, "signed64": 0,
+        "unsigned8": 0, "unsigned16": 0, "unsigned32": 0, "unsigned64": 0,
+        "list": [], "map": {},
     });
-    assert_eq!(
-        Stored::check(&compiled, within.clone())
-            .unwrap()
-            .into_value(),
-        within
-    );
+    Stored::check(&compiled, within.clone()).unwrap();
     for (field, spelling) in [
-        ("signed128", json!(i64::MAX as u64 + 1)),
-        ("signed128", json!(u64::MAX)),
-        ("unsigned128", json!(i64::MAX as u64 + 1)),
-        ("unsigned128", json!(u64::MAX)),
+        ("signed8", json!(128)),
+        ("signed32", json!(i64::from(i32::MAX) + 1)),
+        ("unsigned8", json!(-1)),
+        ("unsigned8", json!(256)),
+        ("unsigned32", json!(i64::from(u32::MAX) + 1)),
+        ("unsigned64", json!(-1)),
+        ("unsigned64", json!(u64::MAX)),
     ] {
         let mut value = within.clone();
         value[field] = spelling;
         assert!(
             Stored::check(&compiled, value).is_err(),
-            "{field} past the signed range is refused"
+            "{field} outside its width is refused"
         );
     }
-    let mut nested = within.clone();
-    nested["list"] = json!([u64::MAX]);
-    assert!(Stored::check(&compiled, nested).is_err());
-    let mut optional = within.clone();
-    optional["optional"] = json!(u64::MAX);
-    assert!(Stored::check(&compiled, optional).is_err());
+}
+
+#[macros::datum(authority = "org.example.daybook")]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct SignedButNonNegative {
+    #[schemars(range(min = 0))]
+    count: i32,
+    #[serde(flatten)]
+    extra: Extra,
+}
+
+/// The sign is a lower bound: `minimum >= 0` is what the codec stores as an Automerge `Uint`, which
+/// an `i32` cannot hydrate from. A signed width bounded that way is refused at declaration instead
+/// of storing a value its own type cannot read back.
+#[test]
+fn a_signed_width_bounded_to_non_negative_is_refused_at_declaration() {
+    let error = Declaration::of::<SignedButNonNegative>().unwrap_err();
+    assert!(
+        error.to_string().contains("unsigned Automerge integer"),
+        "{error}"
+    );
 }
 
 #[macros::datum(authority = "org.example.daybook")]

@@ -33,3 +33,6 @@ daybook_types.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 wat = "1.262"
+
+[lints]
+workspace = true

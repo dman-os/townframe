@@ -144,7 +144,7 @@ pub struct SqliteCore {
     pub sql: Database,
     pub scope_id: i64,
     pub bucket_depth: u8,
-    pub _scope_key: Arc<str>,
+    pub scope_key: Arc<str>,
 }
 
 impl SqliteCore {
@@ -159,7 +159,7 @@ impl SqliteCore {
             sql,
             scope_id,
             bucket_depth,
-            _scope_key: scope_key,
+            scope_key,
         })
     }
 

@@ -1,8 +1,8 @@
 # ADR 031: Manifest-declared collections and lazy capabilities
 
-**Status:** Proposed. The collection and capability waists, manifest admission from a package sidecar, durable registration scopes, lazy activation references and the Clay enablement service are implemented; admission from the `big_plugs_core` envelope and schema validation of collection rows are not. The validation list below is tracked in `docs/scratch/clay-pr-ledger.md` ("Validation matrix").
+**Status:** Proposed. The collection and capability waists, manifest admission from a package sidecar, durable registration scopes, lazy activation references and the Clay enablement service are implemented; admission from the `big_cartridges_core` envelope and schema validation of collection rows are not. The validation list below is tracked in `docs/scratch/clay-pr-ledger.md` ("Validation matrix").
 
-**Builds on:** ADR 017's leased projection protocol, ADR 029's capability bank, ADR 030's micro lifecycle, and the plug envelope/catalog work in `big_plugs_core`.
+**Builds on:** ADR 017's leased projection protocol, ADR 029's capability bank, ADR 030's micro lifecycle, and the plug envelope/catalog work in `big_cartridges_core`.
 
 ## Context
 
@@ -12,7 +12,7 @@ A contribution must often be discoverable before its provider runs. Starting eve
 
 At the same time, a live WIT resource implemented by a guest cannot survive stopping that guest. Durable discovery must therefore store data and a logical activation endpoint, not a live component resource handle.
 
-The plug envelope is the distribution boundary. `big_plugs_core` already separates immutable, content-addressed package revisions and opaque runtime-specific contributions from runtime-owned enablement, configuration, grants, and readiness. `big_nodule` further demonstrates the desired-state pattern: portable configuration lives in schema-governed datums, a runtime service reconciles it, durable actor/grant identities remain host-owned, and effective failures are reported without mutating the package envelope. Clay follows the same separation while using collections as its discovery and projection waist.
+The plug envelope is the distribution boundary. `big_cartridges_core` already separates immutable, content-addressed package revisions and opaque runtime-specific contributions from runtime-owned enablement, configuration, grants, and readiness. `big_nodule` further demonstrates the desired-state pattern: portable configuration lives in schema-governed datums, a runtime service reconciles it, durable actor/grant identities remain host-owned, and effective failures are reported without mutating the package envelope. Clay follows the same separation while using collections as its discovery and projection waist.
 
 ## Decision
 

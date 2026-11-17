@@ -1,6 +1,6 @@
-//! Nodule admission over [`Plug`] envelopes (ADR 027 §2–4, §6–8).
+//! Nodule admission over [`Cartridge`] envelopes (ADR 027 §2–4, §6–8).
 //!
-//! [`admit_plug_nodule`] validates the carrying [`Plug`] envelope, extracts its [`Nodule`]
+//! [`admit_cartridge_nodule`] validates the carrying [`Cartridge`] envelope, extracts its [`Nodule`]
 //! contribution, checks the contribution schema and nodule admission rules, and verifies that
 //! every artifact the handler names is declared in the envelope. [`InstalledNodule`] is the admitted
 //! result that [`crate::config::NoduleConfig`] resolves, with its enablement, configuration,
@@ -10,23 +10,25 @@ use crate::Admitted;
 use crate::Nodule;
 use crate::NoduleError;
 use big_cabinet_core::datum::DatumMember;
-use big_plugs_core::Artifact;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugError;
-use big_plugs_core::PlugId;
-use big_plugs_core::Revision;
-use big_plugs_core::Version;
+use big_cartridges_core::Artifact;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeError;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Revision;
+use big_cartridges_core::Version;
+use big_dispatch_core::Readiness;
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Availability of an artifact declared in the carrying [`Plug`] envelope.
+/// Availability of an artifact declared in the carrying [`Cartridge`] envelope.
 ///
 /// Admission records every artifact the handler references as [`Self::Unavailable`] from the
 /// envelope metadata alone. Only a node's executor, which loads the bytes, can establish
 /// [`Self::Available`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ArtifactState {
@@ -34,57 +36,19 @@ pub enum ArtifactState {
     Available,
 }
 
-/// Whether an [`InstalledNodule`] can serve its handler, and if not the first reason in priority
-/// order: refused configuration, then disabled, then a required operation request no grant
-/// covers, then a required operation request no provider satisfies, then missing handler
-/// artifact bytes, then the
-/// absence of a handler executor, then initialization. [`Self::Ready`] is the executor's word
-/// that the handler can be called now and the node's word that every initializer of this
-/// revision and start has succeeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Readiness {
-    Ready,
-    Refused,
-    Disabled,
-    /// A required operation request has no covering grant. Not a fault: configuration (granting
-    /// the operation) makes the nodule ready. An optional request never causes this.
-    NeedsConfiguration,
-    /// A required operation request has no provider that satisfies it: none enabled, more than
-    /// one, a revision older than the request's `minRevision`, or a different plug than the one
-    /// the operator consented to. The record's `requests` say which and why. Not a fault: the
-    /// nodule is enabled and waits (as a Kubernetes pod waits on a missing dependency, a systemd
-    /// unit on `Requires=`), and becomes ready once a provider appears or the operator confirms.
-    /// An optional request never causes this.
-    ProviderMissing,
-    ArtifactsUnavailable,
-    ExecutorUnavailable,
-    /// The handler is hosted but an initializer of this revision and start is still running or
-    /// waiting on the provider of a foreign operation. Retryable: callers are not queued.
-    Initializing,
-    /// An initializer failed; the record carries the error. It runs again on the next reconcile
-    /// of the node (boot, config change, enable).
-    InitFailed,
-}
-
-impl Readiness {
-    pub fn is_ready(self) -> bool {
-        self == Self::Ready
-    }
-}
-
-/// The plug whose code fills a slot under a substitution, and the version of it that does.
+/// The cartridge whose code fills a slot under a substitution, and the version of it that does.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilledBy {
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub version: Version,
 }
 
 /// An admitted nodule installed in a standalone [`Inventory`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstalledNodule {
-    pub plug_id: PlugId,
+    pub cartridge_id: CartridgeId,
     pub version: Version,
     pub revision: Revision,
     pub nodule: Nodule,
@@ -92,7 +56,7 @@ pub struct InstalledNodule {
     pub artifacts: BTreeMap<String, (Artifact, ArtifactState)>,
     pub enabled: bool,
     pub config: Option<IndexMap<String, Value>>,
-    /// Set when a substitution fills this slot: `plug_id` is the slot, while `version`,
+    /// Set when a substitution fills this slot: `cartridge_id` is the slot, while `version`,
     /// `revision`, `nodule`, `admitted` and `artifacts` are the filler's.
     pub filled_by: Option<FilledBy>,
     configured: bool,
@@ -104,7 +68,7 @@ impl InstalledNodule {
         reason = "crate-private constructor assembling validated fields"
     )]
     pub(crate) fn new(
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         version: Version,
         revision: Revision,
         nodule: Nodule,
@@ -115,7 +79,7 @@ impl InstalledNodule {
         configured: bool,
     ) -> Self {
         Self {
-            plug_id,
+            cartridge_id,
             version,
             revision,
             nodule,
@@ -166,47 +130,49 @@ impl InstalledNodule {
 #[derive(Debug, thiserror::Error)]
 pub enum InventoryError {
     #[error(transparent)]
-    Plug(#[from] PlugError),
+    Cartridge(#[from] CartridgeError),
     #[error(transparent)]
     Nodule(#[from] NoduleError),
-    #[error("plug `{0}` carries no nodule contribution")]
-    MissingContribution(PlugId),
-    #[error("plug `{id}` nodule contribution has unsupported schema `{schema}`")]
-    UnsupportedSchema { id: PlugId, schema: String },
-    #[error("plug `{id}` nodule contribution is not a valid nodule datum: {reason}")]
-    InvalidContribution { id: PlugId, reason: String },
-    #[error("plug `{id}` handler requires artifact `{artifact}` not declared in plug envelope")]
-    MissingArtifact { id: PlugId, artifact: String },
+    #[error("cartridge `{0}` carries no nodule contribution")]
+    MissingContribution(CartridgeId),
+    #[error("cartridge `{id}` nodule contribution has unsupported schema `{schema}`")]
+    UnsupportedSchema { id: CartridgeId, schema: String },
+    #[error("cartridge `{id}` nodule contribution is not a valid nodule datum: {reason}")]
+    InvalidContribution { id: CartridgeId, reason: String },
     #[error(
-        "plug `{id}` handler artifact `{artifact}` declares no size, which a node needs to \
+        "cartridge `{id}` handler requires artifact `{artifact}` not declared in cartridge envelope"
+    )]
+    MissingArtifact { id: CartridgeId, artifact: String },
+    #[error(
+        "cartridge `{id}` handler artifact `{artifact}` declares no size, which a node needs to \
          reference and fetch its bytes"
     )]
-    ArtifactSizeRequired { id: PlugId, artifact: String },
+    ArtifactSizeRequired { id: CartridgeId, artifact: String },
     #[error(
-        "plug `{id}` holds authority `{authority}`, which overlaps `{existing_authority}` held by `{existing_plug}`"
+        "cartridge `{id}` holds authority `{authority}`, which overlaps `{existing_authority}` held by `{existing_cartridge}`"
     )]
     AuthorityConflict {
-        id: PlugId,
+        id: CartridgeId,
         authority: String,
-        existing_plug: Box<PlugId>,
+        existing_cartridge: Box<CartridgeId>,
         existing_authority: String,
     },
     #[error(
-        "plug `{id}` carries Lexicon `{nsid}` in a copy that conflicts with the one carried by \
+        "cartridge `{id}` carries Lexicon `{nsid}` in a copy that conflicts with the one carried by \
          `{other}`: copies must be identical unless their declared revisions differ, and a \
          vendored copy never out-revises the authority's"
     )]
     LexiconConflict {
-        id: PlugId,
+        id: CartridgeId,
         nsid: String,
-        other: Box<PlugId>,
+        other: Box<CartridgeId>,
     },
     #[error("cannot substitute for `{id}`: {reason}")]
-    InvalidSubstitution { id: PlugId, reason: String },
-    #[error("nodule for plug `{0}` is not installed")]
-    UnknownPlug(PlugId),
-    #[error("nodule for plug `{0}` declares no config schema")]
-    NoConfigSchema(PlugId),
+    InvalidSubstitution { id: CartridgeId, reason: String },
+    #[error("nodule for cartridge `{0}` is not installed")]
+    UnknownCartridge(CartridgeId),
+    #[error("nodule for cartridge `{0}` declares no config schema")]
+    NoConfigSchema(CartridgeId),
 }
 
 type Result<T> = std::result::Result<T, InventoryError>;
@@ -217,14 +183,14 @@ pub(crate) type AdmittedContribution = (
     BTreeMap<String, (Artifact, ArtifactState)>,
 );
 
-pub(crate) fn admit_plug_nodule(plug: &Plug) -> Result<AdmittedContribution> {
-    plug.validate()?;
-    let Some(contribution) = plug.nodule() else {
-        return Err(InventoryError::MissingContribution(plug.id.clone()));
+pub(crate) fn admit_cartridge_nodule(cartridge: &Cartridge) -> Result<AdmittedContribution> {
+    cartridge.validate()?;
+    let Some(contribution) = cartridge.nodule() else {
+        return Err(InventoryError::MissingContribution(cartridge.id.clone()));
     };
     if contribution.schema != Nodule::ID {
         return Err(InventoryError::UnsupportedSchema {
-            id: plug.id.clone(),
+            id: cartridge.id.clone(),
             schema: contribution.schema.clone(),
         });
     }
@@ -237,21 +203,21 @@ pub(crate) fn admit_plug_nodule(plug: &Plug) -> Result<AdmittedContribution> {
     );
     let nodule: Nodule =
         serde_json::from_value(payload).map_err(|err| InventoryError::InvalidContribution {
-            id: plug.id.clone(),
+            id: cartridge.id.clone(),
             reason: err.to_string(),
         })?;
-    let admitted = nodule.admit(plug.authority.as_deref())?;
+    let admitted = nodule.admit(cartridge.authority.as_deref())?;
     let mut artifacts = BTreeMap::new();
     for key in &admitted.artifacts {
-        let Some(artifact) = plug.artifact(key) else {
+        let Some(artifact) = cartridge.artifact(key) else {
             return Err(InventoryError::MissingArtifact {
-                id: plug.id.clone(),
+                id: cartridge.id.clone(),
                 artifact: key.clone(),
             });
         };
         if artifact.size.is_none() {
             return Err(InventoryError::ArtifactSizeRequired {
-                id: plug.id.clone(),
+                id: cartridge.id.clone(),
                 artifact: key.clone(),
             });
         }
