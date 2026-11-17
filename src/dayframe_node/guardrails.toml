@@ -2,6 +2,7 @@ version = 1
 role = "application"
 dependency_reason = "The node-holding half of a native Dayframe host's composition root: it boots the host's own big_node from its data directory and gives each Wasmtime micro its own actor and dispatch egress (Clay on the node sections 1 to 3)."
 allowed_dependencies = [
+    "big_cabinet",
     "big_cabinet_core",
     "big_dispatch",
     "big_dispatch_core",

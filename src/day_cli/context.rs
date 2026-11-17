@@ -412,6 +412,7 @@ impl Booted {
             &dir.settings()?,
             listeners,
             role == LockRole::Daemon,
+            Arc::new(big_cabinet::SchemaRepo::open(std::iter::empty())?),
         )
         .await?;
         lock.serving()?;

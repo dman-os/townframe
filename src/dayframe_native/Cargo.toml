@@ -7,8 +7,11 @@ edition = "2021"
 path = "lib.rs"
 
 [dependencies]
-clay_docs = { workspace = true }
+#
+# internal
 clay_guest_session = { workspace = true }
+
+clay_docs = { workspace = true }
 clay_host = { workspace = true }
 clay_mdk = { workspace = true, features = ["in_process", "view", "wasmtime", "package"] }
 clay_store = { workspace = true }

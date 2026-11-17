@@ -101,6 +101,9 @@ pub struct NodeConfig {
     /// the node's `node.json` bootstrap list, so they persist and a node booted with none still
     /// dials the ones an earlier boot was given.
     pub bootstrap: Vec<String>,
+    /// The datum vocabulary the node admits: the Lexicons of the datums its micros read and
+    /// write (a node refuses a datum whose schema it does not know).
+    pub schemas: Arc<big_cabinet::SchemaRepo>,
     pub installs: Vec<MicroInstall>,
 }
 
@@ -132,13 +135,14 @@ impl NodeComposition {
                 let NodeConfig {
                     root,
                     bootstrap,
+                    schemas,
                     installs,
                 } = config;
                 prepare_settings(&root, &bootstrap)?;
                 let settings = NodeSettings::load(&root)?;
                 // No listeners: the holder is its own only client, and reaches the node through
                 // its dispatch client.
-                let held = HeldNode::boot(&root, &settings, default(), true).await?;
+                let held = HeldNode::boot(&root, &settings, default(), true, schemas).await?;
                 match install_all(&held.node, installs).await {
                     Ok(installed) => Ok((held, installed)),
                     Err(error) => match held.stop().await {

@@ -31,6 +31,11 @@ serde_json.workspace = true
 rand.workspace = true
 
 [dev-dependencies]
+#
+# internal
 secrets_rs = { workspace = true, features = ["test-support"] }
+
+#
+# misc
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

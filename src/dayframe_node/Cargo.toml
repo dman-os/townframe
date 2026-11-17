@@ -12,6 +12,7 @@ path = "lib.rs"
 [dependencies]
 #
 # internal
+big_cabinet.workspace = true
 big_cabinet_core.workspace = true
 big_node.workspace = true
 clay_guest_session.workspace = true
@@ -33,6 +34,7 @@ big_dispatch_core.workspace = true
 clay_host.workspace = true
 clay_rt_wasmtime.workspace = true
 clay_surface.workspace = true
+method_core.workspace = true
 secrets_rs = { workspace = true, features = ["test-support"] }
 
 #
@@ -41,7 +43,6 @@ async-trait.workspace = true
 bytes.workspace = true
 http.workspace = true
 http-body-util = "0.1"
-method_core.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

@@ -149,6 +149,33 @@ async fn run_fixture(composition: &NodeComposition) -> BTreeMap<String, String> 
     attempts
 }
 
+fn no_schemas() -> Arc<big_cabinet::SchemaRepo> {
+    Arc::new(big_cabinet::SchemaRepo::open(std::iter::empty()).unwrap())
+}
+
+/// A vocabulary of one datum kind, [`NOTE`].
+fn note_schemas() -> Arc<big_cabinet::SchemaRepo> {
+    Arc::new(
+        big_cabinet::SchemaRepo::open([big_cabinet::SchemaRegistrationGroup::new(
+            None,
+            [big_cabinet::SchemaRegistration::new(
+                NOTE,
+                json!({
+                    "lexicon": 1,
+                    "id": NOTE,
+                    "defs": {"main": {"type": "record", "key": "tid", "record": {
+                        "type": "object",
+                        "required": ["value"],
+                        "properties": {"value": {"type": "string"}}
+                    }}}
+                }),
+            )],
+            Vec::new(),
+        )])
+        .unwrap(),
+    )
+}
+
 fn install(micro: &str, methods: &[&str]) -> MicroInstall {
     MicroInstall {
         drawers: vec![],
@@ -182,6 +209,7 @@ async fn a_wasmtime_micro_calls_a_granted_method_through_the_composition() {
     let config = || NodeConfig {
         root: dir.path().to_owned(),
         bootstrap: vec![],
+        schemas: no_schemas(),
         installs: vec![install(FIXTURE, &[ECHO])],
     };
     let composition = NodeComposition::boot(config()).await.unwrap();
@@ -243,6 +271,7 @@ async fn a_micro_installed_with_no_methods_calls_nothing() {
     let composition = NodeComposition::boot(NodeConfig {
         root: dir.path().to_owned(),
         bootstrap: vec![],
+        schemas: no_schemas(),
         installs: vec![install(FIXTURE, &[])],
     })
     .await
@@ -270,6 +299,7 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
     let host = NodeComposition::boot(NodeConfig {
         root: host_dir.path().to_owned(),
         bootstrap: vec![],
+        schemas: no_schemas(),
         installs: vec![],
     })
     .await
@@ -287,6 +317,7 @@ async fn a_node_dials_the_ticket_in_its_bootstrap_file() {
     let phone = NodeComposition::boot(NodeConfig {
         root: phone_dir.path().to_owned(),
         bootstrap: read_tickets(&tickets).unwrap(),
+        schemas: no_schemas(),
         installs: vec![],
     })
     .await
@@ -403,6 +434,7 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
     let mut composition = NodeComposition::boot(NodeConfig {
         root: dir.path().to_owned(),
         bootstrap: vec![],
+        schemas: note_schemas(),
         installs: vec![],
     })
     .await

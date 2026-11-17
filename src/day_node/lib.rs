@@ -263,12 +263,13 @@ impl HeldNode {
     /// Boots the node in `root` (`node.json` read by the caller as `settings`), serving
     /// `listeners`. With `attach_peers` the node attaches the peers service when `settings` has
     /// a `peers` section; without it the node neither dials nor can be dialed, which is right for
-    /// a node that lives for one command.
+    /// a node that lives for one command. `schemas` is the datum vocabulary the node admits.
     pub async fn boot(
         root: &Path,
         settings: &NodeSettings,
         listeners: Listeners,
         attach_peers: bool,
+        schemas: Arc<big_cabinet::SchemaRepo>,
     ) -> Res<Self> {
         let peers = if attach_peers {
             settings
@@ -293,7 +294,7 @@ impl HeldNode {
                 group_part_group_scope: default(),
             },
             sql: bindings.sql,
-            schemas: Arc::new(big_cabinet::SchemaRepo::open(std::iter::empty())?),
+            schemas,
             secrets: Arc::clone(&secrets),
             index_concurrency: std::num::NonZeroUsize::new(2).expect("two is not zero"),
             blob_storage: bindings.blobs,

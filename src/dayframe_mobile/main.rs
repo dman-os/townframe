@@ -147,6 +147,11 @@ mod android {
         let node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
             root: data_directory.join("node"),
             bootstrap,
+            // No micro on the phone reads a datum yet; the intxt review micro's Lexicons go here.
+            schemas: Arc::new(
+                big_cabinet::SchemaRepo::open(std::iter::empty())
+                    .expect("no registrations is a valid schema repo"),
+            ),
             installs,
         })
         .await
