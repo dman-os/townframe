@@ -279,8 +279,9 @@ fn sha(text: &str) -> Option<String> {
 }
 
 /// The commit `sha` as a datum: author and committer, message, and the paths it changed against
-/// its first parent, with renames detected.
-fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
+/// its first parent, with renames detected. `change_id` is none: git does not know it, and a
+/// caller that read the commit through jj sets it.
+pub fn commit(git: &Git, sha: &str) -> Result<GitCommit, Error> {
     let shown = git.run(&[
         "show",
         "-s",
