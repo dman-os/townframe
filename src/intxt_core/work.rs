@@ -197,9 +197,15 @@ pub struct File {
 /// A git commit (`gitCommit/<sha>`). Every recorder writes the same value to the same slot, and
 /// none rewrites it: a later fact about a commit goes into its own datum. Holds no pins; the op
 /// that observed the commit does.
+///
+/// The slot is a content hash: admission recomputes git's object id over `"commit <len>\0"` and
+/// `raw`'s bytes and refuses a value that doesn't hash to its slot. That is what lets another
+/// datum reference a commit by key (`#keyRef`) and have the node find it in any document that
+/// holds a copy (ADR 035 §2.9).
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(extend("x-content-hash" = {"algorithm": "gitObject", "type": "commit", "content": "raw"}))]
 pub struct GitCommit {
     /// The commit object as git stores it (`git cat-file commit <sha>`), signature and encoding
     /// headers included. The slot is git's object id over it, so the datum is content-addressed
