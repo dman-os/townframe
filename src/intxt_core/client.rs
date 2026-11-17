@@ -204,7 +204,7 @@ impl<H: HttpTransport> Caller<H> {
     ) -> Result<(Vec<ChangeHash>, BTreeMap<DatumKey, DatumRead>), IntxtError> {
         let capability = self
             .doc_capability(DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             })
             .await?;
@@ -354,7 +354,7 @@ impl<H: HttpTransport> Caller<H> {
     pub async fn datum_keys(&self, doc: &DocId) -> Result<BTreeSet<DatumKey>, IntxtError> {
         let capability = self
             .doc_capability(DocScope {
-                read: [doc.clone()].into(),
+                read: DocScope::read_all([doc.clone()]),
                 ..DocScope::default()
             })
             .await?;
