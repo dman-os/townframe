@@ -18,3 +18,5 @@ required_features = ["desktop"]
 [builds.wasm32-unknown-unknown]
 features = ["web"]
 required_features = ["web"]
+# The crate's default feature is `desktop`; the browser build must not add it.
+default_features = false
