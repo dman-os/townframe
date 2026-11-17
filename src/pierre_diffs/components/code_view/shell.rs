@@ -116,7 +116,7 @@ where
 
     /// `shouldDisablePointerEvents()`
     fn should_disable_pointer_events(&self) -> bool {
-        self.state.borrow().options.pointer_events_on_scroll != Some(true)
+        let _ = self; false // INSTR experiment: never suspend pointer events (kinetic scrolling)
     }
 
     /// `clearScrollInteractionTimer()`
