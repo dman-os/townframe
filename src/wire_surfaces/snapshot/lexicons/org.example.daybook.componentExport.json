@@ -1,0 +1,21 @@
+{
+  "defs": {
+    "main": {
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "export": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "export"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.componentExport",
+  "lexicon": 1
+}

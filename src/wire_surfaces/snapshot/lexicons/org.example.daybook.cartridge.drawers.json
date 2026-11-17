@@ -1,0 +1,58 @@
+{
+  "defs": {
+    "main": {
+      "nullable": [
+        "create",
+        "delete",
+        "read",
+        "write"
+      ],
+      "properties": {
+        "create": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "delete": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "read": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        },
+        "resolution": {
+          "knownValues": [
+            "configured",
+            "atRuntime"
+          ],
+          "type": "string"
+        },
+        "write": {
+          "knownValues": [
+            "required",
+            "optional"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge.drawers",
+  "lexicon": 1
+}

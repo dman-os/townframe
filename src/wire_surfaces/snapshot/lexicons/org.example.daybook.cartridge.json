@@ -1,0 +1,215 @@
+{
+  "defs": {
+    "CartridgeSignature": {
+      "properties": {
+        "alg": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "alg",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ImageResource": {
+      "nullable": [
+        "label",
+        "purpose",
+        "sizes"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "sizes": {
+          "type": "string"
+        },
+        "src": {
+          "ref": "org.example.daybook.defs#datumPin",
+          "type": "ref"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "src",
+        "type"
+      ],
+      "type": "object"
+    },
+    "Initializer": {
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "mode": {
+          "knownValues": [
+            "once",
+            "everyStart"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "ref": "#Nsid",
+          "type": "ref"
+        }
+      },
+      "required": [
+        "key",
+        "target",
+        "mode"
+      ],
+      "type": "object"
+    },
+    "MicroContribution": {
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "description": {
+          "type": "unknown"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "component",
+        "schema",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Nodule": {
+      "properties": {
+        "bindings": {
+          "type": "unknown"
+        },
+        "initialization": {
+          "items": {
+            "ref": "#Initializer",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "localState": {
+          "type": "unknown"
+        },
+        "revisionedStores": {
+          "type": "unknown"
+        },
+        "routines": {
+          "type": "unknown"
+        }
+      },
+      "type": "object"
+    },
+    "Nsid": {
+      "type": "string"
+    },
+    "main": {
+      "nullable": [
+        "authority",
+        "description",
+        "micro",
+        "name",
+        "nodule",
+        "shortName",
+        "signature",
+        "themeColor"
+      ],
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "categories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "components": {
+          "type": "unknown"
+        },
+        "dependencies": {
+          "type": "unknown"
+        },
+        "description": {
+          "type": "string"
+        },
+        "icons": {
+          "items": {
+            "ref": "#ImageResource",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "lexicons": {
+          "type": "unknown"
+        },
+        "micro": {
+          "ref": "#MicroContribution",
+          "type": "ref"
+        },
+        "name": {
+          "type": "string"
+        },
+        "nodule": {
+          "ref": "#Nodule",
+          "type": "ref"
+        },
+        "permbinds": {
+          "type": "unknown"
+        },
+        "screenshots": {
+          "items": {
+            "ref": "#ImageResource",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "items": {
+            "ref": "#Nsid",
+            "type": "ref"
+          },
+          "type": "array"
+        },
+        "shortName": {
+          "type": "string"
+        },
+        "sidecars": {
+          "type": "unknown"
+        },
+        "signature": {
+          "ref": "#CartridgeSignature",
+          "type": "ref"
+        },
+        "themeColor": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ],
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.cartridge",
+  "lexicon": 1
+}

@@ -1,0 +1,26 @@
+{
+  "defs": {
+    "main": {
+      "nullable": [
+        "access"
+      ],
+      "properties": {
+        "access": {
+          "knownValues": [
+            "Relay",
+            "Read",
+            "Write",
+            "Admin"
+          ],
+          "type": "string"
+        },
+        "privileged": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "id": "org.example.daybook.micro.grant",
+  "lexicon": 1
+}
