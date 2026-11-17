@@ -487,7 +487,7 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             let wasm = std::fs::read(&handler)
                 .wrap_err_with(|| format!("reading the handler {}", handler.display()))?;
             let caller = Caller::new(
-                &client,
+                &*client,
                 RequestContext::root(),
                 None,
                 "intxt-install".to_owned(),
