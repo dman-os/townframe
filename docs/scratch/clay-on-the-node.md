@@ -1,6 +1,7 @@
 # Clay on the node (claytxt lane, ADR draft)
 
-Status: draft, 2026-11-12. The operator answered both rounds on 2026-11-12 (recorded per section). The operator
+Status: **accepted (operator, 2026-11-17)**, with the nodules lane's sign-off. Draft 2026-11-12; the operator answered both
+rounds on 2026-11-12 (recorded per section). The operator
 reviewed the whole on 2026-11-17 and likes it; §6 is now settled. Two conditions remain before it is accepted: it
 must work for TypeScript micros as well as Rust ones (see "TypeScript micros" in §3), and the nodules lane must
 sign it off, because the micro and nodule surfaces are meant to be as isomorphic as possible. Nodules lane, 2026-11-17:
