@@ -269,6 +269,10 @@ pub enum RewriteHow {
     /// The commits have the same `git patch-id --stable`, which is what `git range-diff` uses.
     #[serde(rename = "patchId")]
     PatchId,
+    /// git's `post-rewrite` hook reported the exact old and new commit on an amend or a rebase,
+    /// on the machine that did the rewrite.
+    #[serde(rename = "hook")]
+    Hook,
     #[datum(other)]
     Unknown(String),
 }
