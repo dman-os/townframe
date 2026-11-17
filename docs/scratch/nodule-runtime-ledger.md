@@ -746,6 +746,13 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   3. **Manifest snapshot:** every cartridge manifest the repo ships rendered to JSON (permbinds, `uses`, routines), the input ADR 049's risk analysis reads.
   4. **Datum slot registry:** slot prefixes declared through one constructor, collected, overlaps fail.
   Items 1–2 landed as #170 (2026-11-17). Next, per the ADR 021 stability amendment (operator, 2026-11-17): per-item `since`/`deprecated`/`unstable` annotations with the revision derived from them, sidecar classification, and item 3 (the manifest-contents snapshot), as one Sonnet lane.
+- **D52. ADR 049 implementation decisions** (operator, 2026-11-17/18):
+  - Items 1–3 landed: the delegator create-drawer right (#159), `#method` → service handle (#168), drawer reach with separate read and write datum kinds (#178).
+  - A document named directly in a scope keeps its own kinds; a drawer's wider kinds do not widen it.
+  - `branch` requires the whole source (a branch is a new document, not bound by the source's grants). `merge` is to check each datum the merge changes against the actor's write kinds on the target, and need read on the source only for those, instead of requiring all kinds on both (lane, 2026-11-18).
+  - Datum-reference edges keep showing unreachable targets: every field an edge carries is already in the readable origin's reference.
+  - The manifest-contents snapshot (D51 item 3) waits until the repo ships real built-in cartridges.
+  - Next: item 4 (grants per cartridge, amending ADR 047 §5), then item 5 (runtime requests, `MissingAuthority`, `day grants`).
 - [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
 - [todo] `big_ndk`'s `export_nodule!` routes with an if-chain of awaits in one async block, the frame shape #143 removed from the route macros; it matters most on a wasm guest's small stack. `big_node`'s boot block is also a 226 KB debug frame.
 - [todo] Typed initializer input record (trigger: install/upgrade/start; previous and current revision) for ADR 047 initializers (D47). Initializers receive `{}` until then.
