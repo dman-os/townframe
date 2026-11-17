@@ -110,7 +110,8 @@ pub(crate) async fn assemble<St: OrderedStore + Send + Sync + 'static>(
     engine: impl dayframe_native::PackageEngine,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
     let (packages, errors) = scan_packages();
-    dayframe_native::native_runtime(store, packages, errors, engine).await
+    // The desktop host holds no node yet, so no micro has a way to call one.
+    dayframe_native::native_runtime(store, packages, errors, engine, &|_| None).await
 }
 
 #[cfg(test)]

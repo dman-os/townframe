@@ -1,5 +1,6 @@
 //! Android composition root: the shared native composition (`dayframe_native`) with the store
-//! under the app's internal data directory and the Wasm packages read from the APK's assets.
+//! under the app's internal data directory and the Wasm packages read from the APK's assets, and
+//! the app's own in-process node (`dayframe_node`) that its Wasm micros reach by `dispatch.local`.
 //!
 //! The crate only means something on Android; a host build exists so `cargo clippy` and the
 //! guardrails see the manifest, and its `main` refuses to run.
@@ -26,10 +27,29 @@ mod android {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::OnceLock;
+    use tokio::sync::OnceCell;
 
     /// `AndroidApp::internal_data_path()`, captured in `android_main`. App-private storage that
     /// needs no permission and is removed with the app.
     static DATA_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+
+    /// `AndroidApp::external_data_path()` (`/sdcard/Android/data/<package>/files`), where
+    /// `adb push` and `adb pull` reach without a debuggable build: the operator's side of
+    /// pairing. `None` when the device has no external storage.
+    static EXTERNAL_DIRECTORY: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    /// The file in the external (or, failing that, internal) data directory that lists the
+    /// endpoint tickets of the nodes this phone dials, one per line.
+    const BOOTSTRAP_FILE: &str = "bootstrap.txt";
+
+    /// The file this phone's node writes its own endpoint ticket to at boot, for the operator to
+    /// put in the other node's bootstrap list.
+    const ADDRESS_FILE: &str = "node-address.txt";
+
+    /// The phone's node, booted once for the process. Android has no second process to hold a
+    /// node, so the app is the holder, and it lives as long as the process does: there is no
+    /// activity-destroy hook that could stop it in order, and the OS reclaims the process.
+    static NODE: OnceCell<dayframe_node::NodeComposition> = OnceCell::const_new();
 
     /// The packages `x/dayframe.ts android` stages into `packages/` before the build. `dx`
     /// copies a folder asset into the APK's `assets/` keeping the file names, which is the only
@@ -46,12 +66,13 @@ mod android {
         DATA_DIRECTORY
             .set(data_directory.clone())
             .expect("android_main runs once");
+        EXTERNAL_DIRECTORY
+            .set(app.external_data_path())
+            .expect("android_main runs once");
         // Android has no `$HOME` or XDG cache for Wasmtime to find, so without this every process
         // start recompiles every guest (6.5 s for a debug counter on a ZTE 8050). The artifacts
         // are regenerable, so they sit under the internal data dir and go with the app.
-        dayframe_native::set_component_cache_directory(
-            data_directory.join("component-cache"),
-        );
+        dayframe_native::set_component_cache_directory(data_directory.join("component-cache"));
         register_back_callback(&app);
         dioxus_native::set_android_app(app);
         dioxus::launch(App);
@@ -102,12 +123,53 @@ mod android {
         })
     }
 
-    async fn load() -> Result<dayframe_native::CompositionRuntime, String> {
-        let store_path = DATA_DIRECTORY
+    /// Boots the phone's node under `<data>/node` with one actor per package micro, dialing the
+    /// tickets in the pairing files and publishing its own ticket beside them. A node that
+    /// cannot boot is a failure the launcher shows: the micros' node access is part of what the
+    /// app is.
+    async fn boot_node(
+        data_directory: &std::path::Path,
+        installs: Vec<dayframe_node::MicroInstall>,
+    ) -> Result<dayframe_node::NodeComposition, String> {
+        let pairing_directories: Vec<&std::path::Path> = EXTERNAL_DIRECTORY
             .get()
-            .expect("android_main sets the data directory before launching")
-            .join("store.sqlite");
-        let store = dayframe_native::open_store(&store_path).await?;
+            .and_then(Option::as_deref)
+            .into_iter()
+            .chain([data_directory])
+            .collect();
+        let mut bootstrap = Vec::new();
+        for directory in &pairing_directories {
+            bootstrap.extend(
+                dayframe_node::read_tickets(&directory.join(BOOTSTRAP_FILE))
+                    .map_err(|error| format!("cannot read the bootstrap tickets: {error:#}"))?,
+            );
+        }
+        let node = dayframe_node::NodeComposition::boot(dayframe_node::NodeConfig {
+            root: data_directory.join("node"),
+            bootstrap,
+            // No micro on the phone reads a datum yet; the intxt review micro's Lexicons go here.
+            schemas: Arc::new(
+                big_cabinet::SchemaRepo::open(std::iter::empty())
+                    .expect("no registrations is a valid schema repo"),
+            ),
+            installs,
+        })
+        .await
+        .map_err(|error| format!("cannot boot the node: {error:#}"))?;
+        let address = node.address();
+        for directory in pairing_directories {
+            let path = directory.join(ADDRESS_FILE);
+            std::fs::write(&path, &address)
+                .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        }
+        Ok(node)
+    }
+
+    async fn load() -> Result<dayframe_native::CompositionRuntime, String> {
+        let data_directory = DATA_DIRECTORY
+            .get()
+            .expect("android_main sets the data directory before launching");
+        let store = dayframe_native::open_store(&data_directory.join("store.sqlite")).await?;
         let mut packages = Vec::new();
         let mut errors = Vec::new();
         for name in PACKAGE_NAMES {
@@ -116,11 +178,17 @@ mod android {
                 Err(error) => errors.push(error),
             }
         }
+        let installs =
+            dayframe_node::MicroInstall::interim(dayframe_native::package_micro_ids(&packages));
+        let node = NODE
+            .get_or_try_init(|| boot_node(data_directory, installs))
+            .await?;
         dayframe_native::native_runtime(
             Arc::new(store),
             packages,
             errors,
             dayframe_native::wasmtime_engine,
+            &|micro| node.egress(micro),
         )
         .await
         .map_err(|error| format!("cannot load the store: {error}"))

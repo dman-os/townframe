@@ -3,6 +3,7 @@ role = "application"
 dependency_reason = "dayframe microkernel layering: the native-engine half of the composition root (Wasmtime, SQLite, linked built-ins) shared by the desktop and mobile shells"
 allowed_dependencies = [
     "clay_docs",
+    "clay_guest_session",
     "clay_host",
     "clay_mdk",
     "clay_store",

@@ -3,11 +3,12 @@
 //! demo seed (ADR 018 §7). A shell supplies only what differs per platform: where the store
 //! file lives and where package bytes come from (a scanned directory on desktop, the APK's
 //! assets on Android).
+use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
-use clay_mdk::host::factory;
 use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
+use clay_mdk::host::factory;
 use clay_store::OrderedStore;
 #[cfg(feature = "blitz")]
 use dayframe_composition::Application;
@@ -144,6 +145,7 @@ pub trait PackageEngine:
         clay_mdk::MicroId,
         clay_mdk::MicroManifest,
         CollectionBindings,
+        Option<Arc<dyn DispatchEgress>>,
         Vec<u8>,
     ) -> Rc<dyn Factory<CapabilityPublication>>
     + Clone
@@ -157,6 +159,7 @@ impl<F> PackageEngine for F where
             clay_mdk::MicroId,
             clay_mdk::MicroManifest,
             CollectionBindings,
+            Option<Arc<dyn DispatchEgress>>,
             Vec<u8>,
         ) -> Rc<dyn Factory<CapabilityPublication>>
         + Clone
@@ -173,21 +176,45 @@ pub fn wasmtime_engine(
     id: clay_mdk::MicroId,
     manifest: clay_mdk::MicroManifest,
     bindings: CollectionBindings,
+    egress: Option<Arc<dyn DispatchEgress>>,
     bytes: Vec<u8>,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    // No micro has a `dispatch.local` egress until the composition boots the node and supplies one
-    // per micro (Clay on the node §3).
-    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, None, move || {
+    clay_mdk::host::wasm_factory(resources, id, manifest, bindings, egress, move || {
         let bytes = bytes.clone();
         async move { clay_mdk::host::WasmPackage::from_bytes(bytes).await }
     })
 }
+
+/// The ids (`<did>/<name>`) of the micros `packages` install, for a composition that opens one
+/// node actor per micro. A package that does not parse is skipped here, and reported by
+/// [`native_runtime`].
+pub fn package_micro_ids(packages: &[PackageFiles]) -> Vec<String> {
+    packages
+        .iter()
+        .filter_map(|files| {
+            // Only the identity is wanted, so the component bytes are not copied in.
+            clay_mdk::package::Package::from_json(
+                clay_mdk::LOCAL_NAMESPACE,
+                &files.manifest_json,
+                Vec::new(),
+            )
+            .ok()
+            .map(|package| package.id().as_str().to_owned())
+        })
+        .collect()
+}
+
+/// The `dispatch.local` egress a composition holds for a micro, by its id text (`<did>/<name>`):
+/// `None` for a micro with no node access. A host with no node (desktop today) answers `None` for
+/// every micro, so none can call a node method (Clay on the node §3).
+pub type MicroEgresses<'a> = &'a dyn Fn(&str) -> Option<Arc<dyn DispatchEgress>>;
 
 /// Parse each package and make it a catalog entry run by `engine`. An unparseable package is
 /// reported per entry and never stops the shell.
 fn package_micros(
     packages: Vec<PackageFiles>,
     engine: impl PackageEngine,
+    egresses: MicroEgresses<'_>,
 ) -> (Vec<InstalledMicro>, Vec<String>) {
     let mut installed = Vec::new();
     let mut errors = Vec::new();
@@ -201,12 +228,20 @@ fn package_micros(
             Ok(package) => {
                 let sidecar = package.sidecar().clone();
                 let bytes = package.bytes().to_vec();
+                let egress = egresses(package.id().as_str());
                 let engine = engine.clone();
                 let micro = InstalledMicro::new(
                     package.id().clone(),
                     sidecar.clone(),
                     move |id, resources, bindings| {
-                        engine(resources, id, sidecar.manifest, bindings, bytes)
+                        engine(
+                            resources,
+                            id,
+                            sidecar.manifest,
+                            bindings,
+                            egress.clone(),
+                            bytes,
+                        )
                     },
                 )
                 // A package may require the shell's publications (the layout's app bar
@@ -229,15 +264,17 @@ fn package_micros(
 /// Assemble the native composition over `store` with `packages` installed beside the linked
 /// built-ins. `package_errors` are the shell's own discovery failures (an unreadable
 /// directory, a missing asset), reported beside the parse failures. Async because durable
-/// collections load before they report bootstrap, which parks on a disk-backed store.
+/// collections load before they report bootstrap, which parks on a disk-backed store. `egresses`
+/// is each package micro's node access (see [`MicroEgresses`]).
 pub async fn native_runtime<St: OrderedStore + Send + Sync + 'static>(
     store: Arc<St>,
     packages: Vec<PackageFiles>,
     package_errors: Vec<String>,
     engine: impl PackageEngine,
+    egresses: MicroEgresses<'_>,
 ) -> Result<CompositionRuntime, clay_store::StoreError> {
     let mut installed = native_micros();
-    let (packages, errors) = package_micros(packages, engine);
+    let (packages, errors) = package_micros(packages, engine, egresses);
     installed.extend(packages);
     let mut runtime = CompositionRuntime::new(store, installed).await?;
     runtime.installation_errors.extend(package_errors);

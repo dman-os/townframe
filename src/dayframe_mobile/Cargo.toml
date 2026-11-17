@@ -12,7 +12,7 @@ anyrender_skia = { version = "0.11.0" }
 anyrender_vello = { version = "0.14.0" }
 anyrender_vello_cpu = { version = "0.17.0" }
 anyrender_vello_hybrid = { version = "0.10.0" }
-tokio = { version = "1", features = ["time", "rt"] }
+tokio = { version = "1", features = ["time", "rt", "sync"] }
 
 [features]
 default = ["desktop"]
@@ -22,6 +22,11 @@ mobile = ["dioxus/mobile"]
 desktop = ["dioxus/native"]
 
 [target.'cfg(target_os = "android")'.dependencies]
+#
+# internal
+big_cabinet = { workspace = true }
+dayframe_node = { workspace = true }
+
 # The composition (Wasmtime, SQLite) is only built for the target that runs it.
 dayframe_native = { workspace = true, features = ["blitz"] }
 android-activity = { version = "0.6", features = ["native-activity"] }

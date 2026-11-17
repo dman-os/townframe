@@ -10,7 +10,7 @@ allowed_dependencies = [
     "big_dispatch_core",
     "big_node",
     "big_nodule_core",
-    "big_repo",
+    "day_node",
     "intxt_capture",
     "intxt_core",
     "method_core",
@@ -18,7 +18,6 @@ allowed_dependencies = [
     "service_client_core_rs",
     "service_utils_rs",
     "short_ids",
-    "sqlite_rs",
     "utils_rs",
 ]
 allow_external_api_types = false
