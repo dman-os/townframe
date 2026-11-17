@@ -248,6 +248,10 @@ pub fn PrCodeView(options: DiffOptions, virtualized: Virtualization) -> Element 
 /// The ids of the PR's files as `&'static str`, for the index, which takes static labels. The
 /// diff is the process's (`PR_DIFF`), and the ids are derived from it, so they are leaked once
 /// per process instead of once per mount.
+/// Whether the PR view shows an `ArcIndex` of its files. Off for now (operator, 2026-11-17): with PR #84's
+/// 599 files the index is too slow to use; the wiring stays so it can come back once `ArcIndex` scales.
+const FILE_INDEX: bool = false;
+
 fn file_labels(files: &[CodeViewFile<()>]) -> &'static [&'static str] {
     static LABELS: OnceLock<Vec<&'static str>> = OnceLock::new();
     let labels = LABELS.get_or_init(|| {
@@ -348,14 +352,16 @@ fn PrCodeFiles(
                     on_top_file: top_file,
                 }
             }
-            ArcIndex {
-                viewport: (viewport(), 860.0),
-                items: labels.to_vec(),
-                current: Some(current()),
-                on_select: move |index: usize| {
-                    *serial.write() += 1;
-                    reveal.set(Some(ScrollRequest::to_file(serial(), labels[index])));
-                },
+            if FILE_INDEX {
+                ArcIndex {
+                    viewport: (viewport(), 860.0),
+                    items: labels.to_vec(),
+                    current: Some(current()),
+                    on_select: move |index: usize| {
+                        *serial.write() += 1;
+                        reveal.set(Some(ScrollRequest::to_file(serial(), labels[index])));
+                    },
+                }
             }
         }
     }
