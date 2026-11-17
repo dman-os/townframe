@@ -20,6 +20,8 @@
 
 #![cfg(test)]
 
+mod intxt;
+
 mod library {
     use crate::client::Mode;
     use crate::client::NodeClient;
@@ -34,7 +36,7 @@ mod library {
     use method_core::Method;
     use tokio::sync::oneshot;
 
-    fn connect(dir: &NodeDir) -> impl Future<Output = Res<NodeClient>> {
+    pub(super) fn connect(dir: &NodeDir) -> impl Future<Output = Res<NodeClient>> {
         NodeClient::connect(dir, crate::client::CONNECT_DEADLINE)
     }
 
@@ -49,7 +51,7 @@ mod library {
 
     /// An initialized node whose socket directory is `<sandbox>/run`, so no test touches the
     /// real runtime directory.
-    fn new_node() -> (tempfile::TempDir, NodeDir) {
+    pub(super) fn new_node() -> (tempfile::TempDir, NodeDir) {
         let tmp = short_tempdir();
         let dir = NodeDir::with_socket_dir(tmp.path().join("node"), tmp.path().join("run"));
         dir.init().unwrap();
@@ -218,6 +220,7 @@ mod library {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_file_round_trips_as_raw_bytes_in_process_and_over_the_daemon() {
         use crate::client::Raw;
+        use crate::client::Upload;
         use method_core::HttpMethod::Get;
         use method_core::HttpMethod::Post;
         const MINT: &str = "org.example.daybook.blobs.mintCapability";
@@ -245,7 +248,7 @@ mod library {
                     Post,
                     &json!({ "capability": put }),
                     Raw {
-                        upload: Some(&upload),
+                        upload: Some(Upload::File(&upload)),
                         ..Default::default()
                     },
                 )
@@ -863,6 +866,60 @@ mod blackbox {
     #[test]
     fn daemon_cases() {
         run_cases("daemon");
+    }
+
+    /// An installed intxt handler remains callable from fresh CLI processes and after daemon restarts.
+    #[test]
+    fn installed_intxt_serves_calls_from_later_processes() {
+        let sandbox = Sandbox::new();
+        let text = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr)
+        };
+        let handler = super::intxt::guest_path();
+        let handler = handler.to_str().expect("the handler path is valid UTF-8");
+
+        let initialized = sandbox.day(&["node", "init"]);
+        assert!(initialized.status.success(), "{}", text(&initialized));
+
+        let installed = sandbox.day(&["x", "intxt", "install", "--handler", handler]);
+        assert!(installed.status.success(), "{}", text(&installed));
+
+        let create = |title: &str| {
+            let input = serde_json::to_string(&json!({"title": title})).unwrap();
+            let output = sandbox.day(&["x", "org.example.intxt.createIntxt", &input]);
+            assert!(output.status.success(), "{}", text(&output));
+            let answer: serde_json::Value =
+                serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                    panic!("invalid createIntxt output: {error}; {}", text(&output))
+                });
+            let drawer_id = answer
+                .get("drawerId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| {
+                    panic!("createIntxt did not print a drawer id: {}", text(&output))
+                });
+            assert!(
+                !drawer_id.is_empty(),
+                "createIntxt printed an empty drawer id"
+            );
+        };
+
+        create("fresh process");
+
+        let started = sandbox.day(&["node", "start"]);
+        assert!(started.status.success(), "{}", text(&started));
+        create("daemon process");
+
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
+
+        let restarted = sandbox.day(&["node", "start"]);
+        assert!(restarted.status.success(), "{}", text(&restarted));
+        create("restarted daemon process");
+
+        let stopped = sandbox.day(&["node", "stop"]);
+        assert!(stopped.status.success(), "{}", text(&stopped));
     }
 
     /// Parallel commands against one node (as a capture hook firing several times at once does)

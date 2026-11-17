@@ -13,8 +13,8 @@
 //!   routing, admission and the error mapping are not reimplemented here. After its command the
 //!   holder stays up until the last client has disconnected.
 //!
-//! Commands see only [`NodeClient::call`]; the mode is a fact they can report, not a branch they
-//! take.
+//! Commands see only [`NodeClient::call`], or `&NodeClient` as an `HttpTransport` for a typed
+//! client (intxt's recorder); the mode is a fact they can report, not a branch they take.
 
 use crate::context::Booted;
 use crate::context::LockRole;
@@ -33,6 +33,12 @@ use service_utils_rs::Body;
 use big_dispatch::Edge;
 use method_core::HttpMethod;
 use serde_json::Value;
+use service_client_core_rs::xrpc::HttpTransport;
+use service_client_core_rs::xrpc::HttpTransportError;
+use service_client_core_rs::xrpc::XrpcBody;
+use service_client_core_rs::xrpc::XrpcRequest;
+use service_client_core_rs::xrpc::XrpcResponse;
+use std::pin::Pin;
 use tower::ServiceExt;
 
 /// The bound on one request or response body, the same as the listener's.
@@ -73,13 +79,22 @@ impl Mode {
 /// bytes, which moves neither as JSON.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Raw<'a> {
-    /// A file streamed as the raw request body, so a procedure's input is never held whole.
-    pub upload: Option<&'a std::path::Path>,
+    /// The raw request body.
+    pub upload: Option<Upload<'a>>,
     /// The value of a `Range` request header, for a method that serves part of its answer.
     pub range: Option<&'a str>,
     /// Where an answer that is bytes is streamed to. An answer that is JSON, such as a method's
     /// own error, is returned as the [`Reply`] whatever this says.
     pub download: Option<&'a std::path::Path>,
+}
+
+/// Where the raw request body of a byte-bodied call comes from.
+#[derive(Debug, Clone, Copy)]
+pub enum Upload<'a> {
+    /// A file, streamed so a procedure's input is never held whole.
+    File(&'a std::path::Path),
+    /// Bytes the caller already holds.
+    Bytes(&'a [u8]),
 }
 
 /// What the node answered: the HTTP status and the JSON body, whatever the transport. A
@@ -112,11 +127,6 @@ pub struct NodeClient {
     transport: Transport,
     mode: Mode,
     #[cfg(unix)]
-    // The descriptor client API is shared by commands added on top of NodeClient.
-    #[expect(
-        dead_code,
-        reason = "descriptor socket is used by native command integrations"
-    )]
     fd_socket: Option<std::path::PathBuf>,
     socket: SocketState,
 }
@@ -211,6 +221,15 @@ impl NodeClient {
         }
     }
 
+    /// The node this client booted, for tests that need what the socket does not expose.
+    #[cfg(test)]
+    pub(crate) fn booted_node(&self) -> &big_node::BigNode {
+        match &self.transport {
+            Transport::Holder(running) => &running.0.node,
+            Transport::Socket(_) => panic!("the node is held by another process"),
+        }
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -227,40 +246,74 @@ impl NodeClient {
     /// Lexicon `parameters` take. The node holds the verb to the method's kind.
     pub async fn call(&self, nsid: &str, verb: HttpMethod, input: &Value) -> Res<Reply> {
         ensure_nsid(nsid)?;
+        let request = match verb {
+            HttpMethod::Post => {
+                let mut headers = http::HeaderMap::new();
+                headers.insert(
+                    http::header::CONTENT_TYPE,
+                    http::HeaderValue::from_static("application/json"),
+                );
+                XrpcRequest {
+                    method: http::Method::POST,
+                    path: format!("xrpc/{nsid}"),
+                    headers,
+                    body: XrpcBody::json(serde_json::to_vec(input)?),
+                }
+            }
+            HttpMethod::Get => XrpcRequest {
+                method: http::Method::GET,
+                path: format!(
+                    "xrpc/{nsid}?{}",
+                    serde_urlencoded::to_string(query_pairs(input)?)?
+                ),
+                headers: http::HeaderMap::new(),
+                body: XrpcBody::json(Vec::new()),
+            },
+        };
+        let response = self.exchange(request).await?;
+        Ok(Reply {
+            status: response.status.as_u16(),
+            body: serde_json::from_slice(&json_bytes(response.body)?)?,
+        })
+    }
+
+    /// Sends one encoded request to the node: over the daemon's socket, or through the router the
+    /// client serves itself. The one place either transport is spoken, for [`Self::call`] and
+    /// for typed clients over [`HttpTransport`].
+    async fn exchange(&self, request: XrpcRequest) -> Res<XrpcResponse> {
+        let body = json_bytes(request.body)?;
         match &self.transport {
             Transport::Socket(http) => {
-                let url = format!("http://localhost/xrpc/{nsid}");
-                let request = match verb {
-                    HttpMethod::Post => http.post(url).json(input),
-                    HttpMethod::Get => http.get(url).query(&query_pairs(input)?),
-                };
-                let response = request.send().await?;
-                Ok(Reply {
-                    status: response.status().as_u16(),
-                    body: response.json().await?,
+                let response = http
+                    .request(request.method, format!("http://localhost/{}", request.path))
+                    .headers(request.headers)
+                    .body(body)
+                    .send()
+                    .await?;
+                Ok(XrpcResponse {
+                    status: response.status(),
+                    headers: response.headers().clone(),
+                    body: XrpcBody::json(response.bytes().await?),
                 })
             }
             Transport::Holder(running) => {
-                let router = running.1.clone();
-                let request = match verb {
-                    HttpMethod::Post => http::Request::post(format!("/xrpc/{nsid}"))
-                        .header(http::header::CONTENT_TYPE, "application/json")
-                        .body(axum::body::Body::from(serde_json::to_vec(input)?))?,
-                    HttpMethod::Get => http::Request::get(format!(
-                        "/xrpc/{nsid}?{}",
-                        serde_urlencoded::to_string(query_pairs(input)?)?
-                    ))
-                    .body(axum::body::Body::empty())?,
-                };
-                let response = router
-                    .oneshot(request)
+                let mut builder = http::Request::builder()
+                    .method(request.method)
+                    .uri(format!("/{}", request.path));
+                *builder
+                    .headers_mut()
+                    .expect("a builder with a valid method and URI has headers") = request.headers;
+                let response = running
+                    .1
+                    .clone()
+                    .oneshot(builder.body(axum::body::Body::from(body))?)
                     .await
                     .unwrap_or_else(|never| match never {});
-                let status = response.status().as_u16();
-                let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES).await?;
-                Ok(Reply {
-                    status,
-                    body: serde_json::from_slice(&bytes)?,
+                let (parts, body) = response.into_parts();
+                Ok(XrpcResponse {
+                    status: parts.status,
+                    headers: parts.headers,
+                    body: XrpcBody::json(axum::body::to_bytes(body, MAX_BODY_BYTES).await?),
                 })
             }
         }
@@ -281,12 +334,20 @@ impl NodeClient {
         use tokio::io::AsyncWriteExt;
         ensure_nsid(nsid)?;
         let query = query_pairs(params)?;
+        // Either source is sent as a stream of chunks, so the two transports below share one path.
         let upload = match raw.upload {
-            Some(path) => Some(
-                tokio::fs::File::open(path)
+            Some(Upload::File(path)) => {
+                let file = tokio::fs::File::open(path)
                     .await
-                    .wrap_err_with(|| format!("opening {}", path.display()))?,
-            ),
+                    .wrap_err_with(|| format!("opening {}", path.display()))?;
+                Some(tokio_util::io::ReaderStream::new(
+                    Box::pin(file) as Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>
+                ))
+            }
+            Some(Upload::Bytes(bytes)) => Some(tokio_util::io::ReaderStream::new(Box::pin(
+                std::io::Cursor::new(bytes.to_vec()),
+            )
+                as Pin<Box<dyn tokio::io::AsyncRead + Send + Sync>>)),
             None => None,
         };
         let header = |headers: &http::HeaderMap, name: http::HeaderName| {
@@ -303,12 +364,10 @@ impl NodeClient {
                     HttpMethod::Get => http.get(url),
                 }
                 .query(&query);
-                if let Some(file) = upload {
+                if let Some(chunks) = upload {
                     request = request
                         .header(http::header::CONTENT_TYPE, "application/octet-stream")
-                        .body(reqwest::Body::wrap_stream(
-                            tokio_util::io::ReaderStream::new(file),
-                        ));
+                        .body(reqwest::Body::wrap_stream(chunks));
                 }
                 if let Some(range) = raw.range {
                     request = request.header(http::header::RANGE, range);
@@ -338,10 +397,10 @@ impl NodeClient {
                     request = request.header(http::header::RANGE, range);
                 }
                 let body = match upload {
-                    Some(file) => {
+                    Some(chunks) => {
                         request =
                             request.header(http::header::CONTENT_TYPE, "application/octet-stream");
-                        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file))
+                        axum::body::Body::from_stream(chunks)
                     }
                     None => axum::body::Body::empty(),
                 };
@@ -407,11 +466,6 @@ impl NodeClient {
     }
     /// Sends a descriptor batch to `blobs.importFile`, preserving one result per path.
     #[cfg(unix)]
-    // The descriptor import entry point is consumed by command integrations.
-    #[expect(
-        dead_code,
-        reason = "descriptor import is used by native command integrations"
-    )]
     pub async fn import_files(
         &self,
         operation: &str,
@@ -488,6 +542,28 @@ impl NodeClient {
                 booted.stop().await
             }
         }
+    }
+}
+
+/// The node as a transport for typed clients (`service_client_core_rs`): what a command that
+/// makes many dependent calls (intxt's recorder) is built over, with the node's operator as the
+/// caller, so it presents no capability of its own.
+impl HttpTransport for &NodeClient {
+    async fn send(&self, request: XrpcRequest) -> Result<XrpcResponse, HttpTransportError> {
+        self.exchange(request)
+            .await
+            .map_err(|error| HttpTransportError {
+                message: format!("{error:#}"),
+            })
+    }
+}
+
+/// The bytes of a JSON body: the node client's `exchange` carries JSON messages only. A byte body
+/// goes through [`NodeClient::call_raw`], which streams it, so one here is a caller's mistake.
+fn json_bytes(body: XrpcBody) -> Res<Vec<u8>> {
+    match body {
+        XrpcBody::Json(bytes) => Ok(bytes),
+        XrpcBody::Bytes(_) => eyre::bail!("a byte body goes through NodeClient::call_raw"),
     }
 }
 

@@ -1,0 +1,242 @@
+[
+  {
+    "name": "no block",
+    "description": "Just a description.\n\nWith two paragraphs.\n",
+    "links": {
+      "intxts": []
+    }
+  },
+  {
+    "name": "an empty description",
+    "description": "",
+    "links": {
+      "intxts": []
+    }
+  },
+  {
+    "name": "one intxt",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a block plus other markdown",
+    "description": "## Summary\n\nPorts the sync.\n\n- one\n- two\n\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>\n\nFooter text.\n",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "title, refs and several intxts in order",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx|zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP\",\n      \"title\": \"intxt: commits live with the intxt\",\n      \"refs\": [\n        \"refs/heads/stack/intxt-16-capture-records-commits\"\n      ]\n    },\n    {\n      \"ref\": \"dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\",\n      \"title\": \"review micro\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx|zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP",
+          "title": "intxt: commits live with the intxt",
+          "refs": [
+            "refs/heads/stack/intxt-16-capture-records-commits"
+          ]
+        },
+        {
+          "ref": "dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "title": "review micro"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a via with several nodes, sorted on write",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP|zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx|zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a pin and a via",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?heads=z4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw&via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?heads=z4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw&via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+        }
+      ]
+    }
+  },
+  {
+    "name": "two details, only one with the type",
+    "description": "<details>\n<summary>other</summary>\n\n```json\n{\n  \"$type\": \"org.example.other\",\n  \"items\": [\n    1\n  ]\n}\n```\n\n</details>\n\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>\n",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a details with a json block that has no type",
+    "description": "<details>\n<summary>data</summary>\n\n```json\n{\n  \"x\": 1\n}\n```\n\n</details>\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "a details with a block that is not json",
+    "description": "<details>\n<summary>notes</summary>\n\n```json\n// not json at all\n```\n\n</details>\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "the wrong type",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.other\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": []
+    }
+  },
+  {
+    "name": "the first matching block wins",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx\"\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "unknown fields are carried",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"ticket\": {\n    \"id\": 7\n  },\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\",\n      \"note\": \"later\",\n      \"extra\": [\n        1,\n        2\n      ]\n    }\n  ]\n}\n```\n\n</details>",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "note": "later",
+          "extra": [
+            1,
+            2
+          ]
+        }
+      ],
+      "ticket": {
+        "id": 7
+      }
+    }
+  },
+  {
+    "name": "crlf line endings",
+    "description": "<details>\r\n<summary>intxt</summary>\r\n\r\n```json\r\n{\r\n  \"$type\": \"org.example.intxt.prLinks\",\r\n  \"intxts\": [\r\n    {\r\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\r\n    }\r\n  ]\r\n}\r\n```\r\n\r\n</details>\r\n",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "crlf around the block",
+    "description": "Text\r\n\r\n<details>\r\n<summary>intxt</summary>\r\n\r\n```json\r\n{\r\n  \"$type\": \"org.example.intxt.prLinks\",\r\n  \"intxts\": [\r\n    {\r\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx|zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP\",\r\n      \"title\": \"intxt: commits live with the intxt\",\r\n      \"refs\": [\r\n        \"refs/heads/stack/intxt-16-capture-records-commits\"\r\n      ]\r\n    }\r\n  ]\r\n}\r\n```\r\n\r\n</details>\r\n\r\nMore\r\n",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=zUS517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx|zEWn7dE93GeQJu72WEkEmC5MZpm5FhiJzkcJEf1xpRdWP",
+          "title": "intxt: commits live with the intxt",
+          "refs": [
+            "refs/heads/stack/intxt-16-capture-records-commits"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "a block that is not inside details is ignored",
+    "description": "```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n",
+    "links": {
+      "intxts": []
+    }
+  },
+  {
+    "name": "a details inside a code fence is ignored",
+    "description": "````markdown\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>\n````\n",
+    "links": {
+      "intxts": []
+    }
+  },
+  {
+    "name": "a details closed before the block is ignored",
+    "description": "<details>\n<summary>x</summary>\n</details>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n",
+    "links": {
+      "intxts": []
+    }
+  },
+  {
+    "name": "a nested details",
+    "description": "<details>\n<summary>outer</summary>\n\n<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n\n</details>\n\n</details>\n",
+    "links": {
+      "intxts": [
+        {
+          "ref": "dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+        }
+      ]
+    }
+  },
+  {
+    "name": "bad json",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n\n```\n\n</details>",
+    "error": true
+  },
+  {
+    "name": "a missing ref",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"title\": \"no ref\"\n    }\n  ]\n}\n```\n\n</details>",
+    "error": true
+  },
+  {
+    "name": "a bad url",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:nope\"\n    }\n  ]\n}\n```\n\n</details>",
+    "error": true
+  },
+  {
+    "name": "a datum url is not a doc url",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:datum:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi/org.example.intxt/main\"\n    }\n  ]\n}\n```\n\n</details>",
+    "error": true
+  },
+  {
+    "name": "a malformed via",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi?via=\"\n    }\n  ]\n}\n```\n\n</details>",
+    "error": true
+  },
+  {
+    "name": "no intxts list",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\"\n}\n```\n\n</details>",
+    "error": true
+  },
+  {
+    "name": "a details never closed",
+    "description": "<details>\n<summary>intxt</summary>\n\n```json\n{\n  \"$type\": \"org.example.intxt.prLinks\",\n  \"intxts\": [\n    {\n      \"ref\": \"dtxt:doc:z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi\"\n    }\n  ]\n}\n```\n",
+    "error": true
+  }
+]
