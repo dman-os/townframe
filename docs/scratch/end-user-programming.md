@@ -121,3 +121,17 @@ audit and evaluate every public surface: versioning, compatibility rules, docume
 4. Tooling and the sandbox, once the language is committed. The Android sandbox needs a survey first.
 5. Permissions, after nodules' permission model.
 6. The public-surface audit, before launch.
+
+## Nodules' first positions (2026-11-17, not yet settled with the operator)
+
+- **Language runtimes:** an ADR 047 amendment adding a hosted component kind,
+  `#hosted { runtime: <cartridge>/js@1#component, sources: [datum pins], entry }`. The runtime cartridge is a
+  dependency with its own permbind. The build routine is an ordinary nodule routine. claytxt asked for a
+  working-copy state, so live edits don't need a new envelope each time: `sources` refers to a mutable drawer
+  until publish pins it.
+- **Datum-backed wasi:filesystem:** owned by nodules, on the cabinet/docs layer. It's the same seam as R19
+  (granted host directories for nodules), with one implementation serving both guest kinds.
+- **Forks:** identity per ADR 028; grants never widen silently. A substitution starts with the original's grants
+  narrowed to what the fork's manifest asks for; anything wider needs fresh consent. Lineage is a signed `lineage`
+  datum beside the envelope, pinned by it. Un-forking means substituting the base again.
+- **Sandbox egress:** uses the same grant vocabulary as micro and nodule egress.
