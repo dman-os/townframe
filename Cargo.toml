@@ -50,6 +50,7 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+  "./src/wire_surfaces",
   "./src/clay_surface",
   "./src/clay_host",
   "./src/clay_docs",
