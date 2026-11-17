@@ -482,36 +482,40 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
         IntxtCommands::Status => {
             with_packaging(async |packaging| packaging.status(&mut std::io::stdout()).await).await
         }
-        IntxtCommands::Install { handler } => {
-            let client = lazy::node().await?;
-            let wasm = std::fs::read(&handler)
-                .wrap_err_with(|| format!("reading the handler {}", handler.display()))?;
-            let caller = Caller::new(
-                &*client,
-                RequestContext::root(),
-                None,
-                "intxt-install".to_owned(),
-            );
-            let installed = intxt_core::install::install(&caller, &wasm).await?;
-            eyre::ensure!(
-                installed.record.readiness == Readiness::Ready,
-                "intxt is installed but not ready: {:?}",
-                installed.record.readiness
-            );
-            println!(
-                "{}",
-                if installed.already_installed {
-                    "intxt is already installed"
-                } else {
-                    "intxt is installed"
-                }
-            );
-            Ok(ExitCode::SUCCESS)
-        }
+        IntxtCommands::Install { handler } => install(&handler).await,
         IntxtCommands::Capture { verbose, command } => {
             capture::CaptureCommands::run(command, verbose).await
         }
     }
+}
+
+/// `day x intxt install`: reads the handler component at `handler` and installs it on the node
+/// through [`intxt_core::install::install`], then reports whether the executor loaded it.
+async fn install(handler: &std::path::Path) -> Res<ExitCode> {
+    let client = lazy::node().await?;
+    let wasm = std::fs::read(handler)
+        .wrap_err_with(|| format!("reading the handler {}", handler.display()))?;
+    let caller = Caller::new(
+        &*client,
+        RequestContext::root(),
+        None,
+        "intxt-install".to_owned(),
+    );
+    let installed = intxt_core::install::install(&caller, &wasm).await?;
+    eyre::ensure!(
+        installed.record.readiness == Readiness::Ready,
+        "intxt is installed but not ready: {:?}",
+        installed.record.readiness
+    );
+    println!(
+        "{}",
+        if installed.already_installed {
+            "intxt is already installed"
+        } else {
+            "intxt is installed"
+        }
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Runs a packaging verb against the node, in the current directory.
