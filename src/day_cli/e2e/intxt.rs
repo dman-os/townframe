@@ -86,7 +86,7 @@ pub(super) async fn read_at(
     let capability = doc_capability(
         client,
         DocScope {
-            read: [doc.clone()].into(),
+            read: DocScope::read_all([doc.clone()]),
             ..DocScope::default()
         },
     )
