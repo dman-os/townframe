@@ -339,7 +339,7 @@ impl Packaging<'_> {
         }
 
         Ok(Outcome::Applied(
-            self.apply_plan(&drawer, &intxts, &view, &keys, &plan, &resolved, dry_run)
+            self.apply_plan((&drawer, &intxts), &view, &keys, &plan, &resolved, dry_run)
                 .await?,
         ))
     }
@@ -351,8 +351,7 @@ impl Packaging<'_> {
     /// change the intxt's heads and would make it stale.
     async fn apply_plan(
         &self,
-        drawer: &DrawerId,
-        intxts: &ShortIds<String>,
+        (drawer, intxts): (&DrawerId, &ShortIds<String>),
         view: &View,
         keys: &[(String, DatumKey)],
         plan: &EditPlan,
@@ -461,15 +460,13 @@ impl Packaging<'_> {
             added_undo.extend(added.undo);
         }
 
-        if set_back.title.is_some() || set_back.description.is_some() {
-            if !applied.dry_run {
-                // The base the intxt stands at after the writes above.
-                set_back.base = base_of(&self.load(drawer).await?);
-                let line = serde_json::to_string(&set_back)?.replace('\'', "'\\''");
-                undo.push(format!(
-                    "echo '{line}' | day x intxt edit {short} --apply -"
-                ));
-            }
+        if (set_back.title.is_some() || set_back.description.is_some()) && !applied.dry_run {
+            // The base the intxt stands at after the writes above.
+            set_back.base = base_of(&self.load(drawer).await?);
+            let line = serde_json::to_string(&set_back)?.replace('\'', "'\\''");
+            undo.push(format!(
+                "echo '{line}' | day x intxt edit {short} --apply -"
+            ));
         }
         undo.extend(added_undo);
         undo.extend(removals);
