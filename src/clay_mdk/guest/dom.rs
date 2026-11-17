@@ -51,7 +51,9 @@ impl ElementReplies {
         let id = self.next.get() + 1;
         self.next.set(id);
         let slot = std::rc::Rc::new(std::cell::RefCell::new(Reply::default()));
-        self.pending.borrow_mut().insert(id, slot.clone());
+        self.pending
+            .borrow_mut()
+            .insert(id, std::rc::Rc::clone(&slot));
         (id, ReplyFuture(slot))
     }
 }
@@ -627,7 +629,7 @@ impl GuestDom {
                 GuestElement {
                     surface: std::rc::Rc::downgrade(held),
                     element: event.element,
-                    replies: self.replies.clone(),
+                    replies: std::rc::Rc::clone(&self.replies),
                 },
             ))) as std::rc::Rc<dyn std::any::Any>
         } else {
