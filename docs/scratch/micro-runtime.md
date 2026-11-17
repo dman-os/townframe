@@ -1,6 +1,8 @@
 # Micro runtime and language (claytxt lane, ADR draft)
 
 Status: draft for the operator, 2026-11-17. The claytxt lane owns the micro-language decision (operator, 2026-11-17).
+The operator's first review (2026-11-17) is recorded under "Operator review" below. In short, TypeScript is the
+end-user default, Rust is first class, and the Clay-on-the-node API comes before the TS spike.
 Builds on `end-user-programming.md`. Evidence: `.claude/scratch/{ts-in-wasm-survey,spike-js-engine,spike-zena}.md`.
 
 ## Context
@@ -51,13 +53,44 @@ language separately.
 - **Web:** the same engine component runs through wcmp in the browser. The browser's own JS engine is not used
   for micros, which keeps one sandbox model; revisit if web performance demands it.
 
+## Operator review (2026-11-17)
+
+- **TypeScript is the default** for end-user programmability, and for daytxt, where most end-user malleability is
+  expected. **Rust is first class too.** intxt is a separate product and ships in Rust now, so it doesn't wait for
+  the TS runtime.
+- **The tiers are accepted**, and so is the roughly 1 MB per-micro baseline; memory can be optimized later.
+- **Host APIs follow WinterTC** (the former WinterCG, now Ecma TC55: the "Minimum Common Web Platform API" that
+  Deno, Cloudflare Workers, Bun and Node align on), wherever possible. That means `fetch`, `URL`, `TextEncoder`
+  and `TextDecoder`, streams, `AbortController`, timers, `crypto.getRandomValues`, `structuredClone` and
+  `console`. `fetch` is the `wasi:http` transport, so egress is limited to `dispatch.local` as for Rust micros
+  (`clay-on-the-node.md` §3). QuickJS ships none of these; the engine component provides them.
+- **The DOM layer must outlive any one framework.** The lasting contract is the presentation wire, not Solid. The
+  JS MDK exposes a small DOM-like node API over the wire: create, insert before an anchor, remove, set an attribute
+  or property, set text, listen. Solid's universal renderer, React's `react-reconciler` host config and Vue's
+  `createRenderer` are all thin adapters over that API. A framework that writes straight to `document` (Svelte, lit)
+  needs a DOM-subset shim over the same API. Solid is the default only because it emits the fewest mutations.
+- **The JSX compile step stays.** Any build step happens inside the language cartridge's build routine.
+- **Open question 1 (hot swap): re-instantiate.** The "snapshot" is the engine's memory after Wizer has run its
+  setup at build time (QuickJS booted, Solid and the MDK loaded), saved inside the component. Each instance starts
+  from that memory instead of redoing the setup, which is why instantiating takes about 0.3 ms. A hot swap throws the
+  instance away and starts fresh from the snapshot with the new user code. State that must survive an edit lives in
+  collections, which are already the place for live state.
+- **Open question 2 (npm): a traditional build step first.** npm packages are bundled at build time inside the
+  sandboxed build routine. Later this moves to Deno-style no-build imports (`npm:` and `jsr:` specifiers, possibly
+  through Deno's crates). That work must not block the first micros.
+- **Open question 3 (type checking): set aside.** Fast checkers (TypeScript's Go port, Rust experiments) can come
+  later.
+- **Order: Clay on the node first** (`clay-on-the-node.md`), so the micro API shape is settled before anything is
+  ported to TS. The `micro_counter` TS spike comes after it.
+
 ## Open questions
 
-1. Does a hot swap keep the snapshot's framework heap and reload only user modules, or re-instantiate from the
-   snapshot (about 2 ms either way in the spike)?
-2. npm dependencies: vendored as datums at build time (bundled), or a curated set inside the snapshot?
-3. Type checking on the phone: unmeasured. Is it needed on-device, or only where the editor runs?
+1. Answered: re-instantiate (see "Operator review").
+2. Answered: a build step first, no-build imports later.
+3. Set aside for now.
 4. Fuel: QuickJS interpreter steps versus wasm fuel. Which budget does a user see?
+5. The wire variant: should the presentation wire get explicit node ids (the form Solid, React and Vue renderers
+   address nodes by) as its main form, with Dioxus's stack-machine ops lowered onto it?
 
 ## First spike (proposed)
 

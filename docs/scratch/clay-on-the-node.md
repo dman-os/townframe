@@ -1,6 +1,9 @@
 # Clay on the node (claytxt lane, ADR draft)
 
-Status: draft, 2026-11-12. The operator answered both rounds on 2026-11-12 (recorded per section); remaining work is review of the whole.
+Status: draft, 2026-11-12. The operator answered both rounds on 2026-11-12 (recorded per section). The operator
+reviewed the whole on 2026-11-17 and likes it; §6 is now settled. Two conditions remain before it is accepted: it
+must work for TypeScript micros as well as Rust ones (see "TypeScript micros" in §3), and the nodules lane must
+sign it off, because the micro and nodule surfaces are meant to be as isomorphic as possible.
 Number: to be assigned when it moves to `docs/adrs/` (ADRs 029–031 are Clay's; the node lane is at
 045 on `feat/big-node-next`). The app this serves is **daytxt** (the user-facing name, spelled with TXT; "Dayframe"
 is free for other use).
@@ -83,6 +86,18 @@ through its host.**
 - The capability bank stays for micro-to-micro calls (publications, presentations). Node methods do
   not go through it.
 
+**TypeScript micros (operator, 2026-11-17: this must work for TS too).** The transport needs nothing
+TS-specific, because it is `wasi:http/client` to `dispatch.local`. The JS engine component exposes it as
+`fetch()`, with the same egress rule: any origin other than `dispatch.local` is refused. The typed layer is
+where the two languages differ:
+- Rust shares the `method_core::Method` types.
+- TS gets its request and response types generated from the same Lexicons (`method_lexicon`). So a method's
+  Lexicon is the single source for both clients, and a TS client is generated, never written by hand.
+- Docs layer 1 (§4) is specified as Lexicon methods plus a thin client, so its TS twin is generated too.
+
+What to check before acceptance: one Lexicon generates both the Rust and the TS client for a test method, and
+both make the same call over `dispatch.local`. That's part of the micro-transport lane below.
+
 ## 4. Documents: one shared layer, one micro-only layer
 
 **Decided in direction (operator, 2026-11-12): share document access and manipulation between
@@ -127,7 +142,22 @@ nodules and micros, but not the partial-sync collection machinery.**
   typed `MicroContribution` (its `component` artifact, `feat/cart-micros`) to load the component.
   This replaces the sidecar package directory.
 
-## 6. Desktop host shape (open: operator decides; data in)
+## 6. Desktop host shape (decided, operator 2026-11-17)
+
+**Decided (operator, 2026-11-17): most micros are wasm; out-of-process (IPC) micros are the exception.**
+- The data above settles it. Micros run as wasm everywhere: in the page on the web and on the Wry desktop (wcmp),
+  and under Wasmtime on Blitz/Android, which has neither V8 nor IPC. Wasmtime stays because it is how Blitz runs
+  micros.
+- Only micros that must reach platform-specific resources run as native (built-in) micros. On the Wry desktop
+  those cross IPC.
+- The operator calls this a forcing function: almost every micro has to be written portable, because it is
+  written for wasm, and a native micro has to justify its native resource (see "built-in micros" in the
+  micro-runtime ADR draft).
+- Still to do: decide where each micro is placed. Today's native micros (shell, settings, toolbar, sample, layout,
+  in `dayframe_desktop/composition.rs`) touch no native resource, so they all become wasm. Native candidates are
+  host services such as file pickers, notifications, clipboard, window management and the camera.
+
+The measurements that led to the decision:
 
 Dioxus desktop runs the Rust UI in the native process and the page in WebKitGTK's web process:
 every DOM event and every batch of edits crosses IPC (as in Tauri, whose Wry it uses). Dioxus web
@@ -151,7 +181,8 @@ Option: **the desktop daytxt host is a Wry window running the web build of the s
 the in-process node through Wry's custom protocol or localhost — exactly as the web host talks to
 its node (§1, §3). One UI build for desktop and web; native code only in the node; UI work never
 crosses IPC. Cost: window-level conveniences (native menus, window events, file pickers) go
-through a small host bridge. Android stays on Blitz (no IPC). Not decided; for the operator.
+through a small host bridge. Android stays on Blitz (no IPC). This option is what the 2026-11-17 decision above
+adopts.
 
 ## Work, once accepted
 
@@ -177,3 +208,10 @@ Dependency: the node lane's newer work (method routes, `day carts`, ADRs 037 and
 
 None from the first two rounds. The cartridge-level parent actor (§2) waits for the cartridge
 consent ADR.
+
+Before acceptance (2026-11-17):
+- **Nodules sign-off.** Pending: sent to the nodules lane on 2026-11-17.
+- **Placement list.** Which micros stay native under §6.
+
+Order (operator, 2026-11-17): this ADR is delivered before the TypeScript spike in `micro-runtime.md`, so the API
+shape is settled before it is ported to TS.
