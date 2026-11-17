@@ -262,7 +262,7 @@ fn a_close_started_inside_cleanup_recovers_dependents_before_their_provider() {
     let provider_for_cleanup = provider.clone();
     let host_in_cleanup = host.clone();
     let recovered = Arc::new(Mutex::new(Vec::new()));
-    let consumer_recovered = recovered.clone();
+    let consumer_recovered = Arc::clone(&recovered);
     host.own(
         &consumer,
         Box::new(move || {
@@ -274,7 +274,7 @@ fn a_close_started_inside_cleanup_recovers_dependents_before_their_provider() {
         }),
     )
     .unwrap();
-    let provider_recovered = recovered.clone();
+    let provider_recovered = Arc::clone(&recovered);
     let consumer_terminal = consumer_ended.clone();
     host.own(
         &provider,
@@ -502,7 +502,7 @@ fn run_host_script(ops: Vec<HostOp>) {
                 if let Some(model) = slots.get(&slot) {
                     if model.live() {
                         sequence += 1;
-                        let recorded = log.clone();
+                        let recorded = Arc::clone(&log);
                         let owner = model.instance.id;
                         host.own(
                             &model.instance,
@@ -711,7 +711,7 @@ type Events = Arc<Mutex<Vec<Lifecycle>>>;
 
 fn record_outward(host: &Host, instance: &Instance) -> (Lifecycle, Events) {
     let events = Events::default();
-    let recorded = events.clone();
+    let recorded = Arc::clone(&events);
     let current = host
         .on_outward(instance, move |lifecycle| {
             recorded.lock().unwrap().push(lifecycle)
@@ -784,7 +784,7 @@ async fn failed_initialization_never_reports_active_and_unwinds_owned_effects() 
     let result = host
         .initialize("failing", |instance| {
             let (_, events) = record_outward(&host, &instance);
-            let unwound = unwound.clone();
+            let unwound = Arc::clone(&unwound);
             host.own(&instance, Box::new(move || *unwound.lock().unwrap() = true))
                 .unwrap();
             observed = Some((instance, events));
@@ -828,7 +828,7 @@ fn committing_initialization_twice_is_an_invariant_failure() {
     let instance = host.create("twice").unwrap();
     host.begin_initialization(&instance).unwrap();
     host.commit_initialization(&instance).unwrap();
-    let _ = host.commit_initialization(&instance);
+    host.commit_initialization(&instance).unwrap();
 }
 
 #[test]

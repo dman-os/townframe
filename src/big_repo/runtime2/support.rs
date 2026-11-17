@@ -214,17 +214,11 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
     let cached = doc.fragments(1..);
     let loose = doc.fragments(0..=0);
     let cached_bytes = doc.bundle_fragments(cached.iter().cloned());
-    let snapshot_doc = doc.clone();
-    let snapshot = snapshot_doc.save();
 
     let mut blobs = Vec::with_capacity(cached.len() + loose.len());
     let mut fragment_entries = Vec::with_capacity(cached.len());
     let mut loose_entries = Vec::with_capacity(loose.len());
-    let mut covered: sedimentree_core::collections::Set<CommitId> = default();
     for (fragment, raw) in cached.iter().zip(cached_bytes) {
-        for member in &fragment.members {
-            covered.insert(CommitId::new(member.0));
-        }
         let head = CommitId::new(fragment.head.0);
         let boundary: BTreeSet<CommitId> = fragment
             .boundary
@@ -251,7 +245,11 @@ pub(crate) fn stage_automerge_ingest(doc: &automerge::Automerge) -> StagedAutome
             .iter()
             .map(|pp| CommitId::new(pp.0))
             .collect();
-        blobs.push(Blob::new(snapshot.clone()));
+        // A loose commit's blob is its own change: the cached fragments above
+        // carry everything they cover, and the loose commits carry the rest.
+        let mut change = automerge::ReadDoc::get_change_by_hash(doc, &fragment.head)
+            .expect("a loose fragment names a change of this document");
+        blobs.push(Blob::new(change.bytes().into_owned()));
         loose_entries.push(LooseEntry { head, parents });
     }
 

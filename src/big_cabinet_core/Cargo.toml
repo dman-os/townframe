@@ -13,10 +13,11 @@ crate-type = ["rlib"]
 
 [features]
 default = ["manifest"]
-schemars = ["dep:schemars", "datum_core/schemars"]
+schemars = ["dep:schemars", "datum_core/schemars", "method_core/schemars", "big_sync_core/schemars"]
 manifest = []
 
 [dependencies]
+method_core.workspace = true
 big_sync_core = { workspace = true, default-features = false }
 datum_core = { workspace = true, features = ["jiff", "automerge"] }
 utils_rs = { workspace = true, features = ["hash"] }
@@ -29,11 +30,10 @@ json-canon = "0.1.3"
 jiff.workspace = true
 # `datum::Extra` keeps the field order a peer sent; `serde_json::Map` is a `BTreeMap` here.
 indexmap = { version = "2", features = ["serde"] }
-schemars = { version = "1.2", features = ["jiff02", "indexmap2"], optional = true }
+schemars = { version = "1.2", features = ["jiff02", "indexmap2", "uuid1"], optional = true }
 thiserror.workspace = true
 jsonschema = { version = "0.42.0", default-features = false }
 displaydoc.workspace = true
-url.workspace = true
 unicode-properties = { version = "=0.1.1", default-features = false, features = ["general-category"] }
 unicode-segmentation = "=1.13.3"
 autosurgeon = { workspace = true, features = ["uuid"] }

@@ -612,6 +612,14 @@ impl<'a> Position<'a> {
                 },
             ));
         }
+        if let Some(form) = super::references::ReferenceForm::of(schema) {
+            // A reference def's position must parse as that form; its storage is the plain string
+            // or map the def states, so no codec applies.
+            if !(value.is_null() && type_mentions(schema, "null")) {
+                form.read(value).map_err(|err| at(path, err))?;
+            }
+            return Ok(());
+        }
         if let Some(codec) = Codec::of(schema).map_err(|err| at(path, err))? {
             // A `null` a declaration claims — the `None` of an option, whose `type` carries it —
             // belongs to the declaration and not to the codec, whose holds is schema-blind.
@@ -902,9 +910,13 @@ pub(super) enum Number {
 /// The kind of number a schema declares.
 ///
 /// JSON Schema already draws the distinction Automerge needs — `integer` and `number` are different
-/// types, and `format` states the width and the sign — so this needs no vocabulary of ours. The
-/// default for a bare `type: integer` is signed, because that type includes the negatives; a schema
-/// that means unsigned says `format: uint64`.
+/// types — and a lower bound draws the sign, so this needs no vocabulary of ours. An integer whose
+/// `minimum` is at least zero can never hold a negative, so it is an Automerge `Uint`, which is what
+/// `autosurgeon` reads a `u64` from; any other integer includes the negatives and is an `Int`, which
+/// is what it reads an `i64` from. `schemars` states `minimum: 0` for every unsigned Rust integer,
+/// so a Rust `u32`/`u64` field is a `Uint` with no width vocabulary at all. The rule is deliberately
+/// by value range and not by Rust type: a signed field that is bounded to `minimum >= 0` is stored
+/// as a `Uint`, and a Rust `i64` could not hydrate it.
 pub(super) fn number_kind(schema: Option<&Value>) -> Number {
     let Some(schema) = schema else {
         return Number::Token;
@@ -919,9 +931,9 @@ pub(super) fn number_kind(schema: Option<&Value>) -> Number {
     if !type_mentions(schema, "integer") {
         return Number::Token;
     }
-    match schema.get("format").and_then(Value::as_str) {
-        Some(format) if format.starts_with("uint") => Number::Unsigned,
-        _value => Number::Signed,
+    match schema.get("minimum").and_then(Value::as_i64) {
+        Some(minimum) if minimum >= 0 => Number::Unsigned,
+        _ => Number::Signed,
     }
 }
 

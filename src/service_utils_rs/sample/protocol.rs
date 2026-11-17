@@ -4,9 +4,9 @@
 //! Nothing here knows how the service is implemented. A consumer that only
 //! talks to the sample over IRPC or HTTP needs exactly this module.
 
-use crate::ContextError;
 use crate::HttpMetadata;
 use crate::RequestContext;
+use method_core::ContextError;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -48,7 +48,7 @@ pub struct GetValueOutput {
     pub observed_metadata: HttpMetadata,
 }
 
-crate::service_operation!(GetValue => GetValueOutput, SampleError, query("org.example.sample.getValue"));
+crate::service_method!(GetValue => GetValueOutput, SampleError, query("org.example.sample.getValue"));
 
 /// Procedure: write the source and wait until the projector has interpreted it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +61,7 @@ pub struct PutValueOutput {
     pub snapshot: ValueSnapshot,
 }
 
-crate::service_operation!(PutValue => PutValueOutput, SampleError, procedure("org.example.sample.putValue"));
+crate::service_method!(PutValue => PutValueOutput, SampleError, procedure("org.example.sample.putValue"));
 
 /// Query: the revisioned read a lagged observer uses to catch up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,7 +75,7 @@ pub struct StatePage {
     pub reset_required: bool,
 }
 
-crate::service_operation!(ReadState => StatePage, SampleError, query("org.example.sample.readState"));
+crate::service_method!(ReadState => StatePage, SampleError, query("org.example.sample.readState"));
 
 /// Subscription: interpreted-state changes after a source revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ pub struct SubscribeEvents {
     pub after_source_revision: u64,
 }
 
-crate::service_operation!(SubscribeEvents => stream SampleEvent, SampleError, "org.example.sample.subscribeEvents");
+crate::service_method!(SubscribeEvents => stream SampleEvent, SampleError, "org.example.sample.subscribeEvents");
 
 crate::service_protocol! {
     pub enum SampleProtocol => SampleMessage {

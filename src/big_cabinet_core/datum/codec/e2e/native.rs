@@ -532,7 +532,7 @@ fn a_keyed_map_stores_each_value_under_its_value_schema() {
                         "required": ["$bytes"],
                         "additionalProperties": false
                     },
-                    "ratio": {"type": "string", "x-automerge": "float", "format": "double"}
+                    "ratio": {"type": "string", "x-automerge": "float"}
                 },
                 "required": ["blob", "ratio"],
                 "additionalProperties": false
@@ -1009,7 +1009,7 @@ fn nested_changes_preserve_native_identity_metadata_and_conflicts() {
 
 #[test]
 fn float_noop_preserves_bits_and_conflicts() {
-    let float = json!({"type": "string", "x-automerge": "float", "format": "double"});
+    let float = json!({"type": "string", "x-automerge": "float"});
     let cases = [
         (float.clone(), 1.25, json!("1.25")),
         (float.clone(), 1.25, json!(1.25)),

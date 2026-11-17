@@ -1,8 +1,6 @@
 use super::serve::expected_peer_error;
 use axum::Router;
-pub use service_client_rs::xrpc::iroh::IROH_XRPC_HTTP_ALPN;
-use service_client_rs::xrpc::iroh::IrohHttpStream;
-pub use service_client_rs::xrpc::iroh::IrohXrpcClient;
+use service_client_native_rs::xrpc::iroh::IrohHttpStream;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::sync::watch;

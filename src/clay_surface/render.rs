@@ -110,7 +110,7 @@ impl<C: Clone> SurfaceTree<C> {
                                 listener_name,
                                 self.revision,
                                 guest_node_id,
-                                dispatch.clone(),
+                                std::rc::Rc::clone(dispatch),
                                 handles,
                             )
                             .expect("validated surface listener"),
@@ -521,7 +521,8 @@ macro_rules! expand_surface_event_listener {
         "null".to_owned()
     }};
     (@serialize $group:ident, $data:ident, $platform:expr, $element:expr, $handles:expr) => {{
-        let _ = (&$element, &$handles);
+        // Only `Mounted` events read the element handles; every other group ignores them.
+        let _: &ElementHandles = $handles;
         pastey::paste! {
             let platform: &PlatformEventData = $platform;
             if let Some(serialized) = platform.downcast::<dioxus_html::[<Serialized $data>]>() {

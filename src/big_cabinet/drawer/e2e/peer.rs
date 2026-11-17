@@ -10,12 +10,12 @@ use std::collections::HashSet;
 impl Node {
     /// Provision a standing grant the way an embedder does for its own actors, without going
     /// through `GrantDrawer` (which would need an Admin on this node).
-    async fn provision(&self, actor: &Actor, drawer: &DrawerId, access: Access) {
+    async fn provision(&self, actor: &OpenedActor, drawer: &DrawerId, access: Access) {
         self.core()
             .grants
             .grant(
                 &RequestContext::root(),
-                actor.actor_id,
+                actor.actor.actor_id,
                 DrawerAccess::object(access, drawer),
                 Rights::USE,
                 None,
@@ -131,11 +131,6 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
             .unwrap()
             .expect("the note never replayed")
         {
-            DatumEvent::Enter { doc_id, datums, .. }
-                if doc_id == doc && datums.contains_key(&key) =>
-            {
-                break;
-            }
             DatumEvent::Datum {
                 doc_id,
                 datum_key,
@@ -147,6 +142,20 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
     }
     let expected = json!({"$type": NOTE, "value": "shared-note"});
     assert_eq!(owner.read_note(&alice, &doc).await.unwrap(), expected);
+    assert_eq!(reader.read_note(&bob, &doc).await.unwrap(), expected);
+
+    // A cabinet grant can exceed this node's keyhive standing: the reader holds only keyhive
+    // Read on the shared drawer, so keyhive refuses the commit a Write grant authorizes. That
+    // refusal is the caller's write denied, not a repository fault. The second attempt runs
+    // on the handle re-acquired after the first rejection broke the bundle.
+    let dave = reader.actor("dave").await;
+    reader.provision(&dave, &drawer, Access::Write).await;
+    for _ in 0..2 {
+        assert_eq!(
+            reader.write_note(&dave, &doc, "beyond keyhive Read").await,
+            Err(DocsError::Denied)
+        );
+    }
     assert_eq!(reader.read_note(&bob, &doc).await.unwrap(), expected);
 
     drop(observations);

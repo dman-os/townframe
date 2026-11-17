@@ -176,6 +176,7 @@ pub fn ListDetails(
 mod tests {
     use super::*;
     use crate::testing::Page;
+    use dioxus_storm::Storm;
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -334,14 +335,6 @@ mod tests {
             );
         }
     }
-}
-
-/// Every listener fed every event kind in seeded random order (see `dioxus_storm`): a panic in
-/// any order of events is a bug, and a seed that found one stays here as a regression case.
-#[cfg(test)]
-mod storm {
-    use super::*;
-    use dioxus_storm::Storm;
 
     use crate::headless::list_row::ListRow;
 
@@ -365,12 +358,6 @@ mod storm {
                 on_back: move |()| open.set(None),
             }
         }
-    }
-
-    #[component]
-    fn Close() -> Element {
-        let actions = use_list_details();
-        rsx! { button { onclick: move |_| actions.back(), "Close" } }
     }
 
     #[test]

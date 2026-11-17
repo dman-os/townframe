@@ -53,6 +53,7 @@ impl Slot {
             Some(value) => DatumRead::Accepted {
                 value: value.clone(),
                 version: self.version(),
+                authors: Vec::new(),
             },
             None => DatumRead::Absent {
                 version: self.version(),
@@ -65,8 +66,14 @@ impl Slot {
     fn normalize(&self, actual: DatumRead, context: &str) -> DatumRead {
         let mut actual = actual;
         match &mut actual {
-            DatumRead::Accepted { version, .. }
-            | DatumRead::Absent { version }
+            DatumRead::Accepted {
+                version, authors, ..
+            } => {
+                // The model does not track authorship; the authors tests pin it directly.
+                version.clock = 0;
+                authors.clear();
+            }
+            DatumRead::Absent { version }
             | DatumRead::Pending { version, .. }
             | DatumRead::Undecodable { version, .. } => version.clock = 0,
             DatumRead::Rejected { .. } => {}
@@ -75,7 +82,7 @@ impl Slot {
             return actual;
         }
         let covered = match &actual {
-            DatumRead::Accepted { value, version } => {
+            DatumRead::Accepted { value, version, .. } => {
                 version.heads == self.heads && self.values.contains(&Some(value.clone()))
             }
             DatumRead::Absent { version } => {
@@ -209,7 +216,14 @@ impl Model {
         self.checkpoints.push(merged);
     }
 
-    async fn check(&self, node: &Node, actor: &Actor, snapshot: &Snapshot, at: At, context: &str) {
+    async fn check(
+        &self,
+        node: &Node,
+        actor: &OpenedActor,
+        snapshot: &Snapshot,
+        at: At,
+        context: &str,
+    ) {
         let capability = node
             .capability(
                 actor,
@@ -246,6 +260,7 @@ impl Model {
         };
         let keep_listed = |listing: DatumListing| DatumListing {
             heads: listing.heads,
+            authors: BTreeMap::new(),
             datums: listing
                 .datums
                 .into_iter()
@@ -312,6 +327,7 @@ impl Model {
                     capability,
                     doc_id: self.document.clone(),
                     at,
+                    with_authors: false,
                 },
             )
             .await)
@@ -320,6 +336,7 @@ impl Model {
             keep_listed(listing),
             keep_listed(DatumListing {
                 heads: snapshot.heads.clone(),
+                authors: BTreeMap::new(),
                 datums: SLOTS
                     .iter()
                     .enumerate()
@@ -453,8 +470,8 @@ enum Op {
 
 #[derive(Clone)]
 enum Request {
-    Create(Actor, CreateDoc),
-    Write(Actor, WriteDatums),
+    Create(OpenedActor, CreateDoc),
+    Write(OpenedActor, WriteDatums),
 }
 
 impl Request {
@@ -494,7 +511,13 @@ impl Request {
     }
 }
 
-async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8, script: &[Op]) {
+async fn run(
+    node: &mut Node,
+    actors: &[OpenedActor; 2],
+    case: &str,
+    initial_mask: u8,
+    script: &[Op],
+) {
     tracing::info!(
         case,
         initial_mask,

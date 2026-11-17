@@ -903,10 +903,10 @@ impl WasmRuntime {
             .collect();
         active.publications = leases;
         let pending_limit = active.store.data().documents.limits().pending_deliveries;
-        let fuel = active.fuel_per_call.clone();
+        let fuel = Arc::clone(&active.fuel_per_call);
         let incarnation = Arc::new(Mutex::new(Some(active)));
-        let driver_incarnation = incarnation.clone();
-        let pump_incarnation = incarnation.clone();
+        let driver_incarnation = Arc::clone(&incarnation);
+        let pump_incarnation = Arc::clone(&incarnation);
         let pump_host = host.clone();
         let pump_instance = instance.clone();
         let documents = clay_guest_session::drive(
@@ -930,7 +930,7 @@ impl WasmRuntime {
                     let Some(active) = guard.as_ref() else {
                         return;
                     };
-                    active.wake.clone()
+                    Arc::clone(&active.wake)
                 };
                 tokio::select! {
                     () = &mut documents => return,
@@ -979,7 +979,7 @@ impl WasmRuntime {
             }
         };
         let revoked = Arc::new(AtomicBool::new(false));
-        let cleanup_revoked = revoked.clone();
+        let cleanup_revoked = Arc::clone(&revoked);
         host.own(
             &instance,
             Box::new(move || {
@@ -1026,7 +1026,7 @@ impl WasmRuntime {
         writer: Arc<dyn SurfaceSink<ComponentRef>>,
     ) -> Result<SurfaceSession, PresentationError> {
         let instance_for_surface = self.instance.clone();
-        let incarnation_for_surface = self.incarnation.clone();
+        let incarnation_for_surface = Arc::clone(&self.incarnation);
         let surface_rep = self.mount_guest_surface(
             publication,
             &writer,
@@ -1034,11 +1034,11 @@ impl WasmRuntime {
             &incarnation_for_surface,
         )?;
         let dispatch_host = self.host.clone();
-        let dispatch_incarnation = incarnation_for_surface.clone();
+        let dispatch_incarnation = Arc::clone(&incarnation_for_surface);
         let dispatch_instance = instance_for_surface.clone();
-        let dispatch_writer = writer.clone();
+        let dispatch_writer = Arc::clone(&writer);
         let drop_host = self.host.clone();
-        let drop_incarnation = incarnation_for_surface.clone();
+        let drop_incarnation = Arc::clone(&incarnation_for_surface);
         let drop_instance = instance_for_surface.clone();
         let drop_writer = writer;
 
@@ -1155,7 +1155,7 @@ impl WasmRuntime {
         instance: &Instance,
         incarnation: &Arc<Mutex<Option<WasmIncarnation>>>,
     ) -> Result<u32, PresentationError> {
-        let revoked = self.revoked.clone();
+        let revoked = Arc::clone(&self.revoked);
         let mut guard = incarnation.lock().unwrap();
         if self.host.check(instance).is_err() {
             return Err(PresentationError::Revoked);
@@ -1167,7 +1167,7 @@ impl WasmRuntime {
             .store
             .data_mut()
             .table
-            .push(Placement::new(writer.clone(), revoked))
+            .push(Placement::new(Arc::clone(writer), revoked))
             .map_err(|_| PresentationError::Revoked)?;
         let placement_rep = placement.rep();
         active.refuel();
@@ -1249,7 +1249,7 @@ impl WasmRuntime {
     /// control knob (`store(0)` makes the next guest entry trap with `OutOfFuel`) without
     /// handing out the runtime or its store.
     pub fn fuel_budget(&self) -> Arc<AtomicU64> {
-        self.fuel.clone()
+        Arc::clone(&self.fuel)
     }
 }
 

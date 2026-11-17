@@ -225,15 +225,6 @@ impl DioxusHost {
             || self.is_measured(node)
     }
 
-    /// Whether this host keeps row heights: a virtualized one always (the port reads them), a
-    /// static one only while the pointer can drag over rows, which is the one thing that reads
-    /// heights there (`element_from_point`). A static view's cost is then one `onresize` per
-    /// measured row (the rows `is_measured` lists) and one `onmounted` on the `pre` and a
-    /// content column: it is for short diffs, and a long one is what the virtualized view is for.
-    fn measures_rows(&self) -> bool {
-        self.is_interactive() || self.pointer.acts_on_rows()
-    }
-
     pub(crate) fn wants_visible(&self, node: NodeKey) -> bool {
         self.registrations.borrow().visible.contains(&node)
     }
@@ -247,12 +238,17 @@ impl DioxusHost {
     /// the header above the lines): every one needs `onresize` to be answerable.
     ///
     /// A static host reads none of them, so it measures them only for the hit-test
-    /// (`measures_rows`). Hunk separators are measured on every host, and only into the geometry
+    /// (see below). Hunk separators are measured on every host, and only into the geometry
     /// cache (`Dispatch::resized`): the port estimates a separator in its metrics but never reads
     /// one from layout, and no style in the document sets its height, so the rows stacked below
     /// one (hit-testing, the scroll fix's tops) are off by its height without a measurement.
     fn is_measured(&self, node: NodeKey) -> bool {
-        self.measures_rows()
+        // Whether this host keeps row heights: a virtualized one always (the port reads them),
+        // a static one only while the pointer can drag over rows, which is the one thing that
+        // reads heights there (`element_from_point`). A static view's cost is then one
+        // `onresize` per measured row and one `onmounted` on the `pre` and a content column: it
+        // is for short diffs, and a long one is what the virtualized view is for.
+        (self.is_interactive() || self.pointer.acts_on_rows())
             && (node == self.container
                 || [
                     "data-line",
@@ -367,15 +363,6 @@ impl DioxusHost {
         self.frames.borrow().flush_count
     }
 
-    fn mounted_of(&self, node: NodeKey) -> Rc<MountedData> {
-        Rc::clone(
-            self.mounted
-                .borrow()
-                .get(&node)
-                .expect("a node with a scroll listener is mounted before it is scrolled"),
-        )
-    }
-
     /// Scrolls `node`. `MountedData::scroll` sets both axes while the virtualizer owns one and
     /// the scroll sync the other, so the axis a caller does not set keeps the position the
     /// engine reports at the time: read in the same task that writes, because the cached one is
@@ -387,7 +374,12 @@ impl DioxusHost {
         left: Option<f64>,
         behavior: dioxus::html::ScrollBehavior,
     ) {
-        let mounted = self.mounted_of(node);
+        let mounted = Rc::clone(
+            self.mounted
+                .borrow()
+                .get(&node)
+                .expect("a node with a scroll listener is mounted before it is scrolled"),
+        );
         let host = self
             .weak_self
             .upgrade()

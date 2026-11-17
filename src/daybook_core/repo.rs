@@ -466,8 +466,7 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let (big_repo, big_repo_stop) =
-            boot_big_repo(Arc::clone(&sqlite_runtime), &layout, &identity).await?;
+        let (big_repo, big_repo_stop) = boot_big_repo(&sqlite_runtime, &layout, &identity).await?;
         let part_store = big_repo.shared_part_store();
         let blob_part_store = open_blob_part_store(big_repo.database()).await?;
         let blob_presence_store = open_blob_presence_part_store(big_repo.database()).await?;
@@ -1013,22 +1012,24 @@ fn compute_user_info(
 }
 
 async fn boot_big_repo(
-    sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+    sqlite_runtime: &sqlite_rs::SqliteRuntime,
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
 ) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
     let config = big_repo::Config {
         node_identity_seed: identity.iroh_secret_key.to_bytes(),
-        storage: big_repo::StorageConfig::Disk {
-            path: layout.big_repo_root.clone(),
-        },
+        storage: big_repo::Storage::in_directory(
+            sqlite_runtime,
+            &layout.big_repo_root,
+            Some(Arc::new(secrets_rs::SecretStore::boot().await?)),
+        )?,
         scope_key: Arc::from("daybook-core"),
         hidden_parts: Default::default(),
         automerge_frontier_group_scope: Default::default(),
         causal_checkpoint_group_scope: Default::default(),
         group_part_group_scope: Default::default(),
     };
-    big_repo::BigRepo::boot(sqlite_runtime, config).await
+    big_repo::BigRepo::boot(config).await
 }
 
 async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {

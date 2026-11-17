@@ -400,10 +400,10 @@ mod tests {
             title: "Primary ledger".into(),
             journal_commodity: "USD".into(),
             account_refs: vec![
-                url::Url::parse("db+facet:///doc/assets/main").unwrap(),
-                url::Url::parse("db+facet:///doc/income/main").unwrap(),
+                url::Url::parse("dtxt:datum:doc/assets/main").unwrap(),
+                url::Url::parse("dtxt:datum:doc/income/main").unwrap(),
             ],
-            transaction_refs: vec![url::Url::parse("db+facet:///doc/txn-1/main").unwrap()],
+            transaction_refs: vec![url::Url::parse("dtxt:datum:doc/txn-1/main").unwrap()],
         }
     }
 
@@ -485,7 +485,7 @@ mod tests {
                                                                         "id": "account-refs-item-0",
                                                                         "kind": {
                                                                             "text": {
-                                                                                "text": "db+facet:///doc/assets/main"
+                                                                                "text": "dtxt:datum:doc/assets/main"
                                                                             }
                                                                         },
                                                                         "events": []
@@ -494,7 +494,7 @@ mod tests {
                                                                         "id": "account-refs-item-1",
                                                                         "kind": {
                                                                             "text": {
-                                                                                "text": "db+facet:///doc/income/main"
+                                                                                "text": "dtxt:datum:doc/income/main"
                                                                             }
                                                                         },
                                                                         "events": []
@@ -524,7 +524,7 @@ mod tests {
                                                                         "id": "transaction-refs-item-0",
                                                                         "kind": {
                                                                             "text": {
-                                                                                "text": "db+facet:///doc/txn-1/main"
+                                                                                "text": "dtxt:datum:doc/txn-1/main"
                                                                             }
                                                                         },
                                                                         "events": []

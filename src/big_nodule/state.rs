@@ -7,12 +7,6 @@
 //! `parent_path`, and applies or revokes service-owned local drawer grants within the nodules
 //! actor's delegated authority.
 
-use crate::dispatch::Caller;
-use crate::dispatch::Provider;
-use crate::dispatch::ProviderError;
-use crate::dispatch::ProviderKind;
-use crate::dispatch::ProviderState;
-use crate::dispatch::Router;
 use crate::executor::HandlerSpec;
 use crate::executor::Hosted;
 use crate::executor::NoduleExecutor;
@@ -22,13 +16,13 @@ use big_cabinet::DatumStoreHandle;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
 use big_cabinet::SchemaRepo;
-use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::InspectCapability;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::OpenedActor;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::operation::OperationKind;
@@ -43,20 +37,31 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cartridges_core::Cartridge;
+use big_cartridges_core::CartridgeId;
+use big_cartridges_core::Revision;
+use big_dispatch::Caller;
+use big_dispatch::LexiconSource;
+use big_dispatch::Operation;
+use big_dispatch::Provider;
+use big_dispatch::ProviderError;
+use big_dispatch::ProviderKind;
+use big_dispatch::ProviderState;
+use big_dispatch::Router;
+use big_dispatch_core::DispatchError;
+use big_dispatch_core::DispatchProtocol;
+use big_dispatch_core::DispatchScope;
+use big_dispatch_core::InvocationContext;
+use big_dispatch_core::Invoke;
+use big_dispatch_core::MintDispatchCapability;
+use big_dispatch_core::Readiness;
 use big_nodule_core::RunMode;
 use big_nodule_core::config::AdmissionCache;
 use big_nodule_core::config::NoduleConfig;
 use big_nodule_core::config::NoduleResolution;
-use big_nodule_core::dispatch::DispatchError;
-use big_nodule_core::dispatch::DispatchProtocol;
-use big_nodule_core::dispatch::DispatchScope;
-use big_nodule_core::dispatch::InvocationContext;
-use big_nodule_core::dispatch::Invoke;
-use big_nodule_core::dispatch::MintDispatchCapability;
 use big_nodule_core::inventory::ArtifactState;
 use big_nodule_core::inventory::InstalledNodule;
 use big_nodule_core::inventory::InventoryError;
-use big_nodule_core::inventory::Readiness;
 use big_nodule_core::protocol::NoduleActor;
 use big_nodule_core::protocol::NoduleGrantStatus;
 use big_nodule_core::protocol::NoduleInitStatus;
@@ -68,13 +73,10 @@ use big_nodule_core::providers::LockedProvider;
 use big_nodule_core::providers::ProviderIndex;
 use big_nodule_core::providers::RequestStatus;
 use big_nodule_core::providers::Unresolved;
-use big_plugs_core::Plug;
-use big_plugs_core::PlugId;
-use big_plugs_core::Revision;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use serde_json::Value;
-use service_utils_rs::Client;
+use service_client_native_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
 use service_utils_rs::Spawner;
@@ -97,7 +99,7 @@ pub(crate) struct Stores {
     pub(crate) authority: Client<AuthorityProtocol>,
     pub(crate) drawers: Client<DrawersProtocol>,
     pub(crate) datum_store: DatumStoreHandle<NoduleConfig>,
-    pub(crate) parent: Actor,
+    pub(crate) parent: OpenedActor,
     pub(crate) parent_path: String,
     pub(crate) dispatch: Arc<Router>,
     pub(crate) dispatch_client: Client<DispatchProtocol>,
@@ -111,7 +113,7 @@ pub(crate) struct Stores {
 
 impl Stores {
     /// The providers the node itself serves `request`'s contract under: dispatch's routes for an
-    /// operation, the boot schemas for a datum. Plugs' own offers come from the snapshot.
+    /// operation, the boot schemas for a datum. Cartridges' own offers come from the snapshot.
     pub(crate) fn native_offers(&self, request_contract: &str, is_operation: bool) -> Vec<String> {
         if is_operation {
             self.dispatch.claimants(request_contract)
@@ -129,54 +131,54 @@ const NATIVE_SCHEMAS: &str = "native";
 pub(crate) enum Command {
     Admit {
         context: RequestContext,
-        plug: Box<Plug>,
+        cartridge: Box<Cartridge>,
         drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
         reply: Reply<NoduleRecord>,
     },
     Configure {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         settings: IndexMap<String, Value>,
         reply: Reply<NoduleRecord>,
     },
     SetEnabled {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         enabled: bool,
         reply: Reply<NoduleRecord>,
     },
     SetDrawerGrants {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         drawers: BTreeMap<DrawerId, DrawerAccess>,
         reply: Reply<NoduleRecord>,
     },
     SetOperationGrants {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         operations: DispatchScope,
         reply: Reply<NoduleRecord>,
     },
     ConfirmResolution {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         binding: String,
         reply: Reply<NoduleRecord>,
     },
     SetSubstitution {
         context: RequestContext,
-        plug_id: PlugId,
-        by: Option<PlugId>,
+        cartridge_id: CartridgeId,
+        by: Option<CartridgeId>,
         reply: Reply<NoduleRecord>,
     },
     Uninstall {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         reply: Reply<()>,
     },
     Get {
         context: RequestContext,
-        plug_id: PlugId,
+        cartridge_id: CartridgeId,
         reply: Reply<NoduleRecord>,
     },
     List {
@@ -198,11 +200,11 @@ enum Trigger {
     InitResult,
 }
 
-/// One nodule's initializers in its current start: one per (plug, revision, start), replaced
+/// One nodule's initializers in its current start: one per (cartridge, revision, start), replaced
 /// whole when the nodule is disabled, retired, refused, uninstalled or moves to another revision.
 struct InitRun {
     /// Names this run. An invocation's result carries the epoch of the run that spawned it and is
-    /// dropped when the plug's run has since been replaced, so a superseded start or revision
+    /// dropped when the cartridge's run has since been replaced, so a superseded start or revision
     /// never marks anything done.
     epoch: u64,
     revision: Revision,
@@ -247,7 +249,7 @@ impl InitRoute {
         let input = serde_json::json!({});
         match self {
             Self::Local { provider, caller } => provider
-                .call(&caller, target, &context, input)
+                .call(&caller, target, &RequestContext::root(), &context, input)
                 .await
                 .map(drop)
                 .map_err(|error| match error {
@@ -259,10 +261,10 @@ impl InitRoute {
                     }
                 }),
             Self::Dispatch(authorization) => dispatch
-                .call(
+                .call_with(
                     RequestContext::root(),
+                    authorization.metadata(),
                     Invoke {
-                        authorization,
                         operation: target.to_owned(),
                         input,
                         context,
@@ -271,7 +273,7 @@ impl InitRoute {
                 .await
                 .map(drop)
                 .map_err(|error| match error {
-                    ClientError::Operation(error) => format!("`{target}`: {error}"),
+                    ClientError::Method(error) => format!("`{target}`: {error}"),
                     // Dispatch outlives the nodule service, and shutdown cancels the task
                     // that makes this call first.
                     ClientError::Transport { message, .. } => {
@@ -284,7 +286,7 @@ impl InitRoute {
 
 /// An initializer invocation's outcome on its way back to the state actor.
 struct InitFinished {
-    plug_id: PlugId,
+    cartridge_id: CartridgeId,
     epoch: u64,
     key: String,
     /// Whether the initializer is `Once`, whose success is persisted.
@@ -307,44 +309,44 @@ impl Handle {
 
 pub(crate) struct State {
     stores: Stores,
-    persisted_actors: BTreeMap<PlugId, Uuid7>,
-    actors: BTreeMap<PlugId, Actor>,
-    applied_grants: BTreeMap<PlugId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
+    persisted_actors: BTreeMap<CartridgeId, Uuid7>,
+    actors: BTreeMap<CartridgeId, OpenedActor>,
+    applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
     /// The dispatch handle minted for each nodule from its operation grants, with the scope it
     /// was minted for.
-    applied_operations: BTreeMap<PlugId, (DispatchScope, CapId)>,
+    applied_operations: BTreeMap<CartridgeId, (DispatchScope, CapId)>,
     /// The resolution lockfile: the provider each enabled nodule's operation request is pinned
     /// to, by binding (see [`LockedProvider`]). Mirrors SQLite.
-    locks: BTreeMap<PlugId, BTreeMap<String, LockedProvider>>,
-    applied_heads: BTreeMap<PlugId, Vec<ChangeHash>>,
-    records: BTreeMap<PlugId, NoduleRecord>,
+    locks: BTreeMap<CartridgeId, BTreeMap<String, LockedProvider>>,
+    applied_heads: BTreeMap<CartridgeId, Vec<ChangeHash>>,
+    records: BTreeMap<CartridgeId, NoduleRecord>,
     observed_heads: Vec<ChangeHash>,
     /// Memoized per-envelope admission, shared with the config-mutation closures.
     admission_cache: Arc<AdmissionCache>,
-    /// The revision the executor was last asked to host for each plug. A plug is here exactly
+    /// The revision the executor was last asked to host for each cartridge. A cartridge is here exactly
     /// while the executor may hold a workload for it, which is what `retire` must undo.
-    hosted: BTreeMap<PlugId, Revision>,
-    /// The revision whose datum Lexicons are registered in the node's schema repo for each plug,
-    /// under the plug id as owner. A plug is here exactly while it is enabled and admitted.
-    registered_schemas: BTreeMap<PlugId, Revision>,
-    /// Plugs whose executor asked to be ensured again. The state actor constructs it and
+    hosted: BTreeMap<CartridgeId, Revision>,
+    /// The revision whose datum Lexicons are registered in the node's schema repo for each cartridge,
+    /// under the cartridge id as owner. A cartridge is here exactly while it is enabled and admitted.
+    registered_schemas: BTreeMap<CartridgeId, Revision>,
+    /// Cartridges whose executor asked to be ensured again. The state actor constructs it and
     /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
     reensure: Arc<ReensureQueue>,
-    /// Initializer runs by plug.
-    inits: BTreeMap<PlugId, InitRun>,
+    /// Initializer runs by cartridge.
+    inits: BTreeMap<CartridgeId, InitRun>,
     /// The revision each `Once` initializer last succeeded at on this node.
-    init_done: BTreeMap<PlugId, BTreeMap<String, Revision>>,
+    init_done: BTreeMap<CartridgeId, BTreeMap<String, Revision>>,
     next_epoch: u64,
     /// Where initializer invocations run, and where their results come back to.
     tasks: Spawner,
     init_results: mpsc::Sender<InitFinished>,
 }
 
-fn nodule_actor(actor: &Actor) -> NoduleActor {
+fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
     NoduleActor {
-        actor_id: actor.actor_id,
-        url: actor.url.clone(),
-        public_key: actor.public_key.clone(),
+        actor_id: actor.actor.actor_id,
+        url: actor.actor.url.clone(),
+        public_key: actor.actor.public_key.clone(),
     }
 }
 
@@ -361,13 +363,13 @@ impl State {
     pub(crate) async fn recover(stores: Stores) -> Res<(Handle, StopToken)> {
         let mut persisted_actors = BTreeMap::new();
         for row in store::actors(&stores.sql).await? {
-            persisted_actors.insert(row.plug_id, row.actor_id);
+            persisted_actors.insert(row.cartridge_id, row.actor_id);
         }
-        let mut applied_grants: BTreeMap<PlugId, BTreeMap<DrawerId, (DrawerAccess, CapId)>> =
+        let mut applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>> =
             BTreeMap::new();
         for row in store::applied_grants(&stores.sql).await? {
             applied_grants
-                .entry(row.plug_id)
+                .entry(row.cartridge_id)
                 .or_default()
                 .insert(row.drawer_id, (row.access, row.capability_id));
         }
@@ -375,7 +377,7 @@ impl State {
         let applied_operations = store::applied_operations(&stores.sql)
             .await?
             .into_iter()
-            .map(|row| (row.plug_id, (row.scope, row.capability_id)))
+            .map(|row| (row.cartridge_id, (row.scope, row.capability_id)))
             .collect();
 
         let init_done = store::init_done(&stores.sql).await?;
@@ -419,15 +421,15 @@ impl State {
             init_results,
         };
         let context = RequestContext::root();
-        for (plug_id, expected_actor_id) in state.persisted_actors.clone() {
-            let actor = state.stores.open_actor(&context, &plug_id).await?;
-            if actor.actor_id != expected_actor_id {
+        for (cartridge_id, expected_actor_id) in state.persisted_actors.clone() {
+            let actor = state.stores.open_actor(&context, &cartridge_id).await?;
+            if actor.actor.actor_id != expected_actor_id {
                 return Err(NodulesError::Storage(format!(
-                    "installed nodule `{plug_id}` was given actor {expected_actor_id} but its path now opens {}",
-                    actor.actor_id
+                    "installed nodule `{cartridge_id}` was given actor {expected_actor_id} but its path now opens {}",
+                    actor.actor.actor_id
                 )));
             }
-            state.actors.insert(plug_id, actor);
+            state.actors.insert(cartridge_id, actor);
         }
         // The boot reconcile may already have started initializers; a failure here must not
         // leave them running behind a service that never came up.
@@ -447,11 +449,11 @@ impl State {
                     biased;
                     () = cancellation.cancelled() => break,
                     // An executor's workload changed readiness after `ensure` returned. Only
-                    // plugs it is still hosting matter: a request from a retired or upgraded-away
+                    // cartridges it is still hosting matter: a request from a retired or upgraded-away
                     // workload names nothing to redo.
-                    plugs = reensure.requested() => {
-                        if plugs.iter().any(|plug_id| {
-                            state.hosted.contains_key(plug_id) || state.inits.contains_key(plug_id)
+                    cartridges = reensure.requested() => {
+                        if cartridges.iter().any(|cartridge_id| {
+                            state.hosted.contains_key(cartridge_id) || state.inits.contains_key(cartridge_id)
                         }) {
                             let snapshot = state
                                 .stores
@@ -475,7 +477,7 @@ impl State {
                         None => break,
                     },
                     event = watch.next() => match event {
-                        // Revoke failures come back as a map of per-plug outcomes that
+                        // Revoke failures come back as a map of per-cartridge outcomes that
                         // `reconcile` already folded into the refused records, so only
                         // an `Err` (storage, actor or capability failure) is fatal.
                         // A change this actor made itself (`mutate_config` reconciles it before
@@ -506,8 +508,8 @@ impl State {
             // go through dispatch's client), which would make dispatch own itself through the
             // router. Withdrawing the registrations at shutdown breaks that cycle; a restart
             // derives them again from the config.
-            for plug_id in state.records.keys() {
-                state.stores.dispatch.unbind(&plug_id.to_string());
+            for cartridge_id in state.records.keys() {
+                state.stores.dispatch.unbind(&cartridge_id.to_string());
             }
             Res::Ok(())
         };
@@ -521,62 +523,74 @@ impl State {
         match command {
             Command::Admit {
                 context,
-                plug,
+                cartridge,
                 drawers,
                 reply,
-            } => answer(reply, self.admit(&context, *plug, drawers)).await,
+            } => answer(reply, self.admit(&context, *cartridge, drawers)).await,
             Command::Configure {
                 context,
-                plug_id,
+                cartridge_id,
                 settings,
                 reply,
-            } => answer(reply, self.configure(&context, &plug_id, settings)).await,
+            } => answer(reply, self.configure(&context, &cartridge_id, settings)).await,
             Command::SetEnabled {
                 context,
-                plug_id,
+                cartridge_id,
                 enabled,
                 reply,
-            } => answer(reply, self.set_enabled(&context, &plug_id, enabled)).await,
+            } => answer(reply, self.set_enabled(&context, &cartridge_id, enabled)).await,
             Command::SetDrawerGrants {
                 context,
-                plug_id,
+                cartridge_id,
                 drawers,
                 reply,
-            } => answer(reply, self.set_drawer_grants(&context, &plug_id, drawers)).await,
+            } => {
+                answer(
+                    reply,
+                    self.set_drawer_grants(&context, &cartridge_id, drawers),
+                )
+                .await
+            }
             Command::SetOperationGrants {
                 context,
-                plug_id,
+                cartridge_id,
                 operations,
                 reply,
             } => {
                 answer(
                     reply,
-                    self.set_operation_grants(&context, &plug_id, operations),
+                    self.set_operation_grants(&context, &cartridge_id, operations),
                 )
                 .await
             }
             Command::ConfirmResolution {
                 context,
-                plug_id,
+                cartridge_id,
                 binding,
                 reply,
-            } => answer(reply, self.confirm_resolution(&context, &plug_id, &binding)).await,
+            } => {
+                answer(
+                    reply,
+                    self.confirm_resolution(&context, &cartridge_id, &binding),
+                )
+                .await
+            }
             Command::SetSubstitution {
                 context,
-                plug_id,
+                cartridge_id,
                 by,
                 reply,
-            } => answer(reply, self.set_substitution(&context, &plug_id, by)).await,
+            } => answer(reply, self.set_substitution(&context, &cartridge_id, by)).await,
             Command::Uninstall {
                 context,
-                plug_id,
+                cartridge_id,
                 reply,
-            } => answer(reply, self.uninstall(&context, &plug_id)).await,
+            } => answer(reply, self.uninstall(&context, &cartridge_id)).await,
             Command::Get {
                 context,
-                plug_id,
+                cartridge_id,
                 reply,
-            } => answer(reply, self.get(&context, &plug_id)).await,
+            } => answer(reply, self.get(&context, &cartridge_id)).await,
             Command::List {
                 context,
                 scope,
@@ -622,123 +636,123 @@ impl State {
     async fn admit(
         &mut self,
         context: &RequestContext,
-        plug: Plug,
+        cartridge: Cartridge,
         drawers: Option<BTreeMap<DrawerId, DrawerAccess>>,
     ) -> Res<NoduleRecord> {
-        let plug_id = plug.id.clone();
+        let cartridge_id = cartridge.id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
-            config.admit(&cache, &plug, drawers).map(|_| ())
+            config.admit(&cache, &cartridge, drawers).map(|_| ())
         })
         .await?;
         self.records
-            .get(&plug_id)
+            .get(&cartridge_id)
             .cloned()
-            .ok_or(NodulesError::UnknownPlug(plug_id))
+            .ok_or(NodulesError::UnknownCartridge(cartridge_id))
     }
 
     async fn configure(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         settings: IndexMap<String, Value>,
     ) -> Res<NoduleRecord> {
-        let target = plug_id.clone();
+        let target = cartridge_id.clone();
         self.mutate_config(context, move |config| {
             config.configure(&target, settings).map(|_| ())
         })
         .await?;
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
     async fn set_enabled(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         enabled: bool,
     ) -> Res<NoduleRecord> {
-        let target = plug_id.clone();
+        let target = cartridge_id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
             config.set_enabled(&cache, &target, enabled).map(|_| ())
         })
         .await?;
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
     async fn set_substitution(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
-        by: Option<PlugId>,
+        cartridge_id: &CartridgeId,
+        by: Option<CartridgeId>,
     ) -> Res<NoduleRecord> {
-        let target = plug_id.clone();
+        let target = cartridge_id.clone();
         let cache = Arc::clone(&self.admission_cache);
         self.mutate_config(context, move |config| {
             config.set_substitution(&cache, &target, by)
         })
         .await?;
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
     async fn set_drawer_grants(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         drawers: BTreeMap<DrawerId, DrawerAccess>,
     ) -> Res<NoduleRecord> {
-        let target = plug_id.clone();
+        let target = cartridge_id.clone();
         self.mutate_config(context, move |config| {
             config.set_drawer_grants(&target, drawers).map(|_| ())
         })
         .await?;
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
     async fn set_operation_grants(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         operations: DispatchScope,
     ) -> Res<NoduleRecord> {
-        let target = plug_id.clone();
+        let target = cartridge_id.clone();
         self.mutate_config(context, move |config| {
             config.set_operation_grants(&target, operations).map(|_| ())
         })
         .await?;
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
-    /// Re-pins `binding` of `plug_id` to the plug that provides its contract now, which the
+    /// Re-pins `binding` of `cartridge_id` to the cartridge that provides its contract now, which the
     /// operator has seen reported as [`Unresolved::ProviderChanged`] and accepts (ADR 028 §3).
     /// Refused when the request is not held at that state, so a confirmation never takes effect
     /// on anything but what was reported.
     async fn confirm_resolution(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         binding: &str,
     ) -> Res<NoduleRecord> {
         self.refresh_if_needed(context).await?;
         let record = self
             .records
-            .get(plug_id)
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))?;
+            .get(cartridge_id)
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))?;
         let Some(RequestStatus {
             contract,
             unresolved: Some(Unresolved::ProviderChanged { .. }),
@@ -746,7 +760,7 @@ impl State {
         }) = record.requests.get(binding)
         else {
             return Err(NodulesError::Rejected(format!(
-                "request `{binding}` of `{plug_id}` is not awaiting confirmation of a changed \
+                "request `{binding}` of `{cartridge_id}` is not awaiting confirmation of a changed \
                  provider"
             )));
         };
@@ -757,10 +771,10 @@ impl State {
             .await
             .map_err(crate::store_error)?;
         // `refresh_if_needed` brought the records to this snapshot, so the recorded provider
-        // change is still what the offers say, and the one offer is the plug to pin.
+        // change is still what the offers say, and the one offer is the cartridge to pin.
         let resolved = snapshot.value.resolve(&self.admission_cache);
         let index = ProviderIndex::new(&resolved);
-        let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(plug_id) else {
+        let Some(NoduleResolution::Admitted { installed, .. }) = resolved.get(cartridge_id) else {
             unreachable!("a request awaiting confirmation belongs to an admitted nodule")
         };
         let request = installed
@@ -777,38 +791,38 @@ impl State {
         let [offer] = offers.as_slice() else {
             unreachable!("a provider change is held only while exactly one provider offers it")
         };
-        let mut locks = self.locks.get(plug_id).cloned().unwrap_or_default();
+        let mut locks = self.locks.get(cartridge_id).cloned().unwrap_or_default();
         locks.insert(binding.to_owned(), offer.clone());
-        self.set_locks(plug_id, locks).await?;
+        self.set_locks(cartridge_id, locks).await?;
         drop(self.reconcile(context, snapshot, Trigger::Change).await?);
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
-    /// Records `locks` as the lockfile of `plug_id`, in SQLite first, when they differ from what
+    /// Records `locks` as the lockfile of `cartridge_id`, in SQLite first, when they differ from what
     /// is recorded.
     async fn set_locks(
         &mut self,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         locks: BTreeMap<String, LockedProvider>,
     ) -> Res<()> {
-        let held = self.locks.get(plug_id);
+        let held = self.locks.get(cartridge_id);
         if held.is_none_or(BTreeMap::is_empty) && locks.is_empty() || held == Some(&locks) {
             return Ok(());
         }
-        store::replace_resolution_locks(&self.stores.sql, plug_id, &locks).await?;
+        store::replace_resolution_locks(&self.stores.sql, cartridge_id, &locks).await?;
         if locks.is_empty() {
-            self.locks.remove(plug_id);
+            self.locks.remove(cartridge_id);
         } else {
-            self.locks.insert(plug_id.clone(), locks);
+            self.locks.insert(cartridge_id.clone(), locks);
         }
         Ok(())
     }
 
-    async fn uninstall(&mut self, context: &RequestContext, plug_id: &PlugId) -> Res<()> {
-        let target = plug_id.clone();
+    async fn uninstall(&mut self, context: &RequestContext, cartridge_id: &CartridgeId) -> Res<()> {
+        let target = cartridge_id.clone();
         let domain_error: Arc<Mutex<Option<NodulesError>>> = Arc::new(Mutex::new(None));
         let captured = Arc::clone(&domain_error);
         let result = self
@@ -835,7 +849,7 @@ impl State {
             .await
             .map_err(crate::store_error)?;
         let revoke_errors = self.reconcile(context, snapshot, Trigger::Change).await?;
-        if let Some(err) = revoke_errors.get(plug_id) {
+        if let Some(err) = revoke_errors.get(cartridge_id) {
             return Err(err.clone());
         }
         Ok(())
@@ -881,12 +895,16 @@ impl State {
         Ok(false)
     }
 
-    async fn get(&mut self, context: &RequestContext, plug_id: &PlugId) -> Res<NoduleRecord> {
+    async fn get(
+        &mut self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+    ) -> Res<NoduleRecord> {
         self.refresh_if_needed(context).await?;
         self.records
-            .get(plug_id)
+            .get(cartridge_id)
             .cloned()
-            .ok_or_else(|| NodulesError::UnknownPlug(plug_id.clone()))
+            .ok_or_else(|| NodulesError::UnknownCartridge(cartridge_id.clone()))
     }
 
     async fn list(
@@ -898,10 +916,10 @@ impl State {
         Ok(self
             .records
             .iter()
-            .filter(|(plug_id, _)| {
+            .filter(|(cartridge_id, _)| {
                 scope
                     .as_ref()
-                    .is_none_or(|scope| scope.plugs.contains(plug_id))
+                    .is_none_or(|scope| scope.cartridges.contains(cartridge_id))
             })
             .map(|(_, record)| record.clone())
             .collect())
@@ -912,52 +930,56 @@ impl State {
         context: &RequestContext,
         snapshot: StoreSnapshot<NoduleConfig>,
         trigger: Trigger,
-    ) -> Res<BTreeMap<PlugId, NodulesError>> {
+    ) -> Res<BTreeMap<CartridgeId, NodulesError>> {
         let mut resolved = snapshot.value.resolve(&self.admission_cache);
         self.sync_schemas(&mut resolved);
-        let mut revoke_errors: BTreeMap<PlugId, NodulesError> = BTreeMap::new();
-        let active_plugs: BTreeSet<PlugId> = self
+        let mut revoke_errors: BTreeMap<CartridgeId, NodulesError> = BTreeMap::new();
+        let active_cartridges: BTreeSet<CartridgeId> = self
             .applied_grants
             .keys()
             .chain(self.applied_operations.keys())
             .cloned()
             .collect();
-        for plug_id in active_plugs {
+        for cartridge_id in active_cartridges {
             if !matches!(
-                resolved.get(&plug_id),
+                resolved.get(&cartridge_id),
                 Some(NoduleResolution::Admitted { .. })
             ) {
                 // Both revocations run whatever the first reports; the first failure is the one
-                // the plug's record carries.
+                // the cartridge's record carries.
                 let drawers = self
-                    .revoke_grants_for_plug(context, &plug_id, &BTreeMap::new())
+                    .revoke_grants_for_cartridge(context, &cartridge_id, &BTreeMap::new())
                     .await;
                 let operations = self
-                    .revoke_operations_for_plug(context, &plug_id, &DispatchScope::default())
+                    .revoke_operations_for_cartridge(
+                        context,
+                        &cartridge_id,
+                        &DispatchScope::default(),
+                    )
                     .await;
                 if let Err(err) = drawers.and(operations) {
-                    revoke_errors.insert(plug_id.clone(), err);
+                    revoke_errors.insert(cartridge_id.clone(), err);
                 }
-                if !resolved.contains_key(&plug_id) {
-                    self.applied_heads.remove(&plug_id);
+                if !resolved.contains_key(&cartridge_id) {
+                    self.applied_heads.remove(&cartridge_id);
                 }
             }
         }
 
-        // A plug that left the config (uninstall) has no resolution to unbind it from below.
+        // A cartridge that left the config (uninstall) has no resolution to unbind it from below.
         // It goes first, so its registration cannot be offered as a provider to the others.
-        let removed: Vec<PlugId> = self
+        let removed: Vec<CartridgeId> = self
             .records
             .keys()
-            .filter(|plug_id| !resolved.contains_key(*plug_id))
+            .filter(|cartridge_id| !resolved.contains_key(*cartridge_id))
             .cloned()
             .collect();
-        for plug_id in removed {
-            self.withdraw(&plug_id).await;
-            if self.init_done.remove(&plug_id).is_some() {
-                store::delete_init_done(&self.stores.sql, &plug_id).await?;
+        for cartridge_id in removed {
+            self.withdraw(&cartridge_id).await;
+            if self.init_done.remove(&cartridge_id).is_some() {
+                store::delete_init_done(&self.stores.sql, &cartridge_id).await?;
             }
-            self.set_locks(&plug_id, BTreeMap::new()).await?;
+            self.set_locks(&cartridge_id, BTreeMap::new()).await?;
         }
 
         // Providers are indexed from the snapshot, not read back from the routing table as the
@@ -965,28 +987,28 @@ impl State {
         // same pass.
         let providers = ProviderIndex::new(&resolved);
         let mut new_records = BTreeMap::new();
-        for (plug_id, resolution) in resolved {
+        for (cartridge_id, resolution) in resolved {
             match resolution {
                 NoduleResolution::Refused {
-                    plug_id,
+                    cartridge_id,
                     version,
                     revision,
                     enabled,
                     config,
                     reason,
                 } => {
-                    self.withdraw(&plug_id).await;
-                    let error = match revoke_errors.get(&plug_id) {
+                    self.withdraw(&cartridge_id).await;
+                    let error = match revoke_errors.get(&cartridge_id) {
                         Some(revoke_err) => format!("{reason}; {revoke_err}"),
                         None => reason,
                     };
                     new_records.insert(
-                        plug_id.clone(),
+                        cartridge_id.clone(),
                         NoduleRecord {
-                            plug_id: plug_id.clone(),
+                            cartridge_id: cartridge_id.clone(),
                             version,
                             revision,
-                            actor: self.actors.get(&plug_id).map(nodule_actor),
+                            actor: self.actors.get(&cartridge_id).map(nodule_actor),
                             filled_by: None,
                             enabled,
                             readiness: Readiness::Refused,
@@ -997,7 +1019,7 @@ impl State {
                             requests: BTreeMap::new(),
                             init: None,
                             observed_heads: snapshot.heads.clone(),
-                            applied_heads: self.applied_heads.get(&plug_id).cloned(),
+                            applied_heads: self.applied_heads.get(&cartridge_id).cloned(),
                             error: Some(error),
                         },
                     );
@@ -1018,7 +1040,7 @@ impl State {
                             desired_operations,
                         )
                         .await?;
-                    new_records.insert(plug_id, record);
+                    new_records.insert(cartridge_id, record);
                 }
             }
         }
@@ -1029,46 +1051,46 @@ impl State {
     }
 
     /// Brings the schema repo to what `resolved` enables: an enabled, admitted nodule's held
-    /// datum records are registered under its plug id (so it can write its own datums and
-    /// others can read them), and everything of a plug that is disabled, refused or gone is
+    /// datum records are registered under its cartridge id (so it can write its own datums and
+    /// others can read them), and everything of a cartridge that is disabled, refused or gone is
     /// retired. A registration the repo refuses (a tag the node already knows, or a Lexicon that
     /// does not compile) refuses the nodule with the repo's reason, the same way an authority
-    /// conflict does: plugs are external input and this is where their Lexicons are first
+    /// conflict does: cartridges are external input and this is where their Lexicons are first
     /// compiled.
-    fn sync_schemas(&mut self, resolved: &mut BTreeMap<PlugId, NoduleResolution>) {
-        let stale: Vec<PlugId> = self
+    fn sync_schemas(&mut self, resolved: &mut BTreeMap<CartridgeId, NoduleResolution>) {
+        let stale: Vec<CartridgeId> = self
             .registered_schemas
             .keys()
-            .filter(|plug_id| {
+            .filter(|cartridge_id| {
                 !matches!(
-                    resolved.get(*plug_id),
+                    resolved.get(*cartridge_id),
                     Some(NoduleResolution::Admitted { installed, .. }) if installed.enabled
                 )
             })
             .cloned()
             .collect();
-        for plug_id in stale {
-            self.stores.schemas.retire(&plug_id.to_string());
-            self.registered_schemas.remove(&plug_id);
+        for cartridge_id in stale {
+            self.stores.schemas.retire(&cartridge_id.to_string());
+            self.registered_schemas.remove(&cartridge_id);
         }
-        let changed: Vec<PlugId> = resolved
+        let changed: Vec<CartridgeId> = resolved
             .iter()
-            .filter(|(plug_id, resolution)| {
+            .filter(|(cartridge_id, resolution)| {
                 matches!(
                     resolution,
                     NoduleResolution::Admitted { installed, .. }
                         if installed.enabled
-                            && self.registered_schemas.get(*plug_id) != Some(&installed.revision)
+                            && self.registered_schemas.get(*cartridge_id) != Some(&installed.revision)
                 )
             })
-            .map(|(plug_id, _)| plug_id.clone())
+            .map(|(cartridge_id, _)| cartridge_id.clone())
             .collect();
-        for plug_id in changed {
+        for cartridge_id in changed {
             let Some(NoduleResolution::Admitted {
                 installed,
                 desired_grants,
                 desired_operations,
-            }) = resolved.remove(&plug_id)
+            }) = resolved.remove(&cartridge_id)
             else {
                 unreachable!("selected as admitted above");
             };
@@ -1083,14 +1105,23 @@ impl State {
                 split
                     .held
                     .iter()
-                    .map(|(nsid, file)| SchemaRegistration::new(*nsid, object(file))),
+                    .map(|(nsid, file, sidecar)| {
+                        let registration = SchemaRegistration::new(*nsid, object(file));
+                        match sidecar {
+                            Some(document) => registration.with_supplement((*document).clone()),
+                            None => registration,
+                        }
+                    }),
                 split.carried.iter().map(|file| object(file)).collect(),
             );
-            let outcome = self.stores.schemas.register(&plug_id.to_string(), group);
+            let outcome = self
+                .stores
+                .schemas
+                .register(&cartridge_id.to_string(), group);
             let resolution = match outcome {
                 Ok(()) => {
                     self.registered_schemas
-                        .insert(plug_id.clone(), installed.revision);
+                        .insert(cartridge_id.clone(), installed.revision);
                     NoduleResolution::Admitted {
                         installed,
                         desired_grants,
@@ -1100,10 +1131,10 @@ impl State {
                 Err(error) => {
                     // `register` is all or nothing, so an earlier revision's schemas are still
                     // there, and a refused nodule must not keep them.
-                    self.stores.schemas.retire(&plug_id.to_string());
-                    self.registered_schemas.remove(&plug_id);
+                    self.stores.schemas.retire(&cartridge_id.to_string());
+                    self.registered_schemas.remove(&cartridge_id);
                     NoduleResolution::Refused {
-                        plug_id: plug_id.clone(),
+                        cartridge_id: cartridge_id.clone(),
                         version: Some(installed.version),
                         revision: Some(installed.revision),
                         enabled: installed.enabled,
@@ -1112,29 +1143,61 @@ impl State {
                     }
                 }
             };
-            resolved.insert(plug_id, resolution);
+            resolved.insert(cartridge_id, resolution);
         }
     }
 
     /// Ends a nodule's start: stops routing to it, retires its workload and abandons its
     /// initializer run, so a result still in flight finds no run and is dropped.
-    async fn withdraw(&mut self, plug_id: &PlugId) {
-        self.stores.dispatch.unbind(&plug_id.to_string());
-        self.retire(plug_id).await;
-        self.inits.remove(plug_id);
+    async fn withdraw(&mut self, cartridge_id: &CartridgeId) {
+        self.stores.dispatch.unbind(&cartridge_id.to_string());
+        self.retire(cartridge_id).await;
+        self.inits.remove(cartridge_id);
     }
 
-    /// Stops the executor hosting `plug_id`, if it was. Dispatch must already have stopped
-    /// routing to it.
-    async fn retire(&mut self, plug_id: &PlugId) {
-        if self.hosted.remove(plug_id).is_some()
-            && let Some(executor) = &self.stores.executor
+    /// Registers `installed`'s operations in dispatch in `state`. Admission checks a Lexicon's
+    /// frame and references, but only the validator compiler knows whether a position can be
+    /// checked at all. A nodule whose contract cannot be enforced is not served: it is refused,
+    /// as if admission had refused it, and the state registered is that refusal.
+    fn register_claims(
+        &self,
+        provider_id: &str,
+        installed: &InstalledNodule,
+        state: ProviderState,
+    ) -> ProviderState {
+        match self
+            .stores
+            .dispatch
+            .register(provider_id, claims(installed, &state), state.clone())
         {
-            executor.retire(plug_id).await;
+            Ok(()) => state,
+            Err(error) => {
+                tracing::error!(cartridge_id = %installed.cartridge_id, %error, "a nodule's method Lexicon does not compile");
+                let refused = ProviderState::NotReady(Readiness::Refused);
+                self.stores
+                    .dispatch
+                    .register(
+                        provider_id,
+                        unchecked_claims(&installed.admitted.operations),
+                        refused.clone(),
+                    )
+                    .expect("claims without a Lexicon compile nothing");
+                refused
+            }
         }
     }
 
-    /// Makes an admitted nodule's `implements` visible through dispatch under its plug id and
+    /// Stops the executor hosting `cartridge_id`, if it was. Dispatch must already have stopped
+    /// routing to it.
+    async fn retire(&mut self, cartridge_id: &CartridgeId) {
+        if self.hosted.remove(cartridge_id).is_some()
+            && let Some(executor) = &self.stores.executor
+        {
+            executor.retire(cartridge_id).await;
+        }
+    }
+
+    /// Makes an admitted nodule's `implements` visible through dispatch under its cartridge id and
     /// returns the readiness both dispatch and the nodule's record report.
     ///
     /// A disabled nodule is unbound instead: two providers of one operation are ambiguous, and
@@ -1153,22 +1216,22 @@ impl State {
     async fn serve(
         &mut self,
         installed: &mut InstalledNodule,
-        actor: &Actor,
+        actor: &OpenedActor,
         capability: Option<CapId>,
         granted: &DispatchScope,
         requests: &BTreeMap<String, RequestStatus>,
         trigger: Trigger,
     ) -> Readiness {
-        let plug_id = installed.plug_id.clone();
-        let provider_id = plug_id.to_string();
+        let cartridge_id = installed.cartridge_id.clone();
+        let provider_id = cartridge_id.to_string();
         // Another revision is another run: abandon the old one now, so none of its results can
         // land even while the new revision's handler is not hosted yet.
         if self
             .inits
-            .get(&plug_id)
+            .get(&cartridge_id)
             .is_some_and(|run| run.revision != installed.revision)
         {
-            self.inits.remove(&plug_id);
+            self.inits.remove(&cartridge_id);
         }
         let hosting = match (&self.stores.executor, &installed.nodule.handler) {
             (Some(executor), Some(handler)) if installed.enabled => {
@@ -1177,22 +1240,25 @@ impl State {
             _ => None,
         };
         if !installed.enabled {
-            self.withdraw(&plug_id).await;
+            self.withdraw(&cartridge_id).await;
             return Readiness::Disabled;
         }
         // A required operation with no covering grant is configuration the nodule is waiting
         // for, not a fault (Clay's "needs configuration"): nothing is hosted or initialized
         // until it is granted, and callers get the retryable not-ready.
         if installed.nodule.unmet_requests(granted).next().is_some() {
-            self.retire(&plug_id).await;
-            self.stores.dispatch.register(
-                &provider_id,
-                installed.admitted.operations.clone(),
-                ProviderState::NotReady(Readiness::NeedsConfiguration),
-            );
+            self.retire(&cartridge_id).await;
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(Readiness::NeedsConfiguration),
+                )
+                .expect("claims without a Lexicon compile nothing");
             return Readiness::NeedsConfiguration;
         }
-        // Likewise a required operation nobody (or more than one, or the wrong plug) provides:
+        // Likewise a required operation nobody (or more than one, or the wrong cartridge) provides:
         // enabling is accepted and the nodule waits, as a pod waits on a missing dependency. No
         // waiter needs waking when a provider turns up: resolution is recomputed for every
         // nodule on each reconcile, and a provider can only appear through one (a config
@@ -1203,16 +1269,19 @@ impl State {
             .next()
             .is_some()
         {
-            self.retire(&plug_id).await;
-            self.stores.dispatch.register(
-                &provider_id,
-                installed.admitted.operations.clone(),
-                ProviderState::NotReady(Readiness::ProviderMissing),
-            );
+            self.retire(&cartridge_id).await;
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(Readiness::ProviderMissing),
+                )
+                .expect("claims without a Lexicon compile nothing");
             return Readiness::ProviderMissing;
         }
         let Some((executor, artifact_key)) = hosting else {
-            self.retire(&plug_id).await;
+            self.retire(&cartridge_id).await;
             let readiness = installed.readiness();
             if readiness.is_ready() {
                 // No handler: it implements nothing, so there is no provider to register. It
@@ -1224,11 +1293,14 @@ impl State {
                     .await
                     .unwrap_or(readiness);
             }
-            self.stores.dispatch.register(
-                &provider_id,
-                installed.admitted.operations.clone(),
-                ProviderState::NotReady(readiness),
-            );
+            self.stores
+                .dispatch
+                .register(
+                    &provider_id,
+                    unchecked_claims(&installed.admitted.operations),
+                    ProviderState::NotReady(readiness),
+                )
+                .expect("claims without a Lexicon compile nothing");
             return readiness;
         };
         // Upgrading to another revision replaces the workload: the old one stops being routed
@@ -1236,26 +1308,26 @@ impl State {
         // is ensured.
         if self
             .hosted
-            .get(&plug_id)
+            .get(&cartridge_id)
             .is_some_and(|hosted| *hosted != installed.revision)
         {
             self.stores.dispatch.unbind(&provider_id);
-            self.retire(&plug_id).await;
+            self.retire(&cartridge_id).await;
         }
         let (handler, _) = installed
             .artifacts
             .get(&artifact_key)
             .expect("admission resolved the handler artifact");
         let spec = HandlerSpec {
-            plug_id: plug_id.clone(),
+            cartridge_id: cartridge_id.clone(),
             revision: installed.revision,
             handler: handler.clone(),
             actor: actor.clone(),
             capability,
             operations: installed.admitted.operations.clone(),
-            reensure: self.reensure.handle(plug_id.clone()),
+            reensure: self.reensure.handle(cartridge_id.clone()),
         };
-        self.hosted.insert(plug_id.clone(), installed.revision);
+        self.hosted.insert(cartridge_id.clone(), installed.revision);
         let state = match executor.ensure(&spec).await {
             // The runtime calls a local initializer on the provider directly, so the provider is
             // used here even while dispatch still answers not ready.
@@ -1289,18 +1361,14 @@ impl State {
         {
             *artifact_state = ArtifactState::Available;
         }
-        self.stores.dispatch.register(
-            &provider_id,
-            installed.admitted.operations.clone(),
-            state.clone(),
-        );
+        let state = self.register_claims(&provider_id, installed, state);
         // The one place a hosted nodule's registration turns ready, whichever way it got
         // there (its inits finished, its bytes arrived, it was enabled or installed late).
         // Comparing with the previous reconcile's record makes it a transition, so a steady
         // ready nodule never wakes anyone and a woken waiter cannot wake itself in a loop.
         let was_ready = self
             .records
-            .get(&plug_id)
+            .get(&cartridge_id)
             .is_some_and(|record| record.readiness.is_ready());
         if state.readiness().is_ready() && !was_ready {
             self.wake_waiters(&installed.admitted.operations);
@@ -1312,13 +1380,13 @@ impl State {
     /// just started providing. Systemd and Kubernetes likewise re-evaluate dependents on a
     /// readiness transition rather than wait for an unrelated event.
     fn wake_waiters(&self, operations: &BTreeMap<String, Option<OperationKind>>) {
-        for (plug_id, run) in &self.inits {
+        for (cartridge_id, run) in &self.inits {
             if run
                 .waiting_on
                 .as_ref()
                 .is_some_and(|nsid| operations.contains_key(nsid))
             {
-                self.reensure.handle(plug_id.clone()).request();
+                self.reensure.handle(cartridge_id.clone()).request();
             }
         }
     }
@@ -1336,24 +1404,24 @@ impl State {
     async fn advance_inits(
         &mut self,
         installed: &InstalledNodule,
-        actor: &Actor,
+        actor: &OpenedActor,
         capability: Option<CapId>,
         provider: Option<Arc<dyn Provider>>,
         trigger: Trigger,
     ) -> Option<Readiness> {
-        let plug_id = &installed.plug_id;
+        let cartridge_id = &installed.cartridge_id;
         let inits = &installed.nodule.initialization;
         if inits.is_empty() {
             return None;
         }
-        if !self.inits.contains_key(plug_id) {
+        if !self.inits.contains_key(cartridge_id) {
             let done = inits
                 .iter()
                 .filter(|init| {
                     init.mode == RunMode::Once
                         && self
                             .init_done
-                            .get(plug_id)
+                            .get(cartridge_id)
                             .and_then(|keys| keys.get(&init.key))
                             == Some(&installed.revision)
                 })
@@ -1361,7 +1429,7 @@ impl State {
                 .collect();
             self.next_epoch += 1;
             self.inits.insert(
-                plug_id.clone(),
+                cartridge_id.clone(),
                 InitRun {
                     epoch: self.next_epoch,
                     revision: installed.revision,
@@ -1375,7 +1443,10 @@ impl State {
                 },
             );
         }
-        let run = self.inits.get_mut(plug_id).expect("run inserted above");
+        let run = self
+            .inits
+            .get_mut(cartridge_id)
+            .expect("run inserted above");
         let init = inits.iter().find(|init| !run.done.contains(&init.key))?;
         if run.running.is_some() {
             return Some(Readiness::Initializing);
@@ -1392,7 +1463,7 @@ impl State {
                 ),
                 caller: Caller {
                     authorization: Authorization::identity(self.stores.parent.capability),
-                    actor: self.stores.parent.actor_id,
+                    actor: self.stores.parent.actor.actor_id,
                     scope: None,
                 },
             }
@@ -1406,12 +1477,12 @@ impl State {
                 Err(_) => Some(None),
             };
             if let Some(provider_id) = waiting_on {
-                let run = self.inits.get_mut(plug_id).expect("run present");
+                let run = self.inits.get_mut(cartridge_id).expect("run present");
                 run.failed = false;
                 run.blocked_on = provider_id;
                 run.waiting_on = Some(init.target.clone());
-                if self.in_dependency_cycle(plug_id) {
-                    let run = self.inits.get_mut(plug_id).expect("run present");
+                if self.in_dependency_cycle(cartridge_id) {
+                    let run = self.inits.get_mut(cartridge_id).expect("run present");
                     run.failed = true;
                     run.error = Some(format!(
                         "initializer `{}` waits for `{}`, whose provider waits for this nodule \
@@ -1432,21 +1503,21 @@ impl State {
             })
         };
 
-        let run = self.inits.get_mut(plug_id).expect("run present");
+        let run = self.inits.get_mut(cartridge_id).expect("run present");
         run.attempts += 1;
         run.failed = false;
         run.blocked_on = None;
         run.waiting_on = None;
         run.running = Some(init.key.clone());
         let context = InvocationContext {
-            deadline_unix_ms: None,
             idempotency_key: Some(format!(
-                "nodule/{plug_id}/{}/{}",
+                "nodule/{cartridge_id}/{}/{}",
                 installed.revision, init.key
             )),
+            ..Default::default()
         };
         let finished = InitFinished {
-            plug_id: plug_id.clone(),
+            cartridge_id: cartridge_id.clone(),
             epoch: run.epoch,
             key: init.key.clone(),
             once: init.mode == RunMode::Once,
@@ -1489,9 +1560,9 @@ impl State {
 
     /// What the record reports of the nodule's initializers: nothing until one was invoked, and
     /// nothing again once the one that was failing has succeeded.
-    fn init_status(&self, plug_id: &PlugId) -> Option<NoduleInitStatus> {
+    fn init_status(&self, cartridge_id: &CartridgeId) -> Option<NoduleInitStatus> {
         self.inits
-            .get(plug_id)
+            .get(cartridge_id)
             .filter(|run| run.attempts > 0 || run.error.is_some() || run.waiting_on.is_some())
             .map(|run| NoduleInitStatus {
                 attempts: run.attempts,
@@ -1500,14 +1571,16 @@ impl State {
             })
     }
 
-    /// Whether following who each blocked nodule waits on, from `plug_id`'s own blocked
-    /// initializer, comes back to `plug_id`.
-    fn in_dependency_cycle(&self, plug_id: &PlugId) -> bool {
-        let own = plug_id.to_string();
+    /// Whether following who each blocked nodule waits on, from `cartridge_id`'s own blocked
+    /// initializer, comes back to `cartridge_id`.
+    fn in_dependency_cycle(&self, cartridge_id: &CartridgeId) -> bool {
+        let own = cartridge_id.to_string();
         let waits: BTreeMap<String, &str> = self
             .inits
             .iter()
-            .filter_map(|(plug, run)| Some((plug.to_string(), run.blocked_on.as_deref()?)))
+            .filter_map(|(cartridge, run)| {
+                Some((cartridge.to_string(), run.blocked_on.as_deref()?))
+            })
             .collect();
         let mut at = waits.get(&own).copied();
         // More hops than waiting nodules means a cycle that does not include this one.
@@ -1524,7 +1597,7 @@ impl State {
     /// Applies an initializer's result, then reconciles so the router and the records show it
     /// and the next initializer starts. A result whose run was replaced meanwhile is dropped.
     async fn init_finished(&mut self, finished: InitFinished) -> Res<()> {
-        let Some(run) = self.inits.get_mut(&finished.plug_id) else {
+        let Some(run) = self.inits.get_mut(&finished.cartridge_id) else {
             return Ok(());
         };
         if run.epoch != finished.epoch {
@@ -1544,13 +1617,13 @@ impl State {
                     let revision = run.revision;
                     store::upsert_init_done(
                         &self.stores.sql,
-                        &finished.plug_id,
+                        &finished.cartridge_id,
                         &finished.key,
                         revision,
                     )
                     .await?;
                     self.init_done
-                        .entry(finished.plug_id.clone())
+                        .entry(finished.cartridge_id.clone())
                         .or_default()
                         .insert(finished.key, revision);
                 }
@@ -1579,7 +1652,7 @@ impl State {
     /// A disabled nodule has no resolution and no lockfile: enabling is the consent to the
     /// providers found then, so it begins afresh each time. For an enabled one every operation
     /// request gets a status, and a request that resolved is (re)pinned to the provider it
-    /// resolved to. A request that did not keeps its earlier pin, so the same plug coming back
+    /// resolved to. A request that did not keeps its earlier pin, so the same cartridge coming back
     /// resolves without asking, and a different one is reported as a change. A pin for a binding
     /// the nodule no longer has, or for another contract than the binding now names, is dropped.
     async fn resolve_requests(
@@ -1587,16 +1660,16 @@ impl State {
         installed: &InstalledNodule,
         providers: &ProviderIndex,
     ) -> Res<BTreeMap<String, RequestStatus>> {
-        let plug_id = &installed.plug_id;
+        let cartridge_id = &installed.cartridge_id;
         if !installed.enabled {
-            self.set_locks(plug_id, BTreeMap::new()).await?;
+            self.set_locks(cartridge_id, BTreeMap::new()).await?;
             return Ok(BTreeMap::new());
         }
         let mut statuses = BTreeMap::new();
         for request in &installed.nodule.requires {
             let pinned = self
                 .locks
-                .get(plug_id)
+                .get(cartridge_id)
                 .and_then(|locks| locks.get(&request.binding))
                 .filter(|pin| pin.contract == request.contract);
             let offers = providers.offers(
@@ -1613,32 +1686,32 @@ impl State {
             .iter()
             .filter_map(|(binding, status)| Some((binding.clone(), status.locked.clone()?)))
             .collect();
-        self.set_locks(plug_id, locks).await?;
+        self.set_locks(cartridge_id, locks).await?;
         Ok(statuses)
     }
 
     async fn ensure_nodule_actor(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
-    ) -> Res<Actor> {
-        if let Some(actor) = self.actors.get(plug_id) {
+        cartridge_id: &CartridgeId,
+    ) -> Res<OpenedActor> {
+        if let Some(actor) = self.actors.get(cartridge_id) {
             return Ok(actor.clone());
         }
-        let opened = self.stores.open_actor(context, plug_id).await?;
-        if let Some(saved_actor_id) = self.persisted_actors.get(plug_id) {
-            if opened.actor_id != *saved_actor_id {
+        let opened = self.stores.open_actor(context, cartridge_id).await?;
+        if let Some(saved_actor_id) = self.persisted_actors.get(cartridge_id) {
+            if opened.actor.actor_id != *saved_actor_id {
                 return Err(NodulesError::Storage(format!(
-                    "installed nodule `{plug_id}` was given actor {saved_actor_id} but its path now opens {}",
-                    opened.actor_id
+                    "installed nodule `{cartridge_id}` was given actor {saved_actor_id} but its path now opens {}",
+                    opened.actor.actor_id
                 )));
             }
         } else {
-            store::upsert_actor(&self.stores.sql, plug_id, opened.actor_id).await?;
+            store::upsert_actor(&self.stores.sql, cartridge_id, opened.actor.actor_id).await?;
             self.persisted_actors
-                .insert(plug_id.clone(), opened.actor_id);
+                .insert(cartridge_id.clone(), opened.actor.actor_id);
         }
-        self.actors.insert(plug_id.clone(), opened.clone());
+        self.actors.insert(cartridge_id.clone(), opened.clone());
         Ok(opened)
     }
 
@@ -1656,8 +1729,8 @@ impl State {
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
         desired_operations: DispatchScope,
     ) -> Res<NoduleRecord> {
-        let plug_id = installed.plug_id.clone();
-        let actor = self.ensure_nodule_actor(context, &plug_id).await?;
+        let cartridge_id = installed.cartridge_id.clone();
+        let actor = self.ensure_nodule_actor(context, &cartridge_id).await?;
         // The handle is minted (or revoked) before the handler is ensured, so the executor is
         // handed the handle that is live now. A disabled nodule has none: it is not serving, and
         // re-enabling it mints a fresh one.
@@ -1673,7 +1746,7 @@ impl State {
             DispatchScope::default()
         };
         let (capability, operations_error) = self
-            .apply_operations(context, &plug_id, &actor, &effective_operations)
+            .apply_operations(context, &cartridge_id, &actor, &effective_operations)
             .await?;
         // A grant that failed to mint covers nothing, so it cannot satisfy a request.
         let granted_operations =
@@ -1695,7 +1768,7 @@ impl State {
             apply_errors.push(format!("operations: {error}"));
         }
         if let Err(err) = self
-            .revoke_grants_for_plug(context, &plug_id, &desired_grants)
+            .revoke_grants_for_cartridge(context, &cartridge_id, &desired_grants)
             .await
         {
             apply_errors.push(err.to_string());
@@ -1710,7 +1783,7 @@ impl State {
         for (drawer_id, desired_access) in &desired_grants {
             let existing = self
                 .applied_grants
-                .get(&plug_id)
+                .get(&cartridge_id)
                 .and_then(|grants| grants.get(drawer_id))
                 .copied();
             if let Some((applied_access, cap_id)) = existing
@@ -1725,7 +1798,7 @@ impl State {
                                 context,
                                 cap_id,
                                 drawer_id,
-                                actor.actor_id,
+                                actor.actor.actor_id,
                                 *desired_access,
                             )
                             .await
@@ -1740,8 +1813,8 @@ impl State {
                         continue;
                     }
                 }
-                store::delete_applied_grant(&self.stores.sql, &plug_id, drawer_id).await?;
-                if let Some(grants) = self.applied_grants.get_mut(&plug_id) {
+                store::delete_applied_grant(&self.stores.sql, &cartridge_id, drawer_id).await?;
+                if let Some(grants) = self.applied_grants.get_mut(&cartridge_id) {
                     grants.remove(drawer_id);
                 }
             }
@@ -1751,16 +1824,16 @@ impl State {
                 .apply_grant(
                     &self.stores.sql,
                     context,
-                    &plug_id,
+                    &cartridge_id,
                     drawer_id,
-                    actor.actor_id,
+                    actor.actor.actor_id,
                     *desired_access,
                 )
                 .await
             {
                 Ok(cap_id) => {
                     self.applied_grants
-                        .entry(plug_id.clone())
+                        .entry(cartridge_id.clone())
                         .or_default()
                         .insert(drawer_id.clone(), (*desired_access, cap_id));
                     drawer_statuses.insert(drawer_id.clone(), granted(*desired_access));
@@ -1782,14 +1855,15 @@ impl State {
         }
 
         let error = if apply_errors.is_empty() {
-            self.applied_heads.insert(plug_id.clone(), heads.to_vec());
+            self.applied_heads
+                .insert(cartridge_id.clone(), heads.to_vec());
             None
         } else {
             Some(apply_errors.join("; "))
         };
 
         Ok(NoduleRecord {
-            plug_id: installed.plug_id.clone(),
+            cartridge_id: installed.cartridge_id.clone(),
             version: Some(installed.version.clone()),
             revision: Some(installed.revision),
             actor: Some(nodule_actor(&actor)),
@@ -1806,9 +1880,9 @@ impl State {
                 error: operations_error,
             }),
             requests,
-            init: self.init_status(&plug_id),
+            init: self.init_status(&cartridge_id),
             observed_heads: heads.to_vec(),
-            applied_heads: self.applied_heads.get(&plug_id).cloned(),
+            applied_heads: self.applied_heads.get(&cartridge_id).cloned(),
             error,
         })
     }
@@ -1826,16 +1900,16 @@ impl State {
     async fn apply_operations(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
-        actor: &Actor,
+        cartridge_id: &CartridgeId,
+        actor: &OpenedActor,
         desired: &DispatchScope,
     ) -> Res<(Option<CapId>, Option<String>)> {
-        if let Some((applied, cap_id)) = self.applied_operations.get(plug_id).cloned() {
+        if let Some((applied, cap_id)) = self.applied_operations.get(cartridge_id).cloned() {
             if applied == *desired && self.stores.is_cap_live(context, cap_id).await? {
                 return Ok((Some(cap_id), None));
             }
             if let Err(error) = self
-                .revoke_operations_for_plug(context, plug_id, &DispatchScope::default())
+                .revoke_operations_for_cartridge(context, cartridge_id, &DispatchScope::default())
                 .await
             {
                 return match error {
@@ -1853,44 +1927,44 @@ impl State {
             Err(error) => return Ok((None, Some(error.to_string()))),
         };
         if let Err(error) =
-            store::upsert_applied_operations(&self.stores.sql, plug_id, desired, cap_id).await
+            store::upsert_applied_operations(&self.stores.sql, cartridge_id, desired, cap_id).await
         {
             // The handle exists but is not recorded, so nothing would ever retract it.
             self.stores.retract_grant_cap(context, cap_id).await?;
             return Err(error);
         }
         self.applied_operations
-            .insert(plug_id.clone(), (desired.clone(), cap_id));
+            .insert(cartridge_id.clone(), (desired.clone(), cap_id));
         Ok((Some(cap_id), None))
     }
 
     /// Retracts the nodule's dispatch handle unless it was minted for exactly `keep`, and
     /// forgets it once retracted.
-    async fn revoke_operations_for_plug(
+    async fn revoke_operations_for_cartridge(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         keep: &DispatchScope,
     ) -> Res<()> {
-        let Some((applied, cap_id)) = self.applied_operations.get(plug_id).cloned() else {
+        let Some((applied, cap_id)) = self.applied_operations.get(cartridge_id).cloned() else {
             return Ok(());
         };
         if applied == *keep {
             return Ok(());
         }
         self.stores.retract_grant_cap(context, cap_id).await?;
-        store::delete_applied_operations(&self.stores.sql, plug_id).await?;
-        self.applied_operations.remove(plug_id);
+        store::delete_applied_operations(&self.stores.sql, cartridge_id).await?;
+        self.applied_operations.remove(cartridge_id);
         Ok(())
     }
 
-    async fn revoke_grants_for_plug(
+    async fn revoke_grants_for_cartridge(
         &mut self,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         keep: &BTreeMap<DrawerId, DrawerAccess>,
     ) -> Res<()> {
-        let Some(existing) = self.applied_grants.get(plug_id).cloned() else {
+        let Some(existing) = self.applied_grants.get(cartridge_id).cloned() else {
             return Ok(());
         };
         let mut first_err: Option<NodulesError> = None;
@@ -1900,8 +1974,8 @@ impl State {
             }
             match self.stores.retract_grant_cap(context, cap_id).await {
                 Ok(()) => {
-                    store::delete_applied_grant(&self.stores.sql, plug_id, &drawer_id).await?;
-                    if let Some(grants) = self.applied_grants.get_mut(plug_id) {
+                    store::delete_applied_grant(&self.stores.sql, cartridge_id, &drawer_id).await?;
+                    if let Some(grants) = self.applied_grants.get_mut(cartridge_id) {
                         grants.remove(&drawer_id);
                     }
                 }
@@ -1914,10 +1988,10 @@ impl State {
         }
         if self
             .applied_grants
-            .get(plug_id)
+            .get(cartridge_id)
             .is_some_and(BTreeMap::is_empty)
         {
-            self.applied_grants.remove(plug_id);
+            self.applied_grants.remove(cartridge_id);
         }
         match first_err {
             Some(err) => Err(err),
@@ -1927,13 +2001,21 @@ impl State {
 }
 
 impl Stores {
-    async fn open_actor(&self, context: &RequestContext, plug_id: &PlugId) -> Res<Actor> {
+    async fn open_actor(
+        &self,
+        context: &RequestContext,
+        cartridge_id: &CartridgeId,
+    ) -> Res<OpenedActor> {
         self.authority
             .call(
                 context.child(),
                 OpenActor {
                     parent: self.parent.capability,
-                    path: format!("{}/{}", self.parent_path, store::actor_segment(plug_id)),
+                    path: format!(
+                        "{}/{}",
+                        self.parent_path,
+                        store::actor_segment(cartridge_id)
+                    ),
                     rights: Rights::USE,
                 },
             )
@@ -1948,7 +2030,7 @@ impl Stores {
             .await
         {
             Ok(_) => Ok(true),
-            Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => Ok(false),
+            Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => Ok(false),
             Err(error) => Err(crate::authority_error(error)),
         }
     }
@@ -1965,32 +2047,33 @@ impl Stores {
             )
             .await
         {
-            Ok(()) | Err(ClientError::Operation(AuthorityServiceError::InvalidCapability)) => {
-                Ok(())
-            }
+            Ok(()) | Err(ClientError::Method(AuthorityServiceError::InvalidCapability)) => Ok(()),
             Err(error) => Err(crate::authority_error(error)),
         }
     }
 
     /// Mints the handle a nodule invokes dispatch with, from the service's own dispatch
-    /// authority. The nodule's actor is presented as the signer, which binds the handle to it:
+    /// authority, which is bound to the nodule service's actor and carries `Rights::DELEGATE`.
+    /// Naming the nodule's actor as the subject is an introduction that binds the handle to it:
     /// dispatch refuses the handle under any other actor, and retracting the actor kills it.
     async fn mint_operations(
         &self,
         context: &RequestContext,
-        actor: &Actor,
+        actor: &OpenedActor,
         scope: &DispatchScope,
     ) -> Res<CapId> {
         self.dispatch_client
-            .call(
+            .call_with(
                 context.child(),
+                Authorization {
+                    authority: self.dispatch_authority,
+                    signer: self.parent.capability,
+                }
+                .metadata(),
                 MintDispatchCapability {
-                    authorization: Authorization {
-                        authority: self.dispatch_authority,
-                        signer: actor.capability,
-                    },
                     scope: scope.clone(),
                     rights: Rights::USE,
+                    subject: Some(actor.actor.actor_id),
                 },
             )
             .await
@@ -2024,65 +2107,120 @@ impl Stores {
         &self,
         sql: &Database,
         context: &RequestContext,
-        plug_id: &PlugId,
+        cartridge_id: &CartridgeId,
         drawer_id: &DrawerId,
         subject_id: Uuid7,
         access: DrawerAccess,
     ) -> Res<CapId> {
         let cap = self
             .drawers
-            .call(
+            .call_with(
                 context.child(),
+                Authorization::identity(self.parent.capability).metadata(),
                 MintDrawerCapability {
-                    authorization: Authorization::identity(self.parent.capability),
                     scope: DrawerScope {
                         drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
                         create: false,
                     },
                     rights: Rights::USE | Rights::DELEGATE,
+                    subject: None,
                 },
             )
             .await
             .map_err(drawers_error)?;
         let cap_id = cap.capability_id;
-        store::upsert_applied_grant(sql, plug_id, drawer_id, access, cap_id).await?;
+        store::upsert_applied_grant(sql, cartridge_id, drawer_id, access, cap_id).await?;
         if let Err(err) = self
             .grant_with_cap(context, cap_id, drawer_id, subject_id, access)
             .await
         {
             drop(self.retract_grant_cap(context, cap_id).await);
-            drop(store::delete_applied_grant(sql, plug_id, drawer_id).await);
+            drop(store::delete_applied_grant(sql, cartridge_id, drawer_id).await);
             return Err(err);
         }
         Ok(cap_id)
     }
 }
 
+/// The operations a provider claims, with no Lexicon: for a provider that is not called.
+fn unchecked_claims(
+    operations: &BTreeMap<String, Option<OperationKind>>,
+) -> Vec<(String, Operation)> {
+    operations
+        .iter()
+        .map(|(nsid, kind)| (nsid.clone(), Operation::unchecked(*kind)))
+        .collect()
+}
+
+/// The operations a nodule's provider claims, each with the Lexicon its own file states, if the
+/// description carries one (a foreign operation no vendored Lexicon states is unchecked). The
+/// nodule's other Lexicon files travel with it: the cartridge carries copies of every Lexicon it
+/// depends on (ADR 028), so datum-typed fields resolve. A non-ready provider is never called, so
+/// it claims with no Lexicon.
+fn claims(installed: &InstalledNodule, state: &ProviderState) -> Vec<(String, Operation)> {
+    if !matches!(state, ProviderState::Ready(_)) {
+        return unchecked_claims(&installed.admitted.operations);
+    }
+    let files: Vec<Value> = installed
+        .nodule
+        .lexicons
+        .iter()
+        .map(|file| Value::Object(file.clone().into_iter().collect()))
+        .collect();
+    installed
+        .admitted
+        .operations
+        .iter()
+        .map(|(nsid, kind)| {
+            let lexicon =
+                files
+                    .iter()
+                    .position(|file| file["id"] == *nsid)
+                    .map(|at| LexiconSource {
+                        file: files[at].clone(),
+                        carried: files
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| *index != at)
+                            .map(|(_, file)| file.clone())
+                            .collect(),
+                    });
+            (
+                nsid.clone(),
+                Operation {
+                    kind: *kind,
+                    lexicon,
+                },
+            )
+        })
+        .collect()
+}
+
 fn dispatch_error(error: ClientError<DispatchError>) -> NodulesError {
     match error {
-        ClientError::Operation(DispatchError::Context(error)) => error.into(),
-        ClientError::Operation(DispatchError::Authority(error)) => NodulesError::Authority(error),
-        ClientError::Operation(DispatchError::AuthorityUnavailable(msg)) => {
+        ClientError::Method(DispatchError::Context(error)) => error.into(),
+        ClientError::Method(DispatchError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(DispatchError::AuthorityUnavailable(msg)) => {
             NodulesError::AuthorityUnavailable(msg)
         }
         // Dispatch refuses a scope wider than the authority the service was granted.
-        ClientError::Operation(DispatchError::Denied) => NodulesError::Rejected(
+        ClientError::Method(DispatchError::Denied) => NodulesError::Rejected(
             "the operation grant exceeds the dispatch authority granted to the nodule service"
                 .into(),
         ),
-        ClientError::Operation(other) => NodulesError::Rejected(other.to_string()),
+        ClientError::Method(other) => NodulesError::Rejected(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }
 
 fn drawers_error(error: ClientError<DrawersError>) -> NodulesError {
     match error {
-        ClientError::Operation(DrawersError::Context(error)) => error.into(),
-        ClientError::Operation(DrawersError::Authority(error)) => NodulesError::Authority(error),
-        ClientError::Operation(DrawersError::AuthorityUnavailable(msg)) => {
+        ClientError::Method(DrawersError::Context(error)) => error.into(),
+        ClientError::Method(DrawersError::Authority(error)) => NodulesError::Authority(error),
+        ClientError::Method(DrawersError::AuthorityUnavailable(msg)) => {
             NodulesError::AuthorityUnavailable(msg)
         }
-        ClientError::Operation(other) => NodulesError::Rejected(other.to_string()),
+        ClientError::Method(other) => NodulesError::Rejected(other.to_string()),
         ClientError::Transport { message, .. } => NodulesError::Storage(message),
     }
 }

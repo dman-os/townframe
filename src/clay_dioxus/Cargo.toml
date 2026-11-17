@@ -18,3 +18,6 @@ tokio = { workspace = true, features = ["sync"] }
 [dev-dependencies]
 dioxus-core.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

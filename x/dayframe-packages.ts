@@ -104,7 +104,7 @@ export async function prepareDayframePackages(
 
   // The counter, the layout and the lab are also packages: the desktop shell scans a package directory for
   // `<name>.manifest.json` sidecars paired with `<name>.component.wasm`, so prepare that
-  // directory beside the raw fixtures. STAND-IN until `big_plugs` delivers manifests; each
+  // directory beside the raw fixtures. STAND-IN until `big_cartridges` delivers manifests; each
   // sidecar is emitted from the package's manifest crate.
   const packagesDirectory = directory.join("packages");
   await Deno.mkdir(packagesDirectory.toString(), { recursive: true });

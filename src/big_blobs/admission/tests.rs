@@ -1,8 +1,4 @@
 use super::*;
-use big_cabinet_core::authority::AuthorityMessage;
-use big_cabinet_core::authority::AuthorityProtocol;
-use futures::future::BoxFuture;
-use service_utils_rs::InlineRoute;
 
 fn database() -> Database {
     sqlite_rs::SqliteRuntime::new(Default::default())
@@ -290,15 +286,6 @@ async fn sources_and_payloadless_observations_are_independent() -> Res<()> {
     );
     stop.stop().await;
     Ok(())
-}
-
-/// A capability authority for tests that never mint client capabilities.
-struct UnusedAuthority;
-
-impl InlineRoute<AuthorityProtocol> for UnusedAuthority {
-    fn route_inline(self: Arc<Self>, _: AuthorityMessage) -> BoxFuture<'static, ()> {
-        Box::pin(async { panic!("these admission tests do not mint client capabilities") })
-    }
 }
 
 mod discovery;

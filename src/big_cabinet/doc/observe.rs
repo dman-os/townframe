@@ -195,7 +195,6 @@ impl DocsService {
         let mut events = Vec::new();
         let mut through = params.after;
         let mut caught_up = false;
-        let mut depth: BTreeMap<DocId, bool> = BTreeMap::new();
         loop {
             match reader.next(limit_reads).await.map_err(repository)? {
                 RevisionRead::ReplayComplete { through: boundary } => {
@@ -211,7 +210,6 @@ impl DocsService {
                         selection,
                         revision,
                         entries,
-                        &mut depth,
                         &mut events,
                     )
                     .await?;
@@ -239,7 +237,6 @@ impl DocsService {
                             selection,
                             revision,
                             entries,
-                            &mut depth,
                             &mut events,
                         )
                         .await?;
@@ -260,19 +257,18 @@ impl DocsService {
         })
     }
 
-    /// Turns one revision's frontier entries into `enter`, `datum` and `leave` events.
+    /// Turns one revision's frontier entries into `datum` and `leave` events (ADR 025 §7).
     ///
-    /// A page carries two kinds of fact. A document's own datum entry says that document
-    /// changed. A roster entry says a drawer projection changed: the document whose membership
-    /// it moved then joins or leaves the predicate without any entry of its own, so the poll
-    /// re-evaluates the documents the entry affects. Without that, a caller watching a drawer
-    /// would never see an already-settled document added to it, nor see it leave when the
-    /// roster withdrew its access.
-    ///
-    /// Documents are deduplicated: the first event for a document that matches the predicate
-    /// delivers its whole selected state as `enter`, and later entries for that document deliver
-    /// only the changed datum. A document that no longer matches leaves.
-    #[expect(clippy::too_many_arguments, reason = "the page context is one unit")]
+    /// A page carries two kinds of fact. A *row* fact is a selected datum entry of a document:
+    /// if that document matches, the row is delivered as one `datum` event. A *predicate* fact
+    /// decides membership: a roster entry (the `InDrawer` anchor's projection moved, so the
+    /// documents it affects may have joined or left without an entry of their own) or a row
+    /// whose tag the predicate names. The server keeps no state between polls and cannot know
+    /// whether the caller already held a document, so a document touched by a predicate fact is
+    /// a move-in when it matches: every selected row of it is delivered, stamped with this
+    /// page's revision even when the rows are older. When it no longer matches it is a
+    /// move-out, one `leave`. A document whose only changes are non-predicate rows and that
+    /// does not match produces nothing.
     async fn page_events(
         &self,
         store: &DatumSetStore,
@@ -280,7 +276,6 @@ impl DocsService {
         selection: &DatumSelection,
         revision: u64,
         entries: Vec<FrontierEntry<DatumRoute, DatumMembership>>,
-        depth: &mut BTreeMap<DocId, bool>,
         events: &mut Vec<DatumEvent>,
     ) -> Result<(), DocsError> {
         if entries.is_empty() {
@@ -289,110 +284,77 @@ impl DocsService {
         let drawers = predicate_drawers(predicate);
         let predicate_tags = predicate.tags();
         let sole_doc = predicate.sole_doc();
-        let mut changed: BTreeMap<DocId, Vec<FrontierEntry<DatumRoute, DatumMembership>>> =
-            BTreeMap::new();
-        let mut affected: BTreeSet<DocId> = BTreeSet::new();
+        // The selected rows this page changed, per document.
+        let mut rows: BTreeMap<DocId, BTreeMap<DatumKey, ObservedDatum>> = BTreeMap::new();
+        // The documents a predicate fact in this page touched: move-in or move-out candidates.
+        let mut moved: BTreeSet<DocId> = BTreeSet::new();
         for entry in entries {
-            if ROSTER_TAGS.contains(&entry.key.datum_key.tag().as_str()) {
-                if !drawers.is_empty() {
-                    affected.extend(
-                        Self::roster_affected(
-                            store,
-                            &entry.key.doc_id,
-                            &entry.key.datum_key,
-                            &drawers,
-                        )
+            if !drawers.is_empty() && ROSTER_TAGS.contains(&entry.key.datum_key.tag().as_str()) {
+                moved.extend(
+                    Self::roster_affected(store, &entry.key.doc_id, &entry.key.datum_key, &drawers)
                         .await?,
-                    );
-                }
-                if !Self::selects(selection, &entry.key.datum_key)
-                    && !predicate_tags.contains(entry.key.datum_key.tag())
-                {
-                    continue;
-                }
+                );
+            }
+            let selected = selection.selects(&entry.key.datum_key);
+            let predicate_fact = predicate_tags.contains(entry.key.datum_key.tag());
+            if !selected && !predicate_fact {
+                continue;
             }
             // A predicate that names one document can only match that document, so the frontier
             // entries of every other document on the node are not this poll's business.
             if sole_doc.is_some_and(|only| *only != entry.key.doc_id) {
                 continue;
             }
-            changed
-                .entry(entry.key.doc_id.clone())
-                .or_default()
-                .push(entry);
-        }
-        let own: BTreeSet<DocId> = changed.keys().cloned().collect();
-        let candidates: BTreeSet<DocId> = own.union(&affected).cloned().collect();
-        let matching = store
-            .matching_docs(predicate, &candidates)
-            .await
-            .map_err(repository)?;
-        for (doc_id, entries) in changed {
-            if !matching.contains(&doc_id) {
-                let known = depth.insert(doc_id.clone(), false);
-                if known != Some(false) {
-                    events.push(DatumEvent::Leave { revision, doc_id });
-                }
-                continue;
+            if predicate_fact {
+                moved.insert(entry.key.doc_id.clone());
             }
-            let entered = depth.insert(doc_id.clone(), true) == Some(true);
-            if !entered {
-                // A doc first named by this page delivers its current selected state as
-                // `enter`. Removals are absent from that state, so a resumed caller that
-                // already knew the doc would otherwise never see them; deliver those from
-                // the page's own entries.
-                let datums = Self::selected_datums(store, &doc_id, selection).await?;
-                events.push(DatumEvent::Enter {
-                    revision,
-                    doc_id: doc_id.clone(),
-                    datums,
-                });
-            }
-            for entry in entries {
-                if !Self::selects(selection, &entry.key.datum_key) {
-                    continue;
-                }
+            if selected {
                 let Some(membership) = entry.value else {
                     return Err(repository(
                         "datum-set frontier published an entry without membership",
                     ));
                 };
-                // A present entry already reached the caller inside `enter`; only a removal
-                // is new information on a doc whose current state was just delivered.
-                if !matches!(membership, DatumMembership::Removed { .. }) {
-                    continue;
-                }
-                let datum = observed(membership);
+                rows.entry(entry.key.doc_id)
+                    .or_default()
+                    .insert(entry.key.datum_key, observed(membership));
+            }
+        }
+        if let Some(only) = sole_doc {
+            moved.retain(|doc_id| doc_id == only);
+        }
+        let candidates: BTreeSet<DocId> = rows.keys().chain(moved.iter()).cloned().collect();
+        let matching = store
+            .matching_docs(predicate, &candidates)
+            .await
+            .map_err(repository)?;
+        let move_ins: BTreeSet<DocId> = moved.intersection(&matching).cloned().collect();
+        // One batched read of the move-in documents' current selected rows.
+        let mut current = Self::selected_datums(store, &move_ins, selection).await?;
+        for doc_id in &candidates {
+            if moved.contains(doc_id) && !matching.contains(doc_id) {
+                events.push(DatumEvent::Leave {
+                    revision,
+                    doc_id: doc_id.clone(),
+                });
+                continue;
+            }
+            if !matching.contains(doc_id) {
+                continue;
+            }
+            // The page's own rows come first so a removal in this page (absent from the
+            // current-state read) still reaches a resumed caller; the current rows then
+            // overwrite them with the newest present state.
+            let mut datums = rows.remove(doc_id).unwrap_or_default();
+            if move_ins.contains(doc_id) {
+                datums.extend(current.remove(doc_id).unwrap_or_default());
+            }
+            for (datum_key, datum) in datums {
                 events.push(DatumEvent::Datum {
                     revision,
                     doc_id: doc_id.clone(),
-                    datum_key: entry.key.datum_key,
+                    datum_key,
                     datum,
                 });
-            }
-        }
-        // A membership move names only the drawer, so these documents have no entry in this
-        // page to carry the event. The predicate decides both directions: a document that now
-        // matches enters with its current selected state, one that stopped matching leaves.
-        for doc_id in affected {
-            if own.contains(&doc_id) {
-                continue;
-            }
-            if matching.contains(&doc_id) {
-                let entered = depth.insert(doc_id.clone(), true) == Some(true);
-                if !entered {
-                    let datums = Self::selected_datums(store, &doc_id, selection).await?;
-                    events.push(DatumEvent::Enter {
-                        revision,
-                        doc_id,
-                        datums,
-                    });
-                }
-            } else {
-                let known = depth.insert(doc_id.clone(), false);
-                if known != Some(false) {
-                    events.push(DatumEvent::Leave { revision, doc_id });
-                }
             }
         }
         Ok(())
@@ -470,19 +432,19 @@ impl DocsService {
         Ok(affected)
     }
 
-    /// The caller's current selected datums of one document, keyed by datum key.
+    /// The present selected datums of `docs`, keyed by document and datum key, in one query per
+    /// selected tag or key (a single query for `All`) regardless of how many documents.
     async fn selected_datums(
         store: &DatumSetStore,
-        doc_id: &DocId,
+        docs: &BTreeSet<DocId>,
         selection: &DatumSelection,
-    ) -> Result<BTreeMap<DatumKey, ObservedDatum>, DocsError> {
-        let docs = BTreeSet::from([doc_id.clone()]);
+    ) -> Result<BTreeMap<DocId, BTreeMap<DatumKey, ObservedDatum>>, DocsError> {
         let mut records = Vec::new();
         match selection {
             DatumSelection::All => {
                 records.extend(
                     store
-                        .query_docs(&docs, None, None)
+                        .query_docs(docs, None, None)
                         .await
                         .map_err(repository)?,
                 );
@@ -491,7 +453,7 @@ impl DocsService {
                 for tag in tags {
                     records.extend(
                         store
-                            .query_docs(&docs, Some(tag), None)
+                            .query_docs(docs, Some(tag), None)
                             .await
                             .map_err(repository)?,
                     );
@@ -499,16 +461,16 @@ impl DocsService {
                 for key in keys {
                     records.extend(
                         store
-                            .query_docs(&docs, None, Some(key))
+                            .query_docs(docs, None, Some(key))
                             .await
                             .map_err(repository)?,
                     );
                 }
             }
         }
-        let mut datums = BTreeMap::new();
+        let mut datums: BTreeMap<DocId, BTreeMap<DatumKey, ObservedDatum>> = BTreeMap::new();
         for record in records {
-            datums.insert(
+            datums.entry(record.route.doc_id).or_default().insert(
                 record.route.datum_key,
                 ObservedDatum::Present {
                     doc_heads: record.doc_heads,
@@ -520,10 +482,6 @@ impl DocsService {
             );
         }
         Ok(datums)
-    }
-
-    fn selects(selection: &DatumSelection, key: &DatumKey) -> bool {
-        selection.selects(key)
     }
 }
 

@@ -46,3 +46,6 @@ web = ["dioxus/web"]
 [[bin]]
 name = "dayframe_showcase"
 path = "main.rs"
+
+[lints]
+workspace = true

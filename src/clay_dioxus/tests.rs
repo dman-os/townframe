@@ -21,14 +21,14 @@ async fn wire_slots_mount_through_context_preserve_identity_and_revoke_nested_su
     let child_writers = Rc::new(RefCell::new(Vec::new()));
     let (reference, _child_surface) = components
         .publish_surface(&child, {
-            let mounts = mounts.clone();
-            let drops = drops.clone();
-            let writers = child_writers.clone();
+            let mounts = std::rc::Rc::clone(&mounts);
+            let drops = std::rc::Rc::clone(&drops);
+            let writers = std::rc::Rc::clone(&child_writers);
             move |_, writer| {
                 mounts.set(mounts.get() + 1);
                 writer.apply(&counter_initial_batch())?;
                 writers.borrow_mut().push(writer.clone());
-                let drops = drops.clone();
+                let drops = std::rc::Rc::clone(&drops);
                 Ok(SurfaceSession::with_drop(
                     |_| EventResponse::default(),
                     move || drops.set(drops.get() + 1),
@@ -39,7 +39,7 @@ async fn wire_slots_mount_through_context_preserve_identity_and_revoke_nested_su
     let parent_writer = Rc::new(RefCell::new(None));
     let (parent, _layout_surface) = components
         .publish_surface(&layout, {
-            let parent_writer = parent_writer.clone();
+            let parent_writer = std::rc::Rc::clone(&parent_writer);
             move |_, writer| {
                 writer.apply(&[
                     Mutation::MountComponent(reference),
@@ -101,8 +101,8 @@ fn recursive_component_slots_are_rejected_without_recursing_into_the_factory() {
     let mounts = Rc::new(Cell::new(0));
     let (reference, _surface) = components
         .publish_surface(&owner, {
-            let self_reference = self_reference.clone();
-            let mounts = mounts.clone();
+            let self_reference = std::rc::Rc::clone(&self_reference);
+            let mounts = std::rc::Rc::clone(&mounts);
             move |_, writer| {
                 mounts.set(mounts.get() + 1);
                 writer.apply(&[
@@ -139,7 +139,7 @@ fn a_surface_attached_to_an_issued_reference_mounts_like_a_published_one() {
     let reference = host.publish_component(&owner).unwrap();
     let mounts = Rc::new(Cell::new(0));
     let _surface = components.attach_surface(&owner, reference, {
-        let mounts = mounts.clone();
+        let mounts = std::rc::Rc::clone(&mounts);
         move |_, writer| {
             mounts.set(mounts.get() + 1);
             writer.apply(&counter_initial_batch())?;
@@ -188,7 +188,7 @@ fn mounted_writer() -> (Host, Instance, Arc<Mount>, SurfaceWriter) {
     let owner = host.start("surface owner");
     let reference = host.publish_component(&owner).unwrap();
     let mount = Arc::new(host.mount(&owner, reference).unwrap());
-    let writer = SurfaceWriter::new(mount.clone());
+    let writer = SurfaceWriter::new(std::sync::Arc::clone(&mount));
     (host, owner, mount, writer)
 }
 
@@ -196,7 +196,7 @@ fn mounted_writer() -> (Host, Instance, Arc<Mount>, SurfaceWriter) {
 fn withdraw_revokes_all_clones_without_closing_the_mount_or_sibling_surface() {
     let (_host, _owner, mount, writer) = mounted_writer();
     let clone = writer.clone();
-    let sibling = SurfaceWriter::new(mount.clone());
+    let sibling = SurfaceWriter::new(std::sync::Arc::clone(&mount));
     writer.apply(&counter_initial_batch()).unwrap();
     sibling.apply(&counter_initial_batch()).unwrap();
     let updates = writer.revisions.subscribe();
@@ -243,7 +243,7 @@ fn withdrawal_before_first_apply_permanently_revokes_escaped_clones() {
 #[test]
 fn invalid_batch_publishes_only_terminal_clear_and_preserves_sibling_revision() {
     let (_host, _owner, mount, writer) = mounted_writer();
-    let sibling = SurfaceWriter::new(mount.clone());
+    let sibling = SurfaceWriter::new(std::sync::Arc::clone(&mount));
     writer.apply(&counter_initial_batch()).unwrap();
     sibling.apply(&counter_initial_batch()).unwrap();
     let updates = writer.revisions.subscribe();
@@ -292,7 +292,7 @@ fn malformed_guest_batches_do_not_panic_or_poison_the_shared_surface_mutex() {
     ] {
         let (_host, _owner, mount, writer) = mounted_writer();
         let clone = writer.clone();
-        let sibling = SurfaceWriter::new(mount.clone());
+        let sibling = SurfaceWriter::new(std::sync::Arc::clone(&mount));
         writer.apply(&counter_initial_batch()).unwrap();
         sibling.apply(&counter_initial_batch()).unwrap();
         let updates = writer.revisions.subscribe();
@@ -326,13 +326,13 @@ fn concurrent_apply_and_withdraw_cannot_resurrect_or_reorder_surface_publication
         writer.apply(&counter_initial_batch()).unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let apply_writer = writer.clone();
-        let apply_barrier = barrier.clone();
+        let apply_barrier = std::sync::Arc::clone(&barrier);
         let apply = std::thread::spawn(move || {
             apply_barrier.wait();
             apply_writer.apply(&counter_text_update_batch("racing"))
         });
         let withdraw_writer = writer.clone();
-        let withdraw_barrier = barrier.clone();
+        let withdraw_barrier = std::sync::Arc::clone(&barrier);
         let withdraw = std::thread::spawn(move || {
             withdraw_barrier.wait();
             withdraw_writer.withdraw();
@@ -358,7 +358,7 @@ fn concurrent_apply_and_withdraw_cannot_resurrect_or_reorder_surface_publication
 fn failed_factory_reports_the_error_and_revokes_escaped_writers() {
     let (_host, owner, mount, _writer) = mounted_writer();
     let slot = Rc::new(RefCell::new(None));
-    let capture = slot.clone();
+    let capture = std::rc::Rc::clone(&slot);
     let factory = SurfaceFactory(Rc::new(move |_mount, writer| {
         writer.apply(&counter_initial_batch())?;
         *capture.borrow_mut() = Some(writer);
@@ -376,7 +376,7 @@ fn failed_factory_reports_the_error_and_revokes_escaped_writers() {
     let mut dom = VirtualDom::new_with_props(
         app,
         Props {
-            mount: SharedMount(mount.clone()),
+            mount: SharedMount(std::sync::Arc::clone(&mount)),
             owner,
             factory,
         },
@@ -398,13 +398,13 @@ fn failed_factory_reports_the_error_and_revokes_escaped_writers() {
 fn stale_host_listener_is_suppressed_after_external_apply_then_current_listener_dispatches() {
     let (_host, owner, mount, _writer) = mounted_writer();
     let slot = Rc::new(RefCell::new(None));
-    let capture = slot.clone();
+    let capture = std::rc::Rc::clone(&slot);
     let received = Rc::new(RefCell::new(Vec::new()));
-    let received_capture = received.clone();
+    let received_capture = std::rc::Rc::clone(&received);
     let factory = SurfaceFactory(Rc::new(move |_mount, writer| {
         writer.apply(&counter_initial_batch())?;
         *capture.borrow_mut() = Some(writer.clone());
-        let received = received_capture.clone();
+        let received = std::rc::Rc::clone(&received_capture);
         Ok(SurfaceSession::new(move |event| {
             assert_eq!(event.name, "click");
             received.borrow_mut().push((event.revision, event.element));
@@ -484,16 +484,16 @@ fn surface_mount_renders_in_host_vdom_dispatches_reentrantly_and_revokes_on_inst
     let micro = host.start("micro");
 
     let dropped = Rc::new(Cell::new(false));
-    let dropped_flag = dropped.clone();
+    let dropped_flag = std::rc::Rc::clone(&dropped);
     let writer_slot: Rc<RefCell<Option<SurfaceWriter>>> = Rc::default();
-    let writer_slot_capture = writer_slot.clone();
+    let writer_slot_capture = std::rc::Rc::clone(&writer_slot);
 
     let (reference, _surface) = components
         .publish_surface(&micro, move |_mount, writer| {
             writer.apply(&counter_initial_batch())?;
             *writer_slot_capture.borrow_mut() = Some(writer.clone());
             let clicks = Cell::new(0_u64);
-            let flag = dropped_flag.clone();
+            let flag = std::rc::Rc::clone(&dropped_flag);
             Ok(SurfaceSession::with_drop(
                 move |event| {
                     assert_eq!(event.name, "click");
@@ -661,7 +661,11 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
     let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
     let slot = Rc::new(RefCell::new(None));
     let factory = SurfaceFactory(Rc::new({
-        let (slot, replies, host_calls) = (slot.clone(), replies.clone(), host_calls.clone());
+        let (slot, replies, host_calls) = (
+            Rc::clone(&slot),
+            Rc::clone(&replies),
+            Rc::clone(&host_calls),
+        );
         move |_mount, writer| {
             writer.apply(&[
                 Mutation::PushId(0),
@@ -672,7 +676,7 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
                 Mutation::Pop,
             ])?;
             *slot.borrow_mut() = Some(writer.clone());
-            let (replies, host_calls) = (replies.clone(), host_calls.clone());
+            let (replies, host_calls) = (Rc::clone(&replies), Rc::clone(&host_calls));
             Ok(SurfaceSession::new(move |event| {
                 if event.name == ELEMENT_REPLY {
                     replies
@@ -741,7 +745,7 @@ async fn element_commands_run_in_issue_order_after_the_dispatch_and_reads_get_re
         "mounted",
         dioxus_core::Event::new(
             Rc::new(dioxus_html::PlatformEventData::new(Box::new(
-                RecordingElement(host_calls.clone()),
+                RecordingElement(Rc::clone(&host_calls)),
             ))) as Rc<dyn std::any::Any>,
             false,
         ),
@@ -784,10 +788,10 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
     let replies = Rc::new(RefCell::new(Vec::<serde_json::Value>::new()));
     let slot = Rc::new(RefCell::new(None));
     let factory = SurfaceFactory(Rc::new({
-        let (slot, replies) = (slot.clone(), replies.clone());
+        let (slot, replies) = (Rc::clone(&slot), Rc::clone(&replies));
         move |_mount, writer| {
             *slot.borrow_mut() = Some(writer);
-            let replies = replies.clone();
+            let replies = Rc::clone(&replies);
             Ok(SurfaceSession::new(move |event| {
                 if event.name == ELEMENT_REPLY {
                     replies
@@ -838,7 +842,7 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
             "mounted",
             dioxus_core::Event::new(
                 Rc::new(dioxus_html::PlatformEventData::new(Box::new(
-                    RecordingElement(host_calls.clone()),
+                    RecordingElement(Rc::clone(&host_calls)),
                 ))) as Rc<dyn std::any::Any>,
                 false,
             ),
@@ -959,7 +963,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
     let parent_events = Rc::new(RefCell::new(Vec::new()));
     let (reference, _child_surface) = components
         .publish_surface(&child, {
-            let child_events = child_events.clone();
+            let child_events = Rc::clone(&child_events);
             move |_, writer| {
                 writer.apply(&[
                     Mutation::PushId(0),
@@ -970,7 +974,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
                     Mutation::AppendChildren(1),
                     Mutation::Pop,
                 ])?;
-                let child_events = child_events.clone();
+                let child_events = Rc::clone(&child_events);
                 Ok(SurfaceSession::new(move |event| {
                     child_events.borrow_mut().push(event.name);
                     EventResponse::default()
@@ -980,7 +984,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
         .unwrap();
     let (parent, _parent_surface) = components
         .publish_surface(&layout, {
-            let parent_events = parent_events.clone();
+            let parent_events = Rc::clone(&parent_events);
             move |_, writer| {
                 writer.apply(&[
                     Mutation::PushId(0),
@@ -993,7 +997,7 @@ fn a_parent_presentation_never_receives_events_that_began_in_a_child_presentatio
                     Mutation::AppendChildren(1),
                     Mutation::Pop,
                 ])?;
-                let parent_events = parent_events.clone();
+                let parent_events = Rc::clone(&parent_events);
                 Ok(SurfaceSession::new(move |event| {
                     parent_events.borrow_mut().push(event.name);
                     EventResponse::default()

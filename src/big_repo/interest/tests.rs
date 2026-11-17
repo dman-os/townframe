@@ -69,19 +69,16 @@ impl DemandFixture {
     /// from it, because dropping that source is itself a scenario step.
     async fn boot() -> Res<(Self, big_sync::SubscriptionSource)> {
         let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
-        let (repo, repo_stop) = BigRepo::boot(
-            runtime,
-            crate::Config {
-                node_identity_seed: [201; 32],
-                storage: crate::StorageConfig::Memory,
-                scope_key: Arc::from("subscription-boundary-test"),
-                hidden_parts: HashSet::new(),
-                automerge_frontier_group_scope: crate::WorkerGroupScope::disabled(),
-                causal_checkpoint_group_scope: crate::WorkerGroupScope::disabled(),
-                group_part_group_scope: crate::WorkerGroupScope::disabled(),
-                keyhive_change_notifs: true,
-            },
-        )
+        let (repo, repo_stop) = BigRepo::boot(crate::Config {
+            node_identity_seed: [201; 32],
+            storage: crate::Storage::memory(&runtime).unwrap(),
+            scope_key: Arc::from("subscription-boundary-test"),
+            hidden_parts: HashSet::new(),
+            automerge_frontier_group_scope: crate::WorkerGroupScope::disabled(),
+            causal_checkpoint_group_scope: crate::WorkerGroupScope::disabled(),
+            group_part_group_scope: crate::WorkerGroupScope::disabled(),
+            keyhive_change_notifs: true,
+        })
         .await?;
         let missing = DocumentId::random();
         assert!(matches!(

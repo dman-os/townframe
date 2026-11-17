@@ -111,6 +111,68 @@ pub(crate) async fn describe_keyhive_ledger(
     ))
 }
 
+/// INSTR: name every logged Keyhive event one node holds and the other lacks:
+/// event-log hash prefix (the same 4-byte blake3 prefix `INSTR sync response` /
+/// `INSTR sync resp ingested` print, for grepping the hops), the Keyhive
+/// `Digest` of CGKA ops (what the divergence report prints), kind, signing
+/// issuer, and the peer the holder received it from (`local` = created there).
+async fn instr_name_missing_events(
+    left: &crate::test2::harness::Node,
+    right: &crate::test2::harness::Node,
+) -> Res<()> {
+    use keyhive_core::event::static_event::StaticEvent;
+    let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let who = |bytes: &[u8]| {
+        for node in [left, right] {
+            if node.peer_id().as_bytes() == bytes {
+                return log_nickname::nickname(&node.peer_id());
+            }
+        }
+        hex(bytes)
+    };
+    let left_events = left.store.load_keyhive_events_with_source().await?;
+    let right_events = right.store.load_keyhive_events_with_source().await?;
+    for (holder, other, mine, theirs) in [
+        (left, right, &left_events, &right_events),
+        (right, left, &right_events, &left_events),
+    ] {
+        let theirs: BTreeSet<[u8; 32]> = theirs.iter().map(|(h, _, _)| *h.as_bytes()).collect();
+        for (index, (hash, bytes, source)) in mine.iter().enumerate() {
+            if theirs.contains(hash.as_bytes()) {
+                continue;
+            }
+            let event: StaticEvent<Vec<u8>> = bincode::deserialize(bytes)
+                .map_err(|err| crate::ferr!("INSTR undecodable logged event: {err}"))?;
+            let (kind, digest, issuer) = match &event {
+                StaticEvent::CgkaOperation(op) => {
+                    let digest: Digest<_> = Digest::hash(op.as_ref());
+                    ("cgka", digest.to_string(), op.issuer().to_bytes())
+                }
+                StaticEvent::Delegated(d) => ("deleg", String::new(), d.issuer().to_bytes()),
+                StaticEvent::Revoked(r) => ("revok", String::new(), r.issuer().to_bytes()),
+                StaticEvent::PrekeysExpanded(p) => {
+                    ("prekeys_expanded", String::new(), p.issuer().to_bytes())
+                }
+                StaticEvent::PrekeyRotated(p) => {
+                    ("prekey_rotated", String::new(), p.issuer().to_bytes())
+                }
+            };
+            tracing::warn!(
+                holder = %log_nickname::nickname(&holder.peer_id()),
+                lacking = %log_nickname::nickname(&other.peer_id()),
+                log_index = index,
+                hash_prefix = %hex(&hash.as_bytes()[..4]),
+                kind,
+                keyhive_digest = %digest,
+                author = %who(&issuer),
+                received_from = %source.as_ref().map(|s| who(s.verifying_key())).unwrap_or_else(|| "local".into()),
+                "INSTR missing keyhive event"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// One node's ingestion ledger, for diagnostics that only have a repo.
 pub(crate) async fn describe_ledger(repo: &crate::BigRepo) -> Res<String> {
     let ledger = repo.sqlite_store().keyhive_event_ledger().await?;
@@ -199,6 +261,7 @@ pub(crate) async fn assert_document_snapshot_equal(
         // Name which side of the delivery pipeline lost the missing events:
         // never delivered, delivered but never applied, or applied anyway.
         let keyhive_ledger = describe_keyhive_ledger(left, right).await?;
+        instr_name_missing_events(left, right).await?; // INSTR
         return Err(crate::ferr!(
             "Keyhive document state diverged: {} vs {}: \
              cgka_left_only={cgka_left_only:?} cgka_right_only={cgka_right_only:?} \

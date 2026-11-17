@@ -94,19 +94,20 @@ impl Core {
                     let receipt = self
                         .as_signer(
                             context,
-                            actor.capability,
+                            caller.via,
                             DocScope {
                                 write: [doc_id.clone()].into(),
                                 ..Default::default()
                             },
-                            |capability| {
+                            |authorization| {
                                 let (command, doc_id) = (&command, &doc_id);
                                 async move {
                                     self.docs()
-                                        .call(
+                                        .call_with(
                                             context.child(),
+                                            authorization.metadata(),
                                             WriteDatums {
-                                                capability,
+                                                capability: authorization.authority,
                                                 command: Some(command.clone()),
                                                 doc_id: doc_id.clone(),
                                                 mode: WriteMode::AtCurrent,
@@ -161,7 +162,10 @@ impl Core {
                     read: [doc_id.clone()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -330,7 +334,10 @@ impl Core {
                     create: [METADATA_PLACEMENT.into()].into(),
                     ..Default::default()
                 },
-                |capability| {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| {
                     let descriptor = &descriptor;
                     async move {
                         self.docs()
@@ -393,7 +400,10 @@ impl Core {
                     create: [METADATA_PLACEMENT.into()].into(),
                     ..Default::default()
                 },
-                |capability| async move {
+                |Authorization {
+                     authority: capability,
+                     ..
+                 }| async move {
                     self.docs()
                         .call(
                             context.child(),
@@ -494,7 +504,10 @@ impl Core {
                             create: [METADATA_PLACEMENT.into()].into(),
                             ..Default::default()
                         },
-                        |capability| async move {
+                        |Authorization {
+                             authority: capability,
+                             ..
+                         }| async move {
                             self.docs()
                                 .call(
                                     context.child(),
@@ -617,11 +630,11 @@ impl DrawerService {
                     .drawer_id,
             );
         }
-        // The registry and node config drawers are fresh self-doc drawers: metadata docs that are
+        // The known-drawers and node config drawers are fresh self-doc drawers: metadata docs that are
         // their own drawers, whose entries are bookkeeping/config datums on them, and a foreign
         // layout arriving from a peer is carried rather than operated, as anywhere else.
         let mut self_docs = Vec::with_capacity(2);
-        for command in ["local drawer registry", "local drawer config"] {
+        for command in ["local known drawers", "local drawer config"] {
             let command = CommandId::try_from(command.to_owned())
                 .expect("the local self-doc drawer commands are within bounds");
             let receipt = self
@@ -633,7 +646,10 @@ impl DrawerService {
                         create: [METADATA_PLACEMENT.into()].into(),
                         ..Default::default()
                     },
-                    |capability| {
+                    |Authorization {
+                         authority: capability,
+                         ..
+                     }| {
                         let (command, context) = (&command, &context);
                         async move {
                             self.core
@@ -672,7 +688,7 @@ impl DrawerService {
         }
         let [present, originated]: [DrawerId; 2] =
             created.try_into().expect("two local drawers were created");
-        let [registry_id, config_id]: [DrawerId; 2] = self_docs
+        let [known_drawers_id, config_id]: [DrawerId; 2] = self_docs
             .try_into()
             .expect("two local self-doc drawers were created");
         self.core
@@ -680,7 +696,7 @@ impl DrawerService {
             .set_local(LocalDrawers {
                 present_id: present,
                 originated_id: originated,
-                registry_id,
+                known_drawers_id,
                 config_id,
             })
             .await

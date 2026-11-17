@@ -1554,7 +1554,7 @@ async fn apply_event(
                     length_octets: payload.len() as u64,
                     digest: hash.clone(),
                     inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
+                    urls: Some(vec![format!("dtxt:blob:{hash}")]),
                 })),
             );
             let out = node

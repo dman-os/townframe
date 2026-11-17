@@ -150,7 +150,7 @@ fn manifest_package_name(path: &Path) -> Option<&str> {
 /// Read every package in the package directory. A missing directory installs nothing; an
 /// unreadable or unpaired entry is reported per entry and never stops the shell.
 ///
-/// STAND-IN until `big_plugs` delivers manifests: a package is the sibling files
+/// STAND-IN until `big_cartridges` delivers manifests: a package is the sibling files
 /// `<name>.manifest.json` and `<name>.component.wasm`, discovered by the manifest.
 ///
 /// `engine` turns a package's identity, manifest and bytes into a supervisor factory: the

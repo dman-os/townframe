@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dfcdf35ba1a56c4c22f657ef476367cacd9722df572188c1d8433e4cec7c4c1c # shrinks to script = [Observe { inventory: 1, digest: 0, peer: 0, revision: 0, present: true }, Select { inventory: 1, owner: 0, selected: true }, Pins { inventory: 1, revision: 0, digest: 0, pin: true, complete: true }, Authorize { inventory: 1, readable: true }, Begin { inventory: 1, digest: 0 }, Observe { inventory: 1, digest: 1, peer: 0, revision: 0, present: false }]

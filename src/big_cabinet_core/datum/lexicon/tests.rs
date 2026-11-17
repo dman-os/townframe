@@ -28,7 +28,7 @@ fn a_typed_dynamic_map_is_an_unknown_the_sidecar_narrows() {
     assert_eq!(
         projected(json!({
             "type": "object",
-            "additionalProperties": {"type": "integer", "format": "uint64"}
+            "additionalProperties": {"type": "integer", "minimum": 0}
         })),
         json!({"type": "unknown"})
     );
@@ -52,7 +52,7 @@ fn a_dynamic_map_still_may_not_admit_a_non_canonical_value() {
 }
 
 /// A named type travels beside the datum that reaches it and is referenced locally, which is
-/// what lets a plug be read on its own. Inlining it would lose the name a peer points at, and
+/// what lets a cartridge be read on its own. Inlining it would lose the name a peer points at, and
 /// leaving the reference alone would publish a file that does not resolve.
 #[test]
 fn a_named_definition_is_carried_and_referenced_locally() {
@@ -150,7 +150,7 @@ fn constraints_lexicon_states_travel_and_the_ones_it_counts_differently_do_not()
         json!({"type": "string", "format": "datetime"})
     );
     assert_eq!(
-        projected(json!({"type": "integer", "format": "uint64", "minimum": 0, "maximum": 9})),
+        projected(json!({"type": "integer", "minimum": 0, "maximum": 9})),
         json!({"type": "integer", "minimum": 0, "maximum": 9})
     );
     // Lexicon counts array elements with the length keywords.
@@ -215,7 +215,7 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
         json!({"type": "bytes"})
     );
     assert_eq!(
-        projected(json!({"type": "string", "x-automerge": "float", "format": "double"})),
+        projected(json!({"type": "string", "x-automerge": "float"})),
         json!({"type": "string"})
     );
     assert_eq!(
@@ -232,9 +232,9 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
         projected(json!({
             "type": "array",
             "x-automerge": "list",
-            "items": {"type": "integer", "format": "uint8"}
+            "items": {"type": "integer", "minimum": 0, "maximum": 255}
         })),
-        json!({"type": "array", "items": {"type": "integer"}})
+        json!({"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}})
     );
 }
 
@@ -244,7 +244,6 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
 fn a_plain_number_is_not_a_lexicon_type() {
     for stated in [
         json!({"type": "number"}),
-        json!({"type": "number", "format": "double"}),
         json!({"type": "number", "x-automerge": "number"}),
     ] {
         let reason = refused(stated);
@@ -460,4 +459,46 @@ fn a_pattern_map_that_is_not_keyed_is_refused() {
         let reason = refused(schema);
         assert!(reason.contains(reason_contains), "{reason}");
     }
+}
+
+/// A Rust reference type is a def of `org.example.daybook.defs`, so a datum holding one publishes a
+/// `ref` to that def and nothing of the type's own schema: a peer resolves the def from the
+/// Lexicon rather than from any sidecar.
+#[cfg(feature = "schemars")]
+#[test]
+fn reference_types_project_to_refs_to_the_reference_defs() {
+    #[derive(schemars::JsonSchema)]
+    #[expect(
+        dead_code,
+        reason = "the fields are read by the schema derive, not by code"
+    )]
+    struct Linked {
+        link: crate::DatumReference,
+        at: crate::Location,
+        pinned: crate::DatumPin,
+        maybe: Option<crate::DatumReference>,
+    }
+    let file = project_datum(
+        "org.example.test",
+        &serde_json::to_value(schemars::schema_for!(Linked)).unwrap(),
+    )
+    .expect("projected");
+    let properties = &file["defs"]["main"]["properties"];
+    assert_eq!(
+        properties["link"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumRef"})
+    );
+    assert_eq!(
+        properties["at"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumLocation"})
+    );
+    assert_eq!(
+        properties["pinned"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumPin"})
+    );
+    assert_eq!(
+        properties["maybe"],
+        json!({"type": "ref", "ref": "org.example.daybook.defs#datumRef"})
+    );
+    assert_eq!(file["defs"]["main"]["nullable"], json!(["maybe"]));
 }

@@ -25,6 +25,25 @@ use crate::runtime2::support::BigRepoCiphertextLocator;
 use crate::store::sqlite::KeyhiveIncorporationSink;
 use tracing::Instrument;
 
+// INSTR: log why a document's PCS root is underivable on this node (the exact
+// beekem error, op count, and whether this node's own leaf is in the tree).
+macro_rules! instr_pcs_state {
+    ($kh_doc:expr, $sed_id:expr, $label:expr) => {{
+        let mut locked = $kh_doc.lock().await;
+        let owner_in_tree = locked.cgka_members().map(|m| m.count()).ok();
+        match locked.cgka_mut() {
+            Ok(cgka) => {
+                let ops = cgka.ops_count();
+                let root = cgka.try_pcs_key_hash();
+                tracing::info!(sed_id = ?$sed_id, label = $label, ops, ?root, ?owner_in_tree, "INSTR pcs state");
+            }
+            Err(error) => {
+                tracing::info!(sed_id = ?$sed_id, label = $label, ?error, "INSTR pcs state: no cgka");
+            }
+        }
+    }};
+}
+
 /// Period between archive/prune/WAL maintenance passes.
 pub(crate) const KEYHIVE_MAINTENANCE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(300);
@@ -53,6 +72,7 @@ use crate::runtime2::support::encrypt_staged_automerge_ingest;
 use crate::runtime2::support::persist_cgka_updates_durably;
 use crate::runtime2::support::sedimentree_heads_payload;
 use crate::runtime2::types::BigRepoSyncPolicy;
+use keyhive_core::cgka::PcsKeyError;
 use keyhive_core::crypto::envelope::Envelope;
 use keyhive_core::principal::document::DecryptError;
 use keyhive_core::principal::document::DocCausalDecryptionError;
@@ -331,6 +351,71 @@ impl<S> NativeBigRepoIo<S>
 where
     S: BigRepoSubductionStorage,
 {
+    /// Make the document's PCS root derivable so a checkpoint can be sealed
+    /// under it, minting an update op when this node may. `false` means the
+    /// checkpoint defers.
+    ///
+    /// Minting an update op for an underivable root is only sound when this
+    /// node is the one member designated to resolve the tree. Concurrent
+    /// `Update` ops leave the root conflicted until a single op causally after
+    /// all of them replaces it. If every member that sees the conflict mints
+    /// its own resolving op, those ops are again mutually concurrent: each
+    /// node's tree resolves, the peers' ops arrive and re-conflict it, and the
+    /// retriggered coverage mints again, forever (observed: >1000 persists and
+    /// 150+ ops on one doc, two nodes ping-ponging). Keyhive names the issuers
+    /// of the conflicting root versions and every node sees the same set, so
+    /// the lowest issuer resolves and the rest defer; the resolver's op is
+    /// ingested, re-triggers coverage, and finds the root derivable.
+    async fn establish_pcs_root(
+        &self,
+        sed_id: SedimentreeId,
+        kh_doc_id: KhDocumentId,
+    ) -> eyre::Result<bool> {
+        let keyhive = self.keyhive.clone_keyhive();
+        let Err(error) = keyhive.try_pcs_key_hash(kh_doc_id).await else {
+            return Ok(true);
+        };
+        if let PcsKeyError::RootConflicted { issuers } = &error {
+            let local_id = keyhive.active().lock().await.id();
+            if issuers.first() != Some(&local_id) {
+                debug!(
+                    ?sed_id,
+                    conflicting = issuers.len(),
+                    "causal checkpoint deferred: another member resolves the conflicted CGKA root"
+                );
+                return Ok(false);
+            }
+        }
+        let kh_doc = keyhive // INSTR
+            .get_document(kh_doc_id) // INSTR
+            .await // INSTR
+            .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?; // INSTR
+        instr_pcs_state!(kh_doc, sed_id, "persist: before force_pcs_update"); // INSTR
+        let forced = keyhive.force_pcs_update(kh_doc_id).await;
+        instr_pcs_state!(kh_doc, sed_id, "persist: after force_pcs_update"); // INSTR
+        let (update, local_secret) = match forced {
+            Ok(update) => update,
+            Err(EncryptError::UnableToPcsUpdate(beekem::error::CgkaError::IdentifierNotFound)) => {
+                debug!(
+                    ?sed_id,
+                    "causal checkpoint deferred: local principal is absent from the current CGKA tree"
+                );
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
+            }
+        };
+        persist_cgka_updates_durably(
+            &self.keyhive_protocol,
+            &self.keyhive_storage,
+            vec![update],
+            vec![local_secret],
+        )
+        .await?;
+        Ok(true)
+    }
+
     /// Compute the sedimentree frontier from durable storage alone (ignoring
     /// the resident cache and the incrementally-maintained heads table).
     /// Debug-only divergence cross-check: see [`Self::sedimentree_heads`]'s
@@ -475,34 +560,13 @@ where
                 .await
                 .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?;
 
-            if keyhive.try_pcs_key_hash(kh_doc_id).await.is_none() {
-                let (update, local_secret) = match keyhive.force_pcs_update(kh_doc_id).await {
-                    Ok(update) => update,
-                    Err(EncryptError::UnableToPcsUpdate(
-                        beekem::error::CgkaError::IdentifierNotFound,
-                    )) => {
-                        debug!(
-                            ?sed_id,
-                            "causal checkpoint deferred: local principal is absent from the current CGKA tree"
-                        );
-                        return Ok(None);
-                    }
-                    Err(error) => {
-                        return Err(ferr!("failed establishing checkpoint PCS root: {error}"));
-                    }
-                };
-                persist_cgka_updates_durably(
-                    &self.keyhive_protocol,
-                    &self.keyhive_storage,
-                    vec![update],
-                    vec![local_secret],
-                )
-                .await?;
+            if !self.establish_pcs_root(sed_id, kh_doc_id).await? {
+                return Ok(None);
             }
 
             let pcs_key_hash = match keyhive.try_pcs_key_hash(kh_doc_id).await {
-                Some(pcs_key_hash) => pcs_key_hash,
-                None => {
+                Ok(pcs_key_hash) => pcs_key_hash,
+                Err(_) => {
                     // A concurrent task rotated/forked the CGKA between our
                     // preparation and this verification (remote ops ingested
                     // via ApplySyncSession). Defer like the other concurrent-
@@ -613,12 +677,16 @@ where
         Sendable::from_future(async move {
             let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
             let keyhive = self.keyhive.clone_keyhive();
-            // A missing document and an underivable PCS key both come back as
-            // `None` from `try_pcs_key_hash`, so no lookup is needed here.
-            Ok(keyhive
-                .try_pcs_key_hash(kh_doc_id)
-                .await
-                .map(|hash| *hash.raw.as_bytes()))
+            // A missing document, a document without a CGKA and an
+            // underivable or conflicted root all mean there is no current
+            // epoch; the error only says which.
+            let hash = keyhive.try_pcs_key_hash(kh_doc_id).await;
+            if hash.is_err()
+                && let Some(kh_doc) = keyhive.get_document(kh_doc_id).await
+            {
+                instr_pcs_state!(kh_doc, sed_id, "current_causal_epoch is None"); // INSTR
+            }
+            Ok(hash.ok().map(|hash| *hash.raw.as_bytes()))
         })
     }
 
@@ -686,24 +754,17 @@ where
                 ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
-            let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
-            let local_write = access.is_some_and(|access| access.is_editor());
-            // Public-member path: a doc that grants editor access to the
-            // well-known Public agent may be written by anyone (the writer
-            // encrypts through Public's well-known keys).
-            let public_ident = keyhive_core::principal::public::Public.id();
-            let public_access = self.keyhive.agent_access_on(&public_ident, doc_ident).await;
-            let public_write = public_access.is_some_and(|access| access.is_editor());
+            // Own editor access, or the Public-member path: a doc that grants
+            // editor access to the well-known Public agent may be written by
+            // anyone (the writer encrypts through Public's well-known keys).
+            let writable = self.keyhive.can_write(&local_ident, doc_ident).await;
             tracing::debug!(
                 %doc_id,
                 local_peer_id = %self.local_peer_id,
-                local_access = ?access,
-                public_access = ?public_access,
-                local_write,
-                public_write,
+                writable,
                 "document write-access probe"
             );
-            Ok(local_write || public_write)
+            Ok(writable)
         })
     }
 
@@ -1161,24 +1222,16 @@ where
             // Return the entrypoint first, followed by the decrypted causal
             // ancestors. Consumers can therefore materialize the exact blob
             // requested as well as its closure.
+            // Keyhive's causal walk already unwrapped each ancestor's envelope:
+            // `state.complete` holds plaintexts. Re-parsing them as envelopes
+            // would read the first plaintext bytes as a length and preallocate
+            // up to 1 MiB per ancestor before failing.
+            let mut seen = std::collections::HashSet::from([encrypted.content_ref.clone()]);
             let mut complete = vec![(encrypted.content_ref.clone(), entrypoint_envelope.plaintext)];
-            for (content_ref, ciphertext_or_plaintext) in state.complete {
-                if complete
-                    .iter()
-                    .any(|(known_ref, _)| known_ref == &content_ref)
-                {
-                    continue;
+            for (content_ref, plaintext) in state.complete {
+                if seen.insert(content_ref.clone()) {
+                    complete.push((content_ref, plaintext));
                 }
-                match bincode::deserialize::<'_, Envelope<Vec<u8>, Vec<u8>>>(
-                    &ciphertext_or_plaintext,
-                ) {
-                    Ok(env) => {
-                        complete.push((content_ref, env.plaintext));
-                    }
-                    Err(_) => {
-                        complete.push((content_ref, ciphertext_or_plaintext));
-                    }
-                };
             }
 
             let mut blockers = Vec::new();
@@ -2140,13 +2193,8 @@ where
     // The incorporation sink is awaited inline: the exchange cannot complete
     // until the durable incorporation record commits. The same sink answers
     // boot's WAL-vs-admission diff for crash-window reconciliation.
-    let keyhive_dispatcher_notify = Arc::new(tokio::sync::Notify::new());
-    let keyhive_reporter_weak = Arc::downgrade(&keyhive_dispatcher_notify);
-    let incorporation_sink = KeyhiveIncorporationSink::new(
-        group_part_store.clone(),
-        evt_tx.clone(),
-        keyhive_reporter_weak,
-    );
+    let incorporation_sink =
+        KeyhiveIncorporationSink::new(group_part_store.clone(), evt_tx.clone());
     let keyhive_protocol: BigRepoKeyhiveProtocol = Arc::new(
         subduction_keyhive::KeyhiveProtocol::new(
             keyhive.clone_keyhive(),
@@ -2161,9 +2209,8 @@ where
         .ingest_from_storage()
         .await
         .map_err(|error| ferr!("failed recovering keyhive event WAL: {error}"))?;
-    // One dispatcher owns the debounced, classified fan-out of keyhive change
     // One dispatcher owns the debounced, classified fan-out of durable
-    // admission-log changes. The notifier is only a wake-up hint.
+    // admission-log changes; it wakes on the store's admission watermark.
     let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
         Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
     // One timer and one clock serve every actor in this node — the hub, the
@@ -2178,7 +2225,6 @@ where
             group_part_store.clone(),
             Arc::clone(&timer),
             Arc::clone(&clock),
-            Arc::clone(&keyhive_dispatcher_notify),
             keyhive_dispatcher_subscriptions,
             utils_rs::batching::DebouncePolicy {
                 quiet_window: std::time::Duration::from_millis(100),
@@ -2345,10 +2391,10 @@ where
     let spawned_causal_checkpoint = crate::runtime2::spawn_causal_checkpoint_worker(
         group_part_store.clone(),
         keyhive.clone(),
+        Arc::clone(&keyhive_protocol),
         handle.clone(),
         Arc::clone(&timer),
         Arc::clone(&clock),
-        evt_tx.clone(),
         causal_checkpoint_group_scope,
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
@@ -2361,11 +2407,8 @@ where
     // Prekey janitor: rotates the local agent's consumed prekeys. Driven by
     // the durable admission log (own cursor) so Add ops incorporated while
     // the runtime was down are picked up on the next boot.
-    let spawned_prekey_janitor = crate::runtime2::spawn_prekey_janitor_worker(
-        group_part_store.clone(),
-        keyhive.clone(),
-        Arc::clone(&timer),
-    );
+    let spawned_prekey_janitor =
+        crate::runtime2::spawn_prekey_janitor_worker(group_part_store.clone(), keyhive.clone());
     stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
     stop_token.worker_tasks.spawn(Sendable::from_future(
         spawned_prekey_janitor
@@ -2412,25 +2455,12 @@ where
         Sendable::from_future(fut.instrument(tracing::info_span!("subduction_manager")))
     })?;
 
-    // Keyhive maintenance: cache warming and archive compaction have
-    // independent schedules. Cache refresh is also single-flight and is
-    // triggered on demand by the protocol when a sync needs fresh state.
-    {
-        let kh_proto = Arc::clone(&keyhive_protocol);
-        stop_token.child_tasks.spawn({
-            let timer = Arc::clone(&timer);
-            let fut = async move {
-                loop {
-                    timer.sleep(std::time::Duration::from_secs(2)).await;
-                    kh_proto
-                        .refresh_cache()
-                        .await
-                        .map_err(|error| ferr!("keyhive cache refresh failed: {error}"))?;
-                }
-            };
-            Sendable::from_future(fut.instrument(tracing::info_span!("keyhive_cache_refresh_loop")))
-        })?;
-    }
+    // Keyhive maintenance: archive compaction runs on a schedule. There is no
+    // periodic cache refresh: the protocol's cache is generation-checked and
+    // every reader (`initiate_sync_with_request`, `notification_targets`)
+    // rebuilds it on demand when local or remote changes bumped the hive
+    // generation, so a timer would only pre-warm it at the cost of locking
+    // every group and document mutex each tick.
     {
         let kh_proto = Arc::clone(&keyhive_protocol);
         let store = group_part_store.clone();
