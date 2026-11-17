@@ -193,9 +193,9 @@ pub struct File {
     pub extra: Extra,
 }
 
-/// A git commit (`gitCommit/<sha>`). Every recorder writes the same value to the same slot, and
-/// none rewrites it: a later fact about a commit goes into its own datum. Holds no pins; the op
-/// that observed the commit does. The commit object itself travels in a pack (an entry's), where
+/// A git commit (`gitCommit/<sha>`). `add` writes it into the commits document of the intxt that
+/// holds the commit (capture does not), the same value to the same slot, and none rewrites it: a
+/// later fact about a commit goes into its own datum. Holds no pins. The commit object itself travels in a pack (an entry's), where
 /// git checks it against its sha on import; this datum is the readable part.
 #[macros::datum(authority = "org.example.intxt.work")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
