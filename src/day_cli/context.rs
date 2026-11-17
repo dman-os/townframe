@@ -240,6 +240,27 @@ impl NodeSettings {
     pub fn node_id(&self) -> String {
         self.node_id.clone()
     }
+
+    /// The nodes a reference to something this node holds can name as holders (the `via=` hint,
+    /// ADR 035): this node, then the peers its daemon dials at start (its other devices and the
+    /// relay it syncs through, `peers.bootstrap`). Read from `node.json`, so it names what the
+    /// node is configured to sync with, not whoever is connected at the moment.
+    pub fn via_keys(&self) -> Res<Vec<big_cabinet_core::dmeta::MultibaseKey>> {
+        let own = big_node::node_id(&self.seed());
+        let own = data_encoding::HEXLOWER.decode(own.as_bytes())?;
+        let bootstrap = self.peers.iter().flat_map(|peers| &peers.bootstrap);
+        std::iter::once(Ok(own))
+            .chain(bootstrap.map(|ticket| {
+                let addr = big_node::peers::parse_ticket(ticket)?;
+                Ok(addr.id.as_bytes().to_vec())
+            }))
+            .map(|key: Res<Vec<u8>>| {
+                Ok(big_cabinet_core::dmeta::MultibaseKey::try_from(
+                    key?.as_slice(),
+                )?)
+            })
+            .collect()
+    }
 }
 
 /// The state of the server's socket file, learned by connecting to it.
