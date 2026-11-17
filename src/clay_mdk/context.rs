@@ -714,14 +714,18 @@ impl Backend {
             // polled by `render_immediate` from the synchronous `mount` and `dispatch` exports,
             // where there is none, and wit-bindgen asserts on it. So the request runs as
             // incarnation-owned work on the guest's own executor, and the caller awaits its
-            // answer over a channel, which any executor can poll.
+            // answer over a channel, which any executor can poll. Nothing polls Dioxus tasks in
+            // a guest on their own wake, so once the answer is sent the views are marked dirty:
+            // the render pass that follows polls the woken caller.
             #[cfg(feature = "guest")]
             Self::Guest(runtime) => {
                 let (answer, answered) = futures::channel::oneshot::channel();
+                let views = Rc::clone(runtime);
                 runtime.spawn(Box::pin(async move {
                     // A caller that stopped waiting (its view unmounted and dropped the
                     // resource) has no use for the answer, so a closed channel is not an error.
                     drop(answer.send(crate::guest::call(input).await));
+                    views.notify_views();
                 }));
                 answered
                     .await
