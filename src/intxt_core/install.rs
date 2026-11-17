@@ -69,13 +69,14 @@ pub async fn install<H: HttpTransport>(
         .nodules
         .into_iter()
         .find(|record| record.cartridge_id == cartridge_id);
-    if let Some(record) = present {
-        if record.enabled && record.version.as_ref() == Some(&version) {
-            return Ok(Installed {
-                record,
-                already_installed: true,
-            });
-        }
+    if let Some(record) = present
+        && record.enabled
+        && record.version.as_ref() == Some(&version)
+    {
+        return Ok(Installed {
+            record,
+            already_installed: true,
+        });
     }
 
     put_blob(caller, guest_wasm).await?;
