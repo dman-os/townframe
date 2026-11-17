@@ -1301,8 +1301,8 @@ async fn add_to_intxt_includes_parts_once_and_shares_their_documents() {
     .await;
 }
 
-/// `day x intxt github pull` with the fetch injected: the pull request lands in its repository's
-/// GitHub document in the node's github drawer (remembered in `<node dir>/intxt/github.json`),
+/// `day x intxt github pull` with the fetch injected: the pull request lands in its own
+/// document in the node's github drawer (remembered in `<node dir>/intxt/github.json`),
 /// the printout names the intxts the description links, and pulling again overwrites the datum
 /// only when `updated_at` moved.
 #[tokio::test(flavor = "multi_thread")]
@@ -1359,11 +1359,11 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         assert!(first.contains("\"Port the sync\""), "{first}");
         assert!(first.contains(&format!("link: {link}")), "{first}");
 
-        // The drawer and the repository's document are remembered, and hold the datum.
+        // The drawer and the pull request's own document are remembered, and hold the datum.
         let state: Value =
             serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
                 .unwrap();
-        let doc: DocId = state["repos"]["o/r"].as_str().unwrap().parse().unwrap();
+        let doc: DocId = state["pulls"]["o/r#12"].as_str().unwrap().parse().unwrap();
         let caller = Caller::new(
             client,
             RequestContext::root(),
@@ -1378,6 +1378,29 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         assert_eq!(datum["state"], "open");
         assert_eq!(datum["headSha"], "4c1f0a");
 
+        // The intxt the description names includes it: an entry that references the pull
+        // request's document, which the intxt's drawer now lists.
+        assert!(first.contains("pull request added to it"), "{first}");
+        let entry_key: big_cabinet_core::DatumKey = format!("{}/o/r/12", work::GithubPullEntry::ID)
+            .parse()
+            .unwrap();
+        let entry = caller.read(&drawer, &entry_key).await.unwrap().1;
+        assert_eq!(
+            entry["pull"],
+            format!("dtxt:datum:{doc}/{}/o/r/12", work::GithubPull::ID)
+        );
+        let drawers = caller
+            .call(big_cabinet_core::drawer::protocol::ListDocDrawers {
+                doc_id: doc.clone(),
+            })
+            .await
+            .unwrap()
+            .drawers;
+        assert!(
+            drawers.iter().any(|listed| listed.drawer_id == drawer),
+            "{drawers:?}"
+        );
+
         // The same `updated_at`: nothing is written, whatever else the answer says. A URL names
         // the same pull request.
         let again = pull(
@@ -1391,11 +1414,23 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
         // A newer `updated_at` overwrites it, in the same document.
         let newer = pull("Edited title", "2026-11-17T12:00:00Z", "o/r#12").await;
         assert!(newer.contains("imported"), "{newer}");
+        assert!(newer.contains("pull request already in it"), "{newer}");
         assert_eq!(held().await["title"], "Edited title");
         let state: Value =
             serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
                 .unwrap();
-        assert_eq!(state["repos"]["o/r"], doc.to_string());
+        assert_eq!(state["pulls"]["o/r#12"], doc.to_string());
+
+        // A run that lost `github.json` creates the document under the same command and gets
+        // the first one back.
+        std::fs::remove_file(node_root.join("intxt/github.json")).unwrap();
+        let recovered = pull("Edited again", "2026-11-17T13:00:00Z", "o/r#12").await;
+        assert!(recovered.contains("imported"), "{recovered}");
+        let state: Value =
+            serde_json::from_slice(&std::fs::read(node_root.join("intxt/github.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["pulls"]["o/r#12"], doc.to_string());
+        assert_eq!(held().await["title"], "Edited again");
     })
     .await;
 }

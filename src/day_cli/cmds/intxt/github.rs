@@ -1,11 +1,13 @@
 //! `day x intxt github pull`: a GitHub pull request onto the node, so a micro (which has no
 //! egress) can list and read it. The CLI fetches it with the user's own `gh` credentials, shelling
-//! out to `gh api`, and writes a `githubPull/<owner>/<repo>/<number>` datum into the repository's
-//! GitHub document. The node holds no token.
+//! out to `gh api`, and writes a `githubPull/<owner>/<repo>/<number>` datum into the pull
+//! request's own document. The node holds no token.
 //!
-//! The documents live in one node-level "github" drawer, made on first use. Its id and each
-//! repository's document id are remembered in `<node dir>/intxt/github.json`, as the capture
-//! drawer's are in `capture.json`.
+//! The documents live in one node-level "github" drawer, made on first use. Its id and each pull
+//! request's document id are remembered in `<node dir>/intxt/github.json`, as the capture
+//! drawer's are in `capture.json`. A pull request has a document of its own so that an intxt
+//! which names it can share exactly that document and not the other pull requests of the
+//! repository.
 
 use super::capture::write_atomically;
 use super::package::Packaging;
@@ -16,6 +18,7 @@ use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::datum::DatumMember;
+use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
@@ -24,6 +27,8 @@ use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cabinet_core::drawer::protocol::DrawerScope;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cabinet_core::drawer::protocol::drawer_placement;
+use big_cabinet_core::reference::DatumReference;
+use big_cabinet_core::reference::ReferenceDocId;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
 use intxt_core::generic;
@@ -83,8 +88,9 @@ impl PullRef {
         })
     }
 
-    fn repository(&self) -> String {
-        format!("{}/{}", self.owner, self.repo)
+    /// `<owner>/<repo>#<number>`, how the state file and the printout name it.
+    fn name(&self) -> String {
+        format!("{}/{}#{}", self.owner, self.repo, self.number)
     }
 
     fn slot(&self) -> String {
@@ -156,8 +162,9 @@ pub(crate) fn pull_datum(answer: &Value) -> Res<work::GithubPull> {
 #[serde(rename_all = "camelCase")]
 struct GithubNode {
     drawer: DrawerId,
-    /// `<owner>/<repo>` → the repository's GitHub document.
-    repos: BTreeMap<String, DocId>,
+    /// `<owner>/<repo>#<number>` → the pull request's document. A missing entry is recovered by
+    /// the idempotent creation, which answers the first one.
+    pulls: BTreeMap<String, DocId>,
 }
 
 impl Packaging<'_> {
@@ -211,16 +218,52 @@ impl Packaging<'_> {
             .drawer_id;
         let node = GithubNode {
             drawer,
-            repos: BTreeMap::new(),
+            pulls: BTreeMap::new(),
         };
         self.save_github(&node)?;
         Ok(node)
     }
 
+    /// The pull request's document in the GitHub drawer, empty when new. The command id is fixed
+    /// per (drawer, owner, repo, number), so a run that died between creating it and saving
+    /// `github.json` finds the same document the next time.
+    async fn github_pull_doc(&self, node: &mut GithubNode, pull: &PullRef) -> Res<DocId> {
+        if let Some(doc) = node.pulls.get(&pull.name()) {
+            return Ok(doc.clone());
+        }
+        let placement = drawer_placement(&node.drawer);
+        let capability = self
+            .caller
+            .doc_capability(DocScope {
+                create: [placement.clone()].into(),
+                ..DocScope::default()
+            })
+            .await?;
+        let doc = self
+            .caller
+            .call(CreateDoc {
+                capability,
+                command: CommandId::try_from(format!(
+                    "intxt-github-pull-{}-{}/{}/{}",
+                    node.drawer, pull.owner, pull.repo, pull.number
+                ))?,
+                placement,
+                datums: BTreeMap::new(),
+            })
+            .await?
+            .doc_id;
+        node.pulls.insert(pull.name(), doc.clone());
+        self.save_github(node)?;
+        Ok(doc)
+    }
+
     /// `day x intxt github pull`: fetches the pull request with `fetch` (in the CLI, `gh`) and
-    /// writes it into its repository's GitHub document, which is made when the repository has
-    /// none. An existing datum is overwritten only when GitHub's `updatedAt` moved. Prints the
-    /// title and the intxts the description names, with their links.
+    /// writes it into its document, which is made when it has none. An existing datum is
+    /// overwritten only when GitHub's `updatedAt` moved. Prints the title and the intxts the
+    /// description names, with their links, and includes the pull request in each of those the
+    /// caller can write: an entry in the intxt, and the pull request's document shared into its
+    /// drawer. An intxt that is not readable or writable here is named with the reason and
+    /// skipped.
     pub(crate) async fn github_pull(
         &self,
         out: &mut impl Write,
@@ -231,60 +274,27 @@ impl Packaging<'_> {
         let datum = pull_datum(&fetch(&pull).await?)?;
         let slot_key: DatumKey = key(work::GithubPull::ID, &pull.slot())?;
         let mut node = self.github_node().await?;
-        let written = match node.repos.get(&pull.repository()) {
-            Some(doc) => {
-                let held = match self.caller.try_read(doc, &slot_key).await?.1 {
-                    Some(value) => Some(serde_json::from_value::<work::GithubPull>(value)?),
-                    None => None,
-                };
-                if held
-                    .as_ref()
-                    .is_some_and(|held| held.updated_at == datum.updated_at)
-                {
-                    false
-                } else {
-                    self.caller
-                        .write_datums(
-                            doc,
-                            [(slot_key, to_value(&datum))].into(),
-                            Default::default(),
-                        )
-                        .await?;
-                    true
-                }
-            }
-            None => {
-                let placement = drawer_placement(&node.drawer);
-                let capability = self
-                    .caller
-                    .doc_capability(DocScope {
-                        create: [placement.clone()].into(),
-                        ..DocScope::default()
-                    })
-                    .await?;
-                let datums: BTreeMap<_, _> = [(slot_key, to_value(&datum))].into();
-                let doc = self
-                    .caller
-                    .call(CreateDoc {
-                        capability,
-                        command: self
-                            .caller
-                            .command(&format!("github-doc/{}", pull.repository()), &datums)?,
-                        placement,
-                        datums,
-                    })
-                    .await?
-                    .doc_id;
-                node.repos.insert(pull.repository(), doc);
-                self.save_github(&node)?;
-                true
-            }
+        let doc = self.github_pull_doc(&mut node, &pull).await?;
+        let held = match self.caller.try_read(&doc, &slot_key).await?.1 {
+            Some(value) => Some(serde_json::from_value::<work::GithubPull>(value)?),
+            None => None,
         };
+        let written = !held
+            .as_ref()
+            .is_some_and(|held| held.updated_at == datum.updated_at);
+        if written {
+            self.caller
+                .write_datums(
+                    &doc,
+                    [(slot_key.clone(), to_value(&datum))].into(),
+                    Default::default(),
+                )
+                .await?;
+        }
         writeln!(
             out,
-            "{}#{} \"{}\" ({:?}) {}",
-            pull.repository(),
-            pull.number,
+            "{} \"{}\" ({:?}) {}",
+            pull.name(),
             datum.title,
             datum.state,
             if written { "imported" } else { "unchanged" }
@@ -293,34 +303,45 @@ impl Packaging<'_> {
         if named.is_empty() {
             writeln!(out, "  names no intxt")?;
         }
+        let part = DatumReference::new(ReferenceDocId::Concrete(doc), slot_key);
         let live = self.live_intxts().await?;
         let ids =
             short_ids::ShortIds::new(live.iter().map(ToString::to_string).collect::<Vec<_>>());
         for drawer in named {
-            let title = match self
-                .caller
-                .try_read(&drawer, &key(generic::Title::ID, "main")?)
-                .await
-            {
-                Ok((_, Some(title))) => {
-                    format!(
-                        "\"{}\"",
-                        serde_json::from_value::<generic::Title>(title)?.title
-                    )
-                }
-                Ok((_, None)) => "(not an intxt on this node)".to_owned(),
-                Err(error) => format!("(not readable here: {error})"),
-            };
             let name = if live.contains(&drawer) {
                 shown(&ids, &drawer.to_string())
             } else {
                 drawer.to_string()
             };
+            let title_key = key(generic::Title::ID, "main")?;
+            let title = match self.caller.try_read(&drawer, &title_key).await {
+                Ok((_, Some(title))) => serde_json::from_value::<generic::Title>(title)?.title,
+                Ok((_, None)) => {
+                    writeln!(out, "  intxt {name}: not an intxt on this node, skipped")?;
+                    continue;
+                }
+                Err(error) => {
+                    writeln!(out, "  intxt {name}: not readable here, skipped ({error})")?;
+                    continue;
+                }
+            };
             writeln!(
                 out,
-                "  intxt {name} {title}\n    link: {}",
+                "  intxt {name} \"{title}\"\n    link: {}",
                 generic::Intxt::reference(&drawer)
             )?;
+            match self.caller.add_part(&drawer, &part).await {
+                Ok(included) => writeln!(
+                    out,
+                    "    {}",
+                    if included.added {
+                        "pull request added to it"
+                    } else {
+                        "pull request already in it"
+                    }
+                )?,
+                Err(error) => writeln!(out, "    not added: the caller cannot write it ({error})")?,
+            }
         }
         Ok(())
     }
