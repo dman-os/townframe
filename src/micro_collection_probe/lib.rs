@@ -244,7 +244,7 @@ impl presentation_events::Guest for CollectionProbe {
     }
 
     fn dispatch(surface: &presentation::Surface, event: Event) -> EventResponse {
-        let state = with_state(|state| Rc::clone(state));
+        let state = with_state(Rc::clone);
         let mut write = false;
         let mut cap_write = false;
         let mut cap_close = false;
