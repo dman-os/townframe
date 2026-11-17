@@ -48,4 +48,12 @@ PRs that link to no intxt show none. Finding intxts by commit is deferred to a c
 
 ## Open (for the operator)
 
-1. **A clickable form of the URL.** GitHub doesn't render `dtxt:` as a link, so in a PR description the reference is text. An `https://` form of ADR 035 URLs (through a resolver or the web node) would make one URL work everywhere: GitHub, chat, the browser. That is an ADR 035 extension, worth designing once for every kind, not for intxt alone.
+1. **Where the intxt can be found: a `via=` query key (ADR 035 extension).** A reader of the PR needs to know which nodes hold the intxt, and ADR 035 deliberately puts no locator in identity (§2.2: any node holding a document can serve it). Its settled points (2026-11-10) say "locators are query keys if ever needed", and the old `db+blob` URL had `?via=`. Proposed: `via=<node key>|<node key>` (the multibase node keys of `dtxt:actor`, sorted, `|`-joined like `heads=`), on any `dtxt:` kind:
+
+   ```
+   dtxt:datum:z5Kd…/org.example.intxt/main?via=zNodeA…|zRelay…
+   ```
+
+   It is a hint, never authority: it grants nothing, a reader may try other nodes, and the reference's identity (and equality) ignores it. `Intxt::reference` takes the nodes to name (this node, plus the relays it syncs with); `named_in` keeps the hint for the caller. Open: whether a hint names a node or a relay ticket, and whether stored references (datums) may carry it or only shared text.
+
+Not open any more: a GitHub-clickable form (operator, 2026-11-17: not needed today). `summarizeIntxts` is expected to go once micros get datum and cabinet services from the Clay docs crate (operator, 2026-11-17).
