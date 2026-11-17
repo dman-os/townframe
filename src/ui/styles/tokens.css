@@ -14,6 +14,23 @@
   *::after {
     box-sizing: border-box;
   }
+
+  /* The document is the scroller of an app that lays out in the page, so what shows past its
+     content (the touchpad's overscroll, a not-yet-rendered gap) is the root element's canvas:
+     it takes the theme's page background and color scheme, not the browser's white. The
+     theme's variables live on `.df-theme` and the scheme's on its mode class, so the root reads
+     them through `:has` (the scheme blocks of material.css name this selector too). */
+  :root:has(.df-theme) {
+    background-color: var(--df-color-canvas);
+  }
+
+  :root:has(.df-theme.light) {
+    color-scheme: light;
+  }
+
+  :root:has(.df-theme.dark) {
+    color-scheme: dark;
+  }
 }
 
 /*
@@ -22,7 +39,8 @@
  * elevation come from tokens.generated.css.
  */
 @layer theme {
-  .df-theme {
+  .df-theme,
+  :root:has(.df-theme) {
     --df-color-canvas: var(--scheme-color-background);
     --df-color-surface: var(--scheme-color-surface-container-low);
     --df-color-surface-raised: var(--scheme-color-surface-container);

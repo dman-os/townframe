@@ -577,6 +577,46 @@ mod transitions {
     }
 
     #[test]
+    fn a_strip_at_rest_follows_the_owner_without_announcing() {
+        let (state, effects) = run(&ArcState::default(), &[ArcEvent::Follow(9)]);
+        assert_eq!(state.focus, 9.0);
+        assert!(effects.is_empty());
+        assert_eq!(state.announced, None);
+        // The list may be shorter than the index the owner reports.
+        let (clamped, _) = run(&ArcState::default(), &[ArcEvent::Follow(COUNT + 5)]);
+        assert_eq!(clamped.focus, (COUNT - 1) as f64);
+    }
+
+    #[test]
+    fn a_strip_under_a_thumb_keeps_where_the_owner_is_for_when_it_rests() {
+        let held = pressed_at(2);
+        let (state, effects) = run(&held, &[ArcEvent::Follow(9)]);
+        assert_eq!(state.focus.round(), 2.0, "the thumb owns the focus");
+        assert!(effects.is_empty());
+        let generation = state.generation;
+        let (released, _) = run(&state, &[ArcEvent::Release]);
+        let (mid, _) = run(
+            &released,
+            &[ArcEvent::Tick {
+                generation: released.generation,
+                step: 1,
+            }],
+        );
+        assert_eq!(mid.focus.round(), 2.0, "still settling");
+        let (rested, _) = run(
+            &released,
+            &[ArcEvent::Tick {
+                generation: released.generation,
+                step: SETTLE_STEPS,
+            }],
+        );
+        assert!(released.generation > generation);
+        assert_eq!(rested.thumb_x, None);
+        assert_eq!(rested.focus, 9.0);
+        assert_eq!(rested.follow, None);
+    }
+
+    #[test]
     fn a_focus_left_past_a_shrunken_list_is_clamped_by_the_next_event() {
         let far = ArcState {
             focus: 20.0,
