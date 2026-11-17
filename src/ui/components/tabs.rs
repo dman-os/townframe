@@ -12,7 +12,7 @@ pub fn Tabs(default_value: String, children: Element) -> Element {
     });
 
     rsx! {
-        div { class: "df-tabs", {children} }
+        div { class: "ct-tabs", {children} }
     }
 }
 
@@ -20,7 +20,7 @@ pub fn Tabs(default_value: String, children: Element) -> Element {
 pub fn TabList(children: Element) -> Element {
     rsx! {
         div {
-            class: "df-tabs-list",
+            class: "ct-tabs-list",
             role: "tablist",
             {children}
         }
@@ -35,7 +35,7 @@ pub fn TabTrigger(value: String, children: Element) -> Element {
 
     rsx! {
         button {
-            class: if active { "df-tab-trigger df-tab-trigger-active" } else { "df-tab-trigger" },
+            class: if active { "ct-tab-trigger ct-tab-trigger-active" } else { "ct-tab-trigger" },
             r#type: "button",
             role: "tab",
             aria_selected: active,
@@ -52,7 +52,7 @@ pub fn TabContent(value: String, children: Element) -> Element {
 
     rsx! {
         div {
-            class: if active { "df-tab-content df-tab-content-active" } else { "df-tab-content" },
+            class: if active { "ct-tab-content ct-tab-content-active" } else { "ct-tab-content" },
             role: "tabpanel",
             if active { {children} }
         }

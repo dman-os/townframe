@@ -30,7 +30,7 @@ Updated: 2026-10-22
 | Theme JSON | `src/dayframe_dx/ui/styles/material-theme.json` | Included fixture and generator input. |
 | Generator | `src/dayframe_dx/ui/styles/gen-material-css.ts` | Copied from Gursha. |
 | Generated CSS | `src/dayframe_dx/ui/styles/material.css` | Material palette and scheme custom properties. |
-| Dayframe aliases | `src/dayframe_dx/ui/styles/tokens.css` | `--df-*` names mapped onto Material scheme tokens. |
+| Dayframe aliases | `src/dayframe_dx/ui/styles/tokens.css` | `--ct-*` names mapped onto Material scheme tokens. |
 | Loader | `src/dayframe_dx/ui/src/foundation.rs` | Loads the generated Tailwind output containing Material CSS and Dayframe aliases. |
 | Color page | `src/dayframe_dx/showcase/src/main.rs` | Includes JSON and renders every palette/scheme entry. |
 
@@ -56,25 +56,25 @@ The JSON and generated CSS must remain from the same generator run.
 ## Theme architecture
 
 - Theme family and mode are separate: `material + light`, `material + dark`, or a user family with either mode.
-- `ThemeRoot` establishes `df-theme theme-<family> <light|dark>` on an ancestor element.
+- `ThemeRoot` establishes `ct-theme theme-<family> <light|dark>` on an ancestor element.
 - Material CSS supplies the baseline scheme variables.
-- Dayframe `--df-*` variables are the stable component contract.
+- Dayframe `--ct-*` variables are the stable component contract.
 - User stylesheets may override only selected variables; missing values inherit from the active baseline.
 - Subtrees may override variables by setting them on an ancestor element; descendants inherit the override.
 - `ThemeStyles` injects trusted user CSS; theme sheets should only set contract variables.
-- Tailwind `@theme inline` aliases compact utility tokens to `--df-*` variables.
+- Tailwind `@theme inline` aliases compact utility tokens to `--ct-*` variables.
 - Theme styles must define variables, not structural component selectors.
 
 
 ## Obsidian lessons
 
-Obsidian separates global foundations, semantic/component variables, editor content, plugins, and window chrome. Dayframe should keep the same separation while exposing only stable `--df-*` names to components.
+Obsidian separates global foundations, semantic/component variables, editor content, plugins, and window chrome. Dayframe should keep the same separation while exposing only stable `--ct-*` names to components.
 
 - Prefer semantic roles such as canvas, surface, text, border, accent, and interactive states over raw palette names.
 - Keep mode-dependent declarations at the theme boundary and allow sparse overrides to inherit.
 - Give state variants explicit names (`hover`, `active`, `focus`, `disabled`, `error`) instead of making components derive them ad hoc.
 - Obsidian exposes companion channels for translucent colors; we should add those only when a real renderer need appears rather than proliferating aliases.
-- A future Obsidian converter should map semantic variables into `--df-*`, not make Obsidian names the production contract.
+- A future Obsidian converter should map semantic variables into `--ct-*`, not make Obsidian names the production contract.
 - Use classes and `data-*` selectors for finite component variants and interaction states; reserve CSS variables for theme contracts and genuine scales, not every per-instance knob.
 ## Spacing and geometry
 
@@ -98,7 +98,7 @@ Obsidian separates global foundations, semantic/component variables, editor cont
 - [x] Establish Material JSON as the color input.
 - [x] Generate and check in `material.css`.
 - [x] Load the generated Tailwind output containing Material CSS and Dayframe aliases.
-- [x] Map `--df-color-*` aliases to Material scheme variables.
+- [x] Map `--ct-color-*` aliases to Material scheme variables.
 - [x] Add shared `FoundationStyles` loader.
 - [x] Apply aliases to the remaining shared shell styles.
 - [x] Add native showcase package.

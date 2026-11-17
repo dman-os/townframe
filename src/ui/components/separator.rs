@@ -3,6 +3,6 @@ use dioxus::prelude::*;
 #[component]
 pub fn Separator() -> Element {
     rsx! {
-        hr { class: "df-separator" }
+        hr { class: "ct-separator" }
     }
 }

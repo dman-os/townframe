@@ -473,20 +473,20 @@ fn SpacingFoundation() -> Element {
 #[component]
 fn ShapeFoundation() -> Element {
     let radii = [
-        ("sm", "var(--df-radius-sm)", "rounded-sm"),
-        ("md", "var(--df-radius-md)", "rounded-md"),
-        ("lg", "var(--df-radius-lg)", "rounded-lg"),
-        ("xl", "var(--df-radius-xl)", "rounded-xl"),
-        ("pill", "var(--df-radius-pill)", "rounded-full"),
+        ("sm", "var(--ct-radius-sm)", "rounded-sm"),
+        ("md", "var(--ct-radius-md)", "rounded-md"),
+        ("lg", "var(--ct-radius-lg)", "rounded-lg"),
+        ("xl", "var(--ct-radius-xl)", "rounded-xl"),
+        ("pill", "var(--ct-radius-pill)", "rounded-full"),
     ];
     let borders = [
         (
             "hairline",
-            "var(--df-border-width-hairline)",
+            "var(--ct-border-width-hairline)",
             "border-hairline",
         ),
-        ("thin", "var(--df-border-width-thin)", "border-thin"),
-        ("thick", "var(--df-border-width-thick)", "border-thick"),
+        ("thin", "var(--ct-border-width-thin)", "border-thin"),
+        ("thick", "var(--ct-border-width-thick)", "border-thick"),
     ];
 
     rsx! {
@@ -512,7 +512,7 @@ fn ShapeFoundation() -> Element {
                         for (name, width, utility) in borders {
                             div {
                                 class: "rounded-sm p-3",
-                                style: "border:{width} solid var(--df-color-primary);",
+                                style: "border:{width} solid var(--ct-color-primary);",
                                 "{name} — {width} · {utility}"
                             }
                         }
@@ -954,9 +954,9 @@ fn TileGrammarFoundation(available_width: f64) -> Element {
     let columns = tile_grammar_columns();
     rsx! {
         div {
-            class: "df-tile-lab",
+            class: "ct-tile-lab",
             p {
-                class: "df-tile-lab-note",
+                class: "ct-tile-lab-note",
                 "ColumnRack owns the responsive window; each Column declares its source and loading state while Tile and Widget keep the content grammar stable."
             }
             div {
@@ -971,27 +971,27 @@ fn SurfaceFoundation() -> Element {
     let surfaces = [
         (
             "canvas",
-            "var(--df-color-canvas)",
-            "var(--df-shadow-none)",
+            "var(--ct-color-canvas)",
+            "var(--ct-shadow-none)",
             "bg-background",
         ),
         (
             "surface",
-            "var(--df-color-surface)",
-            "var(--df-shadow-none)",
+            "var(--ct-color-surface)",
+            "var(--ct-shadow-none)",
             "bg-card",
         ),
         (
             "sunken",
-            "var(--df-color-surface-sunken)",
-            "var(--df-shadow-none)",
+            "var(--ct-color-surface-sunken)",
+            "var(--ct-shadow-none)",
             "bg-surface-sunken",
         ),
     ];
     let shadows = [
-        ("none", "var(--df-shadow-none)", "shadow-none"),
-        ("sm", "var(--df-shadow-sm)", "shadow-sm"),
-        ("md", "var(--df-shadow-md)", "shadow-md"),
+        ("none", "var(--ct-shadow-none)", "shadow-none"),
+        ("sm", "var(--ct-shadow-sm)", "shadow-sm"),
+        ("md", "var(--ct-shadow-md)", "shadow-md"),
     ];
 
     rsx! {
@@ -1050,12 +1050,12 @@ fn StateFoundation() -> Element {
                 CardHeader { strong { "State surfaces" } }
                 CardContent {
                     div { class: "grid gap-2",
-                        StateRow { name: "Default", detail: "Resting surface", decoration: "background:var(--df-color-surface);" }
-                        StateRow { name: "Hover", detail: "Tonal response", decoration: "background:var(--df-color-surface-sunken);" }
-                        StateRow { name: "Focus", detail: "Visible keyboard ring", decoration: "background:var(--df-color-surface); outline:var(--df-border-width-thick) solid var(--df-color-focus); outline-offset:2px;" }
-                        StateRow { name: "Selected", detail: "Primary emphasis", decoration: "background:var(--df-color-primary); color:var(--df-color-on-primary);" }
-                        StateRow { name: "Disabled", detail: "Reduced emphasis", decoration: "background:var(--df-color-surface); opacity:0.38;" }
-                        StateRow { name: "Error", detail: "Actionable feedback", decoration: "border-color:var(--df-color-danger); background:var(--df-color-surface);" }
+                        StateRow { name: "Default", detail: "Resting surface", decoration: "background:var(--ct-color-surface);" }
+                        StateRow { name: "Hover", detail: "Tonal response", decoration: "background:var(--ct-color-surface-sunken);" }
+                        StateRow { name: "Focus", detail: "Visible keyboard ring", decoration: "background:var(--ct-color-surface); outline:var(--ct-border-width-thick) solid var(--ct-color-focus); outline-offset:2px;" }
+                        StateRow { name: "Selected", detail: "Primary emphasis", decoration: "background:var(--ct-color-primary); color:var(--ct-color-on-primary);" }
+                        StateRow { name: "Disabled", detail: "Reduced emphasis", decoration: "background:var(--ct-color-surface); opacity:0.38;" }
+                        StateRow { name: "Error", detail: "Actionable feedback", decoration: "border-color:var(--ct-color-danger); background:var(--ct-color-surface);" }
                     }
                 }
             }

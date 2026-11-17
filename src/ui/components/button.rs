@@ -51,7 +51,7 @@ pub fn Button(
 ) -> Element {
     rsx! {
         button {
-            class: "df-button df-button-{variant.class_name()} df-button-{size.class_name()}",
+            class: "ct-button ct-button-{variant.class_name()} ct-button-{size.class_name()}",
             "data-style": variant.class_name(),
             "data-size": size.class_name(),
             style: style.unwrap_or_default(),

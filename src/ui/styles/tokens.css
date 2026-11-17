@@ -22,34 +22,34 @@
  * elevation come from tokens.generated.css.
  */
 @layer theme {
-  .df-theme {
-    --df-color-canvas: var(--scheme-color-background);
-    --df-color-surface: var(--scheme-color-surface-container-low);
-    --df-color-surface-raised: var(--scheme-color-surface-container);
-    --df-color-surface-sunken: var(--scheme-color-surface-dim);
-    --df-color-text: var(--scheme-color-on-background);
-    --df-color-text-muted: var(--scheme-color-on-surface-variant);
-    --df-color-text-subtle: var(--scheme-color-outline);
-    --df-color-border: var(--scheme-color-outline-variant);
-    --df-color-focus: var(--scheme-color-primary);
-    --df-color-primary: var(--scheme-color-primary);
-    --df-color-on-primary: var(--scheme-color-on-primary);
-    --df-color-accent: var(--scheme-color-secondary);
-    --df-color-on-accent: var(--scheme-color-on-secondary);
-    --df-color-accent-container: var(--scheme-color-secondary-container);
-    --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
-    --df-color-selected: var(--scheme-color-secondary-container);
-    --df-color-on-selected: var(--scheme-color-on-secondary-container);
-    --df-color-danger: var(--scheme-color-error);
-    --df-color-on-danger: var(--scheme-color-on-error);
-    --df-color-success: var(--scheme-color-tertiary);
-    --df-color-warning: var(--scheme-color-secondary);
+  .ct-theme {
+    --ct-color-canvas: var(--scheme-color-background);
+    --ct-color-surface: var(--scheme-color-surface-container-low);
+    --ct-color-surface-raised: var(--scheme-color-surface-container);
+    --ct-color-surface-sunken: var(--scheme-color-surface-dim);
+    --ct-color-text: var(--scheme-color-on-background);
+    --ct-color-text-muted: var(--scheme-color-on-surface-variant);
+    --ct-color-text-subtle: var(--scheme-color-outline);
+    --ct-color-border: var(--scheme-color-outline-variant);
+    --ct-color-focus: var(--scheme-color-primary);
+    --ct-color-primary: var(--scheme-color-primary);
+    --ct-color-on-primary: var(--scheme-color-on-primary);
+    --ct-color-accent: var(--scheme-color-secondary);
+    --ct-color-on-accent: var(--scheme-color-on-secondary);
+    --ct-color-accent-container: var(--scheme-color-secondary-container);
+    --ct-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --ct-color-selected: var(--scheme-color-secondary-container);
+    --ct-color-on-selected: var(--scheme-color-on-secondary-container);
+    --ct-color-danger: var(--scheme-color-error);
+    --ct-color-on-danger: var(--scheme-color-on-error);
+    --ct-color-success: var(--scheme-color-tertiary);
+    --ct-color-warning: var(--scheme-color-secondary);
 
     /* Compatibility aliases for existing utility and component vocabulary. */
-    --color-foreground-muted: var(--df-color-text-muted);
-    --color-foreground-subtle: var(--df-color-text-subtle);
-    --color-surface-raised: var(--df-color-surface-raised);
-    --color-secondary: var(--df-color-accent);
-    --color-secondary-foreground: var(--df-color-on-accent);
+    --color-foreground-muted: var(--ct-color-text-muted);
+    --color-foreground-subtle: var(--ct-color-text-subtle);
+    --color-surface-raised: var(--ct-color-surface-raised);
+    --color-secondary: var(--ct-color-accent);
+    --color-secondary-foreground: var(--ct-color-on-accent);
   }
 }
