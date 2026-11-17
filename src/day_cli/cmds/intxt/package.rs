@@ -1030,7 +1030,7 @@ impl<'a> Packaging<'a> {
 
     /// Puts `pack` in the blob store and answers the blob datum that names it: its key and value.
     async fn put_pack(&self, pack: Vec<u8>) -> Res<(DatumKey, Value)> {
-        let info = super::put_blob(self.client, &pack).await?;
+        let info = intxt_core::install::put_blob(&self.caller, &pack).await?;
         let digest = info.blob_id.digest_str();
         Ok((
             key(big_blobs_core::Blob::ID, &digest)?,

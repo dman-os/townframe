@@ -27,7 +27,6 @@ pub(super) fn guest_path() -> PathBuf {
 /// Needs the component, built with `cargo build --manifest-path src/wasm_utils_rs/Cargo.toml
 /// -p intxt_nodule_guest --target wasm32-wasip3 --release`.
 pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &NodeClient)) {
-    use crate::cmds::intxt;
     use big_dispatch_core::Readiness;
     use utils_rs::prelude::FutureExt;
 
@@ -42,9 +41,12 @@ pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &
     });
     let client = connect(&dir).await.unwrap();
     let outcome = std::panic::AssertUnwindSafe(async {
-        let record = intxt::install(&client, &wasm).await.unwrap();
-        assert_eq!(record.readiness, Readiness::Ready);
-        assert!(record.methods.unwrap().granted);
+        let installed = intxt_core::install::install(&operator(&client), &wasm)
+            .await
+            .unwrap();
+        assert!(!installed.already_installed);
+        assert_eq!(installed.record.readiness, Readiness::Ready);
+        assert!(installed.record.methods.unwrap().granted);
         body(&tmp, &client).await;
     })
     .catch_unwind()
@@ -53,6 +55,17 @@ pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// A caller with the operator's own authority over the node `client` reaches, as `day x intxt
+/// install` makes.
+fn operator(client: &NodeClient) -> intxt_core::client::Caller<&NodeClient> {
+    intxt_core::client::Caller::new(
+        client,
+        service_utils_rs::RequestContext::root(),
+        None,
+        "intxt-install".to_owned(),
+    )
 }
 
 /// A document capability the operator mints for `scope`.
@@ -165,6 +178,36 @@ async fn create_intxt_creates_a_drawer_marked_as_an_intxt() {
             accepted("org.example.intxt.body/main").await,
             json!({"order": []})
         );
+    })
+    .await;
+}
+
+/// Installing again, with the node's handler already installed and enabled, is a no-op: it answers
+/// the record it already holds and publishes no second version.
+#[tokio::test(flavor = "multi_thread")]
+async fn installing_intxt_twice_changes_nothing() {
+    use big_cartridges_core::protocol::GetCartridge;
+
+    with_intxt_node(async |_tmp, client| {
+        let wasm = std::fs::read(guest_path()).unwrap();
+        let before = crate::cmds::intxt::call(
+            client,
+            GetCartridge {
+                id: intxt_core::cartridge::cartridge(&wasm).id,
+            },
+        )
+        .await
+        .unwrap();
+        let again = intxt_core::install::install(&operator(client), &wasm)
+            .await
+            .unwrap();
+        assert!(again.already_installed);
+        assert_eq!(again.record.readiness, big_dispatch_core::Readiness::Ready);
+        let after = crate::cmds::intxt::call(client, GetCartridge { id: before.id.clone() })
+            .await
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(after.versions.len(), 1);
     })
     .await;
 }
