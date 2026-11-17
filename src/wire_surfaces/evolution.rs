@@ -213,17 +213,17 @@ fn item_violations(
                 old.contains_key(outer) && !new.contains_key(outer)
             }) => {}
             None => found.push(format!(
-                "{nsid}: stable item {} was removed; deprecate it instead",
+                "{nsid}: {} was stable and was removed; deprecate it instead",
                 named(path)
             )),
             Some(after) if !after.is_stable() => found.push(format!(
-                "{nsid}: stable item {} became unstable",
+                "{nsid}: {} was stable and became unstable",
                 named(path)
             )),
             Some(after) => {
                 if before.since != after.since {
                     found.push(format!(
-                        "{nsid}: stable item {} changed its `since` from {:?} to {:?}",
+                        "{nsid}: {} is stable and changed its `since` from {:?} to {:?}",
                         named(path),
                         before.since,
                         after.since
@@ -804,12 +804,12 @@ mod tests {
         a_stable_field_is_never_removed: (
             json!({"a": {"x-since": 1}, "b": {"x-since": 1}}),
             json!({"a": {"x-since": 1}}),
-            "stable item `/properties/b` was removed; deprecate it instead"
+            "`/properties/b` was stable and was removed; deprecate it instead"
         ),
         a_deprecated_field_may_not_be_removed_either: (
             json!({"a": {}, "b": {"x-since": 1, "x-deprecated": {"since": 3, "note": "use a"}}}),
             json!({"a": {}}),
-            "stable item `/properties/b` was removed"
+            "`/properties/b` was stable and was removed"
         ),
         a_new_unannotated_field_beside_stable_ones_is_unstable: (
             json!({"a": {"x-since": 1}}),
@@ -834,12 +834,12 @@ mod tests {
         a_stable_field_cannot_become_unstable: (
             json!({"a": {"x-since": 1}}),
             json!({"a": {"x-unstable": "drafts"}}),
-            "stable item `/properties/a` became unstable"
+            "`/properties/a` was stable and became unstable"
         ),
         a_stable_field_cannot_silently_lose_its_since: (
             json!({"a": {"x-since": 1}}),
             json!({"a": {}}),
-            "stable item `/properties/a` became unstable"
+            "`/properties/a` was stable and became unstable"
         ),
         a_stable_fields_since_is_fixed: (
             json!({"a": {"x-since": 2}}),
@@ -889,7 +889,7 @@ mod tests {
         a_stable_union_member_is_never_dropped: (
             json!({"u": {"members": ["a.one", "a.two"], "extras": {"a.one": {"x-since": 1}, "a.two": {"x-since": 1}}}}),
             json!({"u": {"members": ["a.one"], "extras": {"a.one": {"x-since": 1}}}}),
-            "stable item `/properties/u/$union/a.two` was removed"
+            "`/properties/u/$union/a.two` was stable and was removed"
         ),
         an_unstable_union_member_may_be_dropped: (
             json!({"u": {"members": ["a.one", "a.two"], "extras": {"a.one": {"x-since": 1}}}}),
@@ -922,7 +922,7 @@ mod tests {
         assert!(
             destabilized
                 .iter()
-                .any(|line| line.contains("the file became unstable")),
+                .any(|line| line.contains("the file was stable and became unstable")),
             "{destabilized:?}"
         );
     }
