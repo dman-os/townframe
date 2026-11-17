@@ -3,6 +3,7 @@
 //! the egress the composition installed for it, a second node pairs with the first by a
 //! bootstrap ticket, and shutdown is clean.
 
+use crate::InstallConfig;
 use crate::MicroInstall;
 use crate::NodeComposition;
 use crate::NodeConfig;
@@ -183,6 +184,7 @@ fn note_schemas() -> Arc<big_cabinet::SchemaRepo> {
 fn install(micro: &str, methods: &[&str]) -> MicroInstall {
     MicroInstall {
         drawers: vec![],
+        config: None,
         micro: micro.to_owned(),
         methods: methods
             .iter()
@@ -501,8 +503,25 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
 
     composition
         .install_micro(MicroInstall {
-            drawers: vec![(granted_drawer, DrawerAccess::Read)],
-            ..install(FIXTURE, &[ReadDatums::XRPC.nsid])
+            drawers: vec![(granted_drawer.clone(), DrawerAccess::Read)],
+            // The shape the review micro's install takes: its methods, its drawers and a config
+            // datum naming them, to which the composition adds the capability.
+            config: Some(InstallConfig {
+                tag: "org.example.test.config".to_owned(),
+                key: "main".to_owned(),
+                value: serde_json::Map::from_iter([(
+                    "drawers".to_owned(),
+                    json!([granted_drawer.to_string()]),
+                )]),
+            }),
+            ..install(
+                FIXTURE,
+                &[
+                    ReadDatums::XRPC.nsid,
+                    "org.example.test.summarize",
+                    "org.example.test.poll",
+                ],
+            )
         })
         .await
         .unwrap();
@@ -510,6 +529,19 @@ async fn a_micro_reads_documents_only_from_its_granted_drawers() {
         .doc_capability(FIXTURE)
         .expect("a micro with drawers is minted a document capability");
     let egress = composition.egress(FIXTURE).unwrap();
+    let (tag, key, config) = composition.config_datum(FIXTURE).unwrap();
+    assert_eq!(
+        (tag.as_str(), key.as_str()),
+        ("org.example.test.config", "main")
+    );
+    assert_eq!(
+        *config,
+        json!({
+            "drawers": [granted_drawer.to_string()],
+            "docCap": serde_json::to_value(capability).unwrap(),
+        }),
+        "the config datum carries the install's members and the minted capability"
+    );
 
     let (status, read) = read_datums(&egress, capability, &granted_doc).await;
     assert_eq!(status, 200, "{read}");

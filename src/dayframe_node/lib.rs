@@ -60,6 +60,19 @@ pub struct MicroInstall {
     /// `methods` (`readDatums`, `writeDatums`, ...), and cannot mint one, so the composition mints
     /// one bound to the micro's actor over these drawers ([`NodeComposition::doc_capability`]).
     pub drawers: Vec<(DrawerId, DrawerAccess)>,
+    /// The configuration datum the shell writes for the micro at install, if any. The composition
+    /// adds the micro's document capability to it as `docCap` (see
+    /// [`NodeComposition::config_datum`]), since only the composition can mint one.
+    pub config: Option<InstallConfig>,
+}
+
+/// A micro's configuration datum as its install table states it: where it goes and the members
+/// the installer knows (the drawers the micro works over). INTERIM, like [`MicroInstall`].
+#[derive(Debug, Clone)]
+pub struct InstallConfig {
+    pub tag: String,
+    pub key: String,
+    pub value: serde_json::Map<String, serde_json::Value>,
 }
 
 /// The node methods each micro is granted, by its plug name (the `<name>` of `<did>/<name>`).
@@ -86,6 +99,7 @@ impl MicroInstall {
                 Self {
                     methods: granted.iter().map(|nsid| (*nsid).to_owned()).collect(),
                     drawers: Vec::new(),
+                    config: None,
                     micro,
                 }
             })
@@ -120,6 +134,8 @@ struct Installed {
     egress: Arc<MicroEgress>,
     /// The micro's document capability over its configured drawers; `None` for a micro with none.
     doc_capability: Option<CapId>,
+    /// The install's configuration datum with `docCap` added: `(tag, key, value)`.
+    config: Option<(String, String, serde_json::Value)>,
 }
 
 impl NodeComposition {
@@ -188,6 +204,13 @@ impl NodeComposition {
     /// INTERIM: see [`MicroInstall`].
     pub fn doc_capability(&self, micro: &str) -> Option<CapId> {
         self.installed.get(micro)?.doc_capability
+    }
+
+    /// The configuration datum to write for `micro`: its install's [`InstallConfig`] with `docCap`
+    /// set to [`Self::doc_capability`], as `(tag, key, value)`. The shell writes it where the
+    /// micro reads its configuration. `None` for a micro with no config in its install.
+    pub fn config_datum(&self, micro: &str) -> Option<&(String, String, serde_json::Value)> {
+        self.installed.get(micro)?.config.as_ref()
     }
 
     /// Installs one more micro on the running node, replacing an earlier install of the same id
@@ -260,6 +283,7 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
         micro,
         methods,
         drawers,
+        config,
     } = install;
     let authority = &node.authority;
     let minter = Authorization::identity(authority.root);
@@ -310,9 +334,25 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
             .wrap_err_with(|| format!("minting the document capability of micro {micro}"))?;
         Some(minted.capability_id)
     };
+    let config = config.map(
+        |InstallConfig {
+             tag,
+             key,
+             mut value,
+         }| {
+            if let Some(capability) = doc_capability {
+                value.insert(
+                    "docCap".to_owned(),
+                    serde_json::to_value(capability).expect("a capability id is JSON"),
+                );
+            }
+            (tag, key, serde_json::Value::Object(value))
+        },
+    );
     Ok(Installed {
         egress: Arc::new(egress),
         doc_capability,
+        config,
     })
 }
 
