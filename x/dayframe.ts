@@ -21,7 +21,7 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 127.0.0.1:PORT, to compare its diff code in Firefox against Wry
                 --port <n>       default 8765
                 the lab's PR #84 view fetches pr84.diff from beside the page: it is copied
-                from DAYFRAME_LAB_DIFF or /tmp/pr84.diff into the gitignored
+                from DAYFRAME_LAB_DIFF, when set, into the gitignored
                 src/dayframe_showcase/public/ at serve time. Start choices are URL
                 parameters: ?tab=diffs&diffs_view=pr84, ?kit=nav
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
@@ -89,12 +89,13 @@ switch (command) {
     const portFlag = rest.indexOf("--port");
     const port = portFlag >= 0 ? rest[portFlag + 1] : "8765";
     if (!port) throw new Error("--port needs a number");
-    const diff = $.path(Deno.env.get("DAYFRAME_LAB_DIFF") ?? "/tmp/pr84.diff");
     const served = root.join("src/dayframe_showcase/public");
     await Deno.mkdir(served.toString(), { recursive: true });
-    if (await diff.exists()) {
+    const override = Deno.env.get("DAYFRAME_LAB_DIFF");
+    const diff = override ? $.path(override) : served.join("pr84.diff");
+    if (override && await diff.exists()) {
       await diff.copyFile(served.join("pr84.diff"));
-    } else {
+    } else if (!(await diff.exists())) {
       console.warn(
         `${diff} is missing: the PR #84 view will say how to produce it`,
       );

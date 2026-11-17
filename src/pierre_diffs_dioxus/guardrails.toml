@@ -10,6 +10,9 @@ allow_external_api_types = true
 
 [builds.wasm32-unknown-unknown]
 
+# The lab micro and the review mock link the diff view into their wasip3 guests.
+[builds.wasm32-wasip3]
+
 [[exemptions]]
 code = "ERROR_TYPE_ITEMS"
 path = "src/pierre_diffs_dioxus/host.rs"

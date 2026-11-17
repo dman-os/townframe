@@ -22,18 +22,18 @@ use super::Segmented;
 use review_mock::DiffOptions;
 use web_time::Instant;
 
-/// Where the diff comes from unless `DAYFRAME_LAB_DIFF` says otherwise.
+/// Where the diff comes from unless `DAYFRAME_LAB_DIFF` says otherwise: the gitignored `public/` beside the
+/// crate, the same file the browser build serves (3.6 MB, so it is never committed).
 #[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_PATH: &str = "/tmp/pr84.diff";
+const DEFAULT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/public/pr84.diff");
 
-/// Where the page fetches the diff from: `x/dayframe.ts showcase-web` copies it beside the page at
-/// serve time, so it is never in git (3.6 MB).
+/// Where the page fetches the diff from: the same gitignored `public/pr84.diff`, served beside the page
+/// by `x/dayframe.ts showcase-web` (which copies `DAYFRAME_LAB_DIFF` there when it is set).
 #[cfg(target_arch = "wasm32")]
 const FETCH_URL: &str = "pr84.diff";
 
 /// How to produce the file when it is missing.
-const HOW_TO_PRODUCE: &str =
-    "git diff origin/feat/datum-core...origin/feat/big-node > /tmp/pr84.diff";
+const HOW_TO_PRODUCE: &str = "git diff origin/feat/datum-core...origin/feat/big-node > src/dayframe_showcase/public/pr84.diff";
 
 /// One file of the diff: its path, its size, and where its patch lies in the text.
 struct PrFile {
@@ -90,7 +90,9 @@ async fn read_text() -> Result<(String, String), String> {
     use wasm_bindgen_futures::JsFuture;
 
     let unavailable = |why: String| {
-        format!("Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/dayframe.ts showcase-web`, which copies it beside the page.")
+        format!(
+            "Could not fetch {FETCH_URL}: {why}. Produce it with `{HOW_TO_PRODUCE}` and serve the lab with `x/dayframe.ts showcase-web`, which copies it beside the page."
+        )
     };
     let window = web_sys::window().expect("the lab runs in a window");
     let response = JsFuture::from(window.fetch_with_str(FETCH_URL))
