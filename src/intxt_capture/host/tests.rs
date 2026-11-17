@@ -181,7 +181,7 @@ fn a_bash_call_that_edits_a_file_becomes_a_caused_op_and_nothing_persists_withou
     assert_eq!(worktree.docs, WorktreeDocs::default());
     assert_eq!(worktree.next_seq, 0);
     assert!(worktree.ops.is_empty());
-    assert_eq!(worktree.commits.len(), 1);
+    assert_eq!(worktree.refs.len(), 1);
     let recorded = recorded_for(&start, 0);
     start.commit(recorded).unwrap();
 
