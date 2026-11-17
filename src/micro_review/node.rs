@@ -11,6 +11,7 @@
 use big_cabinet_core::DocId;
 use big_cabinet_core::authority::CapId;
 use method_core::Unary;
+use service_core_rs::ClientError;
 use std::future::Future;
 
 /// Why a call did not return its answer: both are the edge's failures to report, not invariants.
@@ -24,10 +25,26 @@ pub enum CallError {
     Transport(String),
 }
 
+impl<E: std::fmt::Display> From<ClientError<E>> for CallError {
+    fn from(error: ClientError<E>) -> Self {
+        match error {
+            ClientError::Method(refusal) => Self::Refused(refusal.to_string()),
+            ClientError::Transport { message, .. } => Self::Transport(message),
+        }
+    }
+}
+
 /// The micro's view of the node. `Clone` because each task the micro spawns holds its own handle.
 pub trait NodeCalls: Clone + 'static {
     /// One call of the node method `M`.
-    fn call<M: Unary>(&self, input: M) -> impl Future<Output = Result<M::Output, CallError>>;
+    /// The signature is `clay_mdk::Context::call` of #169 (`feat/micro-dispatch-transport`),
+    /// `pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>>`,
+    /// so its impl is `self.context.call(input)`. `ClientError` is `service_core_rs`'s until
+    /// that branch re-exports it from `clay_mdk`.
+    fn call<M: Unary>(
+        &self,
+        input: M,
+    ) -> impl Future<Output = Result<M::Output, ClientError<M::Error>>>;
 
     /// The capability that reads `doc` (the `capability` a `readDatums` carries).
     fn read_capability(&self, doc: &DocId) -> impl Future<Output = Result<CapId, CallError>>;

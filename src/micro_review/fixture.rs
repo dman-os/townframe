@@ -25,9 +25,11 @@ use intxt_core::methods::IntxtsSummarized;
 use intxt_core::methods::SummarizeIntxts;
 use intxt_core::methods::SummaryStatus;
 use intxt_core::work;
+use method_core::ContextError;
 use method_core::Unary;
 use serde_json::Value;
 use serde_json::json;
+use service_core_rs::ClientError;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -261,7 +263,8 @@ impl Fixture {
             .doc(not_an_intxt, [])
     }
 
-    fn answer(&self, nsid: &'static str, input: Value) -> Result<Value, CallError> {
+    /// `None` is the node refusing the call.
+    fn answer(&self, nsid: &'static str, input: Value) -> Option<Value> {
         self.calls.borrow_mut().push(nsid);
         let answer = match nsid {
             micro_review_manifest::SUMMARIZE_INTXTS => serde_json::to_value(
@@ -272,7 +275,7 @@ impl Fixture {
             ),
             other => unimplemented!("the fixture node does not serve {other}"),
         };
-        Ok(answer.expect("a method output is plain JSON"))
+        Some(answer.expect("a method output is plain JSON"))
     }
 
     fn summarize(&self, input: SummarizeIntxts) -> IntxtsSummarized {
@@ -318,15 +321,13 @@ impl Fixture {
         IntxtsSummarized { results }
     }
 
-    fn read(&self, input: ReadDatums) -> Result<DatumsRead, CallError> {
-        let datums = self.held.docs.get(&input.doc_id).ok_or_else(|| {
-            CallError::Refused(format!("the node does not hold {}", input.doc_id))
-        })?;
+    fn read(&self, input: ReadDatums) -> Option<DatumsRead> {
+        let datums = self.held.docs.get(&input.doc_id)?;
         let version = DatumVersion {
             heads: vec![],
             clock: 1,
         };
-        Ok(DatumsRead {
+        Some(DatumsRead {
             heads: vec![],
             datums: datums
                 .iter()
@@ -352,12 +353,22 @@ impl Fixture {
 }
 
 impl NodeCalls for Fixture {
-    fn call<M: Unary>(&self, input: M) -> impl Future<Output = Result<M::Output, CallError>> {
+    fn call<M: Unary>(
+        &self,
+        input: M,
+    ) -> impl Future<Output = Result<M::Output, ClientError<M::Error>>> {
         let input = serde_json::to_value(&input).expect("a method input is plain JSON");
-        ready(self.answer(M::XRPC.nsid, input).map(|answer| {
-            serde_json::from_value(answer)
-                .expect("the fixture answers in the method's output shape")
-        }))
+        // The node refuses a document it does not grant as it refuses any call it will not
+        // serve: a method error. The fixture cannot name a method's own refusals generically,
+        // so it refuses with the context error every method error can carry.
+        ready(
+            self.answer(M::XRPC.nsid, input)
+                .map(|answer| {
+                    serde_json::from_value(answer)
+                        .expect("the fixture answers in the method's output shape")
+                })
+                .ok_or_else(|| ClientError::Method(ContextError::Unauthenticated.into())),
+        )
     }
 
     fn read_capability(&self, _doc: &DocId) -> impl Future<Output = Result<CapId, CallError>> {

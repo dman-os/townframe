@@ -197,7 +197,6 @@ micro_sample = { path = "./src/micro_sample" }
 micro_counter = { path = "./src/micro_counter" }
 micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 micro_review_manifest = { path = "./src/micro_review_manifest" }
-micro_review = { path = "./src/micro_review" }
 dayframe_composition = { path = "./src/dayframe_composition" }
 ui = { path = "./src/ui" }
 dayframe_native = { path = "./src/dayframe_native" }

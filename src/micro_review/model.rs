@@ -203,7 +203,8 @@ impl<C: NodeCalls> Review<C> {
                 datums: None,
                 optimistic: false,
             })
-            .await;
+            .await
+            .map_err(CallError::from);
         match read {
             Ok(read) => Ok(Read::Ready(read.datums)),
             Err(CallError::Refused(reason)) => Ok(Read::Unreadable(format!("{doc}: {reason}"))),
@@ -641,6 +642,6 @@ mod tests {
             .intxt(&Fixture::doc_id("8"))
             .await
             .unwrap();
-        assert!(matches!(reading, Read::Unreadable(reason) if reason.contains("does not hold")));
+        assert!(matches!(reading, Read::Unreadable(reason) if reason.contains("credential")));
     }
 }
