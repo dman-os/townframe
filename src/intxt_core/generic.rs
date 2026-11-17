@@ -195,21 +195,18 @@ impl PrLinks {
             self.block()
         };
         let Some(found) = Self::find(description)? else {
-            let separator = if description.trim().is_empty() {
-                ""
-            } else if description.ends_with("\n\n") || description.ends_with("\r\n\r\n") {
-                ""
-            } else if description.ends_with('\n') {
-                if crlf { "\r\n" } else { "\n" }
-            } else if crlf {
-                "\r\n\r\n"
+            let newline = if crlf { "\r\n" } else { "\n" };
+            // The text stays as written; the block is set off by a blank line.
+            let (kept, separator) = if description.trim().is_empty() {
+                ("", String::new())
             } else {
-                "\n\n"
-            };
-            let kept = if description.trim().is_empty() {
-                ""
-            } else {
-                description
+                let trailing = description
+                    .chars()
+                    .rev()
+                    .take_while(|c| *c == '\n' || *c == '\r')
+                    .filter(|c| *c == '\n')
+                    .count();
+                (description, newline.repeat(2usize.saturating_sub(trailing)))
             };
             return Ok(format!("{kept}{separator}{block}"));
         };
