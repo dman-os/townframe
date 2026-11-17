@@ -63,6 +63,13 @@ struct Shared {
 /// handle. Make one with [`use_scroll_root`], forward the scroller's `onmounted`, `onscroll` and
 /// `onresize` into it and pass it as `ScrollMode::Embedder`.
 ///
+/// The scroller can be the document itself: mark the element that wraps the page with
+/// `"data-dioxus-scroll-proxy": "document"` (the Dioxus fork's interpreter then reports the
+/// document's scroll and the viewport's size as that element's `onscroll` and `onresize`, and
+/// drives the document through its `MountedData`) and give it no scroll of its own. Put
+/// `overflow-anchor: none` on `html`. A nested scroller gets no momentum scrolling in some
+/// engines (WebKitGTK), the document does.
+///
 /// ```ignore
 /// let root = use_scroll_root();
 /// rsx! {

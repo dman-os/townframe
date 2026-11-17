@@ -193,8 +193,13 @@ fn App() -> Element {
         _ => LabTab::Components,
     });
     let available_width = use_available_width();
-    // The page's own scroller is `main`, so a viewer that lays out in the page (the PR diff's)
-    // is driven by it: the handle takes `main`'s events and the sections reach it by context.
+    // The page's scroller is the document: it is the one scroller that gets momentum scrolling in
+    // every engine (WebKitGTK gives none to a nested `overflow: auto` element). `main` carries
+    // `data-dioxus-scroll-proxy`, which makes it stand in for the document's scroller in the
+    // Dioxus fork's interpreter (the document's scroll and the viewport's size arrive as `main`'s
+    // `onscroll` and `onresize`, and its mounted scroll commands drive the document). A viewer
+    // that lays out in the page (the PR diff's) is driven by it: the handle takes `main`'s events
+    // and the sections reach it by context.
     let scroll_root = use_scroll_root();
     use_context_provider(|| scroll_root.clone());
     use_context_provider(|| LabViewport(available_width));
@@ -218,16 +223,15 @@ fn App() -> Element {
                 href: src.clone(),
             }
         }
+        // `overflow-anchor` off on the document's scroller (the root element's value governs the
+        // viewport) so the engine does not move the position the diff's scroll fix corrects.
+        document::Style { "html {{ overflow-anchor: none; }}" }
         ThemeRoot {
             family: "material".to_string(),
             mode: mode(),
             main {
                 class: "box-border bg-background p-6 font-sans text-foreground lg:p-12",
-                // The page scroller, a fixed-height element rather than the document: standard
-                // Dioxus reports an element's `onscroll`, not the window's. `overflow-anchor` off
-                // so the engine does not move the position the diff's scroll fix corrects. Inline
-                // because the lab's utility CSS is generated and these two are not in it.
-                style: "height:100vh;overflow-y:auto;overflow-anchor:none;",
+                "data-dioxus-scroll-proxy": "document",
                 onmounted: {
                     let scroll_root = scroll_root.clone();
                     move |event| scroll_root.onmounted(event)
