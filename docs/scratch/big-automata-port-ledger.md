@@ -903,8 +903,13 @@ is clean apart from dead code.
 **Audit decisions (operator approved the lane's recommendations, 2026-11-18):**
 - No `supersede` field: transport cancel discards round N (safe by law 9).
 - Dropping the caller cancels the handler on every transport (fix admitted IRPC unary).
-- Typed peer identity: the iroh endpoint key *is* the peer identity (`PeerKey`). In-process
-  callers state their principal explicitly and never default to the local node.
+- **Identity (corrected by the operator):** the iroh endpoint id is a *transport* fact, not
+  the principal. big_node uses one key for both today (ADR 033 §6), but that's the embedding
+  layer's choice, and multiple principals per connection are coming.
+  - The service stack types `TransportContext::Iroh { endpoint }` and derives no principal.
+  - Mapping an endpoint to the principal(s) it may act as is a seam the layer above owns.
+  - The replay server takes the principal from that seam.
+  - In-process callers state who they are explicitly.
 - The browser client goes in a new wasm-capable crate (`service_client_iroh_rs`).
 - Codec later: a fixed encoding per method, atproto-style, with CBOR as the binary option.
 - Session cleanup by TTL lease (law 5); a connection hook is optional later.
