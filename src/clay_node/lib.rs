@@ -75,9 +75,9 @@ use utils_rs::prelude::default;
 use utils_rs::prelude::ferr;
 
 mod cartridge;
-mod egress;
 #[cfg(test)]
 mod e2e;
+mod egress;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 

@@ -3022,6 +3022,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "claytxt_showcase"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "console_error_panic_hook",
+ "dioxus",
+ "dioxus-native",
+ "dioxus-ssr",
+ "gloo-timers 0.3.0",
+ "js-sys",
+ "pierre_diffs_dioxus",
+ "review_mock",
+ "serde",
+ "serde_json",
+ "tokio",
+ "ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4356,6 +4379,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "daytxt_core"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clay_collection",
+ "clay_dioxus",
+ "clay_docs",
+ "clay_guest_session",
+ "clay_host",
+ "clay_mdk",
+ "clay_store",
+ "clay_surface",
+ "daybook_types",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "getrandom 0.4.3",
+ "micro_counter",
+ "micro_counter_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
+ "serde",
+ "serde_json",
+ "sqlite_rs",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "daytxt_desktop"
 version = "0.1.0"
 dependencies = [
@@ -4419,93 +4476,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "claytxt_showcase"
-version = "0.1.0"
-dependencies = [
- "clay_dioxus_kit",
- "console_error_panic_hook",
- "dioxus",
- "dioxus-native",
- "dioxus-ssr",
- "gloo-timers 0.3.0",
- "js-sys",
- "pierre_diffs_dioxus",
- "review_mock",
- "serde",
- "serde_json",
- "tokio",
- "ui",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
-]
-
-[[package]]
-name = "daytxt_web"
-version = "0.1.0"
-dependencies = [
- "clay_dioxus",
- "clay_docs",
- "clay_mdk",
- "clay_rt_wcmp",
- "clay_rt_wcmp_web",
- "clay_store",
- "console_error_panic_hook",
- "daytxt_core",
- "dioxus",
- "js-sys",
- "micro_counter_manifest",
- "micro_sample",
- "micro_settings",
- "micro_settings_manifest",
- "micro_shell",
- "micro_shell_manifest",
- "micro_toolbar",
- "micro_toolbar_manifest",
- "serde",
- "serde_json",
- "ui",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
-name = "daytxt_core"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "clay_collection",
- "clay_dioxus",
- "clay_docs",
- "clay_guest_session",
- "clay_host",
- "clay_mdk",
- "clay_store",
- "clay_surface",
- "daybook_types",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "getrandom 0.4.3",
- "micro_counter",
- "micro_counter_manifest",
- "micro_sample",
- "micro_settings",
- "micro_settings_manifest",
- "micro_shell",
- "micro_shell_manifest",
- "micro_toolbar",
- "micro_toolbar_manifest",
- "serde",
- "serde_json",
- "sqlite_rs",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "daytxt_native"
 version = "0.1.0"
 dependencies = [
@@ -4542,6 +4512,36 @@ dependencies = [
  "tokio",
  "ui",
  "utils_rs",
+]
+
+[[package]]
+name = "daytxt_web"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus",
+ "clay_docs",
+ "clay_mdk",
+ "clay_rt_wcmp",
+ "clay_rt_wcmp_web",
+ "clay_store",
+ "console_error_panic_hook",
+ "daytxt_core",
+ "dioxus",
+ "js-sys",
+ "micro_counter_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
+ "micro_shell",
+ "micro_shell_manifest",
+ "micro_toolbar",
+ "micro_toolbar_manifest",
+ "serde",
+ "serde_json",
+ "ui",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

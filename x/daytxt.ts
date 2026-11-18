@@ -115,9 +115,9 @@ switch (command) {
     // intxt's nodule handler is not a micro: the phone's node installs it as a cartridge at boot
     // (`daytxt_native`'s `install_intxt`). `prepareDaytxtPackages` built it
     // beside the packages; stage it with them.
-    await $`cp ${
-      $.path(env["DAYTXT_PACKAGE_DIR"]).join("intxt.guest.wasm")
-    } ${staged.join("intxt.guest.wasm")}`;
+    await $`cp ${$.path(env["DAYTXT_PACKAGE_DIR"]).join("intxt.guest.wasm")} ${
+      staged.join("intxt.guest.wasm")
+    }`;
     const abiFlag = rest.indexOf("--abi");
     const abi = abiFlag >= 0 ? rest[abiFlag + 1] : "arm64";
     const androidTargets: Record<string, string> = {

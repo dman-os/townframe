@@ -247,11 +247,7 @@ mod android {
         .unwrap_or_default()
     }
 
-    fn read_insets(
-        env: &mut JNIEnv,
-        activity: &JObject,
-        scale: f64,
-    ) -> daytxt_core::Insets {
+    fn read_insets(env: &mut JNIEnv, activity: &JObject, scale: f64) -> daytxt_core::Insets {
         fn call<'local>(
             env: &mut JNIEnv<'local>,
             object: &JObject,

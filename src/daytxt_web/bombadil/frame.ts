@@ -133,11 +133,10 @@ export function readFrame(document: Document, window: Window): Frame {
       return {
         name,
         hasDismiss: buttonsNamed(`Dismiss ${name}`).length > 0,
-        hasSidebarNavigation:
-          deepQueryAll(
-            dialog,
-            'nav[aria-label="Sidebar"], [role="navigation"][aria-label="Sidebar"]',
-          ).length > 0,
+        hasSidebarNavigation: deepQueryAll(
+          dialog,
+          'nav[aria-label="Sidebar"], [role="navigation"][aria-label="Sidebar"]',
+        ).length > 0,
         isEmpty: dialog.children.length === 0,
       };
     }),

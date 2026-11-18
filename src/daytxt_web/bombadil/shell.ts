@@ -65,8 +65,9 @@ export const backReturnsToTheList = always(() => {
   const list = before.details[0].slice(0, -" details".length);
   return next(() => {
     const action = lastAction.current;
-    if (typeof action !== "object" || action === null || !("Click" in action))
+    if (typeof action !== "object" || action === null || !("Click" in action)) {
       return true;
+    }
     const { x, y } = action.Click.point;
     const onBack = before.backs.some(
       (rect) =>
@@ -90,8 +91,8 @@ export const overlaysBelongToTheirPanel = always(() =>
       ? dialog.hasSidebarNavigation &&
         dialog.hasDismiss &&
         !frame.current.sideBySide
-      : !dialog.isEmpty && dialog.hasDismiss,
-  ),
+      : !dialog.isEmpty && dialog.hasDismiss
+  )
 );
 
 // Why it must hold: a panel's presentation mounts as soon as its guest answers; "Loading
@@ -103,9 +104,9 @@ export const loadingSectionsFinish = always(() =>
   frame.current.loadingSections === 0
     ? true
     : eventually(() => frame.current.loadingSections === 0).within(
-        15,
-        "seconds",
-      ),
+      15,
+      "seconds",
+    )
 );
 
 // Why it must hold: the shell has to come up at all. A load that never reaches a panel region
@@ -119,5 +120,5 @@ export const shellBoots = eventually(() => frame.current.booted).within(
 // a panel renders there is nothing to click, so Bombadil would stop with "no actions available".
 // Waiting is the only move until then; `shellBoots` bounds how long that may take.
 export const waitForTheShell = actions(() =>
-  frame.current.booted ? [] : ["Wait"],
+  frame.current.booted ? [] : ["Wait"]
 );

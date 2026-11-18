@@ -9,9 +9,7 @@ import { openLifecycle, watchFailures } from "./shell";
 // does not cross; a reading that stopped there reported "no navigation" and failed
 // `navigationAlwaysReachable` on a screen that had the button (CI run of #90, bombadil at 1024px,
 // "Show Counter (Wasm) panel", back, "Hide sidebar").
-test("the frame reading finds the sidebar button inside the layout's shadow root", async ({
-  page,
-}) => {
+test("the frame reading finds the sidebar button inside the layout's shadow root", async ({ page }) => {
   const failures = watchFailures(page);
   await page.setViewportSize({ width: 1024, height: 800 });
   await page.goto("/");

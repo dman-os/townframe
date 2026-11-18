@@ -7,9 +7,7 @@ import { openLifecycle, watchFailures } from "./shell";
 // to see it suspend, which `clay_rt_wcmp::first_poll` treats as an invariant break: it panicked,
 // and the panic took the whole shell down with a page error. The `trapper` package (a fixture
 // the e2e server serves, see `x/daytxt-packages.ts`) has one button, and its click traps.
-test("a guest that traps in a sync export faults only its micro", async ({
-  page,
-}) => {
+test("a guest that traps in a sync export faults only its micro", async ({ page }) => {
   const failures = watchFailures(page);
 
   await page.goto("/");

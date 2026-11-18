@@ -6,16 +6,16 @@
 //! (see `clay_node`). A micro not listed still gets an actor and an egress, but can call no
 //! method.
 
-use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::DrawerAccess;
 use clay_node::InstallConfig;
 use clay_node::MicroInstall;
 use clay_node::NodeComposition;
 use service_utils_rs::RequestContext;
 use std::path::Path;
+use utils_rs::prelude::ferr;
 use utils_rs::prelude::Res;
 use utils_rs::prelude::WrapErr;
-use utils_rs::prelude::ferr;
 
 #[cfg(test)]
 mod e2e;
@@ -111,7 +111,10 @@ pub(crate) fn interim_installs(
 /// everywhere is `None`, which installs the micro unconfigured (see [`interim_installs`]);
 /// any other read failure is the operator's to see. The host decides where operators put install
 /// files (the phone's pairing directories, the desktop's data directory).
-pub(crate) fn read_install_file(directories: &[&Path], name: &str) -> std::io::Result<Option<Vec<u8>>> {
+pub(crate) fn read_install_file(
+    directories: &[&Path],
+    name: &str,
+) -> std::io::Result<Option<Vec<u8>>> {
     for directory in directories {
         match std::fs::read(directory.join(name)) {
             Ok(bytes) => return Ok(Some(bytes)),

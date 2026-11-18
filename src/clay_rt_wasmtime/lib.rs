@@ -734,10 +734,7 @@ impl WasmPackage {
     /// `DAYTXT_SLEEPER_COMPONENT`). Test and fixture code only: compositions that ship a package
     /// embed or fetch it themselves.
     pub async fn from_env(name: &str) -> Result<Self, String> {
-        let variable = format!(
-            "DAYTXT_{}_COMPONENT",
-            name.to_uppercase().replace('-', "_")
-        );
+        let variable = format!("DAYTXT_{}_COMPONENT", name.to_uppercase().replace('-', "_"));
         let path = std::env::var(&variable).map_err(|_| {
             format!(
                 "{variable} must name a prepared {name} component; run deno run --allow-all x/check-daytxt.ts --prepare-only and export the printed path"

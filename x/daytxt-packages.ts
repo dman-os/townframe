@@ -24,7 +24,12 @@ import { $ } from "./utils.ts";
 // faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
 // seconds to compile on a phone, and they burn about 10x the fuel (see below).
 export async function prepareDaytxtPackages(
-  { testFixtures, trapper = false, intxtGuest = false, guestProfile = "wasm-release" }: {
+  {
+    testFixtures,
+    trapper = false,
+    intxtGuest = false,
+    guestProfile = "wasm-release",
+  }: {
     testFixtures: boolean;
     trapper?: boolean;
     intxtGuest?: boolean;
@@ -45,8 +50,21 @@ export async function prepareDaytxtPackages(
   //
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_theme_lab", "micro_collection_probe"]
-    : ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_theme_lab"];
+    ? [
+      "micro_counter",
+      "micro_layout",
+      "micro_lab",
+      "micro_review",
+      "micro_theme_lab",
+      "micro_collection_probe",
+    ]
+    : [
+      "micro_counter",
+      "micro_layout",
+      "micro_lab",
+      "micro_review",
+      "micro_theme_lab",
+    ];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3 --profile ${guestProfile}`;
@@ -66,11 +84,17 @@ export async function prepareDaytxtPackages(
 
   // Prepared guest components, keyed by the guest name `component_package`/env vars use.
   const components: Record<string, [string, string]> = {
-    counter: [`wasm32-wasip3/${profileDirectory}/micro_counter.wasm`, "counter"],
+    counter: [
+      `wasm32-wasip3/${profileDirectory}/micro_counter.wasm`,
+      "counter",
+    ],
     layout: [`wasm32-wasip3/${profileDirectory}/micro_layout.wasm`, "layout"],
     lab: [`wasm32-wasip3/${profileDirectory}/micro_lab.wasm`, "lab"],
     review: [`wasm32-wasip3/${profileDirectory}/micro_review.wasm`, "review"],
-    themeLab: [`wasm32-wasip3/${profileDirectory}/micro_theme_lab.wasm`, "theme-lab"],
+    themeLab: [
+      `wasm32-wasip3/${profileDirectory}/micro_theme_lab.wasm`,
+      "theme-lab",
+    ],
     ...(testFixtures
       ? {
         collectionProbe: [
@@ -81,7 +105,10 @@ export async function prepareDaytxtPackages(
           `wasm32-wasip3/${profileDirectory}/examples/sleeper.wasm`,
           "sleeper",
         ],
-        egress: [`wasm32-wasip3/${profileDirectory}/examples/egress.wasm`, "egress"],
+        egress: [
+          `wasm32-wasip3/${profileDirectory}/examples/egress.wasm`,
+          "egress",
+        ],
         dispatch: [
           `wasm32-wasip3/${profileDirectory}/examples/dispatch.wasm`,
           "dispatch",
@@ -155,8 +182,9 @@ export async function prepareDaytxtPackages(
   }
   if (intxtGuest) {
     await $`cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release`;
-    const guestWorkspace = await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
-      .json<{ target_directory: string }>();
+    const guestWorkspace =
+      await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
+        .json<{ target_directory: string }>();
     await $`cp ${
       $.path(guestWorkspace.target_directory).join(
         "wasm32-wasip3/release/intxt_nodule_guest.wasm",

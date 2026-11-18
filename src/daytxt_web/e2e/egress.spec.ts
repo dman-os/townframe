@@ -1,4 +1,4 @@
-import { expect, test, type Request } from "@playwright/test";
+import { expect, type Request, test } from "@playwright/test";
 import { installDeepQuery, showCounterPanel, watchFailures } from "./shell";
 
 // The web host's egress controls (`clay_surface` value policy, the presentation box, and the CSP
@@ -8,9 +8,7 @@ import { installDeepQuery, showCounterPanel, watchFailures } from "./shell";
 
 const FOREIGN = "http://127.0.0.1:9";
 
-test("the app boots under the CSP and a DOM-injected remote image, css url() and javascript: href fetch and run nothing", async ({
-  page,
-}) => {
+test("the app boots under the CSP and a DOM-injected remote image, css url() and javascript: href fetch and run nothing", async ({ page }) => {
   const failures = watchFailures(page);
   await installDeepQuery(page);
   // Chromium announces a CSP-blocked request with a `request` event and then fails it with the
@@ -44,8 +42,9 @@ test("the app boots under the CSP and a DOM-injected remote image, css url() and
 
   const violated = await page.evaluate(async (foreign) => {
     const violations: string[] = [];
-    document.addEventListener("securitypolicyviolation", (event) =>
-      violations.push(event.effectiveDirective),
+    document.addEventListener(
+      "securitypolicyviolation",
+      (event) => violations.push(event.effectiveDirective),
     );
     const host = (window as any).deepQueryAll("[data-clay-presentation]")[0];
     const img = document.createElement("img");
@@ -78,9 +77,7 @@ test("the app boots under the CSP and a DOM-injected remote image, css url() and
   expect(await page.evaluate(() => (window as any).__pwned)).toBeUndefined();
 });
 
-test("a guest node with position:fixed and inset:0 cannot cover the shell outside its presentation box", async ({
-  page,
-}) => {
+test("a guest node with position:fixed and inset:0 cannot cover the shell outside its presentation box", async ({ page }) => {
   watchFailures(page);
   await installDeepQuery(page);
   await page.goto("/");
@@ -111,12 +108,11 @@ test("a guest node with position:fixed and inset:0 cannot cover the shell outsid
     box.append(intruder);
     const rect = intruder.getBoundingClientRect();
     // A point outside the box, inside the viewport.
-    const outside =
-      boxRect.left > 8
-        ? { x: 2, y: 2 }
-        : boxRect.top > 8
-          ? { x: 2, y: 2 }
-          : { x: Math.min(viewport.w - 2, boxRect.right + 2), y: 2 };
+    const outside = boxRect.left > 8
+      ? { x: 2, y: 2 }
+      : boxRect.top > 8
+      ? { x: 2, y: 2 }
+      : { x: Math.min(viewport.w - 2, boxRect.right + 2), y: 2 };
     // `document.elementFromPoint` stops at a shadow host; descend so a hit on the intruder inside
     // a mount's shadow root is seen as the intruder, not as its host.
     let hit: Element | null = document.elementFromPoint(outside.x, outside.y);
@@ -131,8 +127,7 @@ test("a guest node with position:fixed and inset:0 cannot cover the shell outsid
       rect: JSON.parse(JSON.stringify(rect)),
       viewport,
       outsideHitIsIntruder: hit?.id === "intruder",
-      outsideInsideBox:
-        outside.x >= boxRect.left &&
+      outsideInsideBox: outside.x >= boxRect.left &&
         outside.x <= boxRect.right &&
         outside.y >= boxRect.top &&
         outside.y <= boxRect.bottom,

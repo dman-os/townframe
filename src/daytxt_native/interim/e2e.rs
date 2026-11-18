@@ -5,17 +5,17 @@
 use super::install_intxt;
 use super::interim_installs;
 use bytes::Bytes;
-use clay_node::NodeComposition;
-use clay_node::NodeConfig;
 use clay_node::test_support::create_drawer;
 use clay_node::test_support::create_note;
 use clay_node::test_support::no_schemas;
 use clay_node::test_support::note_schemas;
 use clay_node::test_support::read_datums;
+use clay_node::NodeComposition;
+use clay_node::NodeConfig;
 use http_body_util::BodyExt;
 use http_body_util::Full;
-use serde_json::Value;
 use serde_json::json;
+use serde_json::Value;
 use std::sync::Arc;
 
 const REVIEW: &str = "did:example:clay-local/dayframe.review";
@@ -198,4 +198,3 @@ async fn installing_intxt_at_boot_makes_summarize_intxts_reachable_for_the_revie
     );
     composition.stop().await.unwrap();
 }
-

@@ -53,12 +53,13 @@ impl DiffsView {
 /// (`pr84`) opens that view, so a screenshot run needs no click.
 #[component]
 pub fn DiffsFoundation() -> Element {
-    let mut view = use_signal(|| {
-        match crate::lab_setting("DAYTXT_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
-            Some("pr84") => DiffsView::Pr84,
-            _ => DiffsView::Specimens,
-        }
-    });
+    let mut view =
+        use_signal(
+            || match crate::lab_setting("DAYTXT_LAB_DIFFS_VIEW", "diffs_view").as_deref() {
+                Some("pr84") => DiffsView::Pr84,
+                _ => DiffsView::Specimens,
+            },
+        );
     // The options start where the specimens always ran: hover on both parts, selection and the
     // gutter utility on, unchanged lines expanded.
     let mut options = use_signal(|| DiffOptions {

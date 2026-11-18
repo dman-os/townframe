@@ -178,4 +178,3 @@ pub async fn read_datums(
     let body = response.into_body().collect().await.unwrap().to_bytes();
     (status, serde_json::from_slice(&body).unwrap())
 }
-

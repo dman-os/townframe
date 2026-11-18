@@ -5,9 +5,7 @@ import { openLifecycle, watchFailures } from "./shell";
 // the real counter guest through `wcmp` over Chromium's `WebAssembly` engine, mounts it through
 // `clay_dioxus` on `dioxus-web`, and the click round trip reaches the guest. A `first_poll`
 // panic surfaces as a page error, so the test fails on any page or console error.
-test("the composed wcmp counter mounts and dispatches clicks in the browser", async ({
-  page,
-}) => {
+test("the composed wcmp counter mounts and dispatches clicks in the browser", async ({ page }) => {
   const failures = watchFailures(page);
 
   await page.goto("/");
@@ -103,9 +101,7 @@ test("a disabled counter stays disabled across a reload", async ({ page }) => {
 // panel in the shell's sidebar, so with home showing nothing holds the guest, yet the sidebar
 // still lists the button; pressing it starts the guest on `wcmp` for the length of the call, and
 // the new count shows once the counter's section is opened.
-test("the toolbar button increments a stopped wcmp counter", async ({
-  page,
-}) => {
+test("the toolbar button increments a stopped wcmp counter", async ({ page }) => {
   const failures = watchFailures(page);
 
   await page.goto("/");
