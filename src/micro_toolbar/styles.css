@@ -1,0 +1,15 @@
+/*
+ * The toolbar's own stylesheet (a micro's rules sit above the kit and the user's theme, so this
+ * sets layout only and names no colour). Parts are local to this micro: `.ct-toolbar`.
+ */
+.ct-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ct-dimension-spacing-2);
+}
+
+.ct-toolbar [data-part="buttons"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ct-dimension-spacing-2);
+}
