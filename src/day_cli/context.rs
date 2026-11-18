@@ -133,6 +133,11 @@ pub struct PeerSettings {
     /// `big_node::peers::PeersConfig::loopback_only`).
     #[serde(default)]
     pub loopback_only: bool,
+    /// The UDP port the node listens on (see `big_node::peers::PeersConfig::listen_port`). Unset,
+    /// a free port is taken at each start and the node's ticket changes with every restart; a
+    /// node that others dial by its ticket sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
 }
 
 impl PeerSettings {
@@ -167,6 +172,7 @@ impl PeerSettings {
             .collect::<Res<Vec<_>>>()?;
         Ok(big_node::peers::PeersConfig {
             loopback_only: self.loopback_only,
+            listen_port: self.listen_port,
             policy: if relay {
                 big_node::peers::PolicyChoice::Custom(Arc::new(big_node::peers::RelayPolicy::new(
                     dial,
