@@ -6,6 +6,7 @@
 //! through the [`watch`] receiver [`GrantRequests::new`] hands out, for its list and its long
 //! polls.
 
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::CartridgeId;
@@ -17,12 +18,17 @@ use big_cartridges_core::protocol::FiledGrantRequest;
 use big_cartridges_core::protocol::GrantRequestRecord;
 use big_cartridges_core::protocol::GrantRequestState;
 use big_cartridges_core::protocol::RequestedAccess;
+use big_dispatch_core::DispatchError;
 use big_nodule_core::config::CartridgeConfig;
 use big_nodule_core::config::DatumSlot;
 use big_nodule_core::protocol::NoduleRecord;
 use big_nodule_core::protocol::NodulesError;
+use method_core::ContextError;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::watch;
 
 type Res<T> = Result<T, NodulesError>;
@@ -51,7 +57,80 @@ pub(crate) struct GrantRequests {
     declared: BTreeMap<CartridgeId, BTreeMap<String, Permbind>>,
 }
 
+/// How the nodule host tells a refusal of "nobody has said yes yet" from one of "the rules forbid
+/// it" (ADR 049 §4.3), for one cartridge. Dispatch alone cannot: it sees an operation outside the
+/// handle, and only the runtime knows the routine's `uses` and the grants.
+///
+/// The state actor rewrites [`Self::set`] at each reconcile, so every clone, which an executor
+/// keeps for the cartridge's life, sees the routines' current handles.
+#[derive(Clone)]
+pub struct MissingAuthorityLookup {
+    cartridge_id: CartridgeId,
+    /// Per routine, by the dispatch handle it was delivered: the operations its `uses` declare
+    /// through a method permbind that the cartridge's grants did not cover when the handle was
+    /// minted, and the permbind of each. An operation absent here was never declared (or is
+    /// granted, in which case dispatch did not refuse it for want of the handle).
+    ungranted: Arc<RwLock<HashMap<CapId, BTreeMap<String, String>>>>,
+    requests: watch::Receiver<Requests>,
+}
+
+impl MissingAuthorityLookup {
+    pub(crate) fn set(&self, ungranted: HashMap<CapId, BTreeMap<String, String>>) {
+        *self.ungranted.write().expect("ungranted uses lock") = ungranted;
+    }
+
+    /// `error`, as the routine holding the dispatch handle `capability` should see it for a call
+    /// of `operation`: a [`DispatchError::Denied`] for a declared but ungranted operation becomes
+    /// the cartridge's `MissingAuthority`, carrying the request already filed for its permbind
+    /// (nothing files one here: only the routine decides to ask). Any other refusal is returned
+    /// as it was.
+    pub fn refine(
+        &self,
+        capability: CapId,
+        operation: &str,
+        error: DispatchError,
+    ) -> DispatchError {
+        if error != DispatchError::Denied {
+            return error;
+        }
+        let Some(permbind) = self
+            .ungranted
+            .read()
+            .expect("ungranted uses lock")
+            .get(&capability)
+            .and_then(|operations| operations.get(operation))
+            .cloned()
+        else {
+            return error;
+        };
+        let request = self
+            .requests
+            .borrow()
+            .values()
+            .find(|entry| {
+                entry.state == GrantRequestState::Pending
+                    && entry.record.cartridge_id == self.cartridge_id
+                    && entry.record.permbind == permbind
+            })
+            .map(|entry| entry.record.id.to_string());
+        DispatchError::Context(ContextError::MissingAuthority {
+            cartridge: self.cartridge_id.to_string(),
+            permbind,
+            request,
+        })
+    }
+}
+
 impl GrantRequests {
+    /// The attribution of refusals for `cartridge_id`, which starts out knowing nothing.
+    pub(crate) fn lookup(&self, cartridge_id: CartridgeId) -> MissingAuthorityLookup {
+        MissingAuthorityLookup {
+            cartridge_id,
+            ungranted: Arc::default(),
+            requests: self.queue.subscribe(),
+        }
+    }
+
     pub(crate) fn new() -> (Self, watch::Receiver<Requests>) {
         let (queue, receiver) = watch::channel(Requests::new());
         (
