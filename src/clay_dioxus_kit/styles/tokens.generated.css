@@ -75,6 +75,7 @@
     --ct-color-on-info: #ffffff;
     --ct-dimension-spacing: 0.25rem;
     --ct-spacing: 0.25rem;
+    --ct-dimension-target-coarse: 3rem;
     --ct-radius-sm: 0.25rem;
     --ct-radius-md: 0.5rem;
     --ct-radius-lg: 0.75rem;

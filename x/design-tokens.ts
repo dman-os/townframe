@@ -266,6 +266,7 @@ function dimension(value: unknown, path: string): string {
     path === "dimension.radius-pill";
   const isBorder = /(^|\.)border(?:[-.]|$)/.test(path);
   const isFontSize = /(^|\.)font-size(?:[-.]|$)/.test(path);
+  const isTarget = /(^|\.)target(?:[-.]|$)/.test(path);
 
   if (isPill) {
     if (value.unit !== "px" || value.value !== 999) {
@@ -273,7 +274,7 @@ function dimension(value: unknown, path: string): string {
     }
   } else if (isShadow || isBorder) {
     if (value.unit !== "px") fail(`dimension ${path} must use px`);
-  } else if (isSpacing || isRadius || isFontSize) {
+  } else if (isSpacing || isRadius || isFontSize || isTarget) {
     if (value.unit !== "rem") fail(`dimension ${path} must use rem`);
   } else {
     fail(`dimension ${path} has no documented unit policy`);
@@ -588,6 +589,15 @@ function selfTest(): void {
   expectFailure(
     "shadow em",
     () => dimension({ value: 1, unit: "em" }, "shadow.sm[0].offsetX"),
+  );
+  if (
+    dimension({ value: 3, unit: "rem" }, "dimension.target-coarse") !== "3rem"
+  ) {
+    fail("self-test rem target serialization failed");
+  }
+  expectFailure(
+    "target px",
+    () => dimension({ value: 48, unit: "px" }, "dimension.target-coarse"),
   );
   expectFailure(
     "unclassified dimension",

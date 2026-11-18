@@ -112,8 +112,8 @@
 
 @media (pointer: coarse) {
   .ct-alert [data-part="dismiss"] {
-    width: 3rem;
-    height: 3rem;
+    width: var(--ct-dimension-target-coarse);
+    height: var(--ct-dimension-target-coarse);
     margin: calc(var(--ct-spacing) * -3);
   }
 }

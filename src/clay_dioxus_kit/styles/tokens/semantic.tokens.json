@@ -32,6 +32,10 @@
   "dimension": {
     "$type": "dimension",
     "spacing": { "$value": "{dimension.spacing.1}" },
+    "target-coarse": {
+      "$description": "The least a pressable measures on each axis under a coarse pointer (Material's 48 dp touch minimum). Sizes are rem, so it is 48px only while the root font size is 16px.",
+      "$value": "{dimension.spacing.12}"
+    },
     "radius-sm": { "$value": "{dimension.radius.sm}" },
     "radius-md": { "$value": "{dimension.radius.md}" },
     "radius-lg": { "$value": "{dimension.radius.lg}" },

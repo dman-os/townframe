@@ -1392,6 +1392,7 @@
     --ct-color-on-info: #ffffff;
     --ct-dimension-spacing: 0.25rem;
     --ct-spacing: 0.25rem;
+    --ct-dimension-target-coarse: 3rem;
     --ct-radius-sm: 0.25rem;
     --ct-radius-md: 0.5rem;
     --ct-radius-lg: 0.75rem;
@@ -1482,7 +1483,7 @@
   }
   @media (pointer: coarse) {
     .ct-button {
-      min-height: 3rem;
+      min-height: var(--ct-dimension-target-coarse);
     }
   }
   .ct-button[data-variant="secondary"] {
@@ -1573,7 +1574,7 @@
   }
   @media (pointer: coarse) {
     .ct-tabs [data-part="tab"] {
-      min-height: 3rem;
+      min-height: var(--ct-dimension-target-coarse);
     }
   }
   .ct-tabs [data-part="tab"]:hover:not(:disabled) {
@@ -1744,8 +1745,8 @@
   }
   @media (pointer: coarse) {
     .ct-alert [data-part="dismiss"] {
-      width: 3rem;
-      height: 3rem;
+      width: var(--ct-dimension-target-coarse);
+      height: var(--ct-dimension-target-coarse);
       margin: calc(var(--ct-spacing) * -3);
     }
   }

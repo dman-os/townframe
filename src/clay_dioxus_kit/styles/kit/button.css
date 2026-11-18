@@ -42,10 +42,10 @@
   font-size: var(--ct-dimension-font-size-lg);
 }
 
-/* A touch screen asks for a 48px target whatever the size. */
+/* A touch screen asks for a target of at least --ct-dimension-target-coarse (48px) whatever the size. */
 @media (pointer: coarse) {
   .ct-button {
-    min-height: 3rem;
+    min-height: var(--ct-dimension-target-coarse);
   }
 }
 
