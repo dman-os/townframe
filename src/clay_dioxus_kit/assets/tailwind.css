@@ -1051,7 +1051,7 @@
   --scheme-color-surface-container-high: oklch(93.182% 0.011 297.617);
   --scheme-color-surface-container-highest: oklch(91.44% 0.011 303.101);
 }
-.light-medium-contrast {
+:is(:root:has(.light-medium-contrast), .light-medium-contrast) {
   --scheme-color-primary: oklch(33.94% 0.093 273.224);
   --scheme-color-surface-tint: oklch(48.629% 0.09 276.331);
   --scheme-color-on-primary: oklch(100% 0 0);
@@ -1102,7 +1102,7 @@
   --scheme-color-surface-container-high: oklch(89.809% 0.01 299.225);
   --scheme-color-surface-container-highest: oklch(86.233% 0.011 303.087);
 }
-.light-high-contrast {
+:is(:root:has(.light-high-contrast), .light-high-contrast) {
   --scheme-color-primary: oklch(29.817% 0.095 272.119);
   --scheme-color-surface-tint: oklch(48.629% 0.09 276.331);
   --scheme-color-on-primary: oklch(100% 0 0);
@@ -1153,7 +1153,7 @@
   --scheme-color-surface-container-high: oklch(87.079% 0.011 297.598);
   --scheme-color-surface-container-highest: oklch(82.742% 0.011 297.583);
 }
-.dark {
+:is(:root:has(.dark), .dark) {
   --scheme-color-primary: oklch(83.193% 0.085 278.485);
   --scheme-color-surface-tint: oklch(83.193% 0.085 278.485);
   --scheme-color-on-primary: oklch(31.698% 0.094 272.665);
@@ -1204,7 +1204,7 @@
   --scheme-color-surface-container-high: oklch(28.339% 0.011 285.684);
   --scheme-color-surface-container-highest: oklch(32.737% 0.011 285.805);
 }
-.dark-medium-contrast {
+:is(:root:has(.dark-medium-contrast), .dark-medium-contrast) {
   --scheme-color-primary: oklch(89.776% 0.051 281.66);
   --scheme-color-surface-tint: oklch(83.193% 0.085 278.485);
   --scheme-color-on-primary: oklch(27.171% 0.096 271.203);
@@ -1255,7 +1255,7 @@
   --scheme-color-surface-container-high: oklch(31.949% 0.011 285.786);
   --scheme-color-surface-container-highest: oklch(36.229% 0.01 285.878);
 }
-.dark-high-contrast {
+:is(:root:has(.dark-high-contrast), .dark-high-contrast) {
   --scheme-color-primary: oklch(95.487% 0.023 288.667);
   --scheme-color-surface-tint: oklch(83.193% 0.085 278.485);
   --scheme-color-on-primary: oklch(0% 0 0);
@@ -1418,8 +1418,6 @@
     --ct-motion-duration-fade: 150ms;
     --ct-motion-easing-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
     --ct-font-family: var(--ct-font-family-sans);
-  }
-  .ct-theme {
     --ct-color-canvas: var(--scheme-color-background);
     --ct-color-surface: var(--scheme-color-surface-container-low);
     --ct-color-surface-raised: var(--scheme-color-surface-container);
