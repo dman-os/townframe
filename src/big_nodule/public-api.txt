@@ -7,6 +7,8 @@ impl Handler < ObserveCartridgeInstalls > for big_nodule::NoduleService
 pub big_nodule::async fn boot (config : NodulesConfig) -> Result < (Nodules , StopToken) , NodulesError >
 pub big_nodule::async fn ensure_shared_config_drawer (config : SharedConfigDrawerConfig < '_ > ,) -> Result < DrawerId , NodulesError >
 pub big_nodule::egress::async fn call (dispatch : & Client < DispatchProtocol > , caller : Option < & WorkloadCaller > , method : & Method , path : & str , headers : & HeaderMap , body : XrpcBody ,) -> (StatusCode , XrpcBody)
+pub big_nodule::egress::fn authorize_net (caller : Option < & WorkloadCaller > , method : & Method , uri : & Uri , headers : & HeaderMap ,) -> Result < () , (StatusCode , XrpcBody) >
+pub big_nodule::egress::fn strip_node_headers (headers : & mut HeaderMap)
 pub big_nodule::fn schema_group () -> SchemaRegistrationGroup < 'static >
 pub big_nodule::wire::fn delivery_headers (caller : & Caller , request : & RequestContext , context : & InvocationContext , config_doc : & big_cabinet_core :: dmeta :: DocId , capabilities : & RoutineCapabilities ,) -> HeaderMap
 pub big_nodule::wire::fn descriptor_body_refused () -> ProviderError
