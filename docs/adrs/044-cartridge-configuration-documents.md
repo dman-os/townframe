@@ -55,7 +55,7 @@ The nodule reads its settings with ordinary datum reads. At admission it gets **
 ### 4. One datum per grant
 
 Grants are datums in the cartridge config document, one per grant, with the grant as the slot:
-- `cartridges.grant.drawer/<drawerId>`: `{ access }`, where access is `relay|read|write|admin`; `cartridges.grant.cartridge/<cartridgeId>`: `{ access }`; `cartridges.grant.origin/<origin>`: `{ empty: true }`;
+- `cartridges.grant.drawer/<drawerId>`: `{ access }`, where access is `relay|read|write|admin`; `cartridges.grant.cartridge/<cartridgeId>`: `{ access }`; `cartridges.grant.net/<host[:port]>`: `{ empty: true }` (the `#net` permbind, ADR 049 §4.1);
 - `cartridges.grant.method/<nsid>` and `cartridges.grant.authority/<prefix or *>`: `{ empty: true }`. A grant states no privilege bit (ADR 049 §4.1 amends ADR 047 §5: grants are per cartridge and feed the nodule and the micro alike, so the `nodule.grant`/`micro.grant` split is gone).
 
 The slot is the grant's identity. So the same grant made on two devices converges to one datum, and two different grants never touch the same datum. Every grant datum carries its own signature, so its author is recorded. Revoking a grant deletes its datum.
@@ -101,6 +101,13 @@ A cartridge can contribute a nodule, a micro, or both (`docs/scratch/clay-on-the
 - `cartridges.listInstalls` and `cartridges.observeInstalls`, a subscription with the same rows, so the shell reacts live to enable and disable.
 
 These replace the nodule service's `admitNodule`/`setNoduleEnabled`/`setNoduleDrawerGrants`/`setNoduleMethodGrants`/`uninstallNodule`. The nodule service keeps reconciling, resolution and its records (`listNodules`/`getNodule`, `confirmNoduleResolution`, `setNoduleDevTakeover`, `setMethodRoute`).
+
+### 9. Following a cartridge's grants: `awaitCartridgeGrants` (D54, 2026-11-18)
+
+A micro host has to apply a cartridge's grants as they change, and the grants live in this document, so the registry serves them as a long poll: `awaitCartridgeGrants { cartridgeId, since?, holdMs } -> { grants, revision }`.
+- `grants` is the same `CartridgeGrantRecord` list `listCartridgeGrants` returns, not a `ResolvedGrants`; the host applies `ResolvedGrants::from_grants` itself. The call is operator-only, as the list is.
+- `revision` is `<boot uuid>.<feed seq>`. A call whose `since` equals the current revision holds for up to `holdMs` (capped at 15 s, the registry watch's cap in ADR 023 rule 3) and answers when it changes. The boot uuid makes a revision from before a restart never match, so a host that survived the restart is answered at once with the full list instead of waiting on a sequence that restarted from zero.
+- The revision is published at the end of every reconcile (§5), which every grant change runs, so a waiter never observes a half-applied grant set.
 
 ## Implementation notes (2026-11-12)
 
