@@ -77,6 +77,7 @@ pub impl intxt_core::generic::Intxt::fn reference (drawer : & DocId , via : impl
 pub impl intxt_core::generic::PrLink::fn new (reference : DocReference) -> Self
 pub impl intxt_core::generic::PrLinks::fn block (& self) -> String
 pub impl intxt_core::generic::PrLinks::fn read (description : & str) -> Result < Self , PrBlockError >
+pub impl intxt_core::generic::PrLinks::fn split (description : & str) -> Result < (String , Self) , PrBlockError >
 pub impl intxt_core::generic::PrLinks::fn write_into (& self , description : & str) -> Result < String , PrBlockError >
 pub intxt_core::cartridge::fn cartridge (wasm : & [u8]) -> FixtureCartridge
 pub intxt_core::cartridge::fn requested_methods (cartridge : & FixtureCartridge) -> impl Iterator < Item = & str >
