@@ -501,11 +501,8 @@ pub async fn run(command: IntxtCommands) -> Res<ExitCode> {
             resolve,
             reopen,
         } => {
-            let resolved = match (resolve, reopen) {
-                (true, _) => Some(true),
-                (_, true) => Some(false),
-                _ => None,
-            };
+            // clap makes the flags exclusive: `--resolve` is true, `--reopen` is false.
+            let resolved = (resolve || reopen).then_some(resolve);
             with_packaging(async |packaging| {
                 packaging
                     .reply(
