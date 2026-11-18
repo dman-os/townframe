@@ -67,13 +67,105 @@ impl Pull {
         }
     }
 
+    /// The state as the chip says it.
     pub fn state_label(&self) -> &str {
-        match &self.state {
-            PullState::Open => "open",
-            PullState::Closed => "closed",
-            PullState::Merged => "merged",
-            PullState::Unknown(other) => other,
+        state_label(&self.state)
+    }
+
+    /// The description as a reader sees it: the intxt block (machine data) taken out, the rest in
+    /// paragraphs, and how many intxts the block named. A block that cannot be read cannot be
+    /// taken out, so the text is shown as written and names none; the links read of the screen
+    /// reports the problem.
+    pub fn reading(&self) -> PullReading {
+        let (text, named) = match generic::PrLinks::split(&self.body) {
+            Ok((text, links)) => (text, links.intxts.len()),
+            Err(_) => (self.body.clone(), 0),
+        };
+        PullReading {
+            paragraphs: paragraphs(&text),
+            names: named,
         }
+    }
+}
+
+/// A pull request's state as the chip says it.
+pub fn state_label(state: &PullState) -> &str {
+    match state {
+        PullState::Open => "Open",
+        PullState::Closed => "Closed",
+        PullState::Merged => "Merged",
+        PullState::Unknown(other) => other,
+    }
+}
+
+/// A pull request's description for reading: see [`Pull::reading`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullReading {
+    /// The text without the intxt block, split at blank lines; a paragraph keeps its own line
+    /// breaks.
+    pub paragraphs: Vec<String>,
+    /// How many intxts the block names.
+    pub names: usize,
+}
+
+impl PullReading {
+    /// The small line that stands for the hidden block, when it names anything.
+    pub fn names_line(&self) -> Option<String> {
+        match self.names {
+            0 => None,
+            1 => Some("names 1 intxt".to_owned()),
+            many => Some(format!("names {many} intxts")),
+        }
+    }
+}
+
+/// `text` split at blank lines (LF or CRLF), each paragraph trimmed, none empty.
+pub fn paragraphs(text: &str) -> Vec<String> {
+    let mut paragraphs = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            if !current.is_empty() {
+                paragraphs.push(current.join("\n"));
+                current.clear();
+            }
+        } else {
+            current.push(line.trim_end());
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join("\n"));
+    }
+    paragraphs
+}
+
+/// The longest a description is shown in a row, in characters: about three lines of a phone.
+const TEASER_CHARS: usize = 140;
+
+/// A markdown `description` for a row: its words on one line, cut at the last word boundary that
+/// fits and ended with an ellipsis when it was cut.
+pub fn teaser(description: &str) -> String {
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= TEASER_CHARS {
+        return flat;
+    }
+    let cut = flat
+        .char_indices()
+        .nth(TEASER_CHARS)
+        .map_or(flat.len(), |(at, _)| at);
+    // The word the cut falls in is dropped; a single word longer than the line is cut as is.
+    let end = flat[..cut].rfind(' ').filter(|at| *at > 0).unwrap_or(cut);
+    format!(
+        "{}…",
+        flat[..end].trim_end_matches([',', ';', ':', '.', '-', ' '])
+    )
+}
+
+/// "1 entry" or "N entries".
+pub fn entries_label(count: u32) -> String {
+    match count {
+        1 => "1 entry".to_owned(),
+        many => format!("{many} entries"),
     }
 }
 
@@ -142,6 +234,19 @@ pub enum EntryKind {
 }
 
 impl EntryKind {
+    /// The heading of the group the kind is listed under.
+    fn group(&self) -> &'static str {
+        match self {
+            Self::Commits => "Commits",
+            Self::JjChange => "Jj changes",
+            Self::TrackedRef => "Refs",
+            Self::Session => "Sessions",
+            Self::PullRequest => "Pull requests",
+            Self::Other(_) => "Other",
+            Self::Unreadable(_) => "Unreadable",
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Commits => "commits",
@@ -152,6 +257,32 @@ impl EntryKind {
             Self::Other(tag) => tag,
             Self::Unreadable(_) => "unreadable",
         }
+    }
+}
+
+/// The entries of one kind, under the heading the intxt screen gives them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryGroup<'intxt> {
+    pub heading: &'static str,
+    pub entries: Vec<&'intxt Entry>,
+}
+
+impl Intxt {
+    /// The entries grouped by kind, a group where its first entry sits and entries in the body's
+    /// order within it, so the screen reads in the order the intxt was written.
+    pub fn groups(&self) -> Vec<EntryGroup<'_>> {
+        let mut groups: Vec<EntryGroup<'_>> = Vec::new();
+        for entry in &self.entries {
+            let heading = entry.kind.group();
+            match groups.iter_mut().find(|group| group.heading == heading) {
+                Some(group) => group.entries.push(entry),
+                None => groups.push(EntryGroup {
+                    heading,
+                    entries: vec![entry],
+                }),
+            }
+        }
+        groups
     }
 }
 
@@ -485,249 +616,4 @@ fn entry(key: &DatumKey, value: Result<&serde_json::Value, String>) -> Entry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fixture::Fixture;
-    use intxt_core::generic::Intxt as IntxtMarker;
-    use intxt_core::generic::PrLink;
-    use intxt_core::generic::PrLinks;
-
-    fn review(fixture: &Fixture) -> Review<Fixture> {
-        Review::new(fixture.clone())
-    }
-
-    fn found_titles(links: &Links) -> Vec<&str> {
-        let Links::Named(rows) = links else {
-            panic!("expected named links, got {links:?}")
-        };
-        rows.iter()
-            .map(|row| match &row.outcome {
-                LinkOutcome::Found { title, .. } => title.as_str(),
-                LinkOutcome::NotFound => "(not an intxt)",
-                LinkOutcome::Unreadable(_) => "(unreadable)",
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn the_list_shows_each_held_pull_with_its_repo_ref_title_and_state() {
-        let pulls = review(&Fixture::sample()).pulls().await.unwrap();
-        let shown: Vec<(String, String, &str)> = pulls
-            .iter()
-            .map(|read| match read {
-                Read::Ready(pull) => (pull.repo_ref(), pull.title.clone(), pull.state_label()),
-                Read::Unreadable(reason) => panic!("sample pulls are readable: {reason}"),
-            })
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                (
-                    "dman-os/townframe#150".to_owned(),
-                    "intxt: read a PR and its intxts on the phone".to_owned(),
-                    "open"
-                ),
-                (
-                    "dman-os/townframe#151".to_owned(),
-                    "chore: pin the review micro's lockfile".to_owned(),
-                    "merged"
-                ),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_pull_the_poll_names_but_the_document_lacks_is_an_unreadable_row() {
-        let bare = Fixture::doc_id("5");
-        let fixture = Fixture::empty()
-            .doc(bare.clone(), [])
-            .held_pull(bare, key(work::GithubPull::ID, "o/r/1"));
-        let pulls = review(&fixture).pulls().await.unwrap();
-        assert!(matches!(&pulls[..], [Read::Unreadable(reason)] if reason.contains("absent")));
-    }
-
-    #[tokio::test]
-    async fn the_list_is_one_poll_then_one_read_per_pull() {
-        let fixture = Fixture::sample();
-        review(&fixture).pulls().await.unwrap();
-        assert_eq!(
-            fixture.calls(),
-            [
-                "org.example.daybook.docs.pollDatums",
-                "org.example.daybook.docs.readDatums",
-                "org.example.daybook.docs.readDatums"
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn the_block_names_its_intxts_and_one_call_reads_them_all() {
-        let fixture = Fixture::sample();
-        let review = review(&fixture);
-        let Read::Ready(pull) = review.pulls().await.unwrap().remove(0) else {
-            panic!("the first sample pull is readable")
-        };
-        fixture.forget_calls();
-        let links = review.links(&pull.body).await.unwrap();
-        assert_eq!(
-            found_titles(&links),
-            [
-                "intxt: commits live with the intxt",
-                "review micro: the PR on the phone",
-                "(not an intxt)"
-            ]
-        );
-        let Links::Named(rows) = &links else {
-            unreachable!()
-        };
-        assert_eq!(
-            rows[0].hinted_title.as_deref(),
-            Some("intxt: commits live with the intxt")
-        );
-        assert!(matches!(
-            &rows[1].outcome,
-            LinkOutcome::Found { description: Some(text), entries: 1, .. } if text.contains("phone")
-        ));
-        assert_eq!(fixture.calls(), ["org.example.intxt.summarizeIntxts"]);
-    }
-
-    #[tokio::test]
-    async fn a_description_without_a_block_names_nothing_and_asks_the_node_nothing() {
-        let fixture = Fixture::sample();
-        let links = review(&fixture).links("Just words.").await.unwrap();
-        assert_eq!(links, Links::Named(vec![]));
-        assert!(fixture.calls().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_malformed_block_is_an_error_not_an_empty_list() {
-        let body = "<details>\n<summary>intxt</summary>\n\n```json\n{ \"$type\": \"org.example.intxt.prLinks\", \"intxts\": [{ \"ref\": 5 }] }\n```\n\n</details>";
-        let fixture = Fixture::sample();
-        let links = review(&fixture).links(body).await.unwrap();
-        assert!(
-            matches!(&links, Links::Malformed(why) if why.contains("malformed")),
-            "{links:?}"
-        );
-        assert!(fixture.calls().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_drawer_the_node_does_not_hold_is_unreadable_and_an_unrelated_document_is_not_found()
-    {
-        let held_elsewhere = Fixture::doc_id("6");
-        let body = PrLinks {
-            intxts: vec![
-                PrLink::new(IntxtMarker::reference(&Fixture::doc_id("41"), [])),
-                PrLink::new(IntxtMarker::reference(&held_elsewhere, [])),
-            ],
-            ..Default::default()
-        }
-        .block();
-        let Links::Named(rows) = review(&Fixture::sample()).links(&body).await.unwrap() else {
-            panic!("the block is well formed")
-        };
-        assert_eq!(rows[0].outcome, LinkOutcome::NotFound);
-        assert!(
-            matches!(&rows[1].outcome, LinkOutcome::Unreadable(reason) if reason.contains("does not hold"))
-        );
-    }
-
-    #[tokio::test]
-    async fn more_drawers_than_one_call_may_name_are_read_in_batches_in_order() {
-        let drawers: Vec<DocId> = ('a'..='k')
-            .flat_map(|second| {
-                ['2', '3', '4', '5'].map(|first| Fixture::doc_id(&format!("{first}{second}")))
-            })
-            .take(MAX_SUMMARIZED + 8)
-            .collect();
-        let body = PrLinks {
-            intxts: drawers
-                .iter()
-                .map(|drawer| PrLink::new(IntxtMarker::reference(drawer, [])))
-                .collect(),
-            ..Default::default()
-        }
-        .block();
-        let fixture = Fixture::empty();
-        let Links::Named(rows) = review(&fixture).links(&body).await.unwrap() else {
-            panic!("the block is well formed")
-        };
-        assert_eq!(
-            rows.iter()
-                .map(|row| row.drawer.clone())
-                .collect::<Vec<_>>(),
-            drawers
-        );
-        assert_eq!(fixture.calls().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn an_intxt_shows_its_title_description_and_entries_in_the_bodys_order() {
-        let intxt = review(&Fixture::sample())
-            .intxt(&Fixture::doc_id("31"))
-            .await
-            .unwrap();
-        let Read::Ready(intxt) = intxt else {
-            panic!("the sample intxt is readable")
-        };
-        assert_eq!(intxt.title, "intxt: commits live with the intxt");
-        assert_eq!(
-            intxt.description.as_deref(),
-            Some("Commits travel with the intxt that names them.")
-        );
-        let shown: Vec<(&str, &str, bool)> = intxt
-            .entries
-            .iter()
-            .map(|entry| {
-                (
-                    entry.kind.name(),
-                    entry.label.as_str(),
-                    entry.patch.is_some(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                ("commits", "9a0e11c..4c1f0a7", true),
-                ("commits", "77b2d03", false),
-                ("pull request", "dman-os/townframe/150", false),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn an_intxt_missing_its_title_or_an_entry_says_so_instead_of_showing_less() {
-        let drawer = Fixture::doc_id("7");
-        let fixture = Fixture::empty().doc(drawer.clone(), []);
-        let reading = review(&fixture).intxt(&drawer).await.unwrap();
-        assert!(
-            matches!(&reading, Read::Unreadable(reason) if reason.contains("title")),
-            "{reading:?}"
-        );
-
-        let Read::Ready(intxt) =
-            review(&Fixture::sample().listing_a_missing_entry(&Fixture::doc_id("32")))
-                .intxt(&Fixture::doc_id("32"))
-                .await
-                .unwrap()
-        else {
-            panic!("the title and body are there")
-        };
-        assert!(
-            intxt
-                .entries
-                .iter()
-                .any(|entry| matches!(&entry.kind, EntryKind::Unreadable(reason) if reason.contains("not in the document")))
-        );
-    }
-
-    #[tokio::test]
-    async fn an_intxt_the_node_does_not_hold_is_an_unreadable_row() {
-        let reading = review(&Fixture::sample())
-            .intxt(&Fixture::doc_id("8"))
-            .await
-            .unwrap();
-        assert!(matches!(reading, Read::Unreadable(reason) if reason.contains("credential")));
-    }
-}
+mod tests;
