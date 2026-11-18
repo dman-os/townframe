@@ -49,9 +49,9 @@ pub const SECTIONS: &str = "org.example.dayframe.settings.sections";
 pub const SECTIONS_BINDING: &str = "sections";
 /// The local binding name under which Settings contributes its panel to `shell.panels`.
 pub const PANELS_BINDING: &str = "panels";
-/// The local binding names under which Settings requires what it uses of the shell. Each is
-/// the name of the shell publication it binds, so a catalog satisfies all of them from one
-/// provider (`InstalledMicro::satisfied_by`).
+/// The local binding names under which Settings requires what it uses of the shell. They are
+/// local names: the catalog resolves each requirement by the contract it names to the micro
+/// serving it.
 pub const SHELL_OPENED: &str = micro_shell_manifest::OPENED;
 pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 /// Schema NSIDs of [`SECTIONS`] keys (the contributing micro's id, text) and values

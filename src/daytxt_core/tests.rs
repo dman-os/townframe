@@ -117,71 +117,86 @@ fn settings_micro(activations: Rc<std::cell::Cell<usize>>) -> InstalledMicro {
                 )
             },
         )
-        .satisfied_by(
-            &id(micro_shell_manifest::ID),
-            &micro_shell_manifest::sidecar(),
-        )
-        .unwrap()
     }
 }
 
-fn unactivated_settings() -> InstalledMicro {
-    InstalledMicro::new(
-        id(micro_settings_manifest::ID),
-        micro_settings_manifest::sidecar(),
-        |_, _, _| unreachable!("a refused provider never builds the factory"),
-    )
+/// A catalog entry whose factory is never built, for tests of what resolves over the catalog.
+fn unbuilt(id: MicroId, sidecar: clay_mdk::Sidecar) -> InstalledMicro {
+    InstalledMicro::new(id, sidecar, |_, _, _| {
+        unreachable!("requirement resolution builds no factory")
+    })
 }
 
 #[test]
-fn a_provider_publishing_a_requirement_under_another_contract_is_refused() {
-    let mut shell = micro_shell_manifest::sidecar();
-    shell.manifest.endpoints.insert(
-        micro_shell_manifest::OPENED.into(),
-        Endpoint::Method {
-            nsid: Nsid::literal("org.example.test.somethingElse"),
-        },
-    );
-    let error = unactivated_settings()
-        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
-        .err()
-        .unwrap();
-    assert!(
-        error.contains(micro_shell_manifest::OPENED_CONTRACT)
-            && error.contains("org.example.test.somethingElse"),
-        "{error}"
-    );
-}
-
-#[test]
-fn a_provider_without_the_required_endpoint_is_refused() {
-    let mut shell = micro_shell_manifest::sidecar();
-    shell
-        .manifest
-        .endpoints
-        .remove(micro_shell_manifest::NAV_BUTTON);
-    let error = unactivated_settings()
-        .satisfied_by(&id(micro_shell_manifest::ID), &shell)
-        .err()
-        .unwrap();
-    assert!(error.contains(micro_shell_manifest::NAV_BUTTON), "{error}");
-}
-
-#[test]
-fn the_shell_satisfies_what_settings_requires() {
-    let micro = unactivated_settings()
-        .satisfied_by(
-            &id(micro_shell_manifest::ID),
-            &micro_shell_manifest::sidecar(),
-        )
-        .unwrap();
+fn the_shell_supplies_what_settings_requires_under_its_endpoint_names() {
+    let (resolved, errors) = requirements::resolve(&[
+        unbuilt(
+            id(micro_shell_manifest::ID),
+            micro_shell_manifest::sidecar(),
+        ),
+        unbuilt(
+            id(micro_settings_manifest::ID),
+            micro_settings_manifest::sidecar(),
+        ),
+    ]);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(resolved[0].is_empty());
+    let shell = Some(SupervisorId::from(&id(micro_shell_manifest::ID)));
     assert_eq!(
-        micro.requirements.keys().collect::<Vec<_>>(),
+        resolved[1]
+            .iter()
+            .map(|(binding, requirement)| {
+                (
+                    binding.as_str(),
+                    requirement.provider.clone(),
+                    requirement.publication.as_str(),
+                )
+            })
+            .collect::<Vec<_>>(),
         [
-            micro_shell_manifest::NAV_BUTTON,
-            micro_shell_manifest::OPENED
+            (
+                micro_shell_manifest::NAV_BUTTON,
+                shell.clone(),
+                micro_shell_manifest::NAV_BUTTON
+            ),
+            (
+                micro_shell_manifest::OPENED,
+                shell,
+                micro_shell_manifest::OPENED
+            ),
         ]
     );
+}
+
+/// What Settings requires of a shell that serves it under another endpoint name, or under no
+/// NSID it asks for, resolves by NSID: the name is the provider's business.
+#[test]
+fn a_requirement_resolves_by_nsid_whatever_the_provider_names_the_endpoint() {
+    let mut shell = micro_shell_manifest::sidecar();
+    let opened = shell
+        .manifest
+        .endpoints
+        .remove(micro_shell_manifest::OPENED)
+        .unwrap();
+    shell.manifest.endpoints.insert("which-row".into(), opened);
+    shell.manifest.endpoints.insert(
+        micro_shell_manifest::NAV_BUTTON.into(),
+        Endpoint::View { implements: None },
+    );
+    let (resolved, errors) = requirements::resolve(&[
+        unbuilt(id(micro_shell_manifest::ID), shell),
+        unbuilt(
+            id(micro_settings_manifest::ID),
+            micro_settings_manifest::sidecar(),
+        ),
+    ]);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        resolved[1][micro_shell_manifest::OPENED].publication,
+        "which-row"
+    );
+    // The nav button no longer implements its contract, so nothing supplies it.
+    assert_eq!(resolved[1][micro_shell_manifest::NAV_BUTTON].provider, None);
 }
 
 /// The shell (eager), Settings (on demand) and Sample (eager) as the desktop links them, plus a

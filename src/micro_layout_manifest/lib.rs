@@ -49,8 +49,8 @@ pub const PANELS_BINDING: &str = "panels";
 /// arranges inside itself).
 pub const SHELL_PANELS_BINDING: &str = "shell-panels";
 /// The local binding name under which the layout requires the shell's sidebar/back button for
-/// its app bar: the name of the shell publication it binds, so a catalog satisfies it from the
-/// shell (`InstalledMicro::satisfied_by`).
+/// its app bar. The binding is a local name: the catalog resolves the requirement by the
+/// contract it names ([`micro_shell_manifest::NAV_BUTTON_CONTRACT`]) to the micro serving it.
 pub const SHELL_NAV_BUTTON: &str = micro_shell_manifest::NAV_BUTTON;
 /// Schema NSIDs of [`PANELS`] keys (the contributor's registration id, text) and values
 /// ([`Panel`]), and of its selector (the whole collection).
