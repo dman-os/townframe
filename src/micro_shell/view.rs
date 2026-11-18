@@ -11,6 +11,7 @@ use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::NavButton;
 use clay_dioxus_kit::NavButtonMode;
+use clay_dioxus_kit::PanelPage;
 use clay_dioxus_kit::SectionPane;
 use clay_dioxus_kit::Sections;
 use clay_dioxus_kit::Sheet;
@@ -526,11 +527,14 @@ fn Home(shell: Shell) -> Element {
     let failure = use_signal(|| None::<String>);
     rsx! {
         // The frame's region already carries the panel's title as its accessible name.
+        PanelPage {
+            app_bar: rsx! {
+                AppBar {
+                    title: "Home",
+                    leading: rsx! { NavigationButton { shell: shell.clone() } },
+                }
+            },
         div { class: "flex flex-col gap-4",
-            AppBar {
-                title: "Home",
-                leading: rsx! { NavigationButton { shell: shell.clone() } },
-            }
             nav { class: "flex flex-col gap-2 px-4", "aria-label": "Entry points",
                 for row in destinations(&panels).into_iter().filter(|row| !row.value.home) {
                     button {
@@ -550,6 +554,7 @@ fn Home(shell: Shell) -> Element {
             if let Some(problem) = failure() {
                 p { class: "px-4", role: "alert", "{problem}" }
             }
+        }
         }
     }
 }

@@ -10,6 +10,7 @@
 //! provider. A configured id with no row, or whose provider is unavailable, is a placeholder in
 //! its place; nothing here ever edits the configured list except the viewer's own toggles.
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::PanelPage;
 use clay_mdk::Capability;
 use clay_mdk::Collection;
 use clay_mdk::Context;
@@ -142,9 +143,8 @@ fn view(
 /// Every state of the view goes through it, so no state leaves the panel without a way out.
 fn framed(leading: Element, body: Element) -> Element {
     rsx! {
-        div { class: "flex flex-col gap-4",
-            AppBar { title: "Layout", leading }
-            {body}
+        PanelPage { app_bar: rsx! { AppBar { title: "Layout", leading } },
+            div { class: "flex flex-col gap-4", {body} }
         }
     }
 }

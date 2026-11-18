@@ -4,6 +4,7 @@
 use crate::SettingsMicro;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::ListRow;
+use clay_dioxus_kit::PanelPage;
 use clay_mdk::Error;
 use clay_mdk::Operation;
 use clay_mdk::OperationReceipt;
@@ -62,11 +63,14 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
         .collect();
     rsx! {
         // The frame's region already carries the panel's title as its accessible name.
+        PanelPage {
+            app_bar: rsx! {
+                AppBar {
+                    title: "Settings",
+                    leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
+                }
+            },
         div { class: "flex flex-col gap-4",
-            AppBar {
-                title: "Settings",
-                leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
-            }
             details { class: "mx-4 rounded-md border border-border p-4",
                 summary { "Choose settings sections" }
                 if preferences.is_none() { p { role: "status", "Settings preferences are loading." } }
@@ -119,6 +123,7 @@ pub fn SettingsList(props: SettingsListProps) -> Element {
                 if shown.is_empty() { p { class: "px-2", "No settings sections are available." } }
             }
         }
+        }
     }
 }
 
@@ -148,14 +153,18 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
         return rsx! { p { role: "alert", "The {key} section is not available." } };
     };
     rsx! {
-        section { class: "flex flex-col gap-4", "aria-label": "{row.value.title}",
-            AppBar {
-                title: row.value.title.clone(),
-                leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
-            }
-            div { class: "px-4 pb-4",
-                PresentationSlot {
-                    reference: row.attachments[row.value.detail.index()].clone(),
+        section { "aria-label": "{row.value.title}", height: "100%",
+            PanelPage {
+                app_bar: rsx! {
+                    AppBar {
+                        title: row.value.title.clone(),
+                        leading: rsx! { PresentationSlot { reference: props.micro.shell.nav_button.clone() } },
+                    }
+                },
+                div { class: "px-4 pb-4",
+                    PresentationSlot {
+                        reference: row.attachments[row.value.detail.index()].clone(),
+                    }
                 }
             }
         }
