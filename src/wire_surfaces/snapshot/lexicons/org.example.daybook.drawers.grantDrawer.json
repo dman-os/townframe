@@ -17,6 +17,9 @@
         "drawerId": {
           "type": "string"
         },
+        "durable": {
+          "type": "boolean"
+        },
         "subjectId": {
           "type": "string"
         }
@@ -25,7 +28,8 @@
         "capability",
         "drawerId",
         "subjectId",
-        "access"
+        "access",
+        "durable"
       ],
       "type": "object"
     },

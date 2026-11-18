@@ -747,6 +747,7 @@ impl Node {
                     drawer_id: drawer.clone(),
                     subject_id: subject.actor.actor_id,
                     access,
+                    durable: false,
                 },
             )
             .await
