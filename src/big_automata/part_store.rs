@@ -7,7 +7,7 @@
 //! committed write transaction that changes a row stamps all its rows with one new [`Rev`], and
 //! that rev is the cursor peers resume from. Membership and access share the cursor by
 //! construction, so how far a principal is behind on a part is a count of log rows in a rev
-//! window ([`PartStoreServe::part_dirty_count`]).
+//! window ([`PartStoreServe::part_summaries`]).
 //!
 //! - **A payload change re-stamps the object's member rows** at the new rev, so a part's replay
 //!   carries content changes as row changes and an object route is the key range of the
@@ -28,7 +28,6 @@ use crate::interlude::*;
 use crate::rev::Limits;
 use crate::rev::Page;
 use crate::rev::Rev;
-use crate::rev::RevSource;
 use crate::store::bucket::BucketSummary;
 
 pub mod memory;
@@ -205,12 +204,24 @@ pub fn log_row_bytes(key: &LogKey, value: Option<&LogEntry>) -> usize {
 }
 
 /// An object as the sync client sees it.
+///
+/// A payload state promotes every pending membership in the transaction it arrives, so an
+/// object's memberships are either all live (it has content) or all pending (it has none), and
+/// `parts` names them either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjState {
-    pub payload: PayloadState,
-    pub digest: PayloadDigest,
-    /// The parts the object is a live member of.
+    /// The payload state and its digest; `None` while the object only has pending memberships.
+    pub content: Option<(PayloadState, PayloadDigest)>,
+    /// The parts the object is a member of: live with content, pending without.
     pub parts: BTreeSet<PartKey>,
+}
+
+/// A part as a principal sees it from a cursor: what a peer decides its sync strategy on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartSummary {
+    /// The part's live members.
+    pub member_count: u64,
+    pub dirty: PartDirtyCount,
 }
 
 /// How far a principal is behind on a part: the part's log rows past a cursor.
@@ -226,8 +237,8 @@ pub struct PartDirtyCount {
 /// is not a denial, and a denial is not an empty read.
 ///
 /// An object route is `Permitted` while the object is a live member of a part the principal
-/// may read, and `Denied` otherwise; it is never `UnknownPart`, and an object the store does not
-/// know is `Denied` like one it does.
+/// may read, and `Denied` otherwise. `UnknownPart` does not occur for an object route: an object
+/// the store does not know is `Denied` like one it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadVerdict {
     Permitted,
@@ -338,37 +349,37 @@ pub trait PartStoreRead<Async: FutureForm> {
     ) -> Async::Future<'a, Res<()>>;
 }
 
-/// The responder's reads: the log read on a principal's behalf, the log as a [`RevSource`],
-/// authorization against the log's current access rows, dirt counts and the bucket index. No
-/// pages, sessions or budgets.
+/// The responder's reads. Every one answers a principal, and every one decides access and
+/// reads under one snapshot (one lock in memory, one read transaction in SQLite), so no grant or
+/// revocation can commit between deciding and reading.
 ///
-/// **Only [`read_authorized`](Self::read_authorized) serves a peer.** The [`RevSource`] read is
-/// unauthorized: it hands out every selected row whoever asks, so it is for local consumers of
-/// the store (its own embedder, indexes, replays), never for answering a principal. Both reads
-/// apply [`LogSelector`]'s removal rule, so a responder hands out what it reads.
-pub trait PartStoreServe<Async: FutureForm>:
-    RevSource<Async, Key = LogKey, Value = LogEntry, Selector = LogSelector>
-{
+/// Access is decided from the principal's *current* access rows, never from history: an access
+/// row records a change, it does not grant the rows written before it. A revocation cuts the
+/// principal off everything of the part at once, rows, buckets and leaves it had not read yet
+/// included, and a grant opens the part's whole backlog from the reader's cursor.
+///
+/// A part the principal may not read and a part the store does not know answer alike (`None`)
+/// wherever the answer goes on the wire, so a refusal never confirms that a part exists; only
+/// [`read_authorized`](Self::read_authorized)'s verdicts tell them apart.
+///
+/// The log as a [`RevSource`](crate::rev::RevSource) is not here: that read is unauthorized and belongs to the store's
+/// local consumers (its embedder, indexes, replays), never to a peer.
+pub trait PartStoreServe<Async: FutureForm> {
     /// The log rows `principal` may read on `routes` in `(after, until]`, with each route's
-    /// verdict, into `page`. Verdicts and rows come from one snapshot (one lock in memory, one
-    /// read transaction in SQLite), so no grant or revocation can commit between deciding a
-    /// route and reading its rows.
+    /// verdict, into `page`.
     ///
-    /// Access is decided from the principal's *current* access rows, never from the rows'
-    /// history: an access row records a change, it does not grant the rows written before it.
-    /// So a revocation cuts the principal off every row of the part, including rows written
-    /// before the revocation that it had not read yet, and a grant opens the part's whole
-    /// backlog from the reader's cursor.
-    ///
-    /// - A part route is answered by [`read_verdicts`](Self::read_verdicts)' rule, and carries
-    ///   the part's member rows only when `Permitted`.
+    /// - A part route is `Permitted` while the principal has an access row on the part, and
+    ///   carries the part's member rows only then.
     /// - An object route is `Permitted` while the object is a live member of a part the
     ///   principal may read ([`ReadVerdict`]). It then carries the object's member rows in the
     ///   parts the principal may read, and no others: a row names its part, so handing out a
-    ///   row of an unreadable part would disclose that membership.
+    ///   row of an unreadable part would disclose that membership. A denied object route
+    ///   carries nothing, not even the removal from its last readable part; that part's own
+    ///   route carries it.
     /// - Access rows are on no route.
     ///
-    /// `after`, `until`, `limits` and the page's shape are [`RevSource::read`]'s.
+    /// `after`, `until`, `limits` and the page's shape are
+    /// [`RevSource::read`](crate::rev::RevSource::read)'s.
     fn read_authorized<'a>(
         &'a self,
         principal: &'a PeerKey,
@@ -378,42 +389,42 @@ pub trait PartStoreServe<Async: FutureForm>:
         limits: Limits,
         page: &'a mut AuthorizedPage,
     ) -> Async::Future<'a, Res<()>>;
-    /// For each part, whether `principal` may read it: a current access row permits.
-    fn read_verdicts<'a>(
+    /// For each `(part, since)`, the part's summary as `principal` sees it from `since`, in the
+    /// order asked; `None` for a part it may not read or the store does not know.
+    fn part_summaries<'a>(
         &'a self,
         principal: &'a PeerKey,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<Vec<ReadVerdict>>>;
-    /// The parts `obj` is a live member of that `principal` may read.
-    fn readable_parts_of<'a>(
+        parts: &'a [(PartKey, Rev)],
+    ) -> Async::Future<'a, Res<Vec<Option<PartSummary>>>>;
+    /// The objects' states as `principal` may see them, in the order asked: the content, and
+    /// the live parts it may read. `None` for an object that is not a live member of any part
+    /// it may read: content is only ever readable through a part.
+    fn readable_obj_states<'a>(
         &'a self,
         principal: &'a PeerKey,
-        obj: &'a ObjKey,
-    ) -> Async::Future<'a, Res<Vec<PartKey>>>;
-    /// The part's log rows with a rev past `since`; the access half counts `principal`'s row
-    /// (`None` is the local principal, whom access does not gate).
-    fn part_dirty_count<'a>(
-        &'a self,
-        part: &'a PartKey,
-        principal: Option<&'a PeerKey>,
-        since: Rev,
-    ) -> Async::Future<'a, Res<PartDirtyCount>>;
-    /// The part's non-empty buckets in bucket order, from `from` up to `to_level`, at most
-    /// `limit`.
+        objs: &'a [ObjKey],
+    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>>;
+    /// The part's non-empty buckets changed past `since`, in bucket order, from `from` up to
+    /// `to_level`, at most `limit`; `None` for a part `principal` may not read.
     fn bucket_list<'a>(
         &'a self,
+        principal: &'a PeerKey,
         part: &'a PartKey,
         from: BuckId,
         to_level: BuckLevel,
+        since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Vec<BucketSummary>>>;
-    /// The part's members (live and dead) in bucket `buck`, in (deepest bucket, key) order
-    /// after `after`, at most `limit`.
+    ) -> Async::Future<'a, Res<Option<Vec<BucketSummary>>>>;
+    /// For each `(bucket, after)`, the part's members (live and dead) in that bucket in
+    /// (deepest bucket, key) order after `after`, at most `limit`, in the order asked; a bucket
+    /// unchanged past `since` has none. `None` for a part `principal` may not read. One call
+    /// answers a whole leaf request, so all its buckets come from one snapshot.
     fn bucket_leaves<'a>(
         &'a self,
+        principal: &'a PeerKey,
         part: &'a PartKey,
-        buck: BuckId,
-        after: Option<&'a ObjKey>,
+        bucks: &'a [(BuckId, Option<ObjKey>)],
+        since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Vec<LeafEntry>>>;
+    ) -> Async::Future<'a, Res<Option<Vec<Vec<LeafEntry>>>>>;
 }

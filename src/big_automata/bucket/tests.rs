@@ -30,16 +30,13 @@ fn calc_working_level_never_exceeds_remote_depth() {
 }
 
 /// The working level is the shallowest whose child buckets each hold at most
-/// `ACTIVE_SYNC_JOB_TARGET` members: the function's own first step compares level 1's width
-/// while deciding level 0, and `BUCKET_DIRTY_THRESHOLD`'s note has the whole part as one root
-/// bucket below `ACTIVE_SYNC_JOB_TARGET * ARITY`. Each level is then reached in turn.
+/// `ACTIVE_SYNC_JOB_TARGET` members, so each level is reached in turn as the part grows by
+/// `ARITY`, at the boundaries on both sides.
 ///
-/// FAILS against the port as copied (kept failing on purpose, a machine bug to settle): after
-/// the first step the loop recomputes the width with `ARITY.pow(working_level)` where that rule
-/// needs `working_level + 1`, so at level 1 it compares level 1's width a second time. Leaving
-/// level 0 and stopping at level 1 then need opposite answers to one comparison, and level 1 is
-/// never returned: `calc_working_level(16_400, 4)` is 2, as is every size from 16_400 up to
-/// 262_144.
+/// The port as copied compared the child width only on its first step and the working level's
+/// own width after (`ARITY.pow(working_level)`), so leaving level 0 and stopping at level 1
+/// needed opposite answers to one comparison: level 1 was never returned, and
+/// `calc_working_level(16_400, 4)` was 2.
 #[test]
 fn calc_working_level_reaches_every_level() {
     let target = u64::from(BucketMachine::ACTIVE_SYNC_JOB_TARGET);
@@ -209,11 +206,9 @@ fn filter_objects_compares_withheld_payloads_by_digest() {
             RawLeafBucketPage {
                 entries: vec![BucketObjPageEntry {
                     obj_key: obj.clone(),
-                    dead: false,
-                    fp: BucketObjPageEntry::fingerprint(&seed, &obj, digest),
+                    fp: Some(BucketObjPageEntry::fingerprint(&seed, &obj, digest)),
                 }],
                 next_after: None,
-                done: true,
             },
         )])
     };
@@ -277,18 +272,24 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
             objs.iter()
                 .zip(states)
                 .filter(|(_, state)| {
-                    state
-                        .as_ref()
-                        .is_none_or(|state| state.parts.iter().all(|part| !readable.contains(part)))
+                    state.as_ref().is_none_or(|state| {
+                        state.content.is_none()
+                            || state.parts.iter().all(|part| !readable.contains(part))
+                    })
                 })
                 .map(|(obj, _)| obj.clone())
                 .collect::<Vec<_>>()
         };
-        // Their payloads, that is: the requester may still remove them from a readable part.
+        // Their payloads, that is: the requester may still remove them from a readable part,
+        // pending memberships included.
         let payloads = |states: Vec<Option<ObjState>>| {
             states
                 .into_iter()
-                .map(|state| state.map(|state| state.payload))
+                .map(|state| {
+                    state
+                        .and_then(|state| state.content)
+                        .map(|(payload, _)| payload)
+                })
                 .collect::<Vec<_>>()
         };
         let hidden_before =
@@ -366,7 +367,9 @@ fn walk_converges(scenario: harness::Scenario) -> Res<harness::Driver<MemoryPart
                     pending
                         .into_iter()
                         .zip(promoted)
-                        .filter(|(_, state)| state.is_some())
+                        .filter(|(_, state)| {
+                            state.as_ref().is_some_and(|state| state.content.is_some())
+                        })
                         .map(|(obj, _)| (obj, true)),
                 );
                 assert_eq!(membership(&driver.requester, part).await?, expected);
@@ -481,13 +484,15 @@ fn unauthorized_parts_converge_to_nothing() -> Res<()> {
 /// A responder removed object 0 from part 2 and keeps it live in part 1; the requester holds a
 /// *pending* membership of object 0 in part 2 (no payload yet). Both parts are readable.
 ///
-/// FAILS (kept failing on purpose, the counterexample `walks_converge` shrinks to): part 2's
-/// walk reaches object 0's dead leaf entry while the requester has no payload state for it, and
-/// `filter_objects` drops a dead entry for an object it does not hold (a pending membership is
-/// invisible to `obj_states`). Part 1's walk then syncs object 0, and its payload promotes the
-/// pending membership in part 2 to live, against the responder's removal. Walked the other way
-/// round, part 1 first, the membership is live when part 2 compares and its removal applies:
-/// whether the requester converges depends on the order the walks run in.
+/// A pending membership is a membership; only its payload is pending. Part 2's walk reaches
+/// object 0's dead leaf entry while the requester's part 2 bucket is empty (a pending
+/// membership has no bucket entry), sees the pending membership through `obj_states` and
+/// removes it. Part 1's sync then brings the payload with nothing left in part 2 to promote,
+/// whichever order the walks run in.
+///
+/// This was `walks_converge`'s counterexample while pending memberships were invisible to
+/// `obj_states`: the dead entry was dropped as one for an object the requester did not hold,
+/// and the payload later promoted the membership against the responder's removal.
 #[test]
 fn a_pending_membership_misses_a_removal_its_payload_overtakes() -> Res<()> {
     use harness::*;
@@ -511,9 +516,8 @@ fn a_pending_membership_misses_a_removal_its_payload_overtakes() -> Res<()> {
 /// buckets at the working level are leafed, and the listing pages through the levels once
 /// plus a relisting per handoff.
 ///
-/// The working level is whatever `calc_working_level` picks (2 at this size, see
-/// [`calc_working_level_reaches_every_level`]), so this walk runs whichever way that is
-/// settled.
+/// At this size the walk is at level 1: 16 buckets of about 1_060 members, so the six changes
+/// dirty at most six of them, and the members of the clean ones are never leafed.
 ///
 /// The changes: a new payload (object 1), a payload withheld with the same digest (2, no
 /// sync), a member the requester lacks (3), a removal (4), another new payload (5) and a
@@ -523,7 +527,7 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
     use harness::*;
     const MEMBERS: u16 = 17_000;
     let working_level = calc_working_level(u64::from(MEMBERS), BuckId::MAX_LEVEL);
-    assert!(working_level > 0);
+    assert_eq!(working_level, 1);
     let spec = |payload, member| ObjSpec {
         payload,
         parts: vec![member],
@@ -553,12 +557,15 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
         // The buckets at the working level whose summaries differ, and their members.
         let at_level = PartStoreServe::<Sendable>::bucket_list(
             &responder_store,
+            &requester_principal(),
             &part,
             BuckId::new(working_level, 0),
             working_level,
+            0,
             usize::MAX,
         )
-        .await?;
+        .await?
+        .expect("the part is readable");
         let ids = at_level.iter().map(|bucket| bucket.id).collect::<Vec<_>>();
         let ours =
             PartStoreRead::<Sendable>::bucket_summaries(&requester_store, &part, &ids).await?;
@@ -569,7 +576,7 @@ fn a_large_part_walks_only_its_dirty_buckets() -> Res<()> {
             .map(|(theirs, _)| u64::from(theirs.len))
             .collect::<Vec<_>>();
         let dirty_len = dirty.iter().sum::<u64>();
-        assert!(!dirty.is_empty() && dirty_len < u64::from(MEMBERS) / 10);
+        assert!(!dirty.is_empty() && dirty.len() < at_level.len());
         // Every bucket from the root through the working level.
         let listable = (0..=u32::from(working_level))
             .map(|level| u64::from(BuckId::ARITY).pow(level))

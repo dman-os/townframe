@@ -5,6 +5,7 @@
 use crate::interlude::*;
 
 use crate::fingerprint::FingerprintSeed;
+use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
 use crate::rpc::bucket::BucketObjPageEntry as RawLeafBucketEntry;
 use crate::rpc::bucket::LeafBucketPage as RawLeafBucketPage;
@@ -110,7 +111,7 @@ impl BucketMachine {
         last_cursor: CursorIndex,
     ) -> Self {
         let working_level = calc_working_level(remote_size, remote_depth);
-        let bucket_width = remote_size / (BuckId::ARITY.pow(working_level as _) as u64);
+        let bucket_width = remote_size / u64::from(BuckId::ARITY).pow(u32::from(working_level));
         let initial_working_set = (Self::ACTIVE_SYNC_JOB_TARGET as u64)
             .div_ceil(bucket_width.max(1))
             .max(1) as _;
@@ -173,10 +174,11 @@ impl BucketMachine {
                 warn!("on_obj_page on an unexpected bucket: {buck_id:?}");
                 continue;
             };
-            state.leaf_after = page.next_after;
             state.leaf_seen += page.entries.len() as u64;
             state.leaf_inflight = false;
-            state.leaf_exhausted = page.done || state.leaf_seen >= state.summary.len as u64;
+            state.leaf_exhausted =
+                page.next_after.is_none() || state.leaf_seen >= state.summary.len as u64;
+            state.leaf_after = page.next_after;
             // state.pending_objs.extend(page.entries);
             // FIXME: the following code is uncessary and is too defensive
             // we should trust that the remote only returns items after the requested offset
@@ -395,14 +397,18 @@ impl BucketMachine {
     }
 }
 
+/// The level the walk leafs at: the shallowest whose *child* buckets each hold at most
+/// `ACTIVE_SYNC_JOB_TARGET` members (`remote_size / ARITY^(level + 1)`), capped at
+/// `remote_depth`. So a part below `ACTIVE_SYNC_JOB_TARGET * ARITY` members is walked as its one
+/// root bucket, and every deeper level is reached in turn as the part grows by `ARITY`.
 pub fn calc_working_level(remote_size: u64, remote_depth: u8) -> u8 {
+    let arity = u64::from(BuckId::ARITY);
+    let target = u64::from(BucketMachine::ACTIVE_SYNC_JOB_TARGET);
     let mut working_level = 0;
-    let mut bucket_width = remote_size / (BuckId::ARITY as u64);
     while working_level < remote_depth
-        && bucket_width > BucketMachine::ACTIVE_SYNC_JOB_TARGET as u64
+        && remote_size / arity.pow(u32::from(working_level) + 1) > target
     {
         working_level += 1;
-        bucket_width = remote_size / (BuckId::ARITY.pow(working_level as _) as u64);
     }
     working_level
 }
@@ -514,13 +520,17 @@ pub struct BucketObjEntry {
 #[derive(Debug, Clone)]
 pub struct BucketObjLeafPage {
     pub entries: Vec<BucketObjEntry>,
+    /// Where the bucket's next page starts; `None` when this page finished it.
     pub next_after: Option<ObjKey>,
-    pub done: bool,
 }
 
 // FIXME: this is too expensive
 /// The local side of every requested bucket is read in two batches: the summaries of all the
-/// buckets, then the states of every object listed in a bucket that is not empty locally.
+/// buckets, then the states of the objects whose delta depends on them: every entry of a bucket
+/// that is not empty locally, and the dead entries of one that is. A pending membership has no
+/// bucket entry, so an empty local bucket can still hold one, and a peer's removal must cancel
+/// it: the dead entry becomes a removal whenever the local object is a member of the part, live
+/// or pending.
 pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
     part_key: PartKey,
     bucks: Map<BuckId, RawLeafBucketPage>,
@@ -529,83 +539,65 @@ pub async fn filter_objects<K: FutureForm, S: PartStoreRead<K>>(
 ) -> Res<Map<BuckId, BucketObjLeafPage>> {
     let buck_ids = bucks.keys().copied().collect::<Vec<_>>();
     let summaries = part_store.bucket_summaries(&part_key, &buck_ids).await?;
-    let lens = buck_ids
+    let local_empty = buck_ids
         .into_iter()
-        .zip(summaries.iter().map(|summary| summary.len))
+        .zip(summaries.iter().map(|summary| summary.len == 0))
         .collect::<Map<_, _>>();
     let objs = bucks
         .iter()
-        .filter(|(buck_id, _)| lens[buck_id] != 0)
-        .flat_map(|(_, page)| page.entries.iter().map(|entry| entry.obj_key.clone()))
+        .flat_map(|(buck_id, page)| {
+            let empty = local_empty[buck_id];
+            page.entries
+                .iter()
+                .filter(move |entry| !empty || entry.fp.is_none())
+                .map(|entry| entry.obj_key.clone())
+        })
         .collect::<Vec<_>>();
     let states = part_store.obj_states(&objs).await?;
     let states = objs.into_iter().zip(states).collect::<Map<_, _>>();
 
     let mut out = Map::new();
     for (buck_id, page) in bucks {
-        let mut out_objs = vec![];
-        if lens[&buck_id] == 0 {
-            out_objs.extend(page.entries.into_iter().filter_map(|ee| {
-                if !ee.dead {
-                    Some(BucketObjEntry {
-                        obj_key: ee.obj_key,
-                        delta: PartObjDelta::New,
-                    })
-                } else {
-                    None
-                }
-            }));
-            out.insert(
-                buck_id,
-                BucketObjLeafPage {
-                    entries: out_objs,
-                    next_after: page.next_after,
-                    done: page.done,
-                },
-            );
-            continue;
-        }
-        for obj in page.entries {
-            match &states[&obj.obj_key] {
-                Some(state) => {
-                    if obj.dead {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::Delete,
-                        });
-                        continue;
-                    }
-                    let changed =
-                        RawLeafBucketEntry::fingerprint(&seed, &obj.obj_key, state.digest)
-                            != obj.fp;
-                    if changed {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::Change,
-                        });
-                    } else if !state.parts.contains(&part_key) {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::New,
-                        });
-                    }
-                }
-                None => {
-                    if !obj.dead {
-                        out_objs.push(BucketObjEntry {
-                            obj_key: obj.obj_key,
-                            delta: PartObjDelta::New,
-                        });
-                    }
-                }
-            }
-        }
+        let empty = local_empty[&buck_id];
+        let entries = page
+            .entries
+            .into_iter()
+            .filter_map(|entry| {
+                let delta = match (entry.fp, empty) {
+                    (None, _) => states[&entry.obj_key]
+                        .as_ref()
+                        .is_some_and(|state| state.parts.contains(&part_key))
+                        .then_some(PartObjDelta::Delete)?,
+                    (Some(_), true) => PartObjDelta::New,
+                    (Some(fp), false) => match &states[&entry.obj_key] {
+                        Some(ObjState {
+                            content: Some((_, digest)),
+                            parts,
+                        }) => {
+                            if RawLeafBucketEntry::fingerprint(&seed, &entry.obj_key, *digest) != fp
+                            {
+                                PartObjDelta::Change
+                            } else if !parts.contains(&part_key) {
+                                PartObjDelta::New
+                            } else {
+                                return None;
+                            }
+                        }
+                        // No content yet, or no state at all: the sync brings it.
+                        Some(ObjState { content: None, .. }) | None => PartObjDelta::New,
+                    },
+                };
+                Some(BucketObjEntry {
+                    obj_key: entry.obj_key,
+                    delta,
+                })
+            })
+            .collect();
         out.insert(
             buck_id,
             BucketObjLeafPage {
-                entries: out_objs,
+                entries,
                 next_after: page.next_after,
-                done: page.done,
             },
         );
     }

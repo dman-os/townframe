@@ -19,6 +19,7 @@ use crate::part_store::LogSelector;
 use crate::part_store::Membership;
 use crate::part_store::ObjState;
 use crate::part_store::PartDirtyCount;
+use crate::part_store::PartSummary;
 use crate::part_store::PayloadState;
 use crate::part_store::ReadVerdict;
 use crate::part_store::log_row_bytes;
@@ -209,13 +210,38 @@ impl PartOracle {
             .copied()
     }
 
+    /// With a payload, the content and the live parts; without, the parts it was added to,
+    /// which are all still pending.
     pub fn obj_state(&self, obj: &ObjKey) -> Option<ObjState> {
-        let payload = self.payloads.get(obj)?;
-        Some(ObjState {
-            payload: payload.clone(),
-            digest: payload.digest().expect("generated payloads are canonical"),
-            parts: self.live_parts_of(obj),
-        })
+        match self.payloads.get(obj) {
+            Some(payload) => Some(ObjState {
+                content: Some((
+                    payload.clone(),
+                    payload.digest().expect("generated payloads are canonical"),
+                )),
+                parts: self.live_parts_of(obj),
+            }),
+            None => {
+                let pending = self
+                    .intended
+                    .iter()
+                    .filter(|(intended_obj, _)| intended_obj == obj)
+                    .map(|(_, part)| part.clone())
+                    .collect::<BTreeSet<_>>();
+                (!pending.is_empty()).then_some(ObjState {
+                    content: None,
+                    parts: pending,
+                })
+            }
+        }
+    }
+
+    /// The object's state cut down to the live parts `principal` may read; `None` without one.
+    pub fn readable_obj_state(&self, principal: &PeerKey, obj: &ObjKey) -> Option<ObjState> {
+        let mut state = self.obj_state(obj)?;
+        state.content.as_ref()?;
+        state.parts.retain(|part| self.permits(principal, part));
+        (!state.parts.is_empty()).then_some(state)
     }
 
     fn live_parts_of(&self, obj: &ObjKey) -> BTreeSet<PartKey> {
@@ -285,22 +311,53 @@ impl PartOracle {
         self.member_rows(part).filter(|(_, _, live)| *live).count() as u64
     }
 
+    /// `None` when `principal` may not read the part.
     pub fn bucket_list(
         &self,
+        principal: &PeerKey,
         part: &PartKey,
         from: BuckId,
         to_level: BuckLevel,
+        since: Rev,
         limit: usize,
-    ) -> Vec<BucketSummary> {
-        self.buckets(part)
-            .into_iter()
-            .filter(|(id, _)| *id >= from && id.level() <= to_level)
-            .map(|(id, state)| state.summary(id))
-            .take(limit)
-            .collect()
+    ) -> Option<Vec<BucketSummary>> {
+        self.permits(principal, part).then(|| {
+            self.buckets(part)
+                .into_iter()
+                .filter(|(id, state)| {
+                    *id >= from && id.level() <= to_level && state.changed_at() > since
+                })
+                .map(|(id, state)| state.summary(id))
+                .take(limit)
+                .collect()
+        })
     }
 
+    /// `None` when `principal` may not read the part.
     pub fn bucket_leaves(
+        &self,
+        principal: &PeerKey,
+        part: &PartKey,
+        bucks: &[(BuckId, Option<ObjKey>)],
+        since: Rev,
+        limit: usize,
+    ) -> Option<Vec<Vec<LeafEntry>>> {
+        self.permits(principal, part).then(|| {
+            bucks
+                .iter()
+                .map(|(buck, after)| {
+                    if self.bucket_summary(part, *buck).changed_at <= since {
+                        return default();
+                    }
+                    self.members_of(part, *buck, after.as_ref(), limit)
+                })
+                .collect()
+        })
+    }
+
+    /// The part's members (live and dead) in `buck` after `after`, at most `limit`, whoever
+    /// asks.
+    pub fn members_of(
         &self,
         part: &PartKey,
         buck: BuckId,
@@ -332,7 +389,7 @@ impl PartOracle {
         self.access.contains_key(&(part.clone(), principal.clone()))
     }
 
-    pub fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
+    fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
         if !self.parts.contains(part) {
             ReadVerdict::UnknownPart
         } else if self.permits(principal, part) {
@@ -342,34 +399,37 @@ impl PartOracle {
         }
     }
 
-    pub fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Vec<PartKey> {
+    fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Vec<PartKey> {
         self.live_parts_of(obj)
             .into_iter()
             .filter(|part| self.permits(principal, part))
             .collect()
     }
 
-    pub fn part_dirty_count(
+    /// `None` when `principal` may not read the part.
+    pub fn part_summary(
         &self,
+        principal: &PeerKey,
         part: &PartKey,
-        principal: Option<&PeerKey>,
         since: Rev,
-    ) -> PartDirtyCount {
-        PartDirtyCount {
-            member_changes: self
-                .member_rows(part)
-                .filter(|(_, rev, _)| *rev > since)
-                .count() as u64,
-            access_changes: principal.map_or(0, |principal| {
-                let key = LogKey::Access {
-                    part: part.clone(),
-                    principal: principal.clone(),
-                };
-                self.log
-                    .get(&key)
-                    .map_or(0, |(rev, _)| u64::from(*rev > since))
-            }),
-        }
+    ) -> Option<PartSummary> {
+        let access = LogKey::Access {
+            part: part.clone(),
+            principal: principal.clone(),
+        };
+        self.permits(principal, part).then(|| PartSummary {
+            member_count: self.member_count(part),
+            dirty: PartDirtyCount {
+                member_changes: self
+                    .member_rows(part)
+                    .filter(|(_, rev, _)| *rev > since)
+                    .count() as u64,
+                access_changes: self
+                    .log
+                    .get(&access)
+                    .map_or(0, |(rev, _)| u64::from(*rev > since)),
+            },
+        })
     }
 
     /// The current live memberships.

@@ -51,12 +51,39 @@ impl State {
         }
     }
 
+    /// With content, the live parts; without, the pending ones (an object never has both).
     pub(super) fn obj_state(&self, obj: &ObjKey) -> Option<ObjState> {
+        match self.objs.get(obj) {
+            Some(row) => Some(ObjState {
+                content: Some((row.payload.clone(), row.digest)),
+                parts: self.live_parts_of(obj).cloned().collect(),
+            }),
+            None => {
+                let pending = self
+                    .pending
+                    .range((obj.clone(), PartKey::new(&[]))..)
+                    .take_while(|(pending_obj, _)| pending_obj == obj)
+                    .map(|(_, part)| part.clone())
+                    .collect::<BTreeSet<_>>();
+                (!pending.is_empty()).then_some(ObjState {
+                    content: None,
+                    parts: pending,
+                })
+            }
+        }
+    }
+
+    /// The object's content and the live parts `principal` may read, when there is one.
+    pub(super) fn readable_obj_state(&self, principal: &PeerKey, obj: &ObjKey) -> Option<ObjState> {
         let row = self.objs.get(obj)?;
-        Some(ObjState {
-            payload: row.payload.clone(),
-            digest: row.digest,
-            parts: self.live_parts_of(obj).cloned().collect(),
+        let parts = self
+            .live_parts_of(obj)
+            .filter(|part| self.permits(principal, part))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        (!parts.is_empty()).then(|| ObjState {
+            content: Some((row.payload.clone(), row.digest)),
+            parts,
         })
     }
 

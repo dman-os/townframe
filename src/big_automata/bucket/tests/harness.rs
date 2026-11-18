@@ -20,17 +20,16 @@ use crate::bucket::calc_working_level;
 use crate::bucket::filter_buckets;
 use crate::bucket::filter_objects;
 use crate::bucket::summaries_agree;
-use crate::fingerprint::Fingerprint;
 use crate::fingerprint::FingerprintSeed;
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
 use crate::part_store::LeafEntry;
+use crate::part_store::ObjState;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
 use crate::part_store::PayloadDigest;
 use crate::part_store::PayloadState;
-use crate::part_store::ReadVerdict;
 use crate::part_store::memory::MemoryPartStore;
 use crate::part_store::memory::MemoryPartTx;
 use crate::rpc::bucket::BucketObjPageEntry;
@@ -38,9 +37,9 @@ use crate::rpc::bucket::GetChangedBucketsError;
 use crate::rpc::bucket::GetChangedBucketsRequest;
 use crate::rpc::bucket::LeafBucketPage;
 use crate::rpc::bucket::LeafBucketRequest;
-use crate::rpc::bucket::LeafBucketResult;
 use crate::rpc::bucket::LeafBucketsError;
 use crate::rpc::bucket::LeafBucketsRequest;
+use crate::rpc::bucket::LeafBucketsResponse;
 use crate::store::bucket::BucketSummary;
 
 /// Each side's store as the harness reaches it: through the part store traits, in the
@@ -76,6 +75,10 @@ pub fn part_index(part: &PartKey) -> u8 {
 }
 pub fn requester_principal() -> PeerKey {
     PeerKey::new(&[200])
+}
+/// Who the checks read a store as: granted every part the store's objects were added to.
+fn inspector() -> PeerKey {
+    PeerKey::new(&[201])
 }
 pub fn payload(value: u8) -> PayloadState {
     PayloadState::Payload(serde_json::json!(value))
@@ -137,9 +140,20 @@ pub async fn build<S: Store>(store: &S, objs: &[ObjSpec], readable: &[PartKey]) 
     store
         .add_members(&mut tx, &members_where(&[Member::Live, Member::Dead]))
         .await?;
+    // The inspector reads every part an object was added to, so the checks can see each
+    // store whole through the same authorized reads; it adds no part a store did not have.
+    let added = members_where(&[Member::Live, Member::Dead])
+        .into_iter()
+        .map(|(_, part)| part)
+        .collect::<BTreeSet<_>>();
     let grants = readable
         .iter()
         .map(|part| (part.clone(), requester_principal(), AccessLevel::Read))
+        .chain(
+            added
+                .into_iter()
+                .map(|part| (part, inspector(), AccessLevel::Read)),
+        )
         .collect::<Vec<_>>();
     store.grant_access(&mut tx, &grants).await?;
     tx.commit();
@@ -181,14 +195,6 @@ impl<S: Store> Responder<S> {
         }
     }
 
-    async fn readable(&self, part: &PartKey) -> Res<bool> {
-        let verdicts = self
-            .store
-            .read_verdicts(&self.principal, std::slice::from_ref(part))
-            .await?;
-        Ok(verdicts == [ReadVerdict::Permitted])
-    }
-
     /// The part's live member count, or `None` for a part the requester may not read or the
     /// store does not know: both answer as unknown, so a refusal does not confirm the part.
     pub async fn part_summary(&mut self, part: &PartKey) -> Res<Option<u64>> {
@@ -196,17 +202,18 @@ impl<S: Store> Responder<S> {
             .entry(part.clone())
             .or_default()
             .summary_requests += 1;
-        if !self.readable(part).await? {
-            return Ok(None);
-        }
-        Ok(Some(self.store.member_count(part).await?))
+        let summary = self
+            .store
+            .part_summaries(&self.principal, &[(part.clone(), SINCE)])
+            .await?
+            .remove(0);
+        Ok(summary.map(|summary| summary.member_count))
     }
 
     /// The buckets changed past `since` from `offset` through `to_level`, in bucket order:
     /// `limit_hint` of them, plus the remaining siblings of the last one (at most
-    /// [`BuckId::ARITY`] more).
-    ///
-    /// `bucket_list` takes no `since`, so the `since` filter runs here over pages of the list.
+    /// [`BuckId::ARITY`] more). One store read, so the listing and its authorization share a
+    /// snapshot.
     pub async fn changed_buckets(
         &mut self,
         req: GetChangedBucketsRequest,
@@ -222,51 +229,45 @@ impl<S: Store> Responder<S> {
             .entry(part_key.clone())
             .or_default()
             .list_requests += 1;
-        if !self.readable(&part_key).await? {
-            return Ok(Err(GetChangedBucketsError::UnkownPart));
-        }
-        // A zero `limit_hint` is a zero-bucket page, not an unspecified one.
-        if limit_hint == 0 {
-            return Ok(Ok(default()));
-        }
+        // A zero `limit_hint` is a zero-bucket page, not an unspecified one, and the part is
+        // still checked, so a refusal reads the same at any limit.
         let limit = usize::try_from(limit_hint).expect(ERROR_IMPOSSIBLE);
-        let chunk = limit + usize::from(BuckId::ARITY);
+        let Some(listed) = self
+            .store
+            .bucket_list(
+                &self.principal,
+                &part_key,
+                offset,
+                to_level,
+                since,
+                limit + usize::from(BuckId::ARITY),
+            )
+            .await?
+        else {
+            return Ok(Err(GetChangedBucketsError::UnknownPart));
+        };
         let mut out = Vec::<BucketSummary>::new();
-        let mut from = offset;
-        'list: loop {
-            let listed = self
-                .store
-                .bucket_list(&part_key, from, to_level, chunk)
-                .await?;
-            let exhausted = listed.len() < chunk;
-            for bucket in listed {
-                from = bucket.id.increment();
-                if bucket.changed_at <= since {
-                    continue;
-                }
-                if let Some(last) = out.last()
-                    && out.len() >= limit
-                    && (bucket.id.parent() != last.id.parent() || out.len() >= chunk)
-                {
-                    break 'list;
-                }
-                out.push(bucket);
-            }
-            if exhausted {
+        for bucket in listed {
+            // Past the limit, only the last bucket's siblings (the store read is capped at
+            // `ARITY` past it).
+            let sibling = out
+                .last()
+                .is_some_and(|last| last.id.parent() == bucket.id.parent());
+            if out.len() >= limit && !sibling {
                 break;
             }
+            out.push(bucket);
         }
         self.traffic.entry(part_key).or_default().buckets_out += out.len() as u64;
         Ok(Ok(out))
     }
 
     /// One page of members per requested bucket, after each bucket's `after`, with each live
-    /// member's fingerprint under the request's seed. A bucket unchanged past `since` answers
-    /// an empty, finished page.
+    /// member's fingerprint under the request's seed. One store read answers the whole request.
     pub async fn leaf_buckets(
         &mut self,
         req: LeafBucketsRequest,
-    ) -> Res<Result<LeafBucketResult, LeafBucketsError>> {
+    ) -> Res<Result<LeafBucketsResponse, LeafBucketsError>> {
         let LeafBucketsRequest {
             part_key,
             since,
@@ -278,28 +279,23 @@ impl<S: Store> Responder<S> {
             .entry(part_key.clone())
             .or_default()
             .leaf_requests += 1;
-        if !self.readable(&part_key).await? {
-            return Ok(Err(LeafBucketsError::UnkownPart));
-        }
         let limit = usize::try_from(limit_hint.map_or(1, |hint| hint.max(1)).min(self.leaf_cap))
             .expect(ERROR_IMPOSSIBLE);
-        let mut bucks = Map::new();
+        let bucks = buckets
+            .into_iter()
+            .map(|LeafBucketRequest { buck_id, after }| (buck_id, after))
+            .collect::<Vec<_>>();
+        // One past the limit tells whether a page finishes its bucket.
+        let Some(leaves) = self
+            .store
+            .bucket_leaves(&self.principal, &part_key, &bucks, since, limit + 1)
+            .await?
+        else {
+            return Ok(Err(LeafBucketsError::UnknownPart));
+        };
+        let mut pages = Map::new();
         let mut entries_out = 0;
-        for LeafBucketRequest { buck_id, after } in buckets {
-            let changed = self
-                .store
-                .bucket_list(&part_key, buck_id, buck_id.level(), 1)
-                .await?
-                .first()
-                .is_some_and(|bucket| bucket.id == buck_id && bucket.changed_at > since);
-            // One past the limit tells whether the page finishes the bucket.
-            let mut entries = if changed {
-                self.store
-                    .bucket_leaves(&part_key, buck_id, after.as_ref(), limit + 1)
-                    .await?
-            } else {
-                default()
-            };
+        for ((buck_id, _), mut entries) in bucks.into_iter().zip(leaves) {
             let done = entries.len() <= limit;
             entries.truncate(limit);
             entries_out += entries.len() as u64;
@@ -307,27 +303,20 @@ impl<S: Store> Responder<S> {
             let entries = entries
                 .into_iter()
                 .map(|LeafEntry { obj, live }| BucketObjPageEntry {
-                    fp: match live {
-                        Some(digest) => BucketObjPageEntry::fingerprint(&seed, &obj, digest),
-                        // The wire type carries a fingerprint for a dead entry too, and the
-                        // requester never compares it: a removal has no content.
-                        None => Fingerprint::from_u64(0),
-                    },
-                    dead: live.is_none(),
+                    fp: live.map(|digest| BucketObjPageEntry::fingerprint(&seed, &obj, digest)),
                     obj_key: obj,
                 })
                 .collect();
-            bucks.insert(
+            pages.insert(
                 buck_id,
                 LeafBucketPage {
                     entries,
                     next_after,
-                    done,
                 },
             );
         }
         self.traffic.entry(part_key).or_default().leaf_entries_out += entries_out;
-        Ok(Ok(LeafBucketResult { seed, bucks }))
+        Ok(Ok(pages))
     }
 
     /// The object's payload state, for a sync of its membership in `part`. The machine only
@@ -335,18 +324,17 @@ impl<S: Store> Responder<S> {
     /// machine bug.
     pub async fn fetch(&mut self, obj: &ObjKey, part: &PartKey) -> Res<PayloadState> {
         self.traffic.entry(part.clone()).or_default().fetches += 1;
-        let readable = self.store.readable_parts_of(&self.principal, obj).await?;
-        assert!(
-            readable.contains(part),
-            "the machine asked to sync {obj} in {part}, which the requester may not read there"
-        );
         let state = self
             .store
-            .obj_states(std::slice::from_ref(obj))
+            .readable_obj_states(&self.principal, std::slice::from_ref(obj))
             .await?
             .remove(0)
-            .expect("a live member has a payload state");
-        Ok(state.payload)
+            .filter(|state| state.parts.contains(part))
+            .unwrap_or_else(|| {
+                panic!("the machine asked to sync {obj} in {part}, which the requester may not read there")
+            });
+        let (payload, _) = state.content.expect("a readable object has content");
+        Ok(payload)
     }
 }
 
@@ -486,7 +474,7 @@ impl<S: Store> Driver<S> {
                     assert_eq!((part_key, since), (part.clone(), SINCE));
                     let seed = FingerprintSeed::new(self.seeds, 0x5eed);
                     self.seeds += 1;
-                    let result = self
+                    let pages = self
                         .responder
                         .leaf_buckets(LeafBucketsRequest {
                             part_key: part.clone(),
@@ -497,14 +485,9 @@ impl<S: Store> Driver<S> {
                         })
                         .await?
                         .expect("the part stays readable");
-                    assert_eq!(result.seed, seed);
-                    let pages = filter_objects::<Sendable, _>(
-                        part.clone(),
-                        result.bucks,
-                        seed,
-                        &self.requester,
-                    )
-                    .await?;
+                    let pages =
+                        filter_objects::<Sendable, _>(part.clone(), pages, seed, &self.requester)
+                            .await?;
                     machine.on_obj_page(pages, &mut out);
                 }
                 BucketMachineCommand::SyncObj {
@@ -564,19 +547,37 @@ pub struct Divergence {
     /// The responder's live members the requester does not hold live there with the same
     /// digest: the most syncs the walk may make.
     pub live_differing: u64,
-    /// The responder's dead members: the most removals. Not only those the requester holds
-    /// now: another part's walk may hand it the object before this part's leaves reach the
-    /// dead entry, and then the removal is issued (a no-op for a non-member).
+    /// The responder's dead members: the most removals. A bound over all of them, not only
+    /// those the requester is a member for now: a pending membership is one too.
     pub dead: u64,
+}
+
+/// A store's members of `part` with their digests (`None` when dead), as the inspector reads
+/// them; none for a part no object was added to.
+async fn leaves<S: Store>(store: &S, part: &PartKey) -> Res<Vec<LeafEntry>> {
+    Ok(store
+        .bucket_leaves(&inspector(), part, &[(BuckId::ROOT, None)], 0, usize::MAX)
+        .await?
+        .map(|mut leaves| leaves.remove(0))
+        .unwrap_or_default())
+}
+
+/// Whether the requester holds `obj` live in `part` with `digest`.
+fn holds(state: Option<&ObjState>, part: &PartKey, digest: PayloadDigest) -> bool {
+    state.is_some_and(|state| {
+        state
+            .content
+            .as_ref()
+            .is_some_and(|(_, held)| *held == digest)
+            && state.parts.contains(part)
+    })
 }
 
 pub async fn divergence<S: Store>(requester: &S, responder: &S, part: &PartKey) -> Res<Divergence> {
     let root = [BuckId::ROOT];
     let ours = requester.bucket_summaries(part, &root).await?.remove(0);
     let theirs = responder.bucket_summaries(part, &root).await?.remove(0);
-    let leaves = responder
-        .bucket_leaves(part, BuckId::ROOT, None, usize::MAX)
-        .await?;
+    let leaves = leaves(responder, part).await?;
     let objs = leaves
         .iter()
         .map(|entry| entry.obj.clone())
@@ -586,13 +587,7 @@ pub async fn divergence<S: Store>(requester: &S, responder: &S, part: &PartKey) 
     let mut dead = 0;
     for (entry, state) in leaves.iter().zip(&states) {
         match entry.live {
-            Some(digest) => {
-                live_differing += u64::from(
-                    !state
-                        .as_ref()
-                        .is_some_and(|state| state.digest == digest && state.parts.contains(part)),
-                );
-            }
+            Some(digest) => live_differing += u64::from(!holds(state.as_ref(), part, digest)),
             None => dead += 1,
         }
     }
@@ -605,12 +600,10 @@ pub async fn divergence<S: Store>(requester: &S, responder: &S, part: &PartKey) 
 }
 
 /// The requester's view of `part` matches the responder's: every live member of the
-/// responder's is live in the requester's with the same digest, and every dead one is not live
-/// there. Members only the requester has stay: the walk is a pull.
+/// responder's is live in the requester's with the same digest, and every dead one is not a
+/// member there, live or pending. Members only the requester has stay: the walk is a pull.
 pub async fn assert_converged<S: Store>(requester: &S, responder: &S, part: &PartKey) -> Res<()> {
-    let leaves = responder
-        .bucket_leaves(part, BuckId::ROOT, None, usize::MAX)
-        .await?;
+    let leaves = leaves(responder, part).await?;
     let objs = leaves
         .iter()
         .map(|entry| entry.obj.clone())
@@ -619,9 +612,7 @@ pub async fn assert_converged<S: Store>(requester: &S, responder: &S, part: &Par
     for (entry, state) in leaves.iter().zip(&states) {
         match entry.live {
             Some(digest) => assert!(
-                state
-                    .as_ref()
-                    .is_some_and(|state| state.digest == digest && state.parts.contains(part)),
+                holds(state.as_ref(), part, digest),
                 "{obj} is live in {part} at the responder, the requester holds {state:?}",
                 obj = entry.obj,
             ),
@@ -639,8 +630,7 @@ pub async fn assert_converged<S: Store>(requester: &S, responder: &S, part: &Par
 
 /// A store's members of `part`, live or dead, without their digests.
 pub async fn membership<S: Store>(store: &S, part: &PartKey) -> Res<BTreeSet<(ObjKey, bool)>> {
-    Ok(store
-        .bucket_leaves(part, BuckId::ROOT, None, usize::MAX)
+    Ok(leaves(store, part)
         .await?
         .into_iter()
         .map(|entry| (entry.obj, entry.live.is_some()))

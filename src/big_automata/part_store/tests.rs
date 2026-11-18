@@ -74,6 +74,11 @@ fn object_routes_follow_the_readable_parts() -> Res<()> {
 }
 
 #[test]
+fn revocation_hides_the_parts_buckets() -> Res<()> {
+    block_on(laws::revocation_hides_the_parts_buckets(&Memory))
+}
+
+#[test]
 fn grant_returns_the_backlog() -> Res<()> {
     block_on(laws::grant_returns_the_backlog(&Memory))
 }
@@ -189,27 +194,31 @@ fn bucket_leaves_page_without_loss() -> Res<()> {
         &mut tx,
         &members[..3],
     ))?;
+    let (part, peer) = (laws::part(0), laws::principal(0));
+    block_on(PartStoreWrite::<Sendable>::grant_access(
+        &store,
+        &mut tx,
+        &[(part.clone(), peer.clone(), AccessLevel::Read)],
+    ))?;
     tx.commit();
 
-    let part = laws::part(0);
-    let all = block_on(PartStoreServe::<Sendable>::bucket_leaves(
-        &store,
-        &part,
-        BuckId::ROOT,
-        None,
-        usize::MAX,
-    ))?;
+    let leaves = |after: Option<ObjKey>, limit| {
+        block_on(PartStoreServe::<Sendable>::bucket_leaves(
+            &store,
+            &peer,
+            &part,
+            &[(BuckId::ROOT, after)],
+            0,
+            limit,
+        ))
+        .map(|leaves| leaves.expect("the part is readable").remove(0))
+    };
+    let all = leaves(None, usize::MAX)?;
     assert_eq!(all.len(), 12);
     let mut paged = Vec::new();
     let mut after = None;
     loop {
-        let page = block_on(PartStoreServe::<Sendable>::bucket_leaves(
-            &store,
-            &part,
-            BuckId::ROOT,
-            after.as_ref(),
-            1,
-        ))?;
+        let page = leaves(after.clone(), 1)?;
         let Some(entry) = page.into_iter().next() else {
             break;
         };
@@ -257,30 +266,23 @@ fn the_local_form_drives_the_memory_part_store() -> Res<()> {
     assert_eq!(
         states,
         vec![Some(ObjState {
-            payload: laws::payload(1),
-            digest: laws::payload(1).digest()?,
+            content: Some((laws::payload(1), laws::payload(1).digest()?)),
             parts: [part.clone()].into(),
         })]
     );
     assert_eq!(
-        block_on(PartStoreServe::<Local>::read_verdicts(
+        block_on(PartStoreServe::<Local>::part_summaries(
             &store,
             &peer,
-            std::slice::from_ref(&part)
+            &[(part.clone(), 0)]
         ))?,
-        vec![ReadVerdict::Permitted]
-    );
-    assert_eq!(
-        block_on(PartStoreServe::<Local>::part_dirty_count(
-            &store,
-            &part,
-            Some(&peer),
-            0
-        ))?,
-        PartDirtyCount {
-            member_changes: 1,
-            access_changes: 1,
-        }
+        vec![Some(PartSummary {
+            member_count: 1,
+            dirty: PartDirtyCount {
+                member_changes: 1,
+                access_changes: 1,
+            },
+        })]
     );
 
     let mut stream = RevStream::<Local, _>::new(store.clone(), LogSelector::All, 0);

@@ -61,6 +61,7 @@ impl State {
         part: &PartKey,
         from: BuckId,
         to_level: BuckLevel,
+        since: Rev,
         limit: usize,
     ) -> Vec<BucketSummary> {
         let last = BuckId::new(to_level, u16::MAX);
@@ -69,6 +70,7 @@ impl State {
         }
         self.buckets
             .range((part.clone(), from)..=(part.clone(), last))
+            .filter(|(_, state)| state.changed_at() > since)
             .map(|((_, id), state)| state.summary(*id))
             .filter(|summary| summary.len > 0)
             .take(limit)
@@ -80,8 +82,16 @@ impl State {
         part: &PartKey,
         buck: BuckId,
         after: Option<&ObjKey>,
+        since: Rev,
         limit: usize,
     ) -> Vec<LeafEntry> {
+        if self
+            .buckets
+            .get(&(part.clone(), buck))
+            .is_none_or(|state| state.changed_at() <= since)
+        {
+            return default();
+        }
         let (start, end) = deepest_range(buck);
         let lower = match after {
             None => Bound::Included((part.clone(), start as u16, ObjKey::new(&[]))),

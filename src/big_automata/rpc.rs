@@ -43,7 +43,10 @@ pub trait BigSyncRpcClient<K: FutureForm> {
     fn leaf_buckets<'a>(
         &'a self,
         req: bucket::LeafBucketsRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<Result<bucket::LeafBucketResult, bucket::LeafBucketsError>>>;
+    ) -> K::Future<
+        'a,
+        BigSyncRpcResult<Result<bucket::LeafBucketsResponse, bucket::LeafBucketsError>>,
+    >;
 }
 
 #[derive(

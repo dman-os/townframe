@@ -4,8 +4,8 @@
 //! from a test of its own. The harness mirrors every committed transaction into the
 //! [`PartOracle`] and, after each, compares the store's whole observable state with it
 //! ([`Harness::check`]): object states, bucket summaries (incremental against a recompute), the
-//! bucket list and leaves, member counts, read verdicts and readable parts, dirt counts, peer
-//! cursors, the full log, and every principal's authorized read of every route.
+//! member counts, and per principal the part summaries, bucket lists and leaves, readable object
+//! states, peer cursors and authorized reads of every route, and the full log.
 //!
 //! | Law | Where |
 //! | --- | --- |
@@ -20,7 +20,8 @@
 //! | `Withheld` is distinct from deleted | [`withheld_is_not_deleted`] |
 //! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
-//! | `part_dirty_count` equals a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
+//! | part summaries (member count, dirt) equal a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
+//! | bucket reads, summaries and object states follow current access, revocation mid-walk included | [`revocation_hides_the_parts_buckets`], every check |
 //! | peer cursors only advance | [`peer_cursors_only_advance`], every check |
 //! | a transaction is atomic: nothing before commit, everything after, nothing on rollback | [`writes_are_atomic`] |
 //! | a write that changes nothing stamps nothing | [`unchanged_writes_stamp_nothing`] |
@@ -70,6 +71,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
     type Store: PartStoreWrite<Sendable, Tx: Send>
         + PartStoreRead<Sendable>
         + PartStoreServe<Sendable>
+        + RevSource<Sendable, Key = LogKey, Value = LogEntry, Selector = LogSelector>
         + Clone
         + Send
         + Sync
@@ -194,22 +196,21 @@ impl<B: Backend> Harness<B> {
                 .collect::<Vec<_>>(),
             "object states"
         );
+        // Every bucket on the path of every object in the universe, all levels, plus every
+        // level-1 bucket: every non-empty bucket and some empty ones.
+        let ids = objs
+            .iter()
+            .flat_map(|obj| {
+                let deepest = BuckId::deepest_from_obj_key(obj);
+                (0..=BuckId::MAX_LEVEL).map(move |level| deepest.to_level(level))
+            })
+            .chain((0..BuckId::ARITY).map(|index| BuckId::new(1, index)))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         for part in &parts {
             assert_eq!(store.member_count(part).await?, oracle.member_count(part));
-            // Incremental summaries against a recompute, every non-empty bucket, all levels.
-            let listed = store
-                .bucket_list(part, BuckId::ROOT, BuckId::MAX_LEVEL, usize::MAX)
-                .await?;
-            assert_eq!(
-                listed,
-                oracle.bucket_list(part, BuckId::ROOT, BuckId::MAX_LEVEL, usize::MAX),
-                "bucket list of {part}"
-            );
-            let ids = objs
-                .iter()
-                .map(BuckId::deepest_from_obj_key)
-                .chain([BuckId::ROOT, BuckId::new(1, 3)])
-                .collect::<Vec<_>>();
+            // Incremental summaries against a recompute.
             assert_eq!(
                 store.bucket_summaries(part, &ids).await?,
                 ids.iter()
@@ -217,39 +218,60 @@ impl<B: Backend> Harness<B> {
                     .collect::<Vec<_>>(),
                 "bucket summaries of {part}"
             );
-            assert_eq!(
-                store
-                    .bucket_leaves(part, BuckId::ROOT, None, usize::MAX)
-                    .await?,
-                oracle.bucket_leaves(part, BuckId::ROOT, None, usize::MAX),
-                "leaves of {part}"
-            );
+        }
+        for principal in &principals {
             for since in [0, latest / 2, latest] {
-                for principal in principals.iter().map(Some).chain([None]) {
+                let asked = parts
+                    .iter()
+                    .map(|part| (part.clone(), since))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    store.part_summaries(principal, &asked).await?,
+                    parts
+                        .iter()
+                        .map(|part| oracle.part_summary(principal, part, since))
+                        .collect::<Vec<_>>(),
+                    "summaries for {principal} since {since}"
+                );
+                for part in &parts {
                     assert_eq!(
-                        store.part_dirty_count(part, principal, since).await?,
-                        oracle.part_dirty_count(part, principal, since),
-                        "dirt of {part} for {principal:?} since {since}"
+                        store
+                            .bucket_list(
+                                principal,
+                                part,
+                                BuckId::ROOT,
+                                BuckId::MAX_LEVEL,
+                                since,
+                                usize::MAX
+                            )
+                            .await?,
+                        oracle.bucket_list(
+                            principal,
+                            part,
+                            BuckId::ROOT,
+                            BuckId::MAX_LEVEL,
+                            since,
+                            usize::MAX
+                        ),
+                        "bucket list of {part} for {principal} since {since}"
+                    );
+                    let bucks = [(BuckId::ROOT, None), (BuckId::new(1, 3), None)];
+                    assert_eq!(
+                        store
+                            .bucket_leaves(principal, part, &bucks, since, usize::MAX)
+                            .await?,
+                        oracle.bucket_leaves(principal, part, &bucks, since, usize::MAX),
+                        "leaves of {part} for {principal} since {since}"
                     );
                 }
             }
-        }
-        for principal in &principals {
             assert_eq!(
-                store.read_verdicts(principal, &parts).await?,
-                parts
-                    .iter()
-                    .map(|part| oracle.read_verdict(principal, part))
+                store.readable_obj_states(principal, &objs).await?,
+                objs.iter()
+                    .map(|obj| oracle.readable_obj_state(principal, obj))
                     .collect::<Vec<_>>(),
-                "verdicts for {principal}"
+                "objects readable by {principal}"
             );
-            for obj in &objs {
-                assert_eq!(
-                    store.readable_parts_of(principal, obj).await?,
-                    oracle.readable_parts_of(principal, obj),
-                    "parts of {obj} readable by {principal}"
-                );
-            }
             assert_eq!(
                 store.peer_part_cursors(principal, &parts).await?,
                 parts
@@ -529,21 +551,39 @@ pub async fn authorization_follows_current_access<B: Backend>(backend: &B) -> Re
             harness.commit(write).await?;
             harness.commit(vec![grant(&[(0, 0)])]).await?;
         }
-        let store = &harness.store;
+        let routes = LogRoutes {
+            parts: [(part(0), 0), (part(1), 0)].into(),
+            objects: [(obj(0), 0)].into(),
+        };
+        let latest = harness.oracle.latest_rev();
+        let all = limits(usize::MAX, None);
+        let page = harness
+            .read_authorized(&principal(0), &routes, 0, latest, all)
+            .await?;
         assert_eq!(
-            store.readable_parts_of(&principal(0), &obj(0)).await?,
-            vec![part(0)]
+            (page.parts, page.objects),
+            (
+                vec![ReadVerdict::Permitted, ReadVerdict::UnknownPart],
+                vec![ReadVerdict::Permitted]
+            )
         );
+        let page = harness
+            .read_authorized(&principal(1), &routes, 0, latest, all)
+            .await?;
         assert_eq!(
-            store
-                .read_verdicts(&principal(0), &[part(0), part(1)])
-                .await?,
-            vec![ReadVerdict::Permitted, ReadVerdict::UnknownPart]
+            (page.parts, page.objects),
+            (
+                vec![ReadVerdict::Denied, ReadVerdict::UnknownPart],
+                vec![ReadVerdict::Denied]
+            )
         );
-        assert_eq!(
-            store.read_verdicts(&principal(1), &[part(0)]).await?,
-            vec![ReadVerdict::Denied]
-        );
+        let readable = harness
+            .store
+            .readable_obj_states(&principal(0), &[obj(0)])
+            .await?
+            .remove(0)
+            .expect("object 0 lives in a readable part");
+        assert_eq!(readable.parts, [part(0)].into());
 
         // Revocation, before or after a later write: no access either way.
         if grant_first {
@@ -553,16 +593,105 @@ pub async fn authorization_follows_current_access<B: Backend>(backend: &B) -> Re
             harness.commit(vec![set(&[(0, 2)])]).await?;
             harness.commit(vec![revoke(&[(0, 0)])]).await?;
         }
-        let store = &harness.store;
+        let latest = harness.oracle.latest_rev();
+        let page = harness
+            .read_authorized(&principal(0), &routes, 0, latest, all)
+            .await?;
         assert_eq!(
-            store.readable_parts_of(&principal(0), &obj(0)).await?,
-            vec![]
+            (page.parts, page.objects),
+            (
+                vec![ReadVerdict::Denied, ReadVerdict::UnknownPart],
+                vec![ReadVerdict::Denied]
+            )
         );
         assert_eq!(
-            store.read_verdicts(&principal(0), &[part(0)]).await?,
-            vec![ReadVerdict::Denied]
+            harness
+                .store
+                .readable_obj_states(&principal(0), &[obj(0)])
+                .await?,
+            vec![None]
         );
     }
+    Ok(())
+}
+
+/// The bucket reads, part summaries and object states a responder serves follow current access
+/// like the log does: once a revocation commits, every one of them answers `None` for the part,
+/// including the next page of a leaf walk that had started, and an object's state stops naming
+/// the part. A grant serves them again.
+pub async fn revocation_hides_the_parts_buckets<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    harness
+        .commit(vec![
+            set(&[(0, 1), (1, 1), (2, 1)]),
+            add(&[(0, 0), (1, 0), (2, 0), (2, 1)]),
+            grant(&[(0, 0), (1, 0)]),
+        ])
+        .await?;
+    let list = |harness: &Harness<B>| {
+        let store = harness.store.clone();
+        async move {
+            store
+                .bucket_list(
+                    &principal(0),
+                    &part(0),
+                    BuckId::ROOT,
+                    BuckId::MAX_LEVEL,
+                    0,
+                    usize::MAX,
+                )
+                .await
+        }
+    };
+    let listed = list(&harness).await?.expect("the part is readable");
+    assert!(!listed.is_empty());
+    let first = harness
+        .store
+        .bucket_leaves(&principal(0), &part(0), &[(BuckId::ROOT, None)], 0, 1)
+        .await?
+        .expect("the part is readable")
+        .remove(0)
+        .remove(0);
+
+    harness.commit(vec![revoke(&[(0, 0)])]).await?;
+    assert_eq!(list(&harness).await?, None);
+    assert_eq!(
+        harness
+            .store
+            .bucket_leaves(
+                &principal(0),
+                &part(0),
+                &[(BuckId::ROOT, Some(first.obj))],
+                0,
+                usize::MAX
+            )
+            .await?,
+        None,
+        "the walk's next leaf page"
+    );
+    assert_eq!(
+        harness
+            .store
+            .part_summaries(&principal(0), &[(part(0), 0), (part(1), 0)])
+            .await?
+            .into_iter()
+            .map(|summary| summary.is_some())
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
+    let states = harness
+        .store
+        .readable_obj_states(&principal(0), &[obj(0), obj(2)])
+        .await?;
+    assert_eq!(states[0], None, "object 0 lives only in the revoked part");
+    assert_eq!(
+        states[1].as_ref().map(|state| state.parts.clone()),
+        Some([part(1)].into()),
+        "object 2 is still readable through part 1, and no longer names part 0"
+    );
+
+    harness.commit(vec![grant(&[(0, 0)])]).await?;
+    assert_eq!(list(&harness).await?, Some(listed));
     Ok(())
 }
 
@@ -826,24 +955,30 @@ pub async fn grant_returns_the_backlog<B: Backend>(backend: &B) -> Res<()> {
 /// membership.
 pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
-    harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
+    harness
+        .commit(vec![set(&[(0, 1)]), add(&[(0, 0)]), grant(&[(0, 0)])])
+        .await?;
     let digest = PayloadDigest::of(&serde_json::json!(1))?;
     let withheld = PartWrite::SetPayloads(vec![(obj(0), PayloadState::Withheld(digest))]);
     assert_eq!(harness.commit(vec![withheld]).await?, Some(2));
     let state = harness.store.obj_states(&[obj(0)]).await?.remove(0);
     let state = state.expect("a withheld object still has a state");
     assert_eq!(
-        (state.payload, state.digest, state.parts),
-        (PayloadState::Withheld(digest), digest, [part(0)].into())
+        (state.content, state.parts),
+        (
+            Some((PayloadState::Withheld(digest), digest)),
+            [part(0)].into()
+        )
     );
     assert_eq!(harness.store.member_count(&part(0)).await?, 1);
+    let summary = harness
+        .store
+        .part_summaries(&principal(0), &[(part(0), 1)])
+        .await?
+        .remove(0)
+        .expect("the part is readable");
     assert_eq!(
-        harness
-            .store
-            .part_dirty_count(&part(0), None, 1)
-            .await?
-            .member_changes,
-        1,
+        summary.dirty.member_changes, 1,
         "the withheld object's row was re-stamped, live"
     );
     harness.commit(vec![remove(&[(0, 0)])]).await?;
@@ -887,8 +1022,9 @@ pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B
     Ok(())
 }
 
-/// `part_dirty_count` counts the part's log rows past the cursor: member rows live or removed,
-/// and the principal's own access row, granted or revoked.
+/// A part's summary counts its live members and its log rows past the cursor: member rows live
+/// or removed, and the asking principal's own access row. A principal that may not read the
+/// part gets no summary.
 pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     harness
@@ -898,33 +1034,29 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     harness
         .commit(vec![remove(&[(1, 0)]), revoke(&[(0, 1)])])
         .await?;
-    let store = &harness.store;
-    let count = |member_changes, access_changes| crate::part_store::PartDirtyCount {
-        member_changes,
-        access_changes,
+    let summaries = |principal_index| {
+        let store = harness.store.clone();
+        async move {
+            let asked = [0, 1, 3].map(|since| (part(0), since));
+            store
+                .part_summaries(&principal(principal_index), &asked)
+                .await
+        }
+    };
+    let summary = |member_changes, access_changes| {
+        Some(crate::part_store::PartSummary {
+            member_count: 1,
+            dirty: crate::part_store::PartDirtyCount {
+                member_changes,
+                access_changes,
+            },
+        })
     };
     assert_eq!(
-        store
-            .part_dirty_count(&part(0), Some(&principal(0)), 0)
-            .await?,
-        count(2, 1)
+        summaries(0).await?,
+        vec![summary(2, 1), summary(1, 1), summary(0, 0)]
     );
-    assert_eq!(
-        store
-            .part_dirty_count(&part(0), Some(&principal(0)), 1)
-            .await?,
-        count(1, 1)
-    );
-    assert_eq!(
-        store
-            .part_dirty_count(&part(0), Some(&principal(1)), 2)
-            .await?,
-        count(1, 1)
-    );
-    assert_eq!(
-        store.part_dirty_count(&part(0), None, 3).await?,
-        count(0, 0)
-    );
+    assert_eq!(summaries(1).await?, vec![None, None, None], "revoked");
     Ok(())
 }
 

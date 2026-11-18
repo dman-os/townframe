@@ -8,6 +8,7 @@ use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::PartDirtyCount;
+use crate::part_store::PartSummary;
 use crate::part_store::ReadVerdict;
 use crate::part_store::log_row_bytes;
 use crate::rev::Limits;
@@ -52,14 +53,14 @@ impl State {
         stamped
     }
 
-    fn permits(&self, principal: &PeerKey, part: &PartKey) -> bool {
+    pub(super) fn permits(&self, principal: &PeerKey, part: &PartKey) -> bool {
         matches!(
             self.log.get(&access_key(part, principal)),
             Some((_, Some(LogEntry::Access(_))))
         )
     }
 
-    pub(super) fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
+    fn read_verdict(&self, principal: &PeerKey, part: &PartKey) -> ReadVerdict {
         if !self.parts.contains_key(part) {
             ReadVerdict::UnknownPart
         } else if self.permits(principal, part) {
@@ -139,21 +140,14 @@ impl State {
         );
     }
 
-    pub(super) fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Vec<PartKey> {
-        self.live_parts_of(obj)
-            .filter(|part| self.permits(principal, part))
-            .cloned()
-            .collect()
-    }
-
     /// Counts the part's member rows through the member index (every member with a row, live
     /// or removed), not by scanning the log window.
-    pub(super) fn part_dirty_count(
+    pub(super) fn part_summary(
         &self,
+        principal: &PeerKey,
         part: &PartKey,
-        principal: Option<&PeerKey>,
         since: Rev,
-    ) -> PartDirtyCount {
+    ) -> PartSummary {
         let member_changes = self
             .members
             .range((part.clone(), 0, ObjKey::new(&[]))..)
@@ -167,14 +161,16 @@ impl State {
                 rev > since
             })
             .count() as u64;
-        let access_changes = principal.map_or(0, |principal| {
-            self.log
-                .get(&access_key(part, principal))
-                .map_or(0, |(rev, _)| u64::from(rev > since))
-        });
-        PartDirtyCount {
-            member_changes,
-            access_changes,
+        let access_changes = self
+            .log
+            .get(&access_key(part, principal))
+            .map_or(0, |(rev, _)| u64::from(rev > since));
+        PartSummary {
+            member_count: self.member_count(part),
+            dirty: PartDirtyCount {
+                member_changes,
+                access_changes,
+            },
         }
     }
 }

@@ -24,13 +24,12 @@ use crate::part_store::LogKey;
 use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
 use crate::part_store::ObjState;
-use crate::part_store::PartDirtyCount;
 use crate::part_store::PartStoreRead;
 use crate::part_store::PartStoreServe;
 use crate::part_store::PartStoreWrite;
+use crate::part_store::PartSummary;
 use crate::part_store::PayloadDigest;
 use crate::part_store::PayloadState;
-use crate::part_store::ReadVerdict;
 use crate::part_store::log_row_bytes;
 use crate::rev::Limits;
 use crate::rev::Page;
@@ -414,61 +413,68 @@ impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
         Async::ready(Ok(()))
     }
 
-    fn read_verdicts<'a>(
+    fn part_summaries<'a>(
         &'a self,
         principal: &'a PeerKey,
-        parts: &'a [PartKey],
-    ) -> Async::Future<'a, Res<Vec<ReadVerdict>>> {
+        parts: &'a [(PartKey, Rev)],
+    ) -> Async::Future<'a, Res<Vec<Option<PartSummary>>>> {
         Async::ready(Ok(self.with_state(|state| {
             parts
                 .iter()
-                .map(|part| state.read_verdict(principal, part))
+                .map(|(part, since)| {
+                    state
+                        .permits(principal, part)
+                        .then(|| state.part_summary(principal, part, *since))
+                })
                 .collect()
         })))
     }
 
-    fn readable_parts_of<'a>(
+    fn readable_obj_states<'a>(
         &'a self,
         principal: &'a PeerKey,
-        obj: &'a ObjKey,
-    ) -> Async::Future<'a, Res<Vec<PartKey>>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.readable_parts_of(principal, obj))
-        ))
-    }
-
-    fn part_dirty_count<'a>(
-        &'a self,
-        part: &'a PartKey,
-        principal: Option<&'a PeerKey>,
-        since: Rev,
-    ) -> Async::Future<'a, Res<PartDirtyCount>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.part_dirty_count(part, principal, since))
-        ))
+        objs: &'a [ObjKey],
+    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            objs.iter()
+                .map(|obj| state.readable_obj_state(principal, obj))
+                .collect()
+        })))
     }
 
     fn bucket_list<'a>(
         &'a self,
+        principal: &'a PeerKey,
         part: &'a PartKey,
         from: BuckId,
         to_level: BuckLevel,
+        since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Vec<BucketSummary>>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.bucket_list(part, from, to_level, limit))
-        ))
+    ) -> Async::Future<'a, Res<Option<Vec<BucketSummary>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            state
+                .permits(principal, part)
+                .then(|| state.bucket_list(part, from, to_level, since, limit))
+        })))
     }
 
     fn bucket_leaves<'a>(
         &'a self,
+        principal: &'a PeerKey,
         part: &'a PartKey,
-        buck: BuckId,
-        after: Option<&'a ObjKey>,
+        bucks: &'a [(BuckId, Option<ObjKey>)],
+        since: Rev,
         limit: usize,
-    ) -> Async::Future<'a, Res<Vec<LeafEntry>>> {
-        Async::ready(Ok(
-            self.with_state(|state| state.bucket_leaves(part, buck, after, limit))
-        ))
+    ) -> Async::Future<'a, Res<Option<Vec<Vec<LeafEntry>>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            state.permits(principal, part).then(|| {
+                bucks
+                    .iter()
+                    .map(|(buck, after)| {
+                        state.bucket_leaves(part, *buck, after.as_ref(), since, limit)
+                    })
+                    .collect()
+            })
+        })))
     }
 }
