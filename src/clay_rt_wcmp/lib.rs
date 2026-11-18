@@ -24,7 +24,6 @@ use clay_guest_session::capabilities::InFlightCalls;
 use clay_guest_session::capabilities::PublishedCapability;
 use clay_guest_session::collections::CollectionLimits;
 use clay_guest_session::collections::CollectionSession;
-use clay_guest_session::ingress_budget;
 use clay_guest_session::presentation::map_mutations;
 use clay_host::ComponentRef;
 use clay_host::Host;
@@ -182,25 +181,36 @@ impl WcmpStoreState {
     }
 }
 
-/// Marks a presentation call that suspended on its first poll: a guest contract violation
-/// (the sync exports promise a decision before the listener closure returns), handled at
-/// every call site exactly like a trap — withdraw the surface, close the instance.
-#[derive(Debug, thiserror::Error)]
-#[error("guest presentation call suspended on its first poll")]
-pub struct Suspended;
-
-/// Drive a presentation call to completion on its first poll. The WIT *exports* are sync-typed
-/// (ADR 018 §3), but the WASI p3 *imports* are lifted through component-model async, so a guest
-/// can still suspend inside a sync-typed export — synchronous exports do not imply non-suspending
-/// execution. Both failure shapes are handled identically: a guest that blocks inside a sync-typed
-/// call fails with the spec's `CannotBlock` cause (`Ready(Err)`), and a guest that suspends returns
-/// `Pending`, mapped to [`Suspended`]. Either way the caller withdraws the surface and closes the
-/// instance — never a host panic.
-pub fn first_poll<F: Future>(call: F, waker: &Waker) -> Result<F::Output, Suspended> {
-    match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
-        Poll::Ready(output) => Ok(output),
-        Poll::Pending => Err(Suspended),
-    }
+/// Drive a synchronous guest entry (`mount`, `dispatch`, `unmount`, a document delivery) to
+/// completion on its first poll. The WIT *exports* are sync-typed (ADR 018 §3), so a call that
+/// returns `Pending` broke the contract between the host and its guest runtime: nothing can
+/// resume the call (the future is dropped here, abandoning the guest callback half run), and
+/// closing the instance quietly would only hide the break, as it hid a layout's collapse in the
+/// browser (a sync cancel of a host import used to suspend there). It is an invariant break and
+/// panics, naming `export`. A guest that blocks inside a sync-typed call is a different case: it
+/// fails with the spec's `CannotBlock` cause (`Ready(Err)`), which the caller treats as a trap.
+///
+/// `waker` is the incarnation's: it is rung once the entry returns, whatever it answered. An
+/// entry can make guest tasks runnable with no host waker involved: spawning a task from it
+/// queues the task and wakes the guest's executor through a stream write inside the store (see
+/// `Tasks::start_doorbell` in `clay_mdk`), and a store only runs its event loop when the
+/// incarnation's driver ticks it. Nothing else would wake the driver for that, so the new task
+/// would sit unpolled until an unrelated wake: a collection feed's long poll expiring (30 s) is
+/// the only one a layout has.
+pub fn first_poll<F: Future>(
+    call: F,
+    waker: &Waker,
+    export: impl std::fmt::Display,
+) -> F::Output {
+    let entered = match std::pin::pin!(call).poll(&mut Context::from_waker(waker)) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!(
+            "guest export {export} suspended on its first poll; a synchronous export must \
+             decide before it returns"
+        ),
+    };
+    waker.wake_by_ref();
+    entered
 }
 
 struct IncarnationWake {
@@ -358,16 +368,13 @@ impl wit_presentation::HostSurface for WcmpStoreState {
         edits: Vec<wit_presentation::Mutation>,
     ) -> wcmp::Result<Result<u64, wit_presentation::PresentationError>> {
         let edits: Vec<_> = edits.into_iter().map(convert_mutation).collect();
-        if let Err(reason) = ingress_budget(&edits) {
-            self.table.get(&surface)?.writer().withdraw();
-            return Ok(Err(wit_presentation::PresentationError::Unsupported(
-                reason.into(),
-            )));
+        let surface = self.table.get(&surface)?.clone();
+        if let Err(error) = self.presentation.admit(&surface, &edits) {
+            return Ok(Err(convert_error(error)));
         }
         let converted = map_mutations(edits, |reference| {
             self.table.get(&reference).map(|component| component.0)
         })?;
-        let surface = self.table.get(&surface)?.clone();
         Ok(self
             .presentation
             .apply(&surface, &converted)
@@ -645,14 +652,18 @@ impl WcmpRuntime {
                             let Some(active) = guard.as_mut() else {
                                 return;
                             };
-                            let trapped = active.tick().await.is_err();
-                            if trapped {
+                            let outcome = active.tick().await;
+                            if outcome.is_err() {
                                 guard.take();
                             }
-                            trapped
+                            outcome
                         };
-                        if trapped {
+                        if let Err(error) = trapped {
                             if pump_host.check(&pump_instance).is_ok() {
+                                pump_host.record_fault(
+                                    &pump_instance,
+                                    format!("guest store failed while driven: {error}"),
+                                );
                                 pump_host.close_instance(&pump_instance).unwrap();
                             }
                             return;
@@ -735,7 +746,7 @@ impl WcmpRuntime {
             ))
             .map_err(|_| PresentationError::Revoked)?;
         let placement_rep = placement.rep();
-        let mounted = match first_poll(
+        let mounted = first_poll(
             active
                 .client
                 .townframe_dayframe_presentation_events()
@@ -745,12 +756,8 @@ impl WcmpRuntime {
                     Resource::new_borrow(placement_rep),
                 ),
             &active.waker,
-        ) {
-            Ok(outcome) => outcome,
-            Err(Suspended) => Err(wcmp::Error::Internal {
-                message: "guest presentation call suspended on its first poll".into(),
-            }),
-        };
+            format_args!("presentation.mount of {:?}", self.instance),
+        );
         let placement = active
             .store
             .data_mut()
@@ -787,10 +794,14 @@ impl WcmpRuntime {
                     }
                 })
             }
-            Err(_trap) => {
+            Err(trap) => {
                 guard.take();
                 drop(guard);
                 writer.withdraw();
+                self.host.record_fault(
+                    &self.instance,
+                    format!("guest trapped in presentation.mount: {trap}"),
+                );
                 self.host.close_instance(&self.instance).unwrap();
                 Err(PresentationError::Revoked)
             }
@@ -810,7 +821,7 @@ impl WcmpRuntime {
         let Some(active) = guard.as_mut() else {
             return EventResponse::default();
         };
-        let outcome = match first_poll(
+        let outcome = first_poll(
             active
                 .client
                 .townframe_dayframe_presentation_events()
@@ -826,21 +837,17 @@ impl WcmpRuntime {
                     },
                 ),
             &active.waker,
-        ) {
-            Ok(outcome) => outcome,
-            Err(Suspended) => Err(wcmp::Error::Internal {
-                message: "guest presentation call suspended on its first poll".into(),
-            }),
-        };
+            format_args!("presentation.dispatch of {:?}", self.instance),
+        );
         match outcome {
             Ok(response) => EventResponse {
                 prevent_default: response.prevent_default,
                 stop_propagation: response.stop_propagation,
             },
-            Err(_trap) => {
+            Err(trap) => {
                 guard.take();
                 drop(guard);
-                self.trapped(writer);
+                self.trapped(writer, format!("guest trapped in presentation.dispatch: {trap}"));
                 EventResponse::default()
             }
         }
@@ -850,18 +857,14 @@ impl WcmpRuntime {
         let mut guard = self.incarnation.borrow_mut();
         let trapped = match guard.as_mut() {
             Some(active) if self.host.check(&self.instance).is_ok() => {
-                let outcome = match first_poll(
+                let outcome = first_poll(
                     active
                         .client
                         .townframe_dayframe_presentation_events()
                         .call_unmount(&mut active.store, Resource::new_borrow(surface)),
                     &active.waker,
-                ) {
-                    Ok(outcome) => outcome,
-                    Err(Suspended) => Err(wcmp::Error::Internal {
-                        message: "guest presentation call suspended on its first poll".into(),
-                    }),
-                };
+                    format_args!("presentation.unmount of {:?}", self.instance),
+                );
                 match outcome {
                     Ok(()) => {
                         wit_presentation::HostSurface::drop(
@@ -869,25 +872,27 @@ impl WcmpRuntime {
                             Resource::new_own(surface),
                         )
                         .expect("mounted surface must remain in the host resource table");
-                        false
+                        None
                     }
-                    Err(_trap) => {
+                    Err(trap) => {
                         guard.take();
-                        true
+                        Some(format!("guest trapped in presentation.unmount: {trap}"))
                     }
                 }
             }
-            _ => false,
+            _ => None,
         };
         drop(guard);
         writer.withdraw();
-        if trapped {
+        if let Some(cause) = trapped {
+            self.host.record_fault(&self.instance, cause);
             self.host.close_instance(&self.instance).unwrap();
         }
     }
 
-    fn trapped(&self, writer: &Arc<dyn SurfaceSink<ComponentRef>>) {
+    fn trapped(&self, writer: &Arc<dyn SurfaceSink<ComponentRef>>, cause: String) {
         writer.withdraw();
+        self.host.record_fault(&self.instance, cause);
         self.host.close_instance(&self.instance).unwrap();
     }
 }

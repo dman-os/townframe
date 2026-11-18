@@ -21,3 +21,6 @@ clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
 insta.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints]
+workspace = true

@@ -428,3 +428,7 @@ fn the_durable_codec_refuses_a_live_publication() {
     };
     (durable_codec().encode_value)(&value);
 }
+
+mod capability;
+mod registration;
+mod staging;
