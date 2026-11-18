@@ -15,7 +15,7 @@ clay_dioxus_kit = { workspace = true }
 pierre_diffs_dioxus = { workspace = true }
 # Spelled out (not `dioxus.workspace = true`) so default features stay off: the wasip3 guest
 # build has no renderer or launcher to link, like `clay_dioxus_kit`.
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "cd33cdac9b93ffeb779d7feeca66d275484e12a2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 [dev-dependencies]
 dioxus-ssr = { workspace = true }

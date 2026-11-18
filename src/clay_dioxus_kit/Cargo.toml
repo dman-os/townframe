@@ -14,7 +14,7 @@ workspace = true
 # Spelled out (not `dioxus.workspace = true`) so default features stay off: the wasip3 guest
 # build has no renderer, launcher or document integration to link, exactly like `clay_mdk`'s
 # guest-side `dioxus` dependency.
-dioxus = { git = "https://github.com/dman-os/dioxus", rev = "7f6251d8070f39e46cff33712395077a9606a43c", default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "cd33cdac9b93ffeb779d7feeca66d275484e12a2", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 
 [dev-dependencies]
 dioxus_storm.workspace = true
