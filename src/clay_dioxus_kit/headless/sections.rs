@@ -1,4 +1,11 @@
-//! Sections: a horizontal run of panes separated by draggable handles.
+//! Sections (`ct-sections`): a horizontal run of panes separated by draggable handles.
+//!
+//! Parts: `pane` (state `data-state`: `open`, or `collapsed` while a drag would shut it), `handle`
+//! (state `data-state`: `idle`|`dragging`; the strip that reopens a folded first pane is also a
+//! handle and carries `data-edge`) with a `grip` in it, and `gesture`, the overlay that takes a
+//! live drag's pointer events. A pane carries its geometry as the custom properties
+//! `--ct-sections-weight`, `--ct-sections-min` and, when it has a limit, `--ct-sections-max`
+//! (px); the stylesheet turns them into the layout, the handles' 24px hit area and the layers.
 //!
 //! The layout is controlled. The parent owns the [`Split`] (weights, the host-measured extent and
 //! the sizing rules) and hears of a new set of weights through `on_resize`; during a drag the
@@ -29,10 +36,8 @@
 //!   it.
 //! * `tabindex` panics Blitz, so keyboard resizing is gated on [`Renderer::takes_focus`], which the host
 //!   sets through [`Split::renderer`]: browser engines turn it on, Blitz leaves it off.
-use crate::Layer;
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
-use dioxus_core::AttributeValue;
 use std::rc::Rc;
 
 /// One pane's size limits, in logical px along the split axis.
@@ -232,17 +237,6 @@ pub struct SectionPane {
     pub content: Element,
 }
 
-/// The classes a skin gives each part of [`Sections`].
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct SectionsSkin {
-    pub root: &'static str,
-    pub pane: &'static str,
-    /// The handle's hit area; it carries `data-state="idle"` or `"dragging"`.
-    pub handle: &'static str,
-    /// The visible line inside the hit area.
-    pub grip: &'static str,
-}
-
 /// An in-flight drag: where it began and how far the pointer has travelled since. A drag from the
 /// edge strip of a folded first pane is a drag of handle 0 whose pane has no size yet: the pointer's
 /// x is the width it would open at.
@@ -294,12 +288,6 @@ impl Drag {
         }
     }
 }
-
-/// Width of a handle's hit area, in px. It overlaps the neighbouring panes (negative margins), so
-/// it takes no layout space. It is the one pressable narrower than the 48 px touch target
-/// (`KIT-106`): a pane's own edge, with its scrollbar and first controls, lies under half of it.
-/// This is the WCAG 2.5.8 minimum.
-const HANDLE_HIT_PX: f64 = 24.0;
 
 /// What a handle announces about the pair of panes it divides.
 struct HandleView {
@@ -380,7 +368,6 @@ pub fn Sections(
     on_collapse: EventHandler<usize>,
     #[props(default)] on_expand: EventHandler<()>,
     #[props(default)] folded: bool,
-    #[props(default)] skin: SectionsSkin,
 ) -> Element {
     assert_eq!(
         panes.len(),
@@ -397,9 +384,6 @@ pub fn Sections(
         first_shown,
     } = Layout::of(&split, drag(), folded);
     let handles = HandleView::between(&panes, &split, &sizes);
-    let raised = Layer::Raised.css();
-    let gesture = Layer::Gesture.css();
-    let handle_overlap = HANDLE_HIT_PX / 2.0;
 
     let release = use_callback({
         let split = Rc::clone(&split);
@@ -435,25 +419,39 @@ pub fn Sections(
 
     rsx! {
         div {
-            class: skin.root,
+            class: "ct-sections",
             role: "group",
             "aria-label": "{label}",
-            ..root_style(),
             for (index, pane) in panes.iter().enumerate() {
                 if index > 0 || first_shown {
-                    div {
-                        key: "pane-{index}",
-                        class: skin.pane,
-                        role: "region",
-                        "aria-label": "{pane.name}",
-                        ..pane_style(weights[index], &split.rules[index], shut == Some(index)),
-                        {pane.content.clone()}
+                    {
+                        let collapsed = shut == Some(index);
+                        let rule = &split.rules[index];
+                        let weight = weights[index];
+                        // A collapsed pane lays out at 0 whatever its minimum says.
+                        let min = if collapsed { 0.0 } else { rule.min };
+                        let max = if rule.max.is_finite() {
+                            format!("; --ct-sections-max: {}px", rule.max)
+                        } else {
+                            String::new()
+                        };
+                        rsx! {
+                            div {
+                                key: "pane-{index}",
+                                "data-part": "pane",
+                                "data-state": if collapsed { "collapsed" } else { "open" },
+                                role: "region",
+                                "aria-label": "{pane.name}",
+                                style: "--ct-sections-weight: {weight}; --ct-sections-min: {min}px{max}",
+                                {pane.content.clone()}
+                            }
+                        }
                     }
                 }
                 if let Some(view) = handles.get(index).filter(|_| index > 0 || first_shown) {
                     div {
                         key: "handle-{index}",
-                        class: skin.handle,
+                        "data-part": "handle",
                         role: "separator",
                         "aria-orientation": "vertical",
                         "aria-label": "{view.label}",
@@ -479,14 +477,14 @@ pub fn Sections(
                                 on_resize.call(split.dragged(index, step));
                             }
                         },
-                        ..handle_style(raised, handle_overlap),
-                        div { class: skin.grip }
+                        div { "data-part": "grip" }
                     }
                 }
             }
             if folded {
                 div {
-                    class: skin.handle,
+                    "data-part": "handle",
+                    "data-edge": "",
                     role: "separator",
                     "aria-orientation": "vertical",
                     "aria-label": "Open {panes[0].name}",
@@ -511,12 +509,12 @@ pub fn Sections(
                             on_expand.call(());
                         }
                     },
-                    ..edge_style(raised, handle_overlap),
-                    div { class: skin.grip }
+                    div { "data-part": "grip" }
                 }
             }
             if drag().is_some() {
                 div {
+                    "data-part": "gesture",
                     role: "presentation",
                     onpointermove: move |event| track.call(event),
                     onpointerup: move |_| release.call(()),
@@ -526,7 +524,6 @@ pub fn Sections(
                         }
                     },
                     onpointercancel: move |_| abort.call(()),
-                    ..gesture_style(gesture),
                 }
             }
         }
@@ -551,99 +548,6 @@ impl Release {
             Release::Nothing => {}
         }
     }
-}
-
-fn root_style() -> Vec<Attribute> {
-    style_attributes(&[
-        ("display", "flex".into()),
-        ("flex-direction", "row".into()),
-        ("position", "relative".into()),
-        ("width", "100%".into()),
-        ("height", "100%".into()),
-        ("min-width", "0".into()),
-        ("min-height", "0".into()),
-    ])
-}
-
-/// The seam handle: 24 px wide, centred on the seam, above the panes.
-fn handle_style(layer: &str, overlap: f64) -> Vec<Attribute> {
-    style_attributes(&[
-        ("position", "relative".into()),
-        ("z-index", layer.into()),
-        ("flex", "none".into()),
-        ("touch-action", "none".into()),
-        ("cursor", "col-resize".into()),
-        ("width", format!("{HANDLE_HIT_PX}px")),
-        ("margin", format!("0 -{overlap}px")),
-    ])
-}
-
-/// The strip on the leading edge that reopens a folded first pane: the half of a handle's hit
-/// area that lies inside the window.
-fn edge_style(layer: &str, overlap: f64) -> Vec<Attribute> {
-    style_attributes(&[
-        ("position", "absolute".into()),
-        ("top", "0".into()),
-        ("bottom", "0".into()),
-        ("left", "0".into()),
-        ("z-index", layer.into()),
-        ("touch-action", "none".into()),
-        ("cursor", "col-resize".into()),
-        ("width", format!("{overlap}px")),
-    ])
-}
-
-/// The overlay that takes a gesture's pointer events. Absolute inside the presentation: a guest
-/// box cannot be fixed to the viewport (the wire refuses `fixed`, and the host contains the
-/// presentation).
-fn gesture_style(layer: &str) -> Vec<Attribute> {
-    style_attributes(&[
-        ("position", "absolute".into()),
-        ("top", "0".into()),
-        ("right", "0".into()),
-        ("bottom", "0".into()),
-        ("left", "0".into()),
-        ("z-index", layer.into()),
-        ("cursor", "col-resize".into()),
-        ("touch-action", "none".into()),
-    ])
-}
-
-/// Per-property `style:` attributes, the only inline style a guest presentation can send (the
-/// wire has no raw `style` attribute).
-fn style_attributes(declarations: &[(&'static str, String)]) -> Vec<Attribute> {
-    declarations
-        .iter()
-        .map(|(property, value)| {
-            Attribute::new(
-                property,
-                AttributeValue::Text(value.clone()),
-                Some("style"),
-                false,
-            )
-        })
-        .collect()
-}
-
-/// A collapsed pane lays out at 0 whatever its minimum says, and clips what it holds.
-fn pane_style(weight: f64, rule: &SizeRule, collapsed: bool) -> Vec<Attribute> {
-    let mut style = vec![
-        ("flex", format!("{weight} 1 0px")),
-        (
-            "min-width",
-            format!("{}px", if collapsed { 0.0 } else { rule.min }),
-        ),
-        ("min-height", "0".into()),
-        ("position", "relative".into()),
-        ("z-index", Layer::Content.css().into()),
-    ];
-    if collapsed {
-        style.push(("overflow", "hidden".into()));
-    }
-    if rule.max.is_finite() {
-        style.push(("max-width", format!("{}px", rule.max)));
-    }
-    style_attributes(&style)
 }
 
 #[cfg(test)]
@@ -760,11 +664,23 @@ mod collapse_tests {
         let overlay = page.by_role("presentation", "");
         page.pointer(overlay, "pointermove", 100.0);
         let sidebar = page.by_role("region", "Sidebar");
-        assert_eq!(page.style(sidebar, "flex").as_deref(), Some("0 1 0px"));
-        assert_eq!(page.style(sidebar, "min-width").as_deref(), Some("0px"));
+        assert_eq!(
+            page.custom_property(sidebar, "--ct-sections-weight")
+                .as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            page.custom_property(sidebar, "--ct-sections-min")
+                .as_deref(),
+            Some("0px")
+        );
         // Coming back above the threshold un-snaps it to the minimum.
         page.pointer(overlay, "pointermove", 130.0);
-        assert_eq!(page.style(sidebar, "min-width").as_deref(), Some("160px"));
+        assert_eq!(
+            page.custom_property(sidebar, "--ct-sections-min")
+                .as_deref(),
+            Some("160px")
+        );
         page.pointer(overlay, "pointermove", 20.0);
         page.pointer(overlay, "pointerup", 20.0);
         assert_eq!(*heard.borrow(), [Heard::Collapsed(0)]);
@@ -802,7 +718,8 @@ mod collapse_tests {
         assert!(!page.has_role("region", "Sidebar"));
         assert!(!page.has_role("separator", "Resize Sidebar and Content"));
         let strip = page.by_role("separator", "Open Sidebar");
-        assert_eq!(page.style(strip, "width").as_deref(), Some("12px"));
+        assert_eq!(page.attr(strip, "data-edge").as_deref(), Some(""));
+        assert_eq!(page.attr(strip, "data-part").as_deref(), Some("handle"));
         page.pointer(strip, "pointerdown", 2.0);
         assert_eq!(page.attr(strip, "data-state").as_deref(), Some("dragging"));
         let overlay = page.by_role("presentation", "");
@@ -811,12 +728,20 @@ mod collapse_tests {
         assert!(!page.has_role("region", "Sidebar"));
         page.pointer(overlay, "pointermove", 300.0);
         let sidebar = page.by_role("region", "Sidebar");
-        assert_eq!(page.style(sidebar, "flex").as_deref(), Some("1.5 1 0px"));
+        assert_eq!(
+            page.custom_property(sidebar, "--ct-sections-weight")
+                .as_deref(),
+            Some("1.5")
+        );
         assert!(heard.borrow().is_empty(), "nothing is reported mid-drag");
         // Between the threshold and the minimum it opens at the minimum; beyond the maximum, at it.
         page.pointer(overlay, "pointermove", 130.0);
         let sidebar = page.by_role("region", "Sidebar");
-        assert_eq!(page.style(sidebar, "min-width").as_deref(), Some("160px"));
+        assert_eq!(
+            page.custom_property(sidebar, "--ct-sections-min")
+                .as_deref(),
+            Some("160px")
+        );
         page.pointer(overlay, "pointermove", 700.0);
         page.pointer(overlay, "pointerup", 700.0);
         assert_eq!(resized_sidebar(&heard), 480.0);

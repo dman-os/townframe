@@ -10,9 +10,6 @@ pub mod headless;
 
 #[cfg(feature = "host")]
 mod foundation;
-mod layer;
-mod list_details;
-mod sections;
 mod width;
 
 #[cfg(feature = "host")]
@@ -38,6 +35,7 @@ pub use headless::card::CardVariant;
 pub use headless::chip::Chip;
 pub use headless::chip::ChipVariant;
 pub use headless::drawer::Drawer;
+pub use headless::list_details::ListDetails;
 pub use headless::list_details::ListDetailsActions;
 pub use headless::list_details::use_list_details;
 pub use headless::list_row::ListRow;
@@ -47,6 +45,7 @@ pub use headless::panel_page::PanelPage;
 pub use headless::scrub_strip::ScrubStrip;
 pub use headless::sections::Renderer;
 pub use headless::sections::SectionPane;
+pub use headless::sections::Sections;
 pub use headless::sections::SizeRule;
 pub use headless::sections::Snap;
 pub use headless::sections::Split;
@@ -55,9 +54,6 @@ pub use headless::sheet::Sheet;
 pub use headless::tabs::TabItem;
 pub use headless::tabs::TabPanel;
 pub use headless::tabs::Tabs;
-pub use layer::Layer;
-pub use list_details::ListDetails;
-pub use sections::Sections;
 pub use width::WidthClass;
 
 #[cfg(test)]

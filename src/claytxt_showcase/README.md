@@ -17,14 +17,12 @@ through that wrapper (a bare `cargo run` shows the unstyled DOM).
 |---|---|
 | `button`, `tabs`, `card`, `separator`, `alert`, `chip` | `specimens/<name>.rs`, the contract components |
 | `scrub-strip` | `specimens/scrub_strip.rs`: A to Z sections with the strip pinned to the window edge |
-| `layout` | `kit.rs`: `Sections`, `ListDetails`, `Sheet`, `Drawer`, `AppBar` at a compact and an expanded width (Tailwind-skinned until the contract reaches them) |
+| `nav-button`, `app-bar`, `list-row`, `panel-page`, `sheet`, `drawer`, `sections`, `list-details` | `specimens/<name>.rs`: the layout components, the framed ones at a compact and an expanded width (a frame is the host: it hands the component its width class) |
 | `tokens`, `colors` | `foundations.rs` |
 | `diffs` | `diffs.rs`, `pierre_diffs_dioxus::FileDiffView` |
 
 `DAYTXT_LAB_TAB=<tab>` opens a tab at start-up, so a screenshot run needs no click. A page with
-more than one section gets the kit's own `ScrubStrip` as an index. `DAYTXT_SHOWCASE_KIT=<group>`
-(`nav`, `appbar`, `sections`, `list`, `sheet`, `drawer`) shows only that group of layout
-specimens. `DAYTXT_RENDERER=blitz` runs under Blitz instead of Wry (and tells the kit it cannot
+more than one section gets the kit's own `ScrubStrip` as an index. `DAYTXT_RENDERER=blitz` runs under Blitz instead of Wry (and tells the kit it cannot
 move focus: `Renderer::Blitz`). The native window cannot be scrolled by automation, so a screenshot
 run captures one page or group at a time (see `.agents/skills/daytxt-native-dev-loop`).
 

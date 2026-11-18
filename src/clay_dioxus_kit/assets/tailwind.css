@@ -364,9 +364,6 @@
   .w-full {
     width: 100%;
   }
-  .w-px {
-    width: 1px;
-  }
   .max-w-3xl {
     max-width: var(--container-3xl);
   }
@@ -399,9 +396,6 @@
   }
   .transform {
     transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
-  }
-  .cursor-col-resize {
-    cursor: col-resize;
   }
   .cursor-pointer {
     cursor: pointer;
@@ -453,9 +447,6 @@
   }
   .justify-between {
     justify-content: space-between;
-  }
-  .justify-center {
-    justify-content: center;
   }
   .gap-1 {
     gap: var(--ct-spacing);
@@ -565,9 +556,6 @@
   }
   .bg-border {
     background-color: var(--ct-color-border);
-  }
-  .bg-canvas {
-    background-color: var(--ct-color-canvas);
   }
   .bg-card {
     background-color: var(--ct-color-surface);
@@ -864,20 +852,6 @@
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
-  }
-  @media (hover: hover) {
-    .group-hover\:w-0\.5:is(:where(.group):hover *) {
-      width: calc(var(--ct-spacing) * 0.5);
-    }
-    .group-hover\:bg-primary:is(:where(.group):hover *) {
-      background-color: var(--ct-color-primary);
-    }
-  }
-  .group-data-\[state\=dragging\]\:w-0\.5:is(:where(.group)[data-state="dragging"] *) {
-    width: calc(var(--ct-spacing) * 0.5);
-  }
-  .group-data-\[state\=dragging\]\:bg-primary:is(:where(.group)[data-state="dragging"] *) {
-    background-color: var(--ct-color-primary);
   }
   @media (hover: hover) {
     .hover\:bg-surface-sunken:hover {
@@ -1898,6 +1872,97 @@
     .ct-scrub-strip [data-part] {
       transition: none;
     }
+  }
+  .ct-list-details {
+    position: relative;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    background: var(--ct-color-canvas);
+    color: var(--ct-color-text);
+  }
+  .ct-list-details [data-part="list"], .ct-list-details [data-part="details"] {
+    width: 100%;
+    height: 100%;
+    background: var(--ct-color-surface);
+    color: var(--ct-color-text);
+  }
+  .ct-list-details[data-state="stacked"] [data-part="list"] {
+    position: relative;
+    z-index: var(--ct-layer-content);
+  }
+  .ct-list-details [data-part="list"][data-state="covered"] {
+    pointer-events: none;
+  }
+  .ct-list-details[data-state="stacked"] [data-part="details"] {
+    position: absolute;
+    inset: 0;
+    z-index: var(--ct-layer-raised);
+  }
+  .ct-sections {
+    --ct-sections-hit: 24px;
+    position: relative;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    height: 100%;
+    min-width: 0;
+    min-height: 0;
+    background: var(--ct-color-canvas);
+    color: var(--ct-color-text);
+  }
+  .ct-sections [data-part="pane"] {
+    position: relative;
+    z-index: var(--ct-layer-content);
+    flex: var(--ct-sections-weight) 1 0px;
+    min-width: var(--ct-sections-min);
+    min-height: 0;
+    max-width: var(--ct-sections-max, none);
+    background: var(--ct-color-surface);
+  }
+  .ct-sections [data-part="pane"][data-state="collapsed"] {
+    overflow: hidden;
+  }
+  .ct-sections [data-part="handle"] {
+    position: relative;
+    z-index: var(--ct-layer-raised);
+    display: flex;
+    flex: none;
+    justify-content: center;
+    width: var(--ct-sections-hit);
+    margin-inline: calc(var(--ct-sections-hit) / -2);
+    touch-action: none;
+    cursor: col-resize;
+  }
+  .ct-sections [data-part="handle"][data-edge] {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: calc(var(--ct-sections-hit) / 2);
+    margin-inline: 0;
+  }
+  .ct-sections [data-part="handle"]:focus-visible {
+    outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+  }
+  .ct-sections [data-part="grip"] {
+    width: var(--ct-dimension-border-width-thin);
+    height: 100%;
+    background: var(--ct-color-border);
+  }
+  .ct-sections [data-part="handle"]:hover [data-part="grip"], .ct-sections [data-part="handle"][data-state="dragging"] [data-part="grip"] {
+    width: var(--ct-dimension-border-width-thick);
+    background: var(--ct-color-primary);
+  }
+  .ct-sections [data-part="gesture"] {
+    position: absolute;
+    inset: 0;
+    z-index: var(--ct-layer-gesture);
+    touch-action: none;
+    cursor: col-resize;
   }
   .ct-drawer {
     position: absolute;

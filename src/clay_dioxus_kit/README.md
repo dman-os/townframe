@@ -9,10 +9,8 @@ Design: [ADR 032 section 7](../../docs/adrs/032-shell-micro-and-component-kit.md
 copies what is already here, so the rules below are binding; a change to a rule is a change to
 this file.
 
-Two generations of component live here. The **contract** components (the first seven rows below)
-are a headless part and a stylesheet, and follow `KIT-200` to `KIT-205`. The **legacy**
-components (the rest) are a headless part and a styled Rust part of Tailwind classes, and follow
-`KIT-011` to `KIT-013` until the contract reaches them (it is the next lane's work).
+Every component is a headless part and a stylesheet, and follows `KIT-200` to `KIT-205`: the Rust
+renders structure, ARIA and behaviour, and `styles/kit/<name>.css` is the whole of its look.
 
 | Component | Headless part | Skin | Specimen |
 |---|---|---|---|
@@ -23,8 +21,8 @@ components (the rest) are a headless part and a styled Rust part of Tailwind cla
 | `Alert` (info, success, warning, danger) | `headless::alert` | `styles/kit/alert.css` | `specimens/alert.rs` |
 | `Chip` (static, toggle, removable) | `headless::chip` | `styles/kit/chip.css` | `specimens/chip.rs` |
 | `ScrubStrip` (Niagara-style index strip) | `headless::scrub_strip` | `styles/kit/scrub_strip.css` | `specimens/scrub_strip.rs` |
-| `Sections` (resizable split) | `headless::sections` | `Sections` (Rust, Tailwind) | `claytxt_showcase/kit.rs` |
-| `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
+| `Sections` (resizable split) | `headless::sections` | `styles/kit/sections.css` | `specimens/sections.rs` |
+| `ListDetails` (list/details scaffold) | `headless::list_details` | `styles/kit/list_details.css` | `specimens/list_details.rs` |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `styles/kit/sheet.css` | `specimens/sheet.rs` |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `styles/kit/nav_button.css` | `specimens/nav_button.rs` |
 | `PanelPage` (app bar pinned over a scrolling body) | `headless::panel_page` | `styles/kit/panel_page.css` | `specimens/panel_page.rs` |
@@ -46,43 +44,34 @@ the rest are enforced by review.
   has a document and an asset pipeline; a wasm guest never enables it. Checked:
   `guardrails.toml` `[builds.*]`, `cargo x guardrails check-matrix --package clay_dioxus_kit
   --target <t>`.
-- **KIT-002** A component is two modules: `headless/<name>.rs` (public, reached as
-  `clay_dioxus_kit::headless::<name>`) and `<name>.rs` (private; its component is re-exported at
-  the crate root). Module item budgets (40) are the pressure against piling components into one
-  file. Checked: `cargo x guardrails lint`.
-- **KIT-003** The headless and the styled component share the component's name; the skin struct
-  is `<Component>Skin`. Types a caller needs to drive the styled component (`Split`,
-  `NavButtonMode`, ...) are re-exported at the root so callers never import from both layers.
+- **KIT-002** A component is a public module `headless/<name>.rs` (reached as
+  `clay_dioxus_kit::headless::<name>`, its component re-exported at the crate root) and a
+  stylesheet `styles/kit/<name>.css`. There is no styled Rust part: nothing visual lives in Rust.
+  Module item budgets (40) are the pressure against piling components into one file. Checked:
+  `cargo x guardrails lint`, `conventions::a_component_is_a_public_headless_module_and_a_skin`.
+- **KIT-003** Types a caller needs to drive a component (`Split`, `NavButtonMode`, `WidthClass`,
+  ...) are re-exported at the root, so callers never import from `headless` for them.
 
-### Behaviour and skin
+### Behaviour
 
 - **KIT-010** The headless part owns state, ARIA, events and nothing visual: roles, accessible
-  names, `data-state` / `data-value`, listeners, and the controlled/uncontrolled contract.
-- **KIT-011** (legacy; contract components follow `KIT-200` to `KIT-203`) The skin is a plain struct of `&'static str` class strings (`SectionsSkin`, ...)
-  that the headless part applies to its parts. The styled part is the only code that names
-  classes, and it uses only Tailwind utilities that resolve to semantic tokens (`bg-surface`,
-  `text-text`, `rounded-xl`, spacing steps); no palette utilities and no arbitrary values
-  (COMPOSE-001). The only `[...]` forms allowed are Tailwind's `data-[state=...]` and
-  `group-data-[state=...]` variants (the latter styles a part from its group's state, as the
-  `Sections` grip does), which are COMPOSE-003's "data attribute" variant mechanism. A second skin is a second set of strings
-  over the same headless part.
-- **KIT-012** (legacy) Variants are explicit enum props (`NavButtonMode`, `WidthClass`). Styled components
-  take no `class` or `style` pass-through (COMPOSE-003).
-- **KIT-013** (legacy) Inline `style` in a headless part is limited to what breaks behaviour when it is
-  missing: flex weights, an overlay's `position: fixed`, `touch-action`, a handle's hit area.
-  Geometry is px (FOUND-008); appearance never is. A `z-index` is never a number here (`KIT-102`).
-
-### The styling contract (contract components)
+  names, `data-state` and the other vocabulary of `KIT-201`, listeners, and the
+  controlled/uncontrolled contract.
+### The styling contract
 
 The contract itself is `docs/design-language/styling-contract.md`; these are its rules as the kit
-enforces them. They apply to a component that has a stylesheet in `styles/kit/`.
+enforces them. They apply to every component.
 
-- **KIT-200** A contract component is its headless part and `styles/kit/<name>.css`, and nothing
+- **KIT-200** A component is its headless part and `styles/kit/<name>.css`, and nothing
   else visual: no `*Skin` struct, no styled Rust part, no class literal but its root. The only
   inline style is a custom property (`style: "--ct-<component>-<what>: {x}px"`) that the
   stylesheet reads; an inline declaration of any other property is refused at run time by the
   test harness (a guest's wire would admit it, so the harness is the check) and by
   `conventions::contract_parts_set_only_custom_properties_inline`.
+  Variants are explicit enum props (`NavButtonMode`, `ButtonVariant`, `WidthClass`); a component
+  takes no `class` or `style` pass-through (COMPOSE-003). Geometry the host can only classify is
+  px (FOUND-008) and reaches CSS through a custom property or a data attribute, never a number in
+  Rust that is a layout decision.
 - **KIT-201** The vocabulary a stylesheet keys on: a `ct-<name>` class on the root (kebab case),
   `data-part="<part>"` on internals, `data-state` for a part's one enumerated state, a bare
   `data-<name>` for a boolean state (`data-disabled`), `data-orientation`, and the axes the caller
@@ -102,8 +91,12 @@ enforces them. They apply to a component that has a stylesheet in `styles/kit/`.
   part has a `:focus-visible` outline in the `focus` role (INTERACTION-002); a pressable is 48 px
   on a coarse pointer (`KIT-106`). Rust never runs a timer to animate. Checked for the
   reduced-motion guard; the rest by review and the specimen.
-- **KIT-204** A contract component has a specimen page, `claytxt_showcase/specimens/<name>.rs`,
-  that shows every variant and state it has. Checked: `conventions::every_component_has_a_specimen`.
+- **KIT-204** A component has a specimen page, `claytxt_showcase/specimens/<name>.rs`, that shows
+  every variant and state it has. One that is laid out against its host's width (`AppBar`,
+  `Drawer`, `ListDetails`, `Sections`, `Sheet`) shows a compact and an expanded frame: the kit never
+  measures, so a frame is the host, and its width is both its CSS width and the `WidthClass` /
+  extent it hands the component. The showcase is where a new component is reviewed. Checked:
+  `conventions::every_component_has_a_specimen`.
 - **KIT-205** Behaviour tests state the vocabulary: root class, parts in order, each axis value
   and state (`data-state`, ARIA), the keyboard map and, where focus moves, that it moved (the
   harness's `mount` backs an element that records `set_focus`). Invariant violations in props
@@ -191,13 +184,14 @@ named after it.
   The drawer takes the `width` and drops itself on a wider host, rather than leaving every owner
   to repeat "drawer only when compact": a window that grows while the drawer is open then swaps it
   for the side panel without the owner doing anything.
-- **KIT-102** One z-order scale, `Layer` (`layer.rs`): `Content`, `Raised`, `AppBar`, `Drawer`,
-  `Sheet`, `Toast`, `Gesture`, lowest first, mirroring the `layer.*` tokens (a test compares the
-  two). A headless part writes `z-index:{Layer::X.css()}`, which is a `var(--ct-layer-x)`; a
-  numeric `z-index` in a headless part fails a test. A pane is a `Content` stacking context so an
-  app bar inside it cannot climb over the resize handle (`Raised`) overlapping its edge. Reason:
-  the previous constants (10, 20, 40, 50) were each local choices, and an app bar needing a layer
-  of its own would have collided with them.
+- **KIT-102** One z-order scale, the `layer.*` tokens (`semantic.tokens.json`, emitted as
+  `--ct-layer-*`): content, raised, app bar, drawer, sheet, toast, gesture, lowest first. A skin
+  names a layer as `z-index: var(--ct-layer-x)` and never a number; a headless part writes no
+  `z-index` at all (it writes no layout). A pane is a `content` stacking context so an app bar
+  inside it cannot climb over the resize handle (`raised`) overlapping its edge. Reason: the
+  previous constants (10, 20, 40, 50) were each local choices, and an app bar needing a layer of
+  its own would have collided with them. Checked:
+  `conventions::skins_stack_on_the_layer_scale_and_never_name_a_z_index_number`.
 - **KIT-103** The scrim. An overlay (`Drawer` while open, every `Sheet`) renders one: a button
   named `Dismiss <name>` (`data-part="scrim"`) filling the overlay, under the panel by tree order
   (no `z-index` of its own). It is always shown, dims with the `scrim` colour role (a fixed 32%
@@ -212,14 +206,14 @@ named after it.
   of the width. Reason: a phone sheet is a task, so it takes most of the screen, but leaves the
   scrim strip to tap; a wide window's side sheet is a complement to the content, so it keeps a
   fixed reading width instead of growing with the window.
-- **KIT-105** App bar metrics: 56 px (`h-14`) tall and fixed; a 48 px nav button 8 px from the
+- **KIT-105** App bar metrics: 56 px (3.5rem) tall and fixed; a 48 px nav button 8 px from the
   leading edge; the title a single `h2` line (ellipsis when it does not fit, the bar never grows)
   8 px after the leading slot, or, with no leading slot, 16 px from the edge so it lines up with
   page content (`data-state="bare"`); trailing actions are 48 px targets (`KIT-106`) at the end.
   The bar is on `Layer::AppBar`. Reason: a fixed height keeps content from jumping between panels
   and a title that wrapped would push it by an unpredictable amount.
 - **KIT-106** Every pressable is at least 48 logical px on both axes (Material's touch minimum):
-  `NavButton` is `size-12`, a `ListRow` `min-h-12`, a scrim is the whole overlay. The one
+  `NavButton` and a `ListRow` are `--ct-dimension-target-coarse`, a scrim is the whole overlay. The one
   exception is the `Sections` resize handle, 24 px wide (the WCAG 2.5.8 minimum): it overlaps the
   pane edges on both sides, and 48 px would put a pane's own scrollbar and first controls under
   it. Sizes are spacing steps (`rem`), so they equal 48 px only while the root font size is 16 px
@@ -269,12 +263,7 @@ named after it.
   each headless module ends with a `storm` test that feeds every listener every event kind in
   seeded random order under a real owner, with animation timers on a paused clock, so it is
   still deterministic and sleep-free. A seed that finds a panic stays as a regression case.
-- **KIT-072** Every component has a headless test module; a styled part with logic of its own
-  (width to placement) has a skin test.
-- **KIT-080** Every component has a specimen in `claytxt_showcase/kit.rs`, at a compact and an
-  expanded host width. A specimen is a fixed-size frame standing in for the host: its width is
-  both its CSS width and the `WidthClass` / extent it hands the component. The showcase is where
-  a new component is reviewed.
+- **KIT-072** Every component has a headless test module.
 
 ### Renderer limits
 
@@ -307,23 +296,21 @@ What fails, and where, when a rule is broken. `src/conventions.rs` reads this cr
 text (comments stripped, test modules excluded where the rule is about production code) and runs
 under `cargo nextest run -p clay_dioxus_kit`, so it gates CI with the rest of the tests; its
 component list is derived from `headless/`, so a new component needs no edit there. Rules not
-listed are review-only: KIT-003, 013, 020 to 023, 041, 042, 050, 051 and 205. KIT-053 and
+listed are review-only: KIT-003, 020 to 023, 041, 042, 050, 051 and 205. KIT-053 and
 KIT-070 are enforced by the harness itself (`src/testing.rs`).
 
 | Rule | Enforced by |
 |---|---|
 | KIT-001 | `guardrails.toml` (`allowed_dependencies = []` refuses any workspace crate, so no micro, host or renderer crate; `[builds.*]` compiles all three targets in `cargo x guardrails check-matrix`); `conventions::the_only_runtime_dependency_is_dioxus_without_default_features` refuses any other dependency |
-| KIT-002 | `cargo x guardrails lint` (module item budgets); `conventions::a_component_is_a_public_headless_module_and_a_skin` (the headless module is declared; a legacy component's styled module exists, private and re-exported; a contract component is re-exported from `headless`; README table row) |
-| KIT-010, KIT-011 | `conventions::headless_parts_hold_no_styling` (no `class: "..."` literal, no utility strings, no import of a styled part in `headless/`) |
-| KIT-011 | `conventions::styled_parts_use_semantic_tokens_only` (no palette or `white`/`black` utilities, no `[...]` except the `data-[state=...]` variant and its `group-` form) |
-| KIT-012 | `conventions::styled_components_take_no_class_or_style` |
+| KIT-002 | `cargo x guardrails lint` (module item budgets); `conventions::a_component_is_a_public_headless_module_and_a_skin` (the headless module is declared and re-exported, its stylesheet exists, no styled Rust part, tests, README table row) |
+| KIT-010 | `conventions::headless_parts_hold_no_styling` (no class literal but the root's, no utility strings, no skin in `headless/`) |
+| KIT-102 | `conventions::skins_stack_on_the_layer_scale_and_never_name_a_z_index_number` |
 | KIT-040 | `conventions::breakpoints_live_in_width_rs_and_nothing_measures_the_dom` (no `600.0`/`840.0` outside `width.rs`; no `get_client_rect`, `onmounted`, `use_window`, `web_sys`, ...) |
 | KIT-052 | `conventions::tabindex_is_only_the_renderer_focus_gate` (`tabindex` only in `headless/sections.rs`, gated on `.takes_focus()`, and `-1` on the modal panels; focus moves only in `headless.rs`) |
 | KIT-053 | the harness panics on a tag, attribute or style property outside the guest vocabulary |
 | KIT-071 | `conventions::tests_neither_sleep_nor_wait` (no sleeps, timers, clocks, threads, async runtimes) |
 | KIT-072 | `conventions::a_component_is_a_public_headless_module_and_a_skin` (every `headless/<name>.rs` has a `#[test]`) |
-| KIT-080 | `conventions::every_component_has_a_specimen` (the showcase names the legacy component; a framed specimen has a `COMPACT_PX` and an `EXPANDED_PX` frame; `NavButton` and `ListRow` are the two unframed ones) |
-| KIT-200 | `conventions::contract_parts_set_only_custom_properties_inline`; the harness (`src/testing.rs`) panics on any other inline style; `a_component_is_a_public_headless_module_and_a_skin` (no styled Rust part beside a stylesheet); `headless_parts_hold_no_styling` (only the root class) |
+| KIT-200 | `conventions::contract_parts_set_only_custom_properties_inline`; the harness (`src/testing.rs`) panics on any other inline style, per-property or raw; `a_component_is_a_public_headless_module_and_a_skin` (no styled Rust part); `headless_parts_hold_no_styling` (only the root class); `components_take_no_class_or_style_pass_through` |
 | KIT-201 | the component's own tests (`Page::by_class`, `Page::parts`); `contract_skins_are_stylesheets_in_the_kit_layer` (the sheet styles its root class) |
 | KIT-202, KIT-203 | `conventions::contract_skins_are_stylesheets_in_the_kit_layer` (layer import, bundle in sync, no `!important`/`@apply`/`url(`, reduced-motion guard) |
 | KIT-204 | `conventions::every_component_has_a_specimen` |
