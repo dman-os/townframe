@@ -58,8 +58,10 @@ impl Default for MemoryDb {
     }
 }
 
-/// One table's committed rows. A plain value inside the db state: no lock, no sharing.
-struct OkvTable<K, V> {
+/// One table's committed rows. A plain value inside its owner's locked state: no lock, no
+/// sharing. [`MemoryDb`] embeds these, and so can any store that keeps a revisioned table
+/// beside its own state under one lock (the memory part store's log).
+pub(crate) struct OkvTable<K, V> {
     rev: Rev,
     /// The rows, grouped by the rev that wrote them: a read walks this in `(rev, key)` order
     /// with no regrouping.
@@ -110,14 +112,9 @@ impl MemoryDb {
             let (mut state, _key) = key.lock(&self.state);
             let table = state.next_table;
             state.next_table += 1;
-            let old = state.tables.insert(
-                table,
-                Box::new(OkvTable::<K, V> {
-                    rev: 0,
-                    rows_by_rev: default(),
-                    rev_by_key: default(),
-                }),
-            );
+            let old = state
+                .tables
+                .insert(table, Box::new(OkvTable::<K, V>::default()));
             assert!(old.is_none(), "fishy: a table id was reused");
             table
         });
@@ -199,7 +196,7 @@ where
         for (key, (rev, value)) in std::mem::take(&mut self.rows) {
             table.write(rev, key, value);
         }
-        table.rev = self.rev;
+        table.publish(self.rev);
     }
 
     fn notify(&self) {
@@ -263,7 +260,7 @@ where
             "a transaction was used on a table of another db"
         );
         let stage = tx.staged.entry(self.table).or_insert_with(|| {
-            let base = self.with_table(|table| table.rev);
+            let base = self.with_table(OkvTable::rev);
             Box::new(Stage::<K, V> {
                 base,
                 rev: base,
@@ -277,11 +274,33 @@ where
     }
 }
 
+impl<K, V> Default for OkvTable<K, V> {
+    fn default() -> Self {
+        Self {
+            rev: 0,
+            rows_by_rev: default(),
+            rev_by_key: default(),
+        }
+    }
+}
+
 impl<K, V> OkvTable<K, V>
 where
     K: Ord + Clone,
 {
-    fn write(&mut self, rev: Rev, key: K, value: Option<V>) {
+    /// The rev of the last committed batch.
+    pub(crate) fn rev(&self) -> Rev {
+        self.rev
+    }
+
+    /// Write `key`'s row at `rev`, a rev past the committed one that [`Self::publish`] then
+    /// commits. Within one rev the later write of a key wins.
+    pub(crate) fn write(&mut self, rev: Rev, key: K, value: Option<V>) {
+        assert!(
+            rev > self.rev,
+            "okv write at rev {rev}, not past the committed rev {committed}",
+            committed = self.rev
+        );
         match self.rev_by_key.get_mut(&key) {
             Some(old_rev) => {
                 let old_rows = self.rows_by_rev.get_mut(old_rev).expect(ERROR_IMPOSSIBLE);
@@ -298,28 +317,53 @@ where
         self.rows_by_rev.entry(rev).or_default().insert(key, value);
     }
 
-    fn get(&self, key: &K) -> Option<&Option<V>> {
-        let rev = self.rev_by_key.get(key)?;
-        Some(&self.rows_by_rev[rev][key])
+    /// Commit the rows written at `rev`: reads now see them.
+    pub(crate) fn publish(&mut self, rev: Rev) {
+        assert!(rev > self.rev, "okv revs must strictly increase");
+        self.rev = rev;
     }
-}
 
-impl<K, V> OkvTable<K, V>
-where
-    K: Ord + Clone + AsRef<[u8]>,
-    V: Clone + AsRef<[u8]>,
-{
-    /// Scans the rev index for every selector shape and tests each key. The scan stops at the
-    /// first revision that does not fit the page, which once the page is full is the next one
-    /// that selects anything.
-    fn read_into(
+    /// The key's row and the rev that wrote it: `None` for a key never written, `Some((rev,
+    /// None))` for a tombstone.
+    pub(crate) fn get(&self, key: &K) -> Option<(Rev, &Option<V>)> {
+        let rev = *self.rev_by_key.get(key)?;
+        Some((rev, &self.rows_by_rev[&rev][key]))
+    }
+
+    /// The rows of the keys in `range`, in key order, with the rev of each.
+    pub(crate) fn rows_in(
         &self,
-        selector: &Selector<K>,
+        range: impl std::ops::RangeBounds<K>,
+    ) -> impl Iterator<Item = (&K, Rev, &Option<V>)> {
+        self.rev_by_key
+            .range(range)
+            .map(|(key, rev)| (key, *rev, &self.rows_by_rev[rev][key]))
+    }
+
+    /// The bounded read of the [`RevSource`] contract over this table: the rows `selects`
+    /// keeps with a rev in `(after, until]`, each row costing `cost` against the byte budget.
+    ///
+    /// Scans the rev index and tests each row. Each revision is sized before anything is
+    /// cloned, so a revision that does not fit is never copied; the scan stops at the first
+    /// revision that does not fit, which once the page is full is the next one that selects
+    /// anything.
+    pub(crate) fn read_into(
+        &self,
+        selects: impl Fn(&K, Rev) -> bool,
+        cost: impl Fn(&K, Option<&V>) -> usize,
         after: Rev,
         until: Rev,
         limits: Limits,
         page: &mut Page<K, V>,
-    ) {
+    ) where
+        V: Clone,
+    {
+        assert!(after < until, "empty read window ({after}, {until}]");
+        assert!(
+            until <= self.rev,
+            "read until {until} past the committed rev {rev}",
+            rev = self.rev
+        );
         page.entries.clear();
         page.through = until;
         let max_bytes = limits.max_bytes.map_or(usize::MAX, NonZeroUsize::get);
@@ -328,15 +372,10 @@ where
             .rows_by_rev
             .range((Bound::Excluded(after), Bound::Included(until)))
         {
-            // Size the revision before cloning anything, so a revision that does not fit is
-            // never copied.
-            let (rev_len, rev_bytes) = rows.iter().filter(|(key, _)| selector.matches(key)).fold(
+            let (rev_len, rev_bytes) = rows.iter().filter(|(key, _)| selects(key, rev)).fold(
                 (0usize, 0usize),
                 |(len, bytes), (key, value)| {
-                    (
-                        len + 1,
-                        bytes.saturating_add(row_bytes(key, value.as_ref())),
-                    )
+                    (len + 1, bytes.saturating_add(cost(key, value.as_ref())))
                 },
             );
             if rev_len == 0 {
@@ -351,13 +390,15 @@ where
             }
             bytes = bytes.saturating_add(rev_bytes);
             page.entries
-                .extend(rows.iter().filter(|(key, _)| selector.matches(key)).map(
-                    |(key, value)| Entry {
-                        key: key.clone(),
-                        rev,
-                        value: value.clone(),
-                    },
-                ));
+                .extend(
+                    rows.iter()
+                        .filter(|(key, _)| selects(key, rev))
+                        .map(|(key, value)| Entry {
+                            key: key.clone(),
+                            rev,
+                            value: value.clone(),
+                        }),
+                );
         }
     }
 }
@@ -373,7 +414,7 @@ where
     type Selector = Selector<K>;
 
     async fn latest_rev(&self) -> Res<Rev> {
-        Ok(self.with_table(|table| table.rev))
+        Ok(self.with_table(OkvTable::rev))
     }
 
     /// Copies one bounded page out under the lock.
@@ -385,14 +426,15 @@ where
         limits: Limits,
         page: &mut Page<K, V>,
     ) -> Res<()> {
-        assert!(after < until, "empty read window ({after}, {until}]");
         self.with_table(|table| {
-            assert!(
-                until <= table.rev,
-                "read until {until} past the committed rev {rev}",
-                rev = table.rev
+            table.read_into(
+                |key, _rev| selector.matches(key),
+                row_bytes,
+                after,
+                until,
+                limits,
+                page,
             );
-            table.read_into(selector, after, until, limits, page);
         });
         Ok(())
     }
@@ -433,6 +475,6 @@ where
         if let Some((_, value)) = stage.rows.get(key) {
             return Ok(value.clone());
         }
-        Ok(self.with_table(|table| table.get(key).cloned().flatten()))
+        Ok(self.with_table(|table| table.get(key).and_then(|(_rev, value)| value.clone())))
     }
 }
