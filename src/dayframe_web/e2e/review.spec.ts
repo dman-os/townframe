@@ -98,6 +98,11 @@ test("a pull request shows its description and the outcome of each intxt it name
   expect(failures).toEqual([]);
 });
 
+// The diff view injects inline `<style>` elements, which the shell's CSP (`style-src-elem 'self'`)
+// blocks: the console reports each one and the diff renders unstyled. Pinned by the next test.
+const blockedInlineStyle = (failure: string) =>
+  failure.includes("style-src-elem");
+
 test("an intxt shows its entries and a commit's patch in the diff view, and back unwinds", async ({
   page,
 }) => {
@@ -126,7 +131,7 @@ test("an intxt shows its entries and a commit's patch in the diff view, and back
   await expect(patch).toHaveCount(1);
   await expect(patch).toContainText("read the PR");
   await screenshot(page, "intxt-view");
-  expect(failures).toEqual([]);
+  expect(failures.filter((f) => !blockedInlineStyle(f))).toEqual([]);
 
   // Back: intxt -> pull request -> list.
   await back.click();
@@ -135,4 +140,21 @@ test("an intxt shows its entries and a commit's patch in the diff view, and back
   await back.click();
   await expect(review.getByRole("button", { name: pulls[1] })).toBeVisible();
   await expect(back).toHaveCount(0);
+});
+
+// FINDING, expected to fail until the diff view's styles are served from a file the CSP allows
+// (or the CSP is amended on purpose): opening a patch makes the browser refuse inline styles.
+test("the diff view's styles are allowed by the shell's content security policy", async ({
+  page,
+}) => {
+  const failures = watchFailures(page);
+  const review = await openReview(page);
+  await review.getByRole("button", { name: pulls[0] }).click({
+    timeout: 60_000,
+  });
+  await review
+    .getByRole("button", { name: /intxt: commits live with the intxt/ })
+    .click({ timeout: 60_000 });
+  await expect(review.getByRole("region", { name: "Patch" })).toBeVisible();
+  expect(failures.filter(blockedInlineStyle)).toEqual([]);
 });
