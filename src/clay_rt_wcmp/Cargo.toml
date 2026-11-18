@@ -20,6 +20,7 @@ clay_guest_session = { workspace = true }
 clay_host = { workspace = true }
 clay_surface = { workspace = true }
 futures.workspace = true
+getrandom = { workspace = true, features = ["wasm_js"] }
 wcmp.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
