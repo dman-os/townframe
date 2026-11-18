@@ -22,15 +22,15 @@ use crate::Access;
 use crate::Capability;
 use crate::Config;
 use crate::Context;
+use crate::Endpoint;
 use crate::Error;
 use crate::FacetSnapshot;
 use crate::MicroManifest;
 use crate::OperationError;
 use crate::OperationReceipt;
 use crate::OperationStatus;
-use crate::PublicationKind;
 use crate::RefStatus;
-use crate::RowAttachment;
+use crate::RowLink;
 use crate::capability_bank;
 use crate::collection_registration;
 use crate::collections;
@@ -84,7 +84,7 @@ use std::task::Waker;
 mod dom;
 
 /// One row value as a guest's page carries it: its body and the references the host minted for
-/// its attachments, already recipient-local to this incarnation.
+/// its links, already recipient-local to this incarnation.
 pub(crate) struct GuestValue {
     pub(crate) body: Vec<u8>,
     pub(crate) capabilities: Vec<Rc<capability_bank::CapabilityRef>>,
@@ -324,12 +324,14 @@ impl Runtime {
                     })
                     .collect(),
                 calls: manifest
-                    .publications
+                    .endpoints
                     .iter()
-                    .filter_map(|publication| {
-                        let contract = publication.contract.as_ref()?;
-                        (publication.kind == PublicationKind::Call)
-                            .then(|| (publication.name.clone(), contract.clone()))
+                    .filter_map(|(name, endpoint)| match endpoint {
+                        Endpoint::Method { nsid: contract }
+                        | Endpoint::Callback {
+                            implements: contract,
+                        } => Some((name.clone(), contract.clone())),
+                        _ => None,
                     })
                     .collect(),
             },
@@ -665,20 +667,18 @@ pub(crate) fn snapshot<T: DeserializeOwned>(facet: &Facet<T>) -> Result<FacetSna
     }
 }
 
-/// Write one row through the host's registration writer; each attachment names one of this
-/// micro's own declared publications, which the host turns into its endpoint.
+/// Write one row through the host's registration writer; each link names one of this
+/// micro's own declared endpoints, which the host turns into its endpoint.
 pub(crate) async fn put(
     writer: &collection_registration::RegistrationWriter,
     key: Vec<u8>,
     basis: WriteBasis,
     body: Vec<u8>,
-    attachments: Vec<RowAttachment>,
+    links: Vec<RowLink>,
 ) -> Result<Stamp, Error> {
-    let attachments = attachments
+    let attachments = links
         .into_iter()
-        .map(|attachment| {
-            collection_registration::RowAttachment::OwnPublication(attachment.into_name())
-        })
+        .map(|link| collection_registration::RowAttachment::OwnPublication(link.into_name()))
         .collect();
     Ok(writer
         .put(
@@ -851,7 +851,7 @@ impl From<collection_registration::MutationError> for Error {
                 Self::Rejected("row exceeds the collection's size limits".into())
             }
             MutationError::InvalidAttachment => {
-                Self::Rejected("row names an attachment it does not carry".into())
+                Self::Rejected("row names a link it does not carry".into())
             }
         }
     }

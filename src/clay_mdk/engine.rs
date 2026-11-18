@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 use crate::manifest::MicroManifest;
 use crate::native::CollectionBindings;
 use crate::native::Resources;
-use crate::native::declared_publications;
+use crate::native::declared_endpoints;
 use crate::native::grant_configs;
 
 /// The outcome of starting one incarnation: its runtime and the driver future that runs it.
@@ -88,7 +88,7 @@ pub(crate) fn factory<E: Engine>(
     package: PackageSource<E>,
     egress: Option<Arc<dyn DispatchEgress>>,
 ) -> Rc<dyn Factory<CapabilityPublication>> {
-    let declared = declared_publications(&manifest);
+    let declared = declared_endpoints(&manifest);
     Rc::new(GuestFactory::<E> {
         resources,
         micro: (&micro).into(),

@@ -1,6 +1,6 @@
 //! Settings owns its section vocabulary; the shell owns navigation, layout and the back button
 //! (ADR 032 §8), and the host owns storage and authority. Settings contributes a list panel
-//! whose rows are its sections: opening a row asks the shell to show that section's attachment
+//! whose rows are its sections: opening a row asks the shell to show that section's link
 //! as the panel's details. Authored against the MDK only (ADR 015 §5): activation receives a
 //! [`Context`], never the registry, renderer, or host kernel.
 mod view;
@@ -139,29 +139,25 @@ mod tests {
         assert!(config.rank("a") < config.rank("unlisted"));
     }
 
-    /// Stands in for the shell: the publications Settings requires, with the shell's real
+    /// Stands in for the shell: the endpoints Settings requires, with the shell's real
     /// contracts, answering "nothing is open".
     fn shell_stub(resources: Resources) -> ConfiguredMicro<CapabilityPublication> {
-        use clay_mdk::PublicationDeclaration;
-        use clay_mdk::PublicationKind;
-        let call = |name: &str, contract: &str| PublicationDeclaration {
-            name: name.into(),
-            kind: PublicationKind::Call,
-            contract: Some(Nsid::literal(contract)),
-        };
+        use clay_mdk::Endpoint;
         let manifest = clay_mdk::MicroManifest {
             entrypoints: clay_mdk::Entrypoints::micro_client(),
-            publications: vec![
-                PublicationDeclaration {
-                    name: micro_shell_manifest::NAV_BUTTON.into(),
-                    kind: PublicationKind::Presentation,
-                    contract: None,
-                },
-                call(
-                    micro_shell_manifest::OPENED,
-                    micro_shell_manifest::OPENED_CONTRACT,
+            endpoints: [
+                (
+                    micro_shell_manifest::NAV_BUTTON.into(),
+                    Endpoint::View { implements: None },
                 ),
-            ],
+                (
+                    micro_shell_manifest::OPENED.into(),
+                    Endpoint::Method {
+                        nsid: Nsid::literal(micro_shell_manifest::OPENED_CONTRACT),
+                    },
+                ),
+            ]
+            .into(),
             requires: vec![],
             configuration_requests: vec![],
             collection_contracts: vec![],

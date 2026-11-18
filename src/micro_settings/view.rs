@@ -1,6 +1,6 @@
 //! Settings presentations: the list panel (the sections collection's rows, ordered and filtered
 //! by the viewer's preferences) and the section panel (the presentation the shell has open,
-//! mounted from its row attachment). The shell owns which one is shown and where.
+//! mounted from its row link). The shell owns which one is shown and where.
 use crate::SettingsMicro;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::ListRow;
@@ -163,7 +163,7 @@ pub fn SettingsSection(props: SettingsSectionProps) -> Element {
                 },
                 div { class: "px-4 pb-4",
                     PresentationSlot {
-                        reference: row.attachments[row.value.detail.index()].clone(),
+                        reference: row.links[row.value.detail.index()].clone(),
                     }
                 }
             }

@@ -17,18 +17,21 @@ fn canonical_sidecar() -> Sidecar {
 fn canonical_manifest() -> MicroManifest {
     MicroManifest {
         entrypoints: Entrypoints::micro_client(),
-        publications: vec![
-            PublicationDeclaration {
-                name: "view".into(),
-                kind: PublicationKind::Presentation,
-                contract: None,
-            },
-            PublicationDeclaration {
-                name: "increment".into(),
-                kind: PublicationKind::Call,
-                contract: Some(nsid("increment")),
-            },
-        ],
+        endpoints: BTreeMap::from([
+            ("view".into(), Endpoint::View { implements: None }),
+            (
+                "increment".into(),
+                Endpoint::Callback {
+                    implements: nsid("increment"),
+                },
+            ),
+            (
+                "count".into(),
+                Endpoint::Method {
+                    nsid: nsid("count"),
+                },
+            ),
+        ]),
         requires: vec![Request {
             binding: "shelf".into(),
             contract: shelf(),
@@ -74,16 +77,16 @@ fn nested_contribution() -> ContributionDeclaration {
         id: "toolbar-button".into(),
         binding: "tally-book".into(),
         key: "counter".into(),
-        payload: serde_json::json!({
+        value: serde_json::json!({
             "badges": [1, null, "beta"],
             "enabled": true,
             "label": { "en": "Counter" },
             "order": 2,
             "slot": "toolbar"
         }),
-        attachments: vec![AttachmentDeclaration {
+        links: vec![LinkDeclaration {
             index: 0,
-            publication: "view".into(),
+            endpoint: "view".into(),
         }],
     }
 }
@@ -101,7 +104,7 @@ fn manifest_roundtrips_through_json_unchanged() {
 }
 
 /// A manifest written by newer tooling — an extra top-level member, an extra entrypoint,
-/// a publication kind and vocabulary strings this build does not know — must deserialize and
+/// an endpoint member and vocabulary strings this build does not know — must deserialize and
 /// re-serialize to the same JSON, with the unknown parts held as data rather than dropped.
 #[test]
 fn unknown_members_round_trip_unchanged() {
@@ -109,7 +112,7 @@ fn unknown_members_round_trip_unchanged() {
     wire["future_member"] = serde_json::json!({ "nested": [1, "two", null] });
     wire["entrypoints"]["future_entry"] =
         serde_json::json!("townframe:dayframe/future-interface@9.0.0");
-    wire["publications"][1]["kind"] = serde_json::json!("stream");
+    wire["endpoints"]["stream"] = serde_json::json!({ "$type": "org.example.clay.micro.manifest#streamEndpoint", "cursor": ["a", 1] });
     wire["requires"][0]["necessity"] = serde_json::json!("eventual");
     wire["requires"][0]["resolution"] = serde_json::json!("atRuntime");
     wire["collection_contracts"][0]["offered"][1] = serde_json::json!("stream");
@@ -126,8 +129,13 @@ fn unknown_members_round_trip_unchanged() {
         serde_json::json!("townframe:dayframe/future-interface@9.0.0")
     );
     assert_eq!(
-        manifest.publications[1].kind,
-        PublicationKind::Other("stream".into())
+        manifest.endpoints["stream"],
+        Endpoint::Other(
+            serde_json::json!({ "$type": "org.example.clay.micro.manifest#streamEndpoint", "cursor": ["a", 1] })
+                .as_object()
+                .unwrap()
+                .clone()
+        )
     );
     assert_eq!(
         manifest.requires[0].necessity,
@@ -155,25 +163,58 @@ fn unknown_members_round_trip_unchanged() {
     assert_eq!(serde_json::to_value(&manifest).unwrap(), wire);
 }
 
+/// Only an unknown `$type` is carried as `Other`; a known one whose members do not fit is a
+/// malformed manifest, never silently demoted to an endpoint no host serves.
+#[test]
+fn a_known_endpoint_type_with_malformed_members_is_an_error() {
+    let endpoint = |members: serde_json::Value| serde_json::from_value::<Endpoint>(members);
+    let method = "org.example.clay.micro.manifest#methodEndpoint";
+    let callback = "org.example.clay.micro.manifest#callbackEndpoint";
+    let view = "org.example.clay.micro.manifest#viewEndpoint";
+    for malformed in [
+        // A method without its `nsid`, or with one that is not an NSID.
+        serde_json::json!({ "$type": method }),
+        serde_json::json!({ "$type": method, "nsid": 7 }),
+        serde_json::json!({ "$type": method, "nsid": "not an nsid" }),
+        // An anonymous callback.
+        serde_json::json!({ "$type": callback }),
+        serde_json::json!({ "$type": callback, "implements": null }),
+        // A view whose `implements` is not an NSID.
+        serde_json::json!({ "$type": view, "implements": ["org.example.nav"] }),
+        // No `$type` at all.
+        serde_json::json!({ "nsid": "org.example.clay.test.count" }),
+    ] {
+        endpoint(malformed.clone())
+            .expect_err(&format!("{malformed} is malformed, not an unknown member"));
+    }
+    assert_eq!(
+        endpoint(serde_json::json!({ "$type": view })).unwrap(),
+        Endpoint::View { implements: None }
+    );
+    // The short `#methodEndpoint` is not a known `$type`: ids are spelled in full.
+    assert!(matches!(
+        endpoint(serde_json::json!({ "$type": "#methodEndpoint", "nsid": 7 })).unwrap(),
+        Endpoint::Other(_)
+    ));
+}
+
 // ── Validation ──
 
 #[test]
 fn validate_accepts_coherent_manifests() {
     canonical_manifest().validate().unwrap();
 
-    let mut with_unknown_kind = canonical_manifest();
-    with_unknown_kind.publications[1].kind = PublicationKind::Other("stream".into());
-    with_unknown_kind.validate().unwrap();
+    let mut with_unknown_member = canonical_manifest();
+    with_unknown_member
+        .endpoints
+        .insert("stream".into(), Endpoint::Other(Default::default()));
+    with_unknown_member.validate().unwrap();
 }
 
 #[test]
 fn validate_rejects_incoherent_manifests() {
     type Mutation = fn(&mut MicroManifest);
     let cases: &[(Mutation, &str)] = &[
-        (
-            |manifest| manifest.publications.push(manifest.publications[0].clone()),
-            "duplicate publications name \"view\"",
-        ),
         (
             |manifest| manifest.requires.push(manifest.requires[0].clone()),
             "duplicate requires binding \"shelf\"",
@@ -207,17 +248,8 @@ fn validate_rejects_incoherent_manifests() {
             "duplicate contributions id \"toolbar-button\"",
         ),
         (
-            |manifest| manifest.publications[1].contract = None,
-            "call publication \"increment\" declares no contract",
-        ),
-        (
-            |manifest| manifest.publications[0].contract = Some(shelf()),
-            "presentation publication \"view\" declares a contract; presentations have the \
-             one presentation-component contract",
-        ),
-        (
-            |manifest| manifest.contributions[0].attachments[0].publication = "missing".into(),
-            "contribution \"toolbar-button\" attaches undeclared publication \"missing\"",
+            |manifest| manifest.contributions[0].links[0].endpoint = "missing".into(),
+            "contribution \"toolbar-button\" links undeclared endpoint \"missing\"",
         ),
         (
             |manifest| manifest.requires[0].access = Some(Access::Read),
@@ -348,7 +380,7 @@ fn manifest_canonical_wire_shape() {
 }
 
 #[test]
-fn contribution_nested_payload_wire_shape() {
+fn contribution_nested_value_wire_shape() {
     insta::assert_snapshot!(serde_json::to_string_pretty(&nested_contribution()).unwrap());
 }
 
@@ -439,12 +471,23 @@ fn a_package_declares_only_nsids_under_its_authority() {
     let mut foreign_request = canonical_sidecar();
     foreign_request.manifest.collection_requests[0].contract = Nsid::literal("org.other.tallies");
     foreign_request.validate().unwrap();
-    // Implementing a call contract is not owning it (ADR 028 §5): a published call may name
-    // any NSID, while a collection contract the package declares must stay under its authority.
-    let mut foreign_call = canonical_sidecar();
-    foreign_call.manifest.publications[1].contract =
-        Some(Nsid::literal("org.example.other.toolbar.action"));
-    foreign_call.validate().unwrap();
+    // Implementing a contract is not owning it (ADR 028 §5): a callback may implement, and a
+    // method may be registered under, any NSID, while a collection contract the package
+    // declares must stay under its authority.
+    let mut foreign_endpoints = canonical_sidecar();
+    foreign_endpoints.manifest.endpoints.insert(
+        "increment".into(),
+        Endpoint::Callback {
+            implements: Nsid::literal("org.example.other.toolbar.action"),
+        },
+    );
+    foreign_endpoints.manifest.endpoints.insert(
+        "count".into(),
+        Endpoint::Method {
+            nsid: Nsid::literal("org.example.other.counter.count"),
+        },
+    );
+    foreign_endpoints.validate().unwrap();
 
     type Mutation = fn(&mut Sidecar);
     let cases: &[(Mutation, &str)] = &[
@@ -494,8 +537,8 @@ mod builder {
     #[derive(Serialize, Deserialize)]
     struct Card {
         title: String,
-        front: Attachment,
-        back: Attachment,
+        front: Link,
+        back: Link,
     }
 
     struct Front;
@@ -519,13 +562,13 @@ mod builder {
         type Value = u64;
     }
 
-    use crate::Attachment;
+    use crate::Link;
 
     #[test]
-    fn a_contribution_numbers_its_attachments_in_the_order_the_row_takes_them() {
+    fn a_contribution_numbers_its_links_in_the_order_the_row_takes_them() {
         let manifest = ManifestBuilder::new()
-            .component::<Front>()
-            .component::<Back>()
+            .view::<Front>()
+            .view::<Back>()
             .config::<Tally>()
             .writes::<Shelf>("cards", Necessity::Optional)
             .contributes::<Shelf>("card", "k", |at| Card {
@@ -537,19 +580,19 @@ mod builder {
         let contribution = &manifest.contributions[0];
         assert_eq!(contribution.binding, "cards");
         assert_eq!(
-            contribution.payload,
+            contribution.value,
             serde_json::json!({
                 "title": "T",
-                "back": { "$attachment": 0 },
-                "front": { "$attachment": 1 },
+                "back": { "$link": 0 },
+                "front": { "$link": 1 },
             })
         );
-        let attached: Vec<_> = contribution
-            .attachments
+        let linked: Vec<_> = contribution
+            .links
             .iter()
-            .map(|attachment| (attachment.index, attachment.publication.as_str()))
+            .map(|link| (link.index, link.endpoint.as_str()))
             .collect();
-        assert_eq!(attached, [(0, "back"), (1, "front")]);
+        assert_eq!(linked, [(0, "back"), (1, "front")]);
         assert_eq!(manifest.configuration_requests[0].binding, "tally");
     }
 
@@ -557,7 +600,7 @@ mod builder {
     #[should_panic(expected = "needs a write request")]
     fn a_contribution_without_a_write_request_is_a_programming_error() {
         ManifestBuilder::new()
-            .component::<Front>()
+            .view::<Front>()
             .reads::<Shelf>("cards", Necessity::Optional)
             .contributes::<Shelf>("card", "k", |at| Card {
                 title: "T".into(),
@@ -567,8 +610,8 @@ mod builder {
     }
 
     #[test]
-    #[should_panic(expected = "does not publish")]
-    fn an_attachment_to_an_unpublished_presentation_is_a_programming_error() {
+    #[should_panic(expected = "does not declare")]
+    fn a_link_to_an_undeclared_view_is_a_programming_error() {
         ManifestBuilder::new()
             .writes::<Shelf>("cards", Necessity::Optional)
             .contributes::<Shelf>("card", "k", |at| Card {
@@ -579,17 +622,17 @@ mod builder {
     }
 
     #[test]
-    fn an_attachment_is_a_tagged_index_in_cbor_and_an_object_in_json() {
-        let attachment = Attachment::at(3);
+    fn a_link_is_a_tagged_index_in_cbor_and_an_object_in_json() {
+        let link = Link::at(3);
         assert_eq!(
-            serde_json::to_value(attachment).unwrap(),
-            serde_json::json!({ "$attachment": 3 })
+            serde_json::to_value(link).unwrap(),
+            serde_json::json!({ "$link": 3 })
         );
         let mut bytes = Vec::new();
-        ciborium::into_writer(&attachment, &mut bytes).unwrap();
+        ciborium::into_writer(&link, &mut bytes).unwrap();
         assert_eq!(
-            ciborium::from_reader::<Attachment, _>(bytes.as_slice()).unwrap(),
-            attachment
+            ciborium::from_reader::<Link, _>(bytes.as_slice()).unwrap(),
+            link
         );
         assert_eq!(bytes[..3], [0xd9, 0xa7, 0xf8]);
     }
