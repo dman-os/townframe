@@ -129,7 +129,7 @@ fn try_static_cli() -> Res<StaticCliResult> {
     }
 
     lazy::set_node_flag(cli.node.clone());
-    // The foreground daemon shuts its node down on SIGINT itself; racing it against Ctrl-C here
+    // The foreground server shuts its node down on SIGINT itself; racing it against Ctrl-C here
     // would drop the serving future with the node still booted.
     let owns_signals = matches!(
         cli.command,

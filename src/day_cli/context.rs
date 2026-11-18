@@ -10,7 +10,7 @@
 //! <node>/node.sqlite, repo/, blobs/   the node's own storage, opened by `big_node::Bindings`
 //! ```
 //!
-//! The daemon's Unix socket is not in the node directory but in the per-user runtime directory,
+//! The server's Unix socket is not in the node directory but in the per-user runtime directory,
 //! named by the node id (see [`NodeDir::socket_path`]), so a node directory can be anywhere,
 //! however long its path, and two nodes on a machine never share a socket. Every other secret a
 //! node keeps is in the platform keyring under entries that carry the node id too.
@@ -28,11 +28,11 @@ use std::os::unix::fs::PermissionsExt;
 /// terminator; refuse a socket path that cannot fit instead of failing in `bind`.
 const MAX_SOCKET_PATH_BYTES: usize = 100;
 
-/// The directory the daemon sockets live in: the one place the socket location is decided, so
+/// The directory the server sockets live in: the one place the socket location is decided, so
 /// making it configurable is a change to this function and its caller [`NodeDir::new`].
 ///
 /// - **Normally** `$XDG_RUNTIME_DIR/day`: the per-user runtime directory the login session
-///   creates as `0700` and removes at logout, which is where a local daemon's socket belongs
+///   creates as `0700` and removes at logout, which is where a local server's socket belongs
 ///   (ADR 033 section 5). `directories` yields it only where the platform has one (Linux).
 /// - **Without one** (macOS, a session with no `XDG_RUNTIME_DIR`, a cron job) `/tmp/day-<euid>`:
 ///   a directory of the user's own under `/tmp` rather than `std::env::temp_dir()`, because
@@ -85,7 +85,7 @@ pub struct NodeSettings {
     version: u32,
     /// 32 bytes, lowercase hex.
     identity_seed: String,
-    /// The node's network attachment. Absent: the daemon attaches none, so the node neither
+    /// The node's network attachment. Absent: the server attaches none, so the node neither
     /// dials nor can be dialed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peers: Option<PeerSettings>,
@@ -118,12 +118,12 @@ impl DevSettings {
     }
 }
 
-/// The `peers` section of `node.json`: its presence is what makes the daemon attach the peers
+/// The `peers` section of `node.json`: its presence is what makes the server attach the peers
 /// service (the Iroh endpoint, keyed by the node's identity).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PeerSettings {
-    /// Peers dialed as soon as the daemon starts and redialed with backoff when the connection
+    /// Peers dialed as soon as the server starts and redialed with backoff when the connection
     /// drops, as endpoint tickets (the `address` a node's `getNodeInfo` reports). Which nodes
     /// belong here is the composition's policy, not the node's: a user node lists its own other
     /// devices and a relay, a relay lists none.
@@ -162,7 +162,7 @@ impl PeerSettings {
         Ok(true)
     }
 
-    /// The peers config the daemon boots with: dial the bootstrap list under the default
+    /// The peers config the server boots with: dial the bootstrap list under the default
     /// mirroring policy, or under the relay policy when the node is a relay.
     fn peers_config(&self, relay: bool) -> Res<big_node::peers::PeersConfig> {
         let dial = self
@@ -201,13 +201,13 @@ impl NodeSettings {
     }
 }
 
-/// The state of the daemon's socket file, learned by connecting to it.
+/// The state of the server's socket file, learned by connecting to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SocketState {
     /// Something accepted the connection.
     Live,
-    /// The file is there and nothing listens on it: a daemon died without removing it.
+    /// The file is there and nothing listens on it: a server died without removing it.
     Stale,
     Absent,
 }
@@ -243,7 +243,7 @@ impl NodeDir {
         self.root.join("run")
     }
 
-    /// The daemon's socket: `<socket dir>/<node id>.sock`. The node must be initialized, as the
+    /// The server's socket: `<socket dir>/<node id>.sock`. The node must be initialized, as the
     /// id is read from `node.json`. It is refused when it cannot fit in `sun_path`, which a
     /// 64 character id leaves ~35 bytes of directory for on macOS.
     pub fn socket_path(&self) -> Res<PathBuf> {
@@ -332,7 +332,7 @@ impl NodeDir {
             path.display()
         );
         if let Some(peers) = &settings.peers {
-            // Fail on a bad ticket whichever command reads the settings, not when a daemon
+            // Fail on a bad ticket whichever command reads the settings, not when a server
             // happens to boot it.
             peers
                 .peers_config(settings.relay)
@@ -342,7 +342,7 @@ impl NodeDir {
     }
 
     /// Rewrites `node.json` with `change` applied. The new file is written beside it and renamed
-    /// over it, so a reader (a daemon booting) sees the old settings or the new, never half.
+    /// over it, so a reader (a server booting) sees the old settings or the new, never half.
     /// Whether the node is serving does not matter: settings are read once, at boot.
     pub fn update_settings<T>(&self, change: impl FnOnce(&mut NodeSettings) -> Res<T>) -> Res<T> {
         let mut settings = self.settings()?;
@@ -362,7 +362,7 @@ impl NodeDir {
         Ok(out)
     }
 
-    /// Creates `run/` (the daemon's log) and the socket directory, each owner-only.
+    /// Creates `run/` (the server's log) and the socket directory, each owner-only.
     pub fn ensure_run_dir(&self) -> Res<()> {
         Self::ensure_private_dir(&self.run_dir())?;
         Self::ensure_private_dir(&self.socket_dir)
@@ -397,7 +397,7 @@ impl NodeDir {
         Ok(())
     }
 
-    /// Learns whether a daemon answers on the socket by connecting to it, as the node's own
+    /// Learns whether a server answers on the socket by connecting to it, as the node's own
     /// listener does before it replaces a stale socket.
     pub async fn probe_socket(&self) -> Res<SocketState> {
         use std::os::unix::fs::FileTypeExt;
@@ -507,7 +507,7 @@ impl NodeDir {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockRole {
     /// `day node run`: it serves until stopped, and attaches the peers service.
-    Daemon,
+    Serve,
     /// A command that opened the node for itself: it serves its socket while it runs and for as
     /// long as clients remain connected after, and attaches no peers service.
     Command,
@@ -516,7 +516,7 @@ pub enum LockRole {
 impl LockRole {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Daemon => "daemon",
+            Self::Serve => "serve",
             Self::Command => "command",
         }
     }
@@ -565,7 +565,7 @@ impl LockHeld {
             pid: lines.next().and_then(|line| line.parse().ok()),
             socket: lines.next().map(PathBuf::from),
             role: lines.next().and_then(|line| match line {
-                "daemon" => Some(LockRole::Daemon),
+                "serve" => Some(LockRole::Serve),
                 "command" => Some(LockRole::Command),
                 _ => None,
             }),
@@ -593,7 +593,7 @@ pub struct Booted {
 
 impl Booted {
     /// Boots the node in `dir` on the lock the caller holds, serving its socket. `role` is how
-    /// it attaches to the network: a daemon attaches the peers service when `node.json` has a
+    /// it attaches to the network: the serving node attaches the peers service when `node.json` has a
     /// `peers` section; a command's own node attaches none, since it lives for one command and
     /// must not dial or hold the node's endpoint. The lock announces it is serving once the
     /// socket accepts connections.
@@ -604,7 +604,7 @@ impl Booted {
             ..default()
         };
         let peers = match role {
-            LockRole::Daemon => settings
+            LockRole::Serve => settings
                 .peers
                 .as_ref()
                 .map(|peers| peers.peers_config(settings.relay))

@@ -105,7 +105,7 @@ pub async fn run(command: GrantsCommands) -> Res<ExitCode> {
 /// lists them is refused with the way to a running node rather than shown an empty queue.
 fn require_running_node(client: &NodeClient) -> Res<()> {
     eyre::ensure!(
-        client.mode() == Mode::Daemon,
+        client.mode() == Mode::Serving,
         "no node is running here, and grant requests live in a running node's memory: start it \
          with `day node run`"
     );
