@@ -238,6 +238,22 @@ impl NodeDir {
     /// too, which can make a booting holder see the node as held for that moment; it then waits
     /// out the probe and takes the lock on its next attempt.
     pub fn try_lock(&self, role: LockRole) -> Res<Result<NodeLock, LockHeld>> {
+        self.lock_as(role, Some(self.socket_path()?))
+    }
+
+    /// [`Self::try_lock`] for a holder that serves no socket (a host with no second process, whose
+    /// node data directory may be too deep for a socket path). It records no socket in the lock
+    /// file and has no boot to wait out, so `node.boot` is released at once: a process that
+    /// finds this node held sees no socket to wait for, and waits for the lock instead.
+    pub fn try_lock_unserved(&self, role: LockRole) -> Res<Result<NodeLock, LockHeld>> {
+        let mut lock = self.lock_as(role, None)?;
+        if let Ok(lock) = &mut lock {
+            lock.serving()?;
+        }
+        Ok(lock)
+    }
+
+    fn lock_as(&self, role: LockRole, socket: Option<PathBuf>) -> Res<Result<NodeLock, LockHeld>> {
         let path = self.lock_path();
         let boot = Self::open_lock_file(&self.boot_lock_path())?;
         match boot.try_lock() {
@@ -258,7 +274,8 @@ impl NodeDir {
 {}
 {}",
                         std::process::id(),
-                        self.socket_path()?.display(),
+                        // An empty line for a holder with no socket, so the role stays third.
+                        socket.as_deref().unwrap_or(Path::new("")).display(),
                         role.as_str()
                     )
                     .as_bytes(),
@@ -364,7 +381,10 @@ impl LockHeld {
         let mut lines = text.lines();
         Ok(Self {
             pid: lines.next().and_then(|line| line.parse().ok()),
-            socket: lines.next().map(PathBuf::from),
+            socket: lines
+                .next()
+                .filter(|line| !line.is_empty())
+                .map(PathBuf::from),
             role: lines.next().and_then(|line| match line {
                 "daemon" => Some(LockRole::Daemon),
                 "command" => Some(LockRole::Command),
@@ -546,6 +566,23 @@ impl NodeDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A holder with no socket takes the lock without a socket path, records no
+    /// socket and its role, and leaves no boot lock for another process to wait on.
+    #[test]
+    fn an_unserved_lock_records_its_role_but_no_socket_and_holds_no_boot_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = NodeDir::new(tmp.path().to_path_buf());
+        // Initialized only so the probing `try_lock` below can name its own socket.
+        dir.init().unwrap();
+        let _lock = dir.try_lock_unserved(LockRole::Daemon).unwrap().unwrap();
+        let held = dir.try_lock(LockRole::Command).unwrap().unwrap_err();
+        assert_eq!(held.pid, Some(std::process::id()));
+        assert_eq!(held.socket, None);
+        assert_eq!(held.role, Some(LockRole::Daemon));
+        // Returns at once instead of blocking: nothing is booting.
+        dir.wait_until_serving().unwrap();
+    }
 
     #[test]
     fn the_default_socket_directory_is_the_runtime_directory_or_a_private_one_in_tmp() {

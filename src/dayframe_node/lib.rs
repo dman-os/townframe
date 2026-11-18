@@ -5,7 +5,7 @@
 //!
 //! A host with no second process (Android) is always the holder of its node: [`NodeComposition`]
 //! boots a `big_node` in this process from the host's data directory, through the same
-//! [`day_node::Booted`] holder boot the `day` CLI uses, under the node lock, opens the `micros` subsystem actor and one actor
+//! [`day_node::HeldNode`] boot the `day` CLI uses, under the node lock `day` takes, opens the `micros` subsystem actor and one actor
 //! per installed micro below it, and gives each micro a [`MicroEgress`] that answers its
 //! `dispatch.local` requests as that actor.
 //!
@@ -27,9 +27,10 @@ use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use clay_guest_session::egress::DispatchEgress;
 use clay_node_egress::MicroEgress;
-use day_node::Booted;
+use day_node::HeldNode;
 use day_node::LockRole;
 use day_node::NodeDir;
+use day_node::NodeLock;
 use day_node::NodeSettings;
 use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::HttpTransportError;
@@ -233,7 +234,9 @@ pub struct NodeComposition {
     /// Declared first, dropped last: the node's tasks run on it. See [`Self::stop`].
     runtime: tokio::runtime::Runtime,
     installed: BTreeMap<String, Installed>,
-    held: Booted,
+    held: HeldNode,
+    /// Held to the end, after the node has stopped: the node's storage is this process's alone.
+    _lock: NodeLock,
 }
 
 /// What the composition holds for one installed micro.
@@ -262,25 +265,26 @@ impl NodeComposition {
                     installs,
                 } = config;
                 prepare_settings(&root, &bootstrap)?;
-                // The holder takes the node's lock exactly as `day` does, so `day` and any other
-                // host find this process through the lock and its socket instead of booting
-                // the same storage a second time. This host has no second process (Android), so
-                // another holder is an invariant break, not something to attach to: desktop
-                // hosts will use `NodeDir::find_or_hold` and attach instead.
+                // The holder takes the node's lock as `day` does, so `day` and any other host
+                // find the directory held instead of booting the same storage a second time.
+                // This host has no second process (Android), so another holder is an invariant
+                // break, not something to attach to: desktop hosts will use
+                // `NodeDir::find_or_hold` and attach instead. It holds the lock only: no
+                // socket, because nothing can reach one and a data directory this deep would
+                // not fit a socket path. So no listeners; the holder is its own only client
+                // and reaches the node through its dispatch client.
                 let dir = NodeDir::new(root);
-                dir.ensure_run_dir()?;
-                let lock = match dir.try_lock(LockRole::Daemon)? {
+                let lock = match dir.try_lock_unserved(LockRole::Daemon)? {
                     Ok(lock) => lock,
                     Err(held) => utils_rs::prelude::eyre::bail!(
                         "{held} already holds the node at {}; a host with no second process must be its only holder",
                         dir.root().display()
                     ),
                 };
-                // Its own only client: it reaches the node through its dispatch client, and
-                // the socket the holder role serves is for other processes.
-                let held = Booted::boot(&dir, lock, LockRole::Daemon, schemas).await?;
-                match install_all(held.node(), installs).await {
-                    Ok(installed) => Ok((held, installed)),
+                let settings = NodeSettings::load(dir.root())?;
+                let held = HeldNode::boot(dir.root(), &settings, default(), true, schemas).await?;
+                match install_all(&held.node, installs).await {
+                    Ok(installed) => Ok((held, lock, installed)),
                     Err(error) => match held.stop().await {
                         Ok(()) => Err(error),
                         Err(stop) => {
@@ -292,10 +296,11 @@ impl NodeComposition {
             .await
             .expect(ERROR_TOKIO);
         match booted {
-            Ok((held, installed)) => Ok(Self {
+            Ok((held, lock, installed)) => Ok(Self {
                 runtime,
                 installed,
                 held,
+                _lock: lock,
             }),
             Err(error) => {
                 runtime.shutdown_background();
@@ -305,7 +310,7 @@ impl NodeComposition {
     }
 
     pub fn node(&self) -> &big_node::BigNode {
-        self.held.node()
+        &self.held.node
     }
 
     /// The `dispatch.local` egress for `micro` (its id text), to hand to its Wasmtime factory.
@@ -337,7 +342,7 @@ impl NodeComposition {
     /// (its actor is reused; its capabilities are minted anew).
     pub async fn install_micro(&mut self, install: MicroInstall) -> Res<()> {
         let micro = install.micro.clone();
-        let installed = install_one(self.held.node(), install).await?;
+        let installed = install_one(&self.held.node, install).await?;
         self.installed.insert(micro, installed);
         Ok(())
     }
@@ -347,7 +352,7 @@ impl NodeComposition {
     /// node's root authority, so it is for the host's own installs at boot and is never handed to
     /// a micro (a micro's only way out is its [`Self::egress`]).
     pub fn operator_transport(&self) -> OperatorTransport {
-        let node = self.held.node();
+        let node = &self.held.node;
         OperatorTransport {
             router: big_dispatch::xrpc_router(
                 node.dispatch.client.clone(),
@@ -379,7 +384,7 @@ impl NodeComposition {
     /// it. Always present, since the composition always attaches the peers service.
     pub fn address(&self) -> String {
         self.held
-            .node()
+            .node
             .peers
             .as_ref()
             .expect("the composition attaches the peers service")
@@ -393,6 +398,7 @@ impl NodeComposition {
             runtime,
             installed,
             held,
+            _lock,
         } = self;
         drop(installed);
         let stopped = runtime.spawn(held.stop()).await.expect(ERROR_TOKIO);
