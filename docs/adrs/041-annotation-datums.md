@@ -1,5 +1,7 @@
 # ADR 041: Annotation datums: comments, threads, structure, seen state
 
+**Changed 2026-11-18 (operator, ledger D69):** comments carry `creator` and `generator` (W3C Web Annotation) as a claimed participant beside the cabinet's attested actor, so an agent and the operator on one node are two sides of a review. `creator.id` names a recorded session today and a long-lived identity later (§2).
+
 **Changed 2026-11-12:** recorded work has no file documents (ledger D59, ADR 040 §4), so a comment on code targets a commit or a worktree op with a path, a line range and a quote, and is carried across revisions by git's diff mapping instead of a CRDT cursor (§2). Cursors stay for text held in documents.
 
 **Status:** Proposed. Supersedes the notes, threads, structure and seen-state sections of the earlier ADR 036 ("intxt datums for the review loop").
@@ -41,7 +43,16 @@ We take W3C's shape (targets, quote selectors, motivation), an explicit parent f
 - **`quote` is required on text targets.** It checks every carried position: a reader compares the text found there with `quote`. A cursor never fails to resolve: one whose text was deleted resolves to a neighbouring position (F6), so a stale anchor looks valid. A reader compares the resolved text with `quote`; on a mismatch it re-attaches by quote matching or shows the comment as outdated. On a real rebase (F6), 785 of 888 anchors resolved onto identical text and quote matching recovered 99 of the other 103. Tools fill `quote`; people's clients fill it for them. A comment about deleted lines targets the earlier state.
 - **Replies** carry `replyTo` and `motivation: replying`, so a thread is one reference-index query (ADR 035 §2.6) rather than a walk over every comment's targets.
 - **Body** uses the generic note shape (ADR 036 §5). A body that is itself a datum to render (a suggested change, an embedded result) is a reference instead, rendered by the renderer registered for its tag (ADR 036 §4), as Patchwork renders typed comment content.
-- No `creator` or `created`: authorship is what the cabinet attests (ADR 036 §1, rule 4), and time is the datum's change time.
+- **`creator` and `generator`** (W3C Web Annotation §3.3.1, Agents) name who wrote the comment and the software that produced it, as a claim. The cabinet's attestation (ADR 036 §1, rule 4) stays the verified layer: which actor signed the write. The two differ because one node's socket admits every caller from the node's uid as the operator (ADR 043, Context), so the operator and an agent running `day` in the same session are one attested actor. `creator` is what tells a reviewer's comment from the agent's. A reader shows `creator` as claimed until the attested actor is the creator's own: once a client pairs (ADR 043), the plugin's actor signs its own writes and the claim can be checked against it.
+
+  ```jsonc
+  "creator":   { "type": "Software", "id": "dtxt:doc:zSess…" },   // or { "type": "Person" }: the operator, when no agent is detected
+  "generator": { "type": "Software", "name": "claude-code", "version": "2.1.322" }
+  ```
+
+  - **Detection** follows the cross-tool convention: `AI_AGENT` (then `AGENT`) names the agent, and a tool-specific variable gives its session (Claude Code: `CLAUDE_CODE_SESSION_ID`). With none set, the creator is a `Person`. `generator` is the parsed `AI_AGENT` value.
+  - **`creator.id` is a reference to whatever identifies the participant**: today the session document capture recorded for that session id, and nothing when the session is not recorded. A long-lived identity (an agent lane that spans many sessions, a member of a swarm) is a later datum that `creator.id` can name instead, with no change to this shape (ledger D69).
+  - **Time** stays the datum's change time; there is no `created`.
 
 ## 3. Thread state
 
