@@ -12,6 +12,7 @@ use crate::render::supported_listener;
 use crate::render::supported_tag;
 use crate::replay::replay;
 use crate::stylesheet::sanitize_stylesheet;
+use crate::stylesheet::validate_stylesheet;
 use crate::wire::AttributeValue;
 use crate::wire::Mutation;
 use crate::wire::NodeId;

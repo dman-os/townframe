@@ -246,6 +246,9 @@ impl<C: Clone> SurfaceTree<C> {
             }
             Mutation::SetText(text) => self.validate_text(top, text, bytes, work),
             Mutation::SetStyleSheet(sheet) => {
+                validate_stylesheet(sheet).map_err(|reason| {
+                    PresentationError::InvalidBatch(format!("guest stylesheet refused: {reason}"))
+                })?;
                 Self::charge_work(work, 1 + sheet.len() / 64)?;
                 Self::charge_string(bytes, sheet)?;
                 // The stored sheet is charged to the surface's retained budget like node bytes

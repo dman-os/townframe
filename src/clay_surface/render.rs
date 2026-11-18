@@ -227,7 +227,7 @@ pub(crate) fn static_attribute(
             "value", "checked", "disabled", "readonly", "required", "multiple", "selected",
             "name", "type", "placeholder", "autocomplete", "inputmode", "pattern",
             "min", "max", "step", "minlength", "maxlength", "size", "rows", "cols", "wrap",
-            "for", "novalidate", "accept", "href", "rel", "alt", "width", "height", "loading",
+            "for", "novalidate", "accept", "form", "action", "formaction", "href", "src", "srcset", "poster", "background", "rel", "alt", "width", "height", "loading",
             "open", "datetime", "start",
             "reversed", "colspan", "rowspan", "scope", "headers", "label", "low", "high",
             "optimum", "media",
@@ -289,9 +289,11 @@ pub(crate) fn attribute_value_policy(
             // Numbers and booleans cannot carry a URL, but Dioxus stringifies them into
             // attributes whose meaning is a scheme or an autofill token.
             return match (name, namespace) {
-                ("href" | "autocomplete", None | Some(XLINK_NAMESPACE)) => {
-                    Err("non-text value for a restricted attribute")
-                }
+                (
+                    "src" | "href" | "srcset" | "poster" | "action" | "formaction" | "background"
+                    | "autocomplete",
+                    None | Some(XLINK_NAMESPACE),
+                ) => Err("non-text value for a restricted attribute"),
                 _ => Ok(()),
             };
         }
@@ -310,20 +312,14 @@ pub(crate) fn attribute_value_policy(
         // `xlink:href` exists for `<use>` only; on any other element it would be an unchecked
         // second spelling of `href`.
         ("href", Some(XLINK_NAMESPACE)) => return Err("xlink:href is only for svg use"),
-        // Links carry an absolute http, https or mailto target and nothing else. The prefix test
-        // runs at byte 0 (browsers strip leading C0 controls and spaces before reading the
-        // scheme) and control characters anywhere are refused (tab and newline are stripped from
-        // inside a scheme, so `java\tscript:` would otherwise pass for a different scheme).
-        ("href", None) => {
-            let scheme_ok = ["http://", "https://", "mailto:"].iter().any(|scheme| {
-                text.as_bytes()
-                    .get(..scheme.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(scheme.as_bytes()))
-            });
-            if !scheme_ok || text.bytes().any(|byte| byte.is_ascii_control()) {
-                return Err("href must be an http, https or mailto url");
+        // A guest URL attribute is allowed to name only a same-document fragment or a data URL.
+        // Everything else is a fetch, navigation, or submission performed by the host.
+        ("src" | "href" | "srcset" | "poster" | "action" | "formaction" | "background", None) => {
+            if !is_safe_guest_url(text) {
+                return Err("URL attribute must be a #fragment or data: URL");
             }
         }
+
         // Any autofill token other than `off` invites a password manager to fill a guest field.
         ("autocomplete", None) => {
             if text != "off" {
@@ -369,6 +365,18 @@ pub(crate) fn attribute_value_policy(
         _ => {}
     }
     Ok(())
+}
+
+/// A URL value that cannot make the host fetch, navigate, or submit is either a same-document
+/// fragment or a data URL. Controls are refused because browser URL parsing strips some of them.
+fn is_safe_guest_url(value: &str) -> bool {
+    !value.is_empty()
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+        && (value.len() > 1 && value.starts_with('#')
+            || value
+                .as_bytes()
+                .get(..5)
+                .is_some_and(|head| head.eq_ignore_ascii_case(b"data:")))
 }
 
 /// The value rule shared by `style:<property>` attributes and the declarations of a raw `style`

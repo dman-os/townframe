@@ -816,7 +816,7 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
     let text = |value: &str| AttributeValue::Text(value.into());
     let style = Some("style");
     let hostile: Vec<(&str, Option<&str>, AttributeValue)> = vec![
-        // Links: only http, https and mailto, with no scheme smuggling.
+        // URL-bearing attributes allow only same-document fragments and data URLs.
         (
             "href",
             None,
@@ -826,22 +826,24 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
         ("href", None, text(" javascript:alert(1)")),
         ("href", None, text("java\tscript:alert(1)")),
         ("href", None, text("https://ok.example/\nx")),
-        ("href", None, text("data:text/html,<script>1</script>")),
         ("href", None, text("blob:https://host/uuid")),
         ("href", None, text("file:///etc/passwd")),
         ("href", None, text("//evil.example/x")),
         ("href", None, text("/relative")),
-        ("href", None, text("#fragment")),
-        ("href", None, text("")),
         ("href", None, AttributeValue::Int(1)),
         ("href", None, AttributeValue::Boolean(true)),
-        // Names that exist only to carry a fetch, a navigation, or a form submission.
+        // URL-bearing attributes reject fetches, navigations, and form submissions.
         ("src", None, text("https://evil.example/p.png")),
         ("srcset", None, text("https://evil.example/a 1x")),
         ("sizes", None, text("100vw")),
         ("poster", None, text("https://evil.example/p.png")),
         ("action", None, text("https://evil.example/")),
         ("formaction", None, text("https://evil.example/")),
+        (
+            "background",
+            None,
+            text("https://evil.example/background.png"),
+        ),
         ("method", None, text("post")),
         ("form", None, text("host-form")),
         ("target", None, text("_blank")),
@@ -907,7 +909,10 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
         let batch = set_attribute_batch(name, namespace, value.clone());
         let error = assert_terminal(&batch, true);
         assert!(
-            matches!(error, PresentationError::Unsupported(_)),
+            matches!(
+                error,
+                PresentationError::Unsupported(_) | PresentationError::InvalidBatch(_)
+            ),
             "{name} {namespace:?} {value:?}"
         );
     }
@@ -917,13 +922,14 @@ fn hostile_attribute_values_and_removed_names_fault_the_presentation() {
 fn benign_link_and_style_values_are_admitted() {
     let text = |value: &str| AttributeValue::Text(value.into());
     let admitted: Vec<(&str, Option<&str>, AttributeValue)> = vec![
-        ("href", None, text("https://example.com/a?b=c#d")),
-        ("href", None, text("HTTP://example.com")),
-        (
-            "href",
-            None,
-            text("mailto:someone@example.com?subject=hi%20there"),
-        ),
+        ("href", None, text("#fragment")),
+        ("href", None, text("data:text/html,<script>1</script>")),
+        ("src", None, text("#image")),
+        ("srcset", None, text("data:image/png;base64,AA 1x")),
+        ("poster", None, text("#poster")),
+        ("action", None, text("#submit")),
+        ("formaction", None, text("data:text/plain,submit")),
+        ("background", None, text("data:image/png;base64,AA")),
         ("href", None, AttributeValue::None),
         ("autocomplete", None, text("off")),
         ("autocomplete", None, AttributeValue::Boolean(false)),
@@ -1097,13 +1103,16 @@ fn open_data_attributes_and_overflow_anchor_pass_ingress_and_render() {
 }
 
 #[test]
-fn a_later_stylesheet_replaces_the_earlier_one_and_is_sanitized_at_ingress() {
+fn a_later_stylesheet_replaces_the_earlier_one_after_safe_ingress_validation() {
     let mut tree = SurfaceTree::new();
     tree.apply(&[Mutation::SetStyleSheet(
-        "a { color: red; background: url(x.png) }".into(),
+        "a { color: red; background: linear-gradient(red, blue) }".into(),
     )])
     .unwrap();
-    assert_eq!(tree.stylesheet, "a {\ncolor: red;\n}");
+    assert_eq!(
+        tree.stylesheet,
+        "a {\ncolor: red;\nbackground: linear-gradient(red, blue);\n}"
+    );
     tree.apply(&[Mutation::SetStyleSheet("b { margin: 0 }".into())])
         .unwrap();
     assert_eq!(tree.stylesheet, "b {\nmargin: 0;\n}");
@@ -1112,6 +1121,22 @@ fn a_later_stylesheet_replaces_the_earlier_one_and_is_sanitized_at_ingress() {
         SurfaceTree::new().apply(&[Mutation::SetStyleSheet(oversized)]),
         Err(PresentationError::Unsupported("string byte limit".into()))
     );
+}
+#[test]
+fn guest_stylesheet_fetches_refuse_the_whole_batch_at_ingress() {
+    for sheet in [
+        "a { background: url(https://evil.example/p.png) }",
+        "a { background: image-set('https://evil.example/p.png' 1x) }",
+        "@import 'https://evil.example/style.css';",
+    ] {
+        let error = SurfaceTree::new()
+            .apply(&[Mutation::SetStyleSheet(sheet.into())])
+            .unwrap_err();
+        assert!(
+            matches!(error, PresentationError::InvalidBatch(ref reason) if reason.contains("guest stylesheet refused")),
+            "{sheet}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -1964,8 +1989,8 @@ fn the_egress_policy_and_the_richer_vocabulary_compose_without_a_fetching_path()
         )
         .is_err()
     );
-    assert!(apply("a", None, "href", None, "https://example.com/").is_ok());
-    assert!(apply("a", None, "href", None, "#x").is_err());
+    assert!(apply("a", None, "href", None, "#fragment").is_ok());
+    assert!(apply("a", None, "href", None, "https://example.com/").is_err());
     // Neither a custom element nor a `<style>` element reopens a raw `style` attribute, a `src`,
     // or an `action`.
     for tag in ["x-widget", "style", "slot", "bdi"] {

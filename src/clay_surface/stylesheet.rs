@@ -54,6 +54,19 @@ pub(crate) fn sanitize_stylesheet(sheet: &str) -> String {
     rules.join("\n")
 }
 
+/// Validates a guest stylesheet without silently dropping rules. Presentation ingress refuses a
+/// batch containing a fetchable declaration or at-rule, so the caller gets a durable fault instead
+/// of relying on whichever renderer happens to interpret the sanitized result.
+pub(crate) fn validate_stylesheet(sheet: &str) -> Result<(), &'static str> {
+    let mut parser = Parser::new(sheet);
+    let mut sanitizer = Sanitizer { nested: false };
+    StyleSheetParser::new(&mut parser, &mut sanitizer)
+        .find_map(|result| result.err())
+        .map_or(Ok(()), |_| {
+            Err("stylesheet contains a fetchable resource or unsupported rule")
+        })
+}
+
 /// Wraps `sheet` in `@media <query> { ... }` so a `document::Style { media }` keeps its meaning.
 /// The query is checked token by token first: anything that could end the `@media` prelude or
 /// its block early (a brace, semicolon, unbalanced bracket, bad string or url, at-keyword) would
