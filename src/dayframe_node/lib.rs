@@ -25,6 +25,9 @@ use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::drawer::protocol::RememberDrawer;
 use clay_guest_session::egress::DispatchEgress;
 use clay_node_egress::MicroEgress;
 use day_node::HeldNode;
@@ -496,6 +499,48 @@ async fn install_one(node: &big_node::BigNode, install: MicroInstall) -> Res<Ins
     let egress = MicroEgress::install(node.dispatch.client.clone(), minter, &actor, methods)
         .await
         .wrap_err_with(|| format!("minting the capability of micro {micro}"))?;
+    // The micro reads its drawers through this node, and a node fetches from its peers only the
+    // drawers it mirrors: `big_node`'s peer policy wants only the `mirror` entries of the node's
+    // own known-drawers list, and another node's read grant makes a drawer available to this one
+    // without making it wanted. So every drawer granted to a micro is remembered here, mirrored,
+    // or the micro's reads stay empty forever. Remembering a remembered drawer changes nothing.
+    if !drawers.is_empty() {
+        let registry = node
+            .drawers
+            .client
+            .call_with(
+                RequestContext::root(),
+                Authorization::identity(node.drawers_actor.capability).metadata(),
+                MintDrawerCapability {
+                    scope: DrawerScope {
+                        drawers: BTreeMap::from([(
+                            node.drawers.local().known_drawers_id,
+                            DrawerAccess::Admin,
+                        )]),
+                        create: false,
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .wrap_err("minting the known-drawers capability")?
+            .capability_id;
+        for (drawer, _) in &drawers {
+            node.drawers
+                .client
+                .call(
+                    RequestContext::root(),
+                    RememberDrawer {
+                        capability: registry,
+                        drawer_id: drawer.clone(),
+                        mirror: true,
+                    },
+                )
+                .await
+                .wrap_err_with(|| format!("mirroring drawer {drawer} for micro {micro}"))?;
+        }
+    }
     let doc_capability = if drawers.is_empty() {
         None
     } else {
