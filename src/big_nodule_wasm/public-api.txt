@@ -7,5 +7,5 @@ impl NoduleExecutor for big_nodule_wasm::WasmExecutor
 impl OutgoingHandler for big_nodule_wasm::Egress
 impl Provider for big_nodule_wasm::WasmProvider
 impl Router for big_nodule_wasm::Sealed
-pub big_nodule_wasm::async fn boot (blobs : Arc < BlobService > , dispatch : Client < DispatchProtocol > ,) -> Res < (Arc < WasmExecutor > , StopToken) >
+pub big_nodule_wasm::async fn boot (blobs : Arc < BlobService > , dispatch : Client < DispatchProtocol > , allow_host_loopback : bool ,) -> Res < (Arc < WasmExecutor > , StopToken) >
 pub struct big_nodule_wasm::WasmExecutor  {  }

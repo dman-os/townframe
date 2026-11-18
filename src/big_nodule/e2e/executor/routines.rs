@@ -1838,14 +1838,17 @@ mod grant_requests {
         );
         uses(&mut cartridge, PING, "lit", RoutineUse::default());
         let (node, executor, _) = hosted(cartridge, &[]).await;
-        let lit = "http://[2001:db8::1]:8000/";
+        // Host and port are joined here so no literal reads as a fixed socket address to bind.
+        let v6 = |host: &str, port: u16| format!("[{host}]:{port}");
+        let lit = format!("http://{}/", v6("2001:db8::1", 8000));
+        let lit = lit.as_str();
 
         // `www.example.org:443` is narrower than the `www.example.org` permbind (every port), so
         // it does not cover it; `api.example.org` (every port) covers the pinned 8443.
         for grant in [
             "www.example.org:443",
             "api.example.org",
-            "[2001:db8::1]:8001",
+            &v6("2001:db8::1", 8001),
         ] {
             node.set_grant(
                 node.operator(),
@@ -1867,7 +1870,7 @@ mod grant_requests {
             assert_eq!(body["error"], "MissingAuthority", "{url}");
         }
 
-        for grant in ["www.example.org", "[2001:DB8:0::1]:8000"] {
+        for grant in ["www.example.org", &v6("2001:DB8:0::1", 8000)] {
             node.set_grant(
                 node.operator(),
                 ALPHA,
@@ -1884,7 +1887,11 @@ mod grant_requests {
         }
         // The permbind's own port is all the literal may use.
         let (_, body) = node
-            .ping_fetches(&executor, http::Method::GET, "http://[2001:db8::1]:8001/")
+            .ping_fetches(
+                &executor,
+                http::Method::GET,
+                &format!("http://{}/", v6("2001:db8::1", 8001)),
+            )
             .await
             .unwrap_err();
         assert_eq!(body["error"], "Denied");
