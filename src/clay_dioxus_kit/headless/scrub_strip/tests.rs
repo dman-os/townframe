@@ -8,12 +8,12 @@ fn room() -> f64 {
     WIDTH - REST_INSET - spacing(HEIGHT, breakpoints().len()) / 2.0
 }
 
-fn placed(settle: f64) -> Vec<Placed> {
+fn placed(engaged: bool) -> Vec<Placed> {
     let items = breakpoints();
     let spacing = spacing(HEIGHT, breakpoints().len());
     let limit = push_limit(300.0, room());
     let floor = push_floor(limit);
-    place(&items, 6.0, spacing, floor, limit, settle)
+    place(&items, 6.0, spacing, floor, limit, engaged)
 }
 
 /// The whole point of deriving spacing from the window: at rest every
@@ -34,7 +34,7 @@ fn resting_index_fits_every_breakpoint() {
 /// displacement at all.
 #[test]
 fn resting_strip_is_flat_and_uniform() {
-    let placed = placed(0.0);
+    let placed = placed(false);
 
     assert!(
         placed.iter().all(|p| p.push == 0.0),
@@ -330,7 +330,7 @@ fn the_index_stays_inside_the_window() {
 /// Nothing is ever culled, so a run of neighbours can never drop one.
 #[test]
 fn neighbours_are_never_skipped() {
-    let labels: Vec<&str> = placed(1.0).iter().map(|p| p.label).collect();
+    let labels: Vec<&str> = placed(true).iter().map(|p| p.label).collect();
     assert_eq!(labels.len(), breakpoints().len());
 
     let start = labels.iter().position(|l| *l == "A").expect("A is visible");
@@ -374,19 +374,20 @@ fn spacing_shrinks_so_a_long_list_spans_what_the_reference_one_does() {
 }
 
 mod transitions {
-    //! [`ArcState::next`] on its own: no `VirtualDom`, no signals, no timers.
+    //! [`StripState::next`] on its own: no `VirtualDom`, no signals, no timers.
     use super::*;
 
     const VIEW: (f64, f64) = (WIDTH, HEIGHT);
     const COUNT: usize = 28;
 
-    fn run(state: &ArcState, events: &[ArcEvent]) -> (ArcState, Vec<Effect>) {
+    /// The state after the events, and every breakpoint they reported, in order.
+    fn run(state: &StripState, events: &[StripEvent]) -> (StripState, Vec<usize>) {
         let mut state = state.clone();
         let mut all = vec![];
         for event in events {
-            let (next, effects) = state.next(VIEW, COUNT, *event);
+            let (next, selected) = state.next(VIEW, COUNT, *event);
             state = next;
-            all.extend(effects);
+            all.extend(selected);
         }
         (state, all)
     }
@@ -397,10 +398,10 @@ mod transitions {
         top_inset(spacing, COUNT, HEIGHT) + index as f64 * spacing
     }
 
-    fn pressed_at(index: usize) -> ArcState {
+    fn pressed_at(index: usize) -> StripState {
         run(
-            &ArcState::default(),
-            &[ArcEvent::Press {
+            &StripState::default(),
+            &[StripEvent::Press {
                 x: 1050.0,
                 y: y_of(index),
             }],
@@ -411,33 +412,32 @@ mod transitions {
     #[test]
     fn a_press_engages_the_strip_on_the_breakpoint_under_it_and_reports_it_once() {
         let (state, effects) = run(
-            &ArcState::default(),
-            &[ArcEvent::Press {
+            &StripState::default(),
+            &[StripEvent::Press {
                 x: 1050.0,
                 y: y_of(5),
             }],
         );
-        assert_eq!(state.settle, 1.0);
+        assert!(state.engaged());
         assert_eq!(state.thumb_x, Some(1050.0));
-        assert_eq!(state.generation, 1);
         assert_eq!(state.focus.round() as usize, 5);
-        assert_eq!(effects, [Effect::Select(5)]);
+        assert_eq!(effects, [5]);
     }
 
     #[test]
     fn a_release_without_a_press_changes_nothing() {
-        let rest = ArcState::default();
-        let (state, effects) = run(&rest, &[ArcEvent::Release, ArcEvent::Release]);
+        let rest = StripState::default();
+        let (state, effects) = run(&rest, &[StripEvent::Release, StripEvent::Release]);
         assert_eq!(state, rest);
         assert!(effects.is_empty());
     }
 
     #[test]
     fn a_move_without_a_press_changes_nothing() {
-        let rest = ArcState::default();
+        let rest = StripState::default();
         let (state, effects) = run(
             &rest,
-            &[ArcEvent::Drag {
+            &[StripEvent::Drag {
                 x: 1000.0,
                 y: y_of(9),
             }],
@@ -447,75 +447,47 @@ mod transitions {
     }
 
     #[test]
-    fn a_release_after_a_press_starts_one_settle_of_a_new_generation() {
-        let held = pressed_at(3);
-        let (state, effects) = run(&held, &[ArcEvent::Release]);
-        assert_eq!(state.generation, held.generation + 1);
-        assert_eq!(effects, [Effect::Settle(state.generation)]);
-        // Still engaged until the animation lands.
-        assert_eq!(state.settle, 1.0);
-        assert!(state.thumb_x.is_some());
+    fn a_release_after_a_press_returns_the_strip_to_rest_at_once() {
+        // Even from a pull past an end: the stylesheet's transition does the unbending.
+        let pulled = run(&pressed_at(0), &[StripEvent::Drag { x: 900.0, y: -50.0 }]).0;
+        assert!(pulled.pull < 0.0);
+        let (state, selected) = run(&pulled, &[StripEvent::Release]);
+        assert_eq!((state.thumb_x, state.pull), (None, 0.0));
+        assert!(!state.engaged());
+        // Releasing keeps the selection and reports nothing new.
+        assert_eq!(state.focus, pulled.focus);
+        assert!(selected.is_empty());
     }
 
     #[test]
-    fn the_settle_eases_out_and_lands_at_rest() {
-        let released = run(&pressed_at(3), &[ArcEvent::Release]).0;
-        let generation = released.generation;
-        let mut previous = 1.0;
-        let mut state = released;
-        for step in 1..SETTLE_STEPS {
-            state = state
-                .next(VIEW, COUNT, ArcEvent::Tick { generation, step })
-                .0;
-            assert!(state.settle < previous, "step {step} did not ease");
-            assert!(state.thumb_x.is_some(), "landed early at {step}");
-            previous = state.settle;
-        }
-        state = state
-            .next(
-                VIEW,
-                COUNT,
-                ArcEvent::Tick {
-                    generation,
-                    step: SETTLE_STEPS,
-                },
-            )
-            .0;
-        assert_eq!((state.settle, state.pull, state.thumb_x), (0.0, 0.0, None));
+    fn a_second_release_changes_nothing() {
+        let released = run(&pressed_at(3), &[StripEvent::Release]).0;
+        let (again, selected) = run(&released, &[StripEvent::Release]);
+        assert_eq!(again, released);
+        assert!(selected.is_empty());
     }
 
     #[test]
-    fn a_frame_of_a_superseded_settle_is_ignored() {
-        let released = run(&pressed_at(3), &[ArcEvent::Release]).0;
-        let stale = released.generation;
-        // A new press supersedes the animation in flight.
-        let (pressed, _) = released.next(
-            VIEW,
-            COUNT,
-            ArcEvent::Press {
+    fn a_press_clears_the_hover_label() {
+        let hovering = run(&StripState::default(), &[StripEvent::Hover { y: y_of(7) }]).0;
+        assert_eq!(hovering.hovered, Some(7));
+        let (pressed, _) = run(
+            &hovering,
+            &[StripEvent::Press {
                 x: 1050.0,
-                y: y_of(8),
-            },
+                y: y_of(7),
+            }],
         );
-        let (after, effects) = pressed.next(
-            VIEW,
-            COUNT,
-            ArcEvent::Tick {
-                generation: stale,
-                step: SETTLE_STEPS,
-            },
-        );
-        assert_eq!(after, pressed);
-        assert!(effects.is_empty());
+        assert_eq!(pressed.hovered, None);
     }
 
     #[test]
     fn dragging_past_an_end_pulls_and_inside_the_index_does_not() {
         // A drag is laid out with the engaged (wider) spacing.
-        let Metrics { spacing, top, .. } = Metrics::of(VIEW, COUNT, 1.0);
+        let Metrics { spacing, top, .. } = Metrics::of(VIEW, COUNT, true);
         let inside = run(
             &pressed_at(4),
-            &[ArcEvent::Drag {
+            &[StripEvent::Drag {
                 x: 1000.0,
                 y: top + 10.0 * spacing,
             }],
@@ -524,7 +496,7 @@ mod transitions {
         assert_eq!(inside.pull, 0.0);
         let past = run(
             &pressed_at(4),
-            &[ArcEvent::Drag {
+            &[StripEvent::Drag {
                 x: 1000.0,
                 y: top - 30.0,
             }],
@@ -537,29 +509,21 @@ mod transitions {
     #[test]
     fn nudges_and_wheels_clamp_to_the_list_and_report_each_new_breakpoint_once() {
         let (state, effects) = run(
-            &ArcState::default(),
+            &StripState::default(),
             &[
-                ArcEvent::Nudge(1.0),
-                ArcEvent::Nudge(1.0),
-                ArcEvent::Nudge(-1000.0),
-                ArcEvent::Nudge(1000.0),
-                ArcEvent::Nudge(1000.0),
+                StripEvent::Nudge(1.0),
+                StripEvent::Nudge(1.0),
+                StripEvent::Nudge(-1000.0),
+                StripEvent::Nudge(1000.0),
+                StripEvent::Nudge(1000.0),
             ],
         );
         assert_eq!(state.focus, (COUNT - 1) as f64);
-        assert_eq!(
-            effects,
-            [
-                Effect::Select(1),
-                Effect::Select(2),
-                Effect::Select(0),
-                Effect::Select(COUNT - 1)
-            ]
-        );
+        assert_eq!(effects, [1, 2, 0, COUNT - 1]);
         let spacing = spacing(HEIGHT, COUNT);
         let (wheeled, _) = run(
-            &ArcState::default(),
-            &[ArcEvent::Wheel {
+            &StripState::default(),
+            &[StripEvent::Wheel {
                 travel: 3.0 * spacing,
             }],
         );
@@ -568,171 +532,283 @@ mod transitions {
 
     #[test]
     fn hovering_labels_the_breakpoint_only_while_not_pressed() {
-        let (hovered, _) = run(&ArcState::default(), &[ArcEvent::Hover { y: y_of(7) }]);
+        let (hovered, _) = run(&StripState::default(), &[StripEvent::Hover { y: y_of(7) }]);
         assert_eq!(hovered.hovered, Some(7));
-        let (left, _) = run(&hovered, &[ArcEvent::HoverEnd]);
+        let (left, _) = run(&hovered, &[StripEvent::HoverEnd]);
         assert_eq!(left.hovered, None);
-        let (held, _) = run(&pressed_at(2), &[ArcEvent::Hover { y: y_of(7) }]);
+        let (held, _) = run(&pressed_at(2), &[StripEvent::Hover { y: y_of(7) }]);
         assert_eq!(held.hovered, None);
     }
 
     #[test]
     fn a_focus_left_past_a_shrunken_list_is_clamped_by_the_next_event() {
-        let far = ArcState {
+        let far = StripState {
             focus: 20.0,
-            ..ArcState::default()
+            ..StripState::default()
         };
-        let (state, _) = far.next(VIEW, 3, ArcEvent::Nudge(1.0));
+        let (state, _) = far.next(VIEW, 3, StripEvent::Nudge(1.0));
         assert_eq!(state.focus, 2.0);
     }
 }
 
 mod rendered {
-    //! The component under a `VirtualDom`, as the lab drives it: one `ArcIndex` whose items the
-    //! parent swaps when the tab changes.
+    //! The component rendered into the harness's retained DOM, as the lab drives it: one
+    //! `ScrubStrip` whose items the parent swaps when the tab changes, and the vocabulary a
+    //! stylesheet keys on.
     use super::*;
+    use crate::testing::Page;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-    static TAB: GlobalSignal<usize> = Signal::global(|| 0);
     const TABS: [&[&str]; 3] = [
         &["Component kit"],
         &["Typography", "Spacing", "Shape", "Surfaces"],
         &["Colors", "Extra"],
     ];
 
-    fn app() -> Element {
+    #[derive(Clone)]
+    struct Probe {
+        renderer: Renderer,
+        selected: Rc<RefCell<Vec<usize>>>,
+    }
+
+    fn app(probe: Probe) -> Element {
+        let mut tab = use_signal(|| 0usize);
+        let selected = probe.selected;
         rsx! {
-            ArcIndex { viewport: (1076.0, 860.0), items: TABS[TAB()].to_vec(), on_select: |_| {} }
+            for index in 0..TABS.len() {
+                button { key: "{index}", onclick: move |_| tab.set(index), "tab {index}" }
+            }
+            ScrubStrip {
+                viewport: (1076.0, 860.0),
+                items: TABS[tab()].to_vec(),
+                renderer: probe.renderer,
+                on_select: move |index| selected.borrow_mut().push(index),
+            }
         }
     }
 
-    fn switch_to(dom: &mut VirtualDom, tab: usize) -> String {
-        dom.in_runtime(|| *TAB.write() = tab);
-        format!("{:?}", dom.render_immediate_to_vec())
+    fn render(renderer: Renderer) -> (Page, Rc<RefCell<Vec<usize>>>) {
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let probe = Probe {
+            renderer,
+            selected: Rc::clone(&selected),
+        };
+        (Page::with_props(app, probe), selected)
+    }
+
+    fn markers(page: &Page) -> Vec<String> {
+        let root = page.by_class("ct-scrub-strip");
+        page.children(root)
+            .into_iter()
+            .filter(|part| page.attr(*part, "data-part").as_deref() == Some("marker"))
+            .map(|marker| page.text(marker))
+            .collect()
+    }
+
+    #[test]
+    fn the_strip_is_named_parts_and_vocabulary_only() {
+        let (page, _) = render(Renderer::Blitz);
+        let root = page.by_class("ct-scrub-strip");
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
+        // Every child is a part (`parts` fails on one that is not), in paint order.
+        assert_eq!(page.parts(root), ["scrim", "marker", "grab-band", "status"]);
+        for property in [
+            "--ct-strip-cell",
+            "--ct-strip-inset",
+            "--ct-strip-anchor",
+            "--ct-strip-limit",
+        ] {
+            assert!(page.custom_property(root, property).is_some(), "{property}");
+        }
+        // At rest nothing is pushed and nothing reaches out.
+        assert_eq!(
+            page.custom_property(root, "--ct-strip-limit").as_deref(),
+            Some("0px")
+        );
+        let marker = page.children(root)[1];
+        assert_eq!(
+            page.custom_property(marker, "--ct-strip-push").as_deref(),
+            Some("0px")
+        );
+        assert_eq!(page.parts(marker), ["tick", "label"]);
+    }
+
+    #[test]
+    fn the_strip_is_one_slider_whose_value_is_the_breakpoint() {
+        let (page, _) = render(Renderer::Blitz);
+        let slider = page.by_role("slider", "Index");
+        assert_eq!(
+            page.attr(slider, "aria-orientation").as_deref(),
+            Some("vertical")
+        );
+        assert_eq!(page.attr(slider, "aria-valuemin").as_deref(), Some("1"));
+        assert_eq!(page.attr(slider, "aria-valuemax").as_deref(), Some("1"));
+        assert_eq!(page.attr(slider, "aria-valuenow").as_deref(), Some("1"));
+        assert_eq!(
+            page.attr(slider, "aria-valuetext").as_deref(),
+            Some("Component kit")
+        );
+        // The labels are decorative: the slider and the live region carry the meaning.
+        let root = page.by_class("ct-scrub-strip");
+        let marker = page.children(root)[1];
+        assert_eq!(page.attr(marker, "aria-hidden").as_deref(), Some("true"));
+    }
+
+    #[test]
+    fn the_slider_is_a_tab_stop_only_where_the_renderer_takes_focus() {
+        let (page, _) = render(Renderer::Browser);
+        assert_eq!(
+            page.attr(page.by_role("slider", "Index"), "tabindex")
+                .as_deref(),
+            Some("0")
+        );
+        let (page, _) = render(Renderer::Blitz);
+        assert_eq!(page.attr(page.by_role("slider", "Index"), "tabindex"), None);
     }
 
     #[test]
     fn the_strip_follows_the_items_the_parent_passes() {
-        let mut dom = VirtualDom::new(app);
-        let first = format!("{:?}", dom.rebuild_to_vec());
-        assert!(
-            first.contains("aria-valuemax") && first.contains("Int(1)"),
-            "{first}"
-        );
-
-        let second = switch_to(&mut dom, 1);
-        assert!(
-            second.contains("Int(4)"),
-            "valuemax did not follow the items: {second}"
-        );
-        assert!(
-            second.contains("Typography"),
-            "labels did not follow the items: {second}"
-        );
-
-        let third = switch_to(&mut dom, 2);
-        assert!(third.contains("Int(2)"), "{third}");
+        let (mut page, _) = render(Renderer::Blitz);
+        assert_eq!(markers(&page).len(), 1);
+        let second = page.by_role("button", "tab 1");
+        page.click(second);
+        let labels = markers(&page);
+        assert_eq!(labels.len(), 4, "{labels:?}");
+        // A marker holds the tick and the label, so its text is the label.
+        assert_eq!(labels[0], "Typography");
+        let slider = page.by_role("slider", "Index");
+        assert_eq!(page.attr(slider, "aria-valuemax").as_deref(), Some("4"));
+        let third = page.by_role("button", "tab 2");
+        page.click(third);
+        let slider = page.by_role("slider", "Index");
+        assert_eq!(page.attr(slider, "aria-valuemax").as_deref(), Some("2"));
     }
 
-    /// A release with no press of the strip's own (a scrollbar drag let go over the grab
-    /// band) leaves the strip at rest: no settle animation starts, so the overlay never
-    /// turns on `pointer-events`.
-    #[test]
-    fn a_release_without_a_press_leaves_the_strip_at_rest() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        // Handlers read their event data through the converter a renderer installs.
-        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-        runtime.block_on(async {
-            let mut dom = VirtualDom::new(app);
-            let first = dom.rebuild_to_vec();
-            assert!(
-                format!("{first:?}").contains("pointer-events:none"),
-                "{first:?}"
-            );
-            // Every element the renderer registered: a stray release lands wherever the
-            // cursor is, and none of them may engage the strip.
-            let targets: Vec<_> = first
-                .edits
-                .iter()
-                .filter_map(|edit| match edit {
-                    dioxus_core::Mutation::SetId { id } => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            assert!(!targets.is_empty(), "{first:?}");
-            let release: dioxus_html::SerializedPointerData =
-                serde_json::from_value(serde_json::json!({
-                    "pointer_id": 1, "width": 1.0, "height": 1.0, "pressure": 0.0,
-                    "tangential_pressure": 0.0, "tilt_x": 0, "tilt_y": 0, "twist": 0,
-                    "pointer_type": "mouse", "is_primary": true,
-                    "alt_key": false, "button": 0, "buttons": 0,
-                    "client_x": 1050.0, "client_y": 400.0, "ctrl_key": false,
-                    "meta_key": false, "offset_x": 0.0, "offset_y": 0.0,
-                    "page_x": 1050.0, "page_y": 400.0, "screen_x": 1050.0,
-                    "screen_y": 400.0, "shift_key": false,
-                }))
-                .expect("pointer data");
-            for target in targets {
-                dom.runtime().handle_event_for_target(
-                    dioxus_core::RenderTargetId::ROOT,
-                    "pointerup",
-                    dioxus_core::Event::new(
-                        dioxus_html::EventData::Pointer(release.clone()).into_any(),
-                        true,
-                    ),
-                    target,
-                );
-            }
-            // Long enough for several settle ticks had a release started.
-            let _ =
-                tokio::time::timeout(Duration::from_millis(SETTLE_MS), dom.wait_for_work()).await;
-            let after = format!("{:?}", dom.render_immediate_to_vec());
-            assert!(
-                !after.contains("pointer-events:auto"),
-                "a stray release engaged the strip: {after}"
-            );
-        });
+    fn on_tab(page: &mut Page, tab: usize) {
+        let button = page.by_role("button", &format!("tab {tab}"));
+        page.click(button);
     }
 
-    /// A wheel over the index steps the strip without panicking: the handler reads the focus
-    /// before committing the next one, which writes it.
     #[test]
-    fn a_wheel_over_the_index_steps_without_a_double_borrow() {
-        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-        let mut dom = VirtualDom::new(app);
-        let first = dom.rebuild_to_vec();
-        let targets: Vec<_> = first
-            .edits
-            .iter()
-            .filter_map(|edit| match edit {
-                dioxus_core::Mutation::SetId { id } => Some(*id),
-                _ => None,
-            })
-            .collect();
-        assert!(!targets.is_empty(), "{first:?}");
-        let wheel: dioxus_html::SerializedWheelData = serde_json::from_value(serde_json::json!({
-            "delta_mode": 0, "delta_x": 0.0, "delta_y": 120.0, "delta_z": 0.0,
-            "alt_key": false, "button": 0, "buttons": 0,
-            "client_x": 1050.0, "client_y": 400.0, "ctrl_key": false,
-            "meta_key": false, "offset_x": 0.0, "offset_y": 0.0,
-            "page_x": 1050.0, "page_y": 400.0, "screen_x": 1050.0,
-            "screen_y": 400.0, "shift_key": false,
-        }))
-        .expect("wheel data");
-        for target in targets {
-            dom.runtime().handle_event_for_target(
-                dioxus_core::RenderTargetId::ROOT,
-                "wheel",
-                dioxus_core::Event::new(
-                    dioxus_html::EventData::Wheel(wheel.clone()).into_any(),
-                    true,
-                ),
-                target,
+    fn the_keys_scrub_report_each_breakpoint_once_and_move_the_slider() {
+        let (mut page, selected) = render(Renderer::Browser);
+        on_tab(&mut page, 1);
+        let slider = page.by_role("slider", "Index");
+        page.key(slider, Key::Named(NamedKey::ArrowDown));
+        page.key(slider, Key::Named(NamedKey::PageDown));
+        page.key(slider, Key::Named(NamedKey::ArrowRight));
+        let slider = page.by_role("slider", "Index");
+        assert_eq!(page.attr(slider, "aria-valuenow").as_deref(), Some("4"));
+        assert_eq!(
+            page.attr(slider, "aria-valuetext").as_deref(),
+            Some("Surfaces")
+        );
+        // The end clamps and is not reported again.
+        page.key(slider, Key::Named(NamedKey::ArrowDown));
+        page.key(slider, Key::Named(NamedKey::Home));
+        page.key(slider, Key::Named(NamedKey::ArrowUp));
+        page.key(slider, Key::Named(NamedKey::End));
+        assert_eq!(*selected.borrow(), [1, 2, 3, 0, 3]);
+        let slider = page.by_role("slider", "Index");
+        assert_eq!(page.attr(slider, "aria-valuenow").as_deref(), Some("4"));
+        // The live region speaks the last breakpoint.
+        let root = page.by_class("ct-scrub-strip");
+        let status = *page.children(root).last().expect("a status part");
+        assert_eq!(page.text(status), "Surfaces");
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_step_is_left_alone() {
+        let (mut page, selected) = render(Renderer::Browser);
+        on_tab(&mut page, 1);
+        let slider = page.by_role("slider", "Index");
+        page.key(slider, Key::Character("x".into()));
+        page.key(slider, Key::Named(NamedKey::Enter));
+        assert!(selected.borrow().is_empty());
+    }
+
+    #[test]
+    fn pressing_engages_and_releasing_returns_to_rest_with_the_labels_at_the_edge() {
+        let (mut page, selected) = render(Renderer::Blitz);
+        on_tab(&mut page, 1);
+        let root = page.by_class("ct-scrub-strip");
+        let band = page.by_role("slider", "Index");
+        page.pointer_at(band, "pointerdown", (1050.0, 430.0));
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("engaged"));
+        assert!(!selected.borrow().is_empty());
+        // The thumb is 26 px inboard of the resting column, so something is pushed, and the
+        // active label gets a bubble.
+        assert_ne!(
+            page.custom_property(root, "--ct-strip-limit").as_deref(),
+            Some("0px")
+        );
+        let parts = page.parts(root);
+        assert!(parts.contains(&"bubble".to_string()), "{parts:?}");
+        page.pointer_at(root, "pointerup", (1050.0, 430.0));
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
+        assert_eq!(
+            page.custom_property(root, "--ct-strip-limit").as_deref(),
+            Some("0px")
+        );
+        assert!(!page.parts(root).contains(&"bubble".to_string()));
+        for marker in page
+            .children(root)
+            .into_iter()
+            .filter(|part| page.attr(*part, "data-part").as_deref() == Some("marker"))
+        {
+            assert_eq!(
+                page.custom_property(marker, "--ct-strip-push").as_deref(),
+                Some("0px")
             );
         }
-        dom.render_immediate_to_vec();
+    }
+
+    /// A release with no press of the strip's own (a scrollbar drag let go over the grab band)
+    /// leaves the strip at rest: it never turns its `pointer-events` on.
+    #[test]
+    fn a_release_without_a_press_leaves_the_strip_at_rest() {
+        let (mut page, selected) = render(Renderer::Blitz);
+        let root = page.by_class("ct-scrub-strip");
+        let band = page.by_role("slider", "Index");
+        for target in [root, band] {
+            page.pointer_at(target, "pointerup", (1050.0, 400.0));
+            page.pointer_at(target, "pointercancel", (1050.0, 400.0));
+        }
+        let root = page.by_class("ct-scrub-strip");
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
+        assert!(selected.borrow().is_empty());
+    }
+
+    #[test]
+    fn hovering_the_band_reveals_the_labels_and_marks_the_one_under_the_pointer() {
+        let (mut page, _) = render(Renderer::Blitz);
+        on_tab(&mut page, 1);
+        let band = page.by_role("slider", "Index");
+        page.pointer_at(band, "pointermove", (1050.0, 430.0));
+        let root = page.by_class("ct-scrub-strip");
+        // No press started a gesture, so the move over the band is a hover, not a drag.
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("hover"));
+        let hovered = page
+            .children(root)
+            .into_iter()
+            .filter(|part| page.attr(*part, "data-hover").is_some())
+            .count();
+        assert_eq!(hovered, 1);
+        page.pointer_at(band, "pointerleave", (1050.0, 430.0));
+        let root = page.by_class("ct-scrub-strip");
+        assert_eq!(page.attr(root, "data-state").as_deref(), Some("idle"));
+    }
+
+    /// A wheel over the strip steps it without panicking: the handler reads the focus before
+    /// committing the next one, which writes it.
+    #[test]
+    fn a_wheel_over_the_strip_steps_without_a_double_borrow() {
+        let (mut page, selected) = render(Renderer::Blitz);
+        on_tab(&mut page, 1);
+        let root = page.by_class("ct-scrub-strip");
+        page.wheel(root, 120.0);
+        assert!(!selected.borrow().is_empty());
     }
 
     /// The lab's parent: the tabs swap the items under a live strip, so a storm also changes
@@ -743,12 +819,17 @@ mod rendered {
             for index in 0..TABS.len() {
                 button { key: "{index}", onclick: move |_| tab.set(index), "tab {index}" }
             }
-            ArcIndex { viewport: (1076.0, 860.0), items: TABS[tab()].to_vec(), on_select: move |_| {} }
+            ScrubStrip {
+                viewport: (1076.0, 860.0),
+                items: TABS[tab()].to_vec(),
+                renderer: Renderer::Browser,
+                on_select: move |_| {},
+            }
         }
     }
 
     /// Every listener of the strip, fed every event kind it takes in seeded random order, with
-    /// settle animations running between steps and the items swapped under it.
+    /// the items swapped under it.
     #[test]
     fn a_storm_of_events_in_any_order_never_panics() {
         let dispatched = dioxus_storm::Storm::of(tabbed)

@@ -1,0 +1,47 @@
+/*
+ * ct-card (headless/card.rs). Parts: header, content, footer. Axis: data-variant
+ * (outline|raised|plain).
+ */
+.ct-card {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-radius: var(--ct-dimension-radius-lg);
+  background: var(--ct-color-surface);
+  color: var(--ct-color-text);
+  font-family: var(--ct-font-family);
+}
+
+.ct-card[data-variant="outline"] {
+  border: var(--ct-dimension-border-width-hairline) solid var(--ct-color-border);
+}
+
+.ct-card[data-variant="raised"] {
+  background: var(--ct-color-surface-raised);
+  box-shadow: var(--ct-elevation-md);
+}
+
+.ct-card[data-variant="plain"] {
+  background: transparent;
+}
+
+.ct-card [data-part="header"] {
+  padding: var(--ct-dimension-spacing-4) calc(var(--ct-spacing) * 5)
+    var(--ct-dimension-spacing-2);
+  font-weight: var(--ct-font-weight-semibold);
+}
+
+.ct-card [data-part="content"] {
+  padding: var(--ct-dimension-spacing-2) calc(var(--ct-spacing) * 5)
+    calc(var(--ct-spacing) * 5);
+}
+
+.ct-card [data-part="footer"] {
+  display: flex;
+  align-items: center;
+  gap: var(--ct-dimension-spacing-2);
+  padding: var(--ct-dimension-spacing-3) calc(var(--ct-spacing) * 5);
+  border-top: var(--ct-dimension-border-width-hairline) solid
+    var(--ct-color-border);
+}

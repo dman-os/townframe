@@ -5,6 +5,8 @@
 //! (the shell) follows with its window.
 use clay_dioxus_kit::use_list_details;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::Button;
+use clay_dioxus_kit::ButtonVariant;
 use clay_dioxus_kit::Drawer;
 use clay_dioxus_kit::ListDetails;
 use clay_dioxus_kit::ListRow;
@@ -259,11 +261,7 @@ fn SheetSpecimen(width_px: f64) -> Element {
     rsx! {
         div {
             class: "p-4",
-            button {
-                class: "cursor-pointer rounded-md border border-border bg-card px-4 py-2 text-foreground",
-                onclick: move |_| open.set(true),
-                "Open sheet"
-            }
+            Button { variant: ButtonVariant::Outline, onclick: move |()| open.set(true), "Open sheet" }
         }
         if open() {
             Sheet { width, name: "Choose a theme", on_dismiss: move |()| open.set(false),
@@ -284,10 +282,7 @@ fn AppBarSpecimen() -> Element {
             title: "Settings",
             leading: rsx! { NavButton { mode: NavButtonMode::Sidebar, onclick: |_| {} } },
             trailing: rsx! {
-                button {
-                    class: "min-h-12 cursor-pointer rounded-md px-3 text-text hover:bg-surface-sunken",
-                    "Search"
-                }
+                Button { variant: ButtonVariant::Ghost, onclick: |()| {}, "Search" }
             },
         }
     }
@@ -300,11 +295,7 @@ fn DrawerSpecimen(width_px: f64) -> Element {
     rsx! {
         div {
             class: "p-4",
-            button {
-                class: "cursor-pointer rounded-md border border-border bg-card px-4 py-2 text-foreground",
-                onclick: move |_| open.set(true),
-                "Open drawer"
-            }
+            Button { variant: ButtonVariant::Outline, onclick: move |()| open.set(true), "Open drawer" }
         }
         Drawer { width, name: "Sidebar", open: open(), on_dismiss: move |()| open.set(false),
             nav {
@@ -312,11 +303,7 @@ fn DrawerSpecimen(width_px: f64) -> Element {
                 "aria-label": "Specimen sidebar",
                 AppBar { title: "claytxt" }
                 for title in ["Home", "Settings", "Layout"] {
-                    button {
-                        key: "{title}",
-                        class: "block min-h-12 w-full cursor-pointer rounded-md px-4 text-left text-text hover:bg-surface-sunken",
-                        "{title}"
-                    }
+                    Button { key: "{title}", variant: ButtonVariant::Ghost, onclick: |()| {}, "{title}" }
                 }
             }
         }

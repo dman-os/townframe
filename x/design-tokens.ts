@@ -28,7 +28,10 @@ type Token = {
 
 const root = new URL("../", import.meta.url);
 const tokenDirectory = new URL("src/clay_dioxus_kit/styles/tokens/", root);
-const outputUrl = new URL("src/clay_dioxus_kit/styles/tokens.generated.css", root);
+const outputUrl = new URL(
+  "src/clay_dioxus_kit/styles/tokens.generated.css",
+  root,
+);
 const sources = ["primitives.tokens.json", "semantic.tokens.json"];
 const supportedTypes = new Set<TokenType>([
   "color",
@@ -262,6 +265,7 @@ function dimension(value: unknown, path: string): string {
   const isPill = path === "dimension.radius.pill" ||
     path === "dimension.radius-pill";
   const isBorder = /(^|\.)border(?:[-.]|$)/.test(path);
+  const isFontSize = /(^|\.)font-size(?:[-.]|$)/.test(path);
 
   if (isPill) {
     if (value.unit !== "px" || value.value !== 999) {
@@ -269,7 +273,7 @@ function dimension(value: unknown, path: string): string {
     }
   } else if (isShadow || isBorder) {
     if (value.unit !== "px") fail(`dimension ${path} must use px`);
-  } else if (isSpacing || isRadius) {
+  } else if (isSpacing || isRadius || isFontSize) {
     if (value.unit !== "rem") fail(`dimension ${path} must use rem`);
   } else {
     fail(`dimension ${path} has no documented unit policy`);

@@ -4,12 +4,26 @@ The shared Dioxus component library for Clay compositions (claytxt, the agentic 
 into native hosts, the browser build and Wasm guest micros alike, so it depends on Dioxus (default
 features off) and the design-token vocabulary only: no backend, no renderer, no `clay_*` crate.
 Design: [ADR 032 section 7](../../docs/adrs/032-shell-micro-and-component-kit.md); vocabulary:
-[FDR 006](../../docs/fdrs/006-shell-grammar.md). Every later component copies what is already
-here, so the rules below are binding; a change to a rule is a change to this file.
+[FDR 006](../../docs/fdrs/006-shell-grammar.md); styling:
+[the styling contract](../../docs/design-language/styling-contract.md). Every later component
+copies what is already here, so the rules below are binding; a change to a rule is a change to
+this file.
 
-| Component | Headless part | Styled part | Specimen |
+Two generations of component live here. The **contract** components (the first seven rows below)
+are a headless part and a stylesheet, and follow `KIT-200` to `KIT-205`. The **legacy**
+components (the rest) are a headless part and a styled Rust part of Tailwind classes, and follow
+`KIT-011` to `KIT-013` until the contract reaches them (it is the next lane's work).
+
+| Component | Headless part | Skin | Specimen |
 |---|---|---|---|
-| `Sections` (resizable split) | `headless::sections` | `Sections` | `claytxt_showcase/kit.rs` |
+| `Button` (variants, sizes, toggle) | `headless::button` | `styles/kit/button.css` | `claytxt_showcase/specimens/button.rs` |
+| `Tabs`, `TabPanel` (ARIA tabs, roving focus) | `headless::tabs` | `styles/kit/tabs.css` | `specimens/tabs.rs` |
+| `Card`, `CardHeader`, `CardContent`, `CardFooter` | `headless::card` | `styles/kit/card.css` | `specimens/card.rs` |
+| `Separator` | `headless::separator` | `styles/kit/separator.css` | `specimens/separator.rs` |
+| `Alert` (info, success, warning, danger) | `headless::alert` | `styles/kit/alert.css` | `specimens/alert.rs` |
+| `Chip` (static, toggle, removable) | `headless::chip` | `styles/kit/chip.css` | `specimens/chip.rs` |
+| `ScrubStrip` (Niagara-style index strip) | `headless::scrub_strip` | `styles/kit/scrub_strip.css` | `specimens/scrub_strip.rs` |
+| `Sections` (resizable split) | `headless::sections` | `Sections` (Rust, Tailwind) | `claytxt_showcase/kit.rs` |
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `Sheet` | same |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `NavButton` | same |
@@ -25,7 +39,10 @@ the rest are enforced by review.
 ### Structure
 
 - **KIT-001** The crate depends on `dioxus` with `default-features = false` and nothing else at
-  runtime, and builds for native, `wasm32-unknown-unknown` and `wasm32-wasip3`. Checked:
+  runtime, and builds for native, `wasm32-unknown-unknown` and `wasm32-wasip3`. The one optional
+  addition is the `host` feature (`FoundationStyles`, `ThemeRoot`: the generated stylesheet
+  bundle linked as an asset), which turns on `dioxus/asset` and `dioxus/document` for a host that
+  has a document and an asset pipeline; a wasm guest never enables it. Checked:
   `guardrails.toml` `[builds.*]`, `cargo x guardrails check-matrix --package clay_dioxus_kit
   --target <t>`.
 - **KIT-002** A component is two modules: `headless/<name>.rs` (public, reached as
@@ -40,7 +57,7 @@ the rest are enforced by review.
 
 - **KIT-010** The headless part owns state, ARIA, events and nothing visual: roles, accessible
   names, `data-state` / `data-value`, listeners, and the controlled/uncontrolled contract.
-- **KIT-011** The skin is a plain struct of `&'static str` class strings (`SectionsSkin`, ...)
+- **KIT-011** (legacy; contract components follow `KIT-200` to `KIT-203`) The skin is a plain struct of `&'static str` class strings (`SectionsSkin`, ...)
   that the headless part applies to its parts. The styled part is the only code that names
   classes, and it uses only Tailwind utilities that resolve to semantic tokens (`bg-surface`,
   `text-text`, `rounded-xl`, spacing steps); no palette utilities and no arbitrary values
@@ -48,11 +65,48 @@ the rest are enforced by review.
   `group-data-[state=...]` variants (the latter styles a part from its group's state, as the
   `Sections` grip does), which are COMPOSE-003's "data attribute" variant mechanism. A second skin is a second set of strings
   over the same headless part.
-- **KIT-012** Variants are explicit enum props (`NavButtonMode`, `WidthClass`). Styled components
+- **KIT-012** (legacy) Variants are explicit enum props (`NavButtonMode`, `WidthClass`). Styled components
   take no `class` or `style` pass-through (COMPOSE-003).
-- **KIT-013** Inline `style` in a headless part is limited to what breaks behaviour when it is
+- **KIT-013** (legacy) Inline `style` in a headless part is limited to what breaks behaviour when it is
   missing: flex weights, an overlay's `position: fixed`, `touch-action`, a handle's hit area.
   Geometry is px (FOUND-008); appearance never is. A `z-index` is never a number here (`KIT-102`).
+
+### The styling contract (contract components)
+
+The contract itself is `docs/design-language/styling-contract.md`; these are its rules as the kit
+enforces them. They apply to a component that has a stylesheet in `styles/kit/`.
+
+- **KIT-200** A contract component is its headless part and `styles/kit/<name>.css`, and nothing
+  else visual: no `*Skin` struct, no styled Rust part, no class literal but its root. The only
+  inline style is a custom property (`style: "--ct-<component>-<what>: {x}px"`) that the
+  stylesheet reads; an inline declaration of any other property is refused at run time by the
+  test harness (a guest's wire would admit it, so the harness is the check) and by
+  `conventions::contract_parts_set_only_custom_properties_inline`.
+- **KIT-201** The vocabulary a stylesheet keys on: a `ct-<name>` class on the root (kebab case),
+  `data-part="<part>"` on internals, `data-state` for a part's one enumerated state, a bare
+  `data-<name>` for a boolean state (`data-disabled`), `data-orientation`, and the axes the caller
+  picks: `data-variant`, `data-size`, `data-status`. Native pseudo-classes (`:hover`,
+  `:focus-visible`, `:disabled`) are used where one exists. A module's docs list its parts,
+  states and axes, and its tests assert them (`Page::by_class`, `Page::parts`). Adding a name is
+  compatible; renaming or removing one is a breaking change to every theme.
+- **KIT-202** The skin is `styles/kit/<name>.css`, imported with `layer(kit)` by
+  `tailwind.css` and so part of the generated bundle (`assets/tailwind.css`, regenerated with
+  `tailwindcss -i src/clay_dioxus_kit/tailwind.css -o src/clay_dioxus_kit/assets/tailwind.css`).
+  Rules are keyed on the root class, `data-part` and `data-*`, read tokens as `--ct-*`, and use no
+  `!important` (layers order the cascade), no `@apply` and no `url()`. Checked:
+  `conventions::contract_skins_are_stylesheets_in_the_kit_layer`.
+- **KIT-203** Motion and focus are the skin's: a `transition` or `animation` is declared in the
+  stylesheet and removed under `prefers-reduced-motion: reduce` (INTERACTION-007); a focusable
+  part has a `:focus-visible` outline in the `focus` role (INTERACTION-002); a pressable is 48 px
+  on a coarse pointer (`KIT-106`). Rust never runs a timer to animate. Checked for the
+  reduced-motion guard; the rest by review and the specimen.
+- **KIT-204** A contract component has a specimen page, `claytxt_showcase/specimens/<name>.rs`,
+  that shows every variant and state it has. Checked: `conventions::every_component_has_a_specimen`.
+- **KIT-205** Behaviour tests state the vocabulary: root class, parts in order, each axis value
+  and state (`data-state`, ARIA), the keyboard map and, where focus moves, that it moved (the
+  harness's `mount` backs an element that records `set_focus`). Invariant violations in props
+  (`KIT-023`) live in a pure `validate` function so a test can see them panic: Dioxus catches a
+  panic inside a component, so a bare `assert!` there is only logged.
 
 ### Controlled state and callbacks
 
@@ -249,13 +303,13 @@ What fails, and where, when a rule is broken. `src/conventions.rs` reads this cr
 text (comments stripped, test modules excluded where the rule is about production code) and runs
 under `cargo nextest run -p clay_dioxus_kit`, so it gates CI with the rest of the tests; its
 component list is derived from `headless/`, so a new component needs no edit there. Rules not
-listed are review-only: KIT-003, 013, 020 to 023, 041, 042, 050 and 051. KIT-053 and
+listed are review-only: KIT-003, 013, 020 to 023, 041, 042, 050, 051 and 205. KIT-053 and
 KIT-070 are enforced by the harness itself (`src/testing.rs`).
 
 | Rule | Enforced by |
 |---|---|
 | KIT-001 | `guardrails.toml` (`allowed_dependencies = []` refuses any workspace crate, so no micro, host or renderer crate; `[builds.*]` compiles all three targets in `cargo x guardrails check-matrix`); `conventions::the_only_runtime_dependency_is_dioxus_without_default_features` refuses any other dependency |
-| KIT-002 | `cargo x guardrails lint` (module item budgets); `conventions::a_component_is_a_public_headless_module_and_a_private_styled_one` (both modules exist and are declared, styled one private and re-exported, README table row) |
+| KIT-002 | `cargo x guardrails lint` (module item budgets); `conventions::a_component_is_a_public_headless_module_and_a_skin` (the headless module is declared; a legacy component's styled module exists, private and re-exported; a contract component is re-exported from `headless`; README table row) |
 | KIT-010, KIT-011 | `conventions::headless_parts_hold_no_styling` (no `class: "..."` literal, no utility strings, no import of a styled part in `headless/`) |
 | KIT-011 | `conventions::styled_parts_use_semantic_tokens_only` (no palette or `white`/`black` utilities, no `[...]` except the `data-[state=...]` variant and its `group-` form) |
 | KIT-012 | `conventions::styled_components_take_no_class_or_style` |
@@ -263,8 +317,12 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | KIT-052 | `conventions::tabindex_is_only_the_renderer_focus_gate` (`tabindex` only in `headless/sections.rs`, gated on `.takes_focus()`, and `-1` on the modal panels; focus moves only in `headless.rs`) |
 | KIT-053 | the harness panics on a tag, attribute or style property outside the guest vocabulary |
 | KIT-071 | `conventions::tests_neither_sleep_nor_wait` (no sleeps, timers, clocks, threads, async runtimes) |
-| KIT-072 | `conventions::a_component_is_a_public_headless_module_and_a_private_styled_one` (every `headless/<name>.rs` has a `#[test]`) |
-| KIT-080 | `conventions::every_component_has_a_specimen_at_both_widths` (the showcase names the component; a framed specimen has a `COMPACT_PX` and an `EXPANDED_PX` frame; `NavButton` and `ListRow` are the two unframed ones) |
+| KIT-072 | `conventions::a_component_is_a_public_headless_module_and_a_skin` (every `headless/<name>.rs` has a `#[test]`) |
+| KIT-080 | `conventions::every_component_has_a_specimen` (the showcase names the legacy component; a framed specimen has a `COMPACT_PX` and an `EXPANDED_PX` frame; `NavButton` and `ListRow` are the two unframed ones) |
+| KIT-200 | `conventions::contract_parts_set_only_custom_properties_inline`; the harness (`src/testing.rs`) panics on any other inline style; `a_component_is_a_public_headless_module_and_a_skin` (no styled Rust part beside a stylesheet); `headless_parts_hold_no_styling` (only the root class) |
+| KIT-201 | the component's own tests (`Page::by_class`, `Page::parts`); `contract_skins_are_stylesheets_in_the_kit_layer` (the sheet styles its root class) |
+| KIT-202, KIT-203 | `conventions::contract_skins_are_stylesheets_in_the_kit_layer` (layer import, bundle in sync, no `!important`/`@apply`/`url(`, reduced-motion guard) |
+| KIT-204 | `conventions::every_component_has_a_specimen` |
 | KIT-090 | `conventions::a_module_that_mentions_blitz_documents_it_under_renderer_limits` |
 | every cited `KIT-nnn` | `conventions::cited_rules_exist_in_the_readme` |
 

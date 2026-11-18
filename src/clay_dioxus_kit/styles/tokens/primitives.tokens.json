@@ -23,6 +23,11 @@
       "hairline": { "$value": { "value": 1, "unit": "px" } },
       "thin": { "$value": { "value": 1, "unit": "px" } },
       "thick": { "$value": { "value": 2, "unit": "px" } }
+    },
+    "font-size": {
+      "sm": { "$value": { "value": 0.875, "unit": "rem" } },
+      "md": { "$value": { "value": 1, "unit": "rem" } },
+      "lg": { "$value": { "value": 1.125, "unit": "rem" } }
     }
   },
   "color": {

@@ -18,6 +18,9 @@
     --ct-dimension-border-hairline: 1px;
     --ct-dimension-border-thin: 1px;
     --ct-dimension-border-thick: 2px;
+    --ct-dimension-font-size-sm: 0.875rem;
+    --ct-dimension-font-size-md: 1rem;
+    --ct-dimension-font-size-lg: 1.125rem;
     --ct-color-neutral-0: #ffffff;
     --ct-color-neutral-50: #fafafc;
     --ct-color-neutral-100: #f0f0f5;
