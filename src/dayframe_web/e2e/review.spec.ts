@@ -29,9 +29,12 @@ test("the pull request list shows the node's pull requests", async ({
   await expect(review.getByRole("button", { name: /#15\d/ })).toHaveCount(
     pulls.length,
   );
-  await expect(review.getByText("dman-os/townframe#150 · open")).toBeVisible();
+  // A row names its title, `owner/repo#number` and state.
   await expect(
-    review.getByText("dman-os/townframe#151 · merged"),
+    review.getByRole("button", { name: /townframe#150.*open/ }),
+  ).toBeVisible();
+  await expect(
+    review.getByRole("button", { name: /townframe#151.*merged/ }),
   ).toBeVisible();
   // The root screen has no way back.
   await expect(review.getByRole("button", { name: "Back" })).toHaveCount(0);
@@ -65,17 +68,15 @@ test("a pull request shows its description and the outcome of each intxt it name
   await expect(
     review.getByRole("button", { name: /review micro: the PR on the phone/ }),
   ).toBeVisible();
-  await expect(
-    review.getByRole("alert").filter({ hasText: "Not an intxt" }),
-  ).toHaveCount(1);
+  await expect(review.getByRole("group", { name: "Not an intxt" })).toHaveCount(
+    1,
+  );
   await screenshot(page, "pull-view");
   await back.click();
 
   // A document the node does not hold is unreadable, and its row says why.
   await review.getByRole("button", { name: pulls[2] }).click();
-  const unreadable = review.getByRole("alert").filter({
-    hasText: "Unreadable:",
-  });
+  const unreadable = review.getByRole("group", { name: /cannot be read/ });
   await expect(unreadable).toContainText("intxt: held by another node", {
     timeout: 60_000,
   });
