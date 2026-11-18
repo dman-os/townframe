@@ -30,6 +30,22 @@ pub enum ContextError {
     DeadlineExceeded,
     #[error("request carries no valid Authorization credential")]
     Unauthenticated,
+    /// The call is one a declared permbind covers, but nobody has granted it yet (ADR 049 §4.3):
+    /// the conventional refusal of every service for an ungranted call, which dispatch and
+    /// cartridges pass on unchanged. It differs from a refusal by the rules, which no answer to a
+    /// request can lift.
+    ///
+    /// `cartridge` is the cartridge lacking the access, which is not necessarily the caller: when
+    /// X calls Y's routine and Y lacks a grant, X receives Y's. `permbind` is the declared
+    /// permbind that would cover the call. `request` is the id (a UUID's text) of the pending
+    /// grant request for that cartridge and permbind, when one was filed; nothing files one for
+    /// a failed call.
+    #[error("cartridge `{cartridge}` is not granted what its permbind `{permbind}` declares")]
+    MissingAuthority {
+        cartridge: String,
+        permbind: String,
+        request: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
