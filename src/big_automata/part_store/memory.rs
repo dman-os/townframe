@@ -9,6 +9,9 @@
 //! conflict. Its commit applies the batches in the order they were staged, to the state as it is
 //! at commit, and then (after releasing the lock) moves the log's watch if any row was stamped.
 
+use future_form::Local;
+use future_form::Sendable;
+use future_form::future_form;
 use tokio::sync::watch;
 
 use crate::interlude::*;
@@ -60,7 +63,12 @@ strike! {
         >,
         /// Every object with a member row in a part, live or removed, keyed by the part and
         /// the object's deepest bucket index so a bucket's members are one range.
-        members: BTreeSet<(PartKey, u16, ObjKey)>,
+        members: BTreeMap<(PartKey, u16, ObjKey), struct MemberRow {
+            /// When the membership first went live; a re-add does not reset it. Kept when it
+            /// is removed: the log's tombstone carries no value, and a route read needs it to
+            /// skip the removal for a reader that never saw the membership ([`LogSelector`]).
+            first_added_at: Rev,
+        }>,
         /// Memberships added before the object had a payload state: no log row, no bucket
         /// entry.
         pending: BTreeSet<(ObjKey, PartKey)>,
@@ -93,7 +101,9 @@ impl Default for MemoryPartStore {
 /// One staged batch.
 enum Staged {
     EnsureParts(Vec<PartKey>),
-    SetPayloads(Vec<(ObjKey, PayloadState)>),
+    /// Each payload with its digest, computed while staging so the hashing stays outside the
+    /// lock and a payload with no canonical form is refused before anything is staged.
+    SetPayloads(Vec<(ObjKey, PayloadState, PayloadDigest)>),
     AddMembers(Vec<(ObjKey, PartKey)>),
     RemoveMembers(Vec<(ObjKey, PartKey)>),
     GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
@@ -192,73 +202,121 @@ impl State {
     }
 }
 
-#[async_trait]
-impl PartStoreWrite for MemoryPartStore {
-    type Tx = MemoryPartTx;
-
-    async fn ensure_parts(&self, tx: &mut MemoryPartTx, parts: &[PartKey]) -> Res<()> {
-        self.stage(tx, Staged::EnsureParts(parts.to_vec()));
-        Ok(())
-    }
-
-    async fn set_payloads(
-        &self,
-        tx: &mut MemoryPartTx,
-        payloads: Vec<(ObjKey, PayloadState)>,
-    ) -> Res<()> {
-        self.stage(tx, Staged::SetPayloads(payloads));
-        Ok(())
-    }
-
-    async fn add_members(&self, tx: &mut MemoryPartTx, members: &[(ObjKey, PartKey)]) -> Res<()> {
-        self.stage(tx, Staged::AddMembers(members.to_vec()));
-        Ok(())
-    }
-
-    async fn remove_members(
-        &self,
-        tx: &mut MemoryPartTx,
-        members: &[(ObjKey, PartKey)],
-    ) -> Res<()> {
-        self.stage(tx, Staged::RemoveMembers(members.to_vec()));
-        Ok(())
-    }
-
-    async fn grant_access(
-        &self,
-        tx: &mut MemoryPartTx,
-        grants: &[(PartKey, PeerKey, AccessLevel)],
-    ) -> Res<()> {
-        self.stage(tx, Staged::GrantAccess(grants.to_vec()));
-        Ok(())
-    }
-
-    async fn revoke_access(
-        &self,
-        tx: &mut MemoryPartTx,
-        revokes: &[(PartKey, PeerKey)],
-    ) -> Res<()> {
-        self.stage(tx, Staged::RevokeAccess(revokes.to_vec()));
-        Ok(())
+impl State {
+    /// For a removed membership's row, when it had gone live: what the route rule needs.
+    fn removed_added_at(&self, key: &LogKey, value: Option<&LogEntry>) -> Option<Rev> {
+        match (key, value) {
+            (LogKey::Member { obj, part }, None) => {
+                let index = BuckId::deepest_from_obj_key(obj).index();
+                let row = self
+                    .members
+                    .get(&(part.clone(), index, obj.clone()))
+                    .expect("a removed member row without its member");
+                Some(row.first_added_at)
+            }
+            (LogKey::Member { .. }, Some(_)) | (LogKey::Access { .. }, _) => None,
+        }
     }
 }
 
-#[async_trait]
-impl PartStoreRead for MemoryPartStore {
-    async fn obj_states(&self, objs: &[ObjKey]) -> Res<Vec<Option<ObjState>>> {
-        Ok(self.with_state(|state| objs.iter().map(|obj| state.obj_state(obj)).collect()))
+// Every operation is one synchronous critical section, so the memory store does its work when
+// called and hands back a ready future. Staging only records the batch.
+#[future_form(Sendable, Local)]
+impl<Async: FutureForm> PartStoreWrite<Async> for MemoryPartStore {
+    type Tx = MemoryPartTx;
+
+    fn ensure_parts<'a>(
+        &'a self,
+        tx: &'a mut MemoryPartTx,
+        parts: &'a [PartKey],
+    ) -> Async::Future<'a, Res<()>> {
+        self.stage(tx, Staged::EnsureParts(parts.to_vec()));
+        Async::ready(Ok(()))
     }
 
-    async fn bucket_summaries(&self, part: &PartKey, ids: &[BuckId]) -> Res<Vec<BucketSummary>> {
-        Ok(self.with_state(|state| state.bucket_summaries(part, ids)))
+    fn set_payloads<'a>(
+        &'a self,
+        tx: &'a mut MemoryPartTx,
+        payloads: Vec<(ObjKey, PayloadState)>,
+    ) -> Async::Future<'a, Res<()>> {
+        let digested = payloads
+            .into_iter()
+            .map(|(obj, payload)| {
+                let digest = payload.digest()?;
+                Ok((obj, payload, digest))
+            })
+            .collect::<Res<Vec<_>>>();
+        Async::ready(digested.map(|payloads| self.stage(tx, Staged::SetPayloads(payloads))))
     }
 
-    async fn member_count(&self, part: &PartKey) -> Res<u64> {
-        Ok(self.with_state(|state| state.member_count(part)))
+    fn add_members<'a>(
+        &'a self,
+        tx: &'a mut MemoryPartTx,
+        members: &'a [(ObjKey, PartKey)],
+    ) -> Async::Future<'a, Res<()>> {
+        self.stage(tx, Staged::AddMembers(members.to_vec()));
+        Async::ready(Ok(()))
     }
 
-    async fn peer_part_cursors(&self, peer: &PeerKey, parts: &[PartKey]) -> Res<Vec<Option<Rev>>> {
-        Ok(self.with_state(|state| {
+    fn remove_members<'a>(
+        &'a self,
+        tx: &'a mut MemoryPartTx,
+        members: &'a [(ObjKey, PartKey)],
+    ) -> Async::Future<'a, Res<()>> {
+        self.stage(tx, Staged::RemoveMembers(members.to_vec()));
+        Async::ready(Ok(()))
+    }
+
+    fn grant_access<'a>(
+        &'a self,
+        tx: &'a mut MemoryPartTx,
+        grants: &'a [(PartKey, PeerKey, AccessLevel)],
+    ) -> Async::Future<'a, Res<()>> {
+        self.stage(tx, Staged::GrantAccess(grants.to_vec()));
+        Async::ready(Ok(()))
+    }
+
+    fn revoke_access<'a>(
+        &'a self,
+        tx: &'a mut MemoryPartTx,
+        revokes: &'a [(PartKey, PeerKey)],
+    ) -> Async::Future<'a, Res<()>> {
+        self.stage(tx, Staged::RevokeAccess(revokes.to_vec()));
+        Async::ready(Ok(()))
+    }
+}
+
+#[future_form(Sendable, Local)]
+impl<Async: FutureForm> PartStoreRead<Async> for MemoryPartStore {
+    fn obj_states<'a>(
+        &'a self,
+        objs: &'a [ObjKey],
+    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>> {
+        Async::ready(Ok(self.with_state(|state| {
+            objs.iter().map(|obj| state.obj_state(obj)).collect()
+        })))
+    }
+
+    fn bucket_summaries<'a>(
+        &'a self,
+        part: &'a PartKey,
+        ids: &'a [BuckId],
+    ) -> Async::Future<'a, Res<Vec<BucketSummary>>> {
+        Async::ready(Ok(
+            self.with_state(|state| state.bucket_summaries(part, ids))
+        ))
+    }
+
+    fn member_count<'a>(&'a self, part: &'a PartKey) -> Async::Future<'a, Res<u64>> {
+        Async::ready(Ok(self.with_state(|state| state.member_count(part))))
+    }
+
+    fn peer_part_cursors<'a>(
+        &'a self,
+        peer: &'a PeerKey,
+        parts: &'a [PartKey],
+    ) -> Async::Future<'a, Res<Vec<Option<Rev>>>> {
+        Async::ready(Ok(self.with_state(|state| {
             parts
                 .iter()
                 .map(|part| {
@@ -268,10 +326,13 @@ impl PartStoreRead for MemoryPartStore {
                         .copied()
                 })
                 .collect()
-        }))
+        })))
     }
 
-    async fn set_peer_part_cursors(&self, cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()> {
+    fn set_peer_part_cursors<'a>(
+        &'a self,
+        cursors: &'a [(PeerKey, PartKey, Rev)],
+    ) -> Async::Future<'a, Res<()>> {
         surelock::key::lock_scope(|key| {
             let (mut state, _key) = key.lock(&self.state);
             for (peer, part, cursor) in cursors {
@@ -282,32 +343,38 @@ impl PartStoreRead for MemoryPartStore {
                 *stored = (*stored).max(*cursor);
             }
         });
-        Ok(())
+        Async::ready(Ok(()))
     }
 }
 
-#[async_trait]
-impl RevSource for MemoryPartStore {
+#[future_form(Sendable, Local)]
+impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
     type Key = LogKey;
     type Value = LogEntry;
     type Selector = LogSelector;
 
-    async fn latest_rev(&self) -> Res<Rev> {
-        Ok(self.with_state(|state| state.log.rev()))
+    fn latest_rev(&self) -> Async::Future<'_, Res<Rev>> {
+        Async::ready(Ok(self.with_state(|state| state.log.rev())))
     }
 
-    /// Copies one bounded page of the log out under the lock.
-    async fn read(
-        &self,
-        selector: &LogSelector,
+    /// Copies one bounded page of the log out under the lock, applying the route rule for
+    /// removals with the `added_at` the members table keeps.
+    fn read<'a>(
+        &'a self,
+        selector: &'a LogSelector,
         after: Rev,
         until: Rev,
         limits: Limits,
-        page: &mut Page<LogKey, LogEntry>,
-    ) -> Res<()> {
+        page: &'a mut Page<LogKey, LogEntry>,
+    ) -> Async::Future<'a, Res<()>> {
         self.with_state(|state| {
             state.log.read_into(
-                |key, rev| selector.selects(key, rev),
+                |key, rev, value| match selector {
+                    LogSelector::All => true,
+                    LogSelector::Routes(_) => {
+                        selector.selects(key, rev, after, state.removed_added_at(key, value))
+                    }
+                },
                 log_row_bytes,
                 after,
                 until,
@@ -315,7 +382,7 @@ impl RevSource for MemoryPartStore {
                 page,
             );
         });
-        Ok(())
+        Async::ready(Ok(()))
     }
 
     fn watch(&self) -> RevWatch {
@@ -323,47 +390,63 @@ impl RevSource for MemoryPartStore {
     }
 }
 
-#[async_trait]
-impl PartStoreServe for MemoryPartStore {
-    async fn read_verdicts(&self, principal: &PeerKey, parts: &[PartKey]) -> Res<Vec<ReadVerdict>> {
-        Ok(self.with_state(|state| {
+#[future_form(Sendable, Local)]
+impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
+    fn read_verdicts<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        parts: &'a [PartKey],
+    ) -> Async::Future<'a, Res<Vec<ReadVerdict>>> {
+        Async::ready(Ok(self.with_state(|state| {
             parts
                 .iter()
                 .map(|part| state.read_verdict(principal, part))
                 .collect()
-        }))
+        })))
     }
 
-    async fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Res<Vec<PartKey>> {
-        Ok(self.with_state(|state| state.readable_parts_of(principal, obj)))
+    fn readable_parts_of<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        obj: &'a ObjKey,
+    ) -> Async::Future<'a, Res<Vec<PartKey>>> {
+        Async::ready(Ok(
+            self.with_state(|state| state.readable_parts_of(principal, obj))
+        ))
     }
 
-    async fn part_dirty_count(
-        &self,
-        part: &PartKey,
-        principal: Option<&PeerKey>,
+    fn part_dirty_count<'a>(
+        &'a self,
+        part: &'a PartKey,
+        principal: Option<&'a PeerKey>,
         since: Rev,
-    ) -> Res<PartDirtyCount> {
-        Ok(self.with_state(|state| state.part_dirty_count(part, principal, since)))
+    ) -> Async::Future<'a, Res<PartDirtyCount>> {
+        Async::ready(Ok(
+            self.with_state(|state| state.part_dirty_count(part, principal, since))
+        ))
     }
 
-    async fn bucket_list(
-        &self,
-        part: &PartKey,
+    fn bucket_list<'a>(
+        &'a self,
+        part: &'a PartKey,
         from: BuckId,
         to_level: BuckLevel,
         limit: usize,
-    ) -> Res<Vec<BucketSummary>> {
-        Ok(self.with_state(|state| state.bucket_list(part, from, to_level, limit)))
+    ) -> Async::Future<'a, Res<Vec<BucketSummary>>> {
+        Async::ready(Ok(
+            self.with_state(|state| state.bucket_list(part, from, to_level, limit))
+        ))
     }
 
-    async fn bucket_leaves(
-        &self,
-        part: &PartKey,
+    fn bucket_leaves<'a>(
+        &'a self,
+        part: &'a PartKey,
         buck: BuckId,
-        after: Option<&ObjKey>,
+        after: Option<&'a ObjKey>,
         limit: usize,
-    ) -> Res<Vec<LeafEntry>> {
-        Ok(self.with_state(|state| state.bucket_leaves(part, buck, after, limit)))
+    ) -> Async::Future<'a, Res<Vec<LeafEntry>>> {
+        Async::ready(Ok(
+            self.with_state(|state| state.bucket_leaves(part, buck, after, limit))
+        ))
     }
 }

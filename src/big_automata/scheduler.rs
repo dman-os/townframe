@@ -12,9 +12,10 @@ use crate::interlude::*;
 
 pub mod keyed;
 
-// FIXME: std's `Instant` cannot be constructed on wasm32-unknown-unknown; swap this for the
-// web-safe instant type shared with big_repo's injected clock once it is chosen.
-pub type Instant = std::time::Instant;
+// std's `Instant::now` panics on wasm32-unknown-unknown, which has no clock syscall. web-time's
+// `Instant` is a re-export of std's on every other target and reads `performance.now()` in the
+// browser, so the scheduler's caller-supplied `now` can come from the same type everywhere.
+pub type Instant = web_time::Instant;
 
 pub type TaskId = u64;
 

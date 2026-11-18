@@ -14,6 +14,7 @@
 //! | pending → live when the payload arrives, stamped exactly once | [`pending_goes_live_once`] |
 //! | authorization follows current access, both grant and revoke orders; unknown ≠ denied | [`authorization_follows_current_access`] |
 //! | `Withheld` is distinct from deleted | [`withheld_is_not_deleted`] |
+//! | a route skips a removal of a membership added after its cursor | [`removals_skip_routes_that_never_saw_the_member`], every route read in [`differential`] |
 //! | incremental bucket summaries equal a recompute | every check |
 //! | `part_dirty_count` equals a count over the oracle's log | every check, [`dirty_count_counts_log_rows`] |
 //! | peer cursors only advance | [`peer_cursors_only_advance`], every check |
@@ -54,13 +55,20 @@ use crate::rev::laws::StreamBackend;
 use crate::rev::laws::WakeCount;
 use crate::rev::laws::any_limits;
 use crate::rev::laws::limits;
+use future_form::Sendable;
 
-type Tx<B> = <<B as Backend>::Store as PartStoreWrite>::Tx;
+type Tx<B> = <<B as Backend>::Store as PartStoreWrite<Sendable>>::Tx;
 
 /// What a backend supplies to run the laws.
 #[async_trait]
 pub trait Backend: Clone + Send + Sync + 'static {
-    type Store: PartStoreWrite + PartStoreRead + PartStoreServe + Clone + 'static;
+    type Store: PartStoreWrite<Sendable, Tx: Send>
+        + PartStoreRead<Sendable>
+        + PartStoreServe<Sendable>
+        + Clone
+        + Send
+        + Sync
+        + 'static;
 
     /// A new, empty store, sharing nothing with any other.
     async fn open(&self) -> Res<Self::Store>;
@@ -87,7 +95,11 @@ const PARTS: u8 = 3;
 const PRINCIPALS: u8 = 3;
 
 /// Stage one batch through the trait.
-async fn stage<S: PartStoreWrite>(store: &S, tx: &mut S::Tx, write: PartWrite) -> Res<()> {
+async fn stage<S: PartStoreWrite<Sendable>>(
+    store: &S,
+    tx: &mut S::Tx,
+    write: PartWrite,
+) -> Res<()> {
     match write {
         PartWrite::EnsureParts(parts) => store.ensure_parts(tx, &parts).await,
         PartWrite::SetPayloads(payloads) => store.set_payloads(tx, payloads).await,
@@ -311,7 +323,7 @@ pub async fn replay_reconstructs_membership_and_access<B: Backend>(backend: &B) 
         .commit(vec![set(&[(2, 0), (0, 2)]), grant(&[(2, 0)])])
         .await?;
 
-    let mut stream = RevStream::new(harness.store.clone(), LogSelector::All, 0);
+    let mut stream = RevStream::<Sendable, _>::new(harness.store.clone(), LogSelector::All, 0);
     let mut page = Page::default();
     let mut members = BTreeSet::new();
     let mut access = BTreeMap::new();
@@ -490,7 +502,7 @@ pub async fn authorization_follows_current_access<B: Backend>(backend: &B) -> Re
 pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
-    let digest = PayloadDigest::of(&serde_json::json!(1));
+    let digest = PayloadDigest::of(&serde_json::json!(1))?;
     let withheld = PartWrite::SetPayloads(vec![(obj(0), PayloadState::Withheld(digest))]);
     assert_eq!(harness.commit(vec![withheld]).await?, Some(2));
     let state = harness.store.obj_states(&[obj(0)]).await?.remove(0);
@@ -511,6 +523,42 @@ pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
     );
     harness.commit(vec![remove(&[(0, 0)])]).await?;
     assert_eq!(harness.store.member_count(&part(0)).await?, 0);
+    Ok(())
+}
+
+/// RFC 8785 has no form for an integer beyond 2^53 - 1 in magnitude, so a payload holding one
+/// has no digest. The write is refused while staging, nothing of the batch is staged, and the
+/// transaction still commits what else it holds.
+pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B) -> Res<()> {
+    let harness = Harness::open(backend).await?;
+    let unsafe_int = serde_json::json!(1u64 << 60);
+    assert!(PayloadDigest::of(&unsafe_int).is_err());
+    let mut tx = backend.begin(&harness.store).await?;
+    let refused = harness
+        .store
+        .set_payloads(
+            &mut tx,
+            vec![
+                (obj(1), payload(1)),
+                (obj(0), PayloadState::Payload(unsafe_int)),
+            ],
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "a payload with no canonical form is refused"
+    );
+    harness
+        .store
+        .set_payloads(&mut tx, vec![(obj(2), payload(2))])
+        .await?;
+    backend.commit(tx).await?;
+    let states = harness.store.obj_states(&[obj(0), obj(1), obj(2)]).await?;
+    assert!(
+        states[0].is_none() && states[1].is_none(),
+        "nothing of the refused batch was staged"
+    );
+    assert!(states[2].is_some(), "the transaction kept its other writes");
     Ok(())
 }
 
@@ -551,6 +599,77 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     assert_eq!(
         store.part_dirty_count(&part(0), None, 3).await?,
         count(0, 0)
+    );
+    Ok(())
+}
+
+/// A route hands out a removal only to a reader that may have seen the membership: one whose
+/// cursor (the larger of the route's bound and the read's `after`) is at or past the
+/// membership's `added_at`. `All` keeps every removal.
+pub async fn removals_skip_routes_that_never_saw_the_member<B: Backend>(backend: &B) -> Res<()> {
+    let mut harness = Harness::open(backend).await?;
+    // Object 0 goes live at 1 and leaves at 2; object 1 goes live at 3 and leaves at 4.
+    harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
+    harness.commit(vec![remove(&[(0, 0)])]).await?;
+    harness.commit(vec![set(&[(1, 1)]), add(&[(1, 0)])]).await?;
+    harness.commit(vec![remove(&[(1, 0)])]).await?;
+    let route = |bound| {
+        LogSelector::Routes(LogRoutes {
+            parts: [(part(0), bound)].into(),
+            objects: default(),
+        })
+    };
+    let removed = |page: Page<LogKey, LogEntry>| {
+        page.entries
+            .into_iter()
+            .map(|entry| match entry.key {
+                LogKey::Member { obj, .. } => (obj, entry.rev),
+                LogKey::Access { .. } => panic!("a part route selected an access row"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let all = limits(usize::MAX, None);
+    // A reader at 0 saw neither membership.
+    assert_eq!(removed(harness.read(&route(0), 0, 4, all).await?), vec![]);
+    // A reader at 1 may have seen object 0, not object 1.
+    assert_eq!(
+        removed(harness.read(&route(0), 1, 4, all).await?),
+        vec![(obj(0), 2)]
+    );
+    // A route bound counts as the reader's cursor too: from 3, object 1's removal is news.
+    assert_eq!(
+        removed(harness.read(&route(3), 0, 4, all).await?),
+        vec![(obj(1), 4)]
+    );
+    // The object route follows the same rule.
+    let object_route = LogSelector::Routes(LogRoutes {
+        parts: default(),
+        objects: [(obj(1), 0)].into(),
+    });
+    assert_eq!(
+        removed(harness.read(&object_route, 2, 4, all).await?),
+        vec![]
+    );
+    assert_eq!(
+        removed(harness.read(&object_route, 3, 4, all).await?),
+        vec![(obj(1), 4)]
+    );
+    // Object 2 goes live at 5, leaves at 6, comes back at 7 and leaves at 8. A reader at 5 saw
+    // the first incarnation; the log collapsed its removal at 6 away, so the removal at 8 is the
+    // only way it learns the membership is gone, though the second incarnation is news to it.
+    harness.commit(vec![set(&[(2, 1)]), add(&[(2, 0)])]).await?;
+    harness.commit(vec![remove(&[(2, 0)])]).await?;
+    harness.commit(vec![add(&[(2, 0)])]).await?;
+    harness.commit(vec![remove(&[(2, 0)])]).await?;
+    assert_eq!(
+        removed(harness.read(&route(0), 5, 8, all).await?),
+        vec![(obj(2), 8)]
+    );
+    assert_eq!(removed(harness.read(&route(0), 4, 8, all).await?), vec![]);
+    // A full replay keeps both.
+    assert_eq!(
+        removed(harness.read(&LogSelector::All, 0, 8, all).await?),
+        vec![(obj(0), 2), (obj(1), 4), (obj(2), 8)]
     );
     Ok(())
 }
@@ -689,7 +808,7 @@ fn any_payload() -> impl Strategy<Value = PayloadState> {
     prop_oneof![
         3 => (0u8..3).prop_map(payload),
         1 => (0u8..3).prop_map(|value| {
-            PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)))
+            PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)).expect(ERROR_IMPOSSIBLE))
         }),
     ]
 }

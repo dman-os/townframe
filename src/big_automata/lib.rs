@@ -106,7 +106,9 @@ strike! {
     }
 }
 
-pub type Clock = Box<dyn Fn() -> std::time::Instant>;
+// FIXME(port): becomes an injected clock with big_repo's `Clock` shape when the machine is
+// ported; its instant is the web-safe `scheduler::Instant`.
+pub type Clock = Box<dyn Fn() -> scheduler::Instant>;
 
 // FIXME(port): disabled until peer/stat/tasks land
 #[cfg(any())]

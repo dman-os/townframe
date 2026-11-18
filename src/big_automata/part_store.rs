@@ -25,8 +25,6 @@
 
 use crate::interlude::*;
 
-use crate::fingerprint::Fingerprint;
-use crate::fingerprint::FingerprintSeed;
 use crate::rev::Rev;
 use crate::rev::RevSource;
 use crate::store::bucket::BucketSummary;
@@ -41,25 +39,29 @@ pub mod oracle;
 #[cfg(test)]
 mod tests;
 
-/// A payload's identity for the bucket index, computed once when the payload is written: the
-/// live fingerprint of a bucket sums its members' digests, so a summary never rereads payloads,
-/// and an object whose payload is [withheld](PayloadState::Withheld) still has one.
+/// A payload's identity, computed once when the payload is written: the live fingerprint of a
+/// bucket sums its members' digests, so a summary never rereads payloads, and an object whose
+/// payload is [withheld](PayloadState::Withheld) still has one.
+///
+/// A blake3 hash of the payload's RFC 8785 (JCS) canonical JSON, the same canonicalization
+/// `utils_rs::hash::hash_obj` uses. Canonical, because map key order is otherwise insertion
+/// order whenever any crate in the build turns on `serde_json`'s `preserve_order`, and two
+/// peers holding the same payload must agree on its digest. The canonical form is streamed
+/// into the hasher, never built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PayloadDigest(pub u64);
-
-/// Fixed on every node, like the bucket seeds, so digests agree across peers.
-const PAYLOAD_DIGEST_SEED: FingerprintSeed = FingerprintSeed::new(0x7061796c6f6164, 0x646967657374);
+pub struct PayloadDigest(pub [u8; 32]);
 
 impl PayloadDigest {
-    pub fn of(payload: &ObjPayload) -> Self {
-        Self(
-            Fingerprint::new(
-                &PAYLOAD_DIGEST_SEED,
-                &("big-sync-payload-digest-v1", payload),
-            )
-            .as_u64(),
-        )
+    /// Fails for a payload JCS cannot represent: an integer outside the I-JSON safe range
+    /// (beyond 2^53 - 1 in magnitude). Payloads arrive from peers, so this is input
+    /// validation, and the store refuses the write rather than inventing a digest.
+    pub fn of(payload: &ObjPayload) -> Res<Self> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"big-sync-payload-digest-v3\0");
+        json_canon::to_writer(&mut hasher, payload)
+            .wrap_err("payload has no RFC 8785 canonical form")?;
+        Ok(Self(*hasher.finalize().as_bytes()))
     }
 }
 
@@ -74,10 +76,10 @@ pub enum PayloadState {
 }
 
 impl PayloadState {
-    pub fn digest(&self) -> PayloadDigest {
+    pub fn digest(&self) -> Res<PayloadDigest> {
         match self {
             Self::Payload(payload) => PayloadDigest::of(payload),
-            Self::Withheld(digest) => *digest,
+            Self::Withheld(digest) => Ok(*digest),
         }
     }
 }
@@ -122,6 +124,14 @@ strike! {
         /// Member rows by route. A row is selected when a route it is on has a bound below the
         /// row's rev: a part route covers the part's member rows, an object route the object's
         /// member rows in every part. Access rows are on no route.
+        ///
+        /// A removal carries no news to a reader that never saw the membership: a removed row
+        /// is skipped on a route whose cursor (the larger of its bound and the read's `after`)
+        /// is below the rev at which the membership *first* went live. A reader that saw any
+        /// incarnation live did so at or after that rev, so its cursor is never below it and
+        /// it always gets the removal. The first presence, not the latest: a reader that saw
+        /// the first incarnation must hear the removal of a later one, because the log
+        /// collapsed the removal in between away.
         Routes(pub struct LogRoutes {
             pub parts: BTreeMap<PartKey, Rev>,
             pub objects: BTreeMap<ObjKey, Rev>,
@@ -130,12 +140,25 @@ strike! {
 }
 
 impl LogSelector {
-    pub fn selects(&self, key: &LogKey, rev: Rev) -> bool {
+    /// Whether a read of `(after, ..]` hands out `key`'s row at `rev`. `removed_added_at` is
+    /// `Some(first_added_at)` when the row is a removed membership: the rev at which that
+    /// membership first went live.
+    pub fn selects(
+        &self,
+        key: &LogKey,
+        rev: Rev,
+        after: Rev,
+        removed_added_at: Option<Rev>,
+    ) -> bool {
         match (self, key) {
             (Self::All, _) => true,
             (Self::Routes(routes), LogKey::Member { obj, part }) => {
-                routes.parts.get(part).is_some_and(|bound| rev > *bound)
-                    || routes.objects.get(obj).is_some_and(|bound| rev > *bound)
+                let on_route = |bound: Rev| {
+                    rev > bound
+                        && removed_added_at.is_none_or(|added_at| added_at <= bound.max(after))
+                };
+                routes.parts.get(part).copied().is_some_and(on_route)
+                    || routes.objects.get(obj).copied().is_some_and(on_route)
             }
             (Self::Routes(_), LogKey::Access { .. }) => false,
         }
@@ -199,86 +222,123 @@ pub struct LeafEntry {
 /// is after. A committed transaction that changed any log row stamps them all with one new rev.
 ///
 /// Batches are slices of keys (cheap to clone) or owned payloads; there is no per-key call.
-#[async_trait]
-pub trait PartStoreWrite: Send + Sync {
-    type Tx: Send;
+pub trait PartStoreWrite<Async: FutureForm> {
+    type Tx;
 
     /// Make sure the parts exist. Membership and grants create their part too.
-    async fn ensure_parts(&self, tx: &mut Self::Tx, parts: &[PartKey]) -> Res<()>;
+    fn ensure_parts<'a>(
+        &'a self,
+        tx: &'a mut Self::Tx,
+        parts: &'a [PartKey],
+    ) -> Async::Future<'a, Res<()>>;
     /// Set or withhold objects' payloads. A changed payload re-stamps the object's member rows
     /// and promotes its pending memberships; an unchanged one is a no-op.
-    async fn set_payloads(
-        &self,
-        tx: &mut Self::Tx,
+    fn set_payloads<'a>(
+        &'a self,
+        tx: &'a mut Self::Tx,
         payloads: Vec<(ObjKey, PayloadState)>,
-    ) -> Res<()>;
+    ) -> Async::Future<'a, Res<()>>;
     /// Add objects to parts, `(obj, part)`. An object without a payload is pending in the part.
-    async fn add_members(&self, tx: &mut Self::Tx, members: &[(ObjKey, PartKey)]) -> Res<()>;
+    fn add_members<'a>(
+        &'a self,
+        tx: &'a mut Self::Tx,
+        members: &'a [(ObjKey, PartKey)],
+    ) -> Async::Future<'a, Res<()>>;
     /// Remove objects from parts, `(obj, part)`. A live membership leaves a tombstone; a pending
     /// one leaves nothing. The payload stays.
-    async fn remove_members(&self, tx: &mut Self::Tx, members: &[(ObjKey, PartKey)]) -> Res<()>;
+    fn remove_members<'a>(
+        &'a self,
+        tx: &'a mut Self::Tx,
+        members: &'a [(ObjKey, PartKey)],
+    ) -> Async::Future<'a, Res<()>>;
     /// Grant principals access to parts, `(part, principal, level)`.
-    async fn grant_access(
-        &self,
-        tx: &mut Self::Tx,
-        grants: &[(PartKey, PeerKey, AccessLevel)],
-    ) -> Res<()>;
+    fn grant_access<'a>(
+        &'a self,
+        tx: &'a mut Self::Tx,
+        grants: &'a [(PartKey, PeerKey, AccessLevel)],
+    ) -> Async::Future<'a, Res<()>>;
     /// Revoke principals' access to parts, `(part, principal)`; a revocation is a tombstone.
-    async fn revoke_access(&self, tx: &mut Self::Tx, revokes: &[(PartKey, PeerKey)]) -> Res<()>;
+    fn revoke_access<'a>(
+        &'a self,
+        tx: &'a mut Self::Tx,
+        revokes: &'a [(PartKey, PeerKey)],
+    ) -> Async::Future<'a, Res<()>>;
 }
 
 /// The sync client's reads, batched, and its cursor writes.
-#[async_trait]
-pub trait PartStoreRead: Send + Sync {
+pub trait PartStoreRead<Async: FutureForm> {
     /// The objects' states, in the order asked; `None` for an object with no payload state
     /// (unknown, or only pending).
-    async fn obj_states(&self, objs: &[ObjKey]) -> Res<Vec<Option<ObjState>>>;
+    fn obj_states<'a>(
+        &'a self,
+        objs: &'a [ObjKey],
+    ) -> Async::Future<'a, Res<Vec<Option<ObjState>>>>;
     /// The part's bucket summaries, in the order asked; a bucket with no members is the empty
     /// summary.
-    async fn bucket_summaries(&self, part: &PartKey, ids: &[BuckId]) -> Res<Vec<BucketSummary>>;
+    fn bucket_summaries<'a>(
+        &'a self,
+        part: &'a PartKey,
+        ids: &'a [BuckId],
+    ) -> Async::Future<'a, Res<Vec<BucketSummary>>>;
     /// The part's live members.
-    async fn member_count(&self, part: &PartKey) -> Res<u64>;
+    fn member_count<'a>(&'a self, part: &'a PartKey) -> Async::Future<'a, Res<u64>>;
     /// The peer's cursors on the parts, in the order asked.
-    async fn peer_part_cursors(&self, peer: &PeerKey, parts: &[PartKey]) -> Res<Vec<Option<Rev>>>;
+    fn peer_part_cursors<'a>(
+        &'a self,
+        peer: &'a PeerKey,
+        parts: &'a [PartKey],
+    ) -> Async::Future<'a, Res<Vec<Option<Rev>>>>;
     /// Move peers' cursors, `(peer, part, cursor)`. A cursor only advances: a lower one than
     /// stored is ignored.
-    async fn set_peer_part_cursors(&self, cursors: &[(PeerKey, PartKey, Rev)]) -> Res<()>;
+    fn set_peer_part_cursors<'a>(
+        &'a self,
+        cursors: &'a [(PeerKey, PartKey, Rev)],
+    ) -> Async::Future<'a, Res<()>>;
 }
 
 /// The responder's reads: the log as a [`RevSource`], authorization against the log's current
 /// access rows, dirt counts and the bucket index. No pages, sessions or budgets.
-#[async_trait]
-pub trait PartStoreServe:
-    RevSource<Key = LogKey, Value = LogEntry, Selector = LogSelector>
+///
+/// The log read applies [`LogSelector`]'s removal rule, so a responder hands out what it reads.
+pub trait PartStoreServe<Async: FutureForm>:
+    RevSource<Async, Key = LogKey, Value = LogEntry, Selector = LogSelector>
 {
     /// For each part, whether `principal` may read it: a current access row permits.
-    async fn read_verdicts(&self, principal: &PeerKey, parts: &[PartKey]) -> Res<Vec<ReadVerdict>>;
+    fn read_verdicts<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        parts: &'a [PartKey],
+    ) -> Async::Future<'a, Res<Vec<ReadVerdict>>>;
     /// The parts `obj` is a live member of that `principal` may read.
-    async fn readable_parts_of(&self, principal: &PeerKey, obj: &ObjKey) -> Res<Vec<PartKey>>;
+    fn readable_parts_of<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        obj: &'a ObjKey,
+    ) -> Async::Future<'a, Res<Vec<PartKey>>>;
     /// The part's log rows with a rev past `since`; the access half counts `principal`'s row
     /// (`None` is the local principal, whom access does not gate).
-    async fn part_dirty_count(
-        &self,
-        part: &PartKey,
-        principal: Option<&PeerKey>,
+    fn part_dirty_count<'a>(
+        &'a self,
+        part: &'a PartKey,
+        principal: Option<&'a PeerKey>,
         since: Rev,
-    ) -> Res<PartDirtyCount>;
+    ) -> Async::Future<'a, Res<PartDirtyCount>>;
     /// The part's non-empty buckets in bucket order, from `from` up to `to_level`, at most
     /// `limit`.
-    async fn bucket_list(
-        &self,
-        part: &PartKey,
+    fn bucket_list<'a>(
+        &'a self,
+        part: &'a PartKey,
         from: BuckId,
         to_level: BuckLevel,
         limit: usize,
-    ) -> Res<Vec<BucketSummary>>;
-    /// The part's members (live and dead) in bucket `buck`, in key order after `after`, at most
-    /// `limit`.
-    async fn bucket_leaves(
-        &self,
-        part: &PartKey,
+    ) -> Async::Future<'a, Res<Vec<BucketSummary>>>;
+    /// The part's members (live and dead) in bucket `buck`, in (deepest bucket, key) order
+    /// after `after`, at most `limit`.
+    fn bucket_leaves<'a>(
+        &'a self,
+        part: &'a PartKey,
         buck: BuckId,
-        after: Option<&ObjKey>,
+        after: Option<&'a ObjKey>,
         limit: usize,
-    ) -> Res<Vec<LeafEntry>>;
+    ) -> Async::Future<'a, Res<Vec<LeafEntry>>>;
 }
