@@ -11,8 +11,10 @@ use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Permbind;
+use big_cartridges_core::PermbindNet;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::NetTarget;
 use big_cartridges_core::protocol::CartridgeGrantRecord;
 use big_cartridges_core::protocol::FiledGrantRequest;
 use big_cartridges_core::protocol::GrantRequestRecord;
@@ -56,7 +58,35 @@ pub(crate) struct GrantRequests {
     declined: BTreeSet<(CartridgeId, String)>,
     /// The permbinds each admitted cartridge's manifest declares, as the last reconcile saw
     /// them: what a request may name.
-    declared: BTreeMap<CartridgeId, BTreeMap<String, Permbind>>,
+    declared: BTreeMap<CartridgeId, Declared>,
+}
+
+/// What a cartridge's last reconcile said of it: the permbinds its manifest declares, and the
+/// network hosts its grants already cover.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Declared {
+    pub(crate) permbinds: BTreeMap<String, Permbind>,
+    pub(crate) nets: BTreeSet<NetTarget>,
+}
+
+/// What one routine's `uses` leave to be refused for want of a grant someone may still give.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RoutineUses {
+    /// The operations its method permbinds declare that the cartridge's grants do not cover,
+    /// and the permbind of each. An operation absent here was never declared (or is granted,
+    /// in which case dispatch did not refuse it for want of the handle).
+    pub(crate) ungranted: BTreeMap<String, String>,
+    /// Every `#net` permbind it takes.
+    pub(crate) nets: Vec<NetUse>,
+}
+
+/// One `#net` permbind a routine takes, and whether the cartridge holds a matching `grant/net`.
+#[derive(Debug, Clone)]
+pub(crate) struct NetUse {
+    pub(crate) binding: String,
+    pub(crate) permbind: PermbindNet,
+    pub(crate) target: NetTarget,
+    pub(crate) granted: bool,
 }
 
 /// How the nodule host tells a refusal of "nobody has said yes yet" from one of "the rules forbid
@@ -68,17 +98,72 @@ pub(crate) struct GrantRequests {
 #[derive(Clone)]
 pub struct MissingAuthorityLookup {
     cartridge_id: CartridgeId,
-    /// Per routine, by the dispatch handle it was delivered: the operations its `uses` declare
-    /// through a method permbind that the cartridge's grants did not cover when the handle was
-    /// minted, and the permbind of each. An operation absent here was never declared (or is
-    /// granted, in which case dispatch did not refuse it for want of the handle).
-    ungranted: Arc<RwLock<HashMap<CapId, BTreeMap<String, String>>>>,
+    /// Per routine, by the dispatch handle it was delivered: what its `uses` leave refused for
+    /// want of a grant, as of the last reconcile.
+    routines: Arc<RwLock<HashMap<CapId, RoutineUses>>>,
     requests: watch::Receiver<Requests>,
 }
 
 impl MissingAuthorityLookup {
-    pub(crate) fn set(&self, ungranted: HashMap<CapId, BTreeMap<String, String>>) {
-        *self.ungranted.write().expect("ungranted uses lock") = ungranted;
+    pub(crate) fn set(&self, routines: HashMap<CapId, RoutineUses>) {
+        *self.routines.write().expect("routine uses lock") = routines;
+    }
+
+    /// The pending request filed for `permbind` of this cartridge, if any (nothing files one
+    /// here: only the routine decides to ask).
+    fn filed(&self, permbind: &str) -> Option<String> {
+        self.requests
+            .borrow()
+            .values()
+            .find(|entry| {
+                entry.state == GrantRequestState::Pending
+                    && entry.record.cartridge_id == self.cartridge_id
+                    && entry.record.permbind == permbind
+            })
+            .map(|entry| entry.record.id.to_string())
+    }
+
+    fn missing(&self, permbind: String) -> DispatchError {
+        DispatchError::Context(ContextError::MissingAuthority {
+            cartridge: self.cartridge_id.to_string(),
+            request: self.filed(&permbind),
+            permbind,
+        })
+    }
+
+    /// Whether the routine holding the dispatch handle `capability` may send a `method` request
+    /// to `host` on `port` (the URL's own or its scheme's default): its `uses` take a `#net`
+    /// permbind naming that host and port and allowing the verb, and the cartridge holds a
+    /// matching `grant/net`. Declared but not granted is the cartridge's `MissingAuthority`,
+    /// carrying the request already filed for the permbind; anything else, which no grant could
+    /// change, is [`DispatchError::Denied`] (ADR 049 §4.3). The one check every executor puts a
+    /// guest's non-dispatch request through.
+    pub fn authorize_net(
+        &self,
+        capability: CapId,
+        method: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<(), DispatchError> {
+        let routines = self.routines.read().expect("routine uses lock");
+        let mut ungranted = None;
+        for net in routines
+            .get(&capability)
+            .into_iter()
+            .flat_map(|uses| &uses.nets)
+        {
+            if !net.target.reaches(host, port) || !net.permbind.allows_method(method) {
+                continue;
+            }
+            if net.granted {
+                return Ok(());
+            }
+            ungranted.get_or_insert(&net.binding);
+        }
+        Err(match ungranted {
+            Some(binding) => self.missing(binding.clone()),
+            None => DispatchError::Denied,
+        })
     }
 
     /// `error`, as the routine holding the dispatch handle `capability` should see it for a call
@@ -96,30 +181,16 @@ impl MissingAuthorityLookup {
             return error;
         }
         let Some(permbind) = self
-            .ungranted
+            .routines
             .read()
-            .expect("ungranted uses lock")
+            .expect("routine uses lock")
             .get(&capability)
-            .and_then(|operations| operations.get(operation))
+            .and_then(|uses| uses.ungranted.get(operation))
             .cloned()
         else {
             return error;
         };
-        let request = self
-            .requests
-            .borrow()
-            .values()
-            .find(|entry| {
-                entry.state == GrantRequestState::Pending
-                    && entry.record.cartridge_id == self.cartridge_id
-                    && entry.record.permbind == permbind
-            })
-            .map(|entry| entry.record.id.to_string());
-        DispatchError::Context(ContextError::MissingAuthority {
-            cartridge: self.cartridge_id.to_string(),
-            permbind,
-            request,
-        })
+        self.missing(permbind)
     }
 }
 
@@ -128,7 +199,7 @@ impl GrantRequests {
     pub(crate) fn lookup(&self, cartridge_id: CartridgeId) -> MissingAuthorityLookup {
         MissingAuthorityLookup {
             cartridge_id,
-            ungranted: Arc::default(),
+            routines: Arc::default(),
             requests: self.queue.subscribe(),
         }
     }
@@ -161,7 +232,7 @@ impl GrantRequests {
 
     /// Records the permbinds the admitted cartridges declare, replacing what the last reconcile
     /// saw.
-    pub(crate) fn declare(&mut self, declared: BTreeMap<CartridgeId, BTreeMap<String, Permbind>>) {
+    pub(crate) fn declare(&mut self, declared: BTreeMap<CartridgeId, Declared>) {
         self.declared = declared;
     }
 
@@ -200,10 +271,14 @@ impl GrantRequests {
         drawer: Option<DrawerId>,
         held: Option<&NoduleRecord>,
     ) -> Res<FiledGrantRequest> {
+        let held_nets = self
+            .declared
+            .get(&cartridge_id)
+            .map(|declared| &declared.nets);
         let declared = self
             .declared
             .get(&cartridge_id)
-            .and_then(|permbinds| permbinds.get(&permbind))
+            .and_then(|declared| declared.permbinds.get(&permbind))
             .ok_or_else(|| {
                 NodulesError::Rejected(format!(
                     "cartridge `{cartridge_id}` declares no permbind `{permbind}`"
@@ -235,14 +310,28 @@ impl GrantRequests {
                     RequestedAccess::Drawers { access, drawer },
                 )
             }
+            Permbind::Net(net) => {
+                if drawer.is_some() {
+                    return Err(NodulesError::Rejected(
+                        "a net permbind names no drawer".to_owned(),
+                    ));
+                }
+                (
+                    net.description.clone(),
+                    RequestedAccess::Net {
+                        host: net.host.to_ascii_lowercase(),
+                        port: net.port,
+                    },
+                )
+            }
             Permbind::Datum(_) | Permbind::Unknown(_) => {
                 return Err(NodulesError::Rejected(format!(
-                    "permbind `{permbind}` is not requestable: only a method or a drawers \
+                    "permbind `{permbind}` is not requestable: only a method, a drawers or a net \
                      permbind has an answer of its own"
                 )));
             }
         };
-        if held.is_some_and(|record| covers(record, &access)) {
+        if held.is_some_and(|record| covers(record, held_nets, &access)) {
             return Ok(FiledGrantRequest {
                 request: None,
                 state: GrantRequestState::Allowed,
@@ -305,8 +394,8 @@ impl GrantRequests {
         Ok(entry.record.clone())
     }
 
-    /// The grant that answering `record` with a yes writes: a method's, or the drawer `picked`
-    /// (else the one the request names) at the access the permbind declares.
+    /// The grant that answering `record` with a yes writes: a method's, a network host's, or the
+    /// drawer `picked` (else the one the request names) at the access the permbind declares.
     pub(crate) fn grant_for(
         record: &GrantRequestRecord,
         picked: Option<DrawerId>,
@@ -319,6 +408,16 @@ impl GrantRequests {
                     ));
                 }
                 Ok((GrantKey::Method(nsid.clone()), GrantBody::present()))
+            }
+            RequestedAccess::Net { host, port } => {
+                if picked.is_some() {
+                    return Err(NodulesError::Rejected(
+                        "a net request names no drawer".to_owned(),
+                    ));
+                }
+                let target = NetTarget::new(host, *port)
+                    .expect("a filed net request names the host of an admitted permbind");
+                Ok((GrantKey::Net(target), GrantBody::present()))
             }
             RequestedAccess::Drawers { access, drawer } => {
                 let drawer = picked.or_else(|| drawer.clone()).ok_or_else(|| {
@@ -418,8 +517,16 @@ impl GrantRequests {
 
 /// Whether the cartridge's grants, as the last reconcile resolved them, already give `access`: a
 /// datum grant or an "only this time" one, which look the same from here.
-fn covers(record: &NoduleRecord, access: &RequestedAccess) -> bool {
+fn covers(
+    record: &NoduleRecord,
+    nets: Option<&BTreeSet<NetTarget>>,
+    access: &RequestedAccess,
+) -> bool {
     match access {
+        RequestedAccess::Net { host, port } => nets.is_some_and(|nets| {
+            nets.iter()
+                .any(|net| net.reaches(host, port.unwrap_or(NetTarget::DEFAULT_PORT)))
+        }),
         RequestedAccess::Method { nsid } => record
             .methods
             .as_ref()

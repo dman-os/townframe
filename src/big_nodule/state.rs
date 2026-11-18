@@ -15,6 +15,9 @@ use crate::executor::NoduleExecutor;
 use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
+use crate::requests::Declared;
+use crate::requests::NetUse;
+use crate::requests::RoutineUses;
 use crate::requests::GrantRequests;
 use crate::requests::GrantsFeed;
 use crate::requests::MissingAuthorityLookup;
@@ -62,6 +65,7 @@ use big_cartridges_core::RunMode;
 use big_cartridges_core::config::Component;
 use big_cartridges_core::config::GrantBody;
 use big_cartridges_core::config::GrantKey;
+use big_cartridges_core::config::NetTarget;
 use big_cartridges_core::protocol::AwaitCartridgeGrantRequest;
 use big_cartridges_core::protocol::CartridgeGrantRecord;
 use big_cartridges_core::protocol::CartridgeInstallRecord;
@@ -653,7 +657,9 @@ fn desired_routine_scopes(
                         }
                         create_drawer |= usage.create && drawer.create.is_some();
                     }
-                    Permbind::Unknown(_) => {}
+                    // Network access is checked where the request leaves (`egress::authorize_net`),
+                    // not by a handle: there is no scope to mint.
+                    Permbind::Net(_) | Permbind::Unknown(_) => {}
                 }
             }
             // A routine with something in its `uses` may always ask for it and wait for the
@@ -701,43 +707,57 @@ fn desired_routine_scopes(
         .collect()
 }
 
-/// Per routine, the operations its `uses` declare through a method permbind that
-/// `effective_operations` (the cartridge's grants) do not cover, and the permbind of each: the
-/// calls that are refused for want of a grant someone may still give, not for want of a
-/// declaration (ADR 049 §4.3). Drawer and docs calls are not here: they pass the handle and are
-/// refused by their own service, which cannot be traced to one permbind from the call alone.
-fn ungranted_uses(
+/// Per routine, what its `uses` leave refused for want of a grant someone may still give (ADR 049
+/// §4.3): the operations its method permbinds declare that `effective_operations` (the
+/// cartridge's grants) do not cover, with the permbind of each, and every `#net` permbind it
+/// takes with whether `desired_nets` covers it. Drawer and docs calls are not here: they pass the
+/// handle and are refused by their own service, which cannot be traced to one permbind from the
+/// call alone.
+fn routine_uses(
     installed: &InstalledNodule,
     effective_operations: &DispatchScope,
-) -> BTreeMap<String, BTreeMap<String, String>> {
+    desired_nets: &BTreeSet<NetTarget>,
+) -> BTreeMap<String, RoutineUses> {
     installed
         .nodule
         .routines
         .iter()
         .map(|(routine_key, routine)| {
-            let ungranted = routine
-                .uses
-                .keys()
-                .filter_map(|binding| {
-                    match installed
-                        .resolved
-                        .cartridge
-                        .permbinds
-                        .get(binding)
-                        .expect("admission refuses a routine use without its permbind")
+            let mut uses = RoutineUses::default();
+            for binding in routine.uses.keys() {
+                match installed
+                    .resolved
+                    .cartridge
+                    .permbinds
+                    .get(binding)
+                    .expect("admission refuses a routine use without its permbind")
+                {
+                    Permbind::Method(method)
+                        if !effective_operations
+                            .operations
+                            .contains(method.nsid.as_str()) =>
                     {
-                        Permbind::Method(method)
-                            if !effective_operations
-                                .operations
-                                .contains(method.nsid.as_str()) =>
-                        {
-                            Some((method.nsid.to_string(), binding.to_string()))
-                        }
-                        _ => None,
+                        uses.ungranted
+                            .insert(method.nsid.to_string(), binding.to_string());
                     }
-                })
-                .collect();
-            (routine_key.clone(), ungranted)
+                    Permbind::Net(net) => {
+                        let target = net
+                            .target()
+                            .expect("admission refuses a net permbind that names no host");
+                        let port = target.port().unwrap_or(NetTarget::DEFAULT_PORT);
+                        uses.nets.push(NetUse {
+                            binding: binding.to_string(),
+                            permbind: net.clone(),
+                            granted: desired_nets
+                                .iter()
+                                .any(|grant| grant.reaches(target.host(), port)),
+                            target,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            (routine_key.clone(), uses)
         })
         .collect()
 }
@@ -941,6 +961,14 @@ async fn mint_missing_handles(
     error
 }
 
+/// What a cartridge's grants give, as one reconcile resolved them (ADR 049 §4.1).
+struct Granted<'a> {
+    drawers: &'a BTreeMap<DrawerId, DrawerAccess>,
+    /// The operations that cover a request of the manifest.
+    operations: &'a DispatchScope,
+    nets: &'a BTreeSet<NetTarget>,
+}
+
 /// Brings each routine's handles to its desired scopes (ADR 047 §6): a handle whose scope did
 /// not change is kept, one that changed is retracted and then minted again, and one whose
 /// routine no longer wants it is retracted. Before anything is retracted dispatch is
@@ -952,8 +980,11 @@ async fn apply_nodule_capabilities(
     cartridge_id: &CartridgeId,
     actor: &OpenedActor,
     installed: &InstalledNodule,
-    desired_grants: &BTreeMap<DrawerId, DrawerAccess>,
-    effective_operations: &DispatchScope,
+    Granted {
+        drawers: desired_grants,
+        operations: effective_operations,
+        nets: desired_nets,
+    }: Granted<'_>,
 ) -> Res<(
     BTreeMap<String, RoutineCapabilities>,
     Option<String>,
@@ -1071,8 +1102,8 @@ async fn apply_nodule_capabilities(
         .collect();
     // What a routine's refused call is attributed from: only while its handle is the one now
     // minted for it, and none at all when the mint failed and no routine holds a handle.
-    let ungranted = if installed.enabled {
-        ungranted_uses(installed, effective_operations)
+    let uses = if installed.enabled {
+        routine_uses(installed, effective_operations, desired_nets)
     } else {
         BTreeMap::new()
     };
@@ -1080,10 +1111,7 @@ async fn apply_nodule_capabilities(
         routines
             .iter()
             .filter_map(|(routine_key, applied)| {
-                Some((
-                    applied.handles.dispatch?,
-                    ungranted.get(routine_key)?.clone(),
-                ))
+                Some((applied.handles.dispatch?, uses.get(routine_key)?.clone()))
             })
             .collect(),
     );
@@ -1976,9 +2004,16 @@ impl State {
             resolved
                 .iter()
                 .filter_map(|(cartridge_id, resolution)| match resolution {
-                    NoduleResolution::Admitted { installed, .. } => Some((
+                    NoduleResolution::Admitted {
+                        installed,
+                        desired_nets,
+                        ..
+                    } => Some((
                         cartridge_id.clone(),
-                        installed.resolved.cartridge.permbinds.clone(),
+                        Declared {
+                            permbinds: installed.resolved.cartridge.permbinds.clone(),
+                            nets: desired_nets.clone(),
+                        },
                     )),
                     NoduleResolution::Refused { .. } => None,
                 })
@@ -2024,6 +2059,7 @@ impl State {
                     installed,
                     desired_grants,
                     desired_operations,
+                    desired_nets,
                 } => {
                     let record = self
                         .reconcile_admitted(
@@ -2034,6 +2070,7 @@ impl State {
                             installed,
                             desired_grants,
                             desired_operations,
+                            desired_nets,
                         )
                         .await?;
                     new_records.insert(cartridge_id, record);
@@ -2095,6 +2132,7 @@ impl State {
                 installed,
                 desired_grants,
                 desired_operations,
+                desired_nets,
             }) = resolved.remove(&cartridge_id)
             else {
                 unreachable!("selected as admitted above");
@@ -2128,6 +2166,7 @@ impl State {
                         installed,
                         desired_grants,
                         desired_operations,
+                        desired_nets,
                     }
                 }
                 Err(error) => {
@@ -2688,6 +2727,7 @@ impl State {
         mut installed: InstalledNodule,
         desired_grants: BTreeMap<DrawerId, DrawerAccess>,
         desired_operations: DispatchScope,
+        desired_nets: BTreeSet<NetTarget>,
     ) -> Res<NoduleRecord> {
         let cartridge_id = installed.cartridge_id.clone();
         let actor = self.ensure_nodule_actor(context, &cartridge_id).await?;
@@ -2712,8 +2752,11 @@ impl State {
                 &cartridge_id,
                 &actor,
                 &installed,
-                &desired_grants,
-                &effective_operations,
+                Granted {
+                    drawers: &desired_grants,
+                    operations: &effective_operations,
+                    nets: &desired_nets,
+                },
             )
             .await?;
 

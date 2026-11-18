@@ -839,7 +839,7 @@ impl<'a> Admission<'a> {
                 Permbind::Method(method) => method.nsid.as_str() == nsid,
                 Permbind::Datum(datum) => datum.nsid.as_str() == nsid,
                 Permbind::Drawers(_) => binding == nsid,
-                Permbind::Unknown(_) => false,
+                Permbind::Net(_) | Permbind::Unknown(_) => false,
             })
     }
 
