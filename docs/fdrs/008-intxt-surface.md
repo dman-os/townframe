@@ -1,6 +1,6 @@
 # FDR 008: The intxt surface
 
-**Status:** Proposed (2026-11-19, third draft, after the operator's first round of dogfooding; ledger 2026-11-19). How people and agents use intxt (FDR 006): which commands exist, what each one means, and how someone finds them. It is derived from the use cases in `docs/scratch/intxt-use-cases.md` (U1–U16). Datum shapes are in ADRs 036, 040 and 041; working notes are in `docs/scratch/intxt-ledger.md`.
+**Status:** Accepted 2026-11-19 (operator; ledger D71), third draft, written after the operator's first round of dogfooding. Its open questions stay open. How people and agents use intxt (FDR 006): which commands exist, what each one means, and how someone finds them. It is derived from the use cases in `docs/scratch/intxt-use-cases.md` (U1–U16). Datum shapes are in ADRs 036, 040 and 041; working notes are in `docs/scratch/intxt-ledger.md`.
 
 **Changed in the third draft:**
 - Commands are grouped into families that mirror the data's layers, replacing the loaded `add` and `rm` verbs.
