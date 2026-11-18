@@ -30,7 +30,7 @@ use crate::events::Pointers;
 use crate::slot::SlotTable;
 
 /// The core stylesheet in the layer order the port's theme CSS expects, built once.
-static CORE_CSS: LazyLock<String> = LazyLock::new(|| wrap_core_css(""));
+pub(crate) static CORE_CSS: LazyLock<String> = LazyLock::new(|| wrap_core_css(""));
 
 thread_local! {
     /// Attribute names, leaked once each: `Attribute::name` is `&'static str`, and the set is
@@ -167,6 +167,7 @@ fn element(tag: &str, key: NodeKey, attributes: Vec<Attribute>, children: Vec<El
         "a" => a,
         "pre" => pre,
         "code" => code,
+        "style" => style,
         "slot" => slot,
         "button" => button,
         "svg" => svg,
