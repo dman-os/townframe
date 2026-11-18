@@ -49,7 +49,7 @@ impl ComponentDecl for ThemeLabView {
 /// while it is stopped, and opening it is what starts it.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<ThemeLabView>()
+        .view::<ThemeLabView>()
         .requires(
             SHELL_NAV_BUTTON,
             micro_shell_manifest::NAV_BUTTON_CONTRACT,
@@ -98,17 +98,13 @@ mod tests {
         sidecar().validate().unwrap();
         let rows = declared_rows(&clay_mdk::MicroId::local(ID), &sidecar()).unwrap();
         assert_eq!(rows.keys().collect::<Vec<_>>(), [PANELS_BINDING]);
-        // Every requirement names a publication of the shell, which is what `satisfied_by`
+        // Every requirement names an endpoint of the shell, which is what `satisfied_by`
         // needs to bind it.
         let shell = micro_shell_manifest::sidecar();
         for request in &sidecar().manifest.requires {
             assert!(
-                shell
-                    .manifest
-                    .publications
-                    .iter()
-                    .any(|publication| publication.name == request.binding),
-                "the shell publishes no {:?}",
+                shell.manifest.endpoints.contains_key(&request.binding),
+                "the shell serves no {:?}",
                 request.binding
             );
         }

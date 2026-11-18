@@ -82,7 +82,7 @@ impl ConfigDecl for ReviewConfigDecl {
 
 pub fn manifest() -> MicroManifest {
     let mut manifest = ManifestBuilder::new()
-        .component::<ReviewView>()
+        .view::<ReviewView>()
         .config::<ReviewConfigDecl>()
         .writes::<LayoutPanels>(PANELS_BINDING, Necessity::Optional)
         .contributes::<LayoutPanels>("layout-panel", ID, |at| Panel {

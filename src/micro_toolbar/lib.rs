@@ -25,7 +25,7 @@ pub async fn activate(context: Context) -> Result<(), Error> {
     Ok(())
 }
 
-/// The toolbar's model and view in one render. A press calls the button's attachment
+/// The toolbar's model and view in one render. A press calls the button's link
 /// (empty request, empty response); the redeemed call holds its provider live until it returns,
 /// and a failure is shown, not swallowed.
 fn view(buttons: &Collection<String, Button>) -> Element {
@@ -42,7 +42,7 @@ fn view(buttons: &Collection<String, Button>) -> Element {
                         id: row.key.clone(),
                         label: row.value.label.clone(),
                         icon: row.value.icon.clone(),
-                        action: row.attachments[row.value.action.index()].clone(),
+                        action: row.links[row.value.action.index()].clone(),
                         pending,
                         failure,
                     }

@@ -91,7 +91,7 @@ async fn redeeming_the_counter_section_runs_the_guest_only_while_held() {
                     .iter()
                     .find(|row| row.key == micro_counter_manifest::ID)
                     .unwrap();
-                let detail = row.attachments[row.value.detail.index()]
+                let detail = row.links[row.value.detail.index()]
                     .redeem_presentation()
                     .await
                     .unwrap();

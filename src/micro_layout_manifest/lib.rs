@@ -4,7 +4,7 @@
 //! Layout micro itself; Clay knows nothing of layouts.
 //!
 //! A panel row is keyed by its contributor's chosen *registration id* (CBOR text) and holds a
-//! [`Panel`]: a title and an attachment for the panel's presentation. A micro whose panel
+//! [`Panel`]: a title and a link for the panel's presentation. A micro whose panel
 //! should be listed while it is stopped declares the row in its manifest, which stores a lazy
 //! endpoint to its own presentation: the layout reads the title without starting the
 //! contributor, and only a visible panel's slot redeems the endpoint, which activates or joins
@@ -13,12 +13,12 @@
 //! The arrangement is the viewer's, not the contributors': [`LayoutConfig`] names registration
 //! ids, so it survives a contributor being uninstalled, disabled, or reinstalled under the same
 //! id (the layout shows a placeholder for that id and keeps it).
-use clay_mdk::Attachment;
 use clay_mdk::CollectionCapability;
 use clay_mdk::CollectionDecl;
 use clay_mdk::ComponentDecl;
 use clay_mdk::ConfigDecl;
 use clay_mdk::DeclaredCollection;
+use clay_mdk::Link;
 use clay_mdk::ManifestBuilder;
 use clay_mdk::MicroManifest;
 use clay_mdk::Necessity;
@@ -59,11 +59,11 @@ pub const PANEL_VALUE_SCHEMA: &str = "org.example.dayframe.layout.panel";
 pub const PANEL_SELECTOR_SCHEMA: &str = "org.example.dayframe.layout.panelSelector";
 
 /// One installed panel: its title, and the presentation published for its content, as an
-/// attachment of the row.
+/// link of the row.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Panel {
     pub title: String,
-    pub content: Attachment,
+    pub content: Link,
 }
 
 /// The viewer's arrangement, kept in the layout's configuration document: the registration ids
@@ -126,7 +126,7 @@ impl DeclaredCollection for LayoutPanels {
 /// shell's home offers.
 pub fn manifest() -> MicroManifest {
     ManifestBuilder::new()
-        .component::<LayoutView>()
+        .view::<LayoutView>()
         .requires(
             SHELL_NAV_BUTTON,
             micro_shell_manifest::NAV_BUTTON_CONTRACT,
@@ -172,7 +172,7 @@ mod tests {
         ciborium::into_writer(
             &Panel {
                 title: "Counter (Wasm)".into(),
-                content: Attachment::at(0),
+                content: Link::at(0),
             },
             &mut bytes,
         )

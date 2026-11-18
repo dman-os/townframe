@@ -300,7 +300,7 @@ fn package_micros(
                         )
                     },
                 )
-                // A package may require the shell's publications (the layout's app bar
+                // A package may require the shell's endpoints (the layout's app bar
                 // button); the shell is the only provider a package can name today.
                 .satisfied_by(
                     &clay_mdk::MicroId::local(micro_shell_manifest::ID),

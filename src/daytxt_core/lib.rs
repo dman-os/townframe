@@ -53,6 +53,7 @@ use clay_mdk::host::DocumentService;
 use clay_mdk::host::Resources;
 use clay_mdk::host::RootRow;
 use clay_mdk::Collection;
+use clay_mdk::Endpoint;
 use clay_mdk::MicroId;
 use clay_mdk::Nsid;
 use clay_mdk::SHELL_ROOTS;
@@ -112,36 +113,40 @@ pub type FactoryBuilder = Box<
 
 impl InstalledMicro {
     /// Satisfy every requirement of this micro from `provider`, whose package is `offered`:
-    /// each binds the provider's publication of the same name. A catalog convention that
+    /// each binds the provider's endpoint of the same name. A catalog convention that
     /// spares each launcher spelling the same table out; a micro whose requirements come from
     /// several providers sets `requirements` itself.
     ///
-    /// A requirement the provider cannot satisfy is refused: it names no publication of the
-    /// provider, or the provider's call publication implements another contract NSID than the
-    /// one required. A presentation publication declares no contract on the wire (every
-    /// presentation shares the reserved presentation-component contract), so a requirement of
-    /// one is checked by name only.
+    /// A requirement the provider cannot satisfy is refused: it names no endpoint of the
+    /// provider, or the provider's endpoint names another contract NSID than the one
+    /// required. A view that declares no `implements` has no contract to check, so a
+    /// requirement of one is checked by name only.
     pub fn satisfied_by(
         mut self,
         provider: &MicroId,
         offered: &clay_mdk::Sidecar,
     ) -> Result<Self, String> {
         for request in &self.sidecar.manifest.requires {
-            let publication = offered
+            let endpoint = offered
                 .manifest
-                .publications
-                .iter()
-                .find(|publication| publication.name == request.binding)
+                .endpoints
+                .get(&request.binding)
                 .ok_or_else(|| {
                     format!(
-                        "{} requires {:?}, which {provider} does not publish",
+                        "{} requires {:?}, which {provider} does not serve",
                         self.id, request.binding
                     )
                 })?;
-            match &publication.contract {
+            let contract = match endpoint {
+                Endpoint::Method { nsid } => Some(nsid),
+                Endpoint::Callback { implements } => Some(implements),
+                Endpoint::View { implements } => implements.as_ref(),
+                Endpoint::Other(_) => None,
+            };
+            match contract {
                 Some(contract) if *contract != request.contract => {
                     return Err(format!(
-                        "{} requires {:?} under {}, but {provider} publishes it under {contract}",
+                        "{} requires {:?} under {}, but {provider} serves it under {contract}",
                         self.id, request.binding, request.contract
                     ));
                 }
@@ -912,7 +917,7 @@ pub fn Application(runtime: Signal<CompositionRuntime>, host: HostInputs) -> Ele
                     "aria-label": "{row.value.title}",
                     style: "width:100%;height:100%;min-width:0;min-height:0",
                     PresentationSlot {
-                        reference: row.attachments[row.value.content.index()].clone(),
+                        reference: row.links[row.value.content.index()].clone(),
                     }
                 }
             }
