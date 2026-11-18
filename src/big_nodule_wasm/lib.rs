@@ -27,6 +27,8 @@
 // for `ensure` deeper than the default limit (rust-lang/rust#159228).
 #![recursion_limit = "256"]
 
+mod net;
+
 use async_trait::async_trait;
 use big_blobs::BlobService;
 use big_blobs_core::BlobId;
@@ -81,7 +83,6 @@ use wash_runtime::host::Host;
 use wash_runtime::host::HostApi;
 use wash_runtime::host::HostBuilder;
 use wash_runtime::host::allowed_hosts::AllowedHost;
-use wash_runtime::host::http::DefaultOutgoingHandler;
 use wash_runtime::host::http::HostHandler;
 use wash_runtime::host::http::Ingress;
 use wash_runtime::host::http::OutgoingHandler;
@@ -194,9 +195,14 @@ struct Running {
 /// to `dispatch.local` are made through `dispatch`. The returned token stops the feed and then
 /// the host, and must be stopped after the nodule service that calls the executor and before
 /// the dispatch service (and the authority behind it), which in-flight guest calls still use.
+///
+/// `allow_host_loopback` is the node's switch for the machine's own loopback: only when it is
+/// on does `NetTarget::HOST_LOOPBACK`, for the ports a cartridge holds a `grant/net` for,
+/// reach `127.0.0.1`. A guest's own `127.0.0.1` and `localhost` never do.
 pub async fn boot(
     blobs: Arc<BlobService>,
     dispatch: Client<DispatchProtocol>,
+    allow_host_loopback: bool,
 ) -> Res<(Arc<WasmExecutor>, StopToken)> {
     let signers = Signers::default();
     let ingress = Arc::new(
@@ -204,7 +210,7 @@ pub async fn boot(
             .outgoing_handler(Egress {
                 dispatch,
                 signers: Arc::clone(&signers),
-                net: Arc::new(DefaultOutgoingHandler::default()),
+                net: Arc::new(net::NetClients::new(allow_host_loopback)),
             })
             .build()
             .await
@@ -705,8 +711,9 @@ type Signers = Arc<Mutex<BTreeMap<String, WorkloadCaller>>>;
 struct Egress {
     dispatch: Client<DispatchProtocol>,
     signers: Signers,
-    /// Performs the requests [`egress::authorize_net`] allowed.
-    net: Arc<DefaultOutgoingHandler>,
+    /// Performs the requests [`egress::authorize_net`] allowed, refusing the addresses they
+    /// resolve to that no `#net` grant could open.
+    net: Arc<net::NetClients>,
 }
 
 fn answer((status, body): (hyper::StatusCode, XrpcBody)) -> SendResult {
@@ -792,7 +799,7 @@ impl OutgoingHandler for Egress {
         workload_id: &str,
         mut request: hyper::Request<WasiBody>,
         options: Option<RequestOptions>,
-        fut: RequestIoFuture,
+        _fut: RequestIoFuture,
     ) -> SendFuture {
         if request
             .uri()
@@ -815,18 +822,25 @@ impl OutgoingHandler for Egress {
                 return Box::new(async move { answer(refusal) });
             }
             egress::strip_node_headers(request.headers_mut());
-            return self.net.send_request(workload_id, request, options, fut);
+            let net = Arc::clone(&self.net);
+            let workload_id = workload_id.to_owned();
+            return Box::new(async move {
+                match net.send(&workload_id, request, options).await {
+                    Ok(sent) => sent,
+                    // A destination in a refused range is answered as an undeclared host is.
+                    Err(refused) => {
+                        tracing::warn!(%workload_id, %refused, "refused a network destination");
+                        answer(egress::net_refused())
+                    }
+                }
+            });
         }
         let egress = self.clone();
         let workload_id = workload_id.to_owned();
         Box::new(async move { answer(egress.call(&workload_id, request).await) })
     }
 
-    fn on_workload_bind(&self, workload_id: &str, call_concurrency: usize) {
-        self.net.on_workload_bind(workload_id, call_concurrency);
-    }
-
     fn on_workload_unbind(&self, workload_id: &str) {
-        self.net.on_workload_unbind(workload_id);
+        self.net.forget(workload_id);
     }
 }

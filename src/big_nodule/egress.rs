@@ -266,6 +266,13 @@ pub fn authorize_net(
         .map_err(dispatch_error_response)
 }
 
+/// The answer for a request [`authorize_net`] allowed but whose destination the executor refused
+/// when it resolved it (loopback, link-local, metadata, unspecified, multicast, documentation or
+/// a private range): the same `Denied` as an undeclared host, since no grant could change it.
+pub fn net_refused() -> (StatusCode, XrpcBody) {
+    dispatch_error_response(DispatchError::Denied)
+}
+
 /// Removes from the headers of a request [`authorize_net`] allowed what is the node's and never
 /// the destination's: the routine's capability. Nothing else of the node's reaches a guest, so
 /// nothing else of it can be sent; the guest's own headers (an `authorization` for the

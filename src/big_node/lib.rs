@@ -122,6 +122,11 @@ pub struct Config {
     /// nodule service lets a dev build run as an installed cartridge, with its data and grants.
     /// Fixed at boot, so no nodule or runtime call can turn it on.
     pub allow_slot_takeover: bool,
+    /// The machine-loopback switch (`net.allow_host_loopback` in `node.json`): whether a nodule
+    /// that holds a `grant/net` for `host.daybook.internal:<port>` reaches that port on the
+    /// machine's own loopback. A guest's own `127.0.0.1` and `localhost` never do. Fixed at
+    /// boot, so no nodule or runtime call can turn it on.
+    pub allow_host_loopback: bool,
 }
 
 /// A node's id: the public half of its identity seed in lowercase hex, which is its keyhive
@@ -280,8 +285,10 @@ impl BigNode {
 
     /// Boots a production node: its nodules' handlers are Wasm components.
     pub async fn boot(config: Config) -> Res<(Self, StopToken)> {
-        Self::boot_with(config, |deps| async move {
-            let (wasm, stop) = big_nodule_wasm::boot(deps.blobs, deps.dispatch).await?;
+        let allow_host_loopback = config.allow_host_loopback;
+        Self::boot_with(config, move |deps| async move {
+            let (wasm, stop) =
+                big_nodule_wasm::boot(deps.blobs, deps.dispatch, allow_host_loopback).await?;
             Ok((wasm as Arc<dyn NoduleExecutor>, stop))
         })
         .await
