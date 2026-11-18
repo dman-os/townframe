@@ -90,18 +90,29 @@ impl Renderer<'_> {
         attributes.extend(self.pointers.listeners(key));
         let children: Vec<Element> = if let Some(shadow_root) = document.shadow_root(key) {
             attributes.push(Attribute::new("data-dioxus-shadow", "", None, false));
-            // Dioxus rejects a literal key, hence the interpolation.
-            let stylesheet_key = "pierre-core-css";
-            let stylesheet = rsx! {
-                style { key: "{stylesheet_key}", {CORE_CSS.as_str()} }
-            };
-            std::iter::once(stylesheet)
-                .chain(
-                    document
-                        .child_nodes(shadow_root)
-                        .into_iter()
-                        .map(|child| self.node(child, Some(key))),
-                )
+            // The shadow root's stylesheet (Pierre's core CSS, then the text of every `<style>`
+            // Pierre put in the root, such as its theme) rides on the host as an attribute, which
+            // the interpreter adopts as a constructable sheet. A `<style>` element would be refused
+            // by a CSP without `'unsafe-inline'` in `style-src-elem` (the web shell's), while an
+            // attribute's text is data.
+            let (styles, content): (Vec<NodeKey>, Vec<NodeKey>) = document
+                .child_nodes(shadow_root)
+                .into_iter()
+                .partition(|child| document.tag_name(child) == "style");
+            let mut sheet = CORE_CSS.to_string();
+            for style in styles {
+                sheet.push('\n');
+                sheet.push_str(&document.text_content(style));
+            }
+            attributes.push(Attribute::new(
+                "data-dioxus-shadow-sheet",
+                sheet,
+                None,
+                false,
+            ));
+            content
+                .into_iter()
+                .map(|child| self.node(child, Some(key)))
                 .collect()
         } else if tag == "slot" {
             let name = document.get_attribute(key, "name").unwrap_or_default();
@@ -156,7 +167,6 @@ fn element(tag: &str, key: NodeKey, attributes: Vec<Attribute>, children: Vec<El
         "a" => a,
         "pre" => pre,
         "code" => code,
-        "style" => style,
         "slot" => slot,
         "button" => button,
         "svg" => svg,
