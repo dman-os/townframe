@@ -6,10 +6,10 @@
 use clay_docs::FacetRoute;
 use clay_guest_session::egress::DispatchEgress;
 use clay_host::Factory;
+use clay_mdk::host::factory;
 use clay_mdk::host::CapabilityPublication;
 use clay_mdk::host::CollectionBindings;
 use clay_mdk::host::Resources;
-use clay_mdk::host::factory;
 use clay_store::OrderedStore;
 #[cfg(any(feature = "blitz", feature = "wry"))]
 use dayframe_composition::Application;
@@ -31,6 +31,7 @@ use ui::ThemeRoot;
 /// One package as the shell found it: the `<name>.manifest.json` sidecar text and the guest
 /// component bytes it describes.
 // STAND-IN until `big_plugs` delivers manifests.
+#[derive(Clone)]
 pub struct PackageFiles {
     /// Where the shell found it, for installation error messages.
     pub origin: String,
@@ -186,23 +187,18 @@ pub fn wasmtime_engine(
     })
 }
 
-/// The ids (`<did>/<name>`) of the micros `packages` install, for a composition that opens one
-/// node actor per micro. A package that does not parse is skipped here, and reported by
-/// [`native_runtime`].
-pub fn package_micro_ids(packages: &[PackageFiles]) -> Vec<String> {
-    packages
-        .iter()
-        .filter_map(|files| {
-            // Only the identity is wanted, so the component bytes are not copied in.
-            clay_mdk::package::Package::from_json(
-                clay_mdk::LOCAL_NAMESPACE,
-                &files.manifest_json,
-                Vec::new(),
-            )
-            .ok()
-            .map(|package| package.id().as_str().to_owned())
-        })
-        .collect()
+/// The id (`<did>/<name>`) the micro of `files` installs as, for a composition that opens one node
+/// actor per micro and for one that replaces a package with the micro a cartridge contributes. A
+/// package that does not parse has none here, and is reported by [`native_runtime`].
+pub fn package_micro_id(files: &PackageFiles) -> Option<String> {
+    // Only the identity is wanted, so the component bytes are not copied in.
+    clay_mdk::package::Package::from_json(
+        clay_mdk::LOCAL_NAMESPACE,
+        &files.manifest_json,
+        Vec::new(),
+    )
+    .ok()
+    .map(|package| package.id().as_str().to_owned())
 }
 
 /// The `dispatch.local` egress a composition holds for a micro, by its id text (`<did>/<name>`):
@@ -597,8 +593,8 @@ fn use_wry_host_inputs(
     insets_source: Option<InsetsSource>,
     viewport_source: Option<ViewportSource>,
 ) -> HostInputs {
-    use dioxus_desktop::WindowEvent;
     use dioxus_desktop::tao::event::Event;
+    use dioxus_desktop::WindowEvent;
     let window = dioxus_desktop::use_window();
     let viewport = move || {
         viewport_source.map_or_else(
@@ -690,7 +686,7 @@ mod tests {
             manifest_json: serde_json::to_vec(&micro_review_manifest::sidecar()).unwrap(),
             component: Vec::new(),
         };
-        let id = package_micro_ids(&[review("review")]).remove(0);
+        let id = package_micro_id(&review("review")).unwrap();
         let datum = serde_json::json!({ "githubDrawer": "g", "intxtDrawers": [], "docCap": "c" });
         let runtime = native_runtime(
             Arc::new(clay_store::MemoryStore::default()),

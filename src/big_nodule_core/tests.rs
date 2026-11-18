@@ -1291,6 +1291,7 @@ mod admission_tests {
                 component: "micro".into(),
                 schema: "org.example.clay.micro".into(),
                 description: Default::default(),
+                uses: Default::default(),
                 extra: Default::default(),
             });
         };
