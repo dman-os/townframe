@@ -61,7 +61,7 @@ pub const HANDLER_COMPONENT: &str = "handler";
 const HANDLER_EXPORT: &str = "handle";
 
 /// The permbind key of the operation or datum kind `nsid`: its last segment, which is unique
-/// among the operations and kinds the cartridge binds (`cartridge` asserts it).
+/// among the operations and kinds the cartridge binds (`permbinds` asserts it).
 fn permbind_key(nsid: &str) -> &str {
     nsid.rsplit('.')
         .next()
@@ -80,14 +80,86 @@ pub fn requested_methods(cartridge: &FixtureCartridge) -> impl Iterator<Item = &
         })
 }
 
+/// The datum permbinds, one per kind (ADR 047 §5: `#datum` names exactly one NSID). The access is
+/// the union of what the routines below take.
+#[rustfmt::skip]
+const DATUMS: [(&str, &str, bool, bool, bool, bool); 12] = [
+    (generic::Intxt::ID, "intxt markers", true, true, true, true),
+    (generic::Title::ID, "intxt titles", true, true, true, true),
+    (generic::Body::ID, "intxt bodies", true, true, true, true),
+    (
+        work::WorktreeEntry::ID,
+        "worktree entries",
+        true,
+        true,
+        false,
+        true,
+    ),
+    (
+        work::RepoEntry::ID,
+        "repository entries",
+        true,
+        true,
+        false,
+        true,
+    ),
+    (
+        work::SessionEntry::ID,
+        "agent session entries",
+        true,
+        true,
+        false,
+        true,
+    ),
+    (
+        work::GithubPullEntry::ID,
+        "pull request entries",
+        true,
+        true,
+        false,
+        true,
+    ),
+    (
+        work::Worktree::ID,
+        "the worktrees you add",
+        true,
+        false,
+        false,
+        true,
+    ),
+    (
+        work::GitRepo::ID,
+        "the git repositories you add",
+        true,
+        false,
+        false,
+        true,
+    ),
+    (
+        work::AgentSession::ID,
+        "the agent sessions you add",
+        true,
+        false,
+        false,
+        true,
+    ),
+    // Read by `addToIntxt` when the part is a pull request, and by the review micro.
+    (
+        work::GithubPull::ID,
+        "imported GitHub pull requests",
+        true,
+        false,
+        false,
+        false,
+    ),
+    (Blob::ID, "packs and diffs", true, false, true, true),
+];
+
 /// intxt's cartridge version, with `wasm` as its handler component: the envelope, the payloads
 /// its pins name, and the component's bytes, as a publisher stages and publishes them. Its
 /// permbinds are the whole of what it reaches, and an operator grants the cartridge the methods
 /// and drawers they name (`intxt_core::install`).
 ///
-/// This is the one place the manifest's permbinds and routines are written, as the ADR 047
-/// datums themselves; nodules' authoring builder (ADR 049 §2) replaces the body of this function
-/// and nothing around it.
 pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
     let bundle = Bundle::new(&crate::UNIVERSE, Vec::new());
     let mut cartridge = FixtureCartridge::new(Cartridge::new(
@@ -130,6 +202,25 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         ))
         .with_wasm(HANDLER_COMPONENT, wasm);
 
+    manifest(&mut cartridge);
+    cartridge
+}
+
+/// Writes the cartridge's permbinds and its nodule's routines, as the ADR 047 datums themselves.
+/// This is the one place they are written: nodules' authoring builder (ADR 049 §2) replaces
+/// `manifest` and what it calls, and nothing around it.
+fn manifest(cartridge: &mut FixtureCartridge) {
+    cartridge.permbinds = permbinds();
+    cartridge.nodule = Some(nodule());
+
+    // MICRO: the review micro joins here as `cartridge.micro` (ADR 049 §3, the proposal's
+    // `micro` member: component `review`, its description inline, and `uses` of `pullRequests`,
+    // `intxts` (read), `githubPull`, the intxt records, `contentBlobs` and `summarizeIntxts`).
+    // Nothing in the nodule takes `pullRequests` yet, so only the micro makes it used.
+}
+
+/// The cartridge's permbinds: what it reaches, whichever routine reaches it.
+fn permbinds() -> BTreeMap<String, Permbind> {
     let necessity = |required: bool| {
         if required {
             Necessity::Required
@@ -178,78 +269,7 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
     // authority's (the blob).
     //
     //   (kind,                          what it is,                        read,  write, create, required)
-    let datums: [(&str, &str, bool, bool, bool, bool); 12] = [
-        (generic::Intxt::ID, "intxt markers", true, true, true, true),
-        (generic::Title::ID, "intxt titles", true, true, true, true),
-        (generic::Body::ID, "intxt bodies", true, true, true, true),
-        (
-            work::WorktreeEntry::ID,
-            "worktree entries",
-            true,
-            true,
-            false,
-            true,
-        ),
-        (
-            work::RepoEntry::ID,
-            "repository entries",
-            true,
-            true,
-            false,
-            true,
-        ),
-        (
-            work::SessionEntry::ID,
-            "agent session entries",
-            true,
-            true,
-            false,
-            true,
-        ),
-        (
-            work::GithubPullEntry::ID,
-            "pull request entries",
-            true,
-            true,
-            false,
-            true,
-        ),
-        (
-            work::Worktree::ID,
-            "the worktrees you add",
-            true,
-            false,
-            false,
-            true,
-        ),
-        (
-            work::GitRepo::ID,
-            "the git repositories you add",
-            true,
-            false,
-            false,
-            true,
-        ),
-        (
-            work::AgentSession::ID,
-            "the agent sessions you add",
-            true,
-            false,
-            false,
-            true,
-        ),
-        // Read by `addToIntxt` when the part is a pull request, and by the review micro.
-        (
-            work::GithubPull::ID,
-            "imported GitHub pull requests",
-            true,
-            false,
-            false,
-            false,
-        ),
-        (Blob::ID, "packs and diffs", true, false, true, true),
-    ];
-    for (id, what, read, write, create, required) in datums {
+    for (id, what, read, write, create, required) in DATUMS {
         let access = |granted: bool| granted.then(|| necessity(required));
         bind(
             permbind_key(id),
@@ -290,8 +310,11 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
             }),
         );
     }
-    cartridge.permbinds = permbinds;
+    permbinds
+}
 
+/// The cartridge's nodule: each routine takes only what its handler touches (ADR 047 §3).
+fn nodule() -> Nodule {
     // Each routine takes only what its handler touches (ADR 047 §3). `access` is `read`,
     // `write`, `create`; an operation is `access(false, false, false)`.
     let access = |read, write, create| RoutineUse {
@@ -319,7 +342,7 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         )
     };
     let call = access(false, false, false);
-    cartridge.nodule = Some(Nodule {
+    Nodule {
         routines: [
             routine(
                 CreateIntxt::XRPC.nsid,
@@ -370,13 +393,7 @@ pub fn cartridge(wasm: &[u8]) -> FixtureCartridge {
         ]
         .into(),
         ..Default::default()
-    });
-
-    // MICRO: the review micro joins here as `cartridge.micro` (ADR 049 §3, the proposal's
-    // `micro` member: component `review`, its description inline, and `uses` of `pullRequests`,
-    // `intxts` (read), `githubPull`, the intxt records, `contentBlobs` and `summarizeIntxts`).
-    // Nothing in the nodule takes `pullRequests` yet, so only the micro makes it used.
-    cartridge
+    }
 }
 
 /// Whether `value` declares a storage form anywhere: a record that declares none needs no
