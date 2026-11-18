@@ -935,3 +935,28 @@ an accidental quadratic or worse code path, not a tuned performance suite. Candi
 Start with scaling checks: time at n and 10n, asserting a bound on the ratio, run in CI.
 Existing harness to look at first: `.agents/skills/perf-investigation` (costs.rs).
 
+## Wire inspection under normal use (operator, 2026-11-19)
+
+Capture and inspect the raw wire of nodes running normal workloads (relay plus several peers;
+documents, blobs, drawers, sync churn) to learn:
+- what makes up most of the wire bytes, by protocol (ALPN: subduction, big_sync/replay, repo
+  sync, iroh-blobs, XRPC, keyhive) and by message kind;
+- what travels in clear vs ciphertext: QUIC/TLS hides payloads from the network, but inside
+  the connection, what does the *peer* see in clear (keys, part and object ids, cursors,
+  payload JSON) vs encrypted content (keyhive/CGKA ciphertext);
+- overhead: framing, JSON vs binary, repeated keys, chatty round trips, idle keepalives.
+
+Feeds the metadata privacy audit (what each party can link), the codec decision (CBOR per
+method, by measurement), and the benchmarks.
+
+**How:** instrument at the protocol layer (per ALPN or method byte counters and sampled message
+dumps, behind a debug flag) rather than capturing packets, since QUIC is encrypted. Optionally
+add a key-log for decrypting captures in a test harness.
+
+**Uuid audit (2026-11-19):** findings are in `docs/scratch/uuid-audit.md`.
+- **Fixed:** the WebSocket client frame mask and handshake key came from `Uuid::now_v7()`,
+  whose prefix is a predictable timestamp; they now use random bytes, per RFC 6455.
+- **Open:** v7 `Uuid7` actor, `docUuid`, operator and grant-subject ids travel to peers in
+  dmeta and certificates, leaking creation time and order (big_cabinet; ties into the
+  metadata audit). `command_id` primary keys take unvalidated caller text.
+

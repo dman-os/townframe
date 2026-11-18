@@ -15,6 +15,7 @@ default = []
 iroh = ["dep:service_client_iroh_rs"]
 
 [dependencies]
+rand.workspace = true
 method_core.workspace = true
 service_core_rs.workspace = true
 service_client_core_rs.workspace = true

@@ -59,9 +59,9 @@ impl<S: AsyncWrite + Unpin> WsIo<S> {
             }
         }
         if self.client {
-            let mask: [u8; 4] = uuid::Uuid::now_v7().as_bytes()[..4]
-                .try_into()
-                .expect("uuid prefix is a mask key");
+            // RFC 6455 §5.3: a fresh, unpredictable mask per frame. (A v7 uuid's prefix is
+            // its timestamp, which an intermediary could predict.)
+            let mask: [u8; 4] = rand::random();
             header.extend_from_slice(&mask);
             self.stream.write_all(&header).await?;
             let masked: Vec<u8> = payload

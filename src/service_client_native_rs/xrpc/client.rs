@@ -236,7 +236,8 @@ impl XrpcClient {
         };
         let key = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            uuid::Uuid::now_v7().as_bytes(),
+            // RFC 6455 §4.1: a random 16-byte nonce.
+            rand::random::<[u8; 16]>(),
         );
         let path = match url.query() {
             Some(query) => format!("{}?{}", url.path(), query),
