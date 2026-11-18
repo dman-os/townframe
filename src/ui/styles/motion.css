@@ -1,0 +1,58 @@
+/*
+ * The enter animations of overlay surfaces (the kit's Drawer and Sheet). Durations and easing come
+ * from the `motion.*` semantic tokens; this file only turns them into keyframes and `animate-*`
+ * utilities, because a keyframe cannot be authored in the token JSON.
+ *
+ * Only entering exists. An exit would need the surface to stay mounted until its animation ends,
+ * and neither Blitz nor the guest wire delivers `animationend`/`transitionend`; the kit forbids a
+ * timer standing in for them. A dismissed surface therefore disappears at once.
+ *
+ * Every consumer pairs an `animate-*` class with `motion-reduce:animate-none`
+ * (INTERACTION-007).
+ */
+@theme {
+  --animate-fade-in: kit-fade-in var(--df-motion-duration-fade)
+    var(--df-motion-easing-enter) both;
+  --animate-slide-in-leading: kit-slide-in-leading
+    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
+  --animate-slide-in-trailing: kit-slide-in-trailing
+    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
+  --animate-slide-in-bottom: kit-slide-in-bottom var(--df-motion-duration-enter)
+    var(--df-motion-easing-enter) both;
+
+  @keyframes kit-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes kit-slide-in-leading {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes kit-slide-in-trailing {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes kit-slide-in-bottom {
+    from {
+      transform: translateY(100%);
+    }
+    to {
+      transform: translateY(0);
+    }
+  }
+}

@@ -13,7 +13,9 @@ publications:
   - name: view
     kind: presentation
     contract: ~
-requires: []
+requires:
+  - binding: nav-button
+    contract: org.example.dayframe.shell.navButton
 configuration_requests:
   - binding: layout
     facets:
@@ -36,17 +38,18 @@ collection_requests:
   - binding: panels
     contract: org.example.dayframe.layout.panels
     access: read
-  - binding: roots
-    contract: org.example.clay.shell.roots
+  - binding: shell-panels
+    contract: org.example.dayframe.shell.panels
     access: write
 contributions:
-  - id: root
-    binding: roots
+  - id: panel
+    binding: shell-panels
     key: dayframe.layout
     payload:
       content:
         $attachment: 0
-      pinned: true
+      sockets:
+        - list
       title: Layout
     attachments:
       - index: 0

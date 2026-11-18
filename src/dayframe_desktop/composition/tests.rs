@@ -21,9 +21,11 @@ async fn desktop_runtime_installs_the_counter_section_from_its_package_manifest(
     assert_eq!(
         micros,
         [
+            "did:example:clay-local/dayframe.shell",
             "did:example:clay-local/dayframe.settings",
             "did:example:clay-local/dayframe.toolbar",
             "did:example:clay-local/dayframe.sample",
+            "did:example:clay-local/dayframe.lifecycle",
             "did:example:clay-local/dayframe.counter",
             "did:example:clay-local/dayframe.layout"
         ]
