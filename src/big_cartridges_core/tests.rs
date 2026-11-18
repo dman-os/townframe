@@ -221,6 +221,7 @@ fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
     };
     validated(net("api.example.org", Some(8443), Some(&["GET", "POST"]))).unwrap();
     validated(net("API.Example.org", None, None)).unwrap();
+    validated(net("[::1]", Some(8000), None)).unwrap();
     for (permbind, why) in [
         (net("", None, None), "no host"),
         (net("example.org/path", None, None), "a path is not a host"),
@@ -229,6 +230,15 @@ fn net_permbinds_name_a_host_and_verbs_and_a_use_asks_for_nothing_more() {
             "a URL is not a host",
         ),
         (net("*.example.org", None, None), "no wildcards"),
+        (
+            net("example.org:8000", None, None),
+            "the port is its own field",
+        ),
+        (net("::1", Some(8000), None), "an IPv6 literal is bracketed"),
+        (
+            net("[example.org]", None, None),
+            "brackets hold an IPv6 literal",
+        ),
         (net("example.org", Some(0), None), "port 0"),
         (net("example.org", None, Some(&["get"])), "lower-case verb"),
         (net("example.org", None, Some(&[""])), "empty verb"),
@@ -611,4 +621,52 @@ fn a_pinned_datum_pin_tampering_breaks_verification() {
         tampered.verify_signature(),
         Err(crate::signature::SignatureError::Invalid(_))
     ));
+}
+
+/// A network target is Deno's `--allow-net` syntax: `host` is every port, `host:port` one, there
+/// is no scheme, and an IPv6 literal is bracketed. It round-trips as a grant key, and a grant
+/// covers a permbind when it names the host and every port or the permbind's one.
+#[test]
+fn net_targets_follow_deno_allow_net() {
+    use crate::config::GrantKey;
+    use crate::config::NetTarget;
+    let target = |text: &str| text.parse::<NetTarget>().unwrap();
+    assert_eq!(target("Example.ORG"), target("example.org"));
+    assert_eq!(target("example.org").port(), None);
+    assert_eq!(target("example.org:8080").port(), Some(8080));
+    assert_eq!(target("[::1]:8000").host(), "[::1]");
+    assert_eq!(target("[::1]:8000").port(), Some(8000));
+    assert_eq!(target("[::1]").port(), None);
+    // One spelling of an address is one grant.
+    assert_eq!(target("[2001:DB8:0::1]:80").to_string(), "[2001:db8::1]:80");
+    for text in [
+        "https://example.org",
+        "example.org:",
+        "example.org:0",
+        "example.org:99999",
+        "::1",
+        "::1:8000",
+        "[::1",
+        "[::1]8000",
+        "*.example.org",
+        "",
+        ":80",
+    ] {
+        text.parse::<NetTarget>().expect_err(text);
+    }
+    for text in ["example.org", "example.org:8080", "[::1]", "[::1]:8000"] {
+        let key = GrantKey::Net(target(text));
+        assert_eq!(key.to_string().parse::<GrantKey>().unwrap(), key);
+        assert_eq!(GrantKey::from_datum_key(&key.datum_key()), Some(key));
+    }
+
+    assert!(target("example.org").reaches("example.org", 1));
+    assert!(target("example.org:8080").reaches("example.org", 8080));
+    assert!(!target("example.org:8080").reaches("example.org", 8081));
+    assert!(!target("example.org:8080").reaches("other.org", 8080));
+    assert!(target("example.org").covers(&target("example.org:8080")));
+    assert!(target("example.org").covers(&target("example.org")));
+    assert!(target("example.org:8080").covers(&target("example.org:8080")));
+    assert!(!target("example.org:8080").covers(&target("example.org")));
+    assert!(!target("example.org:8080").covers(&target("example.org:8081")));
 }

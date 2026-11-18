@@ -66,8 +66,10 @@ pub struct PermbindMethod {
 /// `dispatch.local`, and is the permbind raw `wasi:sockets` will use. A routine that takes it
 /// reaches the host only once the cartridge also holds the matching `grant/net` datum.
 ///
-/// Matching is exact (no wildcards): the host case-insensitively, the port as stated (none means
-/// the HTTPS port, 443, see [`NetTarget`]), and `methods` (HTTP verbs, upper case) when present.
+/// The syntax is Deno's `--allow-net` (see [`NetTarget`]): `host` is the one host with no `port`
+/// (any port), `host` with a `port` that port only, with no scheme, and an IPv6 literal bracketed
+/// (`[::1]`). Matching is exact (no wildcards): the host case-insensitively, the port as stated,
+/// and `methods` (HTTP verbs, upper case) when present.
 #[macros::datum(authority = PERMBIND_AUTHORITY, name = "net")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

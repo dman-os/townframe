@@ -134,8 +134,8 @@ impl MissingAuthorityLookup {
 
     /// Whether the routine holding the dispatch handle `capability` may send a `method` request
     /// to `host` on `port` (the URL's own or its scheme's default): its `uses` take a `#net`
-    /// permbind naming that host and port and allowing the verb, and the cartridge holds a
-    /// matching `grant/net`. Declared but not granted is the cartridge's `MissingAuthority`,
+    /// permbind naming that host and port (or the host on every port) and allowing the verb, and
+    /// the cartridge holds a matching `grant/net`. Declared but not granted is the cartridge's `MissingAuthority`,
     /// carrying the request already filed for the permbind; anything else, which no grant could
     /// change, is [`DispatchError::Denied`] (ADR 049 §4.3). The one check every executor puts a
     /// guest's non-dispatch request through.
@@ -541,8 +541,9 @@ fn covers(
 ) -> bool {
     match access {
         RequestedAccess::Net { host, port } => nets.is_some_and(|nets| {
-            nets.iter()
-                .any(|net| net.reaches(host, port.unwrap_or(NetTarget::DEFAULT_PORT)))
+            let requested = NetTarget::new(host, *port)
+                .expect("a filed net request names the host of an admitted permbind");
+            nets.iter().any(|net| net.covers(&requested))
         }),
         RequestedAccess::Method { nsid } => record
             .methods

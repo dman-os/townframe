@@ -242,7 +242,7 @@
               },
               {
                 "additionalProperties": true,
-                "description": "`#net { host, port?, methods? }`: a host a routine may use the network to reach (ADR 049 §2).\nIt gates the routine's outgoing `wasi:http` requests to URLs that are not the node's own\n`dispatch.local`, and is the permbind raw `wasi:sockets` will use. A routine that takes it\nreaches the host only once the cartridge also holds the matching `grant/net` datum.\n\nMatching is exact (no wildcards): the host case-insensitively, the port as stated (none means\nthe HTTPS port, 443, see [`NetTarget`]), and `methods` (HTTP verbs, upper case) when present.",
+                "description": "`#net { host, port?, methods? }`: a host a routine may use the network to reach (ADR 049 §2).\nIt gates the routine's outgoing `wasi:http` requests to URLs that are not the node's own\n`dispatch.local`, and is the permbind raw `wasi:sockets` will use. A routine that takes it\nreaches the host only once the cartridge also holds the matching `grant/net` datum.\n\nThe syntax is Deno's `--allow-net` (see [`NetTarget`]): `host` is the one host with no `port`\n(any port), `host` with a `port` that port only, with no scheme, and an IPv6 literal bracketed\n(`[::1]`). Matching is exact (no wildcards): the host case-insensitively, the port as stated,\nand `methods` (HTTP verbs, upper case) when present.",
                 "properties": {
                   "$type": {
                     "const": "org.example.daybook.cartridge.net"
