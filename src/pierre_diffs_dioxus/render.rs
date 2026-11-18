@@ -75,7 +75,7 @@ impl Renderer<'_> {
         let key_id = key.as_u64();
         let tag = document.tag_name(key);
         // Inside a shadow tree a `<style>` is already in its root's sheet attribute.
-        if host.is_some() && tag == "style" {
+        if host.is_some() && tag.eq_ignore_ascii_case("style") {
             return rsx! {};
         }
         if tag.is_empty() {
@@ -104,7 +104,8 @@ impl Renderer<'_> {
             let mut sheet = CORE_CSS.to_string();
             let mut pending = document.child_nodes(shadow_root);
             while let Some(child) = pending.pop() {
-                if document.tag_name(child) == "style" {
+                // Pierre's document names HTML elements in upper case (`STYLE`).
+                if document.tag_name(child).eq_ignore_ascii_case("style") {
                     sheet.push('\n');
                     sheet.push_str(&document.text_content(child));
                 } else if document.shadow_root(child).is_none() {
