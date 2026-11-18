@@ -173,14 +173,11 @@ mod tests {
     #[test]
     fn instr_target_is_off_by_default_and_on_by_filter() {
         assert_eq!(admitted(super::DEFAULT_TEST_FILTER), (0, 1));
-        assert_eq!(admitted(crate::DEFAULT_FILTER), (0, 1));
+        assert_eq!(admitted("info,instr=off,ort::logging=warn"), (0, 1));
         // Explicit env filters replace the default entirely; `instr=info` turns the probes on.
         assert_eq!(admitted("info,instr=info"), (1, 1));
         assert_eq!(admitted("warn,instr=info"), (1, 0));
         // Appended to a filter that already says `instr=off`, a later `instr=info` still wins.
-        assert_eq!(
-            admitted(&format!("{},instr=info", crate::DEFAULT_FILTER)),
-            (1, 1)
-        );
+        assert_eq!(admitted("info,instr=off,instr=info"), (1, 1));
     }
 }
