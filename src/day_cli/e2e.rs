@@ -29,6 +29,8 @@ mod library {
     use crate::context::NodeDir;
     use crate::context::SocketState;
     use crate::interlude::*;
+    use big_blobs_core::protocol::BlobsScope;
+    use big_blobs_core::protocol::MintBlobsCapability;
     use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
     use method_core::Method;
@@ -132,9 +134,12 @@ mod library {
         verb: method_core::HttpMethod,
         input: serde_json::Value,
     ) -> Reply {
-        client.call(nsid, verb, &input).await.unwrap()
+        client.call_untyped(nsid, verb, &input).await.unwrap()
     }
 
+    /// Untyped, because the wire is what these tests compare: an unclaimed NSID and input that is
+    /// not the method's are refused by the router, which no typed call can send.
+    ///
     /// Calls whose answers must not depend on how the node was reached: a query that succeeds, an
     /// operation nothing claims, and a real operation given input it must refuse.
     fn calls() -> Vec<(&'static str, method_core::HttpMethod, serde_json::Value)> {
@@ -156,15 +161,14 @@ mod library {
         let client = connect(&dir).await.unwrap();
         assert_eq!(client.mode(), Mode::InProcess);
         assert_eq!(client.socket_state(), SocketState::Absent);
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.status, 200, "{reply:?}");
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         // Stopping released the node: it can be booted again by the next command.
         connect(&dir).await.unwrap().stop().await.unwrap();
@@ -220,7 +224,6 @@ mod library {
         use crate::client::Raw;
         use method_core::HttpMethod::Get;
         use method_core::HttpMethod::Post;
-        const MINT: &str = "org.example.daybook.blobs.mintCapability";
         const PUT: &str = "org.example.daybook.blobs.put";
         const READ: &str = "org.example.daybook.blobs.read";
         let (tmp, dir) = new_node().await;
@@ -228,19 +231,25 @@ mod library {
         // Over the 64 KiB chunks a read yields, so it is several chunks long.
         let content: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
         std::fs::write(&upload, &content).unwrap();
-        let rights = serde_json::to_value(big_cabinet_core::authority::Rights::USE).unwrap();
         let round_trip = async |client: &NodeClient, name: &str| {
-            let mint = async |scope: serde_json::Value| {
-                let reply = client
-                    .call(MINT, Post, &json!({ "scope": scope, "rights": rights }))
+            let mint = async |scope: BlobsScope| {
+                let minted = client
+                    .call(MintBlobsCapability {
+                        scope,
+                        rights: big_cabinet_core::authority::Rights::USE,
+                        subject: None,
+                    })
                     .await
                     .unwrap();
-                assert_eq!(reply.status, 200, "{reply:?}");
-                reply.body["capabilityId"].as_str().unwrap().to_owned()
+                serde_json::to_value(minted.capability_id).unwrap()
             };
-            let put = mint(json!({ "put": true })).await;
+            let put = mint(BlobsScope {
+                put: true,
+                ..Default::default()
+            })
+            .await;
             let stored = client
-                .call_raw(
+                .call_untyped_bytes(
                     PUT,
                     Post,
                     &json!({ "capability": put }),
@@ -253,12 +262,17 @@ mod library {
                 .unwrap();
             assert_eq!(stored.status, 200, "{stored:?}");
             assert_eq!(stored.body["lengthOctets"], content.len());
-            let blob_id = stored.body["blobId"].as_str().unwrap().to_owned();
-            let read = mint(json!({ "read": [blob_id] })).await;
+            let blob_id: big_blobs_core::BlobId =
+                serde_json::from_value(stored.body["blobId"].clone()).unwrap();
+            let read = mint(BlobsScope {
+                read: [blob_id].into(),
+                ..Default::default()
+            })
+            .await;
             let params = json!({ "capability": read, "blobId": blob_id });
             let whole = tmp.path().join(format!("{name}-whole.bin"));
             let reply = client
-                .call_raw(
+                .call_untyped_bytes(
                     READ,
                     Get,
                     &params,
@@ -274,7 +288,7 @@ mod library {
             assert!(std::fs::read(&whole).unwrap() == content);
             let part = tmp.path().join(format!("{name}-part.bin"));
             let reply = client
-                .call_raw(
+                .call_untyped_bytes(
                     READ,
                     Get,
                     &params,
@@ -384,14 +398,14 @@ mod library {
         states.sort_by_key(|state| matches!(state, SocketState::Live));
         assert_eq!(states, [SocketState::Absent, SocketState::Live]);
         for client in [&first, &second] {
-            let reply = call(
-                client,
-                ListNodules::XRPC.nsid,
-                ListNodules::XRPC.method,
-                json!({}),
-            )
-            .await;
-            assert_eq!(reply.body, json!({"nodules": []}));
+            assert!(
+                client
+                    .call(ListNodules {})
+                    .await
+                    .unwrap()
+                    .nodules
+                    .is_empty()
+            );
         }
         let (holder, client) = if first.socket_state() == SocketState::Live {
             (second, first)
@@ -406,14 +420,14 @@ mod library {
             tokio::task::yield_now().await;
         }
         assert!(!holder_stopped.is_finished());
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         holder_stopped.await.unwrap().unwrap();
         assert_eq!(dir.probe_socket().await.unwrap(), SocketState::Absent);
@@ -468,14 +482,14 @@ mod library {
             .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
-        let reply = call(
-            &client,
-            ListNodules::XRPC.nsid,
-            ListNodules::XRPC.method,
-            json!({}),
-        )
-        .await;
-        assert_eq!(reply.body, json!({"nodules": []}));
+        assert!(
+            client
+                .call(ListNodules {})
+                .await
+                .unwrap()
+                .nodules
+                .is_empty()
+        );
         client.stop().await.unwrap();
         holder.stop().await.unwrap();
     }
