@@ -35,10 +35,10 @@ macro_rules! instr_pcs_state {
             Ok(cgka) => {
                 let ops = cgka.ops_count();
                 let root = cgka.try_pcs_key_hash();
-                tracing::info!(sed_id = ?$sed_id, label = $label, ops, ?root, ?owner_in_tree, "INSTR pcs state");
+                tracing::info!(target: "instr", sed_id = ?$sed_id, label = $label, ops, ?root, ?owner_in_tree, "INSTR pcs state");
             }
             Err(error) => {
-                tracing::info!(sed_id = ?$sed_id, label = $label, ?error, "INSTR pcs state: no cgka");
+                tracing::info!(target: "instr", sed_id = ?$sed_id, label = $label, ?error, "INSTR pcs state: no cgka");
             }
         }
     }};

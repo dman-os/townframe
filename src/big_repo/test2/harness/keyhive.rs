@@ -157,7 +157,7 @@ async fn instr_name_missing_events(
                     ("prekey_rotated", String::new(), p.issuer().to_bytes())
                 }
             };
-            tracing::warn!(
+            tracing::warn!(target: "instr",
                 holder = %log_nickname::nickname(&holder.peer_id()),
                 lacking = %log_nickname::nickname(&other.peer_id()),
                 log_index = index,

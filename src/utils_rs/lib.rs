@@ -171,8 +171,12 @@ pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
     }
 }
 
+/// `instr=off`: `INSTR` investigation probes log under the `instr` target and are silent unless a
+/// filter such as `RUST_LOG=info,instr=info` turns them on.
+pub(crate) const DEFAULT_FILTER: &str = "info,instr=off,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+
 pub fn setup_tracing() -> Res<()> {
-    let default_filter = "info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+    let default_filter = DEFAULT_FILTER;
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         if std::env::var("RUST_BACKTRACE").is_err() {
