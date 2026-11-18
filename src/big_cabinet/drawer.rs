@@ -1107,6 +1107,7 @@ impl DrawerService {
                 }
             }
         }
+        self.core.ledger.purge_done().await?;
         Ok(())
     }
 }
