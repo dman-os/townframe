@@ -96,9 +96,11 @@ impl State {
         };
         self.members
             .range((lower, Bound::Unbounded))
-            .take_while(|(member_part, index, _)| member_part == part && u32::from(*index) < end)
+            .take_while(|((member_part, index, _), _)| {
+                member_part == part && u32::from(*index) < end
+            })
             .take(limit)
-            .map(|(_, _, obj)| {
+            .map(|((_, _, obj), _)| {
                 let key = LogKey::Member {
                     obj: obj.clone(),
                     part: part.clone(),

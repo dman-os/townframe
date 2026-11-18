@@ -2,6 +2,7 @@
 
 use std::ops::Bound;
 
+use super::MemberRow;
 use super::ObjRow;
 use super::State;
 use crate::interlude::*;
@@ -82,11 +83,15 @@ impl State {
             },
             Some(LogEntry::Member(Membership { added_at: rev })),
         );
-        self.members.insert((
-            part.clone(),
-            BuckId::deepest_from_obj_key(obj).index(),
-            obj.clone(),
-        ));
+        self.members
+            .entry((
+                part.clone(),
+                BuckId::deepest_from_obj_key(obj).index(),
+                obj.clone(),
+            ))
+            .or_insert(MemberRow {
+                first_added_at: rev,
+            });
         self.bucket_transition(part, obj, rev, old, BucketMemberKind::Live(digest));
     }
 

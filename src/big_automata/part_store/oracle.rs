@@ -52,6 +52,8 @@ pub struct PartOracle {
     access: BTreeMap<(PartKey, PeerKey), AccessLevel>,
     /// The collapsed log: each key's last stamp.
     log: BTreeMap<LogKey, (Rev, Option<LogEntry>)>,
+    /// When each membership first went live, kept after removal for the route rule.
+    added_at: BTreeMap<(ObjKey, PartKey), Rev>,
     peer_cursors: BTreeMap<(PeerKey, PartKey), Rev>,
 }
 
@@ -103,6 +105,11 @@ impl PartOracle {
                 (LogKey::Member { obj, .. }, Some(changed)) if obj == changed
             );
             if before.get(key) != Some(value) || restamp {
+                if let (LogKey::Member { obj, part }, LogEntry::Member(membership)) = (key, value) {
+                    self.added_at
+                        .entry((obj.clone(), part.clone()))
+                        .or_insert(membership.added_at);
+                }
                 self.log.insert(key.clone(), (rev, Some(value.clone())));
                 stamped = true;
             }
@@ -389,7 +396,17 @@ impl PartOracle {
         let mut window = self
             .log
             .iter()
-            .filter(|(key, (rev, _))| *rev > after && *rev <= until && selector.selects(key, *rev))
+            .filter(|(key, (rev, value))| {
+                let removed_added_at = match (key, value) {
+                    (LogKey::Member { obj, part }, None) => {
+                        Some(self.added_at[&(obj.clone(), part.clone())])
+                    }
+                    _ => None,
+                };
+                *rev > after
+                    && *rev <= until
+                    && selector.selects(key, *rev, after, removed_added_at)
+            })
             .map(|(key, (rev, value))| Entry {
                 key: key.clone(),
                 rev: *rev,
