@@ -1,9 +1,10 @@
 # big_automata port ledger
 
 Status: Living ledger for the file-by-file port of big_sync into big_automata.
-Owner: operator + prod-readiness lane (pairing). Scope: `src/big_sync_core`,
-`src/big_sync`, `src/big_automata`. Companion to `prod-readiness-ledger.md` (W4,
-W7). Updated: 2026-11-17
+Owner: operator + prod-readiness lane (pairing). Companion to `prod-readiness-ledger.md` (W4,
+W7).
+Scope: `src/big_sync_core`, `src/big_sync`, `src/big_automata`.
+Updated: 2026-11-18 (replay session protocol pass)
 
 How we work: the operator reviews each file and leaves FIXMEs; the lane does the
 mechanical port and the reworks the operator approves. No cargo during pairing
