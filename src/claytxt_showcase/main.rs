@@ -99,7 +99,7 @@ fn lab_setting(env: &str, query: &str) -> Option<String> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = env;
+        let _: &str = env;
         let search = web_sys::window()
             .expect("the lab runs in a window")
             .location()
