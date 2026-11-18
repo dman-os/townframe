@@ -836,6 +836,20 @@ is clean apart from dead code.
 - A revoked principal's summary is `None`, so `access_changes` only ever reports grants.
 - `ShallowBucket` is never produced.
 
+**Part summary (fix on layer 09):**
+- `PartSummary { latest_cursor, member_count, deepest_bucket_level, dirty }`.
+- `latest_cursor` is the cursor strat's resume point and the bucket-to-cursor handover: the
+  bucket walk reads state no older than the summary, so replay from it repeats but never
+  skips. Access rows don't move it.
+- `ShallowBucket` is dropped (it was never produced).
+
+**Next cleanups:**
+- Fold `store.rs` into `part_store`: `CursorIndex` becomes `Rev`, `ObjPayload` moves to
+  `part_store`, and `store/bucket.rs` moves to `part_store/bucket_summary.rs`.
+- The outbox in big_automata has no user until the machine is ported. Its users today are
+  big_repo runtime2 (`automerge_frontier_worker`, `group_part_worker`, via big_sync_core) and
+  daybook drawers (its own outbox).
+
 ## Cross-cutting items
 
 - **Remove tokio mutex usages repo-wide (operator, 2026-11-18).** They are not cancel safe: a
