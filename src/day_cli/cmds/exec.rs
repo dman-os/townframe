@@ -28,7 +28,7 @@ pub async fn run(
     };
     let node = lazy::node().await?;
     let reply = if body.is_some() || range.is_some() || output.is_some() {
-        node.call_raw(
+        node.call_untyped_bytes(
             &nsid,
             verb,
             &input,
@@ -40,7 +40,7 @@ pub async fn run(
         )
         .await?
     } else {
-        node.call(&nsid, verb, &input).await?
+        node.call_untyped(&nsid, verb, &input).await?
     };
     println!("{}", serde_json::to_string_pretty(&reply.body)?);
     if !reply.is_success() {

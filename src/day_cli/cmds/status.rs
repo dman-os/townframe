@@ -3,7 +3,6 @@ use crate::interlude::*;
 use method_core::HttpMethod;
 
 use big_nodule_core::protocol::ListNodules;
-use method_core::Method;
 
 /// What the node and this client can say about the node today.
 ///
@@ -17,18 +16,11 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
     let client = lazy::node().await?;
     let info = node_info(&client).await?;
 
-    let reply = client
-        .call(ListNodules::XRPC.nsid, ListNodules::XRPC.method, &json!({}))
-        .await?;
-    eyre::ensure!(
-        reply.is_success(),
-        "listing nodules failed with {}: {}",
-        reply.status,
-        reply.body
-    );
-    let nodules = reply.body["nodules"]
-        .as_array()
-        .ok_or_eyre("listNodules did not answer a `nodules` list")?;
+    let nodules = client
+        .call(ListNodules {})
+        .await
+        .wrap_err("listing nodules failed")?
+        .nodules;
 
     let socket_path = conf.node_dir.socket_path()?;
     // Any exit but 0 means "no daemon serving", the convention `systemctl status` follows.
@@ -61,21 +53,18 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
             .as_str()
             .expect("socket states serialize as strings")
     );
-    let enabled = nodules
-        .iter()
-        .filter(|nodule| nodule["enabled"] == json!(true))
-        .count();
+    let enabled = nodules.iter().filter(|nodule| nodule.enabled).count();
     println!("nodules   {enabled} enabled of {}", nodules.len());
-    for nodule in nodules {
+    for nodule in &nodules {
         println!(
             "  {}  {}  {}",
-            nodule["plugId"],
-            if nodule["enabled"] == json!(true) {
+            nodule.cartridge_id,
+            if nodule.enabled {
                 "enabled"
             } else {
                 "disabled"
             },
-            nodule["readiness"],
+            serde_json::to_string(&nodule.readiness)?,
         );
     }
     if conf.node_dir.settings()?.relay {
@@ -98,7 +87,7 @@ pub async fn run(as_json: bool) -> Res<ExitCode> {
 /// Asks the node who it is and what it is connected to.
 pub async fn node_info(client: &NodeClient) -> Res<big_node::NodeInfo> {
     let reply = client
-        .call(big_node::GET_NODE_INFO, HttpMethod::Get, &json!({}))
+        .call_untyped(big_node::GET_NODE_INFO, HttpMethod::Get, &json!({}))
         .await?;
     eyre::ensure!(
         reply.is_success(),
