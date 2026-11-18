@@ -172,19 +172,17 @@ pub(crate) fn eyre_hook_builder() -> color_eyre::config::HookBuilder {
 }
 
 pub fn setup_tracing() -> Res<()> {
-    // `instr=off`: INSTR investigation probes log under the `instr` target and are silent unless
-    // a filter such as `RUST_LOG=info,instr=info` turns them on.
-    let default_filter = "info,instr=off,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
+    let default_filter = "info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_docs::store::fs::migrations=warn,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         if std::env::var("RUST_BACKTRACE").is_err() {
             // std::env::set_var("RUST_BACKTRACE", "1");
         }
-        std::env::var("RUST_LOG").unwrap_or_else(|_| default_filter.to_owned())
+        testing::instr_off_filter(std::env::var("RUST_LOG").ok(), default_filter)
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter = default_filter;
+    let filter = testing::instr_off_filter(None, default_filter);
 
     use tracing_subscriber::prelude::*;
     let registry = tracing_subscriber::registry()
