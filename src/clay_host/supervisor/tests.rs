@@ -287,7 +287,7 @@ fn requires(
     micro.requirements.insert(
         binding.to_owned(),
         Requirement {
-            provider: id(provider),
+            provider: Some(id(provider)),
             publication: PRESENTATION.to_owned(),
             necessity: Necessity::Required,
         },
@@ -1031,6 +1031,73 @@ async fn an_optional_provider_that_is_live_is_bound_and_a_required_failure_still
         supervisor.state(&id("consumer")),
         MicroState::Blocked(vec!["needed".to_owned()])
     );
+}
+
+/// `consumer` requires `binding`, which no installed micro supplies.
+fn requiring_unsupplied(
+    mut micro: ConfiguredMicro<Provision>,
+    binding: &str,
+    necessity: Necessity,
+) -> ConfiguredMicro<Provision> {
+    micro.requirements.insert(
+        binding.to_owned(),
+        Requirement {
+            provider: None,
+            publication: PRESENTATION.to_owned(),
+            necessity,
+        },
+    );
+    micro
+}
+
+#[tokio::test]
+async fn a_required_requirement_nothing_supplies_blocks_its_consumer_without_a_panic() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [
+            controls.micro("other"),
+            requiring_unsupplied(
+                requires(controls.micro("consumer"), "other", "other"),
+                "shell",
+                Necessity::Required,
+            ),
+        ],
+    );
+    assert_eq!(
+        supervisor.start(&id("consumer")).await,
+        Err(StartError::Unavailable {
+            binding: "shell".to_owned(),
+            cause: Box::new(StartError::Unsupplied),
+        })
+    );
+    assert_eq!(
+        supervisor.state(&id("consumer")),
+        MicroState::Blocked(vec!["shell".to_owned()])
+    );
+    // The supplied requirement started its provider first and releases it again.
+    assert_eq!(supervisor.state(&id("other")), MicroState::Idle);
+    assert_quiescent(&host);
+}
+
+#[tokio::test]
+async fn an_optional_requirement_nothing_supplies_is_left_unbound() {
+    let controls = Controls::default();
+    let host = Host::new();
+    let supervisor = Supervisor::new(
+        host.clone(),
+        [requiring_unsupplied(
+            controls.micro("consumer"),
+            "shell",
+            Necessity::Optional,
+        )],
+    );
+    supervisor.start(&id("consumer")).await.unwrap();
+    assert_eq!(supervisor.state(&id("consumer")), MicroState::Active);
+    assert!(controls.bound("consumer").is_empty());
+    supervisor.shutdown().await.unwrap();
+    assert_quiescent(&host);
 }
 
 #[tokio::test]

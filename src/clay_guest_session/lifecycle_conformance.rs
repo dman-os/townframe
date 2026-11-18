@@ -564,7 +564,7 @@ impl<E: Incarnations> Harness<E> {
                 (
                     "presentation".to_owned(),
                     Requirement {
-                        provider: MicroId::new("provider"),
+                        provider: Some(MicroId::new("provider")),
                         publication: PUBLICATION.to_owned(),
                         necessity: Necessity::Required,
                     },
@@ -572,7 +572,7 @@ impl<E: Incarnations> Harness<E> {
                 (
                     "service".to_owned(),
                     Requirement {
-                        provider: MicroId::new("provider"),
+                        provider: Some(MicroId::new("provider")),
                         publication: ECHO.to_owned(),
                         necessity: Necessity::Required,
                     },

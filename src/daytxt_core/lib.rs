@@ -156,7 +156,7 @@ impl InstalledMicro {
             self.requirements.insert(
                 request.binding.clone(),
                 Requirement {
-                    provider: SupervisorId::from(provider),
+                    provider: Some(SupervisorId::from(provider)),
                     publication: request.binding.clone(),
                     necessity: Necessity::Required,
                 },

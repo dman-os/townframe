@@ -229,7 +229,7 @@ mod tests {
                             (
                                 publication.to_owned(),
                                 Requirement {
-                                    provider: shell_id.clone(),
+                                    provider: Some(shell_id.clone()),
                                     publication: publication.to_owned(),
                                     necessity: Necessity::Required,
                                 },
