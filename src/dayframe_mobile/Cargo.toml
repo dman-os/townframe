@@ -22,10 +22,15 @@ mobile = ["dioxus/mobile"]
 desktop = ["dioxus/native"]
 
 [target.'cfg(target_os = "android")'.dependencies]
+#
+# internal
 # The composition (Wasmtime, SQLite) is only built for the target that runs it.
 dayframe_native = { workspace = true, features = ["blitz"] }
-android-activity = { version = "0.6", features = ["native-activity"] }
 dayframe_composition = { workspace = true }
+
+#
+# misc
+android-activity = { version = "0.6", features = ["native-activity"] }
 jni = "0.21"
 winit = { version = "0.31.0-beta.3", features = ["android-native-activity"] }
 

@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-dioxus = { workspace = true }
+#
+# internal
 ui = { workspace = true }
 clay_dioxus_kit = { workspace = true }
+
+#
+# misc
+dioxus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
 dioxus-native.workspace = true
 
 [features]
