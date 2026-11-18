@@ -33,6 +33,7 @@ use big_cabinet_core::doc::DatumEvent;
 use big_cabinet_core::doc::DatumKinds;
 use big_cabinet_core::doc::DatumRead;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DrawerReach;
 use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::ObservedDatum;
@@ -330,7 +331,7 @@ impl<H: HttpTransport> Caller<H> {
         };
         let capability = self
             .doc_capability(DocScope {
-                drawers: [(drawer.clone(), DrawerAccess::Read)].into(),
+                drawers: [(drawer.clone(), DrawerReach::all_kinds(DrawerAccess::Read))].into(),
                 ..DocScope::default()
             })
             .await?;
