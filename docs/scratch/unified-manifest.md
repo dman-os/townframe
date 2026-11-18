@@ -301,3 +301,14 @@ Agreed: `provides` as the one noun for routines and micro publications, with the
 1. **No new Lexicon def type.** atproto Lexicon has a fixed set of def types, and inventing `collection` breaks compatibility with every Lexicon tool. A collection's rows stay an ordinary `record` Lexicon; the cartridge declares which records are collections (and what a bound cartridge may do with them) in a cartridge-level `collections` map keyed by NSID.
 2. **The permbind key replaces `binding`.** Micro code that names a requirement (`require("shelf")` today) names the permbind key instead, so the local name lives in one place.
 3. **Micro calls move to `wasi:http/handler`** as the target, not a follow-up afterthought: a call is then the same export, the same XRPC envelope and the same caller attribution on both sides, which is the WASI-first direction the operator set. Until then a micro call provision's `export` is `micro-lifecycle`, as the proposal says.
+
+## Operator review (2026-11-18): `provides` withdrawn
+
+Merging routines and micro publications into one cartridge-level `provides` is withdrawn. It muddies which part is the nodule and which the micro, and it doesn't honor the cartridge's future: more plugin surfaces are planned, each its own section with its own vocabulary and runtime (editor extensions, e.g. CodeMirror-style extension points; tiles, a simpler visual surface portable across Clay implementations; more to come). One global "everything a plugin offers" list makes every surface single-purpose and mixes concerns.
+
+Revised direction: **the cartridge is shared infrastructure plus N surfaces.**
+- Shared, cartridge-level: identity (`id`, `version`, `authority`), `lexicons`, `components`, `permbinds`, `settings`, grants.
+- Each surface keeps its own section and vocabulary (`nodule: { routines, … }`, `micro: { … }`, later `editor`, `tiles`, …), runtime and lifecycle.
+- What every surface shares is the *contract with the cartridge*: its entries say what they reach with `uses` over the cartridge's permbinds, and they reference wasm the same way (a component plus the WIT export it is reached through, WASI-first). Nothing else is forced to be the same.
+- Contributions (the micro's reverse edge into another micro's collection) stay in the micro section; whether other surfaces get reverse edges is their own design.
+- A micro is one component, one instance, one address space (operator: no surface so far wants to split a micro's singleton across components).
