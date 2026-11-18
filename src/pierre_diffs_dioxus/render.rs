@@ -76,7 +76,10 @@ impl Renderer<'_> {
         let tag = document.tag_name(key);
         // Inside a shadow tree a `<style>` is already in its root's sheet attribute.
         if host.is_some() && tag.eq_ignore_ascii_case("style") {
-            return rsx! {};
+            // Keyed like every sibling, or the keyed diff of the children refuses the list.
+            return rsx! {
+                Fragment { key: "{key_id}" }
+            };
         }
         if tag.is_empty() {
             let text = document.text_content(key);
