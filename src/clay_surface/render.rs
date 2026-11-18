@@ -40,13 +40,10 @@ impl<C: Clone> SurfaceTree<C> {
         } else {
             Vec::new()
         };
+        // The guest's sanitized stylesheet is not part of the projection: the host that mounts it
+        // decides how a sheet reaches the mount (see `clay_dioxus::MountedSurface`), from
+        // [`Self::stylesheet`].
         rsx! {
-            // The guest's sanitized stylesheet comes first, so every rule of the mount precedes
-            // the mount's content. A renderer that gives the mount a shadow root (see
-            // `MountedSurface`) scopes it there; otherwise it is a light-DOM `<style>`.
-            if !self.stylesheet.is_empty() {
-                style { "{self.stylesheet}" }
-            }
             div {
                 "data-clay-presentation": "",
                 style: PRESENTATION_BOX_STYLE,

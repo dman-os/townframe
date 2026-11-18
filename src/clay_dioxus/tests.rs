@@ -962,10 +962,12 @@ async fn removed_elements_drop_their_mounted_entry_and_host_handle() {
     assert!(writer.mounted.lock().unwrap().is_empty());
 }
 
-/// A mount's root is the `data-dioxus-shadow` element, and the guest's sanitized stylesheet is
-/// its first child, ahead of the guest's own content.
+/// A mount's root is the `data-dioxus-shadow` element, and the guest's sanitized stylesheet is its
+/// `data-dioxus-shadow-sheet` attribute (adopted by the shadow root, never a `<style>` element a
+/// strict CSP would refuse); where the host provides [`LightDomStylesheets`] (Blitz) it is a
+/// light-DOM `<style>` ahead of the guest's own content instead.
 #[test]
-fn a_guest_stylesheet_renders_as_the_first_child_of_the_shadow_root() {
+fn a_guest_stylesheet_reaches_the_mount_as_its_shadow_sheet_or_a_light_dom_style() {
     let (_host, owner, mount, _writer) = mounted_writer();
     let factory = SurfaceFactory(Rc::new(|_mount, writer| {
         let mut batch = counter_initial_batch();
@@ -985,21 +987,29 @@ fn a_guest_stylesheet_renders_as_the_first_child_of_the_shadow_root() {
     fn app(props: Props) -> Element {
         rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
     }
-    let mut dom = VirtualDom::new_with_props(
-        app,
-        Props {
-            mount: SharedMount(mount),
-            owner,
-            factory,
-        },
-    );
-    let mut tree = SurfaceTree::new();
-    dom.rebuild(&mut tree);
+    fn blitz_app(props: Props) -> Element {
+        use_context_provider(|| LightDomStylesheets);
+        rsx! { MountedSurface { mount: props.mount, owner: props.owner, factory: props.factory } }
+    }
+    let props = Props {
+        mount: SharedMount(mount),
+        owner,
+        factory,
+    };
+    let mut browser = SurfaceTree::new();
+    VirtualDom::new_with_props(app, props.clone()).rebuild(&mut browser);
     assert_eq!(
-        tree.outline(),
+        browser.outline(),
+        "(div[data-dioxus-shadow,data-dioxus-shadow-sheet,style](div[data-clay-presentation,style](button[class](#))))"
+    );
+    assert_eq!(browser.text_content(), "0");
+    let mut blitz = SurfaceTree::new();
+    VirtualDom::new_with_props(blitz_app, props).rebuild(&mut blitz);
+    assert_eq!(
+        blitz.outline(),
         "(div[data-dioxus-shadow,style](style(#),div[data-clay-presentation,style](button[class](#))))"
     );
-    assert_eq!(tree.text_content(), ".btn {\ncolor: red;\n}0");
+    assert_eq!(blitz.text_content(), ".btn {\ncolor: red;\n}0");
 }
 
 /// A hostile parent presentation registers `input` and `keydown` on an ancestor of the slot that
