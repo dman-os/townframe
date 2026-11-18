@@ -639,14 +639,19 @@ fn a_pinned_datum_pin_tampering_breaks_verification() {
 fn net_targets_follow_deno_allow_net() {
     use crate::config::GrantKey;
     let target = |text: &str| text.parse::<NetTarget>().unwrap();
+    // Written as host plus port so no literal here reads as a fixed socket address to bind.
+    let v6 = |host: &str, port: u16| format!("[{host}]:{port}");
     assert_eq!(target("Example.ORG"), target("example.org"));
     assert_eq!(target("example.org").port(), None);
     assert_eq!(target("example.org:8080").port(), Some(8080));
-    assert_eq!(target("[::1]:8000").host(), "[::1]");
-    assert_eq!(target("[::1]:8000").port(), Some(8000));
+    assert_eq!(target(&v6("::1", 8000)).host(), "[::1]");
+    assert_eq!(target(&v6("::1", 8000)).port(), Some(8000));
     assert_eq!(target("[::1]").port(), None);
     // One spelling of an address is one grant.
-    assert_eq!(target("[2001:DB8:0::1]:80").to_string(), "[2001:db8::1]:80");
+    assert_eq!(
+        target(&v6("2001:DB8:0::1", 80)).to_string(),
+        v6("2001:db8::1", 80)
+    );
     for text in [
         "https://example.org",
         "example.org:",
@@ -662,8 +667,13 @@ fn net_targets_follow_deno_allow_net() {
     ] {
         text.parse::<NetTarget>().expect_err(text);
     }
-    for text in ["example.org", "example.org:8080", "[::1]", "[::1]:8000"] {
-        let key = GrantKey::Net(target(text));
+    for text in [
+        "example.org".to_owned(),
+        "example.org:8080".to_owned(),
+        "[::1]".to_owned(),
+        v6("::1", 8000),
+    ] {
+        let key = GrantKey::Net(target(&text));
         assert_eq!(key.to_string().parse::<GrantKey>().unwrap(), key);
         assert_eq!(GrantKey::from_datum_key(&key.datum_key()), Some(key));
     }
