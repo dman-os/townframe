@@ -664,12 +664,12 @@ impl<'a> Packaging<'a> {
     }
 
     /// Remembers `drawer` so the node lists it, which is what makes an intxt live.
-    async fn remember(&self, drawer: &DrawerId) -> Res<()> {
+    pub(super) async fn remember(&self, drawer: &DrawerId, mirror: bool) -> Res<()> {
         self.caller
             .call(RememberDrawer {
                 capability: self.known_drawers().await?,
                 drawer_id: drawer.clone(),
-                mirror: false,
+                mirror,
             })
             .await?;
         Ok(())
@@ -701,7 +701,7 @@ impl<'a> Packaging<'a> {
                 "{drawer} is not an intxt: its descriptor has no intxt marker"
             );
             if !live.contains(&drawer) {
-                self.remember(&drawer).await?;
+                self.remember(&drawer, false).await?;
                 ids.push(drawer.to_string());
             }
             return Ok((drawer, ShortIds::new(ids)));
@@ -806,7 +806,7 @@ impl<'a> Packaging<'a> {
             },
         )
         .await?;
-        self.remember(&drawer_id).await?;
+        self.remember(&drawer_id, false).await?;
         if let Some(doc) = &shared {
             self.caller
                 .share(&drawer_id, doc, DrawerAccess::Write)
