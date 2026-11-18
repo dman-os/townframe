@@ -30,9 +30,9 @@ pub enum NodeCommands {
 pub async fn run(command: NodeCommands) -> Res<ExitCode> {
     match command {
         NodeCommands::Init { dir, relay } => super::init::run(dir, relay).await,
-        NodeCommands::Run => super::daemon::run(super::daemon::DaemonCommands::Run).await,
-        NodeCommands::Start => super::daemon::run(super::daemon::DaemonCommands::Start).await,
-        NodeCommands::Stop => super::daemon::run(super::daemon::DaemonCommands::Stop).await,
+        NodeCommands::Run => super::serve::run(super::serve::ServeCommands::Run).await,
+        NodeCommands::Start => super::serve::run(super::serve::ServeCommands::Start).await,
+        NodeCommands::Stop => super::serve::run(super::serve::ServeCommands::Stop).await,
         NodeCommands::Status { json } => super::status::run(json).await,
     }
 }
