@@ -106,9 +106,8 @@ pub async fn install<H: HttpTransport>(
         caller
             .call(SetCartridgeGrant {
                 cartridge_id: cartridge_id.clone(),
-                component: Component::Nodule,
                 grant: GrantKey::Method(operation.to_owned()),
-                value: Some(GrantBody::method(false)),
+                value: Some(GrantBody::present()),
             })
             .await?;
     }
