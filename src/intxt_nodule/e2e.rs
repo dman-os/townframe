@@ -103,9 +103,9 @@ async fn boot() -> TestNode {
     );
     let id = cartridge.id.clone();
     let methods = DispatchScope {
-        operations: intxt_core::methods::REQUIRED_OPERATIONS
+        operations: intxt_core::cartridge::requested_methods(&cartridge)
             .map(str::to_owned)
-            .into(),
+            .collect(),
         ..DispatchScope::default()
     };
     let node = big_ndk_testing::node()

@@ -21,6 +21,7 @@ use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
 use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::DrawerId;
@@ -183,6 +184,22 @@ impl Packaging<'_> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error).wrap_err_with(|| format!("reading {}", path.display())),
         }
+    }
+
+    /// The drawers intxt is granted when it is installed (ADR 049 §4.1): every intxt the node
+    /// holds, at Write, and the GitHub drawer, if the node has one, at Read.
+    pub(super) async fn install_grants(&self) -> Res<Vec<(DrawerId, DrawerAccess)>> {
+        let mut grants: Vec<_> = self
+            .live_intxts()
+            .await?
+            .into_iter()
+            .map(|intxt| (intxt, DrawerAccess::Write))
+            .collect();
+        grants.extend(
+            self.load_github()?
+                .map(|github| (github.drawer, DrawerAccess::Read)),
+        );
+        Ok(grants)
     }
 
     fn save_github(&self, node: &GithubNode) -> Res<()> {
