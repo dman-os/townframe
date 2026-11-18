@@ -1,0 +1,17 @@
+/* The reset layer: the first of the contract's layers (docs/design-language/styling-contract.md). */
+
+@layer reset {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    min-width: 100%;
+    min-height: 100%;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+}

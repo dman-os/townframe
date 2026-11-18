@@ -21,7 +21,13 @@
     "on-selected": { "$value": "{color.on-accent-container}" },
     "scrim": { "$value": "{color.overlay.black-32}" },
     "danger": { "$value": "{color.red.600}" },
-    "on-danger": { "$value": "{color.neutral.0}" }
+    "on-danger": { "$value": "{color.neutral.0}" },
+    "success": { "$value": "{color.green.600}" },
+    "on-success": { "$value": "{color.neutral.0}" },
+    "warning": { "$value": "{color.amber.500}" },
+    "on-warning": { "$value": "{color.neutral.900}" },
+    "info": { "$value": "{color.accent}" },
+    "on-info": { "$value": "{color.on-accent}" }
   },
   "dimension": {
     "$type": "dimension",
