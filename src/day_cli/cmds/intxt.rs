@@ -136,10 +136,10 @@ pub enum IntxtCommands {
     /// The non-interactive form never opens an editor. `--print` writes the document; `--apply`
     /// reads one from a file or `-` for stdin. An applied document may be partial: `base` (the
     /// heads it was printed at, required) and only the members to change. An omitted member is
-    /// unchanged, `"description": null` clears the description, and an `entries` list with no
-    /// existing entry in it is a delta, `{"remove": "<id>"}` and `{"add": {...}}`; a list that
-    /// holds existing entries is the whole list, and the ones it drops are removed. Entries
-    /// are named by their full id (32 characters); any prefix that is unambiguous when the
+    /// unchanged and `"description": null` clears the description. `entries` is the whole list,
+    /// as printed: the existing entries it leaves out are removed. `entryChanges` is a delta that
+    /// leaves the other entries alone: `{"remove": "<id>"}` and `{"add": {...}}`. A document has
+    /// one of the two, never both. Entries are named by their full id (32 characters); any prefix that is unambiguous when the
     /// document is applied (every short id `show` prints) is accepted. Entries are added or
     /// removed, never edited in place. Applying prints each change and the commands that undo
     /// them, in the order to run them. `--dry-run` prints the plan and writes nothing.
@@ -148,11 +148,13 @@ pub enum IntxtCommands {
     /// failure `{"errors": [{"path": "<JSON pointer into the document>", "message"}]}`.
     ///
     /// Exit status: 0 applied (or nothing to change); 1 the document is wrong; 2 bad command
-    /// line; 3 the intxt changed since the document was printed (stale `base`): the current
-    /// document is printed (with `--json`, as `"current"` beside the errors) to edit again.
+    /// line; 3 the intxt changed since the document was printed (stale `base`) and the document
+    /// still has something to change: the current document is printed (with `--json`, as
+    /// `"current"` beside the errors) to edit again. A stale document that asks for nothing the
+    /// intxt does not already have (a retry of one that applied) is "nothing to change", exit 0.
     #[command(
         group = clap::ArgGroup::new("mode").args(["print", "apply", "schema"]),
-        after_long_help = "Example, for an agent or a script:\n  day x intxt edit qx --print > qx.json    # the document, with its base heads\n  # edit qx.json: remove an entry by deleting its line, or add one with\n  #   { \"add\": { \"branch\": \"feat/x\" } }\n  day x intxt edit qx --apply qx.json --dry-run\n  day x intxt edit qx --apply qx.json      # prints the changes and their undo commands\n\nA partial document works as well:\n  echo '{\"base\": [\"z..\"], \"title\": \"New title\", \"entries\": [{\"remove\": \"zkq\"}]}' | day x intxt edit qx --apply -\n\nInteractively:\n  day x intxt edit qx\n"
+        after_long_help = "Example, for an agent or a script:\n  day x intxt edit qx --print > qx.json    # the document, with its base heads\n  # edit qx.json: remove an entry by deleting its line, or add one with\n  #   { \"add\": { \"branch\": \"feat/x\" } }\n  day x intxt edit qx --apply qx.json --dry-run\n  day x intxt edit qx --apply qx.json      # prints the changes and their undo commands\n\nA partial document works as well:\n  echo '{\"base\": [\"z..\"], \"title\": \"New title\", \"entryChanges\": [{\"remove\": \"zkq\"}]}' | day x intxt edit qx --apply -\n\nInteractively:\n  day x intxt edit qx\n"
     )]
     Edit {
         /// The intxt: its short id, or its full drawer id. Default: the one this worktree is on

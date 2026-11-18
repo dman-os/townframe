@@ -1296,6 +1296,17 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
 
         // 2. The reply. The thread is then waiting on the author, and the replier, who has
         // seen everything, has nothing left.
+        // Named as the inbox names it now: ids grow as comments are added, and a prefix printed
+        // earlier can be ambiguous by now.
+        let thread_id = |inbox: &str| -> String {
+            inbox
+                .lines()
+                .find_map(|line| line.strip_prefix("thread "))
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or_else(|| panic!("no thread in {inbox}"))
+                .to_owned()
+        };
+        let root = thread_id(&seen_by_agent);
         let replied = reply(&agent, &root, Some("Fixes the off-by-one."), None).await;
         assert!(replied.starts_with("reply "), "{replied}");
         assert!(inbox(&agent).await.contains("nothing waiting"));
@@ -1359,6 +1370,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         );
 
         // 6. Resolved, the thread is gone, from both sides' inboxes.
+        let root = thread_id(&outdated);
         let resolved = reply(&operator, &root, None, Some(true)).await;
         assert!(resolved.contains("resolved"), "{resolved}");
         // The thread is named by the shortest prefix that is unique now, which may be longer than
@@ -1376,7 +1388,7 @@ async fn intxt_review_comments_follow_a_rebase_and_resolve() {
         assert!(inbox(&operator).await.contains("nothing waiting"));
         assert!(inbox(&agent).await.contains("nothing waiting"));
         // Reopened, it is waiting on the author again: the agent wrote last.
-        reply(&operator, &root, None, Some(false)).await;
+        reply(&operator, thread, None, Some(false)).await;
         let reopened = inbox(&operator).await;
         assert!(reopened.contains("1 thread(s)"), "{reopened}");
     })
@@ -1902,7 +1914,7 @@ async fn intxt_edit_prints_and_applies_partial_and_full_documents() {
             "base": base_heads,
             "title": "Renamed",
             "description": null,
-            "entries": [
+            "entryChanges": [
                 { "remove": &ref_id[..3] },
                 { "add": { "commits": "feat/x~1" } },
             ],
@@ -1949,21 +1961,37 @@ async fn intxt_edit_prints_and_applies_partial_and_full_documents() {
         assert_eq!(stale.errors[0].path, "/base");
         assert_eq!(stale.current.unwrap().to_text(), after);
 
+        // A retry of a document that has applied, whose base is stale, has nothing left to do:
+        // exit 0, not a conflict.
+        let retried = json!({
+            "base": base_heads,
+            "title": "Renamed",
+            "description": null,
+            "entryChanges": [{ "remove": ref_id }],
+        })
+        .to_string();
+        let (exit, out, _) = apply(&retried, false, false).await;
+        assert_eq!(
+            (exit, out.as_str()),
+            (code(ExitCode::SUCCESS), "nothing to change\n")
+        );
+        assert_eq!(print().await, after);
+
         // A document that is wrong: each error has a path, and exit is 1.
         let now: Value = serde_json::from_str(&after).unwrap();
         let wrong = json!({
             "base": now["base"],
-            "entries": [{ "remove": "nope" }, { "add": { "branch": "no/such" } }],
+            "entryChanges": [{ "remove": "nope" }, { "add": { "branch": "no/such" } }],
         })
         .to_string();
         let (exit, out, _) = apply(&wrong, true, false).await;
         assert_eq!(exit, code(ExitCode::FAILURE));
         let failed: Failed = serde_json::from_str(&out).unwrap();
         assert!(failed.current.is_none());
-        assert_eq!(failed.errors[0].path, "/entries/0/remove", "{out}");
+        assert_eq!(failed.errors[0].path, "/entryChanges/0/remove", "{out}");
         let (exit, _, err) = apply(&wrong, false, false).await;
         assert_eq!(exit, code(ExitCode::FAILURE));
-        assert!(err.contains("/entries/0/remove"), "{err}");
+        assert!(err.contains("/entryChanges/0/remove"), "{err}");
         assert!(show().await.contains("\"Renamed\""));
 
         // The undo of the title comes first and is a document at the intxt's new base.
@@ -2001,7 +2029,8 @@ async fn intxt_edit_prints_and_applies_partial_and_full_documents() {
             .unwrap()
             .to_owned();
         let (_, json_out, _) = apply(
-            &json!({ "base": current["base"], "entries": [{ "remove": commits_id }] }).to_string(),
+            &json!({ "base": current["base"], "entryChanges": [{ "remove": commits_id }] })
+                .to_string(),
             true,
             false,
         )

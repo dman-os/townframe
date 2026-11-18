@@ -17,6 +17,7 @@ use intxt_core::edit::Change;
 use intxt_core::edit::EditDocument;
 use intxt_core::edit::EditEntry;
 use intxt_core::edit::EditPlan;
+use intxt_core::edit::EntryChange;
 use intxt_core::edit::ExistingEntry;
 use intxt_core::edit::Failed;
 use intxt_core::edit::Named;
@@ -277,9 +278,7 @@ impl Packaging<'_> {
             }))
         };
         let heads = |base: &[String]| base.iter().cloned().collect::<BTreeSet<_>>();
-        if heads(&document.base) != heads(&current.base) {
-            return stale(current);
-        }
+        let is_stale = heads(&document.base) != heads(&current.base);
 
         // Ids are read at the apply: any prefix that is unambiguous among the entries now.
         let by_key = ShortIds::new(
@@ -288,22 +287,37 @@ impl Packaging<'_> {
                 .collect::<Vec<_>>(),
         );
         let mut errors = Vec::new();
-        for (index, entry) in document.entries.iter_mut().flatten().enumerate() {
-            let (id, member) = match entry {
-                EditEntry::Existing(existing) => (&mut existing.id, "id"),
-                EditEntry::Remove { remove } => (remove, "remove"),
-                EditEntry::Add { .. } => continue,
-            };
-            match by_key.resolve(id) {
-                Ok(key) => {
-                    let rendered = by_key.render(key);
-                    *id = rendered.unique + &rendered.rest;
-                }
-                Err(error) => errors.push(PlanError::new(
-                    format!("/entries/{index}/{member}"),
-                    error.to_string(),
-                )),
+        let mut normalize = |id: &mut String, path: String| match by_key.resolve(id) {
+            Ok(key) => {
+                let rendered = by_key.render(key);
+                *id = rendered.unique + &rendered.rest;
             }
+            // An entry that is gone since the base: a retry's removal of it already happened,
+            // which `holds_in` below sees.
+            Err(short_ids::ResolveError::NotFound(_)) if is_stale => {}
+            Err(error) => errors.push(PlanError::new(path, error.to_string())),
+        };
+        for (index, entry) in document.entries.iter_mut().flatten().enumerate() {
+            if let EditEntry::Existing(existing) = entry {
+                normalize(&mut existing.id, format!("/entries/{index}/id"));
+            }
+        }
+        for (index, change) in document.entry_changes.iter_mut().flatten().enumerate() {
+            if let EntryChange::Remove { remove } = change {
+                normalize(remove, format!("/entryChanges/{index}/remove"));
+            }
+        }
+        if is_stale {
+            // The intxt changed since the document was printed. A retry of a document that
+            // applied has nothing left to do and is not a conflict; anything else is.
+            return if errors.is_empty() && document.holds_in(&current) {
+                Ok(Outcome::Applied(Applied {
+                    dry_run,
+                    ..Applied::default()
+                }))
+            } else {
+                stale(current)
+            };
         }
         if !errors.is_empty() {
             return Ok(Outcome::Refused(Failed {
@@ -325,17 +339,14 @@ impl Packaging<'_> {
         let identity = self.identity();
         let mut resolved = Vec::with_capacity(plan.add.len());
         let mut errors = Vec::new();
-        for (index, named) in &plan.add {
+        for (path, named) in &plan.add {
             match identity
                 .as_ref()
                 .map_err(|error| eyre::eyre!("{error:#}"))
                 .and_then(|identity| Resolved::new(named, identity))
             {
                 Ok(found) => resolved.push((named, found)),
-                Err(error) => errors.push(PlanError::new(
-                    format!("/entries/{index}/add"),
-                    format!("{error:#}"),
-                )),
+                Err(error) => errors.push(PlanError::new(path.clone(), format!("{error:#}"))),
             }
         }
         if !errors.is_empty() {
@@ -379,6 +390,7 @@ impl Packaging<'_> {
             title: None,
             description: None,
             entries: None,
+            entry_changes: None,
             errors: Vec::new(),
         };
         if plan.title.is_some() || plan.description.is_some() {
