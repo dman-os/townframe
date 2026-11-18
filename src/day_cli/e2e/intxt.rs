@@ -1757,14 +1757,54 @@ async fn intxt_github_pull_imports_the_pull_request_once_per_update() {
     .await;
 }
 
+/// A repository with a `feat/x` branch of two commits and an intxt named "Edit me" that holds
+/// it, as `(repo, the intxt's short id)`, on the node `client` reaches.
+async fn edit_fixture(
+    tmp: &tempfile::TempDir,
+    client: &NodeClient,
+) -> (
+    PathBuf,
+    big_cabinet_core::drawer::protocol::DrawerId,
+    String,
+) {
+    use crate::cmds::intxt::package::Packaging;
+    use intxt_core::edit::Named;
+
+    let node_root = tmp.path().join("node");
+    let base = tmp.path().canonicalize().unwrap();
+    let repo = init_repo(&base, &[("a.txt", "one\n")]);
+    for path in ["b.txt", "c.txt"] {
+        std::fs::write(repo.join(path), format!("{path}\n")).unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", &format!("add {path}")]);
+    }
+    let packaging = Packaging::new(client, &repo, &node_root);
+    let drawer = packaging
+        .create(&mut Vec::new(), "Edit me", Some("Before."), None)
+        .await
+        .unwrap();
+    let short = short_ids::ShortIds::new([drawer.to_string()])
+        .render(&drawer.to_string())
+        .unique;
+    packaging
+        .add(
+            &mut Vec::new(),
+            Some(&short),
+            Named::Branch("feat/x".to_owned()),
+            false,
+        )
+        .await
+        .unwrap();
+    (repo, drawer, short)
+}
+
 /// `day x intxt edit` (ledger D64): the document printed, changed by an agent's partial and full
 /// documents and by a scripted `$EDITOR`, and what `show` says after each.
 #[tokio::test(flavor = "multi_thread")]
-async fn intxt_edit_prints_applies_partial_documents_and_runs_the_editor() {
+async fn intxt_edit_prints_and_applies_partial_and_full_documents() {
     use crate::cmds::intxt::package::Packaging;
     use intxt_core::edit::Applied;
     use intxt_core::edit::Failed;
-    use intxt_core::edit::Named;
     use serde_json::Value;
     use serde_json::json;
 
@@ -1774,30 +1814,8 @@ async fn intxt_edit_prints_applies_partial_documents_and_runs_the_editor() {
 
     with_intxt_node(async |tmp, client| {
         let node_root = tmp.path().join("node");
-        let base = tmp.path().canonicalize().unwrap();
-        let repo = init_repo(&base, &[("a.txt", "one\n")]);
-        for path in ["b.txt", "c.txt"] {
-            std::fs::write(repo.join(path), format!("{path}\n")).unwrap();
-            git(&repo, &["add", "-A"]);
-            git(&repo, &["commit", "-q", "-m", &format!("add {path}")]);
-        }
+        let (repo, drawer, short) = edit_fixture(tmp, client).await;
         let packaging = Packaging::new(client, &repo, &node_root);
-        let drawer = packaging
-            .create(&mut Vec::new(), "Edit me", Some("Before."), None)
-            .await
-            .unwrap();
-        let short = short_ids::ShortIds::new([drawer.to_string()])
-            .render(&drawer.to_string())
-            .unique;
-        packaging
-            .add(
-                &mut Vec::new(),
-                Some(&short),
-                Named::Branch("feat/x".to_owned()),
-                false,
-            )
-            .await
-            .unwrap();
 
         let show = async || {
             let mut out = Vec::new();
@@ -1991,11 +2009,33 @@ async fn intxt_edit_prints_applies_partial_documents_and_runs_the_editor() {
         let removed: Applied = serde_json::from_str(&json_out).unwrap();
         assert_eq!(removed.changes[0].op, "remove");
         assert!(removed.undo[0].contains("day x intxt add"), "{removed:?}");
+    })
+    .await;
+}
 
-        // The editor: a script that rewrites the file, as GIT_SEQUENCE_EDITOR does. The first
-        // pass saves an empty title, which is refused and reopens with `errors`; the second
-        // sees them and fixes the title.
-        use std::os::unix::fs::PermissionsExt;
+/// `day x intxt edit` with `$EDITOR` a script that rewrites the file, as `GIT_SEQUENCE_EDITOR`
+/// does: errors reopen the editor, and an unchanged file aborts.
+#[tokio::test(flavor = "multi_thread")]
+async fn intxt_edit_runs_the_editor_and_reopens_it_with_errors() {
+    use crate::cmds::intxt::package::Packaging;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn code(code: ExitCode) -> String {
+        format!("{code:?}")
+    }
+
+    with_intxt_node(async |tmp, client| {
+        let node_root = tmp.path().join("node");
+        let (repo, _, short) = edit_fixture(tmp, client).await;
+        let packaging = Packaging::new(client, &repo, &node_root);
+        let show = async || {
+            let mut out = Vec::new();
+            packaging.show(&mut out, Some(&short)).await.unwrap();
+            String::from_utf8(out).unwrap()
+        };
+
+        // The first pass saves an empty title, which is refused and reopens with `errors`;
+        // the second sees them and fixes the title.
         let script = tmp.path().join("editor.sh");
         std::fs::write(
             &script,
