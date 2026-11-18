@@ -48,7 +48,6 @@ use intxt_core::annotation::ThreadState;
 use intxt_core::client::key;
 use intxt_core::client::to_value;
 use intxt_core::work;
-use short_ids::ShortIds;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -462,7 +461,8 @@ impl Packaging<'_> {
                 BTreeSet::new(),
             )
             .await?;
-        let short = self.comment_short(&drawer, &view, &comment_key).await?;
+        let names = view.names(&self.comment_keys(&drawer).await?);
+        let short = shown(&names, &comment_key.to_string());
         writeln!(
             out,
             "comment {short} on {at} {}:{}",
@@ -477,62 +477,43 @@ impl Packaging<'_> {
         Ok(())
     }
 
-    /// `comment`'s short id among what `rm` resolves in the intxt: its entries and comments.
-    async fn comment_short(
-        &self,
-        drawer: &DrawerId,
-        view: &View,
-        comment: &DatumKey,
-    ) -> Res<String> {
-        let ids = ShortIds::new(
-            view.entries
-                .iter()
-                .map(|(key, _)| key)
-                .chain(&self.comment_keys(drawer).await?)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
-        Ok(shown(&ids, &comment.to_string()))
-    }
-
-    /// The comment `name` names among the comments of every live intxt, and the intxt it is in.
-    async fn resolve_comment(&self, name: &str) -> Res<(DrawerId, DatumKey)> {
-        let mut all: Vec<(DrawerId, DatumKey)> = Vec::new();
-        for drawer in self.live_intxts().await? {
-            for comment in self.comment_keys(&drawer).await? {
-                all.push((drawer.clone(), comment));
-            }
-        }
-        let ids = ShortIds::new(
-            all.iter()
-                .map(|(_, key)| key.to_string())
-                .collect::<Vec<_>>(),
-        );
-        let found = ids.resolve(name).map_err(|error| {
-            eyre::eyre!("{error}; comments are named by the short id `comment` and `inbox` print")
-        })?;
-        all.into_iter()
-            .find(|(_, key)| &key.to_string() == found)
-            .ok_or_else(|| eyre::eyre!("comment {name} vanished while resolving"))
-    }
-
-    /// `day x intxt reply`: answers the comment `comment` names with `text`, and resolves or
-    /// reopens its thread when asked. With no text, only the thread's state is written.
+    /// `day x intxt reply`: answers the comment `comment` names in `intxt` (default: the intxt
+    /// this worktree is on) with `text`, and resolves or reopens its thread when asked. With no
+    /// text, only the thread's state is written. `comment` is resolved against the names
+    /// `comment` and `inbox` printed it from: that one intxt's entries and comments.
     pub(crate) async fn reply(
         &self,
         out: &mut impl Write,
+        intxt: Option<&str>,
         comment: &str,
         text: Option<&str>,
         resolved: Option<bool>,
     ) -> Res<()> {
-        let (drawer, parent_key) = self.resolve_comment(comment).await?;
-        let intxts = ShortIds::new(
-            self.live_intxts()
-                .await?
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
+        let on;
+        let intxt = match intxt {
+            Some(intxt) => intxt,
+            None => {
+                on = host::recorded_worktree(&self.identity()?)?.intxt.ok_or_else(|| {
+                    eyre::eyre!(
+                        "name the intxt the comment is in with `--intxt <intxt>`, or put this worktree on one with `day x intxt use <intxt>`"
+                    )
+                })?;
+                on.as_str()
+            }
+        };
+        let (drawer, intxts) = self.resolve(Some(intxt)).await?;
+        let names = self
+            .load(&drawer)
+            .await?
+            .names(&self.comment_keys(&drawer).await?);
+        let parent_key = names
+            .resolve(comment)
+            .map_err(|error| {
+                eyre::eyre!(
+                    "{error}; comments are named by the short id `comment` and `inbox` print for this intxt"
+                )
+            })?
+            .parse::<DatumKey>()?;
         let me = self.caller.actor().await?;
         let notes = self
             .read_notes(&drawer, &me)
@@ -579,16 +560,19 @@ impl Packaging<'_> {
             .write_datums(&notes.doc, set, BTreeSet::new())
             .await?;
 
-        let view = self.load(&drawer).await?;
+        let names = self
+            .load(&drawer)
+            .await?
+            .names(&self.comment_keys(&drawer).await?);
         let drawer_short = shown(&intxts, &drawer.to_string());
-        let thread_short = self.comment_short(&drawer, &view, &thread.root).await?;
+        let thread_short = shown(&names, &thread.root.to_string());
         match (&reply_key, resolved) {
             (Some(reply), _) => {
-                let short = self.comment_short(&drawer, &view, reply).await?;
+                let short = shown(&names, &reply.to_string());
                 writeln!(
                     out,
                     "reply {short} to {}{}",
-                    self.comment_short(&drawer, &view, &parent_key).await?,
+                    shown(&names, &parent_key.to_string()),
                     match resolved {
                         Some(true) => ", thread resolved",
                         Some(false) => ", thread reopened",
@@ -609,7 +593,7 @@ impl Packaging<'_> {
         if let Some(resolved) = resolved {
             writeln!(
                 out,
-                "  undo: day x intxt reply {thread_short} {}",
+                "  undo: day x intxt reply {thread_short} --intxt {drawer_short} {}",
                 if resolved { "--reopen" } else { "--resolve" }
             )?;
         }
@@ -727,14 +711,7 @@ impl Packaging<'_> {
         };
         let seen = notes.seen_heads();
         let view = self.load(&drawer).await?;
-        let ids = ShortIds::new(
-            view.entries
-                .iter()
-                .map(|(key, _)| key)
-                .chain(notes.posted.iter().map(|post| &post.key))
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-        );
+        let ids = view.names(notes.posted.iter().map(|post| &post.key));
         let waiting: Vec<Thread> = Thread::group(notes.posted.clone())
             .into_iter()
             .filter(|thread| {
