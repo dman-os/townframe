@@ -7,7 +7,7 @@
 
 #[cfg(not(target_os = "android"))]
 fn main() {
-    panic!("dayframe_mobile runs on Android only; use dayframe_desktop on a host");
+    panic!("daytxt_mobile runs on Android only; use daytxt_desktop on a host");
 }
 
 /// Android entry: `dioxus-desktop`'s `start_app` (which `WryActivity` calls) runs `main` on its

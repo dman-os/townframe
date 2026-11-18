@@ -82,7 +82,7 @@ jobs:
       - run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       # Guardrail lint and formatting (all three workspaces) run once, in the
       # lint job; this matrix only compiles the per-target build contracts.
-      # `ci-desktop`, not `ci-rust`: the native contract includes `dayframe_desktop`, which
+      # `ci-desktop`, not `ci-rust`: the native contract includes `daytxt_desktop`, which
       # links the Linux GUI stack (glib/gtk/wayland) through its `desktop` renderer feature.
       # `ci-rust` carries no pkg-config-visible glib, so the native lane there fails in
       # `glib-sys`' build script. This is the same reason the dayframe test lane below runs
@@ -457,8 +457,8 @@ jobs:
       - name: fetch WIT dependencies
         run: nix develop .#ci-desktop --command deno run -A ./x/wit-fetch.ts --clean
       - name: Install dependencies
-        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/dayframe_web
-      # ADR 018 migration steps 6–7: the shared composition + counter guest on `dayframe_web`.
+        run: nix develop .#ci-desktop --command pnpm install --frozen-lockfile --filter @townframe/daytxt_web
+      # ADR 018 migration steps 6–7: the shared composition + counter guest on `daytxt_web`.
       # `x/dayframe-web.ts` prepares the guest component, builds the wasm32 host, runs
       # wasm-bindgen, copies the guest asset (bundle size is printed there for the §7 budget),
       # and serves the site. Building here first keeps the cold compile, about 20 minutes on an
@@ -470,7 +470,7 @@ jobs:
         env:
           DAYFRAME_WEB_TRAPPER: "1"
       - name: Run dayframe web e2e
-        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
+        run: nix develop .#ci-desktop --command pnpm -C src/daytxt_web run e2e
 
       # Bombadil property-based exploration of the same build (ADR 032 section 9): 60 s at a phone
       # width and 60 s at a desktop width by default (BOMBADIL_TIME_LIMIT), driving the pinned
@@ -481,7 +481,7 @@ jobs:
       # sync export in the browser engine) is fixed in `wcmp` and held by a Playwright spec, and
       # ten consecutive 60 s runs at 420 px were green (docs/scratch/dayframe-shell-ledger.md, S8).
       - name: Explore dayframe web with Bombadil
-        run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run bombadil
+        run: nix develop .#ci-desktop --command pnpm -C src/daytxt_web run bombadil
 
       - name: Upload e2e artifacts
         if: always()
@@ -489,6 +489,6 @@ jobs:
         with:
           name: dayframe-web-e2e-artifacts
           path: |
-            src/dayframe_web/test-results/
-            src/dayframe_web/playwright-report/
+            src/daytxt_web/test-results/
+            src/daytxt_web/playwright-report/
           retention-days: 14

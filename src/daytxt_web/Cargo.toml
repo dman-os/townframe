@@ -1,5 +1,5 @@
 [package]
-name = "dayframe_web"
+name = "daytxt_web"
 version = "0.1.0"
 edition = "2021"
 
@@ -34,7 +34,7 @@ default = ["web"]
 web = ["dioxus/web"]
 
 [[bin]]
-name = "dayframe_web"
+name = "daytxt_web"
 path = "main.rs"
 
 [lints]

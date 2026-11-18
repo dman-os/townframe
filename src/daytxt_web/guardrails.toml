@@ -28,7 +28,7 @@ features = ["web"]
 required_features = ["web"]
 [[exemptions]]
 code = "ERROR_DEPENDENCY_GROUP"
-path = "src/dayframe_web/Cargo.toml"
+path = "src/daytxt_web/Cargo.toml"
 symbol = "dependency-groups"
 ceiling = 14
 class = "LEGACY_DEBT"

@@ -37,7 +37,7 @@ features = ["blitz"]
 required_features = ["desktop"]
 [[exemptions]]
 code = "ERROR_DEPENDENCY_GROUP"
-path = "src/dayframe_desktop/Cargo.toml"
+path = "src/daytxt_desktop/Cargo.toml"
 symbol = "dependency-groups"
 ceiling = 19
 class = "LEGACY_DEBT"

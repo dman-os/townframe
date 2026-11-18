@@ -324,7 +324,7 @@ async fn a_mounted_panel_is_interactive_and_disabling_one_provider_leaves_the_ot
 // Hiding a panel withdraws its section and releases its provider, which closes the provider when
 // nothing else holds it. That must leave the layout, which does not depend on the sample's
 // lifetime, mounted and interactive: the panel can be shown and hidden again, round after round.
-// Found by the Bombadil exploration of the browser build (`src/dayframe_web/bombadil/shell.ts`):
+// Found by the Bombadil exploration of the browser build (`src/daytxt_web/bombadil/shell.ts`):
 // the layout's whole region became "Component withdrawn." when the sample's panel was hidden,
 // because a guest task of the layout was suspended in the middle of its callback when the host
 // delivered a document change, and the task hook gave both the same stack (`clay_mdk`'s

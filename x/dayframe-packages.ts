@@ -20,7 +20,7 @@ import { $ } from "./utils.ts";
 // shell's package scan skips it; the node installs it as a cartridge at boot.
 //
 // `guestProfile` is the cargo profile the guests build with. `wasm-release` (the default) is the
-// workspace's optimized guest profile, the one `dayframe_web` also builds with. `dev` is opt-in, for
+// workspace's optimized guest profile, the one `daytxt_web` also builds with. `dev` is opt-in, for
 // faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
 // seconds to compile on a phone, and they burn about 10x the fuel (see below).
 export async function prepareDayframePackages(
@@ -38,7 +38,7 @@ export async function prepareDayframePackages(
   const isolated = ["--config", 'resolver.feature-unification="selected"'];
 
   // Guests build optimized (`wasm-release`), as plugs (`cargo x plug build-oci`, `--release`) and
-  // `dayframe_web` already do. The host meters every guest call with fuel, and an unoptimized
+  // `daytxt_web` already do. The host meters every guest call with fuel, and an unoptimized
   // guest burns about 10x the fuel of an optimized one (the lab's first diff render: ~95M in the
   // dev profile, ~9.6M optimized, against a 50M per-call budget), so a dev build would measure
   // the budget against code no user runs.

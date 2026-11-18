@@ -269,4 +269,4 @@ KIT-070 are enforced by the harness itself (`src/testing.rs`).
 | every cited `KIT-nnn` | `conventions::cited_rules_exist_in_the_readme` |
 
 The Blitz limits several rules route around are pinned, as defects, in
-`dayframe_desktop/e2e/blitz_limits.rs` (see the dayframe ledger, "K2 notes").
+`daytxt_desktop/e2e/blitz_limits.rs` (see the dayframe ledger, "K2 notes").

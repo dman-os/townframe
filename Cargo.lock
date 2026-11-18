@@ -4356,7 +4356,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_desktop"
+name = "daytxt_desktop"
 version = "0.1.0"
 dependencies = [
  "accesskit_xplat 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -4408,7 +4408,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_mobile"
+name = "daytxt_mobile"
 version = "0.1.0"
 dependencies = [
  "daytxt_core",
@@ -4442,7 +4442,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_web"
+name = "daytxt_web"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus",

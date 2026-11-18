@@ -1,5 +1,5 @@
 [package]
-name = "dayframe_mobile"
+name = "daytxt_mobile"
 version = "0.1.0"
 edition = "2021"
 
@@ -24,7 +24,7 @@ daytxt_core = { workspace = true }
 jni = "0.21"
 
 [[bin]]
-name = "dayframe_mobile"
+name = "daytxt_mobile"
 path = "main.rs"
 
 [lints]

@@ -28,7 +28,7 @@ with its own `package.json` pinning `@playwright/test` to the driver version, a
 
 - `src/btress_sysadmin`: the sysadmin login flow; CI starts its servers itself (see the
   `sysadmin e2e` job in `.github/workflows/checks.yml`).
-- `src/dayframe_web`: the browser composition shell (ADR 018). Its config's `webServer` runs
+- `src/daytxt_web`: the browser composition shell (ADR 018). Its config's `webServer` runs
   `x/dayframe-web.ts`, which prepares the counter component, builds the wasm32 host, runs
   `wasm-bindgen` (checked against `Cargo.lock`'s version), and serves the page; the first run
   includes a cold wasm32 build.
@@ -37,8 +37,8 @@ Run specs from the package, through the package's own CLI, never a global or wor
 one (those resolve a different version and so a different browser revision):
 
 ```bash
-nix develop .#ci-desktop -c pnpm install --frozen-lockfile --filter @townframe/dayframe_web
-nix develop .#ci-desktop -c pnpm -C src/dayframe_web run e2e
+nix develop .#ci-desktop -c pnpm install --frozen-lockfile --filter @townframe/daytxt_web
+nix develop .#ci-desktop -c pnpm -C src/daytxt_web run e2e
 ```
 
 A new package joins `pnpm-workspace.yaml` and gets an `importers:` entry in `pnpm-lock.yaml`
@@ -49,8 +49,8 @@ with the same `@playwright/test` version, so the lock keeps a single Playwright.
 The package CLI also does ad-hoc work, using the same pinned browsers:
 
 ```bash
-pnpm -C src/dayframe_web exec playwright screenshot http://127.0.0.1:4518/ /tmp/dayframe.png
-pnpm -C src/dayframe_web exec playwright codegen http://127.0.0.1:4518/
+pnpm -C src/daytxt_web exec playwright screenshot http://127.0.0.1:4518/ /tmp/dayframe.png
+pnpm -C src/daytxt_web exec playwright codegen http://127.0.0.1:4518/
 ```
 
 Keep artifacts out of the checkout (`/tmp`, `$TMPDIR`); specs write `test-results/` and

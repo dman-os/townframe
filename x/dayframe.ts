@@ -14,7 +14,7 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 --native         the Blitz renderer instead
                 --fresh          start from an empty store and an empty node directory (temp)
                 --store <path>   use this store file (DAYFRAME_STORE_PATH)
-  android     build the Android APK (dayframe_mobile)
+  android     build the Android APK (daytxt_mobile)
                 --abi <arm64|x86_64>  target ABI, default arm64 (aarch64-linux-android);
                                  x86_64 is what an emulator on this host runs
                 --release        release profile (unsigned unless Dioxus.toml configures signing)
@@ -22,7 +22,7 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                                  default wasm-release; dev builds faster but its 15 to 17 MB components
                                  compile slowly on a phone and burn about 10x the fuel
                 --install        adb install the APK on the attached device
-  web         build and serve dayframe_web (--build: build only)
+  web         build and serve daytxt_web (--build: build only)
   showcase    run the design showcase (dayframe_showcase) in a webview (Wry)
                 --native         the Blitz renderer instead
   showcase-web  serve the design showcase for the browser (Dioxus web, wasm-release) on
@@ -33,10 +33,10 @@ const help = `usage: deno run --allow-all x/dayframe.ts <command> [flags]
                 src/dayframe_showcase/public/ at serve time. Start choices are URL
                 parameters: ?tab=diffs&diffs_view=pr84, ?kit=nav
   packages    only (re)build the Wasm packages and print the DAYFRAME_* env lines
-  test        x/check-dayframe.ts, then the dayframe_web Playwright e2e
+  test        x/check-dayframe.ts, then the daytxt_web Playwright e2e
                 --no-e2e         skip the browser part
-  bombadil    explore dayframe_web with Bombadil and check the shell invariants
-                (src/dayframe_web/bombadil/shell.ts); BOMBADIL_TIME_LIMIT=<n>s sets
+  bombadil    explore daytxt_web with Bombadil and check the shell invariants
+                (src/daytxt_web/bombadil/shell.ts); BOMBADIL_TIME_LIMIT=<n>s sets
                 the exploration time per width, default 60s
 `;
 
@@ -70,14 +70,14 @@ switch (command) {
       // a fresh run gets a fresh node directory too, not the operator's own.
       env["DAY_NODE"] = await Deno.makeTempDir({ prefix: "dayframe-node-" });
     }
-    // One binary carries both launchers; the variable picks Blitz (see dayframe_desktop/main.rs).
+    // One binary carries both launchers; the variable picks Blitz (see daytxt_desktop/main.rs).
     if (flag("--native")) env["DAYFRAME_RENDERER"] = "blitz";
     if (store) env["DAYFRAME_STORE_PATH"] = $.path(store).resolve().toString();
     console.log(`package dir: ${env["DAYFRAME_PACKAGE_DIR"]}`);
     console.log(`store path: ${env["DAYFRAME_STORE_PATH"] ?? "(app default)"}`);
     await dx(
       "-p",
-      "dayframe_desktop",
+      "daytxt_desktop",
       ...(flag("--native")
         ? ["--renderer", "native", "--features", "blitz"]
         : ["--renderer", "webview"]),
@@ -101,9 +101,9 @@ switch (command) {
       intxtGuest: true,
       guestProfile,
     });
-    // The APK carries its packages as assets: `dayframe_mobile` bundles `packages/` with
+    // The APK carries its packages as assets: `daytxt_mobile` bundles `packages/` with
     // `asset!`, so stage the prepared counter, layout and review beside the crate (gitignored).
-    const staged = root.join("src/dayframe_mobile/packages");
+    const staged = root.join("src/daytxt_mobile/packages");
     await Deno.mkdir(staged.toString(), { recursive: true });
     for (const name of ["counter", "layout", "review"]) {
       for (const suffix of ["manifest.json", "component.wasm"]) {
@@ -146,22 +146,22 @@ switch (command) {
     // signing config in Dioxus.toml to yield a signed APK.
     await $`deno run --allow-all ${
       root.join("x/dx.ts")
-    } build --platform android --target ${androidTarget} --renderer webview -p dayframe_mobile ${
+    } build --platform android --target ${androidTarget} --renderer webview -p daytxt_mobile ${
       flag("--release") ? ["--release"] : []
     }`.cwd(root);
     const metadata =
       await $`cargo metadata --locked --no-deps --format-version 1`
         .json<{ target_directory: string }>();
     const apks =
-      await $`find -H ${metadata.target_directory} -name '*.apk' -path '*dayframe_mobile*' -printf '%T@ %p\n'`
+      await $`find -H ${metadata.target_directory} -name '*.apk' -path '*daytxt_mobile*' -printf '%T@ %p\n'`
         .text();
     const apk = apks.trim().split("\n").filter(Boolean).sort().pop()?.split(
       " ",
     )[1];
     if (!apk) {
-      throw new Error("dx reported success but no dayframe_mobile APK exists");
+      throw new Error("dx reported success but no daytxt_mobile APK exists");
     }
-    // `src/dayframe_mobile/AndroidManifest.xml` replaces dx's generated manifest to opt in to
+    // `src/daytxt_mobile/AndroidManifest.xml` replaces dx's generated manifest to opt in to
     // predictive back (dx's template has no hook for application attributes). Check the shipped
     // APK's manifest rather than trust that dx still honors `android_manifest`: without the
     // attribute, API 33 ignores `MainActivity`'s back callback and back at Home does nothing.
@@ -171,7 +171,7 @@ switch (command) {
     ) {
       throw new Error(
         `${apk} lacks android:enableOnBackInvokedCallback="true"; ` +
-          "dx did not use src/dayframe_mobile/AndroidManifest.xml (Dioxus.toml android_manifest)",
+          "dx did not use src/daytxt_mobile/AndroidManifest.xml (Dioxus.toml android_manifest)",
       );
     }
     console.log(`apk: ${apk}`);
@@ -225,11 +225,11 @@ switch (command) {
   case "test":
     await $`deno run --allow-all ${root.join("x/check-dayframe.ts")}`;
     if (!flag("--no-e2e")) {
-      await $`pnpm -C src/dayframe_web run e2e`.cwd(root);
+      await $`pnpm -C src/daytxt_web run e2e`.cwd(root);
     }
     break;
   case "bombadil":
-    await $`pnpm -C src/dayframe_web run bombadil`.cwd(root);
+    await $`pnpm -C src/daytxt_web run bombadil`.cwd(root);
     break;
   case "--help":
   case "-h":

@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { openLifecycle, watchFailures } from "./shell";
 
-// ADR 018 migration step 7 in the browser: the shared composition on `dayframe_web` activates
+// ADR 018 migration step 7 in the browser: the shared composition on `daytxt_web` activates
 // the real counter guest through `wcmp` over Chromium's `WebAssembly` engine, mounts it through
 // `clay_dioxus` on `dioxus-web`, and the click round trip reaches the guest. A `first_poll`
 // panic surfaces as a page error, so the test fails on any page or console error.

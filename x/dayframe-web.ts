@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run --allow-all
 
-// Build and serve the `dayframe_web` shell (ADR 018 migration steps 6–7): the shared
+// Build and serve the `daytxt_web` shell (ADR 018 migration steps 6–7): the shared
 // composition plus every package in `packages/index.json`. Each entry's manifest is the
 // sidecar `<name>.manifest.json` beside the component (STAND-IN until `big_cartridges` delivers
 // manifests) and is pinned with the BLAKE3 digest of the component bytes; the shell fetches a
@@ -50,7 +50,7 @@ async function blake3Hex(bytes: Uint8Array): Promise<string> {
 
 // `wasm-release`, as `cargo x guardrails check-matrix` builds it: a debug build also links
 // Dioxus devtools, whose hot-reload socket finds no `dx serve` here and logs an error per retry.
-await $`cargo build --locked ${isolated} -p dayframe_web --bin dayframe_web --target wasm32-unknown-unknown --profile wasm-release`;
+await $`cargo build --locked ${isolated} -p daytxt_web --bin daytxt_web --target wasm32-unknown-unknown --profile wasm-release`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
   .json<{ target_directory: string }>();
 const target = $.path(metadata.target_directory);
@@ -64,11 +64,11 @@ if (lockedBindgen !== cliBindgen) {
   );
 }
 
-const site = target.join("dayframe_web/site");
+const site = target.join("daytxt_web/site");
 await $`rm -rf ${site}`;
 await Deno.mkdir(site.toString(), { recursive: true });
-await $`wasm-bindgen --target web --no-typescript --out-dir ${site} --out-name dayframe_web ${
-  target.join("wasm32-unknown-unknown/wasm-release/dayframe_web.wasm")
+await $`wasm-bindgen --target web --no-typescript --out-dir ${site} --out-name daytxt_web ${
+  target.join("wasm32-unknown-unknown/wasm-release/daytxt_web.wasm")
 }`;
 await Deno.mkdir(site.join("packages").toString(), { recursive: true });
 // One index entry per `<name>.manifest.json` beside its `<name>.component.wasm`, in name order
@@ -107,7 +107,7 @@ const PLACEHOLDER =
   "This should be replaced by dx as part of the build process. If you see this error, make sure you are using a matching version of dx and dioxus and you are not stripping symbols from your binary.";
 const MANGANIS_SECTION_SIZE = 4096;
 {
-  const hostWasmPath = site.join("dayframe_web_bg.wasm").toString();
+  const hostWasmPath = site.join("daytxt_web_bg.wasm").toString();
   const wasm = await Deno.readFile(hostWasmPath);
   const ph = new TextEncoder().encode(PLACEHOLDER);
   const key = new TextEncoder().encode("bundled_path");
@@ -132,7 +132,7 @@ const MANGANIS_SECTION_SIZE = 4096;
   }
   if (at < 0) {
     throw new Error(
-      "dayframe_web_bg.wasm: manganis PLACEHOLDER_HASH not found (already patched, or dioxus changed the blob format)",
+      "daytxt_web_bg.wasm: manganis PLACEHOLDER_HASH not found (already patched, or dioxus changed the blob format)",
     );
   }
   // Map header `a3` sits 2 bytes before `74 absolute_source_path`; walk back from the key.
@@ -149,7 +149,7 @@ const MANGANIS_SECTION_SIZE = 4096;
   }
   if (mapStart < 0) {
     throw new Error(
-      "dayframe_web_bg.wasm: BundledAsset map header (a3) not found",
+      "daytxt_web_bg.wasm: BundledAsset map header (a3) not found",
     );
   }
   const newPath = "tailwind.css";
@@ -176,19 +176,19 @@ await Deno.copyFile(
 
 // Bundle-size tracking (ADR 018 §7): the host module carries `wasmtime-environ` and a second
 // `wasmparser` next to the Dioxus web runtime. Print raw + gzip so regressions are visible.
-const hostWasm = site.join("dayframe_web_bg.wasm");
+const hostWasm = site.join("daytxt_web_bg.wasm");
 const hostBytes = await Deno.stat(hostWasm.toString()).then((s) => s.size);
 const gzip = new Deno.Command("gzip", {
   args: ["-c", "-9", hostWasm.toString()],
   stdout: "piped",
 }).outputSync().stdout;
 console.log(
-  `bundle-size dayframe_web host=${hostBytes} gzip=${gzip.length} guests=${guestBytes}`,
+  `bundle-size daytxt_web host=${hostBytes} gzip=${gzip.length} guests=${guestBytes}`,
 );
 
 // The boot module is a file, not an inline script, so the CSP below can omit `'unsafe-inline'`
 // from `script-src`: that omission is what stops a guest `javascript:` href from running.
-await site.join("boot.js").writeText(`import init from "./dayframe_web.js";
+await site.join("boot.js").writeText(`import init from "./daytxt_web.js";
 await init();
 `);
 await site.join("index.html").writeText(`<!doctype html>

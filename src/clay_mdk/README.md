@@ -54,8 +54,8 @@ native, self-contained micro may keep `manifest()` inline (see `micro_sample`).
 
 1. Write the crate(s) following `micro_sample` (native) or `micro_counter` +
    `micro_counter_manifest` (guest).
-2. Append one entry to the shell's guest providers — `dayframe_desktop/composition.rs`
-   (`guest_providers`) for Wasmtime, `dayframe_web/main.rs` (`guest_providers`) for `wcmp` — a
+2. Append one entry to the shell's guest providers — `daytxt_desktop/composition.rs`
+   (`guest_providers`) for Wasmtime, `daytxt_web/main.rs` (`guest_providers`) for `wcmp` — a
    manifest plus its backend (`activate` fn, `component_package("name")`, or the `wcmp`
    package factory). Contribution targets are declared in *your* manifest; you never name
    another micro's contract from composition code.

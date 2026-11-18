@@ -94,9 +94,9 @@ members = [
   "./src/dioxus_storm",
   "./src/daytxt_core",
   "./src/daytxt_native",
-  "./src/dayframe_web",
-  "./src/dayframe_desktop",
-  "./src/dayframe_mobile",
+  "./src/daytxt_web",
+  "./src/daytxt_desktop",
+  "./src/daytxt_mobile",
   "./src/dayframe_showcase",
 ]
 exclude = [
@@ -187,7 +187,7 @@ clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
 clay_rt_wcmp = { path = "./src/clay_rt_wcmp" }
 clay_rt_wcmp_wasmi = { path = "./src/clay_rt_wcmp_wasmi" }
 # Lives in the `src/wasm_utils_rs` workspace (it is the only root-workspace consumer), but
-# `dayframe_web` links it as a plain path dependency.
+# `daytxt_web` links it as a plain path dependency.
 clay_rt_wcmp_web = { path = "./src/clay_rt_wcmp_web" }
 clay_guest_session = { path = "./src/clay_guest_session" }
 clay_mdk = { path = "./src/clay_mdk", default-features = false }
