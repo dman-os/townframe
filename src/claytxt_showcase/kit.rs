@@ -3,6 +3,9 @@
 //! The kit never measures, so a specimen is a fixed-size frame whose width is both its CSS width
 //! and the `WidthClass` / split extent it hands the component: the same contract a real host
 //! (the shell) follows with its window.
+use crate::specimens::Frame;
+use crate::specimens::COMPACT_PX;
+use crate::specimens::EXPANDED_PX;
 use clay_dioxus_kit::use_list_details;
 use clay_dioxus_kit::AppBar;
 use clay_dioxus_kit::Button;
@@ -21,36 +24,8 @@ use clay_dioxus_kit::Split;
 use clay_dioxus_kit::WidthClass;
 use dioxus::prelude::*;
 
-const COMPACT_PX: f64 = 390.0;
-const EXPANDED_PX: f64 = 960.0;
-const FRAME_HEIGHT_PX: f64 = 260.0;
-
-/// A host stand-in: a bordered box of known size that the component fills.
-#[component]
-fn Frame(title: String, width_px: f64, children: Element) -> Element {
-    rsx! {
-        figure {
-            class: "m-0",
-            figcaption {
-                class: "mb-2 text-sm font-medium text-foreground-muted",
-                "{title} — {width_px}px ({WidthClass::from_px(width_px):?})"
-            }
-            // The 1px `bg-border` padding is the frame's outline: Tailwind's `border` utilities drew
-            // nothing in the Blitz showcase (observed; cause not investigated).
-            div {
-                class: "overflow-hidden rounded-lg bg-border p-px",
-                style: "width:{width_px + 2.0}px;height:{FRAME_HEIGHT_PX + 2.0}px",
-                div {
-                    class: "relative h-full w-full overflow-hidden rounded-lg bg-surface-sunken",
-                    {children}
-                }
-            }
-        }
-    }
-}
-
 /// Which specimen groups to show: all of them, or the one a screenshot run names through
-/// `DAYTXT_SHOWCASE_KIT` (`nav`, `appbar`, `sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
+/// `DAYTXT_SHOWCASE_KIT` (`appbar`, `sections`, `list`, `sheet`, `drawer`). The native window cannot scroll
 /// under automation, so a group per run is how every specimen gets captured.
 #[component]
 pub fn KitSpecimens(only: Option<String>) -> Element {
@@ -58,14 +33,6 @@ pub fn KitSpecimens(only: Option<String>) -> Element {
     rsx! {
         div {
             class: "flex flex-col gap-8",
-            if shows("nav") {
-                div {
-                    class: "flex items-center gap-4",
-                    NavButton { mode: NavButtonMode::Back, onclick: |_| {} }
-                    NavButton { mode: NavButtonMode::Sidebar, onclick: |_| {} }
-                    span { class: "text-sm text-foreground-muted", "NavButton: back, then sidebar" }
-                }
-            }
             if shows("appbar") {
                 div {
                     class: "flex flex-wrap items-start gap-8",

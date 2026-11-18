@@ -271,6 +271,7 @@ enum LabTab {
     Alert,
     Chip,
     ScrubStrip,
+    NavButton,
     Layout,
     Tokens,
     Colors,
@@ -278,7 +279,7 @@ enum LabTab {
 }
 
 impl LabTab {
-    const ALL: [LabTab; 11] = [
+    const ALL: [LabTab; 12] = [
         LabTab::Button,
         LabTab::Tabs,
         LabTab::Card,
@@ -286,6 +287,7 @@ impl LabTab {
         LabTab::Alert,
         LabTab::Chip,
         LabTab::ScrubStrip,
+        LabTab::NavButton,
         LabTab::Layout,
         LabTab::Tokens,
         LabTab::Colors,
@@ -302,6 +304,7 @@ impl LabTab {
             LabTab::Alert => "alert",
             LabTab::Chip => "chip",
             LabTab::ScrubStrip => "scrub-strip",
+            LabTab::NavButton => "nav-button",
             LabTab::Layout => "layout",
             LabTab::Tokens => "tokens",
             LabTab::Colors => "colors",
@@ -322,6 +325,7 @@ impl LabTab {
             LabTab::Alert => "Alert",
             LabTab::Chip => "Chip",
             LabTab::ScrubStrip => "ScrubStrip",
+            LabTab::NavButton => "NavButton",
             LabTab::Layout => "Layout kit",
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
@@ -357,6 +361,7 @@ impl LabTab {
                 ("chip-interactive", "Interactive"),
             ],
             LabTab::ScrubStrip => &[],
+            LabTab::NavButton => &[("nav-button-modes", "Modes")],
             LabTab::Layout => &[("kit", "Layout kit")],
             LabTab::Tokens => &[
                 ("typography", "Typography"),
@@ -381,6 +386,7 @@ impl LabTab {
             LabTab::ScrubStrip => {
                 rsx! { specimens::ScrubStripSpecimens { viewport: (available_width, 860.0) } }
             }
+            LabTab::NavButton => rsx! { specimens::NavButtonSpecimens {} },
             LabTab::Layout => rsx! {
                 FoundationSection {
                     id: "kit".to_string(),

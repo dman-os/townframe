@@ -322,14 +322,6 @@
   .table {
     display: table;
   }
-  .size-3 {
-    width: calc(var(--ct-spacing) * 3);
-    height: calc(var(--ct-spacing) * 3);
-  }
-  .size-6 {
-    width: calc(var(--ct-spacing) * 6);
-    height: calc(var(--ct-spacing) * 6);
-  }
   .size-12 {
     width: calc(var(--ct-spacing) * 12);
     height: calc(var(--ct-spacing) * 12);
@@ -337,9 +329,6 @@
   .size-24 {
     width: calc(var(--ct-spacing) * 24);
     height: calc(var(--ct-spacing) * 24);
-  }
-  .h-0\.5 {
-    height: calc(var(--ct-spacing) * 0.5);
   }
   .h-2 {
     height: calc(var(--ct-spacing) * 2);
@@ -370,9 +359,6 @@
   }
   .min-h-screen {
     min-height: 100vh;
-  }
-  .w-5 {
-    width: calc(var(--ct-spacing) * 5);
   }
   .w-28 {
     width: calc(var(--ct-spacing) * 28);
@@ -424,9 +410,6 @@
   }
   .grow {
     flex-grow: 1;
-  }
-  .rotate-45 {
-    rotate: 45deg;
   }
   .transform {
     transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
@@ -625,9 +608,6 @@
   }
   .bg-card {
     background-color: var(--ct-color-surface);
-  }
-  .bg-current {
-    background-color: currentcolor;
   }
   .bg-destructive {
     background-color: var(--ct-color-danger);
@@ -1967,6 +1947,50 @@
     .ct-scrub-strip [data-part] {
       transition: none;
     }
+  }
+  .ct-nav-button {
+    box-sizing: border-box;
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: var(--ct-dimension-target-coarse);
+    height: var(--ct-dimension-target-coarse);
+    padding: 0;
+    border: 0;
+    border-radius: var(--ct-dimension-radius-pill);
+    background: transparent;
+    color: var(--ct-color-text);
+    cursor: pointer;
+  }
+  .ct-nav-button:hover {
+    background: var(--ct-color-surface-sunken);
+  }
+  .ct-nav-button:focus-visible {
+    outline: var(--ct-dimension-border-width-thick) solid var(--ct-color-focus);
+  }
+  .ct-nav-button [data-part="icon"] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+  .ct-nav-button[data-state="back"] [data-part="glyph"] {
+    width: 0.75rem;
+    height: 0.75rem;
+    border-bottom: var(--ct-dimension-border-width-thick) solid currentColor;
+    border-left: var(--ct-dimension-border-width-thick) solid currentColor;
+    rotate: 45deg;
+  }
+  .ct-nav-button[data-state="sidebar"] [data-part="icon"] {
+    flex-direction: column;
+    gap: var(--ct-dimension-spacing-1);
+  }
+  .ct-nav-button[data-state="sidebar"] [data-part="bar"] {
+    width: 1.25rem;
+    height: 0.125rem;
+    background: currentColor;
   }
 }
 @property --tw-rotate-x {

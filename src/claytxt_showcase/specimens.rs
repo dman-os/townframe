@@ -9,6 +9,7 @@ mod alert;
 mod button;
 mod card;
 mod chip;
+mod nav_button;
 mod scrub_strip;
 mod separator;
 mod tabs;
@@ -17,11 +18,13 @@ pub(super) use alert::AlertSpecimens;
 pub(super) use button::ButtonSpecimens;
 pub(super) use card::CardSpecimens;
 pub(super) use chip::ChipSpecimens;
+pub(super) use nav_button::NavButtonSpecimens;
 pub(super) use scrub_strip::ScrubStripSpecimens;
 pub(super) use separator::SeparatorSpecimens;
 pub(super) use tabs::TabsSpecimens;
 
 use clay_dioxus_kit::Renderer;
+use clay_dioxus_kit::WidthClass;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -35,6 +38,34 @@ pub(super) fn renderer() -> Renderer {
         return Renderer::Blitz;
     }
     Renderer::Browser
+}
+
+pub(crate) const COMPACT_PX: f64 = 390.0;
+pub(crate) const EXPANDED_PX: f64 = 960.0;
+const FRAME_HEIGHT_PX: f64 = 260.0;
+
+/// A host stand-in: a bordered box of known size that the component fills.
+#[component]
+pub(crate) fn Frame(title: String, width_px: f64, children: Element) -> Element {
+    rsx! {
+        figure {
+            class: "m-0",
+            figcaption {
+                class: "mb-2 text-sm font-medium text-foreground-muted",
+                "{title} — {width_px}px ({WidthClass::from_px(width_px):?})"
+            }
+            // The 1px `bg-border` padding is the frame's outline: Tailwind's `border` utilities drew
+            // nothing in the Blitz showcase (observed; cause not investigated).
+            div {
+                class: "overflow-hidden rounded-lg bg-border p-px",
+                style: "width:{width_px + 2.0}px;height:{FRAME_HEIGHT_PX + 2.0}px",
+                div {
+                    class: "relative h-full w-full overflow-hidden rounded-lg bg-surface-sunken",
+                    {children}
+                }
+            }
+        }
+    }
 }
 
 /// A labelled row of cells.
