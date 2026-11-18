@@ -5,6 +5,7 @@ use super::library::connect;
 use super::library::new_node;
 use crate::client::NodeClient;
 use crate::interlude::*;
+use big_cabinet_core::datum::DatumMember as _;
 
 mod patch;
 
