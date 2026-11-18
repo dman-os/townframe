@@ -22,6 +22,7 @@ use crate::requests::NetUse;
 use crate::requests::Requests;
 use crate::requests::RoutineUses;
 use crate::store;
+use crate::store::DrawerOrigin;
 use big_cabinet::DatumStore;
 use big_cabinet::DatumStoreHandle;
 use big_cabinet::SchemaRegistration;
@@ -56,6 +57,7 @@ use big_cabinet_core::drawer::protocol::DrawersError;
 use big_cabinet_core::drawer::protocol::DrawersProtocol;
 use big_cabinet_core::drawer::protocol::GrantDrawer;
 use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::drawer::protocol::RevokeDrawer;
 use big_cabinet_core::reference::DatumTag;
 use big_cartridges_core::CartridgeId;
 use big_cartridges_core::Permbind;
@@ -195,6 +197,9 @@ pub(crate) enum Command {
     },
     SetGrant {
         context: RequestContext,
+        /// The caller's authority, which must reach the drawer a drawer grant names: it is what
+        /// grants the drawer to the service's own actor (see `State::hold_drawer`).
+        authorization: Authorization,
         cartridge_id: CartridgeId,
         grant: GrantKey,
         value: Option<GrantBody>,
@@ -254,8 +259,20 @@ pub(crate) enum Command {
         drawer: Option<DrawerId>,
         reply: Reply<FiledGrantRequest>,
     },
+    /// A routine of the cartridge created `drawer` through its own call (see
+    /// [`MissingAuthorityLookup::drawer_created`]); `access` is what its `#drawers` permbind
+    /// declares for what it creates.
+    DrawerCreated {
+        context: RequestContext,
+        cartridge_id: CartridgeId,
+        drawer: DrawerId,
+        access: Option<DrawerAccess>,
+        reply: Reply<()>,
+    },
     AnswerGrantRequest {
         context: RequestContext,
+        /// The operator's authority, as for [`Command::SetGrant`].
+        authorization: Authorization,
         request: Uuid7,
         answer: GrantAnswer,
         drawer: Option<DrawerId>,
@@ -336,6 +353,12 @@ pub(crate) struct State {
     persisted_actors: BTreeMap<CartridgeId, Uuid7>,
     actors: BTreeMap<CartridgeId, OpenedActor>,
     applied_grants: BTreeMap<CartridgeId, BTreeMap<DrawerId, (DrawerAccess, CapId)>>,
+    /// The drawers the service's own actor holds durably, each for the cartridge whose grant it
+    /// serves, mirrored from SQLite: a cartridge's grant is handed down from the service's hold
+    /// (`apply_grant`), so a drawer a cartridge is granted is held here for it until its config
+    /// document no longer names the drawer (`release_idle_drawers`). A drawer a routine had the
+    /// service create is `Created` and never given back.
+    service_drawers: BTreeMap<(DrawerId, CartridgeId), DrawerOrigin>,
     /// The dispatch handle minted for each nodule from its method grants, with the scope it
     /// was minted for.
     applied_operations: BTreeMap<CartridgeId, (DispatchScope, CapId)>,
@@ -362,6 +385,9 @@ pub(crate) struct State {
     /// Cartridges whose executor asked to be ensured again. The state actor constructs it and
     /// outlives nothing that holds a handle to it in a way that matters (see [`ReensureQueue`]).
     reensure: Arc<ReensureQueue>,
+    /// This actor's own inbox, which each cartridge's [`MissingAuthorityLookup`] reports a created
+    /// drawer through. Weak, so the inbox still closes when the service drops its handle.
+    commands: mpsc::WeakSender<Command>,
     /// Initializer runs by cartridge.
     inits: BTreeMap<CartridgeId, InitRun>,
     /// The revision each `Once` initializer last succeeded at on this node.
@@ -382,6 +408,8 @@ pub(crate) struct State {
     /// [`MissingAuthorityLookup`]).
     missing_authority: BTreeMap<CartridgeId, MissingAuthorityLookup>,
 }
+
+mod holds;
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
     NoduleActor {
@@ -709,7 +737,8 @@ fn desired_routine_scopes(
 /// Per routine, what its `uses` leave refused for want of a grant someone may still give (ADR 049
 /// §4.3): the operations its method permbinds declare that `effective_operations` (the
 /// cartridge's grants) do not cover, with the permbind of each, and every `#net` permbind it
-/// takes with whether `desired_nets` covers it. Drawer and docs calls are not here: they pass the
+/// takes with whether `desired_nets` covers it, and the access a drawer the routine creates is
+/// granted it at (`RoutineUses::create_access`). Drawer and docs calls are not here: they pass the
 /// handle and are refused by their own service, which cannot be traced to one permbind from the
 /// call alone.
 fn routine_uses(
@@ -723,7 +752,7 @@ fn routine_uses(
         .iter()
         .map(|(routine_key, routine)| {
             let mut uses = RoutineUses::default();
-            for binding in routine.uses.keys() {
+            for (binding, usage) in &routine.uses {
                 match installed
                     .resolved
                     .cartridge
@@ -749,6 +778,18 @@ fn routine_uses(
                             granted: desired_nets.iter().any(|grant| grant.covers(&target)),
                             target,
                         });
+                    }
+                    Permbind::Drawers(drawer) if usage.create && drawer.create.is_some() => {
+                        // The access `desired_routine_scopes` reaches existing drawers at.
+                        let access = [
+                            (usage.read && drawer.read.is_some(), DrawerAccess::Read),
+                            (usage.write && drawer.write.is_some(), DrawerAccess::Write),
+                            (usage.delete && drawer.delete.is_some(), DrawerAccess::Write),
+                        ]
+                        .into_iter()
+                        .filter_map(|(used, access)| used.then_some(access))
+                        .max();
+                        uses.create_access = uses.create_access.max(access);
                     }
                     _ => {}
                 }
@@ -1162,9 +1203,8 @@ impl State {
             persisted_actors.insert(row.cartridge_id, row.actor_id);
         }
         let applied_grants = load_applied_grants(&stores.sql).await?;
-
+        let service_drawers = store::service_drawers(&stores.sql).await?;
         let applied_settings = load_applied_settings(&stores.sql).await?;
-
         let applied_operations = load_applied_operations(&stores.sql).await?;
         let init_done = store::init_done(&stores.sql).await?;
         let locks = store::resolution_locks(&stores.sql).await?;
@@ -1199,6 +1239,7 @@ impl State {
             persisted_actors,
             actors: BTreeMap::new(),
             applied_grants,
+            service_drawers,
             applied_operations,
             routine_capabilities: BTreeMap::new(),
             applied_settings,
@@ -1211,6 +1252,7 @@ impl State {
             admission_cache: Arc::default(),
             hosted: BTreeMap::new(),
             reensure: Arc::default(),
+            commands: commands.downgrade(),
             inits: BTreeMap::new(),
             init_done,
             next_epoch: 0,
@@ -1388,11 +1430,18 @@ impl State {
             }
             Command::SetGrant {
                 context,
+                authorization,
                 cartridge_id,
                 grant,
                 value,
                 reply,
-            } => answer(reply, self.set_grant(&context, &cartridge_id, grant, value)).await,
+            } => {
+                answer(
+                    reply,
+                    self.set_grant(&context, authorization, &cartridge_id, grant, value),
+                )
+                .await
+            }
             Command::ClearConfig {
                 context,
                 cartridge_id,
@@ -1460,8 +1509,22 @@ impl State {
                 })
                 .await
             }
+            Command::DrawerCreated {
+                context,
+                cartridge_id,
+                drawer,
+                access,
+                reply,
+            } => {
+                answer(
+                    reply,
+                    self.drawer_created(&context, &cartridge_id, drawer, access),
+                )
+                .await
+            }
             Command::AnswerGrantRequest {
                 context,
+                authorization,
                 request,
                 answer: given,
                 drawer,
@@ -1469,7 +1532,7 @@ impl State {
             } => {
                 answer(
                     reply,
-                    self.answer_grant_request(&context, request, given, drawer),
+                    self.answer_grant_request(&context, authorization, request, given, drawer),
                 )
                 .await
             }
@@ -1596,24 +1659,41 @@ impl State {
 
     /// Sets or revokes one grant datum in the cartridge's config document. A grant is the
     /// cartridge's, not a component's (ADR 049 §4.1), so any install may be granted.
+    ///
+    /// A drawer grant first grants the drawer to the service's own actor on the caller's authority
+    /// (`hold_drawer`), so a caller with no authority over the drawer cannot grant it.
     async fn set_grant(
         &mut self,
         context: &RequestContext,
+        authorization: Authorization,
         cartridge_id: &CartridgeId,
         grant: GrantKey,
         value: Option<GrantBody>,
     ) -> Res<()> {
         self.install_record(cartridge_id)?;
+        let holds = match (&grant, &value) {
+            (GrantKey::Drawer(drawer), Some(_)) => {
+                self.hold_drawer(context, authorization, cartridge_id, drawer)
+                    .await?;
+                true
+            }
+            _ => false,
+        };
         if value.is_none() {
             // A revoke takes back an "only this time" answer too; the reconcile the edit runs
             // below re-mints without it.
             self.grant_requests
                 .revoke_boot_grants(cartridge_id, Some(&grant));
         }
-        self.edit_cartridge_config(context, cartridge_id, move |config| {
-            config.set_grant(grant, value)
-        })
-        .await
+        let edited = self
+            .edit_cartridge_config(context, cartridge_id, move |config| {
+                config.set_grant(grant, value)
+            })
+            .await;
+        if holds && edited.is_err() {
+            self.release_after_failed_grant(context).await?;
+        }
+        edited
     }
 
     /// Deletes the settings and every grant of the cartridge, installed or not: the config
@@ -1628,7 +1708,18 @@ impl State {
             config.clear();
             Ok(())
         })
-        .await
+        .await?;
+        // The document is empty now, which the reconcile above saw only if the cartridge is
+        // installed: an uninstalled cartridge's document is not loaded there.
+        let held: Vec<(DrawerId, CartridgeId)> = self
+            .service_drawers
+            .iter()
+            .filter(|((_, holder), origin)| {
+                holder == cartridge_id && **origin == DrawerOrigin::Granted
+            })
+            .map(|(pair, _)| pair.clone())
+            .collect();
+        self.end_holds(context, held).await
     }
 
     /// Edits `cartridge_id`'s config document, the one its install names or else the one an
@@ -1661,6 +1752,7 @@ impl State {
     async fn answer_grant_request(
         &mut self,
         context: &RequestContext,
+        authorization: Authorization,
         request: Uuid7,
         answer: GrantAnswer,
         drawer: Option<DrawerId>,
@@ -1674,23 +1766,40 @@ impl State {
             }
             GrantAnswer::Allow => {
                 let (grant, body) = GrantRequests::grant_for(&record, drawer)?;
-                self.edit_cartridge_config(context, &cartridge_id, move |config| {
-                    // An answer never narrows: a wider grant of the same thing stays.
-                    let access = |body: &GrantBody| body.access.as_ref().and_then(|a| a.known());
-                    let wider = config.grants().any(|(key, slot)| {
-                        *key == grant
-                            && matches!(slot, DatumSlot::Accepted { value, .. } if access(value) >= access(&body))
-                    });
-                    if wider {
-                        return Ok(());
+                let holds = match &grant {
+                    GrantKey::Drawer(drawer) => {
+                        self.hold_drawer(context, authorization, &cartridge_id, drawer)
+                            .await?;
+                        true
                     }
-                    config.set_grant(grant, Some(body))
-                })
-                .await?;
+                    _ => false,
+                };
+                let edited = self
+                    .edit_cartridge_config(context, &cartridge_id, move |config| {
+                        // An answer never narrows: a wider grant of the same thing stays.
+                        let access = |body: &GrantBody| body.access.as_ref().and_then(|a| a.known());
+                        let wider = config.grants().any(|(key, slot)| {
+                            *key == grant
+                                && matches!(slot, DatumSlot::Accepted { value, .. } if access(value) >= access(&body))
+                        });
+                        if wider {
+                            return Ok(());
+                        }
+                        config.set_grant(grant, Some(body))
+                    })
+                    .await;
+                if holds && edited.is_err() {
+                    self.release_after_failed_grant(context).await?;
+                }
+                edited?;
                 GrantRequestState::Allowed
             }
             GrantAnswer::OnlyThisBoot => {
                 let (grant, body) = GrantRequests::grant_for(&record, drawer)?;
+                if let GrantKey::Drawer(drawer) = &grant {
+                    self.hold_drawer(context, authorization, &cartridge_id, drawer)
+                        .await?;
+                }
                 self.grant_requests
                     .grant_this_boot(cartridge_id, grant, body);
                 let snapshot = self.config().await?;
@@ -1870,7 +1979,10 @@ impl State {
     fn missing_authority(&mut self, cartridge_id: &CartridgeId) -> MissingAuthorityLookup {
         self.missing_authority
             .entry(cartridge_id.clone())
-            .or_insert_with(|| self.grant_requests.lookup(cartridge_id.clone()))
+            .or_insert_with(|| {
+                self.grant_requests
+                    .lookup(cartridge_id.clone(), self.commands.clone())
+            })
             .clone()
     }
 
@@ -2081,6 +2193,10 @@ impl State {
             .publish_grants(snapshot.value.cartridge_docs());
         self.observed_heads = snapshot.heads;
         self.records = new_records;
+        // A revoked grant ends the service's hold on a drawer its cartridge's document no longer
+        // names (a clear does so in `clear_config`; an uninstall leaves the document and so the
+        // hold). Last, so the cartridges' own grants of it are retracted first.
+        self.release_idle_drawers(context, &snapshot.value).await?;
         Ok(revoke_errors)
     }
 
@@ -2794,6 +2910,7 @@ impl State {
                                 drawer_id,
                                 actor.actor.actor_id,
                                 *desired_access,
+                                false,
                             )
                             .await
                             .is_ok()
@@ -3071,6 +3188,7 @@ impl Stores {
         drawer_id: &DrawerId,
         subject_id: Uuid7,
         access: DrawerAccess,
+        durable: bool,
     ) -> Res<()> {
         self.drawers
             .call(
@@ -3080,11 +3198,87 @@ impl Stores {
                     drawer_id: drawer_id.clone(),
                     subject_id,
                     access,
-                    durable: false,
+                    durable,
                 },
             )
             .await
             .map_err(drawers_error)
+    }
+
+    /// Grants `drawer_id` to the service's own actor at Admin, durably, with a capability minted
+    /// on `authorization`'s authority: the capability only proves the granter's right to delegate
+    /// and is retracted at once, as the grant is a standing one that does not depend on it.
+    async fn grant_to_service(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+        drawer_id: &DrawerId,
+    ) -> Res<()> {
+        let capability = self
+            .drawers
+            .call_with(
+                context.child(),
+                authorization.metadata(),
+                MintDrawerCapability {
+                    scope: DrawerScope {
+                        drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
+                        create: false,
+                    },
+                    rights: Rights::USE | Rights::DELEGATE,
+                    subject: None,
+                },
+            )
+            .await
+            .map_err(drawers_error)?
+            .capability_id;
+        let granted = self
+            .grant_with_cap(
+                context,
+                capability,
+                drawer_id,
+                self.parent.actor.actor_id,
+                DrawerAccess::Admin,
+                true,
+            )
+            .await;
+        self.retract_grant_cap(context, capability).await?;
+        granted
+    }
+
+    /// Withdraws the service's own actor's standing grant on `drawer_id`, which a
+    /// capability minted from the actor's own authority (it holds Admin there) is enough for.
+    async fn revoke_from_service(&self, context: &RequestContext, drawer_id: &DrawerId) -> Res<()> {
+        let capability = self
+            .drawers
+            .call_with(
+                context.child(),
+                Authorization::identity(self.parent.capability).metadata(),
+                MintDrawerCapability {
+                    scope: DrawerScope {
+                        drawers: BTreeMap::from([(drawer_id.clone(), DrawerAccess::Admin)]),
+                        create: false,
+                    },
+                    rights: Rights::USE,
+                    subject: None,
+                },
+            )
+            .await
+            .map_err(drawers_error)?
+            .capability_id;
+        let revoked = self
+            .drawers
+            .call(
+                context.child(),
+                RevokeDrawer {
+                    capability,
+                    drawer_id: drawer_id.clone(),
+                    subject_id: self.parent.actor.actor_id,
+                },
+            )
+            .await
+            .map_err(drawers_error);
+        self.retract_grant_cap(context, capability).await?;
+        revoked
     }
 
     async fn apply_grant(
@@ -3115,7 +3309,7 @@ impl Stores {
         let cap_id = cap.capability_id;
         store::upsert_applied_grant(sql, cartridge_id, drawer_id, access, cap_id).await?;
         if let Err(err) = self
-            .grant_with_cap(context, cap_id, drawer_id, subject_id, access)
+            .grant_with_cap(context, cap_id, drawer_id, subject_id, access, false)
             .await
         {
             drop(self.retract_grant_cap(context, cap_id).await);

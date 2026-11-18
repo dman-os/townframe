@@ -34,12 +34,17 @@ use big_cabinet_core::drawer::MetaRoot;
 use big_cabinet_core::drawer::protocol::CreateDrawer;
 use big_cabinet_core::drawer::protocol::CreateLayout;
 use big_cabinet_core::drawer::protocol::CreateMetaDoc;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
 use big_cartridges_core::Initializer;
 use big_cartridges_core::Permbind;
 use big_cartridges_core::PermbindDatum;
 use big_cartridges_core::PermbindDrawers;
 use big_cartridges_core::RoutineUse;
 use big_cartridges_core::RunMode;
+use big_cartridges_core::config::GrantBody;
+use big_cartridges_core::config::GrantKey;
 use big_cartridges_core::example_cartridge;
 use big_cartridges_core::request::Necessity;
 use big_cartridges_core::test_support::FixtureCartridge;
@@ -49,6 +54,7 @@ use big_dispatch::ProviderState;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchScope;
 use big_dispatch_core::Readiness;
+use big_nodule_core::protocol::NoduleGrantStatus;
 use serde_json::json;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -482,14 +488,6 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
     uses(&mut cartridge, SETUP, "drawers", writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
     let present = node.drawers.local().present_id.clone();
-    crate::e2e::grant_drawer(
-        &node.drawers,
-        &node.drawers_actor,
-        &present,
-        node.nodules_actor.actor.actor_id,
-        DrawerAccess::Admin,
-    )
-    .await;
     node.set_drawers(
         ALPHA,
         BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
@@ -511,7 +509,8 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
         .metadata()
     };
 
-    node.drawers
+    let created = node
+        .drawers
         .client
         .call_with(
             RequestContext::root(),
@@ -523,7 +522,12 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
             },
         )
         .await
-        .expect("a create use mints the right to create drawers");
+        .expect("a create use mints the right to create drawers")
+        .drawer_id;
+    // Records who owns what a routine creates through its handle: the owner is the actor the
+    // handle chain originates from, which is the service, not the nodule actor it is bound to.
+    assert!(reaches(&node, node.nodules_actor.capability, &created).await);
+    assert!(!reaches(&node, actor.capability, &created).await);
 
     let create_meta_doc = |capability, name: &str| CreateMetaDoc {
         capability,
@@ -551,6 +555,379 @@ async fn a_create_only_drawers_use_makes_drawers_but_writes_no_existing_one() {
         )
         .await
         .expect_err("a create use confers no write on an existing drawer");
+    node.shutdown().await;
+}
+
+/// Whether `holder`, presenting its own identity, can mint a handle with Admin on `drawer`.
+async fn reaches(node: &Node, holder: CapId, drawer: &DrawerId) -> bool {
+    node.drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization::identity(holder).metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Admin)]),
+                    create: false,
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .is_ok()
+}
+
+/// Whether the `SETUP` routine's current drawers handle reads `drawer`.
+async fn routine_reaches(
+    node: &Node,
+    executor: &FakeExecutor,
+    actor: &OpenedActor,
+    drawer: &DrawerId,
+) -> bool {
+    let handle = executor.routine_capabilities()[SETUP]
+        .drawers
+        .expect("a drawers handle");
+    node.drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization {
+                authority: handle,
+                signer: actor.capability,
+            }
+            .metadata(),
+            big_cabinet_core::drawer::protocol::GetDrawer {
+                capability: handle,
+                drawer_id: drawer.clone(),
+            },
+        )
+        .await
+        .is_ok()
+}
+
+/// A drawer the operator made, which the service's actor holds none of, is granted to a cartridge
+/// through `setCartridgeGrant` alone: the call grants the drawer to the service's actor on the
+/// operator's authority, the service hands it down, and revoking the grant takes the service's
+/// hold back.
+#[tokio::test]
+async fn an_operator_made_drawer_granted_through_set_cartridge_grant_reaches_the_routine() {
+    let mut cartridge = alpha(&[PING], &[], &[]);
+    cartridge.permbinds.insert(
+        "drawers".into(),
+        Permbind::Drawers(PermbindDrawers {
+            description: "drawers".into(),
+            resolution: Default::default(),
+            read: None,
+            write: Some(Necessity::Optional),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    uses(&mut cartridge, PING, "drawers", writes());
+    let (mut node, executor, _) = hosted(cartridge, &[]).await;
+    let operator = node.operator();
+    let minted = node
+        .drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            operator.metadata(),
+            MintDrawerCapability {
+                scope: DrawerScope {
+                    drawers: BTreeMap::new(),
+                    create: true,
+                },
+                rights: Rights::USE,
+                subject: None,
+            },
+        )
+        .await
+        .expect("the operator mints the right to create drawers");
+    let made = node
+        .drawers
+        .client
+        .call_with(
+            RequestContext::root(),
+            Authorization {
+                authority: minted.capability_id,
+                signer: operator.signer,
+            }
+            .metadata(),
+            CreateDrawer {
+                capability: minted.capability_id,
+                command: CommandId::try_from("operator-makes".to_owned()).unwrap(),
+                layout: CreateLayout::SingleGroup,
+            },
+        )
+        .await
+        .expect("the operator creates a drawer")
+        .drawer_id;
+    assert!(
+        !reaches(&node, node.nodules_actor.capability, &made).await,
+        "the service's actor holds none of the operator's drawers"
+    );
+
+    let record = node
+        .set_drawers(ALPHA, BTreeMap::from([(made.clone(), DrawerAccess::Write)]))
+        .await;
+    assert_eq!(record.error, None);
+    assert!(record.drawers[&made].granted);
+    assert!(
+        executor.routine_capabilities()[PING].drawers.is_some(),
+        "the routine's drawers handle reaches the drawer with no staging by the test"
+    );
+    assert!(
+        reaches(&node, node.nodules_actor.capability, &made).await,
+        "the call granted the service"
+    );
+    // The hold is a standing grant, not one resting on a capability: the capability that made it
+    // was retracted at once, and the routine still reaches the drawer after the service restarts.
+    node.restart_nodules().await.unwrap();
+    assert!(
+        reaches(&node, node.nodules_actor.capability, &made).await,
+        "the service's hold outlives a restart"
+    );
+    assert!(executor.routine_capabilities()[PING].drawers.is_some());
+
+    node.set_grant(operator, ALPHA, GrantKey::Drawer(made.clone()), None)
+        .await
+        .unwrap();
+    assert!(
+        !reaches(&node, node.nodules_actor.capability, &made).await,
+        "revoking the only grant ends the service's hold"
+    );
+    assert_eq!(executor.routine_capabilities()[PING].drawers, None);
+    // Giving the hold back is durable too: nothing brings it back at the next start.
+    node.restart_nodules().await.unwrap();
+    assert!(!reaches(&node, node.nodules_actor.capability, &made).await);
+    node.shutdown().await;
+}
+
+/// The native provider of `createDrawer` the egress reaches through dispatch: it runs the call
+/// against the drawers service as the routine's actor presenting the handle in the body, as the
+/// node's own provider does.
+struct CreatesDrawers {
+    drawers: service_client_native_rs::Client<big_cabinet_core::drawer::protocol::DrawersProtocol>,
+}
+
+#[async_trait::async_trait]
+impl big_dispatch::Provider for CreatesDrawers {
+    async fn call(
+        &self,
+        caller: &big_dispatch::Caller,
+        _operation: &str,
+        request: &RequestContext,
+        _context: &big_dispatch_core::InvocationContext,
+        input: serde_json::Value,
+        _body: Option<big_dispatch_core::Body>,
+    ) -> Result<big_dispatch_core::Body, big_dispatch::ProviderError> {
+        let params: CreateDrawer = serde_json::from_value(input).expect("a createDrawer body");
+        let created = self
+            .drawers
+            .call_with(
+                request.child(),
+                Authorization {
+                    authority: params.capability,
+                    signer: caller.authorization.signer,
+                }
+                .metadata(),
+                params,
+            )
+            .await
+            .expect("the routine's handle may create drawers");
+        Ok(big_dispatch_core::Body::Json(
+            serde_json::to_value(created).expect("a created drawer serializes"),
+        ))
+    }
+}
+
+const CREATE_DRAWER: &str = "org.example.daybook.drawers.createDrawer";
+
+/// A drawer a routine creates through the host's egress is owned by the service's actor, which
+/// the runtime then grants down: the cartridge gets a grant datum for it at the access the
+/// routine's `#drawers` permbind declares (Write here, not the Admin the service owns it at),
+/// the routine's re-minted handle reaches it, and none of that is the guest's doing. The
+/// service's ownership is its own, so neither revoking that grant nor a restart takes it back.
+#[tokio::test]
+async fn a_drawer_a_routine_creates_is_owned_by_the_service_and_granted_to_the_cartridge() {
+    let mut cartridge = alpha(&[SETUP], &[CREATE_DRAWER], &[]);
+    cartridge.permbinds.insert(
+        "makes".into(),
+        Permbind::Drawers(PermbindDrawers {
+            description: "makes".into(),
+            resolution: Default::default(),
+            read: None,
+            write: Some(Necessity::Optional),
+            create: Some(Necessity::Optional),
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    uses(
+        &mut cartridge,
+        SETUP,
+        "makes",
+        RoutineUse {
+            write: true,
+            create: true,
+            ..Default::default()
+        },
+    );
+    uses(&mut cartridge, SETUP, CREATE_DRAWER, RoutineUse::default());
+    let (mut node, executor, _) = hosted(cartridge, &[CREATE_DRAWER]).await;
+    node.dispatch
+        .router
+        .register(
+            "drawers",
+            [(
+                CREATE_DRAWER.to_owned(),
+                Operation::unchecked(Some(OperationKind::Procedure)),
+            )],
+            ProviderState::Ready(ProviderKind::BuiltIn(Arc::new(CreatesDrawers {
+                drawers: node.drawers.client.clone(),
+            }))),
+        )
+        .unwrap();
+    let actor = node.actor_at(&id(ALPHA)).await;
+
+    let create = |node: &Node, command: &str| {
+        let caller = crate::egress::WorkloadCaller {
+            signer: actor.capability,
+            missing_authority: executor.missing_authority(),
+        };
+        let handles = executor.routine_capabilities()[SETUP].clone();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            service_core_rs::xrpc::bearer_header_value(&Authorization::id_text(
+                handles.dispatch.expect("a dispatch handle"),
+            ))
+            .parse()
+            .unwrap(),
+        );
+        let body = serde_json::to_vec(&CreateDrawer {
+            capability: handles.drawers.expect("a drawers handle"),
+            command: CommandId::try_from(command.to_owned()).unwrap(),
+            layout: CreateLayout::SingleGroup,
+        })
+        .unwrap();
+        let client = node.dispatch.client.clone();
+        async move {
+            let (status, body) = crate::egress::call(
+                &client,
+                Some(&caller),
+                &http::Method::POST,
+                &format!("/xrpc/{CREATE_DRAWER}"),
+                &headers,
+                crate::XrpcBody::json(body),
+            )
+            .await;
+            let crate::XrpcBody::Json(body) = body else {
+                panic!("a created drawer is JSON")
+            };
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        }
+    };
+    let (status, body) = create(&node, "setup-creates").await;
+    assert_eq!(status, http::StatusCode::OK, "{body}");
+    let created: DrawerId = serde_json::from_value(body["drawerId"].clone()).unwrap();
+
+    // Owned by the service's actor, not by the nodule's.
+    assert!(reaches(&node, node.nodules_actor.capability, &created).await);
+    assert!(!reaches(&node, actor.capability, &created).await);
+
+    // The runtime wrote the grant datum, so it shows in the cartridge's consent and audit view.
+    let grants: Vec<GrantKey> = node
+        .cartridge_doc(ALPHA)
+        .await
+        .datums
+        .keys()
+        .filter_map(GrantKey::from_datum_key)
+        .filter(|grant| matches!(grant, GrantKey::Drawer(_)))
+        .collect();
+    assert_eq!(grants, vec![GrantKey::Drawer(created.clone())]);
+    let record = node.get(node.operator(), ALPHA).await.unwrap();
+    assert_eq!(
+        record.drawers[&created],
+        NoduleGrantStatus {
+            desired: DrawerAccess::Write,
+            granted: true,
+            error: None,
+        }
+    );
+
+    // The routine's handle, re-minted by the reconcile, reaches the drawer.
+    assert!(routine_reaches(&node, &executor, &actor, &created).await);
+
+    // Survives a restart, and the cartridge's grant going does not take the owner's hold.
+    node.restart_nodules().await.unwrap();
+    assert!(routine_reaches(&node, &executor, &actor, &created).await);
+    node.set_grant(
+        node.operator(),
+        ALPHA,
+        GrantKey::Drawer(created.clone()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(reaches(&node, node.nodules_actor.capability, &created).await);
+    node.restart_nodules().await.unwrap();
+    assert!(reaches(&node, node.nodules_actor.capability, &created).await);
+    node.shutdown().await;
+}
+
+/// A caller whose authority does not reach the drawer cannot grant it: the service's actor is
+/// not granted it, and no grant datum is written.
+#[tokio::test]
+async fn a_caller_without_authority_over_the_drawer_cannot_grant_it() {
+    let mut cartridge = alpha(&[PING], &[], &[]);
+    cartridge.permbinds.insert(
+        "drawers".into(),
+        Permbind::Drawers(PermbindDrawers {
+            description: "drawers".into(),
+            resolution: Default::default(),
+            read: None,
+            write: Some(Necessity::Optional),
+            create: None,
+            delete: None,
+            extra: Default::default(),
+        }),
+    );
+    uses(&mut cartridge, PING, "drawers", writes());
+    let (node, executor, _) = hosted(cartridge, &[]).await;
+    let present = node.drawers.local().present_id.clone();
+    // Manages alpha, and holds a handle on no drawer.
+    let manager = node
+        .mint(
+            node.operator(),
+            crate::e2e::scope(false, &[ALPHA]),
+            Rights::USE,
+        )
+        .await
+        .unwrap();
+    node.set_grant(
+        manager,
+        ALPHA,
+        GrantKey::Drawer(present.clone()),
+        Some(GrantBody::access(DrawerAccess::Write.into())),
+    )
+    .await
+    .expect_err("a manager with no authority over the drawer cannot grant it");
+    assert!(
+        node.cartridge_doc(ALPHA)
+            .await
+            .datums
+            .keys()
+            .filter_map(GrantKey::from_datum_key)
+            .all(|grant| !matches!(grant, GrantKey::Drawer(_))),
+        "no grant datum was written"
+    );
+    assert_eq!(executor.routine_capabilities()[PING].drawers, None);
     node.shutdown().await;
 }
 
@@ -593,14 +970,6 @@ async fn one_drawer_grant_reaches_every_routine_that_uses_it_and_revoking_retrac
     uses(&mut cartridge, SETUP, "writable", writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
     let present = node.drawers.local().present_id.clone();
-    crate::e2e::grant_drawer(
-        &node.drawers,
-        &node.drawers_actor,
-        &present,
-        node.nodules_actor.actor.actor_id,
-        DrawerAccess::Admin,
-    )
-    .await;
     assert!(
         executor
             .routine_capabilities()
@@ -704,14 +1073,6 @@ async fn a_routine_reaches_granted_drawers_only_for_its_datum_kinds() {
     uses(&mut cartridge, SPLIT, "secret", writes());
     let (node, executor, _) = hosted(cartridge, &[]).await;
     let present = node.drawers.local().present_id.clone();
-    crate::e2e::grant_drawer(
-        &node.drawers,
-        &node.drawers_actor,
-        &present,
-        node.nodules_actor.actor.actor_id,
-        DrawerAccess::Admin,
-    )
-    .await;
     node.set_drawers(
         ALPHA,
         BTreeMap::from([(present.clone(), DrawerAccess::Write)]),
@@ -893,14 +1254,6 @@ mod grant_requests {
     async fn asking() -> (Node, Arc<FakeExecutor>, DrawerId) {
         let (node, executor, _) = hosted(requesting(), &[]).await;
         let drawer = node.drawers.local().present_id.clone();
-        crate::e2e::grant_drawer(
-            &node.drawers,
-            &node.drawers_actor,
-            &drawer,
-            node.nodules_actor.actor.actor_id,
-            DrawerAccess::Admin,
-        )
-        .await;
         (node, executor, drawer)
     }
 

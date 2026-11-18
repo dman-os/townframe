@@ -28,6 +28,8 @@
 use crate::requests::MissingAuthorityLookup;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::DrawerCreated;
 use big_dispatch_core::Body;
 use big_dispatch_core::DispatchError;
 use big_dispatch_core::DispatchProtocol;
@@ -40,6 +42,7 @@ use http::Method;
 use http::StatusCode;
 use http::Uri;
 use method_core::ContextError;
+use method_core::Method as _;
 use serde_json::Value;
 use serde_json::json;
 use service_client_core_rs::xrpc::XrpcBody;
@@ -50,6 +53,7 @@ use service_core_rs::xrpc::domain_error_envelope;
 use service_core_rs::xrpc::request_context;
 use service_utils_rs::ClientError;
 use service_utils_rs::HttpMetadata;
+use service_utils_rs::RequestContext;
 
 fn json_response(status: StatusCode, body: Value) -> (StatusCode, XrpcBody) {
     (
@@ -187,7 +191,7 @@ pub async fn call(
     };
     let result = dispatch
         .call_with(
-            request_context,
+            request_context.clone(),
             HttpMetadata {
                 idempotency_key: idempotency_key.clone(),
                 ..Authorization {
@@ -201,7 +205,15 @@ pub async fn call(
         .await;
     match result {
         Ok(output) => match output.body {
-            Body::Json(output) => json_response(StatusCode::OK, output),
+            Body::Json(output) => {
+                if called == CreateDrawer::XRPC.nsid
+                    && let Err(refusal) =
+                        grant_created_drawer(caller, &request_context, authority, &output).await
+                {
+                    return refusal;
+                }
+                json_response(StatusCode::OK, output)
+            }
             Body::Bytes(body) => (StatusCode::OK, XrpcBody::Bytes(body)),
             #[cfg(unix)]
             Body::Descriptors(_) => bad(
@@ -216,6 +228,38 @@ pub async fn call(
         Err(ClientError::Transport { message, .. }) => {
             panic!("in-process dispatch transport failed: {message}")
         }
+    }
+}
+
+/// A drawer the routine just created (`output` is `createDrawer`'s answer) is the service's actor's,
+/// because the routine called with a handle the service minted. The runtime grants it down to the
+/// cartridge before the routine hears of it, so the routine's next invocation reaches it. `Err` is
+/// the answer to give the routine instead.
+async fn grant_created_drawer(
+    caller: &WorkloadCaller,
+    request_context: &RequestContext,
+    authority: CapId,
+    output: &Value,
+) -> Result<(), (StatusCode, XrpcBody)> {
+    let created: DrawerCreated = serde_json::from_value(output.clone())
+        .expect("dispatch validated createDrawer's output against its Lexicon");
+    match caller
+        .missing_authority
+        .drawer_created(request_context, authority, created.drawer_id)
+        .await
+    {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "error": "WorkloadStopped", "message": "the nodule service is shutting down" }),
+        )),
+        Err(error) => Err(json_response(
+            StatusCode::BAD_GATEWAY,
+            json!({
+                "error": "BadGateway",
+                "message": format!("the created drawer could not be granted: {error}"),
+            }),
+        )),
     }
 }
 

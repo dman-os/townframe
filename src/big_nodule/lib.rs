@@ -436,6 +436,7 @@ impl NoduleService {
             .state
             .ask(|reply| Command::AnswerGrantRequest {
                 context,
+                authorization,
                 request: params.request,
                 answer: params.answer,
                 drawer: params.drawer,
@@ -607,6 +608,7 @@ impl NoduleService {
         self.state
             .ask(|reply| Command::SetGrant {
                 context,
+                authorization,
                 cartridge_id: params.cartridge_id,
                 grant: params.grant,
                 value: params.value,
