@@ -251,6 +251,8 @@
         // {
           cargoArtifacts = craneLib.buildDepsOnly manifestsArgs;
           doInstallCargoArtifacts = false;
+          # The build phase runs the emitters, so there is no cargo build log.
+          doNotPostBuildInstallCargoBinaries = true;
           buildPhaseCargoCommand = lib.concatMapStringsSep "\n" (name: ''
             cargo run --release --locked ${isolated} -q -p micro_${name}_manifest --example emit_manifest -- $PWD/${name}.manifest.json
           '') microNames;
