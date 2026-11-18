@@ -22,9 +22,6 @@ use big_cabinet_core::drawer::DrawerAccess;
 use big_cabinet_core::query::DatumSelection;
 use big_cabinet_core::query::Predicate;
 use intxt_core::generic;
-use intxt_core::methods::MAX_SUMMARIZED;
-use intxt_core::methods::SummarizeIntxts;
-use intxt_core::methods::SummaryStatus;
 use intxt_core::work;
 use intxt_core::work::PullState;
 use std::collections::BTreeMap;
@@ -187,7 +184,7 @@ pub struct LinkRow {
     pub outcome: LinkOutcome,
 }
 
-/// What `summarizeIntxts` said of one drawer.
+/// What the descriptor read said of one drawer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LinkOutcome {
     Found {
@@ -310,6 +307,9 @@ pub enum Content {
 pub struct Review<C> {
     node: C,
 }
+
+/// The maximum number of intxt descriptors a pull request opens.
+const MAX_LINKS_PER_PULL: usize = 32;
 
 impl<C: NodeCalls> Review<C> {
     pub fn new(node: C) -> Self {
@@ -446,53 +446,40 @@ impl<C: NodeCalls> Review<C> {
         }))
     }
 
-    /// The intxts `description` names, with what the node says of each: one `summarizeIntxts`
-    /// call (more only past its [`MAX_SUMMARIZED`] bound), none when nothing is named.
+
+    /// The intxts `description` names, with the descriptor each node lets this micro read.
+    /// One descriptor read is made per drawer, in the block's order.
     pub(crate) async fn links(&self, description: &str) -> Result<Links, CallError> {
         let named = match generic::PrLinks::read(description) {
             Ok(named) => named,
             Err(malformed) => return Ok(Links::Malformed(malformed.to_string())),
         };
-        let drawers: Vec<DocId> = named
-            .intxts
-            .iter()
-            .map(|link| link.reference.document().clone())
-            .collect();
-        let mut summaries = Vec::with_capacity(drawers.len());
-        for batch in drawers.chunks(MAX_SUMMARIZED) {
-            let summarized = self
-                .node
-                .call(SummarizeIntxts {
-                    drawers: batch.to_vec(),
-                })
-                .await?;
-            summaries.extend(summarized.results);
-        }
-        assert_eq!(
-            summaries.len(),
-            drawers.len(),
-            "summarizeIntxts answers one result per drawer, in order"
-        );
-        let rows = named
-            .intxts
-            .into_iter()
-            .zip(summaries)
-            .map(|(link, summary)| LinkRow {
-                drawer: summary.drawer,
-                hinted_title: link.title,
-                outcome: match summary.status {
-                    SummaryStatus::Found => LinkOutcome::Found {
-                        title: summary.title.expect("a found intxt has a title"),
-                        description: summary.description,
-                        entries: summary.entries.expect("a found intxt counts its entries"),
+        let descriptor_keys = BTreeSet::from([
+            key(generic::Intxt::ID, "main"),
+            key(generic::Title::ID, "main"),
+            key(generic::Body::ID, "main"),
+        ]);
+        let mut rows = Vec::new();
+        for link in named.intxts.into_iter().take(MAX_LINKS_PER_PULL) {
+            let drawer = link.reference.document().clone();
+            let outcome = match self.read(&drawer, Some(descriptor_keys.clone())).await? {
+                Read::Ready(datums) => match descriptor(&datums) {
+                    Ok(Some((title, body))) => LinkOutcome::Found {
+                        title: title.title,
+                        description: title.description,
+                        entries: u32::try_from(body.order.len()).expect("few entries"),
                     },
-                    SummaryStatus::NotFound => LinkOutcome::NotFound,
-                    SummaryStatus::Unreadable => LinkOutcome::Unreadable(
-                        summary.reason.expect("an unreadable drawer says why"),
-                    ),
+                    Ok(None) => LinkOutcome::NotFound,
+                    Err(reason) => LinkOutcome::Unreadable(format!("{drawer}: {reason}")),
                 },
-            })
-            .collect();
+                Read::Unreadable(reason) => LinkOutcome::Unreadable(reason),
+            };
+            rows.push(LinkRow {
+                drawer,
+                hinted_title: link.title,
+                outcome,
+            });
+        }
         Ok(Links::Named(rows))
     }
 
@@ -526,10 +513,10 @@ fn accepted<'datums>(
     }
 }
 
-/// An intxt from its descriptor document's datums: the title, and the body's entries in order, a
-/// duplicated reference once (ADR 036 §2). The title and the body are what make it an intxt; an
-/// entry that cannot be read is a row saying so.
-fn assemble(datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
+/// The title and body are the descriptor datums shared by the intxt page and its PR rows.
+fn title_and_body(
+    datums: &BTreeMap<DatumKey, DatumRead>,
+) -> Result<(generic::Title, generic::Body), String> {
     let title_key = key(generic::Title::ID, "main");
     let title: generic::Title = serde_json::from_value(
         accepted(datums, &title_key)
@@ -544,6 +531,27 @@ fn assemble(datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
             .clone(),
     )
     .expect("the node admitted this value as a body");
+    Ok((title, body))
+}
+
+/// Read only the descriptor shape needed for a PR row. An absent marker is a readable, ordinary
+/// document; a marker with an unreadable descriptor datum is an unreadable intxt.
+fn descriptor(
+    datums: &BTreeMap<DatumKey, DatumRead>,
+) -> Result<Option<(generic::Title, generic::Body)>, String> {
+    let marker = key(generic::Intxt::ID, "main");
+    match datums.get(&marker) {
+        None | Some(DatumRead::Absent { .. }) => Ok(None),
+        Some(DatumRead::Accepted { .. }) => title_and_body(datums).map(Some),
+        Some(other) => Err(format!("its intxt marker is {}", why(other))),
+    }
+}
+
+/// An intxt from its descriptor document's datums: the title, and the body's entries in order, a
+/// duplicated reference once (ADR 036 §2). The title and the body are what make it an intxt; an
+/// entry that cannot be read is a row saying so.
+fn assemble(datums: &BTreeMap<DatumKey, DatumRead>) -> Result<Intxt, String> {
+    let (title, body) = title_and_body(datums)?;
     let mut shown = BTreeSet::new();
     let entries = body
         .order

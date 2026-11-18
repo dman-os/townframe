@@ -165,7 +165,7 @@ async fn the_list_is_one_poll_then_one_read_per_pull() {
 }
 
 #[tokio::test]
-async fn the_block_names_its_intxts_and_one_call_reads_them_all() {
+async fn the_block_reads_one_descriptor_per_link_in_order() {
     let fixture = Fixture::sample();
     let review = review(&fixture);
     let Read::Ready(pull) = review.pulls().await.unwrap().remove(0) else {
@@ -192,7 +192,14 @@ async fn the_block_names_its_intxts_and_one_call_reads_them_all() {
         &rows[1].outcome,
         LinkOutcome::Found { description: Some(text), entries: 1, .. } if text.contains("phone")
     ));
-    assert_eq!(fixture.calls(), ["org.example.intxt.summarizeIntxts"]);
+    assert_eq!(
+        fixture.calls(),
+        [
+            "org.example.daybook.docs.readDatums",
+            "org.example.daybook.docs.readDatums",
+            "org.example.daybook.docs.readDatums"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -231,17 +238,17 @@ async fn a_drawer_the_node_does_not_hold_is_unreadable_and_an_unrelated_document
     };
     assert_eq!(rows[0].outcome, LinkOutcome::NotFound);
     assert!(
-        matches!(&rows[1].outcome, LinkOutcome::Unreadable(reason) if reason.contains("does not hold"))
+        matches!(&rows[1].outcome, LinkOutcome::Unreadable(reason) if reason.contains("credential"))
     );
 }
 
 #[tokio::test]
-async fn more_drawers_than_one_call_may_name_are_read_in_batches_in_order() {
+async fn a_pull_reads_at_most_32_descriptors_in_order() {
     let drawers: Vec<DocId> = ('a'..='k')
         .flat_map(|second| {
             ['2', '3', '4', '5'].map(|first| Fixture::doc_id(&format!("{first}{second}")))
         })
-        .take(MAX_SUMMARIZED + 8)
+        .take(MAX_LINKS_PER_PULL + 8)
         .collect();
     let body = PrLinks {
         intxts: drawers
@@ -259,9 +266,9 @@ async fn more_drawers_than_one_call_may_name_are_read_in_batches_in_order() {
         rows.iter()
             .map(|row| row.drawer.clone())
             .collect::<Vec<_>>(),
-        drawers
+        drawers[..MAX_LINKS_PER_PULL]
     );
-    assert_eq!(fixture.calls().len(), 2);
+    assert_eq!(fixture.calls().len(), MAX_LINKS_PER_PULL);
 }
 
 #[tokio::test]

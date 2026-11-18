@@ -1,5 +1,5 @@
 //! The node seam: what the review micro asks of the node. A micro reaches the node's methods
-//! (`summarizeIntxts`, `readDatums`, `pollDatums`) through [`NodeCalls`], which the micro owns:
+//! (`readDatums`, `pollDatums`) through [`NodeCalls`], which the micro owns:
 //! [`ContextNode`] is the real implementation over `clay_mdk::Context::call`, and
 //! [`crate::fixture::Fixture`] answers the same methods from memory for tests and the standalone
 //! lab.

@@ -41,6 +41,5 @@ contributions:
       - index: 0
         publication: view
 interimMethods:
-  - org.example.intxt.summarizeIntxts
   - org.example.daybook.docs.readDatums
   - org.example.daybook.docs.pollDatums
