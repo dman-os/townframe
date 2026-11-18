@@ -16,6 +16,7 @@ use crate::executor::ReensureQueue;
 use crate::executor::RoutineCapabilities;
 use crate::executor::RoutineSpec;
 use crate::requests::GrantRequests;
+use crate::requests::MissingAuthorityLookup;
 use crate::requests::Requests;
 use crate::store;
 use big_cabinet::DatumStore;
@@ -370,6 +371,9 @@ pub(crate) struct State {
     installs: watch::Sender<Vec<CartridgeInstallRecord>>,
     /// The runtime grant requests of this boot and the grants that last as long (ADR 049 §4.2).
     grant_requests: GrantRequests,
+    /// Each cartridge's refusal attribution, shared with its executor (see
+    /// [`MissingAuthorityLookup`]).
+    missing_authority: BTreeMap<CartridgeId, MissingAuthorityLookup>,
 }
 
 fn nodule_actor(actor: &OpenedActor) -> NoduleActor {
@@ -689,6 +693,47 @@ fn desired_routine_scopes(
                     blobs,
                 },
             )
+        })
+        .collect()
+}
+
+/// Per routine, the operations its `uses` declare through a method permbind that
+/// `effective_operations` (the cartridge's grants) do not cover, and the permbind of each: the
+/// calls that are refused for want of a grant someone may still give, not for want of a
+/// declaration (ADR 049 §4.3). Drawer and docs calls are not here: they pass the handle and are
+/// refused by their own service, which cannot be traced to one permbind from the call alone.
+fn ungranted_uses(
+    installed: &InstalledNodule,
+    effective_operations: &DispatchScope,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    installed
+        .nodule
+        .routines
+        .iter()
+        .map(|(routine_key, routine)| {
+            let ungranted = routine
+                .uses
+                .keys()
+                .filter_map(|binding| {
+                    match installed
+                        .resolved
+                        .cartridge
+                        .permbinds
+                        .get(binding)
+                        .expect("admission refuses a routine use without its permbind")
+                    {
+                        Permbind::Method(method)
+                            if !effective_operations
+                                .operations
+                                .contains(method.nsid.as_str()) =>
+                        {
+                            Some((method.nsid.to_string(), binding.to_string()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            (routine_key.clone(), ungranted)
         })
         .collect()
 }
@@ -1020,6 +1065,24 @@ async fn apply_nodule_capabilities(
             )
         })
         .collect();
+    // What a routine's refused call is attributed from: only while its handle is the one now
+    // minted for it, and none at all when the mint failed and no routine holds a handle.
+    let ungranted = if installed.enabled {
+        ungranted_uses(installed, effective_operations)
+    } else {
+        BTreeMap::new()
+    };
+    state.missing_authority(cartridge_id).set(
+        routines
+            .iter()
+            .filter_map(|(routine_key, applied)| {
+                Some((
+                    applied.handles.dispatch?,
+                    ungranted.get(routine_key)?.clone(),
+                ))
+            })
+            .collect(),
+    );
     state
         .routine_capabilities
         .insert(cartridge_id.clone(), routines);
@@ -1115,6 +1178,7 @@ impl State {
             docs_changed,
             installs,
             grant_requests,
+            missing_authority: BTreeMap::new(),
         };
         let context = RequestContext::root();
         // The boot reconcile may already have started initializers, and the config documents it
@@ -1758,6 +1822,15 @@ impl State {
         Ok(())
     }
 
+    /// The cartridge's refusal attribution, which its executor keeps and the next reconcile
+    /// updates in place.
+    fn missing_authority(&mut self, cartridge_id: &CartridgeId) -> MissingAuthorityLookup {
+        self.missing_authority
+            .entry(cartridge_id.clone())
+            .or_insert_with(|| self.grant_requests.lookup(cartridge_id.clone()))
+            .clone()
+    }
+
     async fn any_applied_grant_dead(&self, context: &RequestContext) -> Res<bool> {
         let grant_caps = self
             .applied_grants
@@ -2266,6 +2339,7 @@ impl State {
             config_doc: installed.config_doc.clone(),
 
             reensure: self.reensure.handle(cartridge_id.clone()),
+            missing_authority: self.missing_authority(&cartridge_id),
         };
         self.hosted.insert(cartridge_id.clone(), installed.revision);
         let state = match executor.ensure(&spec).await {
@@ -2801,6 +2875,9 @@ impl State {
             self.stores.retract_grant_cap(context, capability).await?;
         }
         self.routine_capabilities.remove(cartridge_id);
+        if let Some(lookup) = self.missing_authority.remove(cartridge_id) {
+            lookup.set(Default::default());
+        }
         Ok(())
     }
 
