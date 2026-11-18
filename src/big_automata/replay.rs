@@ -86,4 +86,9 @@
 //!     `hold_ms`. A request over a cap on targets or sessions is refused whole with
 //!     [`wire::SessionError::Limit`]; `limit` and `hold_ms` are silently capped.
 
+pub mod client;
+pub mod server;
 pub mod wire;
+
+#[cfg(test)]
+mod tests;
