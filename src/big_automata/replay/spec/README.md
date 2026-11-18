@@ -146,6 +146,12 @@ liveness for `final`.
 
 **Not run to completion:** `amended`, and the `rows` configuration.
 
+**Decision (operator, 2026-11-18):** law 5 is amended to allow the revival (see `replay.rs`):
+the client resets on an `UnknownTarget` for a target it holds, and orphans expire with the
+revived session. The `amended` configuration models this. Its safety run (with the invariants
+the revival breaks by design, `law5NoRevival`, `noOrphans` and `agreement`, left out or
+restated) and its `liveCatchesUp` run are still to do.
+
 ## Not checked
 
 * Law 10 (`drained`): a pacing hint with no correctness content; the model has

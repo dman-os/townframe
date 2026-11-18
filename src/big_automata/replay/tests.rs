@@ -62,8 +62,8 @@ enum Step {
     RetryBlocked,
     /// The TTL elapses with no request: the server sweeps the session. The network's delay is
     /// bounded well below the TTL, so every message in flight is delivered or lost by then;
-    /// the sim loses them. A message outliving the TTL would break law 5, see
-    /// `a_late_opening_update_revives_a_forgotten_session`.
+    /// the sim loses them. A message outliving the TTL is the revival law 5 allows, pinned
+    /// separately by `a_late_opening_update_revives_a_forgotten_session`.
     Sweep,
     /// The server restarts: it forgets everything, and the connection's messages are lost.
     Restart,
