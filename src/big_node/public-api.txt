@@ -32,7 +32,7 @@ pub struct big_node::Config  { repo: big_repo :: Config, sql: Database, schemas:
 pub struct big_node::ExecutorDeps  { blobs: Arc < BlobService >, dispatch: service_client_native_rs :: Client < DispatchProtocol > }
 pub struct big_node::StopToken  {  }
 pub struct big_node::peers::Peers  {  }
-pub struct big_node::peers::PeersConfig  { loopback_only: bool, policy: PolicyChoice, initial_backoff: Duration, max_backoff: Duration, sweep_interval: Duration }
+pub struct big_node::peers::PeersConfig  { loopback_only: bool, listen_port: Option < u16 >, policy: PolicyChoice, initial_backoff: Duration, max_backoff: Duration, sweep_interval: Duration }
 pub type big_node::HostedExecutor = (Arc < dyn NoduleExecutor > , service_utils_rs :: StopToken)
 pub use big_node::info :: GET_NODE_INFO
 pub use big_node::info :: NodeInfo
