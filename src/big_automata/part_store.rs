@@ -25,6 +25,8 @@
 
 use crate::interlude::*;
 
+use crate::rev::Limits;
+use crate::rev::Page;
 use crate::rev::Rev;
 use crate::rev::RevSource;
 use crate::store::bucket::BucketSummary;
@@ -153,15 +155,35 @@ impl LogSelector {
         match (self, key) {
             (Self::All, _) => true,
             (Self::Routes(routes), LogKey::Member { obj, part }) => {
-                let on_route = |bound: Rev| {
-                    rev > bound
-                        && removed_added_at.is_none_or(|added_at| added_at <= bound.max(after))
-                };
-                routes.parts.get(part).copied().is_some_and(on_route)
-                    || routes.objects.get(obj).copied().is_some_and(on_route)
+                let (on_part, on_object) = routes.carriers(obj, part, rev, after, removed_added_at);
+                on_part || on_object
             }
             (Self::Routes(_), LogKey::Access { .. }) => false,
         }
+    }
+}
+
+impl LogRoutes {
+    /// Which routes carry the member row `(obj, part)` at `rev` to a read of `(after, ..]`:
+    /// `(part route, object route)`. A route carries the row when its bound is below `rev` and
+    /// the removal rule of [`LogSelector::Routes`] lets it through. The two answers are kept
+    /// apart because an [authorized read](PartStoreServe::read_authorized) admits them on
+    /// different grounds.
+    pub fn carriers(
+        &self,
+        obj: &ObjKey,
+        part: &PartKey,
+        rev: Rev,
+        after: Rev,
+        removed_added_at: Option<Rev>,
+    ) -> (bool, bool) {
+        let on_route = |bound: Rev| {
+            rev > bound && removed_added_at.is_none_or(|added_at| added_at <= bound.max(after))
+        };
+        (
+            self.parts.get(part).copied().is_some_and(on_route),
+            self.objects.get(obj).copied().is_some_and(on_route),
+        )
     }
 }
 
@@ -200,13 +222,33 @@ pub struct PartDirtyCount {
     pub access_changes: u64,
 }
 
-/// Whether a principal may read a part. Each answer is distinct: a part the store does not know
+/// Whether a principal may read a route. Each answer is distinct: a part the store does not know
 /// is not a denial, and a denial is not an empty read.
+///
+/// An object route is `Permitted` while the object is a live member of a part the principal
+/// may read, and `Denied` otherwise; it is never `UnknownPart`, and an object the store does not
+/// know is `Denied` like one it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadVerdict {
     Permitted,
     Denied,
     UnknownPart,
+}
+
+/// One [authorized read](PartStoreServe::read_authorized): each route's verdict and the rows
+/// they let through, all taken from one snapshot of the store. The caller owns it and reuses
+/// it across reads like a [`Page`]: a read clears and refills every field.
+///
+/// `rows.through` is the progress of the permitted routes only. A route answered `Denied` or
+/// `UnknownPart` read nothing, so its reader keeps its cursor where it was: should access be
+/// granted later, reading from that cursor returns the backlog.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AuthorizedPage {
+    /// Each part route's verdict, in the routes' key order.
+    pub parts: Vec<ReadVerdict>,
+    /// Each object route's verdict, in the routes' key order.
+    pub objects: Vec<ReadVerdict>,
+    pub rows: Page<LogKey, LogEntry>,
 }
 
 /// One entry of a bucket leaf: a member of the part in that bucket, live with its digest or
@@ -296,13 +338,46 @@ pub trait PartStoreRead<Async: FutureForm> {
     ) -> Async::Future<'a, Res<()>>;
 }
 
-/// The responder's reads: the log as a [`RevSource`], authorization against the log's current
-/// access rows, dirt counts and the bucket index. No pages, sessions or budgets.
+/// The responder's reads: the log read on a principal's behalf, the log as a [`RevSource`],
+/// authorization against the log's current access rows, dirt counts and the bucket index. No
+/// pages, sessions or budgets.
 ///
-/// The log read applies [`LogSelector`]'s removal rule, so a responder hands out what it reads.
+/// **Only [`read_authorized`](Self::read_authorized) serves a peer.** The [`RevSource`] read is
+/// unauthorized: it hands out every selected row whoever asks, so it is for local consumers of
+/// the store (its own embedder, indexes, replays), never for answering a principal. Both reads
+/// apply [`LogSelector`]'s removal rule, so a responder hands out what it reads.
 pub trait PartStoreServe<Async: FutureForm>:
     RevSource<Async, Key = LogKey, Value = LogEntry, Selector = LogSelector>
 {
+    /// The log rows `principal` may read on `routes` in `(after, until]`, with each route's
+    /// verdict, into `page`. Verdicts and rows come from one snapshot (one lock in memory, one
+    /// read transaction in SQLite), so no grant or revocation can commit between deciding a
+    /// route and reading its rows.
+    ///
+    /// Access is decided from the principal's *current* access rows, never from the rows'
+    /// history: an access row records a change, it does not grant the rows written before it.
+    /// So a revocation cuts the principal off every row of the part, including rows written
+    /// before the revocation that it had not read yet, and a grant opens the part's whole
+    /// backlog from the reader's cursor.
+    ///
+    /// - A part route is answered by [`read_verdicts`](Self::read_verdicts)' rule, and carries
+    ///   the part's member rows only when `Permitted`.
+    /// - An object route is `Permitted` while the object is a live member of a part the
+    ///   principal may read ([`ReadVerdict`]). It then carries the object's member rows in the
+    ///   parts the principal may read, and no others: a row names its part, so handing out a
+    ///   row of an unreadable part would disclose that membership.
+    /// - Access rows are on no route.
+    ///
+    /// `after`, `until`, `limits` and the page's shape are [`RevSource::read`]'s.
+    fn read_authorized<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        routes: &'a LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        page: &'a mut AuthorizedPage,
+    ) -> Async::Future<'a, Res<()>>;
     /// For each part, whether `principal` may read it: a current access row permits.
     fn read_verdicts<'a>(
         &'a self,

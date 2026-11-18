@@ -10,9 +10,11 @@ use std::num::NonZeroUsize;
 
 use crate::interlude::*;
 use crate::part_store::AccessLevel;
+use crate::part_store::AuthorizedPage;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
+use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
 use crate::part_store::Membership;
 use crate::part_store::ObjState;
@@ -393,6 +395,74 @@ impl PartOracle {
         until: Rev,
         limits: Limits,
     ) -> Page<LogKey, LogEntry> {
+        self.read_where(after, until, limits, |key, rev, removed_added_at| {
+            selector.selects(key, rev, after, removed_added_at)
+        })
+    }
+
+    /// What an authorized read must return, by brute force: the verdicts from current access,
+    /// then the plain read of only the routes those verdicts permit, with every row of a part
+    /// the principal cannot read now filtered out.
+    pub fn read_authorized(
+        &self,
+        principal: &PeerKey,
+        routes: &LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+    ) -> AuthorizedPage {
+        let object_permitted = |obj: &ObjKey| !self.readable_parts_of(principal, obj).is_empty();
+        let permitted = LogSelector::Routes(LogRoutes {
+            parts: routes
+                .parts
+                .iter()
+                .filter(|(part, _)| self.permits(principal, part))
+                .map(|(part, bound)| (part.clone(), *bound))
+                .collect(),
+            objects: routes
+                .objects
+                .iter()
+                .filter(|(obj, _)| object_permitted(obj))
+                .map(|(obj, bound)| (obj.clone(), *bound))
+                .collect(),
+        });
+        AuthorizedPage {
+            parts: routes
+                .parts
+                .keys()
+                .map(|part| self.read_verdict(principal, part))
+                .collect(),
+            objects: routes
+                .objects
+                .keys()
+                .map(|obj| {
+                    if object_permitted(obj) {
+                        ReadVerdict::Permitted
+                    } else {
+                        ReadVerdict::Denied
+                    }
+                })
+                .collect(),
+            rows: self.read_where(after, until, limits, |key, rev, removed_added_at| {
+                let readable_part = match key {
+                    LogKey::Member { part, .. } | LogKey::Access { part, .. } => {
+                        self.permits(principal, part)
+                    }
+                };
+                readable_part && permitted.selects(key, rev, after, removed_added_at)
+            }),
+        }
+    }
+
+    /// The rows `selects(key, rev, removed_added_at)` keeps with a rev in `(after, until]`, in
+    /// `(rev, key)` order, cut after the last whole revision that fits the limits.
+    fn read_where(
+        &self,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        selects: impl Fn(&LogKey, Rev, Option<Rev>) -> bool,
+    ) -> Page<LogKey, LogEntry> {
         let mut window = self
             .log
             .iter()
@@ -403,9 +473,7 @@ impl PartOracle {
                     }
                     _ => None,
                 };
-                *rev > after
-                    && *rev <= until
-                    && selector.selects(key, *rev, after, removed_added_at)
+                *rev > after && *rev <= until && selects(key, *rev, removed_added_at)
             })
             .map(|(key, (rev, value))| Entry {
                 key: key.clone(),

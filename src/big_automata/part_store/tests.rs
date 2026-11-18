@@ -59,6 +59,26 @@ fn authorization_follows_current_access() -> Res<()> {
 }
 
 #[test]
+fn revocation_hides_every_row_of_the_part() -> Res<()> {
+    block_on(laws::revocation_hides_every_row_of_the_part(&Memory))
+}
+
+#[test]
+fn revocation_mid_stream_hides_the_unread_rows() -> Res<()> {
+    block_on(laws::revocation_mid_stream_hides_the_unread_rows(&Memory))
+}
+
+#[test]
+fn object_routes_follow_the_readable_parts() -> Res<()> {
+    block_on(laws::object_routes_follow_the_readable_parts(&Memory))
+}
+
+#[test]
+fn grant_returns_the_backlog() -> Res<()> {
+    block_on(laws::grant_returns_the_backlog(&Memory))
+}
+
+#[test]
 fn withheld_is_not_deleted() -> Res<()> {
     block_on(laws::withheld_is_not_deleted(&Memory))
 }

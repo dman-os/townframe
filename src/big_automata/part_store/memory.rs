@@ -17,9 +17,11 @@ use tokio::sync::watch;
 use crate::interlude::*;
 use crate::okv::memory::OkvTable;
 use crate::part_store::AccessLevel;
+use crate::part_store::AuthorizedPage;
 use crate::part_store::LeafEntry;
 use crate::part_store::LogEntry;
 use crate::part_store::LogKey;
+use crate::part_store::LogRoutes;
 use crate::part_store::LogSelector;
 use crate::part_store::ObjState;
 use crate::part_store::PartDirtyCount;
@@ -359,6 +361,9 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
 
     /// Copies one bounded page of the log out under the lock, applying the route rule for
     /// removals with the `added_at` the members table keeps.
+    ///
+    /// Unauthorized: every selected row, whoever asks. For the store's local consumers; a
+    /// responder serves a peer through [`PartStoreServe::read_authorized`].
     fn read<'a>(
         &'a self,
         selector: &'a LogSelector,
@@ -392,6 +397,23 @@ impl<Async: FutureForm> RevSource<Async> for MemoryPartStore {
 
 #[future_form(Sendable, Local)]
 impl<Async: FutureForm> PartStoreServe<Async> for MemoryPartStore {
+    /// Decides every route and copies the rows out in one critical section, so a commit
+    /// (a revocation included) lands either wholly before the read or wholly after it.
+    fn read_authorized<'a>(
+        &'a self,
+        principal: &'a PeerKey,
+        routes: &'a LogRoutes,
+        after: Rev,
+        until: Rev,
+        limits: Limits,
+        page: &'a mut AuthorizedPage,
+    ) -> Async::Future<'a, Res<()>> {
+        self.with_state(|state| {
+            state.read_authorized(principal, routes, after, until, limits, page);
+        });
+        Async::ready(Ok(()))
+    }
+
     fn read_verdicts<'a>(
         &'a self,
         principal: &'a PeerKey,
