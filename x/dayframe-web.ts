@@ -35,9 +35,13 @@ const isolated = ["--config", 'resolver.feature-unification="selected"'];
 // Only the shells' packages: the test-only guest fixtures are not served. The one exception is
 // the `trapper` micro the e2e's sync-export trap spec opens, served when the e2e asks for it
 // (`DAYFRAME_WEB_TRAPPER=1`, which `playwright.config.ts` sets) and never in a plain serve.
+// Likewise `DAYFRAME_WEB_REVIEW_FIXTURE=1` swaps the review package for its `fixture`-feature
+// build, which shows a sample node; a plain serve serves the shipped guest, which is Unconfigured
+// here because the web composition has no node.
 const packageDirectory = (await prepareDayframePackages({
   testFixtures: false,
   trapper: Deno.env.get("DAYFRAME_WEB_TRAPPER") === "1",
+  reviewFixture: Deno.env.get("DAYFRAME_WEB_REVIEW_FIXTURE") === "1",
 }))["DAYFRAME_PACKAGE_DIR"];
 
 // BLAKE3, the digest big_blobs uses and `clay_mdk::package::Package::digest` computes (Deno's

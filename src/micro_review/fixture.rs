@@ -270,6 +270,39 @@ impl Fixture {
             .doc(not_an_intxt, [])
     }
 
+    /// [`Self::sample`] plus the two pull requests the browser e2e needs for the rest of a
+    /// description's outcomes: one naming a document this node does not hold (an unreadable
+    /// link) and one whose block is malformed. Kept apart from `sample` so the view-model tests
+    /// keep reading the smaller node.
+    pub fn showcase() -> Self {
+        let not_held = Self::doc_id("51");
+        let unreadable = generic::PrLinks {
+            intxts: vec![{
+                let mut link = generic::PrLink::new(generic::Intxt::reference(&not_held, []));
+                link.title = Some("intxt: held by another node".to_owned());
+                link
+            }],
+            ..Default::default()
+        }
+        .block();
+        let malformed = "<details>\n<summary>intxt</summary>\n\n```json\n{ \"$type\": \"org.example.intxt.prLinks\", \"intxts\": [{ \"ref\": 5 }] }\n```\n\n</details>";
+        Self::sample()
+            .pull(
+                Self::doc_id("23"),
+                "dman-os/townframe/152",
+                "intxt: a review from another node",
+                "open",
+                &format!("Names an intxt this node does not hold.\n\n{unreadable}"),
+            )
+            .pull(
+                Self::doc_id("24"),
+                "dman-os/townframe/153",
+                "chore: a description with a broken block",
+                "closed",
+                &format!("The block below is not the shape.\n\n{malformed}"),
+            )
+    }
+
     /// `None` is the node refusing the call.
     fn answer(&self, nsid: &'static str, input: Value) -> Option<Value> {
         self.calls.borrow_mut().push(nsid);

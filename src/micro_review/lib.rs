@@ -56,18 +56,34 @@ async fn activate(context: Context) -> Result<(), Error> {
             let context = context.clone();
             move || configured_view(context.clone(), facet.clone())
         })?,
-        None => context.publish::<ReviewView>(|| {
-            rsx! {
-                Failed {
-                    error: CallError::Unconfigured(
-                        "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
-                            .to_owned(),
-                    ),
-                }
-            }
-        })?,
+        None => publish_unconfigured(&context)?,
     }
     Ok(())
+}
+
+/// No configuration entry was granted. A shipped guest publishes the "Unconfigured" alert. The
+/// `fixture` feature, which only the browser e2e's guest is built with (`DAYFRAME_WEB_REVIEW_FIXTURE`
+/// in `x/dayframe-web.ts`), publishes the view over [`fixture::Fixture::showcase`] instead, because
+/// the web composition has no node to configure the micro against. The node is built once, outside
+/// the publication, so every render reads the same node: a fresh one per render would restart the
+/// reads forever.
+fn publish_unconfigured(context: &Context) -> Result<(), Error> {
+    #[cfg(feature = "fixture")]
+    {
+        let node = fixture::Fixture::showcase();
+        context.publish::<ReviewView>(move || view(node.clone()))
+    }
+    #[cfg(not(feature = "fixture"))]
+    context.publish::<ReviewView>(|| {
+        rsx! {
+            Failed {
+                error: CallError::Unconfigured(
+                    "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
+                        .to_owned(),
+                ),
+            }
+        }
+    })
 }
 
 clay_mdk::export_micro!(activate, micro_review_manifest::manifest);
@@ -325,7 +341,10 @@ fn Patch(patch: String) -> Element {
     let input = use_hook(|| DiffInput::from_patch(&patch).map_err(|error| error.to_string()));
     match input {
         Ok(input) => rsx! {
-            div { class: "overflow-x-auto rounded-md border border-border",
+            div {
+                class: "overflow-x-auto rounded-md border border-border",
+                role: "region",
+                "aria-label": "Patch",
                 FileDiffView::<()> { input, diff_style: DiffStyle::Unified }
             }
         },

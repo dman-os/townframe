@@ -469,6 +469,7 @@ jobs:
         run: nix develop .#ci-desktop --command deno run --allow-all ./x/dayframe-web.ts --build
         env:
           DAYFRAME_WEB_TRAPPER: "1"
+          DAYFRAME_WEB_REVIEW_FIXTURE: "1"
       - name: Run dayframe web e2e
         run: nix develop .#ci-desktop --command pnpm -C src/dayframe_web run e2e
 

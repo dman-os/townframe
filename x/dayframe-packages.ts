@@ -14,14 +14,21 @@ import { $ } from "./utils.ts";
 // those are components tests load by environment variable, while this one is a package the
 // shell lists and so changes what every shell shows.
 //
+// `reviewFixture` builds the review micro with its `fixture` cargo feature, so its guest serves
+// the in-memory `Fixture::showcase` node when no configuration is granted (the web composition has
+// no node), and serves it in place of the plain review package. The feature is compiled only into
+// this build; the shipped guest has no fixture code. For the web e2e's review specs
+// (`DAYFRAME_WEB_REVIEW_FIXTURE=1`).
+//
 // `guestProfile` is the cargo profile the guests build with. `wasm-release` (the default) is the
 // workspace's optimized guest profile, the one `dayframe_web` also builds with. `dev` is opt-in, for
 // faster rebuilds while iterating: it emits 15 to 17 MB unoptimized components that Wasmtime needs
 // seconds to compile on a phone, and they burn about 10x the fuel (see below).
 export async function prepareDayframePackages(
-  { testFixtures, trapper = false, guestProfile = "wasm-release" }: {
+  { testFixtures, trapper = false, reviewFixture = false, guestProfile = "wasm-release" }: {
     testFixtures: boolean;
     trapper?: boolean;
+    reviewFixture?: boolean;
     guestProfile?: "dev" | "wasm-release";
   },
 ): Promise<
@@ -41,9 +48,17 @@ export async function prepareDayframePackages(
   const guests = testFixtures
     ? ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_collection_probe"]
     : ["micro_counter", "micro_layout", "micro_lab", "micro_review"];
+  // The fixture variant of the review guest is its own invocation (cargo names the output by
+  // package, so it must not share a build with the plain one) and replaces it in the list.
+  const plainGuests = reviewFixture
+    ? guests.filter((guest) => guest !== "micro_review")
+    : guests;
   await $`cargo build --locked ${isolated} ${
-    guests.flatMap((guest) => ["-p", guest])
+    plainGuests.flatMap((guest) => ["-p", guest])
   } --target wasm32-wasip3 --profile ${guestProfile}`;
+  if (reviewFixture) {
+    await $`cargo build --locked ${isolated} -p micro_review --features fixture --target wasm32-wasip3 --profile ${guestProfile}`;
+  }
   if (testFixtures) {
     await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example egress --example dispatch --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
   }

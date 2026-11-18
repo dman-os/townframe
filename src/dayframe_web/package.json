@@ -8,7 +8,8 @@
   "private": true,
   "scripts": {
     "bombadil": "playwright test --grep @bombadil",
-    "e2e": "playwright test --grep-invert @bombadil",
+    "e2e": "playwright test --grep-invert @bombadil && playwright test -c playwright.unconfigured.config.ts",
+    "e2e:unconfigured": "playwright test -c playwright.unconfigured.config.ts",
     "e2e:all": "playwright test"
   },
   "type": "module"

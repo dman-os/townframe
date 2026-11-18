@@ -6,6 +6,8 @@ const port = Number(process.env.DAYFRAME_WEB_PORT ?? "4518");
 
 export default defineConfig({
   testDir: "./e2e",
+  // The plain-serve spec runs under its own config (`playwright.unconfigured.config.ts`).
+  testIgnore: "**/unconfigured.spec.ts",
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
   reporter: "list",
@@ -22,6 +24,8 @@ export default defineConfig({
       HOST: "127.0.0.1",
       PORT: String(port),
       DAYFRAME_WEB_TRAPPER: "1",
+      // The review micro served over its sample node (`e2e/review.spec.ts`).
+      DAYFRAME_WEB_REVIEW_FIXTURE: "1",
     },
     url: `http://127.0.0.1:${port}/`,
     reuseExistingServer: !process.env.CI,
