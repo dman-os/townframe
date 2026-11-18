@@ -14,6 +14,7 @@ pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 7, name: "007_shared_config_drawer.sql", sql: include_str!("migrations/007_shared_config_drawer.sql") },
     Migration { version: 8, name: "008_config_docs.sql", sql: include_str!("migrations/008_config_docs.sql") },
     Migration { version: 9, name: "009_applied_settings.sql", sql: include_str!("migrations/009_applied_settings.sql") },
+    Migration { version: 10, name: "010_service_drawers.sql", sql: include_str!("migrations/010_service_drawers.sql") },
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +137,11 @@ pub async fn delete_resolution_locks(db: &impl crate::sqlite_rs_alias::Executor,
     db.execute(DELETE_RESOLUTION_LOCKS_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id)]).await
 }
 
+pub const DELETE_SERVICE_DRAWER_SQL: &str = include_str!("queries/delete_service_drawer.sql");
+pub async fn delete_service_drawer(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String, cartridge_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_SERVICE_DRAWER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id)]).await
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct InitDoneRow {
     pub cartridge_id: String,
@@ -177,6 +183,25 @@ pub async fn resolution_locks(db: &impl crate::sqlite_rs_alias::QueryExecutor) -
     set.all()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServiceDrawersRow {
+    pub drawer_id: String,
+    pub cartridge_id: String,
+    pub origin: String,
+}
+impl crate::sqlite_rs_alias::FromRow for ServiceDrawersRow {
+    fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
+        row.require_width(3)?;
+        Ok(ServiceDrawersRow { drawer_id: row.get::<String>("drawer_id")?, cartridge_id: row.get::<String>("cartridge_id")?, origin: row.get::<String>("origin")? })
+    }
+}
+
+pub const SERVICE_DRAWERS_SQL: &str = include_str!("queries/service_drawers.sql");
+pub async fn service_drawers(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResult<Vec<ServiceDrawersRow>> {
+    let set = db.query(SERVICE_DRAWERS_SQL, &[]).await?;
+    set.all()
+}
+
 pub const SET_SHARED_CONFIG_DRAWER_SQL: &str = include_str!("queries/set_shared_config_drawer.sql");
 pub async fn set_shared_config_drawer(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(SET_SHARED_CONFIG_DRAWER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id)]).await
@@ -211,4 +236,9 @@ pub async fn upsert_init_done(db: &impl crate::sqlite_rs_alias::Executor, cartri
 pub const UPSERT_RESOLUTION_LOCK_SQL: &str = include_str!("queries/upsert_resolution_lock.sql");
 pub async fn upsert_resolution_lock(db: &impl crate::sqlite_rs_alias::Executor, cartridge_id: String, binding: String, contract: String, provider: String, provider_version: Option<String>, lexicon_revision: Option<i64>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
     db.execute(UPSERT_RESOLUTION_LOCK_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(binding), crate::sqlite_rs_alias::IntoValue::into_value(contract), crate::sqlite_rs_alias::IntoValue::into_value(provider), crate::sqlite_rs_alias::IntoValue::into_value(provider_version), crate::sqlite_rs_alias::IntoValue::into_value(lexicon_revision)]).await
+}
+
+pub const UPSERT_SERVICE_DRAWER_SQL: &str = include_str!("queries/upsert_service_drawer.sql");
+pub async fn upsert_service_drawer(db: &impl crate::sqlite_rs_alias::Executor, drawer_id: String, cartridge_id: String, origin: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(UPSERT_SERVICE_DRAWER_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(drawer_id), crate::sqlite_rs_alias::IntoValue::into_value(cartridge_id), crate::sqlite_rs_alias::IntoValue::into_value(origin)]).await
 }
