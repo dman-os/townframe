@@ -238,7 +238,9 @@
       # micro's manifest crate emits its own through a native example (host build).
       manifestsArgs = wasmArgs // {
         pname = "daytxt-manifests";
-        cargoExtraArgs = "--locked ${
+        # Isolated features: workspace unification would build the desktop
+        # renderer's GTK stack (glib-sys) for a manifest emitter.
+        cargoExtraArgs = "--locked ${isolated} ${
           lib.concatMapStringsSep " " (name: "-p micro_${name}_manifest") microNames
         }";
       };
@@ -248,7 +250,7 @@
           cargoArtifacts = craneLib.buildDepsOnly manifestsArgs;
           doInstallCargoArtifacts = false;
           buildPhaseCargoCommand = lib.concatMapStringsSep "\n" (name: ''
-            cargo run --release --locked -q -p micro_${name}_manifest --example emit_manifest -- $PWD/${name}.manifest.json
+            cargo run --release --locked ${isolated} -q -p micro_${name}_manifest --example emit_manifest -- $PWD/${name}.manifest.json
           '') microNames;
           installPhaseCommand = ''
             mkdir -p $out
