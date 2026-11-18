@@ -21,6 +21,7 @@ use crate::model::teaser;
 use crate::node::CallError;
 use crate::node::NodeCalls;
 use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::PanelPage;
 use dioxus::prelude::*;
 use intxt_core::work::PullState;
 use pierre_diffs_dioxus::DiffInput;
@@ -85,26 +86,31 @@ pub(crate) fn screens<C: NodeCalls>(node: C) -> Element {
         (Screen::Intxt { .. }, Some(Content::Intxt(intxt))) => rsx! { IntxtPage { intxt } },
         (screen, Some(content)) => unreachable!("{screen:?} was read as {content:?}"),
     };
-    rsx! {
-        section { class: "flex flex-col", "aria-label": "Review",
-            if can_go_back {
-                AppBar {
-                    title,
-                    leading: rsx! {
-                        button {
-                            class: "min-h-12 rounded-md px-4 focus-visible:outline",
-                            "aria-label": "Back",
-                            onclick: move |_| stack.with_mut(|stack| {
-                                stack.pop();
-                            }),
-                            "Back"
-                        }
-                    },
-                }
-            } else {
-                AppBar { title }
+    let app_bar = if can_go_back {
+        rsx! {
+            AppBar {
+                title,
+                leading: rsx! {
+                    button {
+                        class: "min-h-12 rounded-md px-4 focus-visible:outline",
+                        "aria-label": "Back",
+                        onclick: move |_| stack.with_mut(|stack| {
+                            stack.pop();
+                        }),
+                        "Back"
+                    }
+                },
             }
-            div { class: "flex flex-col gap-6 px-4 pb-6", {page} }
+        }
+    } else {
+        rsx! { AppBar { title } }
+    };
+    // The bar stays put and the body scrolls: a micro's root clips at its pane (`PanelPage`).
+    rsx! {
+        section { "aria-label": "Review", height: "100%",
+            PanelPage { app_bar,
+                div { class: "flex flex-col gap-6 px-4 pb-6", {page} }
+            }
         }
     }
 }

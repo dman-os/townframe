@@ -18,6 +18,8 @@ pub mod model;
 pub mod node;
 mod view;
 
+use clay_dioxus_kit::AppBar;
+use clay_dioxus_kit::PanelPage;
 use clay_mdk::Context;
 use clay_mdk::Error;
 use clay_mdk::Facet;
@@ -43,12 +45,14 @@ async fn activate(context: Context) -> Result<(), Error> {
         })?,
         None => context.publish::<ReviewView>(|| {
             rsx! {
-                div { class: "p-4",
-                    Failed {
-                        error: CallError::Unconfigured(
-                            "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
-                                .to_owned(),
-                        ),
+                PanelPage { app_bar: rsx! { AppBar { title: "Review" } },
+                    div { class: "px-4 pb-4",
+                        Failed {
+                            error: CallError::Unconfigured(
+                                "grant the micro the org.example.dayframe.review.config entry (githubDrawer, intxtDrawers, docCap)"
+                                    .to_owned(),
+                            ),
+                        }
                     }
                 }
             }
