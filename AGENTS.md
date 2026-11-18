@@ -80,7 +80,7 @@
 > Red herring on record: waves of `big sync object task failed; rescheduling` with a local-policy rejection (e.g. `no document definition`, `Policy(DocumentNotFound)`) are NOT a bug in the task lifecycle. Rescheduling is the intentional mechanism by which big_sync races keyhive membership: a doc task may be scheduled before the local keyhive has pulled membership, and the retry succeeds once the pull lands. Do not "fix" this by parking, cancelling, or gating the retries.
 
 If a doc cannot be pulled because the local keyhive rejects it, one of these failed instead:
-- The keyhive pull from the peer the sync task was scheduled for never completed (check the `INSTR sync response`/`resp ingested` warns: `sending=0`/`received=[]`/`our_pending=0` on a peer that should have new events means the serving side's pending/event state diverged from its own admissions).
+- The keyhive pull from the peer the sync task was scheduled for never completed (check the `INSTR sync response`/`resp ingested` warns, which log under the `instr` target and are off by default: add `instr=info` to `RUST_LOG`/`RUST_LOG_TEST`, e.g. `RUST_LOG_TEST=info,instr=info`; `sending=0`/`received=[]`/`our_pending=0` on a peer that should have new events means the serving side's pending/event state diverged from its own admissions).
 - Keyhive filtering/destination classification on the serving side failed, or its keyhive storage errored (`keyhive protocol error: storage error` on dispatch).
 
 Diagnose the keyhive pull pipeline first; the worker-side retry storm is only the symptom.
