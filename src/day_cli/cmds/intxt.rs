@@ -616,7 +616,8 @@ async fn edit(
 }
 
 /// `day x intxt install`: reads the handler component at `handler` and installs it on the node
-/// through [`intxt_core::install::install`], then reports whether the executor loaded it.
+/// through [`intxt_core::install::install`], granting it the intxt drawers the node holds and
+/// its GitHub drawer if it has one, then reports whether the executor loaded it.
 async fn install(handler: &std::path::Path) -> Res<ExitCode> {
     let client = lazy::node().await?;
     let wasm = std::fs::read(handler)
@@ -627,7 +628,14 @@ async fn install(handler: &std::path::Path) -> Res<ExitCode> {
         None,
         "intxt-install".to_owned(),
     );
-    let installed = intxt_core::install::install(&caller, &wasm).await?;
+    let drawers = package::Packaging::new(
+        &client,
+        &std::env::current_dir()?,
+        lazy::config().await?.node_dir.root(),
+    )
+    .install_grants()
+    .await?;
+    let installed = intxt_core::install::install(&caller, &wasm, &drawers).await?;
     eyre::ensure!(
         installed.record.readiness == Readiness::Ready,
         "intxt is installed but not ready: {:?}",

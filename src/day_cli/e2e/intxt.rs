@@ -43,7 +43,7 @@ pub(super) async fn with_intxt_node(body: impl AsyncFnOnce(&tempfile::TempDir, &
     });
     let client = connect(&dir).await.unwrap();
     let outcome = std::panic::AssertUnwindSafe(async {
-        let installed = intxt_core::install::install(&operator(&client), &wasm)
+        let installed = intxt_core::install::install(&operator(&client), &wasm, &[])
             .await
             .unwrap();
         assert!(!installed.already_installed);
@@ -200,7 +200,7 @@ async fn installing_intxt_twice_changes_nothing() {
         )
         .await
         .unwrap();
-        let again = intxt_core::install::install(&operator(client), &wasm)
+        let again = intxt_core::install::install(&operator(client), &wasm, &[])
             .await
             .unwrap();
         assert!(again.already_installed);
@@ -215,6 +215,34 @@ async fn installing_intxt_twice_changes_nothing() {
         .unwrap();
         assert_eq!(after, before);
         assert_eq!(after.versions.len(), 1);
+
+        // Drawers are the cartridge's grants (ADR 049 §4.1): installing again with an intxt the
+        // node now holds grants it, and doing that twice changes nothing the second time.
+        let created = day_x(
+            client,
+            "org.example.intxt.createIntxt",
+            json!({"title": "granted after install"}),
+        )
+        .await;
+        let drawer: big_cabinet_core::drawer::protocol::DrawerId =
+            created["drawerId"].as_str().unwrap().parse().unwrap();
+        let grants = [(
+            drawer.clone(),
+            big_cabinet_core::drawer::DrawerAccess::Write,
+        )];
+        let granted = intxt_core::install::install(&operator(client), &wasm, &grants)
+            .await
+            .unwrap();
+        assert!(!granted.already_installed);
+        assert!(granted.record.drawers[&drawer].granted);
+        let again = intxt_core::install::install(&operator(client), &wasm, &grants)
+            .await
+            .unwrap();
+        assert!(again.already_installed);
+        assert_eq!(
+            again.record.drawers[&drawer],
+            granted.record.drawers[&drawer]
+        );
     })
     .await;
 }
