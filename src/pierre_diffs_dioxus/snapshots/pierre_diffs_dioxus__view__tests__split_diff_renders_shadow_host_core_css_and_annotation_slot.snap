@@ -2,10 +2,7 @@
 source: src/pierre_diffs_dioxus/view.rs
 expression: outline(&dom)
 ---
-<diffs-container data-dioxus-shadow="">
-<style>
-<core css>
-</style>
+<diffs-container data-dioxus-shadow="" data-dioxus-shadow-sheet="<core css, theme css>">
 <div data-change-type="change" data-diffs-header="default">
 <div data-header-content="">
 <slot name="header-prefix">
@@ -114,7 +111,4 @@ expression: outline(&dom)
 </div>
 </code>
 </pre>
-<style data-theme-css="">
-<theme css>
-</style>
 </diffs-container>

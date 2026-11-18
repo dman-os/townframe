@@ -30,7 +30,7 @@ use crate::events::Pointers;
 use crate::slot::SlotTable;
 
 /// The core stylesheet in the layer order the port's theme CSS expects, built once.
-pub(crate) static CORE_CSS: LazyLock<String> = LazyLock::new(|| wrap_core_css(""));
+static CORE_CSS: LazyLock<String> = LazyLock::new(|| wrap_core_css(""));
 
 thread_local! {
     /// Attribute names, leaked once each: `Attribute::name` is `&'static str`, and the set is
@@ -74,6 +74,13 @@ impl Renderer<'_> {
         let document = self.document;
         let key_id = key.as_u64();
         let tag = document.tag_name(key);
+        // Inside a shadow tree a `<style>` is already in its root's sheet attribute.
+        if host.is_some() && tag.eq_ignore_ascii_case("style") {
+            // Keyed like every sibling, or the keyed diff of the children refuses the list.
+            return rsx! {
+                Fragment { key: "{key_id}" }
+            };
+        }
         if tag.is_empty() {
             let text = document.text_content(key);
             return rsx! {
@@ -91,18 +98,23 @@ impl Renderer<'_> {
         let children: Vec<Element> = if let Some(shadow_root) = document.shadow_root(key) {
             attributes.push(Attribute::new("data-dioxus-shadow", "", None, false));
             // The shadow root's stylesheet (Pierre's core CSS, then the text of every `<style>`
-            // Pierre put in the root, such as its theme) rides on the host as an attribute, which
-            // the interpreter adopts as a constructable sheet. A `<style>` element would be refused
-            // by a CSP without `'unsafe-inline'` in `style-src-elem` (the web shell's), while an
-            // attribute's text is data.
-            let (styles, content): (Vec<NodeKey>, Vec<NodeKey>) = document
-                .child_nodes(shadow_root)
-                .into_iter()
-                .partition(|child| document.tag_name(child) == "style");
+            // Pierre put anywhere in this shadow tree, such as its theme) rides on the host as an
+            // attribute, which the interpreter adopts as a constructable sheet; those `<style>`
+            // elements are not rendered (see `node`). A `<style>` element would be refused by a
+            // CSP without `'unsafe-inline'` in `style-src-elem` (the web shell's), while an
+            // attribute's text is data. A style's position in the tree does not change what it
+            // styles: it applies to the whole shadow tree either way.
             let mut sheet = CORE_CSS.to_string();
-            for style in styles {
-                sheet.push('\n');
-                sheet.push_str(&document.text_content(style));
+            let mut pending = document.child_nodes(shadow_root);
+            while let Some(child) = pending.pop() {
+                // Pierre's document names HTML elements in upper case (`STYLE`).
+                if document.tag_name(child).eq_ignore_ascii_case("style") {
+                    sheet.push('\n');
+                    sheet.push_str(&document.text_content(child));
+                } else if document.shadow_root(child).is_none() {
+                    // A nested shadow host's tree is its own: its styles go on its own sheet.
+                    pending.extend(document.child_nodes(child));
+                }
             }
             attributes.push(Attribute::new(
                 "data-dioxus-shadow-sheet",
@@ -110,6 +122,7 @@ impl Renderer<'_> {
                 None,
                 false,
             ));
+            let content = document.child_nodes(shadow_root);
             content
                 .into_iter()
                 .map(|child| self.node(child, Some(key)))
