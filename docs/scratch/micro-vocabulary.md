@@ -1,5 +1,10 @@
 # Micro manifest vocabulary audit
 
+Status: Reference (an audit of the micro manifest as built on feat/desktop-base)
+Owner: nodules lane
+Updated: 2026-11-18
+Scope: Glossary, schemas, kind-like fields and naming problems of the micro manifest, and the lazy-link chain end to end.
+
 Sources, all read via git refs, nothing built. D = `origin/feat/desktop-base`, S = `stack/node-59-adr-d56`.
 - `M:n` = `src/clay_mdk/manifest.rs` on D, line n. `T` = `src/clay_mdk/manifest/tests.rs` on D (`canonical_manifest()` at line 17) and its snapshot `manifest_canonical_wire_shape.snap`.
 - ADR30 = `docs/adrs/030-micro-lifecycle-and-manifest-contract.md`, ADR31 = `docs/adrs/031-manifest-declared-collections-and-lazy-capabilities.md` (both on D, status Proposed).
