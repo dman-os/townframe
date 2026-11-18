@@ -197,7 +197,11 @@ The caller's credential is no longer a body field. It is `Authorization: Bearer 
 
 ### Node-scoped secrets and the socket
 
-Every keyring secret is named by node id (`wrapping.<node-id>`), and `big_node::delete_secrets` lists every entry a node keeps. The socket is `$XDG_RUNTIME_DIR/day/<node-id>.sock`, falling back to a `0700` `/tmp/day-<euid>` directory (`default_socket_dir` in `day_cli/context.rs`). It is not configurable yet. An old unscoped `wrapping` entry is never read, so a node directory booted before this change refuses to boot instead of re-keying; nothing migrates because no release has shipped.
+Every keyring secret is named by node id (`wrapping.<node-id>`), and `big_node::delete_secrets` lists every entry a node keeps.
+
+Every node secret lives in the OS keyring through `secrets_rs`, including the identity seed (the node's private key, from which the Peers service above derives the Iroh key). `node.json` holds only the public node id, which is what names the keyring entries. Decided 2026-11-18 (D56); implementation in progress.
+
+ The socket is `$XDG_RUNTIME_DIR/day/<node-id>.sock`, falling back to a `0700` `/tmp/day-<euid>` directory (`default_socket_dir` in `day_cli/context.rs`). It is not configurable yet. An old unscoped `wrapping` entry is never read, so a node directory booted before this change refuses to boot instead of re-keying; nothing migrates because no release has shipped.
 
 ### Built-in `getNodeInfo`
 
