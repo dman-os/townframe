@@ -29,6 +29,12 @@ use std::sync::Arc;
 use ui::ThemeMode;
 use ui::ThemeRoot;
 
+/// The discovered packages the first boot that admits them records as enabled, so they run
+/// without a click in Settings: any other package stays disabled until a user enables it (see
+/// [`InstalledMicro::enabled_on_admission`]). The theme lab is the app's own editor for the
+/// theme, which a user must be able to reach to repair a theme that made the app unusable.
+const ENABLED_ON_ADMISSION: &[&str] = &[micro_theme_lab_manifest::ID];
+
 /// One package as the shell found it: the `<name>.manifest.json` sidecar text and the guest
 /// component bytes it describes.
 // STAND-IN until `big_plugs` delivers manifests.
@@ -293,7 +299,13 @@ fn package_micros(
                 .satisfied_by(
                     &clay_mdk::MicroId::local(micro_shell_manifest::ID),
                     &micro_shell_manifest::sidecar(),
-                );
+                )
+                .map(|micro| InstalledMicro {
+                    enabled_on_admission: ENABLED_ON_ADMISSION
+                        .iter()
+                        .any(|id| micro.id == clay_mdk::MicroId::local(id)),
+                    ..micro
+                });
                 match micro {
                     Ok(micro) => installed.push(micro),
                     Err(error) => errors.push(format!("{}: {error}", files.origin)),
@@ -838,6 +850,38 @@ mod tests {
         assert!(back.request());
         // The permit is stored, so a request made before the shell's task waits is not lost.
         back.requested.notified().await;
+    }
+
+    /// A package named in [`ENABLED_ON_ADMISSION`] is admitted enabled; any other discovered
+    /// package is admitted disabled.
+    #[tokio::test]
+    async fn the_theme_lab_is_admitted_enabled_and_other_packages_are_not() {
+        let package = |origin: &str, sidecar: &clay_mdk::Sidecar| PackageFiles {
+            origin: origin.to_owned(),
+            manifest_json: serde_json::to_vec(sidecar).unwrap(),
+            component: Vec::new(),
+        };
+        let theme_lab = package("theme-lab", &micro_theme_lab_manifest::sidecar());
+        let review = package("review", &micro_review_manifest::sidecar());
+        let theme_lab_id = clay_mdk::MicroId::local(micro_theme_lab_manifest::ID);
+        let review_id = clay_mdk::MicroId::local(micro_review_manifest::ID);
+        let runtime = native_runtime(
+            Arc::new(clay_store::MemoryStore::default()),
+            vec![theme_lab, review],
+            Vec::new(),
+            wasmtime_engine,
+            &|_| None,
+            &|_| None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            runtime.installation_errors.is_empty(),
+            "{:?}",
+            runtime.installation_errors
+        );
+        assert!(runtime.is_enabled(&theme_lab_id));
+        assert!(!runtime.is_enabled(&review_id));
     }
 
     /// An install's configuration datum is written into the document the composition bound the

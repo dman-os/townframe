@@ -4459,6 +4459,7 @@ dependencies = [
  "micro_settings_manifest",
  "micro_shell",
  "micro_shell_manifest",
+ "micro_theme_lab_manifest",
  "micro_toolbar",
  "micro_toolbar_manifest",
  "serde_json",
@@ -9799,6 +9800,28 @@ dependencies = [
  "clay_mdk",
  "insta",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_theme_lab"
+version = "0.1.0"
+dependencies = [
+ "clay_dioxus_kit",
+ "clay_mdk",
+ "dioxus",
+ "dioxus-core",
+ "micro_shell_manifest",
+ "micro_theme_lab_manifest",
+]
+
+[[package]]
+name = "micro_theme_lab_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "insta",
+ "micro_shell_manifest",
  "serde_json",
 ]
 

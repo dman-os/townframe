@@ -25,6 +25,7 @@ micro_counter_manifest = { workspace = true }
 micro_sample = { workspace = true }
 micro_settings = { workspace = true }
 micro_settings_manifest = { workspace = true }
+micro_theme_lab_manifest = { workspace = true }
 micro_shell = { workspace = true }
 micro_shell_manifest = { workspace = true }
 micro_toolbar = { workspace = true }
