@@ -216,7 +216,7 @@ fn pull_row(read: Read<Pull>, on_open: EventHandler<Screen>) -> Element {
                         move |_| on_open.call(Screen::Pull(pull.clone()))
                     },
                     span { class: "font-semibold text-text break-words", "{pull.title}" }
-                    PullMeta { reference: pull.repo_ref(), state: pull.state }
+                    PullMeta { reference: pull.repo_ref(), state: pull.state.clone() }
                 }
             }
         }
