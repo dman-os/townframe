@@ -188,3 +188,15 @@ Accepted as the direction: access through `uses` only (`requires` keeps supplier
 3. **`fetch` is being built now** by the `#net` lane (streaming `Cx::fetch`, node-57). It should land with this signature, `fetch(http::Request<Bytes>) -> Result<http::Response<Body>, FetchError>`, so it doesn't change twice.
 4. **`request(permbind: &str)` is stringly typed.** Fine for now; once the manifest builder exists, permbinds become typed values the builder hands out, and `request` takes one of those.
 5. **The `Refusal` wire change** is a breaking change to fixtures in three crates, done outright (house rule), as one layer on the stack after `#net` lands.
+
+## claytxt's review (2026-11-18): direction accepted
+
+- **Shared author types live in a new small crate**, not `method_core`, whose `allowed_dependencies = []` would otherwise grow `http`, `bytes` and `futures` for ergonomics. `big_ndk` links it unconditionally; `clay_mdk` links it under both its in-process and guest features. It holds `FetchError`, `Body`, `GrantRequest`, `GrantAnswer`, the `Setting` trait and `BlobError`, plus a small backend trait: `Blobs` (and `fetch`'s plumbing) is a struct over that trait, so the names and methods exist once and each SDK supplies the backend. `Refusal` and `GrantRequestId` go to `method_core`.
+- **`!Send` everywhere:** `Body` is a local boxed stream. A wasm guest and the in-process micro host both consume bodies on one thread; where the producer runs on the node's tokio runtime, the backend hands over a channel receiver wrapped as a local stream. One type, no generics.
+- **A `#publication` permbind kind** for micro-to-micro contracts (`requires` with a supplier micro), which the Clay host answers, not node dispatch, so they aren't `#method`. Routing their authority through `uses` against `#publication` keeps "nothing in the manifest grants authority" true. **Needs the operator's sign-off** (a new permbind kind); claytxt raises it in their design session.
+- **`Revoked` is lifecycle,** not a refusal; it stays in the MDK `Error`.
+- **Naming the permbind behind a refused handle:** not possible today (the interim docCap and `MicroInstall::interim` carry none). Once handles are minted from `uses` ∩ grants (§6.1), record the permbind on each minted handle so the host reports `MissingAuthority` precisely; until then it reports `Denied`.
+- **`request_drawer` folds into `request(permbind)`.**
+- **Re-mint before `answered` resolves** is required: `MicroEgress::remint` exists (`feat/desktop-base`); the host re-mints when `awaitCartridgeGrants` moves, and `answered` resolves only after, or the next call races the old handle.
+- **The web shell's `fetch` is enforceable:** a micro is wasm with only WIT imports, so its only network path is `wasi:http`, which the wcmp host serves (refuse-all today, then dispatch.local, then `#net` through the nodules egress). The remaining leak class is markup that makes the page fetch (`style url()`, `img src`); the host refuses batches carrying it.
+- Manager notes 2–5 agreed, including node-57's `fetch` landing with the final signature.
