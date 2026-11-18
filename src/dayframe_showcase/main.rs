@@ -13,13 +13,13 @@ compile_error!(
 );
 
 #[cfg(feature = "desktop")]
-use dioxus::desktop::DesktopContext;
-#[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::Event as DesktopEvent;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::tao::event::WindowEvent as DesktopWindowEvent;
 #[cfg(feature = "desktop")]
 use dioxus::desktop::use_wry_event_handler;
+#[cfg(feature = "desktop")]
+use dioxus::desktop::DesktopContext;
 use dioxus::prelude::*;
 #[cfg(feature = "desktop")]
 use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
@@ -150,8 +150,8 @@ fn use_available_width() -> Signal<f64> {
 /// The width the lab's sections lay out in, kept current as the window resizes.
 #[cfg(target_arch = "wasm32")]
 fn use_available_width() -> Signal<f64> {
-    use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
 
     fn window_content_width() -> f64 {
         content_width(

@@ -1286,6 +1286,18 @@ async fn call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     name: &str,
     request: &Req,
 ) -> Resp {
+    try_call_publication(runtime, micro, name, request)
+        .await
+        .unwrap()
+}
+
+/// [`call_publication`] for a call the provider may reject: the rejection is the `Err`.
+async fn try_call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
+    runtime: &CompositionRuntime,
+    micro: &str,
+    name: &str,
+    request: &Req,
+) -> Result<Resp, String> {
     let lease = runtime
         .supervisor
         .acquire(&supervised(micro), name)
@@ -1301,10 +1313,13 @@ async fn call_publication<Req: Serialize, Resp: serde::de::DeserializeOwned>(
     .unwrap();
     let mut bytes = Vec::new();
     ciborium::into_writer(request, &mut bytes).unwrap();
-    let response = reference.call(bytes).await.unwrap();
+    let response = reference
+        .call(bytes)
+        .await
+        .map_err(|error| format!("{error:?}"));
     drop((reference, lease));
     runtime.host.close_instance(&recipient).unwrap();
-    ciborium::from_reader(response.as_slice()).unwrap()
+    response.map(|response| ciborium::from_reader(response.as_slice()).unwrap())
 }
 
 // The counter's Increment button is a manifest-declared row whose action is a lazy endpoint:
@@ -1959,6 +1974,86 @@ async fn home_opens_settings_then_a_section_and_back_unwinds_to_home() {
             "Settings started once for the whole visit"
         );
 
+        drop(dom);
+    })
+    .await;
+}
+
+// The theme is applied through the shell's `set-theme` call: the frame puts it in the host
+// document in `@layer user` live, `get-theme` reads it back, and CSS that could make the host
+// fetch anything is rejected before anything is stored or applied.
+#[tokio::test(flavor = "current_thread")]
+async fn a_theme_set_through_the_shell_is_applied_live_and_a_fetching_one_is_refused() {
+    use micro_shell_manifest::ThemeSheet;
+    let runtime = memory_runtime(stub_counter()).await;
+    let shell = micro_shell_manifest::ID;
+    served(&runtime, async {
+        let mut roots = runtime.roots.clone();
+        while runtime.roots.rows().unwrap().is_empty() {
+            roots.changed().await.unwrap();
+        }
+        let rows = runtime.roots.rows().unwrap();
+        let root = rows.iter().find(|row| row.key == shell).unwrap();
+        let mut dom = VirtualDom::new_with_props(
+            frame_app,
+            FrameApp {
+                components: runtime.components.clone(),
+                reference: root.attachments[root.value.content.index()].clone(),
+                width: 400.0,
+            },
+        );
+        let mut tree = clay_surface::SurfaceTree::new();
+        dom.rebuild(&mut tree);
+        slot_shows(&mut dom, &mut tree, "Home").await;
+        assert!(!tree.text_content().contains("theme-probe"));
+
+        let sheet = |css: &str| ThemeSheet { css: css.into() };
+        let theme = sheet(".theme-probe { color: red; }");
+        call_publication::<_, ()>(&runtime, shell, micro_shell_manifest::SET_THEME, &theme).await;
+        slot_shows(&mut dom, &mut tree, "@layer user").await;
+        assert!(tree.text_content().contains(".theme-probe"));
+        assert_eq!(
+            call_publication::<_, ThemeSheet>(
+                &runtime,
+                shell,
+                micro_shell_manifest::GET_THEME,
+                &()
+            )
+            .await,
+            theme
+        );
+
+        // Refused, not repaired: the applied theme stays what it was.
+        let fetching = sheet(".theme-probe { background: url(https://evil.example/x.png); }");
+        let refusal = try_call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::SET_THEME,
+            &fetching,
+        )
+        .await
+        .expect_err("a theme that fetches is rejected");
+        assert!(refusal.contains("url("), "{refusal}");
+        assert_eq!(
+            call_publication::<_, ThemeSheet>(
+                &runtime,
+                shell,
+                micro_shell_manifest::GET_THEME,
+                &()
+            )
+            .await,
+            theme
+        );
+
+        // The empty theme removes the layer again.
+        call_publication::<_, ()>(
+            &runtime,
+            shell,
+            micro_shell_manifest::SET_THEME,
+            &ThemeSheet::default(),
+        )
+        .await;
+        slot_lacks(&mut dom, &mut tree, "@layer user").await;
         drop(dom);
     })
     .await;

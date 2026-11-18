@@ -21,10 +21,10 @@ use clay_dioxus_kit::WidthClass;
 use clay_mdk::FacetSnapshot;
 use clay_mdk::FacetState;
 use clay_mdk::Row;
-use clay_mdk::host::UserStylesheet;
 use clay_mdk::hooks::PresentationSlot;
 use clay_mdk::hooks::use_facet;
 use clay_mdk::hooks::use_rows;
+use clay_mdk::host::UserStylesheet;
 use dioxus::prelude::*;
 use micro_shell_manifest::NavigateRequest;
 use micro_shell_manifest::Panel;
@@ -335,7 +335,11 @@ fn use_theme(shell: &Shell) -> String {
         } else {
             String::new()
         };
-        mounts.set(if accepted { raw.to_owned() } else { String::new() });
+        mounts.set(if accepted {
+            raw.to_owned()
+        } else {
+            String::new()
+        });
     }
     applied.document_sheet.clone()
 }
