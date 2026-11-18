@@ -137,7 +137,7 @@ named after it.
   for the side panel without the owner doing anything.
 - **KIT-102** One z-order scale, `Layer` (`layer.rs`): `Content`, `Raised`, `AppBar`, `Drawer`,
   `Sheet`, `Toast`, `Gesture`, lowest first, mirroring the `layer.*` tokens (a test compares the
-  two). A headless part writes `z-index:{Layer::X.css()}`, which is a `var(--df-layer-x)`; a
+  two). A headless part writes `z-index:{Layer::X.css()}`, which is a `var(--ct-layer-x)`; a
   numeric `z-index` in a headless part fails a test. A pane is a `Content` stacking context so an
   app bar inside it cannot climb over the resize handle (`Raised`) overlapping its edge. Reason:
   the previous constants (10, 20, 40, 50) were each local choices, and an app bar needing a layer

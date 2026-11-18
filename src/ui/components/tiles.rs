@@ -254,7 +254,7 @@ pub fn ColumnRack(
 
     rsx! {
         section {
-            class: "df-column-rack",
+            class: "ct-column-rack",
             "data-layout": layout.as_str(),
             "data-height": height.as_str(),
             if max_offset > 0 {
@@ -321,7 +321,7 @@ pub fn ColumnRack(
                 }
             }
             div {
-                class: "df-column-rack-window",
+                class: "ct-column-rack-window",
                 style: track_style,
                 for column in visible_columns {
                     Column { column }
@@ -335,35 +335,35 @@ pub fn ColumnRack(
 fn TileList(list: TileListSpec, depth: usize) -> Element {
     let body = match list.state {
         ColumnState::Unrequested => rsx! {
-            div { class: "df-column-state", "Not loaded" }
+            div { class: "ct-column-state", "Not loaded" }
         },
         ColumnState::Loading => rsx! {
-            div { class: "df-column-state", "Loading…" }
+            div { class: "ct-column-state", "Loading…" }
         },
         ColumnState::Empty => rsx! {
-            div { class: "df-column-state", "Nothing here" }
+            div { class: "ct-column-state", "Nothing here" }
         },
         ColumnState::Failed => rsx! {
-            div { class: "df-column-state df-column-state-error", "Unable to load this list" }
+            div { class: "ct-column-state ct-column-state-error", "Unable to load this list" }
         },
         ColumnState::Ready | ColumnState::Stale => {
             if list.sections.iter().all(|section| section.tiles.is_empty()) {
-                rsx! { div { class: "df-column-state", "Nothing here" } }
+                rsx! { div { class: "ct-column-state", "Nothing here" } }
             } else {
                 rsx! {
                     for list_section in list.sections.iter() {
                         div {
-                            class: "df-column-section",
+                            class: "ct-column-section",
                             if let Some(title) = &list_section.title {
                                 h3 {
-                                    class: "df-column-section-header",
+                                    class: "ct-column-section-header",
                                     "{title}"
                                 }
                             }
                             div {
                                 class: match list_section.layout {
-                                    SectionLayout::List => "df-column-list",
-                                    SectionLayout::DenseGallery { .. } => "df-column-gallery",
+                                    SectionLayout::List => "ct-column-list",
+                                    SectionLayout::DenseGallery { .. } => "ct-column-gallery",
                                 },
                                 style: match list_section.layout {
                                     SectionLayout::List => String::new(),
@@ -382,7 +382,7 @@ fn TileList(list: TileListSpec, depth: usize) -> Element {
                         }
                     }
                     if list.has_next {
-                        div { class: "df-column-pagination", "More available" }
+                        div { class: "ct-column-pagination", "More available" }
                     }
                 }
             }
@@ -401,17 +401,17 @@ pub fn Column(column: ColumnSpec) -> Element {
 
     rsx! {
         article {
-            class: "df-column",
+            class: "ct-column",
             "data-state": state.as_str(),
             "data-relation": column.relation.as_str(),
             "data-source": source.as_str(),
             header {
-                class: "df-column-header",
-                strong { class: "df-column-title", "{column.title}" }
-                span { class: "df-column-count", if let Some(total) = total { "{total}" } else { "…" } }
+                class: "ct-column-header",
+                strong { class: "ct-column-title", "{column.title}" }
+                span { class: "ct-column-count", if let Some(total) = total { "{total}" } else { "…" } }
             }
             div {
-                class: "df-column-scroll",
+                class: "ct-column-scroll",
                 TileList { list, depth: 0 }
             }
         }
@@ -460,7 +460,7 @@ pub fn Tile(tile: TileSpec, depth: usize, layout: SectionLayout) -> Element {
     };
     rsx! {
         div {
-            class: if has_inline_children { "df-tile df-tile-inline-parent" } else { "df-tile" },
+            class: if has_inline_children { "ct-tile ct-tile-inline-parent" } else { "ct-tile" },
             "data-kind": tile.kind.as_str(),
             "data-content": tile.content.as_str(),
             "data-expanded": expanded.to_string(),
@@ -471,7 +471,7 @@ pub fn Tile(tile: TileSpec, depth: usize, layout: SectionLayout) -> Element {
                 if let Some(list) = inline_list.clone() {
                     div {
                         id: inline_id,
-                        class: "df-inline-children",
+                        class: "ct-inline-children",
                         TileList { list, depth: depth + 1 }
                     }
                 }
@@ -490,21 +490,21 @@ fn TileGallery(
 ) -> Element {
     rsx! {
         article {
-            class: "df-gallery-tile",
+            class: "ct-gallery-tile",
             "aria-label": tile.title.clone(),
             div {
-                class: "df-gallery-media",
+                class: "ct-gallery-media",
                 match &tile.content {
                     TileContent::Thumbnail { src, alt } => rsx! {
                         img { src: src.clone(), alt: alt.clone() }
                     },
                     _ => rsx! {
-                        div { class: "df-gallery-placeholder", "Photo" }
+                        div { class: "ct-gallery-placeholder", "Photo" }
                     },
                 }
                 if has_inline_children {
                     button {
-                        class: "df-gallery-toggle",
+                        class: "ct-gallery-toggle",
                         r#type: "button",
                         "aria-label": if expanded { "collapse nested items" } else { "expand nested items" },
                         "aria-expanded": expanded.to_string(),
@@ -528,21 +528,21 @@ fn TileLine(
 ) -> Element {
     rsx! {
         div {
-            class: "df-tile-line",
-            span { class: "df-tile-leading", "{tile.kind.mark()}" }
+            class: "ct-tile-line",
+            span { class: "ct-tile-leading", "{tile.kind.mark()}" }
             span {
-                class: "df-tile-copy",
-                strong { class: "df-tile-title", "{tile.title}" }
+                class: "ct-tile-copy",
+                strong { class: "ct-tile-title", "{tile.title}" }
                 if !tile.subtitle.is_empty() {
-                    small { class: "df-tile-subtitle", "{tile.subtitle}" }
+                    small { class: "ct-tile-subtitle", "{tile.subtitle}" }
                 }
                 for paragraph in tile.body.iter() {
-                    p { class: "df-tile-body", "{paragraph}" }
+                    p { class: "ct-tile-body", "{paragraph}" }
                 }
             }
             if has_inline_children {
                 button {
-                    class: "df-tile-trailing df-tile-toggle",
+                    class: "ct-tile-trailing ct-tile-toggle",
                     r#type: "button",
                     "aria-label": if expanded { "collapse nested items" } else { "expand nested items" },
                     "aria-expanded": expanded.to_string(),
@@ -551,7 +551,7 @@ fn TileLine(
                     if expanded { "⌃" } else { "⌄" }
                 }
             } else if tile.kind == TileKind::Group {
-                span { class: "df-tile-trailing", "↗" }
+                span { class: "ct-tile-trailing", "↗" }
             }
         }
     }
@@ -561,17 +561,17 @@ fn TileLine(
 pub fn Widget(tile: TileSpec) -> Element {
     rsx! {
         div {
-            class: "df-widget",
+            class: "ct-widget",
             "data-content": tile.content.as_str(),
-            span { class: "df-widget-leading", "{tile.content.mark()}" }
+            span { class: "ct-widget-leading", "{tile.content.mark()}" }
             span {
-                class: "df-tile-copy",
-                strong { class: "df-tile-title", "{tile.title}" }
+                class: "ct-tile-copy",
+                strong { class: "ct-tile-title", "{tile.title}" }
                 if !tile.subtitle.is_empty() {
-                    small { class: "df-tile-subtitle", "{tile.subtitle}" }
+                    small { class: "ct-tile-subtitle", "{tile.subtitle}" }
                 }
                 for paragraph in tile.body.iter() {
-                    p { class: "df-tile-body", "{paragraph}" }
+                    p { class: "ct-tile-body", "{paragraph}" }
                 }
             }
         }

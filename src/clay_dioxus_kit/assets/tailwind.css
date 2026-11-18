@@ -3,11 +3,11 @@
 @layer theme, base, components, utilities;
 @layer theme {
   :root, :host {
-    --font-sans: var(--df-font-family-sans);
+    --font-sans: var(--ct-font-family-sans);
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
     --color-amber-400: oklch(82.8% 0.189 84.429);
-    --spacing: var(--df-spacing);
+    --spacing: var(--ct-spacing);
     --container-3xl: 48rem;
     --container-7xl: 80rem;
     --text-xs: 0.75rem;
@@ -35,31 +35,31 @@
     --leading-relaxed: 1.625;
     --default-transition-duration: 150ms;
     --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-    --default-font-family: var(--df-font-family-sans);
+    --default-font-family: var(--ct-font-family-sans);
     --default-mono-font-family: var(--font-mono);
-    --color-scrim: var(--df-color-scrim);
-    --color-background: var(--df-color-canvas);
-    --color-foreground: var(--df-color-text);
-    --color-card: var(--df-color-surface);
-    --color-card-foreground: var(--df-color-text);
-    --color-primary: var(--df-color-primary);
-    --color-primary-foreground: var(--df-color-on-primary);
-    --color-secondary: var(--df-color-accent);
-    --color-secondary-foreground: var(--df-color-on-accent);
-    --color-destructive: var(--df-color-danger);
-    --color-destructive-foreground: var(--df-color-on-danger);
-    --color-ring: var(--df-color-focus);
-    --color-surface-sunken: var(--df-color-surface-sunken);
-    --color-foreground-muted: var(--df-color-text-muted);
-    --color-foreground-subtle: var(--df-color-text-subtle);
-    --animate-fade-in: kit-fade-in var(--df-motion-duration-fade)
-    var(--df-motion-easing-enter) both;
+    --color-scrim: var(--ct-color-scrim);
+    --color-background: var(--ct-color-canvas);
+    --color-foreground: var(--ct-color-text);
+    --color-card: var(--ct-color-surface);
+    --color-card-foreground: var(--ct-color-text);
+    --color-primary: var(--ct-color-primary);
+    --color-primary-foreground: var(--ct-color-on-primary);
+    --color-secondary: var(--ct-color-accent);
+    --color-secondary-foreground: var(--ct-color-on-accent);
+    --color-destructive: var(--ct-color-danger);
+    --color-destructive-foreground: var(--ct-color-on-danger);
+    --color-ring: var(--ct-color-focus);
+    --color-surface-sunken: var(--ct-color-surface-sunken);
+    --color-foreground-muted: var(--ct-color-text-muted);
+    --color-foreground-subtle: var(--ct-color-text-subtle);
+    --animate-fade-in: kit-fade-in var(--ct-motion-duration-fade)
+    var(--ct-motion-easing-enter) both;
     --animate-slide-in-leading: kit-slide-in-leading
-    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
+    var(--ct-motion-duration-enter) var(--ct-motion-easing-enter) both;
     --animate-slide-in-trailing: kit-slide-in-trailing
-    var(--df-motion-duration-enter) var(--df-motion-easing-enter) both;
-    --animate-slide-in-bottom: kit-slide-in-bottom var(--df-motion-duration-enter)
-    var(--df-motion-easing-enter) both;
+    var(--ct-motion-duration-enter) var(--ct-motion-easing-enter) both;
+    --animate-slide-in-bottom: kit-slide-in-bottom var(--ct-motion-duration-enter)
+    var(--ct-motion-easing-enter) both;
   }
 }
 @layer base {
@@ -235,16 +235,16 @@
   .visible {
     visibility: visible;
   }
-  .df-gallery-toggle {
+  .ct-gallery-toggle {
     position: absolute;
-    top: var(--df-spacing);
-    right: var(--df-spacing);
+    top: var(--ct-spacing);
+    right: var(--ct-spacing);
     display: grid;
-    width: calc(var(--df-spacing) * 8);
-    height: calc(var(--df-spacing) * 8);
+    width: calc(var(--ct-spacing) * 8);
+    height: calc(var(--ct-spacing) * 8);
     cursor: pointer;
     place-items: center;
-    border-radius: var(--df-radius-md);
+    border-radius: var(--ct-radius-md);
     border-style: var(--tw-border-style);
     border-width: 0px;
     background-color: var(--scheme-color-surface-container-high);
@@ -252,9 +252,9 @@
       background-color: color-mix(in oklab, var(--scheme-color-surface-container-high) 90%, transparent);
     }
     padding: 0px;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-gallery-media {
+  .ct-gallery-media {
     position: relative;
     aspect-ratio: 1 / 1;
     width: 100%;
@@ -302,14 +302,14 @@
   }
   .column-navigation {
     margin-inline: auto;
-    margin-bottom: calc(var(--df-spacing) * 3);
+    margin-bottom: calc(var(--ct-spacing) * 3);
     display: flex;
     width: 100%;
     max-width: var(--container-7xl);
     flex-wrap: nowrap;
     align-items: center;
     justify-content: center;
-    gap: calc(var(--df-spacing) * 2);
+    gap: calc(var(--ct-spacing) * 2);
   }
   .tile-strip {
     margin-inline: auto;
@@ -317,100 +317,100 @@
     width: 100%;
     max-width: var(--container-7xl);
     align-items: flex-start;
-    gap: calc(var(--df-spacing) * 6);
+    gap: calc(var(--ct-spacing) * 6);
   }
   .mx-2 {
-    margin-inline: calc(var(--df-spacing) * 2);
+    margin-inline: calc(var(--ct-spacing) * 2);
   }
   .mx-4 {
-    margin-inline: calc(var(--df-spacing) * 4);
+    margin-inline: calc(var(--ct-spacing) * 4);
   }
-  .df-separator {
-    margin-block: calc(var(--df-spacing) * 4);
+  .ct-separator {
+    margin-block: calc(var(--ct-spacing) * 4);
     height: 1px;
     width: 100%;
     border-style: var(--tw-border-style);
     border-width: 0px;
-    background-color: var(--df-color-border);
+    background-color: var(--ct-color-border);
   }
   .mt-1 {
-    margin-top: var(--df-spacing);
+    margin-top: var(--ct-spacing);
   }
   .mt-3 {
-    margin-top: calc(var(--df-spacing) * 3);
+    margin-top: calc(var(--ct-spacing) * 3);
   }
   .mt-4 {
-    margin-top: calc(var(--df-spacing) * 4);
+    margin-top: calc(var(--ct-spacing) * 4);
   }
   .mt-6 {
-    margin-top: calc(var(--df-spacing) * 6);
+    margin-top: calc(var(--ct-spacing) * 6);
   }
   .mt-12 {
-    margin-top: calc(var(--df-spacing) * 12);
+    margin-top: calc(var(--ct-spacing) * 12);
   }
   .mr-2 {
-    margin-right: calc(var(--df-spacing) * 2);
+    margin-right: calc(var(--ct-spacing) * 2);
   }
   .mb-2 {
-    margin-bottom: calc(var(--df-spacing) * 2);
+    margin-bottom: calc(var(--ct-spacing) * 2);
   }
   .mb-3 {
-    margin-bottom: calc(var(--df-spacing) * 3);
+    margin-bottom: calc(var(--ct-spacing) * 3);
   }
   .mb-6 {
-    margin-bottom: calc(var(--df-spacing) * 6);
+    margin-bottom: calc(var(--ct-spacing) * 6);
   }
   .mb-8 {
-    margin-bottom: calc(var(--df-spacing) * 8);
+    margin-bottom: calc(var(--ct-spacing) * 8);
   }
   .column-nested {
-    margin-left: calc(var(--df-spacing) * -6);
+    margin-left: calc(var(--ct-spacing) * -6);
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;
   }
   .box-border {
     box-sizing: border-box;
   }
-  .df-tile-toggle {
+  .ct-tile-toggle {
     display: grid;
-    width: calc(var(--df-spacing) * 10);
-    height: calc(var(--df-spacing) * 10);
+    width: calc(var(--ct-spacing) * 10);
+    height: calc(var(--ct-spacing) * 10);
     cursor: pointer;
     place-items: center;
-    border-radius: var(--df-radius-md);
+    border-radius: var(--ct-radius-md);
     border-style: var(--tw-border-style);
     border-width: 0px;
     background-color: transparent;
     padding: 0px;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-gallery-placeholder {
+  .ct-gallery-placeholder {
     display: grid;
     width: 100%;
     height: 100%;
     place-items: center;
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-tile-leading {
+  .ct-tile-leading {
     display: grid;
-    width: calc(var(--df-spacing) * 8);
-    height: calc(var(--df-spacing) * 8);
+    width: calc(var(--ct-spacing) * 8);
+    height: calc(var(--ct-spacing) * 8);
     place-items: center;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-widget-leading {
+  .ct-widget-leading {
     display: grid;
-    width: calc(var(--df-spacing) * 8);
-    height: calc(var(--df-spacing) * 8);
+    width: calc(var(--ct-spacing) * 8);
+    height: calc(var(--ct-spacing) * 8);
     place-items: center;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
   .column-arrow {
     display: flex;
-    height: calc(var(--df-spacing) * 10);
-    min-width: calc(var(--df-spacing) * 10);
+    height: calc(var(--ct-spacing) * 10);
+    min-width: calc(var(--ct-spacing) * 10);
     flex: 1;
     cursor: pointer;
     align-items: center;
@@ -421,7 +421,7 @@
     background-color: transparent;
     font-size: var(--text-lg);
     line-height: var(--tw-leading, var(--text-lg--line-height));
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
   .tile-column {
     display: flex;
@@ -429,121 +429,121 @@
     min-width: 0px;
     flex: 1;
     flex-direction: column;
-    border-radius: var(--df-radius-xl);
-    background-color: var(--df-color-text);
+    border-radius: var(--ct-radius-xl);
+    background-color: var(--ct-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 2%, transparent);
+      background-color: color-mix(in oklab, var(--ct-color-text) 2%, transparent);
     }
   }
-  .df-tile-line {
+  .ct-tile-line {
     display: grid;
-    min-height: calc(var(--df-spacing) * 16);
+    min-height: calc(var(--ct-spacing) * 16);
     min-width: 0px;
     align-items: flex-start;
-    gap: calc(var(--df-spacing) * 3);
-    padding-inline: calc(var(--df-spacing) * 2);
-    padding-block: calc(var(--df-spacing) * 2);
-    color: var(--df-color-text);
+    gap: calc(var(--ct-spacing) * 3);
+    padding-inline: calc(var(--ct-spacing) * 2);
+    padding-block: calc(var(--ct-spacing) * 2);
+    color: var(--ct-color-text);
     grid-template-columns: 2rem minmax(0, 1fr) auto;
   }
-  .df-tab-trigger {
+  .ct-tab-trigger {
     display: inline-flex;
-    min-height: calc(var(--df-spacing) * 9);
+    min-height: calc(var(--ct-spacing) * 9);
     cursor: pointer;
     align-items: center;
-    border-radius: var(--df-radius-sm);
+    border-radius: var(--ct-radius-sm);
     background-color: transparent;
-    padding-inline: calc(var(--df-spacing) * 3);
+    padding-inline: calc(var(--ct-spacing) * 3);
     --tw-font-weight: var(--font-weight-medium);
     font-weight: var(--font-weight-medium);
     white-space: nowrap;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-column-section {
+  .ct-column-section {
     display: flex;
     min-height: 0px;
     flex-direction: column;
-    gap: calc(var(--df-spacing) * 3);
+    gap: calc(var(--ct-spacing) * 3);
   }
-  .df-column-header {
+  .ct-column-header {
     display: flex;
-    min-height: calc(var(--df-spacing) * 10);
+    min-height: calc(var(--ct-spacing) * 10);
     align-items: center;
     justify-content: space-between;
-    gap: calc(var(--df-spacing) * 3);
-    padding-block: calc(var(--df-spacing) * 2);
+    gap: calc(var(--ct-spacing) * 3);
+    padding-block: calc(var(--ct-spacing) * 2);
   }
-  .df-column-rack {
+  .ct-column-rack {
     display: flex;
     width: 100%;
     max-width: 100%;
     min-width: 0px;
     flex-direction: column;
-    gap: calc(var(--df-spacing) * 3);
+    gap: calc(var(--ct-spacing) * 3);
   }
-  .df-column-rack-window {
+  .ct-column-rack-window {
     display: grid;
     width: 100%;
     max-width: 100%;
     min-width: 0px;
     align-items: flex-start;
-    gap: calc(var(--df-spacing) * 6);
+    gap: calc(var(--ct-spacing) * 6);
   }
-  .df-tabs-list {
+  .ct-tabs-list {
     display: flex;
     width: fit-content;
     max-width: 100%;
     flex-direction: row;
-    gap: var(--df-spacing);
+    gap: var(--ct-spacing);
     overflow-x: auto;
-    border-radius: var(--df-radius-md);
-    background-color: var(--df-color-surface-sunken);
-    padding: var(--df-spacing);
+    border-radius: var(--ct-radius-md);
+    background-color: var(--ct-color-surface-sunken);
+    padding: var(--ct-spacing);
   }
-  .df-tabs {
+  .ct-tabs {
     display: flex;
     width: 100%;
     flex-direction: column;
-    gap: calc(var(--df-spacing) * 3);
+    gap: calc(var(--ct-spacing) * 3);
   }
-  .df-column-gallery {
+  .ct-column-gallery {
     display: grid;
     min-width: 0px;
-    gap: var(--df-spacing);
+    gap: var(--ct-spacing);
     grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
   }
-  .df-column {
+  .ct-column {
     display: flex;
     min-width: 0px;
     flex-direction: column;
-    gap: calc(var(--df-spacing) * 3);
-    padding-inline: calc(var(--df-spacing) * 3);
+    gap: calc(var(--ct-spacing) * 3);
+    padding-inline: calc(var(--ct-spacing) * 3);
   }
-  .df-column-list {
+  .ct-column-list {
     display: flex;
     min-width: 0px;
     flex-direction: column;
-    gap: var(--df-spacing);
+    gap: var(--ct-spacing);
   }
-  .df-column-scroll {
+  .ct-column-scroll {
     display: flex;
     min-width: 0px;
     flex-direction: column;
-    gap: calc(var(--df-spacing) * 3);
+    gap: calc(var(--ct-spacing) * 3);
   }
-  .df-tile-copy {
+  .ct-tile-copy {
     display: flex;
     min-width: 0px;
     flex-direction: column;
-    gap: var(--df-spacing);
+    gap: var(--ct-spacing);
   }
-  .df-button {
+  .ct-button {
     display: inline-flex;
     cursor: pointer;
     align-items: center;
     justify-content: center;
-    gap: calc(var(--df-spacing) * 2);
-    border-radius: var(--df-radius-md);
+    gap: calc(var(--ct-spacing) * 2);
+    border-radius: var(--ct-radius-md);
     border-style: var(--tw-border-style);
     border-width: 1px;
     border-color: transparent;
@@ -555,13 +555,13 @@
     --tw-duration: 150ms;
     transition-duration: 150ms;
   }
-  .df-widget {
+  .ct-widget {
     display: grid;
     align-items: flex-start;
-    gap: calc(var(--df-spacing) * 3);
-    border-radius: var(--df-radius-md);
+    gap: calc(var(--ct-spacing) * 3);
+    border-radius: var(--ct-radius-md);
     background-color: var(--scheme-color-surface-container-low);
-    padding: calc(var(--df-spacing) * 4);
+    padding: calc(var(--ct-spacing) * 4);
     grid-template-columns: 2rem minmax(0, 1fr);
   }
   .column-pager {
@@ -569,25 +569,25 @@
     align-items: center;
     gap: 0px;
     border-radius: calc(infinity * 1px);
-    background-color: var(--df-color-text);
+    background-color: var(--ct-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 5%, transparent);
+      background-color: color-mix(in oklab, var(--ct-color-text) 5%, transparent);
     }
-    padding-inline: calc(var(--df-spacing) * 1.5);
-    padding-block: var(--df-spacing);
+    padding-inline: calc(var(--ct-spacing) * 1.5);
+    padding-block: var(--ct-spacing);
   }
   .strip-header {
     display: flex;
     align-items: center;
-    gap: calc(var(--df-spacing) * 2);
-    padding-inline: calc(var(--df-spacing) * 3.5);
-    padding-top: calc(var(--df-spacing) * 2.5);
-    padding-bottom: calc(var(--df-spacing) * 2);
+    gap: calc(var(--ct-spacing) * 2);
+    padding-inline: calc(var(--ct-spacing) * 3.5);
+    padding-top: calc(var(--ct-spacing) * 2.5);
+    padding-bottom: calc(var(--ct-spacing) * 2);
     font-size: var(--text-xs);
     line-height: var(--tw-leading, var(--text-xs--line-height));
     --tw-tracking: var(--tracking-wider);
     letter-spacing: var(--tracking-wider);
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
     text-transform: uppercase;
   }
   .block {
@@ -615,8 +615,8 @@
     display: table;
   }
   .path-back {
-    width: calc(var(--df-spacing) * 5);
-    height: calc(var(--df-spacing) * 5);
+    width: calc(var(--ct-spacing) * 5);
+    height: calc(var(--ct-spacing) * 5);
     flex: none;
     cursor: pointer;
     border-radius: calc(infinity * 1px);
@@ -628,16 +628,16 @@
     line-height: var(--tw-leading, var(--text-sm--line-height));
     --tw-leading: 1;
     line-height: 1;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
   .column-dot {
-    width: calc(var(--df-spacing) * 2.5);
-    height: calc(var(--df-spacing) * 2.5);
+    width: calc(var(--ct-spacing) * 2.5);
+    height: calc(var(--ct-spacing) * 2.5);
     cursor: pointer;
     border-radius: calc(infinity * 1px);
     border-style: var(--tw-border-style);
     border-width: 0px;
-    background-color: var(--df-color-text-subtle);
+    background-color: var(--ct-color-text-subtle);
     padding: 0px;
     transition-property: all;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
@@ -646,32 +646,32 @@
     transition-duration: 150ms;
   }
   .size-3 {
-    width: calc(var(--df-spacing) * 3);
-    height: calc(var(--df-spacing) * 3);
+    width: calc(var(--ct-spacing) * 3);
+    height: calc(var(--ct-spacing) * 3);
   }
   .size-6 {
-    width: calc(var(--df-spacing) * 6);
-    height: calc(var(--df-spacing) * 6);
+    width: calc(var(--ct-spacing) * 6);
+    height: calc(var(--ct-spacing) * 6);
   }
   .size-12 {
-    width: calc(var(--df-spacing) * 12);
-    height: calc(var(--df-spacing) * 12);
+    width: calc(var(--ct-spacing) * 12);
+    height: calc(var(--ct-spacing) * 12);
   }
   .size-24 {
-    width: calc(var(--df-spacing) * 24);
-    height: calc(var(--df-spacing) * 24);
+    width: calc(var(--ct-spacing) * 24);
+    height: calc(var(--ct-spacing) * 24);
   }
   .h-0\.5 {
-    height: calc(var(--df-spacing) * 0.5);
+    height: calc(var(--ct-spacing) * 0.5);
   }
   .h-2 {
-    height: calc(var(--df-spacing) * 2);
+    height: calc(var(--ct-spacing) * 2);
   }
   .h-5\/6 {
     height: calc(5 / 6 * 100%);
   }
   .h-14 {
-    height: calc(var(--df-spacing) * 14);
+    height: calc(var(--ct-spacing) * 14);
   }
   .h-full {
     height: 100%;
@@ -680,51 +680,51 @@
     min-height: 0px;
     flex: 1;
     overflow-y: auto;
-    padding-inline: calc(var(--df-spacing) * 2);
-    padding-bottom: calc(var(--df-spacing) * 3);
+    padding-inline: calc(var(--ct-spacing) * 2);
+    padding-bottom: calc(var(--ct-spacing) * 3);
   }
-  .df-button-lg {
-    min-height: calc(var(--df-spacing) * 12);
-    padding-inline: calc(var(--df-spacing) * 5);
+  .ct-button-lg {
+    min-height: calc(var(--ct-spacing) * 12);
+    padding-inline: calc(var(--ct-spacing) * 5);
     font-size: var(--text-lg);
     line-height: var(--tw-leading, var(--text-lg--line-height));
   }
-  .df-button-sm {
-    min-height: calc(var(--df-spacing) * 8);
-    padding-inline: calc(var(--df-spacing) * 3);
+  .ct-button-sm {
+    min-height: calc(var(--ct-spacing) * 8);
+    padding-inline: calc(var(--ct-spacing) * 3);
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
   }
-  .df-button-md {
-    min-height: calc(var(--df-spacing) * 10);
-    padding-inline: calc(var(--df-spacing) * 4);
+  .ct-button-md {
+    min-height: calc(var(--ct-spacing) * 10);
+    padding-inline: calc(var(--ct-spacing) * 4);
   }
   .min-h-12 {
-    min-height: calc(var(--df-spacing) * 12);
+    min-height: calc(var(--ct-spacing) * 12);
   }
   .min-h-16 {
-    min-height: calc(var(--df-spacing) * 16);
+    min-height: calc(var(--ct-spacing) * 16);
   }
   .min-h-18 {
-    min-height: calc(var(--df-spacing) * 18);
+    min-height: calc(var(--ct-spacing) * 18);
   }
   .min-h-64 {
-    min-height: calc(var(--df-spacing) * 64);
+    min-height: calc(var(--ct-spacing) * 64);
   }
   .min-h-screen {
     min-height: 100vh;
   }
   .w-5 {
-    width: calc(var(--df-spacing) * 5);
+    width: calc(var(--ct-spacing) * 5);
   }
   .w-80 {
-    width: calc(var(--df-spacing) * 80);
+    width: calc(var(--ct-spacing) * 80);
   }
   .w-96 {
-    width: calc(var(--df-spacing) * 96);
+    width: calc(var(--ct-spacing) * 96);
   }
   .w-128 {
-    width: calc(var(--df-spacing) * 128);
+    width: calc(var(--ct-spacing) * 128);
   }
   .w-full {
     width: 100%;
@@ -751,10 +751,10 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .df-gallery-tile {
+  .ct-gallery-tile {
     min-width: 0px;
     overflow: hidden;
-    border-radius: var(--df-radius-sm);
+    border-radius: var(--ct-radius-sm);
     background-color: var(--scheme-color-surface-container);
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
@@ -762,7 +762,7 @@
     --tw-duration: 150ms;
     transition-duration: 150ms;
   }
-  .df-column-title {
+  .ct-column-title {
     min-width: 0px;
     overflow: hidden;
     font-size: var(--text-2xl);
@@ -771,18 +771,18 @@
     font-weight: var(--font-weight-semibold);
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
-  .df-inline-children {
+  .ct-inline-children {
     min-width: 0px;
-    padding-right: calc(var(--df-spacing) * 2);
-    padding-bottom: calc(var(--df-spacing) * 2);
-    padding-left: calc(var(--df-spacing) * 4);
+    padding-right: calc(var(--ct-spacing) * 2);
+    padding-bottom: calc(var(--ct-spacing) * 2);
+    padding-left: calc(var(--ct-spacing) * 4);
   }
-  .df-tab-content {
+  .ct-tab-content {
     min-width: 0px;
   }
-  .df-tile {
+  .ct-tile {
     min-width: 0px;
   }
   .min-w-0 {
@@ -790,7 +790,7 @@
   }
   .strip-count {
     flex: none;
-    color: var(--df-color-text-subtle);
+    color: var(--ct-color-text-subtle);
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
   }
@@ -846,7 +846,7 @@
     resize: vertical;
   }
   .scroll-mt-18 {
-    scroll-margin-top: calc(var(--df-spacing) * 18);
+    scroll-margin-top: calc(var(--ct-spacing) * 18);
   }
   .list-none {
     list-style-type: none;
@@ -888,30 +888,30 @@
     justify-content: center;
   }
   .gap-1 {
-    gap: var(--df-spacing);
+    gap: var(--ct-spacing);
   }
   .gap-2 {
-    gap: calc(var(--df-spacing) * 2);
+    gap: calc(var(--ct-spacing) * 2);
   }
   .gap-3 {
-    gap: calc(var(--df-spacing) * 3);
+    gap: calc(var(--ct-spacing) * 3);
   }
   .gap-4 {
-    gap: calc(var(--df-spacing) * 4);
+    gap: calc(var(--ct-spacing) * 4);
   }
   .gap-6 {
-    gap: calc(var(--df-spacing) * 6);
+    gap: calc(var(--ct-spacing) * 6);
   }
   .gap-8 {
-    gap: calc(var(--df-spacing) * 8);
+    gap: calc(var(--ct-spacing) * 8);
   }
   .gap-x-6 {
-    column-gap: calc(var(--df-spacing) * 6);
+    column-gap: calc(var(--ct-spacing) * 6);
   }
   .gap-y-3 {
-    row-gap: calc(var(--df-spacing) * 3);
+    row-gap: calc(var(--ct-spacing) * 3);
   }
-  .df-tile-title {
+  .ct-tile-title {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -931,7 +931,7 @@
     overflow-y: auto;
   }
   .tile-line-group {
-    border-radius: var(--df-radius-xl);
+    border-radius: var(--ct-radius-xl);
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
@@ -945,33 +945,33 @@
     border-radius: calc(infinity * 1px);
   }
   .rounded-lg {
-    border-radius: var(--df-radius-lg);
+    border-radius: var(--ct-radius-lg);
   }
   .rounded-md {
-    border-radius: var(--df-radius-md);
+    border-radius: var(--ct-radius-md);
   }
   .rounded-pill {
-    border-radius: var(--df-radius-pill);
+    border-radius: var(--ct-radius-pill);
   }
   .rounded-sm {
-    border-radius: var(--df-radius-sm);
+    border-radius: var(--ct-radius-sm);
   }
   .rounded-xl {
-    border-radius: var(--df-radius-xl);
+    border-radius: var(--ct-radius-xl);
   }
   .rounded-t-xl {
-    border-top-left-radius: var(--df-radius-xl);
-    border-top-right-radius: var(--df-radius-xl);
+    border-top-left-radius: var(--ct-radius-xl);
+    border-top-right-radius: var(--ct-radius-xl);
   }
   .rounded-l-xl {
-    border-top-left-radius: var(--df-radius-xl);
-    border-bottom-left-radius: var(--df-radius-xl);
+    border-top-left-radius: var(--ct-radius-xl);
+    border-bottom-left-radius: var(--ct-radius-xl);
   }
   .column-spawns {
     border-top-right-radius: 0;
     border-bottom-right-radius: 0;
   }
-  .df-card {
+  .ct-card {
     border-style: var(--tw-border-style);
     border-width: 0px;
     background-color: transparent;
@@ -984,15 +984,15 @@
   }
   .border-hairline {
     border-style: var(--tw-border-style);
-    border-width: var(--df-border-width-hairline);
+    border-width: var(--ct-border-width-hairline);
   }
   .border-thick {
     border-style: var(--tw-border-style);
-    border-width: var(--df-border-width-thick);
+    border-width: var(--ct-border-width-thick);
   }
   .border-thin {
     border-style: var(--tw-border-style);
-    border-width: var(--df-border-width-thin);
+    border-width: var(--ct-border-width-thin);
   }
   .border-y {
     border-block-style: var(--tw-border-style);
@@ -1010,168 +1010,168 @@
     border-left-style: var(--tw-border-style);
     border-left-width: 2px;
   }
-  .df-button-outline {
-    border-color: var(--df-color-border);
+  .ct-button-outline {
+    border-color: var(--ct-color-border);
     background-color: transparent;
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
   .border-border {
-    border-color: var(--df-color-border);
+    border-color: var(--ct-color-border);
   }
   .border-current {
     border-color: currentcolor;
   }
   .border-danger {
-    border-color: var(--df-color-danger);
+    border-color: var(--ct-color-danger);
   }
-  .df-tab-trigger-active {
-    background-color: var(--df-color-surface);
-    color: var(--df-color-text);
-    --tw-shadow: var(--df-shadow-sm);
+  .ct-tab-trigger-active {
+    background-color: var(--ct-color-surface);
+    color: var(--ct-color-text);
+    --tw-shadow: var(--ct-shadow-sm);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
-  .df-button-default {
-    background-color: var(--df-color-primary);
-    color: var(--df-color-on-primary);
+  .ct-button-default {
+    background-color: var(--ct-color-primary);
+    color: var(--ct-color-on-primary);
   }
-  .df-button-destructive {
-    background-color: var(--df-color-danger);
-    color: var(--df-color-on-danger);
+  .ct-button-destructive {
+    background-color: var(--ct-color-danger);
+    color: var(--ct-color-on-danger);
   }
-  .df-button-ghost {
+  .ct-button-ghost {
     background-color: transparent;
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
-  .df-button-secondary {
-    background-color: var(--df-color-accent);
-    color: var(--df-color-on-accent);
+  .ct-button-secondary {
+    background-color: var(--ct-color-accent);
+    color: var(--ct-color-on-accent);
   }
   .bg-accent-container {
-    background-color: var(--df-color-accent-container);
+    background-color: var(--ct-color-accent-container);
   }
   .bg-background {
-    background-color: var(--df-color-canvas);
+    background-color: var(--ct-color-canvas);
   }
   .bg-border {
-    background-color: var(--df-color-border);
+    background-color: var(--ct-color-border);
   }
   .bg-canvas {
-    background-color: var(--df-color-canvas);
+    background-color: var(--ct-color-canvas);
   }
   .bg-card {
-    background-color: var(--df-color-surface);
+    background-color: var(--ct-color-surface);
   }
   .bg-current {
     background-color: currentcolor;
   }
   .bg-destructive {
-    background-color: var(--df-color-danger);
+    background-color: var(--ct-color-danger);
   }
   .bg-primary {
-    background-color: var(--df-color-primary);
+    background-color: var(--ct-color-primary);
   }
   .bg-scrim {
-    background-color: var(--df-color-scrim);
+    background-color: var(--ct-color-scrim);
   }
   .bg-secondary {
-    background-color: var(--df-color-accent);
+    background-color: var(--ct-color-accent);
   }
   .bg-selected {
-    background-color: var(--df-color-selected);
+    background-color: var(--ct-color-selected);
   }
   .bg-surface {
-    background-color: var(--df-color-surface);
+    background-color: var(--ct-color-surface);
   }
   .bg-surface-raised {
-    background-color: var(--df-color-surface-raised);
+    background-color: var(--ct-color-surface-raised);
   }
   .bg-surface-sunken {
-    background-color: var(--df-color-surface-sunken);
+    background-color: var(--ct-color-surface-sunken);
   }
   .p-0 {
     padding: 0px;
   }
   .p-1 {
-    padding: var(--df-spacing);
+    padding: var(--ct-spacing);
   }
   .p-2 {
-    padding: calc(var(--df-spacing) * 2);
+    padding: calc(var(--ct-spacing) * 2);
   }
   .p-3 {
-    padding: calc(var(--df-spacing) * 3);
+    padding: calc(var(--ct-spacing) * 3);
   }
   .p-4 {
-    padding: calc(var(--df-spacing) * 4);
+    padding: calc(var(--ct-spacing) * 4);
   }
   .p-5 {
-    padding: calc(var(--df-spacing) * 5);
+    padding: calc(var(--ct-spacing) * 5);
   }
   .p-6 {
-    padding: calc(var(--df-spacing) * 6);
+    padding: calc(var(--ct-spacing) * 6);
   }
   .p-8 {
-    padding: calc(var(--df-spacing) * 8);
+    padding: calc(var(--ct-spacing) * 8);
   }
   .p-9 {
-    padding: calc(var(--df-spacing) * 9);
+    padding: calc(var(--ct-spacing) * 9);
   }
   .p-12 {
-    padding: calc(var(--df-spacing) * 12);
+    padding: calc(var(--ct-spacing) * 12);
   }
   .p-px {
     padding: 1px;
   }
-  .df-column-section-header {
-    padding-inline: calc(var(--df-spacing) * 2);
-    padding-block: var(--df-spacing);
+  .ct-column-section-header {
+    padding-inline: calc(var(--ct-spacing) * 2);
+    padding-block: var(--ct-spacing);
     font-size: var(--text-lg);
     line-height: var(--tw-leading, var(--text-lg--line-height));
     --tw-font-weight: var(--font-weight-semibold);
     font-weight: var(--font-weight-semibold);
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
-  .df-card-content {
-    padding-inline: calc(var(--df-spacing) * 5);
-    padding-top: calc(var(--df-spacing) * 2);
-    padding-bottom: calc(var(--df-spacing) * 5);
+  .ct-card-content {
+    padding-inline: calc(var(--ct-spacing) * 5);
+    padding-top: calc(var(--ct-spacing) * 2);
+    padding-bottom: calc(var(--ct-spacing) * 5);
   }
-  .df-card-header {
-    padding-inline: calc(var(--df-spacing) * 5);
-    padding-top: calc(var(--df-spacing) * 4);
-    padding-bottom: calc(var(--df-spacing) * 2);
+  .ct-card-header {
+    padding-inline: calc(var(--ct-spacing) * 5);
+    padding-top: calc(var(--ct-spacing) * 4);
+    padding-bottom: calc(var(--ct-spacing) * 2);
   }
   .px-1 {
-    padding-inline: var(--df-spacing);
+    padding-inline: var(--ct-spacing);
   }
   .px-2 {
-    padding-inline: calc(var(--df-spacing) * 2);
+    padding-inline: calc(var(--ct-spacing) * 2);
   }
   .px-3 {
-    padding-inline: calc(var(--df-spacing) * 3);
+    padding-inline: calc(var(--ct-spacing) * 3);
   }
   .px-4 {
-    padding-inline: calc(var(--df-spacing) * 4);
+    padding-inline: calc(var(--ct-spacing) * 4);
   }
   .py-1 {
-    padding-block: var(--df-spacing);
+    padding-block: var(--ct-spacing);
   }
   .py-2 {
-    padding-block: calc(var(--df-spacing) * 2);
+    padding-block: calc(var(--ct-spacing) * 2);
   }
   .py-3 {
-    padding-block: calc(var(--df-spacing) * 3);
+    padding-block: calc(var(--ct-spacing) * 3);
   }
   .py-8 {
-    padding-block: calc(var(--df-spacing) * 8);
+    padding-block: calc(var(--ct-spacing) * 8);
   }
   .pb-1 {
-    padding-bottom: var(--df-spacing);
+    padding-bottom: var(--ct-spacing);
   }
   .pb-4 {
-    padding-bottom: calc(var(--df-spacing) * 4);
+    padding-bottom: calc(var(--ct-spacing) * 4);
   }
   .pb-6 {
-    padding-bottom: calc(var(--df-spacing) * 6);
+    padding-bottom: calc(var(--ct-spacing) * 6);
   }
   .text-center {
     text-align: center;
@@ -1183,38 +1183,38 @@
     font-family: var(--font-mono);
   }
   .font-sans {
-    font-family: var(--df-font-family-sans);
+    font-family: var(--ct-font-family-sans);
   }
-  .df-tile-body {
+  .ct-tile-body {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
     --tw-leading: var(--leading-relaxed);
     line-height: var(--leading-relaxed);
     overflow-wrap: break-word;
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
-  .df-tile-subtitle {
+  .ct-tile-subtitle {
     font-size: var(--text-xs);
     line-height: var(--tw-leading, var(--text-xs--line-height));
     --tw-leading: var(--leading-tight);
     line-height: var(--leading-tight);
     overflow-wrap: break-word;
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-column-count {
+  .ct-column-count {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-column-pagination {
+  .ct-column-pagination {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-column-state {
+  .ct-column-state {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
   .text-2xl {
     font-size: var(--text-2xl);
@@ -1289,29 +1289,29 @@
   .whitespace-pre-wrap {
     white-space: pre-wrap;
   }
-  .df-tile-trailing {
-    color: var(--df-color-text-muted);
+  .ct-tile-trailing {
+    color: var(--ct-color-text-muted);
   }
   .text-card-foreground {
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
   .text-danger {
-    color: var(--df-color-danger);
+    color: var(--ct-color-danger);
   }
   .text-destructive {
-    color: var(--df-color-danger);
+    color: var(--ct-color-danger);
   }
   .text-destructive-foreground {
-    color: var(--df-color-on-danger);
+    color: var(--ct-color-on-danger);
   }
   .text-foreground {
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
   .text-foreground-muted {
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
   .text-foreground-subtle {
-    color: var(--df-color-text-subtle);
+    color: var(--ct-color-text-subtle);
   }
   .text-muted {
     color: var(--scheme-color-surface-variant);
@@ -1320,22 +1320,22 @@
     color: var(--scheme-color-on-surface-variant);
   }
   .text-on-accent-container {
-    color: var(--df-color-on-accent-container);
+    color: var(--ct-color-on-accent-container);
   }
   .text-on-selected {
-    color: var(--df-color-on-selected);
+    color: var(--ct-color-on-selected);
   }
   .text-primary-foreground {
-    color: var(--df-color-on-primary);
+    color: var(--ct-color-on-primary);
   }
   .text-secondary-foreground {
-    color: var(--df-color-on-accent);
+    color: var(--ct-color-on-accent);
   }
   .text-text {
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
   .text-text-muted {
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
   .lowercase {
     text-transform: lowercase;
@@ -1357,7 +1357,7 @@
     text-decoration-line: underline;
   }
   .accent-foreground {
-    accent-color: var(--df-color-text);
+    accent-color: var(--ct-color-text);
   }
   .opacity-80 {
     opacity: 80%;
@@ -1367,7 +1367,7 @@
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-md {
-    --tw-shadow: var(--df-shadow-md);
+    --tw-shadow: var(--ct-shadow-md);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-none {
@@ -1375,11 +1375,11 @@
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-raised {
-    --tw-shadow: var(--df-shadow-raised);
+    --tw-shadow: var(--ct-shadow-raised);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-sm {
-    --tw-shadow: var(--df-shadow-sm);
+    --tw-shadow: var(--ct-shadow-sm);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .ring {
@@ -1390,7 +1390,7 @@
     outline-style: var(--tw-outline-style);
     outline-width: 2px;
     outline-offset: 1px;
-    outline-color: var(--df-color-focus);
+    outline-color: var(--ct-color-focus);
   }
   .outline {
     outline-style: var(--tw-outline-style);
@@ -1421,21 +1421,21 @@
   }
   @media (hover: hover) {
     .group-hover\:w-0\.5:is(:where(.group):hover *) {
-      width: calc(var(--df-spacing) * 0.5);
+      width: calc(var(--ct-spacing) * 0.5);
     }
     .group-hover\:bg-primary:is(:where(.group):hover *) {
-      background-color: var(--df-color-primary);
+      background-color: var(--ct-color-primary);
     }
   }
   .group-data-\[state\=dragging\]\:w-0\.5:is(:where(.group)[data-state="dragging"] *) {
-    width: calc(var(--df-spacing) * 0.5);
+    width: calc(var(--ct-spacing) * 0.5);
   }
   .group-data-\[state\=dragging\]\:bg-primary:is(:where(.group)[data-state="dragging"] *) {
-    background-color: var(--df-color-primary);
+    background-color: var(--ct-color-primary);
   }
   @media (hover: hover) {
     .hover\:bg-surface-sunken:hover {
-      background-color: var(--df-color-surface-sunken);
+      background-color: var(--ct-color-surface-sunken);
     }
   }
   .focus-visible\:outline:focus-visible {
@@ -1447,7 +1447,7 @@
     outline-width: 2px;
   }
   .focus-visible\:outline-focus:focus-visible {
-    outline-color: var(--df-color-focus);
+    outline-color: var(--ct-color-focus);
   }
   .disabled\:cursor-default:disabled {
     cursor: default;
@@ -1459,19 +1459,19 @@
     opacity: 50%;
   }
   .data-\[state\=active\]\:bg-selected[data-state="active"] {
-    background-color: var(--df-color-selected);
+    background-color: var(--ct-color-selected);
   }
   .data-\[state\=active\]\:text-on-selected[data-state="active"] {
-    color: var(--df-color-on-selected);
+    color: var(--ct-color-on-selected);
   }
   .data-\[state\=bare\]\:pl-4[data-state="bare"] {
-    padding-left: calc(var(--df-spacing) * 4);
+    padding-left: calc(var(--ct-spacing) * 4);
   }
   .data-\[state\=current\]\:bg-selected[data-state="current"] {
-    background-color: var(--df-color-selected);
+    background-color: var(--ct-color-selected);
   }
   .data-\[state\=current\]\:text-on-selected[data-state="current"] {
-    color: var(--df-color-on-selected);
+    color: var(--ct-color-on-selected);
   }
   @media (prefers-reduced-motion: reduce) {
     .motion-reduce\:animate-none {
@@ -1480,7 +1480,7 @@
   }
   @media (width >= 64rem) {
     .lg\:w-96 {
-      width: calc(var(--df-spacing) * 96);
+      width: calc(var(--ct-spacing) * 96);
     }
     .lg\:shrink-0 {
       flex-shrink: 0;
@@ -1489,7 +1489,7 @@
       flex-direction: row;
     }
     .lg\:p-12 {
-      padding: calc(var(--df-spacing) * 12);
+      padding: calc(var(--ct-spacing) * 12);
     }
   }
 }
@@ -1801,94 +1801,94 @@
 }
 @layer theme {
   :root {
-    --df-dimension-spacing-0: 0rem;
-    --df-dimension-spacing-1: 0.25rem;
-    --df-dimension-spacing-2: 0.5rem;
-    --df-dimension-spacing-3: 0.75rem;
-    --df-dimension-spacing-4: 1rem;
-    --df-dimension-spacing-6: 1.5rem;
-    --df-dimension-spacing-8: 2rem;
-    --df-dimension-spacing-12: 3rem;
-    --df-dimension-radius-sm: 0.25rem;
-    --df-dimension-radius-md: 0.5rem;
-    --df-dimension-radius-lg: 0.75rem;
-    --df-dimension-radius-xl: 1rem;
-    --df-dimension-radius-pill: 999px;
-    --df-dimension-border-hairline: 1px;
-    --df-dimension-border-thin: 1px;
-    --df-dimension-border-thick: 2px;
-    --df-color-neutral-0: #ffffff;
-    --df-color-neutral-50: #fafafc;
-    --df-color-neutral-100: #f0f0f5;
-    --df-color-neutral-600: #5c5c6b;
-    --df-color-neutral-900: #1f1f29;
-    --df-color-neutral-1000: #000000;
-    --df-color-overlay-black-32: rgba(0, 0, 0, 0.32);
-    --df-color-blue-100: #dbe8ff;
-    --df-color-blue-600: #2952c7;
-    --df-color-blue-900: #0f1f61;
-    --df-color-red-100: #ffe0e0;
-    --df-color-red-600: #bd1f1f;
-    --df-font-family-sans: system-ui, sans-serif;
-    --df-font-weight-regular: 400;
-    --df-font-weight-medium: 500;
-    --df-font-weight-semibold: 600;
-    --df-font-weight-bold: 700;
-    --df-shadow-none: none;
-    --df-shadow-sm: 0px 1px 2px 0px #000000;
-    --df-shadow-md: 0px 4px 12px 0px #000000;
-    --df-shadow-raised: 0px 8px 24px 0px #000000;
-    --df-motion-duration-short: 150ms;
-    --df-motion-duration-medium: 250ms;
-    --df-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
-    --df-color-canvas: #fafafc;
-    --df-color-surface: #ffffff;
-    --df-color-surface-raised: #ffffff;
-    --df-color-surface-sunken: #f0f0f5;
-    --df-color-text: #1f1f29;
-    --df-color-text-muted: #5c5c6b;
-    --df-color-text-subtle: #5c5c6b;
-    --df-color-border: #5c5c6b;
-    --df-color-focus: #2952c7;
-    --df-color-primary: #2952c7;
-    --df-color-on-primary: #ffffff;
-    --df-color-accent: #2952c7;
-    --df-color-on-accent: #ffffff;
-    --df-color-accent-container: #dbe8ff;
-    --df-color-on-accent-container: #0f1f61;
-    --df-color-selected: #dbe8ff;
-    --df-color-on-selected: #0f1f61;
-    --df-color-scrim: rgba(0, 0, 0, 0.32);
-    --df-color-danger: #bd1f1f;
-    --df-color-on-danger: #ffffff;
-    --df-dimension-spacing: 0.25rem;
-    --df-spacing: 0.25rem;
-    --df-radius-sm: 0.25rem;
-    --df-radius-md: 0.5rem;
-    --df-radius-lg: 0.75rem;
-    --df-radius-xl: 1rem;
-    --df-radius-pill: 999px;
-    --df-dimension-border-width-hairline: 1px;
-    --df-border-width-hairline: 1px;
-    --df-dimension-border-width-thin: 1px;
-    --df-border-width-thin: 1px;
-    --df-dimension-border-width-thick: 2px;
-    --df-border-width-thick: 2px;
-    --df-elevation-none: none;
-    --df-elevation-sm: 0px 1px 2px 0px #000000;
-    --df-elevation-md: 0px 4px 12px 0px #000000;
-    --df-elevation-raised: 0px 8px 24px 0px #000000;
-    --df-layer-content: 0;
-    --df-layer-raised: 10;
-    --df-layer-app-bar: 20;
-    --df-layer-drawer: 30;
-    --df-layer-sheet: 40;
-    --df-layer-toast: 50;
-    --df-layer-gesture: 60;
-    --df-motion-duration-enter: 250ms;
-    --df-motion-duration-fade: 150ms;
-    --df-motion-easing-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
-    --df-font-family: var(--df-font-family-sans);
+    --ct-dimension-spacing-0: 0rem;
+    --ct-dimension-spacing-1: 0.25rem;
+    --ct-dimension-spacing-2: 0.5rem;
+    --ct-dimension-spacing-3: 0.75rem;
+    --ct-dimension-spacing-4: 1rem;
+    --ct-dimension-spacing-6: 1.5rem;
+    --ct-dimension-spacing-8: 2rem;
+    --ct-dimension-spacing-12: 3rem;
+    --ct-dimension-radius-sm: 0.25rem;
+    --ct-dimension-radius-md: 0.5rem;
+    --ct-dimension-radius-lg: 0.75rem;
+    --ct-dimension-radius-xl: 1rem;
+    --ct-dimension-radius-pill: 999px;
+    --ct-dimension-border-hairline: 1px;
+    --ct-dimension-border-thin: 1px;
+    --ct-dimension-border-thick: 2px;
+    --ct-color-neutral-0: #ffffff;
+    --ct-color-neutral-50: #fafafc;
+    --ct-color-neutral-100: #f0f0f5;
+    --ct-color-neutral-600: #5c5c6b;
+    --ct-color-neutral-900: #1f1f29;
+    --ct-color-neutral-1000: #000000;
+    --ct-color-overlay-black-32: rgba(0, 0, 0, 0.32);
+    --ct-color-blue-100: #dbe8ff;
+    --ct-color-blue-600: #2952c7;
+    --ct-color-blue-900: #0f1f61;
+    --ct-color-red-100: #ffe0e0;
+    --ct-color-red-600: #bd1f1f;
+    --ct-font-family-sans: system-ui, sans-serif;
+    --ct-font-weight-regular: 400;
+    --ct-font-weight-medium: 500;
+    --ct-font-weight-semibold: 600;
+    --ct-font-weight-bold: 700;
+    --ct-shadow-none: none;
+    --ct-shadow-sm: 0px 1px 2px 0px #000000;
+    --ct-shadow-md: 0px 4px 12px 0px #000000;
+    --ct-shadow-raised: 0px 8px 24px 0px #000000;
+    --ct-motion-duration-short: 150ms;
+    --ct-motion-duration-medium: 250ms;
+    --ct-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+    --ct-color-canvas: #fafafc;
+    --ct-color-surface: #ffffff;
+    --ct-color-surface-raised: #ffffff;
+    --ct-color-surface-sunken: #f0f0f5;
+    --ct-color-text: #1f1f29;
+    --ct-color-text-muted: #5c5c6b;
+    --ct-color-text-subtle: #5c5c6b;
+    --ct-color-border: #5c5c6b;
+    --ct-color-focus: #2952c7;
+    --ct-color-primary: #2952c7;
+    --ct-color-on-primary: #ffffff;
+    --ct-color-accent: #2952c7;
+    --ct-color-on-accent: #ffffff;
+    --ct-color-accent-container: #dbe8ff;
+    --ct-color-on-accent-container: #0f1f61;
+    --ct-color-selected: #dbe8ff;
+    --ct-color-on-selected: #0f1f61;
+    --ct-color-scrim: rgba(0, 0, 0, 0.32);
+    --ct-color-danger: #bd1f1f;
+    --ct-color-on-danger: #ffffff;
+    --ct-dimension-spacing: 0.25rem;
+    --ct-spacing: 0.25rem;
+    --ct-radius-sm: 0.25rem;
+    --ct-radius-md: 0.5rem;
+    --ct-radius-lg: 0.75rem;
+    --ct-radius-xl: 1rem;
+    --ct-radius-pill: 999px;
+    --ct-dimension-border-width-hairline: 1px;
+    --ct-border-width-hairline: 1px;
+    --ct-dimension-border-width-thin: 1px;
+    --ct-border-width-thin: 1px;
+    --ct-dimension-border-width-thick: 2px;
+    --ct-border-width-thick: 2px;
+    --ct-elevation-none: none;
+    --ct-elevation-sm: 0px 1px 2px 0px #000000;
+    --ct-elevation-md: 0px 4px 12px 0px #000000;
+    --ct-elevation-raised: 0px 8px 24px 0px #000000;
+    --ct-layer-content: 0;
+    --ct-layer-raised: 10;
+    --ct-layer-app-bar: 20;
+    --ct-layer-drawer: 30;
+    --ct-layer-sheet: 40;
+    --ct-layer-toast: 50;
+    --ct-layer-gesture: 60;
+    --ct-motion-duration-enter: 250ms;
+    --ct-motion-duration-fade: 150ms;
+    --ct-motion-easing-enter: cubic-bezier(0.05, 0.7, 0.1, 1);
+    --ct-font-family: var(--ct-font-family-sans);
   }
 }
 @layer base {
@@ -1903,52 +1903,52 @@
   }
 }
 @layer theme {
-  .df-theme {
-    --df-color-canvas: var(--scheme-color-background);
-    --df-color-surface: var(--scheme-color-surface-container-low);
-    --df-color-surface-raised: var(--scheme-color-surface-container);
-    --df-color-surface-sunken: var(--scheme-color-surface-dim);
-    --df-color-text: var(--scheme-color-on-background);
-    --df-color-text-muted: var(--scheme-color-on-surface-variant);
-    --df-color-text-subtle: var(--scheme-color-outline);
-    --df-color-border: var(--scheme-color-outline-variant);
-    --df-color-focus: var(--scheme-color-primary);
-    --df-color-primary: var(--scheme-color-primary);
-    --df-color-on-primary: var(--scheme-color-on-primary);
-    --df-color-accent: var(--scheme-color-secondary);
-    --df-color-on-accent: var(--scheme-color-on-secondary);
-    --df-color-accent-container: var(--scheme-color-secondary-container);
-    --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
-    --df-color-selected: var(--scheme-color-secondary-container);
-    --df-color-on-selected: var(--scheme-color-on-secondary-container);
-    --df-color-danger: var(--scheme-color-error);
-    --df-color-on-danger: var(--scheme-color-on-error);
-    --df-color-success: var(--scheme-color-tertiary);
-    --df-color-warning: var(--scheme-color-secondary);
-    --color-foreground-muted: var(--df-color-text-muted);
-    --color-foreground-subtle: var(--df-color-text-subtle);
-    --color-surface-raised: var(--df-color-surface-raised);
-    --color-secondary: var(--df-color-accent);
-    --color-secondary-foreground: var(--df-color-on-accent);
+  .ct-theme {
+    --ct-color-canvas: var(--scheme-color-background);
+    --ct-color-surface: var(--scheme-color-surface-container-low);
+    --ct-color-surface-raised: var(--scheme-color-surface-container);
+    --ct-color-surface-sunken: var(--scheme-color-surface-dim);
+    --ct-color-text: var(--scheme-color-on-background);
+    --ct-color-text-muted: var(--scheme-color-on-surface-variant);
+    --ct-color-text-subtle: var(--scheme-color-outline);
+    --ct-color-border: var(--scheme-color-outline-variant);
+    --ct-color-focus: var(--scheme-color-primary);
+    --ct-color-primary: var(--scheme-color-primary);
+    --ct-color-on-primary: var(--scheme-color-on-primary);
+    --ct-color-accent: var(--scheme-color-secondary);
+    --ct-color-on-accent: var(--scheme-color-on-secondary);
+    --ct-color-accent-container: var(--scheme-color-secondary-container);
+    --ct-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --ct-color-selected: var(--scheme-color-secondary-container);
+    --ct-color-on-selected: var(--scheme-color-on-secondary-container);
+    --ct-color-danger: var(--scheme-color-error);
+    --ct-color-on-danger: var(--scheme-color-on-error);
+    --ct-color-success: var(--scheme-color-tertiary);
+    --ct-color-warning: var(--scheme-color-secondary);
+    --color-foreground-muted: var(--ct-color-text-muted);
+    --color-foreground-subtle: var(--ct-color-text-subtle);
+    --color-surface-raised: var(--ct-color-surface-raised);
+    --color-secondary: var(--ct-color-accent);
+    --color-secondary-foreground: var(--ct-color-on-accent);
   }
 }
 @layer components {
   .tile-line-group:hover, .tile-line-group:focus-within {
-    background-color: var(--df-color-text);
+    background-color: var(--ct-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 5%, transparent);
+      background-color: color-mix(in oklab, var(--ct-color-text) 5%, transparent);
     }
   }
   .tile-line-group.surface-1:hover, .tile-widget-group.surface-1:hover {
-    background-color: var(--df-color-primary);
+    background-color: var(--ct-color-primary);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-primary) 17%, transparent);
+      background-color: color-mix(in oklab, var(--ct-color-primary) 17%, transparent);
     }
   }
   .tile-line-group.surface-2:hover, .tile-widget-group.surface-2:hover {
-    background-color: var(--df-color-accent);
+    background-color: var(--ct-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-accent) 17%, transparent);
+      background-color: color-mix(in oklab, var(--ct-color-accent) 17%, transparent);
     }
   }
   .tile-line-group.surface-3:hover, .tile-widget-group.surface-3:hover {
@@ -1961,21 +1961,21 @@
     background-clip: padding-box;
   }
   .path-back:hover, .path-back:focus-visible, .column-arrow:hover:not(:disabled), .column-arrow:focus-visible {
-    background-color: var(--df-color-text);
+    background-color: var(--ct-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 10%, transparent);
+      background-color: color-mix(in oklab, var(--ct-color-text) 10%, transparent);
     }
-    color: var(--df-color-text);
+    color: var(--ct-color-text);
   }
   .column-dot[aria-current="true"], .column-dot[data-selected="true"], .column-dot[data-window-position="leading"], .column-dot[data-window-position="middle"], .column-dot[data-window-position="trailing"], .column-dot[data-window-position="single"] {
-    height: calc(var(--df-spacing) * 2.5);
-    width: calc(var(--df-spacing) * 4);
-    --tw-shadow: 0 1px 3px 0 var(--df-color-primary), 0 1px 2px -1px var(--df-color-primary);
+    height: calc(var(--ct-spacing) * 2.5);
+    width: calc(var(--ct-spacing) * 4);
+    --tw-shadow: 0 1px 3px 0 var(--ct-color-primary), 0 1px 2px -1px var(--ct-color-primary);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     @supports (color: color-mix(in lab, red, red)) {
-      --tw-shadow: 0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent),
+      --tw-shadow: 0 1px 3px 0 color-mix(in srgb, var(--ct-color-primary) 50%, transparent),
       0 1px 2px -1px
-      color-mix(in srgb, var(--df-color-primary) 50%, transparent);
+      color-mix(in srgb, var(--ct-color-primary) 50%, transparent);
     }
   }
   .column-dot[data-window-position="leading"] {
@@ -1997,7 +1997,7 @@
     border-radius: calc(infinity * 1px);
   }
   .column-dot[data-window-position="inactive"] {
-    background-color: var(--df-color-text-subtle);
+    background-color: var(--ct-color-text-subtle);
   }
   .column-dot[aria-current="true"], .column-dot[data-selected="true"] {
     background-color: var(--scheme-color-secondary) !important;
@@ -2010,130 +2010,130 @@
   }
 }
 @layer components {
-  .df-button:hover:not(:disabled) {
+  .ct-button:hover:not(:disabled) {
     filter: brightness(1.08);
   }
-  .df-button:focus-visible, .df-tab-trigger:focus-visible {
+  .ct-button:focus-visible, .ct-tab-trigger:focus-visible {
     outline-style: var(--tw-outline-style);
     outline-width: 2px;
     outline-offset: 1px;
-    outline-color: var(--df-color-focus);
+    outline-color: var(--ct-color-focus);
   }
-  .df-button:disabled {
+  .ct-button:disabled {
     cursor: not-allowed;
     opacity: 40%;
   }
-  .df-tab-trigger:hover {
-    background-color: var(--df-color-surface-sunken);
-    color: var(--df-color-text);
+  .ct-tab-trigger:hover {
+    background-color: var(--ct-color-surface-sunken);
+    color: var(--ct-color-text);
   }
-  .df-tabs-sticky {
+  .ct-tabs-sticky {
     flex-direction: row;
   }
-  .df-tabs-sticky .df-tab-trigger {
+  .ct-tabs-sticky .ct-tab-trigger {
     text-decoration-line: none;
   }
-  .df-section-dot:hover .df-section-dot-mark, .df-section-dot:focus-visible .df-section-dot-mark {
-    background-color: var(--df-color-primary);
+  .ct-section-dot:hover .ct-section-dot-mark, .ct-section-dot:focus-visible .ct-section-dot-mark {
+    background-color: var(--ct-color-primary);
   }
-  .df-section-dot:focus-visible {
+  .ct-section-dot:focus-visible {
     outline-style: var(--tw-outline-style);
     outline-width: 2px;
     outline-offset: 2px;
-    outline-color: var(--df-color-focus);
+    outline-color: var(--ct-color-focus);
   }
-  .df-gallery-media img {
+  .ct-gallery-media img {
     display: block;
     width: 100%;
     height: 100%;
     object-fit: cover;
   }
-  .df-gallery-tile:hover {
+  .ct-gallery-tile:hover {
     --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-    --tw-ring-color: var(--df-color-primary);
+    --tw-ring-color: var(--ct-color-primary);
   }
-  .df-column-rack[data-height="bounded"] .df-column {
+  .ct-column-rack[data-height="bounded"] .ct-column {
     max-height: calc(100dvh - calc(var(--spacing) * 12));
     min-height: 0px;
   }
-  .df-column-rack[data-height="bounded"] .df-column-scroll {
+  .ct-column-rack[data-height="bounded"] .ct-column-scroll {
     min-height: 0px;
     flex: 1;
     overflow-y: auto;
   }
-  .df-column-state-error {
-    color: var(--df-color-danger);
+  .ct-column-state-error {
+    color: var(--ct-color-danger);
   }
-  .df-tile[data-kind="app"], .df-tile[data-kind="group"] {
+  .ct-tile[data-kind="app"], .ct-tile[data-kind="group"] {
     cursor: pointer;
   }
-  .df-tile-line {
-    border-radius: var(--df-radius-md);
+  .ct-tile-line {
+    border-radius: var(--ct-radius-md);
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
   }
-  .df-tile-line:hover {
+  .ct-tile-line:hover {
     background-color: var(--scheme-color-surface-container-high);
   }
-  .df-tile-inline-parent[data-expanded="true"][data-depth="0"] {
-    border-radius: var(--df-radius-md);
+  .ct-tile-inline-parent[data-expanded="true"][data-depth="0"] {
+    border-radius: var(--ct-radius-md);
     background-color: var(--scheme-color-surface-container-low);
   }
-  .df-tile-inline-parent[data-expanded="true"][data-depth="1"] {
-    border-radius: var(--df-radius-md);
+  .ct-tile-inline-parent[data-expanded="true"][data-depth="1"] {
+    border-radius: var(--ct-radius-md);
     background-color: var(--scheme-color-surface-container);
   }
-  .df-tile-inline-parent[data-expanded="true"][data-depth="2"] {
-    border-radius: var(--df-radius-md);
+  .ct-tile-inline-parent[data-expanded="true"][data-depth="2"] {
+    border-radius: var(--ct-radius-md);
     background-color: var(--scheme-color-surface-container-high);
   }
-  .df-tile-inline-parent[data-expanded="true"][data-depth="3"] {
-    border-radius: var(--df-radius-md);
+  .ct-tile-inline-parent[data-expanded="true"][data-depth="3"] {
+    border-radius: var(--ct-radius-md);
     background-color: var(
     --scheme-color-surface-container-highest
   );
   }
-  .df-inline-children .df-column-section-header {
-    padding-inline: calc(var(--df-spacing) * 2);
+  .ct-inline-children .ct-column-section-header {
+    padding-inline: calc(var(--ct-spacing) * 2);
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
     --tw-font-weight: var(--font-weight-medium);
     font-weight: var(--font-weight-medium);
-    color: var(--df-color-text-muted);
+    color: var(--ct-color-text-muted);
   }
-  .df-tile-body + .df-tile-body {
-    margin-top: calc(var(--df-spacing) * 2);
+  .ct-tile-body + .ct-tile-body {
+    margin-top: calc(var(--ct-spacing) * 2);
   }
-  .df-widget {
+  .ct-widget {
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
   }
-  .df-widget:hover {
+  .ct-widget:hover {
     background-color: var(--scheme-color-surface-container-high);
   }
-  .df-tile[data-kind="app"]:hover .df-tile-title, .df-tile[data-kind="group"]:hover .df-tile-title {
-    color: var(--df-color-primary);
+  .ct-tile[data-kind="app"]:hover .ct-tile-title, .ct-tile[data-kind="group"]:hover .ct-tile-title {
+    color: var(--ct-color-primary);
   }
-  .df-tile:focus-visible {
+  .ct-tile:focus-visible {
     outline-style: var(--tw-outline-style);
     outline-width: 2px;
     outline-offset: 1px;
-    outline-color: var(--df-color-focus);
+    outline-color: var(--ct-color-focus);
   }
-  .df-widget[data-content="media"] .df-widget-leading {
-    color: var(--df-color-primary);
+  .ct-widget[data-content="media"] .ct-widget-leading {
+    color: var(--ct-color-primary);
   }
-  .df-widget[data-content="sticky-note"] .df-widget-leading {
-    color: var(--df-color-accent);
+  .ct-widget[data-content="sticky-note"] .ct-widget-leading {
+    color: var(--ct-color-accent);
   }
-  .df-column[data-state="loading"] .df-column-list, .df-column[data-state="stale"] .df-column-list {
+  .ct-column[data-state="loading"] .ct-column-list, .ct-column[data-state="stale"] .ct-column-list {
     opacity: 40%;
   }
 }

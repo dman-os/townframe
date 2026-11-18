@@ -431,12 +431,12 @@ const runtimeAliases: Record<string, string> = {
 };
 
 function cssName(path: string): string {
-  return `--df-${path.replaceAll(".", "-")}`;
+  return `--ct-${path.replaceAll(".", "-")}`;
 }
 
 function runtimeName(path: string): string | undefined {
   const alias = runtimeAliases[path];
-  return alias ? `--df-${alias}` : undefined;
+  return alias ? `--ct-${alias}` : undefined;
 }
 
 function tailwindName(path: string, type: TokenType): string | undefined {
@@ -514,7 +514,7 @@ const generated = [
   "@layer theme {",
   "  :root {",
   ...declarations,
-  "    --df-font-family: var(--df-font-family-sans);",
+  "    --ct-font-family: var(--ct-font-family-sans);",
   "  }",
   "}",
   "",
@@ -522,7 +522,7 @@ const generated = [
   "@theme inline {",
   ...tailwindAliases,
   ...compatibilityAliases,
-  "  --font-sans: var(--df-font-family-sans);",
+  "  --font-sans: var(--ct-font-family-sans);",
   "}",
   "",
 ].join("\n");
@@ -661,7 +661,7 @@ function selfTest(): void {
         semantic.path,
       ),
   );
-  if (!generated.includes("--df-font-family: var(--df-font-family-sans);")) {
+  if (!generated.includes("--ct-font-family: var(--ct-font-family-sans);")) {
     fail("self-test generated legacy font alias is missing");
   }
   console.log("design token self-tests passed");
