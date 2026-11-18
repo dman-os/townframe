@@ -8,8 +8,7 @@ Usage: day node [OPTIONS] <COMMAND>
 
 Commands:
   init    Set up a new node directory with a fresh identity
-  run     Serve the node on its socket in the foreground until SIGTERM or Ctrl-C
-  start   Start a background daemon and return once it is serving
+  start   Serve the node on its socket in the foreground until SIGTERM or Ctrl-C
   stop    Stop the background daemon and return once it has exited
   status  Show the node's id, how it was reached, and what it runs (exit status 3 when no daemon is serving it)
   help    Print this message or the help of the given subcommand(s)

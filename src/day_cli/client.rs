@@ -48,7 +48,7 @@ pub const CONNECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
-    /// The node is held by `day node run`/`start`, with the peers service its `node.json` asks for.
+    /// The node is held by `day node start`, with the peers service its `node.json` asks for.
     #[serde(rename = "daemon")]
     Serving,
     /// The node is held by a command (this one, or another running at the same time), which

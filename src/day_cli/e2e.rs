@@ -435,7 +435,7 @@ mod library {
         connect(&dir).await.unwrap().stop().await.unwrap();
     }
 
-    /// `node run` against a node a command has open waits for the command, instead of refusing.
+    /// `node start` against a node a command has open waits for the command, instead of refusing.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_daemon_waits_for_a_command_that_has_the_node_open() {
         let (_tmp, dir) = new_node().await;
@@ -934,7 +934,7 @@ mod blackbox {
                 + &String::from_utf8_lossy(&output.stderr)
         };
         assert!(day(&["node", "init"]).status.success());
-        let started = day(&["node", "start"]);
+        let started = day(&["node", "start", "--bg"]);
         assert!(started.status.success(), "{}", text(&started));
         // The lock records the holder's pid on its first line.
         let pid: u32 = std::fs::read_to_string(node.join("node.lock"))
@@ -985,7 +985,7 @@ mod blackbox {
         assert!(!socket.exists());
 
         // And a server can start over a stale socket too.
-        assert!(day(&["node", "start"]).status.success());
+        assert!(day(&["node", "start", "--bg"]).status.success());
         let lock_again = std::fs::read_to_string(node.join("node.lock")).unwrap();
         assert_ne!(
             lock_again.lines().next().unwrap().parse::<u32>().unwrap(),

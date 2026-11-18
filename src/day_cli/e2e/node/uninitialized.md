@@ -12,7 +12,7 @@ $ day exec org.example.nothing.here
 ? 1
 [..]node not initialized at resolved path; run `day node init`[..]
 
-$ day node start
+$ day node start --bg
 ? 1
 [..]node not initialized at resolved path; run `day node init`[..]
 

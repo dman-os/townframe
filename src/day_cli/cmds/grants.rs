@@ -30,7 +30,7 @@ pub enum GrantsCommands {
     /// List the requests waiting for an answer
     ///
     /// One per line: its id, the cartridge, what it asks and when. Requests live in the running
-    /// node's memory, so this needs the node running (`day node run`).
+    /// node's memory, so this needs the node running (`day node start`).
     Pending {
         /// Print the node's raw answer as JSON
         #[arg(long)]
@@ -107,7 +107,7 @@ fn require_running_node(client: &NodeClient) -> Res<()> {
     eyre::ensure!(
         client.mode() == Mode::Serving,
         "no node is running here, and grant requests live in a running node's memory: start it \
-         with `day node run`"
+         with `day node start`"
     );
     Ok(())
 }

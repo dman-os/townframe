@@ -10,7 +10,7 @@ initialized node [..] at [..]/node
 
 $ sh -c 'sed -i "s/\"loopbackOnly\": false/\"loopbackOnly\": true/" "$DAY_NODE/node.json"'
 
-$ day node start
+$ day node start --bg
 daemon started (pid [..]) listening on [..]/run/day/[..].sock
 
 $ day node status

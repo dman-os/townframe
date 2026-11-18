@@ -134,7 +134,7 @@ fn try_static_cli() -> Res<StaticCliResult> {
     let owns_signals = matches!(
         cli.command,
         StaticCommands::Node {
-            command: cmds::node::NodeCommands::Run
+            command: cmds::node::NodeCommands::Start { bg: false }
         }
     );
     lazy::rt()
