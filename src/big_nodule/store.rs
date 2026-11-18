@@ -4,7 +4,7 @@
 //! Portable desired configuration (the `CartridgeInstall` pins in the node's config drawer
 //! document, and the settings and grants in each cartridge's config document) lives in the
 //! documents; SQLite stores only the id of the shared config drawer this node created, the host's `(cartridge_id, actor_uuid)`
-//! identity binding, the `(cartridge_id, drawer_id) -> access` grants this service has applied, and the
+//! identity binding, the `(cartridge_id, drawer_id) -> access` grants this service has applied, the `(drawer_id, cartridge_id)` holds of the service's own actor on drawers it was granted or created for a cartridge, and the
 //! `cartridge_id -> (scope, capability)` dispatch capability minted from each nodule's operation grants,
 //! the `(cartridge_id, init key) -> revision` a [`Once`](big_nodule_core::RunMode::Once)
 //! initializer last succeeded at on this node, and the `(cartridge_id, binding) -> provider` each
@@ -54,6 +54,24 @@ pub(crate) struct AppliedSettingsRow {
     pub(crate) doc_id: DocId,
     pub(crate) kinds: big_cabinet_core::doc::DatumKinds,
     pub(crate) capability_id: CapId,
+}
+
+/// How the service's actor came to hold a drawer for a cartridge: a person's drawer a grant handed
+/// it, which the service gives back when no grant needs it, or one the cartridge's routine had it
+/// create, which it owns for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DrawerOrigin {
+    Granted,
+    Created,
+}
+
+impl DrawerOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Created => "created",
+        }
+    }
 }
 
 fn storage(error: impl std::fmt::Display) -> NodulesError {
@@ -497,5 +515,74 @@ pub(crate) async fn upsert_config_doc(
     sqlite::upsert_config_doc(&transaction, cartridge_id.to_string(), doc_id.to_string())
         .await
         .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+/// The drawers the service's actor holds durably, each for the cartridge whose grant or creation
+/// it is, with how it came to.
+pub(crate) async fn service_drawers(
+    database: &Database,
+) -> Result<BTreeMap<(DrawerId, CartridgeId), DrawerOrigin>, NodulesError> {
+    let transaction = database.begin_read().await.map_err(storage)?;
+    sqlite::service_drawers(&transaction)
+        .await
+        .map_err(storage)?
+        .into_iter()
+        .map(|row| {
+            let drawer_id: DrawerId = row.drawer_id.parse().map_err(|error| {
+                storage(format!(
+                    "service drawer `{}` is invalid: {error}",
+                    row.drawer_id
+                ))
+            })?;
+            let cartridge_id: CartridgeId = row.cartridge_id.parse().map_err(|error| {
+                storage(format!(
+                    "service drawer cartridge_id `{}` is invalid: {error}",
+                    row.cartridge_id
+                ))
+            })?;
+            let origin = match row.origin.as_str() {
+                "granted" => DrawerOrigin::Granted,
+                "created" => DrawerOrigin::Created,
+                other => return Err(storage(format!("service drawer origin `{other}`"))),
+            };
+            Ok(((drawer_id, cartridge_id), origin))
+        })
+        .collect()
+}
+
+/// Records that the service's actor holds `drawer_id` for `cartridge_id`. A pair recorded as
+/// `Created` stays so however it is recorded afterwards: ownership is not a hold anyone gives back.
+pub(crate) async fn upsert_service_drawer(
+    database: &Database,
+    drawer_id: &DrawerId,
+    cartridge_id: &CartridgeId,
+    origin: DrawerOrigin,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::upsert_service_drawer(
+        &transaction,
+        drawer_id.to_string(),
+        cartridge_id.to_string(),
+        origin.as_str().to_owned(),
+    )
+    .await
+    .map_err(storage)?;
+    transaction.commit().await.map_err(storage)
+}
+
+pub(crate) async fn delete_service_drawer(
+    database: &Database,
+    drawer_id: &DrawerId,
+    cartridge_id: &CartridgeId,
+) -> Result<(), NodulesError> {
+    let transaction = database.begin_write().await.map_err(storage)?;
+    sqlite::delete_service_drawer(
+        &transaction,
+        drawer_id.to_string(),
+        cartridge_id.to_string(),
+    )
+    .await
+    .map_err(storage)?;
     transaction.commit().await.map_err(storage)
 }
