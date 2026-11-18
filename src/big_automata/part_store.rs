@@ -219,8 +219,16 @@ pub struct ObjState {
 /// A part as a principal sees it from a cursor: what a peer decides its sync strategy on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PartSummary {
+    /// The rev of the part's latest member row. The cursor strat resumes from it, and a bucket
+    /// walk hands over to the cursor strat at it: the walk reads state no older than this
+    /// summary, so replaying from here may repeat rows but never skips one. Access rows do not
+    /// move it: a peer must not learn when other principals' access changed.
+    pub latest_cursor: Rev,
     /// The part's live members.
     pub member_count: u64,
+    /// The deepest bucket level the store keeps summaries for; the asker picks its working
+    /// level from this and `member_count`.
+    pub deepest_bucket_level: BuckLevel,
     pub dirty: PartDirtyCount,
 }
 

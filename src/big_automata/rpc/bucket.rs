@@ -95,6 +95,4 @@ impl BucketObjPageEntry {
 pub enum LeafBucketsError {
     /// The part is unknown, or the requester may not read it: both answer alike.
     UnknownPart,
-    /// Bucket level too shallow {buck_id:?}
-    ShallowBucket { buck_id: BuckId },
 }

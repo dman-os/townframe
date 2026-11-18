@@ -1023,8 +1023,9 @@ pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B
 }
 
 /// A part's summary counts its live members and its log rows past the cursor: member rows live
-/// or removed, and the asking principal's own access row. A principal that may not read the
-/// part gets no summary.
+/// or removed, and the asking principal's own access row. Its latest cursor is the latest
+/// member row's rev, which another principal's grant does not move. A principal that may not
+/// read the part gets no summary.
 pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     harness
@@ -1034,6 +1035,7 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     harness
         .commit(vec![remove(&[(1, 0)]), revoke(&[(0, 1)])])
         .await?;
+    harness.commit(vec![grant(&[(0, 2)])]).await?;
     let summaries = |principal_index| {
         let store = harness.store.clone();
         async move {
@@ -1045,7 +1047,9 @@ pub async fn dirty_count_counts_log_rows<B: Backend>(backend: &B) -> Res<()> {
     };
     let summary = |member_changes, access_changes| {
         Some(crate::part_store::PartSummary {
+            latest_cursor: 3,
             member_count: 1,
+            deepest_bucket_level: BuckId::MAX_LEVEL,
             dirty: crate::part_store::PartDirtyCount {
                 member_changes,
                 access_changes,

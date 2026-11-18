@@ -166,7 +166,9 @@ impl State {
             .get(&access_key(part, principal))
             .map_or(0, |(rev, _)| u64::from(rev > since));
         PartSummary {
+            latest_cursor: self.parts.get(part).map_or(0, |row| row.latest_cursor),
             member_count: self.member_count(part),
+            deepest_bucket_level: BuckId::MAX_LEVEL,
             dirty: PartDirtyCount {
                 member_changes,
                 access_changes,

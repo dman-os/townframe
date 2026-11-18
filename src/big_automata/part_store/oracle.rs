@@ -418,7 +418,13 @@ impl PartOracle {
             principal: principal.clone(),
         };
         self.permits(principal, part).then(|| PartSummary {
+            latest_cursor: self
+                .member_rows(part)
+                .map(|(_, rev, _)| rev)
+                .max()
+                .unwrap_or(0),
             member_count: self.member_count(part),
+            deepest_bucket_level: BuckId::MAX_LEVEL,
             dirty: PartDirtyCount {
                 member_changes: self
                     .member_rows(part)

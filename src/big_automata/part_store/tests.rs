@@ -277,7 +277,9 @@ fn the_local_form_drives_the_memory_part_store() -> Res<()> {
             &[(part.clone(), 0)]
         ))?,
         vec![Some(PartSummary {
+            latest_cursor: 1,
             member_count: 1,
+            deepest_bucket_level: BuckId::MAX_LEVEL,
             dirty: PartDirtyCount {
                 member_changes: 1,
                 access_changes: 1,

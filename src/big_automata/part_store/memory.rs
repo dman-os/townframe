@@ -58,7 +58,8 @@ strike! {
         parts: BTreeMap<PartKey,
             #[derive(Default)]
             struct PartRow {
-                /// The rev of the part's latest log row (member or access); 0 for none.
+                /// The rev of the part's latest member row; 0 for none. Access rows do not move
+                /// it (see `PartSummary::latest_cursor`).
                 latest_cursor: Rev,
             }
         >,
@@ -186,18 +187,19 @@ impl State {
         }
     }
 
-    /// Write one log row at `rev` and move its part's cursor. The part row is created if the
-    /// part was not known.
+    /// Write one log row at `rev`. A member row moves its part's cursor; any row creates the
+    /// part row if the part was not known.
     fn stamp(&mut self, rev: Rev, key: LogKey, value: Option<LogEntry>) {
-        let part = match &key {
-            LogKey::Member { part, .. } | LogKey::Access { part, .. } => part,
+        let (part, is_member) = match &key {
+            LogKey::Member { part, .. } => (part, true),
+            LogKey::Access { part, .. } => (part, false),
         };
-        match self.parts.get_mut(part) {
-            Some(row) => row.latest_cursor = rev,
-            None => {
-                self.parts
-                    .insert(part.clone(), PartRow { latest_cursor: rev });
-            }
+        let row = match self.parts.get_mut(part) {
+            Some(row) => row,
+            None => self.parts.entry(part.clone()).or_default(),
+        };
+        if is_member {
+            row.latest_cursor = rev;
         }
         self.log.write(rev, key, value);
     }
