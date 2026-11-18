@@ -13,6 +13,8 @@ allowed_dependencies = [
     "micro_sample",
     "micro_settings",
     "micro_settings_manifest",
+    "micro_shell",
+    "micro_shell_manifest",
     "micro_toolbar",
     "micro_toolbar_manifest",
     "ui",

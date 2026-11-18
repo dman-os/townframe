@@ -491,7 +491,7 @@ impl DocumentService {
             revoked: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&self.inner);
-        let cleanup = authority.clone();
+        let cleanup = Arc::clone(&authority);
         host.own(
             instance,
             Box::new(move || {
@@ -549,7 +549,7 @@ impl DocumentAccess {
                 .insert(
                     id,
                     WatchRecord {
-                        authority: self.authority.clone(),
+                        authority: Arc::clone(&self.authority),
                         selection,
                         generation: 0,
                         minimum_revision: 0,

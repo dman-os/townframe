@@ -12,13 +12,11 @@ use clay_mdk::Operation;
 use clay_mdk::OperationStatus;
 use clay_mdk::hooks::use_facet;
 use dioxus::prelude::*;
-use micro_counter_manifest::BADGE;
-use micro_counter_manifest::CONFIG_KEY;
-use micro_counter_manifest::CONFIG_NAME;
-use micro_counter_manifest::CONFIG_TAG;
 use micro_counter_manifest::COUNT;
+use micro_counter_manifest::CounterBadge;
+use micro_counter_manifest::CounterConfig;
+use micro_counter_manifest::CounterView;
 use micro_counter_manifest::INCREMENT;
-use micro_counter_manifest::VIEW;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -62,17 +60,14 @@ impl Counter {
 /// presentations and its call over it.
 async fn activate(context: Context) -> Result<(), Error> {
     let counter = Counter {
-        facet: match context.config(CONFIG_NAME) {
-            Some(config) => Some(config.facet::<u64>(CONFIG_TAG, CONFIG_KEY)?),
-            None => None,
-        },
+        facet: context.config::<CounterConfig>()?,
         standalone: Rc::default(),
     };
-    context.publish_component(VIEW, {
+    context.publish::<CounterView>({
         let counter = counter.clone();
         move || view(counter.clone())
     })?;
-    context.publish_component(BADGE, {
+    context.publish::<CounterBadge>({
         let counter = counter.clone();
         move || badge(counter.clone())
     })?;
@@ -116,7 +111,7 @@ clay_mdk::export_micro!(activate, micro_counter_manifest::manifest);
 /// the host mounts this presentation into (see [`Context::publish_component`]).
 fn view(counter: Counter) -> Element {
     let mut rerender = use_signal(|| 0_u64);
-    let _ = rerender();
+    let _: u64 = rerender();
     let mut operation = use_signal(|| None::<Operation>);
     let mut error = use_signal(|| None::<String>);
     let snapshot = counter.facet.as_ref().map(use_facet);
@@ -241,7 +236,7 @@ mod tests {
                 let supervisor = Supervisor::new(host.clone(), [counter]);
                 let id = MicroId::from(&clay_mdk::MicroId::local(micro_counter_manifest::ID));
                 assert!(supervisor.reconcile().await.is_empty());
-                for name in [VIEW, BADGE] {
+                for name in [micro_counter_manifest::VIEW, micro_counter_manifest::BADGE] {
                     drop(supervisor.acquire(&id, name).await.unwrap());
                 }
                 let lease = supervisor.acquire(&id, COUNT).await.unwrap();
