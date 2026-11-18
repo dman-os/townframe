@@ -155,6 +155,23 @@ impl Readiness {
     }
 }
 
+/// The state in a person's words (`ready`, `needs configuration`), not the wire's camelCase.
+impl std::fmt::Display for Readiness {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Ready => "ready",
+            Self::Refused => "refused",
+            Self::Disabled => "disabled",
+            Self::NeedsConfiguration => "needs configuration",
+            Self::ProviderMissing => "provider missing",
+            Self::ArtifactsUnavailable => "artifacts unavailable",
+            Self::ExecutorUnavailable => "executor unavailable",
+            Self::Initializing => "initializing",
+            Self::InitFailed => "init failed",
+        })
+    }
+}
+
 /// Where a call came from, as the edge transport that accepted it knows (ADR 042 §3). Only an edge
 /// transport sets it, and it is never inherited: a nodule's egress call, made while serving a
 /// local caller, has the nodule as its origin, which is [`Self::Remote`]. It does not travel on
