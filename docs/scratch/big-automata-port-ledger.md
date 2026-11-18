@@ -916,6 +916,37 @@ is clean apart from dead code.
 - In flight: service stack fixes (cancellation, the WebSocket pump, identity, wasm clocks,
   codec seam) and the wasm iroh client crate.
 
+**Replay machines landed (8978c2b9; 171/171 tests; 9 planted bugs all caught):**
+`ReplayServer` (`update`, `close`, `sweep`, `resolve_round` → `Round { routes, after, limits,
+hold, content_keys, answer }`) and `ReplayClient` (`set_wanted`, `next_update`,
+`update_lost`, `update_answered`, `retry_blocked`, `round`, `round_answered`). There is a
+simulation proptest over a faulty network.
+
+**Open:**
+- **Law 5 gap.** A late duplicate of a session's opening update (generation 0) can revive a
+  session the server already forgot. The client is never told.
+  - Targets added since the opening are missing; the client detects that via
+    `UnknownTarget` and resets.
+  - Targets the client already removed become orphans. They're never paged, so they're
+    harmless apart from the resources they hold until the TTL.
+  - Fix options: amend law 5 to state this, bound message lifetime below the TTL, or have
+    the server keep tombstones of forgotten session ids.
+- **Store seams for the responder:**
+  - `read_authorized` asserts `after < until`, so a caught-up round can't get verdicts;
+  - payloads come from a second snapshot (`readable_obj_states`); return them in the same
+    snapshot instead;
+  - `PartStoreServe` exposes no `latest_rev` or watch for `until` and the hold.
+- **Privacy note:** a drained target's `resume` is the snapshot's global rev, which reveals
+  activity in other parts (metadata audit).
+- **Performance:** `update`'s reuse check calls `Vec::contains` per addition, which is
+  quadratic at 16k targets.
+- **Defaults the lane accepts:**
+  - a round naming one route under two ids is `Invalid`;
+  - an empty round is `Invalid`;
+  - a refusal in a round blocks the target and drops its id;
+  - `Limit` on an update is treated as possibly applied;
+  - limits are checked before admission.
+
 **Then:** `quint-connect` conformance; the responder on `read_authorized`; the service
 binding; the bucket and summary RPCs on the same binding; the tasks (batched, coalesced
 cursor persistence).
