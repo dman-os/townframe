@@ -2779,7 +2779,21 @@ where
             );
             return Ok(());
         }
-        if self.active_keyhive_syncs.contains_key(&peer_id) {
+        if let Some(active) = self.active_keyhive_syncs.get(&peer_id) {
+            // INSTR: a notification latched behind a round that never
+            // completes is silent push death for the connection, so report
+            // the round's age and any held admission watermark at warn.
+            let age = self.clock.instant().saturating_duration_since(active.started_at);
+            if age > std::time::Duration::from_secs(30) {
+                warn!(
+                    %peer_id,
+                    round_id = active.round_id,
+                    age_ms = age.as_millis(),
+                    pending_admission_seq = ?active.pending_admission_seq,
+                    admitted_head = self.admitted_head,
+                    "INSTR keyhive change notification latched behind a stale round"
+                );
+            }
             self.keyhive_notif_pending.insert(peer_id.clone());
             debug!(
                 %peer_id,
