@@ -1939,6 +1939,20 @@
       transition: none;
     }
   }
+  .ct-panel-page {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+  .ct-panel-page [data-part="bar"] {
+    flex: none;
+  }
+  .ct-panel-page [data-part="body"] {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+  }
   .ct-list-row {
     box-sizing: border-box;
     display: block;

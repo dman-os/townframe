@@ -274,6 +274,7 @@ enum LabTab {
     NavButton,
     AppBar,
     ListRow,
+    PanelPage,
     Layout,
     Tokens,
     Colors,
@@ -281,7 +282,7 @@ enum LabTab {
 }
 
 impl LabTab {
-    const ALL: [LabTab; 14] = [
+    const ALL: [LabTab; 15] = [
         LabTab::Button,
         LabTab::Tabs,
         LabTab::Card,
@@ -292,6 +293,7 @@ impl LabTab {
         LabTab::NavButton,
         LabTab::AppBar,
         LabTab::ListRow,
+        LabTab::PanelPage,
         LabTab::Layout,
         LabTab::Tokens,
         LabTab::Colors,
@@ -311,6 +313,7 @@ impl LabTab {
             LabTab::NavButton => "nav-button",
             LabTab::AppBar => "app-bar",
             LabTab::ListRow => "list-row",
+            LabTab::PanelPage => "panel-page",
             LabTab::Layout => "layout",
             LabTab::Tokens => "tokens",
             LabTab::Colors => "colors",
@@ -334,6 +337,7 @@ impl LabTab {
             LabTab::NavButton => "NavButton",
             LabTab::AppBar => "AppBar",
             LabTab::ListRow => "ListRow",
+            LabTab::PanelPage => "PanelPage",
             LabTab::Layout => "Layout kit",
             LabTab::Tokens => "Tokens",
             LabTab::Colors => "Colors",
@@ -372,6 +376,7 @@ impl LabTab {
             LabTab::NavButton => &[("nav-button-modes", "Modes")],
             LabTab::AppBar => &[("app-bar-slots", "Slots")],
             LabTab::ListRow => &[("list-row-states", "States")],
+            LabTab::PanelPage => &[("panel-page-scroll", "Scroll")],
             LabTab::Layout => &[("kit", "Layout kit")],
             LabTab::Tokens => &[
                 ("typography", "Typography"),
@@ -399,6 +404,7 @@ impl LabTab {
             LabTab::NavButton => rsx! { specimens::NavButtonSpecimens {} },
             LabTab::AppBar => rsx! { specimens::AppBarSpecimens {} },
             LabTab::ListRow => rsx! { specimens::ListRowSpecimens {} },
+            LabTab::PanelPage => rsx! { specimens::PanelPageSpecimens {} },
             LabTab::Layout => rsx! {
                 FoundationSection {
                     id: "kit".to_string(),
