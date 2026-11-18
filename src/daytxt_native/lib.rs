@@ -28,8 +28,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use ui::ThemeMode;
-use ui::ThemeRoot;
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
 
 /// The discovered packages the first boot that admits them records as enabled, so they run
 /// without a click in Settings: any other package stays disabled until a user enables it (see

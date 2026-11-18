@@ -27,8 +27,8 @@ type Token = {
 };
 
 const root = new URL("../", import.meta.url);
-const tokenDirectory = new URL("src/ui/styles/tokens/", root);
-const outputUrl = new URL("src/ui/styles/tokens.generated.css", root);
+const tokenDirectory = new URL("src/clay_dioxus_kit/styles/tokens/", root);
+const outputUrl = new URL("src/clay_dioxus_kit/styles/tokens.generated.css", root);
 const sources = ["primitives.tokens.json", "semantic.tokens.json"];
 const supportedTypes = new Set<TokenType>([
   "color",

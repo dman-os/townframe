@@ -45,8 +45,8 @@ use ui::ColumnSource;
 use ui::ColumnSpec;
 use ui::ColumnState;
 use ui::SectionLayout;
-use ui::ThemeMode;
-use ui::ThemeRoot;
+use clay_dioxus_kit::ThemeMode;
+use clay_dioxus_kit::ThemeRoot;
 use ui::TileChildren;
 use ui::TileContent;
 use ui::TileKind;
@@ -55,7 +55,7 @@ use ui::TileSpec;
 
 const MATERIAL_THEME_JSON: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../ui/styles/material-theme.json"
+    "/../clay_dioxus_kit/styles/material-theme.json"
 ));
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

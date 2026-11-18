@@ -42,6 +42,7 @@
     --color-foreground: var(--df-color-text);
     --color-card: var(--df-color-surface);
     --color-card-foreground: var(--df-color-text);
+    --color-primary: var(--df-color-primary);
     --color-primary-foreground: var(--df-color-on-primary);
     --color-secondary: var(--df-color-accent);
     --color-secondary-foreground: var(--df-color-on-accent);
@@ -707,6 +708,9 @@
   .min-h-18 {
     min-height: calc(var(--df-spacing) * 18);
   }
+  .min-h-64 {
+    min-height: calc(var(--df-spacing) * 64);
+  }
   .min-h-screen {
     min-height: 100vh;
   }
@@ -838,8 +842,14 @@
   .resize {
     resize: both;
   }
+  .resize-y {
+    resize: vertical;
+  }
   .scroll-mt-18 {
     scroll-margin-top: calc(var(--df-spacing) * 18);
+  }
+  .list-none {
+    list-style-type: none;
   }
   .grid-cols-\[6rem_1fr_10rem\] {
     grid-template-columns: 6rem 1fr 10rem;
@@ -914,6 +924,9 @@
   .overflow-hidden {
     overflow: hidden;
   }
+  .overflow-x-auto {
+    overflow-x: auto;
+  }
   .overflow-y-auto {
     overflow-y: auto;
   }
@@ -985,6 +998,10 @@
     border-block-style: var(--tw-border-style);
     border-block-width: 1px;
   }
+  .border-b {
+    border-bottom-style: var(--tw-border-style);
+    border-bottom-width: 1px;
+  }
   .border-b-2 {
     border-bottom-style: var(--tw-border-style);
     border-bottom-width: 2px;
@@ -1003,6 +1020,9 @@
   }
   .border-current {
     border-color: currentcolor;
+  }
+  .border-danger {
+    border-color: var(--df-color-danger);
   }
   .df-tab-trigger-active {
     background-color: var(--df-color-surface);
@@ -1026,6 +1046,9 @@
     background-color: var(--df-color-accent);
     color: var(--df-color-on-accent);
   }
+  .bg-accent-container {
+    background-color: var(--df-color-accent-container);
+  }
   .bg-background {
     background-color: var(--df-color-canvas);
   }
@@ -1041,11 +1064,17 @@
   .bg-current {
     background-color: currentcolor;
   }
+  .bg-destructive {
+    background-color: var(--df-color-danger);
+  }
   .bg-primary {
     background-color: var(--df-color-primary);
   }
   .bg-scrim {
     background-color: var(--df-color-scrim);
+  }
+  .bg-secondary {
+    background-color: var(--df-color-accent);
   }
   .bg-selected {
     background-color: var(--df-color-selected);
@@ -1058,6 +1087,9 @@
   }
   .bg-surface-sunken {
     background-color: var(--df-color-surface-sunken);
+  }
+  .p-0 {
+    padding: 0px;
   }
   .p-1 {
     padding: var(--df-spacing);
@@ -1108,6 +1140,9 @@
     padding-top: calc(var(--df-spacing) * 4);
     padding-bottom: calc(var(--df-spacing) * 2);
   }
+  .px-1 {
+    padding-inline: var(--df-spacing);
+  }
   .px-2 {
     padding-inline: calc(var(--df-spacing) * 2);
   }
@@ -1116,6 +1151,9 @@
   }
   .px-4 {
     padding-inline: calc(var(--df-spacing) * 4);
+  }
+  .py-1 {
+    padding-block: var(--df-spacing);
   }
   .py-2 {
     padding-block: calc(var(--df-spacing) * 2);
@@ -1126,14 +1164,23 @@
   .py-8 {
     padding-block: calc(var(--df-spacing) * 8);
   }
+  .pb-1 {
+    padding-bottom: var(--df-spacing);
+  }
   .pb-4 {
     padding-bottom: calc(var(--df-spacing) * 4);
+  }
+  .pb-6 {
+    padding-bottom: calc(var(--df-spacing) * 6);
   }
   .text-center {
     text-align: center;
   }
   .text-left {
     text-align: left;
+  }
+  .font-mono {
+    font-family: var(--font-mono);
   }
   .font-sans {
     font-family: var(--df-font-family-sans);
@@ -1189,6 +1236,10 @@
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
   }
+  .text-xs {
+    font-size: var(--text-xs);
+    line-height: var(--tw-leading, var(--text-xs--line-height));
+  }
   .leading-normal {
     --tw-leading: var(--leading-normal);
     line-height: var(--leading-normal);
@@ -1229,11 +1280,29 @@
     --tw-tracking: var(--tracking-wide);
     letter-spacing: var(--tracking-wide);
   }
+  .break-words {
+    overflow-wrap: break-word;
+  }
   .break-all {
     word-break: break-all;
   }
+  .whitespace-pre-wrap {
+    white-space: pre-wrap;
+  }
   .df-tile-trailing {
     color: var(--df-color-text-muted);
+  }
+  .text-card-foreground {
+    color: var(--df-color-text);
+  }
+  .text-danger {
+    color: var(--df-color-danger);
+  }
+  .text-destructive {
+    color: var(--df-color-danger);
+  }
+  .text-destructive-foreground {
+    color: var(--df-color-on-danger);
   }
   .text-foreground {
     color: var(--df-color-text);
@@ -1241,11 +1310,26 @@
   .text-foreground-muted {
     color: var(--df-color-text-muted);
   }
+  .text-foreground-subtle {
+    color: var(--df-color-text-subtle);
+  }
   .text-muted {
     color: var(--scheme-color-surface-variant);
   }
   .text-muted-foreground {
     color: var(--scheme-color-on-surface-variant);
+  }
+  .text-on-accent-container {
+    color: var(--df-color-on-accent-container);
+  }
+  .text-on-selected {
+    color: var(--df-color-on-selected);
+  }
+  .text-primary-foreground {
+    color: var(--df-color-on-primary);
+  }
+  .text-secondary-foreground {
+    color: var(--df-color-on-accent);
   }
   .text-text {
     color: var(--df-color-text);
@@ -1364,6 +1448,9 @@
   }
   .focus-visible\:outline-focus:focus-visible {
     outline-color: var(--df-color-focus);
+  }
+  .disabled\:cursor-default:disabled {
+    cursor: default;
   }
   .disabled\:cursor-not-allowed:disabled {
     cursor: not-allowed;

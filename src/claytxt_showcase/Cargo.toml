@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 dioxus = { workspace = true }
 ui = { workspace = true }
-clay_dioxus_kit = { workspace = true }
+clay_dioxus_kit = { workspace = true, features = ["host"] }
 pierre_diffs_dioxus = { workspace = true }
 review_mock = { workspace = true }
 serde = { workspace = true }
