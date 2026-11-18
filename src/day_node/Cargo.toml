@@ -30,6 +30,16 @@ serde_json.workspace = true
 # crypto
 rand.workspace = true
 
+#
+# async and http, to wait on the node's locks and reach its holder over its socket
+tokio = { workspace = true, features = ["rt", "time", "net"] }
+reqwest.workspace = true
+
+#
+# fs and os
+directories.workspace = true
+libc = "0.2"
+
 [dev-dependencies]
 #
 # internal
