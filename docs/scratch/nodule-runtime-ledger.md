@@ -786,7 +786,7 @@ Items 2 and 4–10 of the original list are done (see Done). Left before the PR 
   - **Mothership:** our user has sudo, so system changes there (lingering, services) are approved.
   - **Documentation:** the permission decisions here, in D52–D55 and in ADR 037's actor-tree rule must be stated in ADRs a future reader will find (ADR 049 amendments or a new ADR), not only in this ledger.
   - **Ledger hygiene (operator):** don't re-ask settled questions. The open questions below on `#keyRef` (removed 2026-11-17) and `nodule_operations` (gone with the ceiling, 2026-11-11) were stale.
-  - ADR text: ADR 049 §2, §4.2, §4.3, §6.1, §10 (acb83932); SHA_PLACEHOLDER.
+  - ADR text: ADR 049 §2, §4.2, §4.3, §6.1, §10 (acb83932); 3ea75c18 (ADR 033, 044, 047).
 - [todo] Least privilege after D54: the nodule service's docs handle still reads the registry drawer (`big_nodule/lib.rs` boot, `registry_drawer` in `NodulesConfig`), which only the removed envelope read used. Drop the reach and the config field.
 - [todo] An "any" datum: an untyped, opaque JSON key/value datum for prototyping, frozen into schemas once a shape settles. Separate from the sidecar tag.
 - [done 2026-11-18] `big_ndk`'s `export_nodule!` boxes each arm's handler future (node-51), the frame shape #143 removed from the route macros.
