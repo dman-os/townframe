@@ -451,6 +451,8 @@ pub fn BlitzApplication(
         .clone()
         .expect("BlitzApplication mounts only with a built runtime");
     let runtime = use_signal(|| initial);
+    // Blitz has no shadow roots: micros' stylesheets go into the light DOM.
+    use_context_provider(|| clay_mdk::host::LightDomStylesheets);
     let host = use_host_inputs(insets);
     rsx! { Application { runtime, host } }
 }

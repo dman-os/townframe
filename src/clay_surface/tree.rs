@@ -103,6 +103,13 @@ impl<C: PartialEq> PartialEq for SurfaceTree<C> {
 }
 
 impl<C: Clone> SurfaceTree<C> {
+    /// The guest's sanitized stylesheet, empty when it set none. The host that mounts the
+    /// projection delivers it (a sheet adopted by the mount's shadow root, or a light-DOM
+    /// `<style>` where the renderer has no shadow roots).
+    pub fn stylesheet(&self) -> &str {
+        &self.stylesheet
+    }
+
     pub const MAX_BATCH_MUTATIONS: usize = 4096;
     pub const MAX_BATCH_BYTES: usize = 256 * 1024;
     pub const MAX_STRING_BYTES: usize = 64 * 1024;
