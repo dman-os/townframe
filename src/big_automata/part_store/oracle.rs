@@ -211,7 +211,7 @@ impl PartOracle {
         let payload = self.payloads.get(obj)?;
         Some(ObjState {
             payload: payload.clone(),
-            digest: payload.digest(),
+            digest: payload.digest().expect("generated payloads are canonical"),
             parts: self.live_parts_of(obj),
         })
     }
@@ -252,7 +252,7 @@ impl PartOracle {
         let mut buckets = BTreeMap::<BuckId, BucketSummaryState>::new();
         for (obj, rev, live) in rows {
             let kind = if live {
-                BucketMemberKind::Live(self.payloads[obj].digest())
+                BucketMemberKind::Live(self.payloads[obj].digest().expect(ERROR_IMPOSSIBLE))
             } else {
                 BucketMemberKind::Dead
             };
@@ -320,7 +320,7 @@ impl PartOracle {
             })
             .take(limit)
             .map(|(_, obj, live)| LeafEntry {
-                live: live.then(|| self.payloads[&obj].digest()),
+                live: live.then(|| self.payloads[&obj].digest().expect(ERROR_IMPOSSIBLE)),
                 obj,
             })
             .collect()

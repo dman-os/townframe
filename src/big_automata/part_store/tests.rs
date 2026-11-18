@@ -71,6 +71,11 @@ fn removals_skip_routes_that_never_saw_the_member() -> Res<()> {
 }
 
 #[test]
+fn a_payload_with_no_canonical_form_is_refused() -> Res<()> {
+    block_on(laws::a_payload_with_no_canonical_form_is_refused(&Memory))
+}
+
+#[test]
 fn dirty_count_counts_log_rows() -> Res<()> {
     block_on(laws::dirty_count_counts_log_rows(&Memory))
 }
@@ -233,7 +238,7 @@ fn the_local_form_drives_the_memory_part_store() -> Res<()> {
         states,
         vec![Some(ObjState {
             payload: laws::payload(1),
-            digest: laws::payload(1).digest(),
+            digest: laws::payload(1).digest()?,
             parts: [part.clone()].into(),
         })]
     );

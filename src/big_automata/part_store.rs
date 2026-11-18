@@ -43,57 +43,25 @@ mod tests;
 /// bucket sums its members' digests, so a summary never rereads payloads, and an object whose
 /// payload is [withheld](PayloadState::Withheld) still has one.
 ///
-/// A blake3 hash of the payload's canonical JSON: object keys sorted (bytewise), no whitespace,
-/// strings and numbers as `serde_json` writes them. Canonical, because map key order is
-/// otherwise insertion order whenever any crate in the build turns on `serde_json`'s
-/// `preserve_order`, and two peers holding the same payload must agree on its digest.
+/// A blake3 hash of the payload's RFC 8785 (JCS) canonical JSON, the same canonicalization
+/// `utils_rs::hash::hash_obj` uses. Canonical, because map key order is otherwise insertion
+/// order whenever any crate in the build turns on `serde_json`'s `preserve_order`, and two
+/// peers holding the same payload must agree on its digest. The canonical form is streamed
+/// into the hasher, never built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PayloadDigest(pub [u8; 32]);
 
 impl PayloadDigest {
-    pub fn of(payload: &ObjPayload) -> Self {
+    /// Fails for a payload JCS cannot represent: an integer outside the I-JSON safe range
+    /// (beyond 2^53 - 1 in magnitude). Payloads arrive from peers, so this is input
+    /// validation, and the store refuses the write rather than inventing a digest.
+    pub fn of(payload: &ObjPayload) -> Res<Self> {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"big-sync-payload-digest-v2\0");
-        write_canonical(&mut hasher, payload);
-        Self(*hasher.finalize().as_bytes())
-    }
-}
-
-/// Feed `value`'s canonical JSON to `hasher` without building it: objects are walked in sorted
-/// key order, everything else is written as `serde_json` writes it.
-fn write_canonical(hasher: &mut blake3::Hasher, value: &ObjPayload) {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
-            hasher.update(b"{");
-            for (index, (key, value)) in entries.into_iter().enumerate() {
-                if index > 0 {
-                    hasher.update(b",");
-                }
-                serde_json::to_writer(&mut *hasher, key).expect(ERROR_JSON);
-                hasher.update(b":");
-                write_canonical(hasher, value);
-            }
-            hasher.update(b"}");
-        }
-        serde_json::Value::Array(items) => {
-            hasher.update(b"[");
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    hasher.update(b",");
-                }
-                write_canonical(hasher, item);
-            }
-            hasher.update(b"]");
-        }
-        scalar @ (serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::String(_)) => {
-            serde_json::to_writer(&mut *hasher, scalar).expect(ERROR_JSON);
-        }
+        hasher.update(b"big-sync-payload-digest-v3\0");
+        json_canon::to_writer(&mut hasher, payload)
+            .wrap_err("payload has no RFC 8785 canonical form")?;
+        Ok(Self(*hasher.finalize().as_bytes()))
     }
 }
 
@@ -108,10 +76,10 @@ pub enum PayloadState {
 }
 
 impl PayloadState {
-    pub fn digest(&self) -> PayloadDigest {
+    pub fn digest(&self) -> Res<PayloadDigest> {
         match self {
             Self::Payload(payload) => PayloadDigest::of(payload),
-            Self::Withheld(digest) => *digest,
+            Self::Withheld(digest) => Ok(*digest),
         }
     }
 }

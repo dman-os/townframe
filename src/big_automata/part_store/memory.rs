@@ -101,7 +101,9 @@ impl Default for MemoryPartStore {
 /// One staged batch.
 enum Staged {
     EnsureParts(Vec<PartKey>),
-    SetPayloads(Vec<(ObjKey, PayloadState)>),
+    /// Each payload with its digest, computed while staging so the hashing stays outside the
+    /// lock and a payload with no canonical form is refused before anything is staged.
+    SetPayloads(Vec<(ObjKey, PayloadState, PayloadDigest)>),
     AddMembers(Vec<(ObjKey, PartKey)>),
     RemoveMembers(Vec<(ObjKey, PartKey)>),
     GrantAccess(Vec<(PartKey, PeerKey, AccessLevel)>),
@@ -237,8 +239,14 @@ impl<Async: FutureForm> PartStoreWrite<Async> for MemoryPartStore {
         tx: &'a mut MemoryPartTx,
         payloads: Vec<(ObjKey, PayloadState)>,
     ) -> Async::Future<'a, Res<()>> {
-        self.stage(tx, Staged::SetPayloads(payloads));
-        Async::ready(Ok(()))
+        let digested = payloads
+            .into_iter()
+            .map(|(obj, payload)| {
+                let digest = payload.digest()?;
+                Ok((obj, payload, digest))
+            })
+            .collect::<Res<Vec<_>>>();
+        Async::ready(digested.map(|payloads| self.stage(tx, Staged::SetPayloads(payloads))))
     }
 
     fn add_members<'a>(

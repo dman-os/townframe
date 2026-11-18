@@ -502,7 +502,7 @@ pub async fn authorization_follows_current_access<B: Backend>(backend: &B) -> Re
 pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
     let mut harness = Harness::open(backend).await?;
     harness.commit(vec![set(&[(0, 1)]), add(&[(0, 0)])]).await?;
-    let digest = PayloadDigest::of(&serde_json::json!(1));
+    let digest = PayloadDigest::of(&serde_json::json!(1))?;
     let withheld = PartWrite::SetPayloads(vec![(obj(0), PayloadState::Withheld(digest))]);
     assert_eq!(harness.commit(vec![withheld]).await?, Some(2));
     let state = harness.store.obj_states(&[obj(0)]).await?.remove(0);
@@ -523,6 +523,42 @@ pub async fn withheld_is_not_deleted<B: Backend>(backend: &B) -> Res<()> {
     );
     harness.commit(vec![remove(&[(0, 0)])]).await?;
     assert_eq!(harness.store.member_count(&part(0)).await?, 0);
+    Ok(())
+}
+
+/// RFC 8785 has no form for an integer beyond 2^53 - 1 in magnitude, so a payload holding one
+/// has no digest. The write is refused while staging, nothing of the batch is staged, and the
+/// transaction still commits what else it holds.
+pub async fn a_payload_with_no_canonical_form_is_refused<B: Backend>(backend: &B) -> Res<()> {
+    let harness = Harness::open(backend).await?;
+    let unsafe_int = serde_json::json!(1u64 << 60);
+    assert!(PayloadDigest::of(&unsafe_int).is_err());
+    let mut tx = backend.begin(&harness.store).await?;
+    let refused = harness
+        .store
+        .set_payloads(
+            &mut tx,
+            vec![
+                (obj(1), payload(1)),
+                (obj(0), PayloadState::Payload(unsafe_int)),
+            ],
+        )
+        .await;
+    assert!(
+        refused.is_err(),
+        "a payload with no canonical form is refused"
+    );
+    harness
+        .store
+        .set_payloads(&mut tx, vec![(obj(2), payload(2))])
+        .await?;
+    backend.commit(tx).await?;
+    let states = harness.store.obj_states(&[obj(0), obj(1), obj(2)]).await?;
+    assert!(
+        states[0].is_none() && states[1].is_none(),
+        "nothing of the refused batch was staged"
+    );
+    assert!(states[2].is_some(), "the transaction kept its other writes");
     Ok(())
 }
 
@@ -772,7 +808,7 @@ fn any_payload() -> impl Strategy<Value = PayloadState> {
     prop_oneof![
         3 => (0u8..3).prop_map(payload),
         1 => (0u8..3).prop_map(|value| {
-            PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)))
+            PayloadState::Withheld(PayloadDigest::of(&serde_json::json!(value)).expect(ERROR_IMPOSSIBLE))
         }),
     ]
 }

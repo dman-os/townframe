@@ -95,10 +95,13 @@ impl State {
         self.bucket_transition(part, obj, rev, old, BucketMemberKind::Live(digest));
     }
 
-    pub(super) fn set_payloads(&mut self, rev: Rev, payloads: Vec<(ObjKey, PayloadState)>) -> bool {
+    pub(super) fn set_payloads(
+        &mut self,
+        rev: Rev,
+        payloads: Vec<(ObjKey, PayloadState, PayloadDigest)>,
+    ) -> bool {
         let mut stamped = false;
-        for (obj, payload) in payloads {
-            let digest = payload.digest();
+        for (obj, payload, digest) in payloads {
             let old = self.objs.get(&obj);
             if old.is_some_and(|row| row.payload == payload) {
                 continue;

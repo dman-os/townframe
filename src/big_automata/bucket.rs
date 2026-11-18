@@ -768,7 +768,8 @@ mod tests {
 
         let store = MemoryPartStore::default();
         let obj = ObjKey::new(&[7]);
-        let digest = PayloadDigest::of(&serde_json::json!({"held": "elsewhere"}));
+        let digest =
+            PayloadDigest::of(&serde_json::json!({"held": "elsewhere"})).expect(ERROR_IMPOSSIBLE);
         let mut tx = store.begin();
         futures::executor::block_on(PartStoreWrite::<Local>::set_payloads(
             &store,
@@ -811,7 +812,8 @@ mod tests {
         };
 
         assert_eq!(deltas(leaf(digest)), vec![], "same content, held or not");
-        let other = PayloadDigest::of(&serde_json::json!({"held": "changed"}));
+        let other =
+            PayloadDigest::of(&serde_json::json!({"held": "changed"})).expect(ERROR_IMPOSSIBLE);
         assert_eq!(
             deltas(leaf(other)),
             vec![(obj.clone(), PartObjDelta::Change)]

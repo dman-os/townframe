@@ -1432,6 +1432,7 @@ dependencies = [
  "future_form",
  "futures",
  "getrandom 0.3.4",
+ "json-canon",
  "proptest",
  "rand 0.9.5",
  "serde",

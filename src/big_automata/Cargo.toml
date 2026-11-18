@@ -44,6 +44,7 @@ futures.workspace = true
 #
 # encoding
 blake3.workspace = true
+json-canon.workspace = true
 bs58.workspace = true
 serde.workspace = true
 autosurgeon = { workspace = true, optional = true }
