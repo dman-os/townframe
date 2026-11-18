@@ -9,7 +9,7 @@ mod kit;
 
 #[cfg(not(any(feature = "desktop", target_arch = "wasm32")))]
 compile_error!(
-    "dayframe_showcase builds natively with the `desktop` feature and for the browser (wasm32) with the `web` feature"
+    "claytxt_showcase builds natively with the `desktop` feature and for the browser (wasm32) with the `web` feature"
 );
 
 #[cfg(feature = "desktop")]

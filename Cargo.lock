@@ -4419,7 +4419,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_showcase"
+name = "claytxt_showcase"
 version = "0.1.0"
 dependencies = [
  "clay_dioxus_kit",

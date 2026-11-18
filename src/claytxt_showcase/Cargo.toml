@@ -1,5 +1,5 @@
 [package]
-name = "dayframe_showcase"
+name = "claytxt_showcase"
 version = "0.1.0"
 edition = "2021"
 
@@ -44,7 +44,7 @@ desktop = [
 web = ["dioxus/web"]
 
 [[bin]]
-name = "dayframe_showcase"
+name = "claytxt_showcase"
 path = "main.rs"
 
 [lints]

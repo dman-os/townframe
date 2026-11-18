@@ -9,7 +9,7 @@ here, so the rules below are binding; a change to a rule is a change to this fil
 
 | Component | Headless part | Styled part | Specimen |
 |---|---|---|---|
-| `Sections` (resizable split) | `headless::sections` | `Sections` | `dayframe_showcase/kit.rs` |
+| `Sections` (resizable split) | `headless::sections` | `Sections` | `claytxt_showcase/kit.rs` |
 | `ListDetails` (list/details scaffold) | `headless::list_details` | `ListDetails` | same |
 | `Sheet` (bottom/side sheet) | `headless::sheet` | `Sheet` | same |
 | `NavButton` (back / open sidebar) | `headless::nav_button` | `NavButton` | same |
@@ -213,7 +213,7 @@ named after it.
   still deterministic and sleep-free. A seed that finds a panic stays as a regression case.
 - **KIT-072** Every component has a headless test module; a styled part with logic of its own
   (width to placement) has a skin test.
-- **KIT-080** Every component has a specimen in `dayframe_showcase/kit.rs`, at a compact and an
+- **KIT-080** Every component has a specimen in `claytxt_showcase/kit.rs`, at a compact and an
   expanded host width. A specimen is a fixed-size frame standing in for the host: its width is
   both its CSS width and the `WidthClass` / extent it hands the component. The showcase is where
   a new component is reviewed.

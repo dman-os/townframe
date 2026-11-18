@@ -97,7 +97,7 @@ members = [
   "./src/daytxt_web",
   "./src/daytxt_desktop",
   "./src/daytxt_mobile",
-  "./src/dayframe_showcase",
+  "./src/claytxt_showcase",
 ]
 exclude = [
   "src/wasm_utils_rs",

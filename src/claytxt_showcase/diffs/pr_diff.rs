@@ -33,7 +33,7 @@ const DEFAULT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/public/pr84.dif
 const FETCH_URL: &str = "pr84.diff";
 
 /// How to produce the file when it is missing.
-const HOW_TO_PRODUCE: &str = "git diff origin/feat/datum-core...origin/feat/big-node > src/dayframe_showcase/public/pr84.diff";
+const HOW_TO_PRODUCE: &str = "git diff origin/feat/datum-core...origin/feat/big-node > src/claytxt_showcase/public/pr84.diff";
 
 /// One file of the diff: its path, its size, and where its patch lies in the text.
 struct PrFile {

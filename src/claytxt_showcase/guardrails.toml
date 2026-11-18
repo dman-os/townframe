@@ -11,7 +11,7 @@ allow_external_api_types = false
 
 [[exemptions]]
 code = "ERROR_DEPENDENCY_GROUP"
-path = "src/dayframe_showcase/Cargo.toml"
+path = "src/claytxt_showcase/Cargo.toml"
 symbol = "dependency-groups"
 ceiling = 1
 class = "LEGACY_DEBT"
