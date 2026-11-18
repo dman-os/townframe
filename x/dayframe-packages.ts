@@ -39,7 +39,13 @@ export async function prepareDayframePackages(
   //
   // One cargo invocation per artifact kind, so cargo schedules the guests together.
   const guests = testFixtures
-    ? ["micro_counter", "micro_layout", "micro_lab", "micro_review", "micro_collection_probe"]
+    ? [
+      "micro_counter",
+      "micro_layout",
+      "micro_lab",
+      "micro_review",
+      "micro_collection_probe",
+    ]
     : ["micro_counter", "micro_layout", "micro_lab", "micro_review"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
@@ -60,7 +66,10 @@ export async function prepareDayframePackages(
 
   // Prepared guest components, keyed by the guest name `component_package`/env vars use.
   const components: Record<string, [string, string]> = {
-    counter: [`wasm32-wasip3/${profileDirectory}/micro_counter.wasm`, "counter"],
+    counter: [
+      `wasm32-wasip3/${profileDirectory}/micro_counter.wasm`,
+      "counter",
+    ],
     layout: [`wasm32-wasip3/${profileDirectory}/micro_layout.wasm`, "layout"],
     lab: [`wasm32-wasip3/${profileDirectory}/micro_lab.wasm`, "lab"],
     review: [`wasm32-wasip3/${profileDirectory}/micro_review.wasm`, "review"],
@@ -74,7 +83,10 @@ export async function prepareDayframePackages(
           `wasm32-wasip3/${profileDirectory}/examples/sleeper.wasm`,
           "sleeper",
         ],
-        egress: [`wasm32-wasip3/${profileDirectory}/examples/egress.wasm`, "egress"],
+        egress: [
+          `wasm32-wasip3/${profileDirectory}/examples/egress.wasm`,
+          "egress",
+        ],
         dispatch: [
           `wasm32-wasip3/${profileDirectory}/examples/dispatch.wasm`,
           "dispatch",

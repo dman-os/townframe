@@ -109,8 +109,9 @@ switch (command) {
     // (`dayframe_node::NodeComposition::install_intxt`). It is built where `day_cli`'s tests
     // read it (the `wasm_utils_rs` workspace, `INTXT_GUEST_WASM`) and staged beside the packages.
     await $`cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p intxt_nodule_guest --target wasm32-wasip3 --release`;
-    const guestWorkspace = await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
-      .json<{ target_directory: string }>();
+    const guestWorkspace =
+      await $`cargo metadata --locked --no-deps --format-version 1 --manifest-path src/wasm_utils_rs/Cargo.toml`
+        .json<{ target_directory: string }>();
     await $`cp ${
       $.path(guestWorkspace.target_directory).join(
         "wasm32-wasip3/release/intxt_nodule_guest.wasm",
@@ -191,6 +192,8 @@ switch (command) {
       "dayframe_showcase",
       "--renderer",
       flag("--native") ? "native" : "webview",
+      "--hot-patch",
+      "false",
     ).env(flag("--native") ? { DAYFRAME_RENDERER: "blitz" } : {});
     break;
   case "showcase-web": {
