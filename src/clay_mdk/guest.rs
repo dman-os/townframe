@@ -57,11 +57,20 @@ use clay_collection::Transaction;
 use clay_collection::Version;
 use clay_collection::WriteBasis;
 use dioxus::prelude::*;
+use method_core::ByteBody;
+use method_core::Method;
+use method_core::MethodKind;
 use method_core::Unary;
 use serde::de::DeserializeOwned;
 use service_client_core_rs::Client;
+use service_client_core_rs::xrpc::HttpTransport;
 use service_client_core_rs::xrpc::Xrpc;
+use service_client_core_rs::xrpc::XrpcBody;
+use service_client_core_rs::xrpc::XrpcClientError;
+use service_client_core_rs::xrpc::decode_response;
+use service_client_core_rs::xrpc::encode_request;
 use service_core_rs::ClientError;
+use service_core_rs::Envelope;
 use service_core_rs::RequestContext;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -892,6 +901,51 @@ impl From<documents::OperationReceipt> for OperationReceipt {
                     outcome_unknown: failure.outcome_unknown,
                 }),
             },
+        }
+    }
+}
+
+/// [`call`] for a method whose answer is a byte stream (`bytes_output`), handing the stream back
+/// unread. A success is the body as the transport received it; anything else is a JSON error
+/// envelope, which `decode_response` maps to the method's error exactly as for a unary call.
+pub(crate) async fn call_bytes<M>(input: M) -> Result<ByteBody, ClientError<M::Error>>
+where
+    M: Method<Output = ByteBody>,
+{
+    let Envelope {
+        context,
+        metadata,
+        params,
+        ..
+    } = Envelope::new(RequestContext::root(), input);
+    context.validate()?;
+    let request = encode_request(M::XRPC, &context, &metadata, &params)
+        .map_err(XrpcClientError::<M::Error>::Encode)?;
+    let response = big_ndk::WasiHttp
+        .send(request)
+        .await
+        .map_err(|error| XrpcClientError::<M::Error>::Transport {
+            message: error.message,
+            outcome_unknown: M::XRPC.kind == MethodKind::Procedure,
+        })?;
+    match response.body {
+        XrpcBody::Bytes(body) if response.status.is_success() => Ok(body),
+        other => {
+            // A byte stream is only a success; a JSON body is the error envelope, and a JSON
+            // success from a byte method is the node breaking its contract.
+            decode_response::<serde_json::Value, M::Error>(
+                M::XRPC,
+                context.request_id,
+                response.status,
+                &response.headers,
+                &other,
+            )
+            .map_err(ClientError::from)?;
+            Err(XrpcClientError::<M::Error>::Protocol {
+                message: format!("{} answered JSON where bytes were declared", M::XRPC.nsid),
+                outcome_unknown: false,
+            }
+            .into())
         }
     }
 }

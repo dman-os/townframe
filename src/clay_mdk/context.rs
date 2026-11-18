@@ -22,12 +22,17 @@ use crate::manifest::Access;
 use crate::manifest::Request;
 use crate::rows::Minter;
 use crate::rows::Writer;
+use bytes::Bytes;
+use futures::stream::LocalBoxStream;
+use method_core::ByteBody;
+use method_core::Method;
 use method_core::Unary;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use service_core_rs::ClientError;
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -722,6 +727,44 @@ impl Backend {
         }
     }
 
+    async fn call_bytes<M>(
+        &self,
+        input: M,
+    ) -> Result<LocalBoxStream<'static, io::Result<Bytes>>, ClientError<M::Error>>
+    where
+        M: Method<Output = ByteBody>,
+    {
+        match self {
+            #[cfg(feature = "in_process")]
+            Self::InProcess(_) => {
+                // The request is unsent: there is no transport to hand it to.
+                drop(input);
+                unimplemented!(
+                    "an in-process micro has no node transport yet: only guest micros call node \
+                     methods (over wasi:http to dispatch.local)"
+                )
+            }
+            // As `call`: the request is incarnation-owned work, because the `wasi:http` future
+            // can only be polled inside a component-model task. Only the response head is
+            // awaited there; the body is the transport's own pull stream and is read by the
+            // caller.
+            #[cfg(feature = "guest")]
+            Self::Guest(runtime) => {
+                let (answer, answered) = futures::channel::oneshot::channel();
+                let views = Rc::clone(runtime);
+                runtime.spawn(Box::pin(async move {
+                    // A caller that stopped waiting has no use for the answer.
+                    drop(answer.send(crate::guest::call_bytes(input).await));
+                    views.notify_views();
+                }));
+                answered
+                    .await
+                    .expect("a call's task lives until the incarnation closes, with its callers")
+                    .map(futures::StreamExt::boxed_local)
+            }
+        }
+    }
+
     async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
         match self {
             #[cfg(feature = "in_process")]
@@ -926,6 +969,22 @@ impl Context {
     /// awaits its answer.
     pub async fn call<M: Unary>(&self, input: M) -> Result<M::Output, ClientError<M::Error>> {
         self.0.backend.call(input).await
+    }
+
+    /// [`Self::call`] for a method that answers raw octets (`bytes_output`, such as
+    /// `blobs.read`): the head of the answer is awaited, and the body comes back as the stream
+    /// the transport pulls, not collected. The stream is not `Send`, the one body type guest
+    /// code can hold. Collecting it in the micro is fine.
+    ///
+    /// INTERIM: replaced by the shared `Cx::blobs()` / `fetch` surface.
+    pub async fn call_bytes<M>(
+        &self,
+        input: M,
+    ) -> Result<LocalBoxStream<'static, io::Result<Bytes>>, ClientError<M::Error>>
+    where
+        M: Method<Output = ByteBody>,
+    {
+        self.0.backend.call_bytes(input).await
     }
 
     /// Run `future` as incarnation-owned local work: it is dropped when this instance closes,
