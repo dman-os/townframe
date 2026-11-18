@@ -50,14 +50,14 @@ export const METRICS = {
   codeView: { hunkLineCount: 1, lineHeight: 22, diffHeaderHeight: 36, spacing: 10 },
 };
 
-function numbered(count, edits, newline = true) {
+export function numbered(count, edits, newline = true) {
   const lines = Array.from({ length: count }, (_, index) =>
     edits.includes(index + 1) ? `edited ${index + 1}` : `line ${index + 1}`,
   );
   return lines.join("\n") + (newline ? "\n" : "");
 }
 
-function file(name, contents) {
+export function file(name, contents) {
   return { name, contents };
 }
 

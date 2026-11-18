@@ -8,7 +8,9 @@
 
 use std::rc::Rc;
 
+use crate::components::file_diff::FileDiff;
 use crate::components::file_diff::FileDiffRenderProps;
+use crate::components::file_diff::RenderedContent;
 use crate::diff::PatchOptions;
 use crate::diff::PatchSide;
 use crate::diff::create_two_files_patch;
@@ -39,7 +41,7 @@ use super::file_diff_upstream_tests::window;
 // ---- FileDiff.partialHydration.test.ts ---------------------------------------
 
 /// `catch_unwind` of `action`, its panic message (`expect(...).toThrow(message)`).
-fn panic_message(action: impl FnOnce()) -> String {
+pub(in crate::components) fn panic_message(action: impl FnOnce()) -> String {
     let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
         .expect_err("expected a panic");
     payload
@@ -53,7 +55,7 @@ fn panic_message(action: impl FnOnce()) -> String {
         .expect("panic with a message")
 }
 
-fn parse_single_partial_file(patch: &str) -> Rc<FileDiffMetadata> {
+pub(in crate::components) fn parse_single_partial_file(patch: &str) -> Rc<FileDiffMetadata> {
     let file = parse_patch_files(
         patch,
         &ParsePatchOptions {
@@ -71,7 +73,11 @@ fn parse_single_partial_file(patch: &str) -> Rc<FileDiffMetadata> {
     Rc::new(file)
 }
 
-fn keyed_file(name: &str, contents: &str, cache_key: &str) -> FileContents {
+pub(in crate::components) fn keyed_file(
+    name: &str,
+    contents: &str,
+    cache_key: &str,
+) -> FileContents {
     FileContents {
         cache_key: Some(cache_key.to_owned()),
         ..file(name, contents)
@@ -80,7 +86,9 @@ fn keyed_file(name: &str, contents: &str, cache_key: &str) -> FileContents {
 
 /// `createPartialChange`: a change in a four-line file with no context, so the
 /// first hunk has collapsed lines before it.
-fn create_partial_change(name: &str) -> (FileContents, FileContents, Rc<FileDiffMetadata>) {
+pub(in crate::components) fn create_partial_change(
+    name: &str,
+) -> (FileContents, FileContents, Rc<FileDiffMetadata>) {
     let old_file = keyed_file(
         name,
         "keep 1\nold value\nkeep 3\nkeep 4\n",
@@ -112,7 +120,10 @@ fn create_partial_change(name: &str) -> (FileContents, FileContents, Rc<FileDiff
     (old_file, new_file, partial)
 }
 
-fn changed(old_file: &FileContents, new_file: &FileContents) -> FileDiffLoadedFiles {
+pub(in crate::components) fn changed(
+    old_file: &FileContents,
+    new_file: &FileContents,
+) -> FileDiffLoadedFiles {
     FileDiffLoadedFiles::Changed {
         old_file: old_file.clone(),
         new_file: new_file.clone(),
@@ -123,14 +134,20 @@ fn changed(old_file: &FileContents, new_file: &FileContents) -> FileDiffLoadedFi
 /// `loadFilesForDiff` does when `loadFilesIfNecessary` finds a partial diff),
 /// counts the calls, and settles it when the test says so (the `deferred`
 /// promise).
-struct LoaderHarness {
-    instance: Rc<Instance>,
-    calls: std::cell::Cell<usize>,
+pub(in crate::components) struct LoaderHarness<Rendered: 'static, LAnnotation: 'static> {
+    instance: Rc<FileDiff<FakeDom, Rendered, LAnnotation>>,
+    pub(in crate::components) calls: std::cell::Cell<usize>,
     in_flight: std::cell::RefCell<Option<Rc<FileDiffMetadata>>>,
 }
 
-impl LoaderHarness {
-    fn new(instance: &Rc<Instance>) -> Self {
+impl<Rendered, LAnnotation> LoaderHarness<Rendered, LAnnotation>
+where
+    Rendered: RenderedContent + 'static,
+    LAnnotation: Clone + PartialEq + 'static,
+{
+    pub(in crate::components) fn new(
+        instance: &Rc<FileDiff<FakeDom, Rendered, LAnnotation>>,
+    ) -> Self {
         Self {
             instance: Rc::clone(instance),
             calls: std::cell::Cell::new(0),
@@ -141,7 +158,7 @@ impl LoaderHarness {
     /// What the host does after every call that may have asked for files: a
     /// pending request the harness has not started a load for gets one
     /// (`loadDiffFiles(fileDiff)`).
-    fn poll(&self) {
+    pub(in crate::components) fn poll(&self) {
         let Some(pending) = self.instance.loading().pending_files() else {
             return;
         };
@@ -156,12 +173,12 @@ impl LoaderHarness {
         *in_flight = Some(pending);
     }
 
-    fn in_flight(&self) -> Rc<FileDiffMetadata> {
+    pub(in crate::components) fn in_flight(&self) -> Rc<FileDiffMetadata> {
         Rc::clone(self.in_flight.borrow().as_ref().expect("a load in flight"))
     }
 
     /// `deferred.resolve(files)`
-    fn resolve(&self, files: &FileDiffLoadedFiles) {
+    pub(in crate::components) fn resolve(&self, files: &FileDiffLoadedFiles) {
         let diff = self
             .in_flight
             .borrow_mut()
