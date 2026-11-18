@@ -34,7 +34,12 @@ pub(crate) fn resolve(
                 .requires
                 .iter()
                 .map(|request| {
-                    let candidates = suppliers(installed, &request.contract);
+                    // A micro never supplies its own requirement: the supervisor would wait on
+                    // itself at start.
+                    let candidates: Vec<_> = suppliers(installed, &request.contract)
+                        .into_iter()
+                        .filter(|(provider, _)| **provider != consumer.id)
+                        .collect();
                     let (provider, publication) = match candidates.as_slice() {
                         [(provider, endpoint)] => (
                             Some(clay_host::MicroId::from(*provider)),
