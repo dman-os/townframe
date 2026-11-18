@@ -1,0 +1,12 @@
+---
+source: src/clay_mdk/manifest/tests.rs
+expression: "serde_json::to_string_pretty(&acl).unwrap()"
+---
+{
+  "tag": "org.example.test.counter.config",
+  "key_id": "count",
+  "read": true,
+  "write": true,
+  "create": false,
+  "delete": false
+}

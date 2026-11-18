@@ -7,8 +7,22 @@ import { $ } from "./utils.ts";
 // `testFixtures` also builds the guests only tests load (the collection probe and the
 // `clay_mdk` example fixtures). The shells need just the packages; building the fixtures for
 // them doubled the cold build that the web e2e server waits on.
+//
+// `trapper` builds the `clay_mdk` `trapper` example (a micro whose view traps its guest on a
+// click) and adds it to the package directory beside the counter and the layout, for the web
+// e2e that pins a sync-export trap faulting only that micro. It is not part of `testFixtures`:
+// those are components tests load by environment variable, while this one is a package the
+// shell lists and so changes what every shell shows.
+//
+// `guestProfile` is the cargo profile the guests build with. `dev` (the default) emits 15 to 17
+// MB unoptimized components that Wasmtime needs seconds to compile on a phone; `wasm-release`
+// is the workspace's optimized guest profile (the one `dayframe_web` also builds with).
 export async function prepareDayframePackages(
-  { testFixtures }: { testFixtures: boolean },
+  { testFixtures, trapper = false, guestProfile = "dev" }: {
+    testFixtures: boolean;
+    trapper?: boolean;
+    guestProfile?: "dev" | "wasm-release";
+  },
 ): Promise<
   Record<string, string>
 > {
@@ -22,10 +36,15 @@ export async function prepareDayframePackages(
     : ["micro_counter", "micro_layout"];
   await $`cargo build --locked ${isolated} ${
     guests.flatMap((guest) => ["-p", guest])
-  } --target wasm32-wasip3`;
+  } --target wasm32-wasip3 --profile ${guestProfile}`;
   if (testFixtures) {
-    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example lifecycle --example context --target wasm32-wasip3`;
+    await $`cargo build --locked ${isolated} -p clay_mdk --example sleeper --example overbudget --example lifecycle --example context --target wasm32-wasip3 --profile ${guestProfile}`;
   }
+  if (trapper) {
+    await $`cargo build --locked ${isolated} -p clay_mdk --example trapper --target wasm32-wasip3 --profile ${guestProfile}`;
+  }
+  // cargo names the `dev` profile's output directory `debug`; other profiles use their own name.
+  const profileDirectory = guestProfile === "dev" ? "debug" : guestProfile;
   const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
     .json<{ target_directory: string; packages: { name: string }[] }>();
   const target = $.path(metadata.target_directory);
@@ -34,20 +53,41 @@ export async function prepareDayframePackages(
 
   // Prepared guest components, keyed by the guest name `component_package`/env vars use.
   const components: Record<string, [string, string]> = {
-    counter: ["wasm32-wasip3/debug/micro_counter.wasm", "counter"],
-    layout: ["wasm32-wasip3/debug/micro_layout.wasm", "layout"],
+    counter: [
+      `wasm32-wasip3/${profileDirectory}/micro_counter.wasm`,
+      "counter",
+    ],
+    layout: [`wasm32-wasip3/${profileDirectory}/micro_layout.wasm`, "layout"],
     ...(testFixtures
       ? {
         collectionProbe: [
-          "wasm32-wasip3/debug/micro_collection_probe.wasm",
+          `wasm32-wasip3/${profileDirectory}/micro_collection_probe.wasm`,
           "collection-probe",
         ],
-        sleeper: ["wasm32-wasip3/debug/examples/sleeper.wasm", "sleeper"],
+        sleeper: [
+          `wasm32-wasip3/${profileDirectory}/examples/sleeper.wasm`,
+          "sleeper",
+        ],
+        overbudget: [
+          `wasm32-wasip3/${profileDirectory}/examples/overbudget.wasm`,
+          "overbudget",
+        ],
         lifecycle: [
-          "wasm32-wasip3/debug/examples/lifecycle.wasm",
+          `wasm32-wasip3/${profileDirectory}/examples/lifecycle.wasm`,
           "lifecycle",
         ],
-        context: ["wasm32-wasip3/debug/examples/context.wasm", "context"],
+        context: [
+          `wasm32-wasip3/${profileDirectory}/examples/context.wasm`,
+          "context",
+        ],
+      }
+      : {}),
+    ...(trapper
+      ? {
+        trapper: [
+          `wasm32-wasip3/${profileDirectory}/examples/trapper.wasm`,
+          "trapper",
+        ],
       }
       : {}),
   };
@@ -81,6 +121,15 @@ export async function prepareDayframePackages(
     }`;
     await $`cargo run --locked -q -p ${manifestCrate} --example emit_manifest -- ${
       packagesDirectory.join(`${name}.manifest.json`)
+    }`;
+  }
+  if (trapper) {
+    await $`cp ${directory.join("trapper.component.wasm")} ${
+      packagesDirectory.join("trapper.component.wasm")
+    }`;
+    // A native example of `clay_mdk` (built for the host, not wasm32-wasip3).
+    await $`cargo run --locked -q -p clay_mdk --example emit_trapper_manifest -- ${
+      packagesDirectory.join("trapper.manifest.json")
     }`;
   }
   componentEnv["DAYFRAME_PACKAGE_DIR"] = packagesDirectory.toString();
