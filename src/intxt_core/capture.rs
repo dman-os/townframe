@@ -30,8 +30,9 @@ pub struct Batch {
     pub session: SessionBatch,
     /// Only worktrees with something to record.
     pub worktrees: Vec<WorktreeBatch>,
-    /// Ops of a post hook whose tool call the transcript did not show yet, so they carry no cause
-    /// (and are not retried). For the CLI to report.
+    /// Ops of tool calls that never got a cause: the transcript never showed the call before the
+    /// session's `Stop` or `SessionEnd`, so the cause withheld at the call's post hook (see
+    /// [`WorktreeBatch::cause_backfills`]) was never resolved. For the CLI to report.
     pub uncaused_tool_calls: u64,
     #[serde(flatten)]
     pub extra: Extra,
@@ -122,6 +123,23 @@ pub struct WorktreeBatch {
     /// with `how: hook`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rewrites: Vec<RewritePair>,
+    /// Causes for ops an earlier batch recorded without one, because the transcript did not show
+    /// their tool call yet. The recorder sets the cause on the op already in the log.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cause_backfills: Vec<CauseBackfill>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// The cause an earlier batch withheld from the op `seq` of a worktree's log, now that the
+/// transcript shows the tool call's turn.
+#[macros::datum]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CauseBackfill {
+    pub seq: u64,
+    /// Always has its `turn`.
+    pub cause: Cause,
     #[serde(flatten)]
     pub extra: Extra,
 }
@@ -198,7 +216,8 @@ pub struct Cause {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     /// The turn holding the call. None when the transcript did not yet have the call at this
-    /// hook (the harness writes it concurrently).
+    /// hook (the harness writes it concurrently); the op is then recorded without a cause and
+    /// given one later ([`CauseBackfill`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<String>,
     pub tool_use_id: String,

@@ -255,6 +255,9 @@ fn idempotency_key(batch: &intxt_core::capture::Batch) -> String {
             worktree.next_seq,
             worktree.next_seq + worktree.ops.len() as u64
         ));
+        for backfill in &worktree.cause_backfills {
+            key.push_str(&format!("+cause{}", backfill.seq));
+        }
     }
     let turns = &batch.session.imported.turns;
     if let Some(last) = turns.keys().next_back() {
