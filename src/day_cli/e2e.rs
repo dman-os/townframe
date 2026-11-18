@@ -26,18 +26,18 @@ mod library {
     use crate::client::Mode;
     use crate::client::NodeClient;
     use crate::client::Reply;
-    use crate::context::Booted;
-    use crate::context::LockRole;
-    use crate::context::NodeDir;
-    use crate::context::SocketState;
     use crate::interlude::*;
     use big_node::peers::Peers;
     use big_nodule_core::protocol::ListNodules;
+    use day_node::Booted;
+    use day_node::LockRole;
+    use day_node::NodeDir;
+    use day_node::SocketState;
     use method_core::Method;
     use tokio::sync::oneshot;
 
     pub(super) fn connect(dir: &NodeDir) -> impl Future<Output = Res<NodeClient>> {
-        NodeClient::connect(dir, crate::client::CONNECT_DEADLINE)
+        NodeClient::connect(dir, day_node::CONNECT_DEADLINE)
     }
 
     /// A directory under `/tmp` rather than `$TMPDIR`: a socket named by a 64 character node id
@@ -176,7 +176,14 @@ mod library {
     async fn the_node_id_is_the_repos_peer_id() {
         let (_tmp, dir) = new_node();
         let lock = dir.try_lock(LockRole::Command).unwrap().unwrap();
-        let booted = Booted::boot(&dir, lock, LockRole::Command).await.unwrap();
+        let booted = Booted::boot(
+            &dir,
+            lock,
+            LockRole::Command,
+            crate::client::empty_schemas().unwrap(),
+        )
+        .await
+        .unwrap();
         let peer = booted.node().repo.local_peer_id().to_bytes32().unwrap();
         assert_eq!(
             dir.settings().unwrap().node_id(),
@@ -465,9 +472,14 @@ mod library {
             async move { connect(&dir).await }
         });
         // The arrival blocks on the boot lock while the holder boots.
-        let holder = Booted::boot(&dir, booting, LockRole::Command)
-            .await
-            .unwrap();
+        let holder = Booted::boot(
+            &dir,
+            booting,
+            LockRole::Command,
+            crate::client::empty_schemas().unwrap(),
+        )
+        .await
+        .unwrap();
         let client = arriving.await.unwrap().unwrap();
         assert_eq!(client.socket_state(), SocketState::Live);
         let reply = call(
@@ -515,19 +527,6 @@ mod library {
             NodeDir::with_socket_dir(tmp.path().join("x".repeat(200)), tmp.path().join("run"));
         far.init().unwrap();
         far.socket_path().unwrap();
-    }
-
-    #[test]
-    fn the_default_socket_directory_is_the_runtime_directory_or_a_private_one_in_tmp() {
-        use crate::context::socket_dir_in;
-        assert_eq!(
-            socket_dir_in(Some(std::path::Path::new("/run/user/1000")), 1000),
-            std::path::Path::new("/run/user/1000/day")
-        );
-        assert_eq!(
-            socket_dir_in(None, 1000),
-            std::path::Path::new("/tmp/day-1000")
-        );
     }
 
     /// A directory that is not the user's own is refused as a socket directory, whoever made
@@ -760,7 +759,7 @@ mod blackbox {
 
         /// The node's socket, from its id: `<runtime dir>/day/<node id>.sock`.
         fn socket(&self) -> PathBuf {
-            let id = crate::context::NodeDir::new(self.node())
+            let id = day_node::NodeDir::new(self.node())
                 .settings()
                 .unwrap()
                 .node_id();
@@ -807,7 +806,7 @@ mod blackbox {
         fn drop(&mut self) {
             // A node whose settings do not parse (a case that corrupts them on purpose) never
             // booted, so it owns no keyring entries.
-            let Ok(settings) = crate::context::NodeDir::new(self.node()).settings() else {
+            let Ok(settings) = day_node::NodeDir::new(self.node()).settings() else {
                 return;
             };
             // The test process's `SecretStore::boot` is the in-memory mock (the dev-dependency

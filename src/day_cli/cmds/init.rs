@@ -10,7 +10,7 @@ use crate::interlude::*;
 pub async fn run(dir: Option<PathBuf>, relay: bool) -> Res<ExitCode> {
     let node_dir = match dir {
         Some(dir) => {
-            crate::context::NodeDir::new(crate::config::CliConfig::source(Some(&dir))?.node_path)
+            day_node::NodeDir::new(crate::config::CliConfig::source(Some(&dir))?.node_path)
         }
         None => lazy::config().await?.node_dir.clone(),
     };

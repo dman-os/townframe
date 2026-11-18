@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 /// Where the node lives and nothing else: everything about the node itself is read from the
-/// directory (see [`crate::context::NodeDir`]).
+/// directory (see [`day_node::NodeDir`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
     pub node_path: PathBuf,
