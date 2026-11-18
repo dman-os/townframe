@@ -348,7 +348,7 @@ pub struct big_cabinet_core::drawer::protocol::DrawerScope  { drawers: BTreeMap 
 pub struct big_cabinet_core::drawer::protocol::DrawerView  { drawer_id: DrawerId, layout: DrawerLayout, descriptor: Drawer, access: Access, docs: BTreeMap < DocId , Access >, children: BTreeMap < DrawerId , Access >, meta_docs: BTreeMap < MetaRoot , BTreeMap < String , DocId > > }
 pub struct big_cabinet_core::drawer::protocol::ForgetDrawer  { capability: CapId, drawer_id: DrawerId }
 pub struct big_cabinet_core::drawer::protocol::GetDrawer  { capability: CapId, drawer_id: DrawerId }
-pub struct big_cabinet_core::drawer::protocol::GrantDrawer  { capability: CapId, drawer_id: DrawerId, subject_id: Uuid7, access: Access }
+pub struct big_cabinet_core::drawer::protocol::GrantDrawer  { capability: CapId, drawer_id: DrawerId, subject_id: Uuid7, access: Access, durable: bool }
 pub struct big_cabinet_core::drawer::protocol::InvitePrincipal  { capability: CapId, drawer_id: DrawerId, principal: Principal, access: Access }
 pub struct big_cabinet_core::drawer::protocol::ListDocDrawers  { doc_id: DocId }
 pub struct big_cabinet_core::drawer::protocol::ListDocs  { capability: CapId, drawer_id: DrawerId, offset: u64, limit: Option < u64 > }
