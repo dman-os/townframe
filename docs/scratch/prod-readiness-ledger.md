@@ -715,7 +715,14 @@ replay. For small machines, **TLC with full-graph conformance is cheaper and str
 - proptest for APIs;
 - the bespoke DST simulator for liveness.
 
-**TLC is not a quint backend:** `quint verify` drives Apalache only. TLC runs on the TLA+ from
+**Correction (2026-11-19):** quint 0.33's `quint verify --backend=tlc` runs TLC directly
+(Apalache's jar bundles it), as the replay spec's runs show. What is still missing for
+full-graph conformance is TLC's state-graph dump plus a converter to something Rust reads.
+Conformance needs small per-machine models (e.g. `ReplayServer` alone, with inputs as free
+events), not the joint client/server/network model in `replay/spec/session.qnt` (4.4M
+states, log abstracted). Status: not wired for any machine yet.
+
+**Original note (superseded):** `quint verify` drives Apalache only. TLC runs on the TLA+ from
 `quint compile --target=tlaplus` (<https://quint-lang.org/docs/model-checkers>), which is the
 route flotilla's spike took, plus a converter from TLC's dumped state graph. So `formal-tools`
 must also provision `tla2tools.jar` (TLC). The JSON-limit fix to Apalache 0.62.4 also unblocked
