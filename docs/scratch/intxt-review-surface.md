@@ -36,7 +36,7 @@ comment kz on 4c1f src/big_cabinet_core/reference.rs:120-124
 ```
 $ day x intxt inbox qx            # comments it hasn't seen, and threads waiting on it
 $ day x intxt inbox qx --wait     # blocks until there is something
-$ day x intxt reply kz -m "Done in 77b2" --resolve
+$ day x intxt reply kz --intxt qx -m "Done in 77b2" --resolve
 ```
 
 - "Unseen" is ADR 041 §5's `seen` datum of the reader; "waiting on me" is derived: the other side wrote last.
